@@ -179,14 +179,21 @@ async def owner_page(
     wanted = {note_id for line in lines for note_id in line.cites}
     cited = {note_id: pending[note_id] for note_id in wanted if note_id in pending}
     cited |= await _held_notes(stories, story_id, wanted - cited.keys())
-    addresses = dict.fromkeys(
-        episode_address(note.rests_on)
+    rested = dict.fromkeys(
+        note.rests_on
         for note in (*state.pending_notes, *cited.values())
         if note.rests_on is not None
     )
-    found = await memory.get_many(list(addresses)) if addresses else {}
-    visibility = PageVisibility.of(
-        (record for record in found.values() if isinstance(record, EpisodicMemory)),
+    addresses = [episode_address(activation) for activation in rested]
+    found = await memory.get_many(addresses) if addresses else {}
+    # Held at its address is shown, whatever the record carries: the owner may be
+    # shown every record the store holds, so no field of it is read to decide.
+    visibility = PageVisibility(
+        activations=frozenset(
+            activation
+            for activation in rested
+            if isinstance(found.get(episode_address(activation)), EpisodicMemory)
+        ),
         owner_notes=True,
     )
     shown_lines = tuple(line for line in lines if visibility.line(line, cited))
