@@ -32734,7 +32734,8 @@ class StoryOutcome(BaseModel):
 
     Exactly one of ``story_id`` and ``refusal`` is set. An applied write names the
     story it leaves standing — the one minted by a create or a split, the one
-    written by a link or an unlink, and the one merged into by a merge — and says
+    written by a link or an unlink, the one merged into by a merge, and the one moved
+    to by a move (ADR-0300 §3:14) — and says
     how many change-log lines it appended, which is ``0`` where every member it
     named was passed over. A refused write appended nothing.
     """
