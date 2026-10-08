@@ -89,16 +89,18 @@ def test_the_stage_enumeration_carries_exactly_the_members_the_adr_lists() -> No
         "drive",
         "compose",
         "end",
-        # ADR-0281 §2 and ADR-0282 §3 each add a member without renaming one.
+        # ADR-0281 §2, ADR-0282 §3 and ADR-0300 §6:10 each add a member without
+        # renaming one.
         "recall",
         "windows",
+        "story_links",
     ]
 
 
 def test_the_rule_enumeration_carries_the_table_the_guard_and_the_endings() -> None:
     # §4's table (12 rules), the loop guard, §2's no_text_input and §5's endings,
-    # then ADR-0281 §2's row, ADR-0282 §3's, ADR-0284 §5:4's, ADR-0286 §7's and
-    # ADR-0297 §4's, each added without renaming one.
+    # then ADR-0281 §2's row, ADR-0282 §3's, ADR-0284 §5:4's, ADR-0286 §7's,
+    # ADR-0297 §4's and ADR-0300 §6:10's, each added without renaming one.
     assert [member.value for member in ControllerRule] == [
         "conversation_unresolved",
         "route_unchecked",
@@ -123,6 +125,7 @@ def test_the_rule_enumeration_carries_the_table_the_guard_and_the_endings() -> N
         "park_answered",
         "hub_stopped",
         "stopped",
+        "story_links_unrecorded",
     ]
 
 

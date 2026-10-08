@@ -339,6 +339,7 @@ from ai_assistant.orchestration.speech import (
     transcribe_within,
 )
 from ai_assistant.orchestration.stories import fitted, resolved_view, unknown_activation
+from ai_assistant.orchestration.story_links import StoryLinksDecision
 from ai_assistant.orchestration.traces import Observation, OperationTraces
 from ai_assistant.orchestration.understanding import (
     ChannelWindow,
@@ -372,6 +373,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.core.types import (
         ActionPlan,
+        ActivationUnderstanding,
         AnswerOutcome,
         BeliefBand,
         ChatChanges,
@@ -447,6 +449,11 @@ if TYPE_CHECKING:
         StepDisposition,
         StepRunner,
     )
+    from ai_assistant.orchestration.story_links import (
+        Candidates,
+        StoryCandidates,
+        StoryLinksStage,
+    )
     from ai_assistant.orchestration.understanding import (
         Fetched,
         UnderstandingStage,
@@ -514,6 +521,7 @@ _ROUTE_ID_ATTEMPTS: Final = 8
 _UNDERSTANDING_EXPIRED: Final = "the pass's deadline expired during understanding"
 _RECALL_EXPIRED: Final = "the pass's deadline expired during recall"
 _WINDOWS_EXPIRED: Final = "the pass's deadline expired while assembling the windows"
+_STORY_LINKS_EXPIRED: Final = "the pass's deadline expired while recording the story links"
 
 
 class _NothingTakenInError(Exception):
@@ -2186,16 +2194,28 @@ class _ActivationPass:
             (ADR-0282 §3); written by that stage alone.
         understanding_fetch: What the understanding phase fetched by id and what came
             back missing (ADR-0282 §2); written by that phase alone, never persisted.
+        story_links_wired: The deployment wired the story-links stage (ADR-0300 §6).
+        understanding: The understanding version the stage recorded on the activation's
+            state, where it recorded one; written by the understanding stage alone.
+        story_candidates: The candidate stories the understanding phase assembled
+            (ADR-0300 §6:1-§6:4), with what it fetched for them and what came back
+            missing; written by that phase alone, never persisted (§12:3).
+        story_links: The story-links stage's decision (§6:10); written by that stage
+            alone, never persisted (§12:3).
     """
 
     deadline: float
     supply: TurnSupply
     understanding_wired: bool
     recall_wired: bool
+    story_links_wired: bool = False
     understood: bool = False
     recalled: Recalled | None = None
     windows: Windows | None = None
     understanding_fetch: Fetched | None = None
+    understanding: ActivationUnderstanding | None = None
+    story_candidates: Candidates | None = None
+    story_links: StoryLinksDecision | None = None
 
     @property
     def text(self) -> str:
@@ -2216,6 +2236,16 @@ class _ActivationPass:
     def recall_decided(self) -> bool:
         """Recall made its decision, a failed or timed-out one included."""
         return self.recalled is not None
+
+    @property
+    def understanding_recorded(self) -> bool:
+        """The understanding outcome is a recorded version (ADR-0300 §6:11)."""
+        return self.understanding is not None
+
+    @property
+    def story_links_decided(self) -> bool:
+        """The story-links stage made its decision, a failed one included (§6:10)."""
+        return self.story_links is not None
 
     @property
     def deadline_passed(self) -> bool:
@@ -2464,6 +2494,38 @@ def _windows_expired(working: _ActivationPass) -> Exception | None:
     if isinstance(working, _EventPass):
         return ChannelProcessingTimeoutError("informational event processing timed out")
     return ModelTimeoutError(_WINDOWS_EXPIRED)
+
+
+def _check_story_wiring(*, candidates: bool, links: bool, understanding: bool) -> None:
+    """ADR-0300 §6's two pieces are wired together or not at all, and only beside understanding.
+
+    Raises:
+        ConfigurationError: If one is wired without the other — links proposed against
+            no candidates, or candidates whose links nothing records — or either without
+            the understanding stage whose links they are.
+    """
+    if candidates != links:
+        msg = (
+            "the story candidates and the story-links stage are wired together or not "
+            "at all (ADR-0300 §6)"
+        )
+        raise ConfigurationError(msg)
+    if links and not understanding:
+        msg = "the story-links stage records understanding's links, and needs it (ADR-0300 §6)"
+        raise ConfigurationError(msg)
+
+
+def _story_links_expired(working: _ActivationPass) -> Exception | None:
+    """ADR-0300 §6:13 under ADR-0281 §5: the story-links stage's deadline is the pass's.
+
+    Classified as each pass kind classifies its deadline, as recall's is. ``None``
+    while there is time.
+    """
+    if not working.deadline_passed:
+        return None
+    if isinstance(working, _EventPass):
+        return ChannelProcessingTimeoutError("informational event processing timed out")
+    return ModelTimeoutError(_STORY_LINKS_EXPIRED)
 
 
 def _drive_verdict(working: _TurnPass) -> Verdict:
@@ -2958,6 +3020,8 @@ class Engine:
         reconciliation: ReconciliationStage | None = None,
         parked_reads: ParkedReadOperations | None = None,
         stories: StoryStore | None = None,
+        story_candidates: StoryCandidates | None = None,
+        story_links: StoryLinksStage | None = None,
         authorization_operations: AuthorizationOperations | None = None,
         authorizations: AuthorizationResolution | None = None,
         transcriber: SpeechTranscriber | None = None,
@@ -3347,7 +3411,15 @@ class Engine:
                 write and nothing else here touches — or ``None`` where this deployment
                 wired none, in which case each of those methods raises
                 ``ConfigurationError`` rather than answering as though no story existed.
-                **No stage, phase, rule or prompt reads it** (ADR-0289 §4).
+                The stages that read and write stories hold their own reference to the
+                same store (ADR-0300 §6), so the engine surface's own use is unchanged.
+            story_candidates: ADR-0300 §6's assembler of understanding's candidate
+                stories, which the understanding phase runs before the stage renders —
+                or ``None``, and then no stories section is rendered. Wired together
+                with ``story_links`` or not at all, and only beside understanding.
+            story_links: ADR-0300 §6's story-links stage, which records the latest
+                recorded understanding's links in the story store — or ``None``, and
+                then the ``story_links_unrecorded`` rule never answers.
             authorization_operations: ADR-0254 §11's read side — the confirmation
                 projection, the listing and the revocation — or ``None`` where this
                 deployment wired no authorization store. **Passed rather than
@@ -3715,10 +3787,17 @@ class Engine:
                 "windows before recall (ADR-0282 §3)"
             )
             raise ConfigurationError(msg)
+        _check_story_wiring(
+            candidates=story_candidates is not None,
+            links=story_links is not None,
+            understanding=understanding is not None,
+        )
         self._understanding = understanding
         self._understanding_version_limit = understanding_version_limit or 2
         self._windows = windows
         self._recall = recall
+        self._story_candidates = story_candidates
+        self._story_links = story_links
         if stage_record_limit < 2:  # noqa: PLR2004 — the first entry and the end entry
             msg = "a stage record keeps its first entry and its end entry (ADR-0280 §6)"
             raise ConfigurationError(msg)
@@ -4447,9 +4526,10 @@ class Engine:
                 ),
                 understanding_wired=self._understanding is not None,
                 recall_wired=self._recall is not None,
+                story_links_wired=self._story_links is not None,
             )
-            # ADR-0280 §4: the windows, recall, understanding, then the event summary,
-            # by the rules.
+            # ADR-0280 §4: the windows, recall, understanding, the story links, then the
+            # event summary, by the rules.
             await self._controlled(
                 event,
                 (
@@ -4461,6 +4541,11 @@ class Engine:
                         ControllerStage.UNDERSTANDING,
                         self._event_understanding_stage,
                         expired=_event_expired,
+                    ),
+                    TolerantStage(
+                        ControllerStage.STORY_LINKS,
+                        self._story_links_stage,
+                        expired=_story_links_expired,
                     ),
                     Stage(ControllerStage.EVENT_SUMMARY, self._event_summary_stage),
                 ),
@@ -12248,6 +12333,7 @@ class Engine:
                 routing_wired=self._routing is not None,
                 understanding_wired=self._understanding is not None,
                 recall_wired=self._recall is not None,
+                story_links_wired=self._story_links is not None,
                 reconciliation_wired=self._reconciliation is not None and remaining is not None,
             )
         )
@@ -12372,6 +12458,13 @@ class Engine:
         by id in one read — current versions, the audience predicate applied again, a
         missing one left out and recorded on the working episode.
 
+        **It assembles the candidate stories first** (ADR-0300 §6:1-§6:4), where they
+        are wired: the stories the episode window's fetched episodes belong to, each
+        read as a short view, written on the working episode with what was fetched
+        for them before the stage renders. A story store that cannot be read leaves
+        none, and the stage proceeds. A version the stage records is written on the
+        working episode as well as the state, where the story-links rule reads it.
+
         **It runs inside the pass's existing deadline** (§5): the fetch and both
         completions are bounded by what is left of the budget the call was handed,
         and a deadline that expires is a classified timeout — ``ModelTimeoutError``,
@@ -12401,6 +12494,7 @@ class Engine:
         try:
             async with asyncio.timeout_at(deadline):
                 fetched = await self._fetch_held(working, windows)
+                stories = await self._assembled_candidates(working, fetched)
                 recalled = working.recalled
                 understood = await self._understanding.understand(
                     input.text,
@@ -12413,6 +12507,7 @@ class Engine:
                     deadline=deadline,
                     recall=None if recalled is None else recalled.result,
                     recalled=fetched.recalled,
+                    stories=stories,
                 )
         except BaseException as exc:
             # A timer fires only when the loop gets control, so a stage can cross the
@@ -12438,6 +12533,68 @@ class Engine:
             raise ModelTimeoutError(_UNDERSTANDING_EXPIRED) from None
         if state is not None:
             state.understood(understood, limit=self._understanding_version_limit)
+            # ADR-0300 §6:11: the story-links rule reads the recorded version.
+            working.understanding = understood
+
+    async def _assembled_candidates(
+        self, working: _ActivationPass, fetched: Fetched
+    ) -> Candidates | None:
+        """ADR-0300 §6:1-§6:4: the candidate stories, written on the working episode.
+
+        The window's stories are looked up from the episodes the fetch admitted, in the
+        window's order; a pass that takes no episode window has none of its own. What
+        the assembly fetched and what came back missing ride on the decision (ADR-0282
+        §2:7). ``None`` where no assembler is wired, and then no section is rendered.
+        """
+        if self._story_candidates is None:
+            return None
+        candidates = await self._story_candidates.assemble(
+            fetched.episodes or (), audience=working.supply
+        )
+        working.story_candidates = candidates
+        return candidates
+
+    async def _story_links_stage(self, working: _ActivationPass) -> StageResult:
+        """ADR-0300 §6:12-§6:13's story-links stage, failure-tolerant, for both pass kinds.
+
+        It reads the latest recorded understanding's links off the working episode and
+        records them in the story store, for the activation the state names. The
+        decision is written on the working episode before the stage returns, so the
+        rule that made it due does not answer again; a ``StoryStoreError`` is a
+        ``failed`` decision returned ``tolerated`` with its error, and the pass goes on
+        while its deadline holds (ADR-0281 §5). An activation with no id — capture
+        degraded at admission — has no member to link, and decides that it linked
+        nothing.
+
+        Its writes run inside the pass's deadline, and an expiry is the pass kind's
+        classified timeout, as recall's is.
+
+        Raises:
+            ModelTimeoutError: If a turn's deadline expired inside the stage.
+            ChannelProcessingTimeoutError: If an event's deadline expired inside it.
+        """
+        assert self._story_links is not None  # noqa: S101 — the rule makes the stage due only where it is wired
+        understanding = working.understanding
+        assert understanding is not None  # noqa: S101 — the rule makes the stage due only once a version is recorded
+        state = active_state()
+        activation_id = None if state is None else state.activation_id
+        if activation_id is None:
+            decision = StoryLinksDecision(outcome=StageOutcome.DONE)
+        else:
+            try:
+                async with asyncio.timeout_at(working.deadline):
+                    decision = await self._story_links.record(
+                        understanding.story_links, activation_id=activation_id
+                    )
+            except TimeoutError:
+                late = _story_links_expired(working)
+                if late is None:
+                    raise
+                raise late from None
+        working.story_links = decision
+        if decision.outcome is StageOutcome.DONE:
+            return StageResult(StageOutcome.DONE)
+        return StageResult(decision.outcome, decision.error, tolerated=True)
 
     async def _understand_event(self, event: _EventPass) -> None:
         """The event path's understanding, mapped outward as the event stage maps its own.
@@ -12633,6 +12790,11 @@ class Engine:
                 TolerantStage(ControllerStage.RECALL, self._recall_stage, expired=_recall_expired),
                 Stage(
                     ControllerStage.UNDERSTANDING, self._understanding_stage, expired=_turn_expired
+                ),
+                TolerantStage(
+                    ControllerStage.STORY_LINKS,
+                    self._story_links_stage,
+                    expired=_story_links_expired,
                 ),
                 Stage(ControllerStage.ASSOCIATE_GOAL, self._associate_stage),
                 Stage(ControllerStage.ASK_DISAMBIGUATION, self._disambiguation_stage),

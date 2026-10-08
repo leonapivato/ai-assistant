@@ -96,6 +96,7 @@ from ai_assistant.orchestration.informational_events import InformationalEventSt
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.reconciling import ReconciliationStage
+from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
 from ai_assistant.orchestration.understanding import (
     RecentEpisodes,
     UnderstandingStage,
@@ -291,6 +292,25 @@ UNDERSTANDING_EXCERPT_CHARS: Final = 2000
 #: bound is what keeps a record's size a function of the activation rather than of how
 #: many stages a later redesign runs.
 UNDERSTANDING_VERSION_LIMIT: Final = 8
+
+#: How many candidate stories understanding is shown at most (ADR-0300 §6:1): first the
+#: stories the episode window's episodes belong to, then recall's. The decision's
+#: initial value, unmeasured; a story already a candidate is not repeated.
+UNDERSTANDING_STORY_CANDIDATES: Final = 5
+
+#: How much of each candidate a short view shows (ADR-0300 §6:2), chosen here as §6:2
+#: and §3:17 have the building lane choose them. A short view is for recognising the
+#: matter, not for its account, which planning is given whole (§8). **Lines: 3** — the
+#: page's first line says what the matter is (§3:6), and two more carry where it is
+#: going; with five candidates that keeps the section at fifteen lines, each within
+#: ``STORY_NOTE_MAX_CHARS``. **Notes: 2** and **episodes: 2**, §6:2's ceilings taken
+#: whole: a pending note is what the page has not folded in yet, so on a page not
+#: tidied lately it is the freshest thing said about the matter; and the two latest
+#: meanings show what the matter was doing last, which is what an input continuing it
+#: would follow on from.
+STORY_SHORT_VIEW_LINES: Final = 3
+STORY_SHORT_VIEW_NOTES: Final = 2
+STORY_SHORT_VIEW_EPISODES: Final = 2
 
 #: How many long-term memories recall keeps for one activation at most (ADR-0281 §3).
 #: Thin on purpose: recall leaves the story-following and the understanding-cued
@@ -967,9 +987,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # setting would be computing a deadline `orchestration` owns.
         parked_reads = SqliteParkedReads(path=directory / "parked_reads.db")
         opened.append(parked_reads.close)
-        # **ADR-0289 §1's story store, on its own file and handed to the engine alone.**
-        # It reads no other store and no store reads it: the engine is its only
-        # caller (§4), and no stage, phase, rule or prompt is given it. Its records
+        # **ADR-0289 §1's story store, on its own file.** It reads no other store and
+        # no store reads it. The engine surface writes it as the owner (§4), and since
+        # ADR-0300 §6 understanding's candidates read it and the story-links stage
+        # writes it, each handed this same object below. Its records
         # are identities and instants only (§2), but which activations belong
         # together is a fact about the owner's life, so it is owner-only like every
         # other file here. Deploying it adds the file and changes no existing record
@@ -2235,9 +2256,21 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # rather than left as a claim. There is no type that could say so — both
             # parameters take the same class — so it is a property of *this* wiring.
             parked_reads=parked_read_operations,
-            # ADR-0289 §4's nine story methods read and write this store, and nothing
-            # else the engine runs does.
+            # ADR-0289 §4's nine story methods read and write this store.
             stories=stories,
+            # ADR-0300 §6: the candidate stories understanding is shown, read from the
+            # same story store and the one memory store, and the stage that records
+            # its links there with the actor `understanding`. Wired together, as the
+            # engine requires.
+            story_candidates=StoryCandidates(
+                stories=stories,
+                memory=memory,
+                limit=UNDERSTANDING_STORY_CANDIDATES,
+                lines=STORY_SHORT_VIEW_LINES,
+                notes=STORY_SHORT_VIEW_NOTES,
+                episodes=STORY_SHORT_VIEW_EPISODES,
+            ),
+            story_links=StoryLinksStage(stories=stories),
             # ADR-0254 §11's two operations and the confirmation projection, over the
             # object built above.
             authorization_operations=authorization_operations,

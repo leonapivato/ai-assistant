@@ -47,6 +47,9 @@ class _Facts:
     deadline_passed: bool = False
     understanding_wired: bool = False
     understanding_decided: bool = False
+    understanding_recorded: bool = False
+    story_links_wired: bool = False
+    story_links_decided: bool = False
     event_summarized: bool = False
     associated: bool = False
     asks_which_goal: bool = False
@@ -70,6 +73,9 @@ _TURN: Final = _Facts(conversation_turn=True)
 _RESOLVED: Final = replace(_TURN, conversation_resolved=True)
 _ASSOCIATED: Final = replace(_RESOLVED, associated=True)
 _PLANNED: Final = replace(_ASSOCIATED, turn_decided=True)
+_UNDERSTOOD: Final = replace(
+    _RESOLVED, understanding_wired=True, windows_decided=True, understanding_decided=True
+)
 
 
 # --- §4: the table, over constructed states ---------------------------------------
@@ -165,6 +171,47 @@ _PLANNED: Final = replace(_ASSOCIATED, turn_decided=True)
             ControllerRule.EVENT_UNSUMMARIZED,
             ControllerStage.EVENT_SUMMARY,
         ),
+        # ADR-0300 §6:11: the story links once understanding is a recorded version,
+        # ahead of everything a turn or an event does with its input.
+        (
+            replace(_UNDERSTOOD, story_links_wired=True, understanding_recorded=True),
+            ControllerRule.STORY_LINKS_UNRECORDED,
+            ControllerStage.STORY_LINKS,
+        ),
+        (
+            _Facts(
+                informational_event=True,
+                understanding_wired=True,
+                windows_decided=True,
+                understanding_decided=True,
+                understanding_recorded=True,
+                story_links_wired=True,
+            ),
+            ControllerRule.STORY_LINKS_UNRECORDED,
+            ControllerStage.STORY_LINKS,
+        ),
+        (
+            replace(
+                _UNDERSTOOD,
+                story_links_wired=True,
+                understanding_recorded=True,
+                story_links_decided=True,
+            ),
+            ControllerRule.ASSOCIATION_DUE,
+            ControllerStage.ASSOCIATE_GOAL,
+        ),
+        # Wired, but no version recorded: the rule does not answer.
+        (
+            replace(_UNDERSTOOD, story_links_wired=True),
+            ControllerRule.ASSOCIATION_DUE,
+            ControllerStage.ASSOCIATE_GOAL,
+        ),
+        # A version recorded, and no stage wired: the rule does not answer.
+        (
+            replace(_UNDERSTOOD, understanding_recorded=True),
+            ControllerRule.ASSOCIATION_DUE,
+            ControllerStage.ASSOCIATE_GOAL,
+        ),
         (_RESOLVED, ControllerRule.ASSOCIATION_DUE, ControllerStage.ASSOCIATE_GOAL),
         (
             replace(_ASSOCIATED, asks_which_goal=True),
@@ -229,7 +276,8 @@ def test_the_first_rule_that_answers_decides(
 
 def test_the_table_is_the_adrs_rows_in_order_ending_in_one_that_always_answers() -> None:
     """ADR-0280 §4's twelve rows, with ADR-0282 §3's and ADR-0281 §2's between
-    ``route_taken`` and ``not_understood``."""
+    ``route_taken`` and ``not_understood``, and ADR-0300 §6:11's immediately after
+    ``not_understood``."""
     assert [rule.name for rule in ACTIVATION_RULES] == [
         ControllerRule.CONVERSATION_UNRESOLVED,
         ControllerRule.ROUTE_UNCHECKED,
@@ -237,6 +285,7 @@ def test_the_table_is_the_adrs_rows_in_order_ending_in_one_that_always_answers()
         ControllerRule.WINDOWS_UNASSEMBLED,
         ControllerRule.NOT_RECALLED,
         ControllerRule.NOT_UNDERSTOOD,
+        ControllerRule.STORY_LINKS_UNRECORDED,
         ControllerRule.EVENT_UNSUMMARIZED,
         ControllerRule.ASSOCIATION_DUE,
         ControllerRule.DISAMBIGUATION_RAISED,

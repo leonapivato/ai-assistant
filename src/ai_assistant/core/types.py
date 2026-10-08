@@ -3328,6 +3328,39 @@ class ActivationLinks(BaseModel):
     parks: ParkedBinding | None = None
 
 
+# --- a story's member (ADR-0289 §2) ------------------------------------------
+#
+# Declared here, ahead of :class:`ActivationUnderstanding`, because ADR-0300 §6:7
+# records an understanding's story links as story members. They used to sit in the
+# stories section far below; the rule above :data:`Identifier` decides the move — a
+# forward reference plus ``model_rebuild`` would have made a `core` type depend on
+# an import-order side effect, so the two types moved instead of the model.
+# Relocating a type is not redefining it (ADR-0084 §4): nothing about either changed.
+
+
+class StoryMemberKind(StrEnum):
+    """Which of the two kinds of thing a story member is (ADR-0289 §2).
+
+    A **closed** enumeration: members are activations' episodes and other stories,
+    and nothing else. The kind is carried with the id and never inferred from it.
+    """
+
+    ACTIVATION = "activation"
+    """An activation, named by its activation id; its episode is the record at
+    ``activation:<activation_id>``."""
+
+    STORY = "story"
+    """Another story, named by its story id: a smaller matter inside a larger one."""
+
+
+class StoryMember(BaseModel):
+    """One member of a story: its kind and its id, carried together (ADR-0289 §2)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: StoryMemberKind
+    id: Identifier
+
+
 # --- activation understanding (ADR-0276) -------------------------------------
 
 
@@ -3417,6 +3450,11 @@ class ProposedActivationUnderstanding(BaseModel):
     rendered it. A ``supplied`` ground with no label is a grounding defect the
     stage repairs and then records as ``inferred`` (§6), never a parse failure —
     so this type validates nothing about it.
+
+    ``story_labels`` (ADR-0300 §6:6) are the labels of the candidate stories, and of
+    earlier episodes, that the input belongs with as one matter. A label naming
+    nothing a story link can be made from is a label defect the stage repairs and
+    then drops (§6:8), so this type validates nothing about them either.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3426,6 +3464,7 @@ class ProposedActivationUnderstanding(BaseModel):
     references: tuple[ProposedReference, ...] = ()
     relationships: tuple[ProposedRelationship, ...] = ()
     unresolved: tuple[UnresolvedMatter, ...] = ()
+    story_labels: tuple[EncodableText, ...] = ()
 
 
 #: ADR-0276 §2: an excerpt is a bounded prefix of the referent's rendered text.
@@ -3478,6 +3517,13 @@ class ActivationUnderstanding(BaseModel):
     texts and grounds unchanged. It carries no goal id, no attempt id, no plan id
     and no label, and it crosses no model-facing seam under ADR-0276. It grants no
     authority and establishes no fact; it is what the assistant understood.
+
+    ``story_links`` (ADR-0300 §6:7) are the matters the input was understood to
+    belong to, in proposal order with no member twice: a candidate story as a story
+    member, and an earlier episode as its activation. A link says the input belongs
+    to that matter and nothing more; the story-links stage records it in the story
+    store (§6:12), and a record written before the field validates unchanged
+    (§12:1).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3491,6 +3537,14 @@ class ActivationUnderstanding(BaseModel):
     relationships: tuple[UnderstandingRelationship, ...] = ()
     unresolved: tuple[UnresolvedMatter, ...] = ()
     grounding_dropped: int = Field(default=0, strict=True, ge=0, lt=2**31)
+    story_links: tuple[StoryMember, ...] = ()
+
+    @model_validator(mode="after")
+    def _no_story_link_twice(self) -> Self:
+        if len(set(self.story_links)) != len(self.story_links):
+            msg = "an understanding links to each story member at most once (ADR-0300 §6:7)"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _supplied_names_its_source(self) -> Self:
@@ -3527,6 +3581,8 @@ class ControllerStage(StrEnum):
     END = "end"
     RECALL = "recall"
     WINDOWS = "windows"
+    STORY_LINKS = "story_links"
+    """Record the understanding's story links in the story store (ADR-0300 §6:10)."""
 
 
 class ControllerRule(StrEnum):
@@ -3568,6 +3624,10 @@ class ControllerRule(StrEnum):
     ADR-0295 §3:1 added and left unnamed. Appended where ``interrupted`` would be
     (ADR-0280 §5:3, §5:4) for a pass whose stop mark is set. It ends a pass, so it is
     in :data:`ENDING_CONTROLLER_RULES`."""
+    STORY_LINKS_UNRECORDED = "story_links_unrecorded"
+    """The story-links stage is wired, the understanding outcome is a recorded
+    version, and there is no story-links decision (ADR-0300 §6:11): ``story_links``
+    is due. It makes a stage due, so it is not among the ending rules."""
 
 
 #: The rules that end a pass rather than make a stage due (ADR-0280 §4, §5).
@@ -32473,21 +32533,6 @@ MAX_STORY_PAGE: Final[int] = 100
 _STORY_POSITION_BOUND: Final[int] = 2**63
 
 
-class StoryMemberKind(StrEnum):
-    """Which of the two kinds of thing a story member is (ADR-0289 §2).
-
-    A **closed** enumeration: members are activations' episodes and other stories,
-    and nothing else. The kind is carried with the id and never inferred from it.
-    """
-
-    ACTIVATION = "activation"
-    """An activation, named by its activation id; its episode is the record at
-    ``activation:<activation_id>``."""
-
-    STORY = "story"
-    """Another story, named by its story id: a smaller matter inside a larger one."""
-
-
 class StoryActor(StrEnum):
     """Who made a change to a story (ADR-0289 §2).
 
@@ -32573,14 +32618,6 @@ class StoryRefusalReason(StrEnum):
     """A create or a link through the engine named an activation with no record at
     ``activation:<activation_id>`` (ADR-0289 §4). The refusal names the member.
     The store itself never answers this: it reads no other store (§1)."""
-
-
-class StoryMember(BaseModel):
-    """One member of a story: its kind and its id, carried together (ADR-0289 §2)."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: StoryMemberKind
-    id: Identifier
 
 
 class StoryHeader(BaseModel):

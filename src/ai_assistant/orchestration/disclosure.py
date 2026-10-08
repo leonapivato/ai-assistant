@@ -141,6 +141,7 @@ __all__ = [
     "BoundedAudienceSupply",
     "TurnSupply",
     "UnboundedAudienceSupply",
+    "admits_owner_placed",
     "admitted_to_understanding",
     "notification_is_speakable",
     "placed_facet_kinds",
@@ -482,6 +483,26 @@ def admitted_to_understanding[R: MemoryRecord](
     return tuple(
         record for record in records if _speakable(record, speakable_attested_sources=sources)
     )
+
+
+def admits_owner_placed(supply: TurnSupply) -> bool:
+    """Whether a record placed for the owner alone may be shown to this audience.
+
+    ADR-0300 §11:1's test for a note the user wrote directly, which rests on no
+    episode: it is shown "only where a record placed for the owner alone may be
+    shown". That is :func:`admitted_to_understanding`'s own answer for an
+    ``OWNER``-placed record, read off the posture rather than off a record built to
+    ask it: on a channel of bounded audience the predicate withholds nothing, and on
+    one of unbounded audience :func:`_speakable` withholds every record whose reach
+    is not ``ANYONE``.
+
+    Args:
+        supply: The reader's audience posture.
+
+    Returns:
+        ``True`` on a channel of bounded audience, ``False`` on one of unbounded.
+    """
+    return isinstance(supply, BoundedAudienceSupply)
 
 
 def _speakable(record: MemoryRecord, *, speakable_attested_sources: frozenset[str]) -> bool:

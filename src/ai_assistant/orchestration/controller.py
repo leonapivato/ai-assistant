@@ -111,6 +111,18 @@ class PassFacts(Protocol):
         """The understanding stage has an outcome for the input."""
 
     @property
+    def understanding_recorded(self) -> bool:
+        """The understanding outcome is a recorded version (ADR-0300 §6:11)."""
+
+    @property
+    def story_links_wired(self) -> bool:
+        """The deployment wired the story-links stage (ADR-0300 §6:10)."""
+
+    @property
+    def story_links_decided(self) -> bool:
+        """The story-links stage made its decision, a failed one included (§6:10)."""
+
+    @property
     def event_summarized(self) -> bool:
         """The event summary has been produced."""
 
@@ -176,9 +188,9 @@ def _turn_asks_nothing(facts: PassFacts) -> bool:
     return facts.conversation_turn and facts.associated and not facts.asks_which_goal
 
 
-#: ADR-0280 §4's table, in its order, with ADR-0281 §2's row. The first rule that
-#: answers decides, and ``nothing_due`` is last and always answers, so every pass ends
-#: by a rule.
+#: ADR-0280 §4's table, in its order, with ADR-0281 §2's row, ADR-0282 §3's and
+#: ADR-0300 §6:11's. The first rule that answers decides, and ``nothing_due`` is last
+#: and always answers, so every pass ends by a rule.
 ACTIVATION_RULES: Final[tuple[Rule, ...]] = (
     Rule(
         ControllerRule.CONVERSATION_UNRESOLVED,
@@ -207,6 +219,13 @@ ACTIVATION_RULES: Final[tuple[Rule, ...]] = (
         ControllerRule.NOT_UNDERSTOOD,
         lambda f: f.understanding_wired and not f.understanding_decided,
         ControllerStage.UNDERSTANDING,
+    ),
+    # ADR-0300 §6:11: the understanding's story links are recorded once it is a
+    # recorded version, before anything the pass does with the input.
+    Rule(
+        ControllerRule.STORY_LINKS_UNRECORDED,
+        lambda f: f.story_links_wired and f.understanding_recorded and not f.story_links_decided,
+        ControllerStage.STORY_LINKS,
     ),
     Rule(
         ControllerRule.EVENT_UNSUMMARIZED,
