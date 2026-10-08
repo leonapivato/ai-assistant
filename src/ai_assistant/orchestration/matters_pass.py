@@ -18,7 +18,15 @@ timing.
 **Understanding's flags wait for the episode** (§5:2). An understanding flag is
 decided only once its activation's episode is recorded frozen (ADR-0286): while it is
 open, or where no record of it is there, nothing is written for it, by rule or by a
-model.
+model. The episodes are checked after the run first reads the store, and where any is
+frozen the change logs are read again, so the stories such a flag concerns are read
+after its episode froze, when the story-links stage has written every line of it.
+
+**Its stories as they now stand.** Each flag's stories are followed through merges by
+reading the store's headers when the flag is decided, not from the run's first read,
+so a merge landing meanwhile neither joins two stories nor parts one in the pass's
+eyes. A merge landing between that read and the write is the store's to place: a
+decision's lines go on the stories as they stand in its own transaction (§3:4).
 
 **By rule** (§5:3). A ``like_another`` flag whose two stories have since become one,
 and an understanding flag fewer than two of whose stories still hold its activation,
@@ -42,9 +50,11 @@ that fails to parse or a check is no decision: nothing is written, and the flag 
 decided on a later run.
 
 **One bounded run.** At most ``flags_per_run`` completions, and no new flag started
-once the budget is spent, so a run overruns by at most one flag's work. A store or a
-provider error ends the run and propagates; what was written before it stands, each
-decision being its own transaction.
+once the budget is spent, so a run overruns by at most one flag's work. The budget
+starts once the flags are found, and the first flag is always started, so a store
+whose reading outlasts the budget still has a flag decided on every run (#2770 is the
+reading's own cost). A store or a provider error ends the run and propagates; what was
+written before it stands, each decision being its own transaction.
 
 **It logs code-owned counts only**: no story id, no line, no note and no episode
 content (ADR-0275 §8).
@@ -77,7 +87,12 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.episode_reads import is_open_episode
 from ai_assistant.orchestration.stories import episode_address
-from ai_assistant.orchestration.story_flags import read_records, reread
+from ai_assistant.orchestration.story_flags import (
+    StoryRecords,
+    followed_now,
+    read_records,
+    reread,
+)
 from ai_assistant.orchestration.story_privacy import activation_of
 
 if TYPE_CHECKING:
@@ -93,11 +108,7 @@ if TYPE_CHECKING:
         StoryOutcome,
         StoryPageState,
     )
-    from ai_assistant.orchestration.story_flags import (
-        RaisedFlag,
-        RecordedDecision,
-        StoryRecords,
-    )
+    from ai_assistant.orchestration.story_flags import RaisedFlag, RecordedDecision
 
 __all__ = ["MattersPass", "MattersPassReport"]
 
@@ -193,9 +204,14 @@ class _Result(StrEnum):
 
 @dataclass(slots=True)
 class _Run:
-    """One run's state: the records as last read, its counts and its completions."""
+    """One run's state: the records as last read, its counts and its completions.
+
+    ``frozen`` holds the activations of understanding's flags whose episode was found
+    recorded frozen before the records were last read whole.
+    """
 
     records: StoryRecords
+    frozen: frozenset[str] = frozenset()
     tally: _Tally = field(default_factory=_Tally)
     calls: int = 0
 
@@ -635,6 +651,13 @@ class MattersPass:
     async def run(self) -> MattersPassReport:
         """Decide the flags no decision answers, one bounded run.
 
+        **Discovery, then deciding.** The store's records are read; the episodes of
+        understanding's undecided flags are checked for being recorded frozen; and,
+        where any is, the change logs are read again, so each such flag's stories are
+        read **after** its episode froze, when no later line can join them (§5:2).
+        Only then does the budget start, so a store whose reading outlasts the budget
+        still decides a flag on every run, and the first flag is always started.
+
         Returns:
             What the run did.
 
@@ -643,21 +666,36 @@ class MattersPass:
             MemoryStoreError: If the memory store cannot be read.
             ModelError: Propagated unwrapped from the provider.
         """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._budget.total_seconds()
-        run = _Run(records=await read_records(self._stories, versions=True))
-        answered = run.records.decided()
-        undecided = [flag for flag in run.records.flags() if flag.name not in answered]
+        records = await read_records(self._stories, versions=True)
+        found = [flag.name for flag in records.flags() if flag.name not in records.decided()]
+        frozen = await self._frozen(
+            [name.activation for name in found if name.activation is not None]
+        )
+        if frozen:
+            # Every story's header and change log again, a story minted since
+            # included: understanding's rule start can put a frozen flag's last line on
+            # a new story. No version is read again: a later one is the next run's.
+            again = await read_records(self._stories, versions=False)
+            records = StoryRecords(
+                headers=again.headers, logs=again.logs, versions=records.versions
+            )
+        run = _Run(records=records, frozen=frozen)
+        answered = records.decided()
+        undecided = [flag for flag in records.flags() if flag.name not in answered]
+        # A flag decided elsewhere, or by an earlier run, is forgotten here too.
+        names = {flag.name for flag in undecided}
+        self._failures = {name: n for name, n in self._failures.items() if name in names}
         # Stable: the raised order holds among flags that have failed equally often.
         undecided.sort(key=lambda flag: self._failures.get(flag.name, 0))
         run.tally.flags = len(undecided)
-        for flag in undecided:
-            if loop.time() >= deadline:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._budget.total_seconds()
+        for index, flag in enumerate(undecided):
+            if index and loop.time() >= deadline:
                 run.tally.exhausted = False
                 break
             await self._one(run, flag)
-        tally = run.tally
-        report = tally.report()
+        report = run.tally.report()
         _log.info(
             "matters_pass",
             stage="matters_pass",
@@ -673,12 +711,19 @@ class MattersPass:
         return report
 
     async def _one(self, run: _Run, flag: RaisedFlag) -> None:
-        """Decide one flag, by rule or by a completion, or leave it for a later run."""
+        """Decide one flag, by rule or by a completion, or leave it for a later run.
+
+        Its stories are followed through merges as the store holds them now, not as
+        the run's discovery read them, so a merge since does not make two stories
+        look like one, or one look like two (§5:3).
+        """
         tally = run.tally
-        if flag.name.activation is not None and not await self._frozen(flag.name.activation):
+        if flag.name.activation is not None and flag.name.activation not in run.frozen:
             tally.waiting += 1
             return
-        concerned = run.records.concerned(flag.name)
+        concerned = tuple(
+            dict.fromkeys([await followed_now(self._stories, raised) for raised in flag.raised])
+        )
         if await self._together(flag.name, concerned):
             left = await self._stories.leave_flag(flag.name, actor=_ACTOR)
             tally.count(_Result.LEFT_BY_RULE if left.refusal is None else _Result.RACED)
@@ -688,6 +733,8 @@ class MattersPass:
             tally.exhausted = False
             return
         run.calls += 1
+        # The decisions it is shown are read from these stories' logs as they now are.
+        run.records = await reread(run.records, self._stories, concerned)
         result, touched = await self._decide(run.records, flag, concerned)
         tally.count(result)
         if result is _Result.REFUSED:
@@ -697,12 +744,16 @@ class MattersPass:
         if touched:
             run.records = await reread(run.records, self._stories, touched)
 
-    async def _frozen(self, activation: str) -> bool:
-        """§5:2: whether the activation's episode is recorded, and recorded frozen."""
-        address = episode_address(activation)
-        record = (await self._memory.get_many([address])).get(address)
-        return (
-            isinstance(record, EpisodicMemory)
+    async def _frozen(self, activations: Sequence[str]) -> frozenset[str]:
+        """§5:2: which of ``activations`` have an episode recorded, and recorded frozen."""
+        if not activations:
+            return frozenset()
+        addresses = {episode_address(activation): activation for activation in activations}
+        found = await self._memory.get_many(list(addresses))
+        return frozenset(
+            activation
+            for address, activation in addresses.items()
+            if isinstance(record := found.get(address), EpisodicMemory)
             and record.processing_record is not None
             and not record.processing_record.is_open
             and activation_of(record) == activation
