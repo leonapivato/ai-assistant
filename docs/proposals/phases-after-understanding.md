@@ -6,7 +6,7 @@ how the old turn loop gives way to it?
 
 ## The baseline
 
-The wiki at [b195f48](https://github.com/leonapivato/ai-assistant/wiki) describes the
+The wiki at [6ccbabd](https://github.com/leonapivato/ai-assistant/wiki) describes the
 phases this proposal builds:
 [Controller](https://github.com/leonapivato/ai-assistant/wiki/Controller),
 [Recall](https://github.com/leonapivato/ai-assistant/wiki/Recall),
@@ -39,8 +39,8 @@ flowchart LR
     P -->|"calls"| Z["Authorizing<br/>by rule"]
     Z -->|"allowed"| X["Acting"]
     Z -->|"needs you"| P
-    X -->|"structured results, outcomes"| P
-    X -->|"unstructured results"| D["Digesting"]
+    X -->|"results, failures, unknown outcomes"| P
+    X -->|"results carrying outside text"| D["Digesting"]
     D -->|"evidence"| P
     P -->|"nothing left to do"| E["End"]
 ```
@@ -129,6 +129,7 @@ optimisation a kind's push filter (ADR-0292 §6) or a cheaper model can make lat
 | **Its text** | The message, written into the place the input came from. Planning writes the words itself; no compose step follows it. Replies arrive whole, with no streaming for now. |
 | **Its tool calls** | What to do: searches, forecasts, bookings, emails, writing a note on a story's page, remembering something. Calls in one response run in parallel. |
 | **Scratch notes** | Notes for this activation only, read by its next round. |
+| **Another round needed** | A mark that a later step depends on this round's calls, so planning must run again once they finish. |
 
 There are no kinds of step. What a call does is declared by its **capability** (section 5),
 and every rule reads that declaration.
@@ -138,9 +139,12 @@ and every rule reads that declaration.
   refers to another's output.
 - **The round is recorded in the episode**, naming the round it follows. Claims point at
   it by id.
-- **The tidy-up**: for each story planning is handed with changes not yet tidied, the
-  planning phase's own code adds a tidy-up call to the round, by rule; the model never
-  decides it (#2747).
+- **The tidy-up is planning's call.** For each story it is handed, planning is told when
+  the page was last tidied and how many changes have come since (from the page's version
+  log), and calls the tidy-up when it judges the page behind. The tidy-up never brings a
+  round, even when it fails; its outcome is recorded in the page's version log, not the
+  episode, so the activation can end while it runs (#2747). That is ADR-0292 §12:2 as
+  written: planning chooses it.
 - **Messages go only into the place the input came from** in this milestone; the hub
   refuses any other. Writing into other places and starting conversations come with the
   timers and proactivity milestone, with the audience rules they need
@@ -148,8 +152,8 @@ and every rule reads that declaration.
 
 **What it is given**: understanding's record and its story links; what both recall runs
 found, under the reader rule; for each story it belongs to, the full page, what is newer
-than it, the short views of the stories it is part of, where the matter stands and the
-latest episodes (#2747); the channel window and the episode window; the capability names;
+than it, when it was last tidied and how many changes have come since, the short views of
+the stories it is part of, where the matter stands and the latest episodes (#2747); the channel window and the episode window; the capability names;
 the channel kind's description (ADR-0292 §8); digested evidence; acting's outcomes; earlier
 rounds and their scratch notes; the current time.
 
@@ -159,9 +163,19 @@ pull, ADR-0292 §13).
 
 **Rounds** run one per stage, with a round limit, an end when no progress is made and the
 deadlines; the numbers are [#2589](https://github.com/leonapivato/ai-assistant/issues/2589)'s.
-When the calls are done, the next round's text is the **report**, written from acting's
-outcomes and claiming no more than they show. When processing cannot finish, the fixed
-*couldn't finish* message is written (ADR-0293 §10).
+**A new round runs when**:
+
+- a result arrives (after digesting, where it carries outside text);
+- a call fails or comes back unknown, whatever the call;
+- the round marked that it needs another round, once its calls finish. Planning marks it
+  when a later step depends on this round's calls; a mark on a round with no calls waits
+  for nothing, and the no-progress rule ends it.
+
+Otherwise the activation ends after the round: a note, a memory, a link, or an effect in
+the world that succeeded with nothing to follow brings no round. When a round runs because
+the calls are done, its text is the **report**, written from acting's outcomes and claiming
+no more than they show. When processing cannot finish, the fixed *couldn't finish* message
+is written (ADR-0293 §9).
 
 **Rules**: it proposes and never permits; it never reads raw outside content; it cites what
 it relies on; it never substitutes for what you asked; a call that comes back *needs you*
@@ -193,39 +207,44 @@ or by consolidation, until the authority milestone.
 Acting runs the round's allowed calls in parallel, with no model, and records each
 outcome: **done**, **not done** with its reason, or **unknown**.
 
-**What each capability declares**, set by the hub and never taken from a tool on trust
-(an MCP server's annotations are hints only); an undeclared property takes its most
-dangerous value:
+**What each capability declares**, set by the hub and never taken from a tool on trust (an
+MCP server's annotations are hints only). Every capability declares every property; the
+hub does not offer planning a capability until it has, so a newly connected tool is usable
+only once declared:
 
 | Property | Values | What reads it |
 | --- | --- | --- |
 | **Effect** | none / the assistant's own records / the world | Claims, unknown outcomes and the report apply to effects in the world |
 | **Leaves the hub** | yes / no | Whether it goes out through a channel's actuator (ADR-0292 §7) or runs directly (§12) |
-| **Result** | structured / unstructured / none | Structured results go to planning; unstructured ones to digesting |
+| **Result** | none / no outside text / may carry outside text | A result that may carry outside text takes a *looking for* argument; when it arrives, the text someone other than you or the assistant wrote goes to a digest, record by record, and the rest goes to planning |
 | **Outcome can be unknown** | yes / no | An unknown outcome is never retried or done another way, and never reported as done |
 | **Safe to repeat** | yes / no | The duplicate backstop |
 
 - **Effects in the world** are claimed before they run, so a stop refuses them (ADR-0297),
-  and written durably the moment they happen, pointing at the story where there is one.
-- **The duplicate backstop.** A call with the same capability and values as one already
-  done in the same story, or the same activation where there is no story, is refused as
-  *already done* unless planning marks it a deliberate repeat. It is ADR-0259 and
-  ADR-0265's effect key, scoped to the story instead of the goal.
-- **Memory search** returns a mix: your own records and the assistant's conclusions are
-  structured; a fact stored word for word from outside content is unstructured and goes
-  through a digest.
-- **The assistant's own records**: notes on a story's page, the tidy-up, remembering and
-  starting or linking a story are capabilities whose effect is the assistant's own records
-  (ADR-0292 §12), #2747's.
+  and written durably the moment they happen, **pointing at the activation that made
+  them**. A story finds its effects through its current episodes, so a split, a merge or a
+  corrected link moves them with their episode.
+- **The duplicate backstop.** A call with the same capability and values as an effect of
+  the episodes in this activation's stories, or of this activation alone when it has none,
+  is refused as *already done* unless planning marks it a deliberate repeat. It is ADR-0259
+  and ADR-0265's effect key, scoped by the stories' episodes instead of the goal.
+- **Who wrote the text decides digesting, record by record.** For a web search that is all
+  of it; for a memory search, only the records whose stored source is outside.
+- **The assistant's own records** are #2747's story capabilities (starting a story with its
+  first notes and, optionally, the story it sits inside; a note on a story's page, which
+  must name a story that exists; linking; the tidy-up; reading a page) and remembering, all
+  with the assistant's own records as their effect (ADR-0292 §12). Several new stories in
+  one round are several start calls.
 - **What runs finishes** when a stop arrives; nothing new starts. No locks in this
   milestone; they come with the concurrency milestone.
 
 ## 6. Digesting
 
-- **One model call per unstructured result**, in parallel, with no tools.
+- **One model call per result carrying outside text**, in parallel, with no tools.
 - **Each digest answers a question.** The hub adds a required *looking for* argument to
-  every capability whose result is unstructured, so the call carries the question and the
-  digest answers it.
+  every capability whose result may carry outside text, so the call carries the question
+  and the digest answers it. An outside fact that **recall** finds has no call behind it;
+  its digest answers what understanding said the input means.
 - **A follow-up** is a call on the assistant's own records: ask again about a stored result,
   with a new question. Nothing is remembered between calls.
 - **Long content** is split into parts digested in parallel, and their evidence merged; the
@@ -288,7 +307,9 @@ To be confirmed clause by clause when each section becomes its ADR:
 
 - ADR-0170, "a reply is not a tool": the reply is planning's own text.
 - ADR-0052, ADR-0244 and ADR-0148's parked call resumed on the answer; ADR-0078's deferred
-  questions and `answer` (ADR-0293 §11 already retires `answer`).
+  questions and `answer`, with ADR-0293 §11's clause retiring `answer` "once question
+  messages and their answers (§6) are built", which never fires now that question messages
+  are dropped.
 - ADR-0293 §6, its options on a question and an answer naming its question: questions and
   answers are ordinary messages.
 - ADR-0248–ADR-0273, the goal and attempt model; ADR-0226, ADR-0228 and ADR-0251's turn
@@ -316,11 +337,25 @@ To be confirmed clause by clause when each section becomes its ADR:
 - **A separate writing step**, so replies stream. Not now: streaming is not needed, and a
   writer can be added later without changing a round's shape.
 - **A separate closing phase.** Folded into planning's last round.
+- **The tidy-up added by planning's code, by rule.** Replaced by planning's own call, given
+  how far behind each page is: it fits ADR-0292 §12:2 as written.
+- **A result's shape (structured or unstructured)** deciding what is digested. Replaced by who
+  wrote the text: shape mislabels your own free-text notes and an invite's outside title.
+- **Every round after calls bringing another round.** A round that only writes a note would
+  bring a second planning call with nothing to plan from, and risk a second message.
+- **Effects pointing at the story.** A split would leave them behind and let the duplicate
+  backstop miss a second booking.
 - **Leaving duplicates to planning alone.** Rejected: a mistake costs money or sends
   something twice.
 
 ## What it leaves open
 
+- Timers and watches pointing at what set them and found through the story, as effects
+  now are (the timers milestone).
+- Approvals found through a story that later merges or splits (the authority milestone).
+- Whether the lineage rule (ADR-0181 §5, and the direction "never what, where or to whom")
+  should relax toward the owner's principle for outside content recorded on #2747 (the
+  authority milestone, where asking the user is designed).
 - The numbers: rounds, no progress, deadlines, digest part size, the second recall run's
   total cap ([#2589](https://github.com/leonapivato/ai-assistant/issues/2589)).
 - Which read capabilities survive, and the unbounded-audience gate on reads
