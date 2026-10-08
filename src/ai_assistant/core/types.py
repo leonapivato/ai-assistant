@@ -33263,3 +33263,198 @@ def story_note_ids(notes: object) -> tuple[int, ...]:
             msg = "a story note id must be an integer in [1, 2**63)"
             raise ValueError(msg)
     return snapshot
+
+
+# --- where a matter stands (ADR-0300 §8) ---------------------------------------
+#
+# Worked out from the records each time a reader needs it, and never stored
+# (ADR-0300 §2:1, §8:1): what was done, when things happened, and the related
+# matters. Assembled per reader, so what one reader is shown need not be what another
+# is (§8, §11). No field holds a note or a line of the page; the one text is an
+# episode's understood meaning, read from the episode itself.
+
+#: How many of a matter's episodes its timeline shows one by one, most recent first;
+#: the older ones are summarised as counts (ADR-0300 §8:1). Chosen from the
+#: understanding stage's episode window, which renders ten episodes by recency
+#: (``UNDERSTANDING_EPISODE_LIMIT``, the owner's first guess in #2544): a reader asking
+#: where a matter stands sees as many of its moments one by one as understanding sees
+#: of what happened recently. It also bounds the view's size on the wire, since each
+#: moment carries an understood meaning.
+STORY_STANDING_RECENT: Final[int] = 10
+
+
+class StoryEffectState(StrEnum):
+    """Where one thing done stands, in the order the view lists them (ADR-0300 §8:1).
+
+    A **closed** enumeration, added to and never renamed. What was done is listed
+    unknown first, then not done, then done.
+    """
+
+    UNKNOWN = "unknown"
+    """Whether it took effect is not known."""
+
+    NOT_DONE = "not_done"
+    """It did not take effect."""
+
+    DONE = "done"
+    """It took effect."""
+
+
+#: The order ADR-0300 §8:1 lists what was done in, by state.
+_STORY_EFFECT_ORDER: Final = {
+    StoryEffectState.UNKNOWN: 0,
+    StoryEffectState.NOT_DONE: 1,
+    StoryEffectState.DONE: 2,
+}
+
+
+class StoryStandingEffect(BaseModel):
+    """One thing done, as where the matter stands lists it (ADR-0300 §8:1-§8:2).
+
+    It names the activation that made it, never a story, so a split, a merge, a move
+    and a corrected link carry it with its episode (§8:2). Effect records come with
+    the phases' acting (§8); the decision that builds them fills this slot and may
+    add to what it carries.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    activation_id: Identifier
+    state: StoryEffectState
+    at: UtcInstant
+
+
+class StoryStandingEpisode(BaseModel):
+    """One member episode on a matter's timeline (ADR-0300 §8:1).
+
+    ``occurred_at`` is the episode's own instant, so the timeline runs in when things
+    happened rather than in link order (ADR-0289, *What stays open*). ``meaning`` is
+    the episode's latest understood meaning, or ``None`` where it has none.
+    ``in_progress`` marks an open episode (ADR-0286 §1), which a reader feeding a
+    model is never shown (§6). ``outside`` marks an episode resting on outside
+    content, by the rule ADR-0300 §4:3 marks a note resting on an episode: its
+    trigger's ``origin`` is ``outside``, or the hub's record of what its activation
+    read shows outside content.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    activation_id: Identifier
+    occurred_at: UtcInstant
+    meaning: NonBlankEncodableText | None
+    in_progress: bool = Field(strict=True)
+    outside: bool = Field(strict=True)
+
+
+class StoryStandingEarlier(BaseModel):
+    """The timeline's older episodes, summarised as counts (ADR-0300 §8:1).
+
+    ``episodes`` is how many episodes are older than the ones shown one by one, and
+    ``first_at`` and ``last_at`` the instants of the oldest and the newest of them.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    episodes: int = Field(strict=True, ge=1, lt=_STORY_POSITION_BOUND)
+    first_at: UtcInstant
+    last_at: UtcInstant
+
+    @model_validator(mode="after")
+    def _spans_forward(self) -> Self:
+        if self.first_at > self.last_at:
+            msg = "the earlier episodes' first instant is not after their last"
+            raise ValueError(msg)
+        return self
+
+
+class StoryRelation(StrEnum):
+    """How a related matter relates to the one being read (ADR-0300 §8:1).
+
+    A **closed** enumeration, added to and never renamed.
+    """
+
+    PART_OF = "part_of"
+    """The story read is a member of this one: the larger matter it is part of."""
+
+    CONTAINS = "contains"
+    """This one is a member of the story read: a smaller matter inside it."""
+
+
+class StoryRelated(BaseModel):
+    """A related matter: a story one membership away, and how (ADR-0300 §8:1).
+
+    Named by its id and its current member count, one level deep, as ADR-0289 §4:5
+    resolves a story member. A matter related but separate is a note on the page,
+    not a link, so it is not here (ADR-0300 §8).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    relation: StoryRelation
+    story_id: Identifier
+    member_count: int = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
+
+
+class StoryStanding(BaseModel):
+    """Where a matter stands, assembled from the records for one reader (ADR-0300 §8:1).
+
+    ``done`` is what was done, from the effect records of the story's current
+    episodes, unknown first, then not done, then done. ``recent`` is the timeline's
+    newest episodes, most recent first, at most :data:`STORY_STANDING_RECENT`;
+    ``earlier`` summarises the older ones as counts, and is set only where ``recent``
+    is full. ``related`` is the stories the story read is part of, then the stories
+    it contains. Each episode is one the reader may be shown (§11).
+
+    A merged story stands nowhere of its own: its standing carries its header, which
+    names the story it was merged into, and nothing else, so a reader follows it as
+    it follows a merged story's view (ADR-0289 §3).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    story: StoryHeader
+    done: tuple[StoryStandingEffect, ...] = ()
+    recent: tuple[StoryStandingEpisode, ...] = Field(default=(), max_length=STORY_STANDING_RECENT)
+    earlier: StoryStandingEarlier | None = None
+    related: tuple[StoryRelated, ...] = ()
+
+    @model_validator(mode="after")
+    def _a_merged_story_stands_nowhere(self) -> Self:
+        if self.story.merged_into is not None and (
+            self.done or self.recent or self.earlier is not None or self.related
+        ):
+            msg = "a merged story's standing carries its header and nothing else"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _done_in_state_order(self) -> Self:
+        ranks = [_STORY_EFFECT_ORDER[effect.state] for effect in self.done]
+        if ranks != sorted(ranks):
+            msg = "what was done is listed unknown first, then not done, then done"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _recent_first(self) -> Self:
+        instants = [episode.occurred_at for episode in self.recent]
+        if instants != sorted(instants, reverse=True):
+            msg = "the timeline lists its episodes most recent first"
+            raise ValueError(msg)
+        earlier = self.earlier
+        if earlier is None:
+            return self
+        if len(self.recent) < STORY_STANDING_RECENT:
+            msg = "older episodes are summarised only once the recent ones are full"
+            raise ValueError(msg)
+        if earlier.last_at > self.recent[-1].occurred_at:
+            msg = "the earlier episodes are no newer than the oldest one shown"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _each_related_once(self) -> Self:
+        named = [related.story_id for related in self.related]
+        if len(set(named)) != len(named) or self.story.story_id in named:
+            msg = "a related matter is another story, named once"
+            raise ValueError(msg)
+        contains = [related.relation is StoryRelation.CONTAINS for related in self.related]
+        if contains != sorted(contains):
+            msg = "the stories it is part of come before the stories it contains"
+            raise ValueError(msg)
+        return self
