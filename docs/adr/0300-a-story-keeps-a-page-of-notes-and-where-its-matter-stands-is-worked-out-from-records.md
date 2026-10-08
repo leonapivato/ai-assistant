@@ -10,6 +10,7 @@
 - **Partially supersedes** [ADR-0281](0281-recall-runs-before-understanding-and-understanding-reads-what-it-found.md) — **three scopes.** **§1:3's *"and nothing else"*, in the addition alone**: recall also looks up the stories the episodes it keeps belong to, by identity and never by search (§7 below). **§6:1's `RecalledItem`, in the addition alone**: it gains `stories`. **§7:1's *"or memory from any other read"*, for the candidate stories alone**: understanding also receives the latest episodes of each candidate story (§6 below). Every other clause stands.
 - **Partially supersedes** [ADR-0282](0282-phases-read-and-write-the-working-episode-and-recall-searches-past-the-windows.md) — **two scopes.** **§2:5's *"and only those"*, for recall alone**: recall's reads also include the story store's lookup of the stories each episode it keeps belongs to (§7 below). **§2:4's *"and fetches no other record"* and §5:1's single `MemoryStore.get_many`, for the candidate stories alone**: before understanding renders, the understanding phase looks up the stories of the episode window's episodes, reads each candidate's short view from the story store, and fetches the records of each candidate's latest episodes, under §2:6–§2:8 otherwise (§6 below). Every other clause stands.
 - **Partially supersedes** [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) — **one scope.** **§3:5's working set and §4:1–§4:3's enums and table, in the additions alone**: the working set gains the story-links decision, and §4:1–§4:3 gain the stage `story_links`, the rule `story_links_unrecorded` and its row immediately after `not_understood` (§6 below); no other member, row or order changes. Every other clause stands.
+- **Partially supersedes** [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md) — **one scope.** **§12:1's and §12:2's reach, for the story changes the hub makes outside planning**: the membership the hub records from understanding's links and the stories §6's rule starts (§6 below), the matters pass's changes (§9 below), and, until the phases replace the turn loop, the engine's tidy-up run by rule (§5 below) are bookkeeping and background maintenance of the assistant's records, not actions: planning does not choose them and authorizing does not check them, and they still run directly on no channel. The story calls planning makes (§10 below) are inside actions under §12:1–§12:2 as written, starting a story, writing a note and tidying a page joining §12:1's examples; every other clause stands.
 
 ## Context
 
@@ -146,7 +147,7 @@ identity.
 | **Who wrote it**: planning, the tidy-up, or the user directly | The tidy-up never rewords or drops the user's own notes |
 | **What it rests on**: exactly one activation's episode, or, for a note the user wrote directly, nothing but itself | Splitting sends each entry with its episode; the privacy default reads it |
 | **Whether outside content fed it** | It is shown marked as such, never as the user's words, and counts as outside content for whoever reads it (§4) |
-| **When it was written** | Which entries are newer than the current page |
+| **When it was written** | The order of a story's entries; which of them a version has taken in is the version log's |
 
 > **Normative.** An entry carries its text, within a bound on its length; who wrote it;
 > what it rests on; whether outside content fed it; and the store's clock reading when it
@@ -178,8 +179,15 @@ identity.
 
 > **Normative.** The **version log** is append-only, and holds identities and instants
 > only. Each version records when it was written; the entries each line cited; the
-> safety-net entries it added; the episodes it took in; the supersession marks it made;
-> and the flags it raised (§9). No field of it holds free text.
+> safety-net entries it added; the entries and the episodes it took in; the supersession
+> marks it made; and the flags it raised (§9). No field of it holds free text.
+
+> **Normative.** An entry or a member episode is **pending** on a story until a version
+> of that story's page records taking it in. A version takes in exactly the pending
+> entries and episodes its run read: one that becomes pending while the run is out stays
+> pending after the run's write, whatever the instants say. An entry or an episode that a
+> merge, a split or a move brings into a story is pending there until a version of that
+> story takes it in, whatever any other story's version took in.
 
 > **Normative.** The current page has a size cap. What falls outside it stays in the
 > entries and in their episodes.
@@ -194,7 +202,7 @@ canoe." "Next: check the forecast on Thursday."
 > **Normative.** `StoryStore` gains the page: appending an entry; writing a new current
 > page together with its safety-net entries and its version, in one transaction, refused
 > where the version it was built on is no longer the current one; and reading the
-> current page with the entries newer than it, a story's entries page by page, and its
+> current page with its pending entries, a story's entries page by page, and its
 > version log page by page. A refused page write writes nothing.
 
 > **Normative.** The page's types take names that `core/types.py` does not already
@@ -271,9 +279,9 @@ one model call produces (a model call is processing, ADR-0292 §12:4).
 > `ModelProvider`, `StoryStore` and `MemoryStore`. It is not a Protocol, and
 > `core/protocols.py` gains no member for it.
 
-> **Normative.** A tidy-up of a story reads its current page, the entries newer than it,
-> and the member episodes no version has yet taken in that are frozen. An open episode is
-> not taken in, and waits for a later run.
+> **Normative.** A tidy-up of a story reads its current page, its pending entries, and its
+> pending member episodes that are frozen. An open episode is not read, and stays pending
+> for a later run.
 
 > **Normative.** The tidy-up renders an episode with the user's own input as written
 > where its author is the user, established (ADR-0292 §5), any other input only through
@@ -308,22 +316,22 @@ one model call produces (a model call is processing, ADR-0292 §12:4).
 > standing.
 
 > **Normative.** At most one tidy-up runs on a story at a time. A run asked for while one
-> is running on the same story does not start, and changes that arrive meanwhile are
-> taken in by the next run.
+> is running on the same story does not start, and what becomes pending meanwhile is
+> taken in by a later run (§3).
 
 > **Normative.** Nobody waits for a tidy-up: the activation that started it does not wait
 > for it, and its finishing starts nothing.
 
 A tidy-up skipped or late loses nothing: every reader of the page is given the current
-page plus everything newer than it, which is the same information the tidy-up folds in;
+page plus everything pending on it, which is the same information the tidy-up folds in;
 it only grows the next reader's input.
 
 > **Normative — before the phases.** Until the phases replace the turn loop, the engine
 > starts a tidy-up by rule, without waiting for it, for each story into which the
-> story-links stage (§6) links an activation and whose page has changes not yet tidied.
-> This run is
-> scaffolding for the test hub and is removed at the cutover; it is never the phases'
-> route to the tidy-up.
+> story-links stage (§6) links an activation and on whose page anything is pending.
+> This run is scaffolding for the test hub, is not an action under ADR-0292 §12:1–§12:2
+> in the scope this decision's header gives, and is removed at the cutover; it is never
+> the phases' route to the tidy-up.
 
 ### 6. Understanding links an activation to stories
 
@@ -337,7 +345,7 @@ it only grows the next reader's input.
 > score first. A story already a candidate is not repeated.
 
 > **Normative.** Each candidate is rendered as a **short view**: the first lines of its
-> current page, its newest entries not yet tidied, and the meanings of its latest
+> current page, its newest pending entries, and the meanings of its latest
 > episodes, each episode rendered with ADR-0276 §4's projection. The numbers of each are
 > composition-root constants the lane that builds them sets, at most two entries and two
 > episodes.
@@ -397,8 +405,9 @@ it only grows the next reader's input.
 > `StoryStoreError` records the decision as `failed` and the pass goes on.
 
 > **Normative.** Membership the hub records from understanding's links, or by rule, is
-> bookkeeping, as the hub records understanding's own record; it is not an action under
-> ADR-0292 §12, and planning does not choose it.
+> bookkeeping, as the hub records understanding's own record. It is not an action under
+> ADR-0292 §12:1–§12:2, in the scope this decision's header gives, and planning does not
+> choose it.
 
 So "my running" becomes a story the second time it comes up, whether or not planning
 runs.
@@ -443,11 +452,11 @@ view.
 | Reader | Shown |
 | --- | --- |
 | **Understanding**, judging whether input belongs | The candidates' short views (§6). |
-| **Planning** | For each story the activation belongs to: the full page, the entries and episodes newer than it, when it was last tidied and how many changes since, the short views of the stories it is part of (marked as inherited), where the matter stands, and the latest episodes (§10). |
+| **Planning** | For each story the activation belongs to: the full page, its pending entries and episodes, when it was last tidied and how many are pending, the short views of the stories it is part of (marked as inherited), where the matter stands, and the latest episodes (§10). |
 | **The user** | Mostly through conversation ("where are we with the trip?"), which planning answers. Directly through the story commands: the page, where the matter stands, and adding a note. |
 
 > **Normative.** `AssistantEngine` gains the **story commands**: reading a story's page,
-> with the entries newer than it and when it was last tidied; reading where its matter
+> with its pending entries and when it was last tidied; reading where its matter
 > stands; adding a note, written by `owner`, resting on nothing, unmarked; and moving
 > activation members between stories. Each names its story by id. They are added to
 > `Engine`, the canonical fake engine and the wire client, and the change advances
@@ -477,7 +486,9 @@ as well as by rule, and mistakes are cheap because reorganising is free and invi
 > **Normative.** A background **matters pass**, run on the schedule of the background
 > memory work, consolidation, decides each flag: merge, split, move members, group
 > stories under a larger one, or leave them. It writes through the store with the actor
-> `matters_pass`, and its prompt renders pages under §4's rules.
+> `matters_pass`, and its prompt renders pages under §4's rules. Its changes are
+> background maintenance, not actions under ADR-0292 §12:1–§12:2, in the scope this
+> decision's header gives.
 
 > **Normative.** No story is dissolved by rule. A story left with no members stays, as
 > ADR-0289 §3:3 decides.
@@ -512,9 +523,8 @@ reply"), and understanding links the reply.
 > story is its own call.
 
 > **Normative.** The tidy-up is a call planning chooses. For each story it is given,
-> planning sees when the page was last tidied and how many changes have come since, the
-> entries newer than the page and the member episodes no version has taken in, and
-> nothing adds the call to a round by rule.
+> planning sees when the page was last tidied and how many entries and episodes are
+> pending on it, and nothing adds the call to a round by rule.
 
 > **Normative.** The story calls are inside actions under ADR-0292 §12:1–§12:2: planning
 > chooses them, authorizing checks them, and acting runs them. Each one's effect is the
@@ -543,10 +553,11 @@ reply"), and understanding links the reply.
 
 ### 11. Privacy, for now
 
-> **Normative.** Until privacy is designed, a line or an entry is shown to a reader only
-> where every episode it rests on may be shown to that reader, a line resting on the
-> episodes its cited entries rest on; and an entry the user wrote directly only where a
-> record placed for the owner alone may be shown.
+> **Normative.** Until privacy is designed, an entry is shown to a reader only where the
+> episode it rests on may be shown to that reader, and an entry the user wrote directly
+> only where a record placed for the owner alone may be shown. A line is shown only where
+> every entry it cites may be shown, so a line copying the user's direct note carries
+> that note's restriction.
 
 ### 12. The wire and the episode record
 
@@ -597,10 +608,11 @@ it. §10 is built by the phases.
 | ADR-0281 §1:3, §6:1, §7:1 | As this ADR's header states |
 | ADR-0282 §2:4, §2:5, §5:1 | As this ADR's header states |
 | ADR-0280 §3:5, §4:1–§4:3 | As this ADR's header states |
-| ADR-0292 §12:1 | Nothing: its list of inside actions is examples, and starting a story with its first notes, writing a note and tidying a page are more of the same class |
+| ADR-0292 §12:1, §12:2 | As this ADR's header states. Otherwise §12:1's list of inside actions is examples, and starting a story with its first notes, writing a note and tidying a page are more of the same class |
 
 > **Normative.** This numbered draft records its replacements on the status line and in
-> a dated header note of ADR-0289, ADR-0276, ADR-0281, ADR-0282 and ADR-0280, atomically
+> a dated header note of ADR-0289, ADR-0276, ADR-0281, ADR-0282, ADR-0280 and ADR-0292,
+> atomically
 > with this ADR under ADR-0070 and ADR-0082, preserving their ratified bodies. The
 > replacements take effect on this ADR's ratification.
 

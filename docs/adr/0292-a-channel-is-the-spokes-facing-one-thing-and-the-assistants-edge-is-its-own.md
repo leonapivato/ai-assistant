@@ -1,6 +1,6 @@
 # 292. A channel is the spokes facing one thing, and the assistant's edge is its own
 
-- Status: Partially superseded by ADR-0294 (§Decision:2's and §13:1's hold on readers' scheduled ingestion) and ADR-0296 (§4:8's one connection per device, §4:9's closing of that connection, and §4:10's gate as it reaches a browser device)
+- Status: Partially superseded by ADR-0294 (§Decision:2's and §13:1's hold on readers' scheduled ingestion) and ADR-0296 (§4:8's one connection per device, §4:9's closing of that connection, and §4:10's gate as it reaches a browser device) and ADR-0300 (§12:1's and §12:2's reach, for the story changes the hub makes outside planning: understanding's links, the matters pass and the interim tidy-up run)
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign, rethought: the model the conversation channel ([#2680](https://github.com/leonapivato/ai-assistant/pull/2680)), the device session and stopping an activation apply, in place of ADR-0290 and ADR-0291.
 - Authorization: the owner accepted proposal #2682 on 2026-10-04, at `36031075`, after walking the model through item by item the same day, and the dispatcher assigned 0292. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
@@ -24,6 +24,16 @@
   clause. This replacement takes effect on ratification of ADR-0296. This reciprocal
   header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-08 by ADR-0300 — one scope. §12:1's and §12:2's reach,
+  for the story changes the hub makes outside planning: the membership the hub records
+  from understanding's links and the stories ADR-0300's rule starts, the matters pass's
+  changes, and, until the phases replace the turn loop, the engine's tidy-up run by rule
+  are bookkeeping and background maintenance, not actions, so planning does not choose
+  them and authorizing does not check them; they still run directly on no channel. The
+  story calls planning makes stay inside actions under §12:1–§12:2 as written, and every
+  other clause stands. This replacement takes effect on ratification of ADR-0300. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  prior supersessions and the ratified body below are preserved.
 
 ## Context
 
