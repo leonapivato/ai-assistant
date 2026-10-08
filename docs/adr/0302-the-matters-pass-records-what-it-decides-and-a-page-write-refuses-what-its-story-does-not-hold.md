@@ -185,16 +185,20 @@ answer one flag, whatever their timing.
 > `matters_pass`.
 
 > **Normative.** The pass decides an understanding flag only once its activation's
-> episode is no longer open: frozen (ADR-0286), or no longer recorded. Until then the
-> flag is not decided, by rule or by a model, and nothing is written for it.
+> episode is recorded frozen (ADR-0286). While the episode is open, or where no record
+> of it is there, the flag is not decided, by rule or by a model, and nothing is
+> written for it.
 
 The story-links stage writes an activation's links while the activation runs, each in
 its own transaction (ADR-0300 §6:12), so a flag that exists after its second link may
 gain a third before the stage finishes. Once the episode is frozen the stage has run, and
 no later write carries the actor `understanding` with that activation as trigger, so the
 flag's stories are all written. The tidy-up waits for the same boundary before it reads
-an episode (ADR-0300 §5:2). A tidy-up's flag needs no such wait: its version is written
-whole, in one transaction.
+an episode (ADR-0300 §5:2). A missing record proves nothing: an open episode may be
+forgotten, or deleted by a capture failure, while its activation's stages still run
+(ADR-0286 §5, §8). Such a flag stays undecided and its stories stay as they are, which
+is what no decision means; the pass has no episode to show of it in any case. A
+tidy-up's flag needs no wait: its version is written whole, in one transaction.
 
 > **Normative.** A flag whose stories have since come together is recorded `left` by
 > rule, without a model call: a `like_another` flag whose two stories are one, and an
