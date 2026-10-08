@@ -260,26 +260,48 @@ async def test_an_open_episode_is_neither_shown_nor_lets_its_notes_be() -> None:
     assert (candidates.fetched, candidates.missing) == ((address("a-1"),), ())
 
 
-async def test_a_chosen_episode_gone_by_the_fetch_is_recorded_missing_and_not_shown() -> None:
+@pytest.mark.parametrize("change", ["forgotten", "narrowed"])
+async def test_an_episode_changed_between_the_choice_and_the_fetch_withholds_what_rests_on_it(
+    change: str,
+) -> None:
+    """§11:1 is decided from the fetch: what rests on a changed episode is not shown."""
     stories = _stories()
-    await _story(stories, activation("a-1"), activation("a-2"))
+    trip = await _story(stories, activation("a-1"), activation("a-2"))
+    written = await stories.append_note(
+        trip, "on a-2", author=StoryNoteAuthor.PLANNING, rests_on="a-2"
+    )
+    assert written.note is not None
+    state = await stories.current_page(trip)
+    assert state is not None
+    draft = StoryPageDraft(
+        lines=(StoryDraftLine(text="from a-2", cites=(written.note.note_id,), outside=False),),
+        took_in_notes=(written.note.note_id,),
+    )
+    assert (await stories.write_page(trip, draft, as_of=state.as_of)).refusal is None
+    await stories.append_note(trip, "also on a-2", author=StoryNoteAuthor.PLANNING, rests_on="a-2")
     window = (episode("a-1"),)
-    memory = await memory_of(episode("a-1"), episode("a-2"))
+    memory = await memory_of(episode("a-1"), episode("a-2", at=AT + timedelta(minutes=1)))
     reads = memory.get_many
     calls = count()
 
-    async def forgetting(record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+    async def changing(record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
         found = dict(await reads(record_ids))
-        if next(calls):
-            # The second read, the fetch: a-2 was forgotten after it was chosen.
-            found.pop(address("a-2"), None)
+        if next(calls) and address("a-2") in found:
+            # The second read, the fetch: a-2 changed after it was chosen.
+            if change == "forgotten":
+                del found[address("a-2")]
+            else:
+                found[address("a-2")] = found[address("a-2")].model_copy(
+                    update={"placement": OWNER_ONLY}
+                )
         return found
 
-    memory.get_many = forgetting  # type: ignore[method-assign]  # an interleaving point
+    memory.get_many = changing  # type: ignore[method-assign]  # an interleaving point
 
-    candidates = await _candidates(stories, memory).assemble(window, audience=BOUNDED)
+    candidates = await _candidates(stories, memory).assemble(window, audience=UNBOUNDED)
 
     (view,) = candidates.views
+    assert (view.lines, view.notes) == ((), ())
     assert [record.id for record in view.episodes] == [address("a-1")]
     assert candidates.fetched == (address("a-2"), address("a-1"))
     assert candidates.missing == (address("a-2"),)
