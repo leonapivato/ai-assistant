@@ -58,7 +58,7 @@ from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_privacy import PageVisibility, activation_of
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
     from ai_assistant.core.types import (
@@ -111,10 +111,11 @@ class Candidates:
         views: The candidates' short views, in §6:1's order.
         unreadable: A story-store read raised ``StoryStoreError``, so there are no
             candidates and the section says the stories could not be read (§6:4).
-        fetched: Every episode id the phase asked for, in order, each once
-            (ADR-0282 §2:7).
-        missing: The ids that returned no episode, an open one, or one the audience
-            predicate refused (§2:6, §2:8).
+        fetched: The ids of the latest episodes the views were fetched for, in order,
+            each once (ADR-0282 §2:7). Each was admitted for the pass when it was
+            chosen, so no id the audience predicate refuses enters here (§2:8).
+        missing: The fetched ids that came back with no episode, an open one, or one
+            the predicate refused on the second application (§2:6, §2:8).
     """
 
     views: tuple[ShortView, ...] = ()
@@ -134,7 +135,7 @@ class _Read:
     members: tuple[str, ...]
 
     def addresses(self) -> list[str]:
-        """The episodes this view's privacy and its episodes need, in that order."""
+        """The episodes this view's privacy and its choice of episodes read, in order."""
         rests = [
             note.rests_on
             for note in (*self.cited.values(), *self.notes)
@@ -142,15 +143,12 @@ class _Read:
         ]
         return [episode_address(activation) for activation in (*rests, *self.members)]
 
-    def view(
-        self, visibility: PageVisibility, admitted: dict[str, EpisodicMemory], *, episodes: int
-    ) -> ShortView:
-        """The short view, kept under §11's default.
+    def latest(self, admitted: dict[str, EpisodicMemory], *, episodes: int) -> tuple[str, ...]:
+        """The ids of the latest ``episodes`` members by occurrence, among those admitted.
 
-        Its episodes are the latest by occurrence among the members that came back
-        admitted — ``(occurred_at, id)`` descending, ADR-0276 §4's recency order — and
-        never by link order, which a merge or a move makes say nothing about time
-        (ADR-0289 §3: a merge appends the absorbed story's members).
+        ``(occurred_at, id)`` descending, ADR-0276 §4's recency order, and never link
+        order, which a merge or a move makes say nothing about time (ADR-0289 §3: a
+        merge appends the absorbed story's members).
         """
         held = [
             record
@@ -158,11 +156,20 @@ class _Read:
             if (record := admitted.get(episode_address(activation))) is not None
         ]
         held.sort(key=lambda record: (record.occurred_at, record.id), reverse=True)
+        return tuple(record.id for record in held[:episodes])
+
+    def view(
+        self,
+        visibility: PageVisibility,
+        latest: tuple[str, ...],
+        fetched: dict[str, EpisodicMemory],
+    ) -> ShortView:
+        """The short view: its lines and notes under §11's default, its latest as fetched."""
         return ShortView(
             story_id=self.story_id,
             lines=tuple(line for line in self.lines if visibility.line(line, self.cited)),
             notes=tuple(note for note in self.notes if visibility.note(note)),
-            episodes=tuple(held[:episodes]),
+            episodes=tuple(record for id_ in latest if (record := fetched.get(id_)) is not None),
         )
 
 
@@ -242,27 +249,46 @@ class StoryCandidates:
         except StoryStoreError:
             _log.warning("story_candidates_unreadable", stage="understanding")
             return Candidates(unreadable=True)
-        addresses = tuple(dict.fromkeys(address for read in reads for address in read.addresses()))
-        found = without_open_episodes(await self._memory.get_many(addresses)) if addresses else {}
-        episodes = [
-            record
-            for address in addresses
-            if isinstance(record := found.get(address), EpisodicMemory)
-        ]
-        admitted = {record.id: record for record in admitted_to_understanding(audience, episodes)}
+        # ADR-0282 §2:5, §2:8: the reads that choose, and only admitted ids chosen. The
+        # episodes the notes rest on and every member are read once, through the audience
+        # predicate: what is admitted decides what of each page may be shown (§11:1) and
+        # which members are the latest; nothing refused is chosen or recorded.
+        admitted = await self._admitted(
+            dict.fromkeys(address for read in reads for address in read.addresses()), audience
+        )
         visibility = PageVisibility.of(admitted.values(), owner_notes=admits_owner_placed(audience))
-        views = tuple(read.view(visibility, admitted, episodes=self._episodes) for read in reads)
+        latest = [read.latest(admitted, episodes=self._episodes) for read in reads]
+        # §2:6-§2:8: the chosen ids fetched for their current versions, the predicate
+        # applied again, and what came back missing recorded beside what was fetched.
+        fetched = tuple(dict.fromkeys(id_ for ids in latest for id_ in ids))
+        held = await self._admitted(fetched, audience)
+        views = tuple(
+            read.view(visibility, ids, held) for read, ids in zip(reads, latest, strict=True)
+        )
         _log.info(
             "story_candidates",
             stage="understanding",
             candidates=len(views),
-            fetched=len(addresses),
+            fetched=len(fetched),
         )
         return Candidates(
             views=views,
-            fetched=addresses,
-            missing=tuple(address for address in addresses if address not in admitted),
+            fetched=fetched,
+            missing=tuple(id_ for id_ in fetched if id_ not in held),
         )
+
+    async def _admitted(
+        self, addresses: Iterable[str], audience: TurnSupply
+    ) -> dict[str, EpisodicMemory]:
+        """The frozen episodes at ``addresses`` the audience admits, by address."""
+        wanted = list(addresses)
+        if not wanted:
+            return {}
+        found = without_open_episodes(await self._memory.get_many(wanted))
+        episodes = [
+            record for address in wanted if isinstance(record := found.get(address), EpisodicMemory)
+        ]
+        return {record.id: record for record in admitted_to_understanding(audience, episodes)}
 
     async def _chosen(self, window: Sequence[EpisodicMemory], recalled: Sequence[str]) -> list[str]:
         """§6:1's order: the window's episodes' stories, then recall's, each once."""
@@ -336,13 +362,15 @@ class StoryCandidates:
         """
         if state.story.merged_into is not None:
             return ()
-        members: list[str] = []
+        # Each once: a member unlinked and linked again while the pages are read comes
+        # back at its new position on a later page.
+        members: dict[str, None] = {}
         cursor: int | None = None
         while True:
             page = await self._stories.view(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
             if page is None:
                 break
-            members.extend(
+            members |= dict.fromkeys(
                 entry.member.id
                 for entry in page.entries
                 if entry.member.kind is StoryMemberKind.ACTIVATION
