@@ -3,7 +3,9 @@
 The stage alone, over a scripted model and hand-built short views: the fourth section,
 its ``S`` labels and the instruction (§6:5, §6:9), ``story_labels`` resolved into
 ``story_links`` (§6:6, §6:7), and a defective story label repaired once and then
-dropped and counted (§6:8). Which candidates are assembled is ``test_story_links.py``'s.
+dropped and counted (§6:8). An ``H`` label naming a stored episode the pass admitted
+resolves as a ``P`` label naming it would, and any other ``H`` label stays a defect
+(ADR-0301 §1). Which candidates are assembled is ``test_story_links.py``'s.
 """
 
 from __future__ import annotations
@@ -13,7 +15,16 @@ import json
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from story_support import AT, EVENTS, activation, episode, story
+from story_support import (
+    AT,
+    CONVERSATION,
+    EVENTS,
+    OWNER_ONLY,
+    activation,
+    address,
+    episode,
+    story,
+)
 
 from ai_assistant.core.types import (
     ActivationRecall,
@@ -22,6 +33,7 @@ from ai_assistant.core.types import (
     ChannelContextItem,
     MemoryKind,
     MemorySource,
+    MessageAuthor,
     Provenance,
     RecallCue,
     RecalledItem,
@@ -31,16 +43,25 @@ from ai_assistant.core.types import (
     StoryNote,
     StoryNoteAuthor,
     StoryPageLine,
+    TranscriptMessage,
 )
-from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
+from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
 from ai_assistant.orchestration.story_links import Candidates, ShortView
-from ai_assistant.orchestration.understanding import SuppliedWindow, UnderstandingStage
+from ai_assistant.orchestration.understanding import (
+    ConversationWindow,
+    SuppliedWindow,
+    TranscriptWindow,
+    UnderstandingStage,
+)
 from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ActivationUnderstanding, EpisodicMemory
+    from ai_assistant.orchestration.disclosure import TurnSupply
+    from ai_assistant.orchestration.understanding import ChannelWindow
 
 BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
+UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
 WINDOW: Final = SuppliedWindow(
     ChannelContext(history=(ChannelContextItem(text="Trip plans", item_id="item-1"),))
 )
@@ -82,12 +103,14 @@ _TRIP: Final = ShortView(
 _RUNNING: Final = ShortView(story_id="story:running", lines=(), notes=(), episodes=())
 
 
-async def _understand(
+async def _understand(  # noqa: PLR0913 — the model, then one knob per input a case varies
     model: FakeModelProvider,
     *,
     stories: Candidates | None,
-    episodes: tuple[EpisodicMemory, ...] = (),
+    episodes: tuple[EpisodicMemory, ...] | None = (),
     recalled: tuple[EpisodicMemory | SemanticMemory, ...] = (),
+    window: ChannelWindow = WINDOW,
+    audience: TurnSupply = BOUNDED,
 ) -> ActivationUnderstanding:
     recall = None
     if recalled:
@@ -99,8 +122,8 @@ async def _understand(
     return await UnderstandingStage(model=model, excerpt_chars=2000).understand(
         "The canoe is booked.",
         channel=EVENTS,
-        window=WINDOW,
-        audience=BOUNDED,
+        window=window,
+        audience=audience,
         episodes=episodes,
         version=1,
         now=lambda: AT,
@@ -247,7 +270,12 @@ async def test_a_defective_story_label_is_repaired_once_then_dropped_and_counted
 
     assert len(model.calls) == 2
     statement = model.calls[1].messages[-1].content
-    assert "story labels name no story and no earlier episode" in statement
+    if label == "H1":
+        # ADR-0301 §1: the supplied item is no stored episode the pass admitted, and the
+        # repair statement names an H label citing it as the defect it is.
+        assert "no other H label" in statement
+    else:
+        assert "story labels name no story and no earlier episode" in statement
     assert "S1 (the stories section)" in statement
     assert understood.story_links == (story("story:trip"),)
     assert understood.grounding_dropped == 1
@@ -287,3 +315,182 @@ async def test_an_s_label_cited_as_a_referent_resolves_to_nothing() -> None:
     statement = model.calls[1].messages[-1].content
     assert "An S label names a story and is cited in `story_labels` alone." in statement
     assert understood.meaning_referents == ()
+
+
+# --- ADR-0301 §1: an H label naming a stored episode the pass admitted ------------------
+
+
+def _tail(*records: EpisodicMemory) -> ConversationWindow:
+    return ConversationWindow(CONVERSATION, records)
+
+
+def _statement(model: FakeModelProvider) -> str:
+    return model.calls[1].messages[-1].content
+
+
+@pytest.mark.parametrize(
+    "episodes",
+    [None, ()],
+    ids=["a spoken turn, which takes no episode window", "beyond the selector's reach"],
+)
+async def test_a_tail_record_links_its_activation_through_its_h_label(
+    episodes: tuple[EpisodicMemory, ...] | None,
+) -> None:
+    model = FakeModelProvider(_proposal(story_labels=["H2", "S1", "H1", "H2"]))
+
+    understood = await _understand(
+        model,
+        stories=Candidates(views=(_TRIP,)),
+        episodes=episodes,
+        window=_tail(episode("a-3"), episode("a-4")),
+    )
+
+    first, second = _payload(model)["channel_window"]
+    assert (first["label"], second["label"]) == ("H1", "H2")
+    assert "also_in_episode_window" not in first
+    assert understood.story_links == (activation("a-4"), story("story:trip"), activation("a-3"))
+    assert understood.grounding_dropped == 0
+    assert len(model.calls) == 1
+
+
+async def test_an_h_label_cited_as_a_referent_stays_a_channel_item() -> None:
+    model = FakeModelProvider(
+        _proposal(meaning_ground="supplied", meaning_labels=["H1"], story_labels=["H1"])
+    )
+
+    understood = await _understand(
+        model, stories=Candidates(views=()), episodes=None, window=_tail(episode("a-3"))
+    )
+
+    # §1's fifth clause: outside `story_labels` the label resolves as it always did.
+    (referent,) = understood.meaning_referents
+    assert (referent.kind, referent.id) == ("channel_item", address("a-3"))
+    assert understood.story_links == (activation("a-3"),)
+
+
+async def test_a_tail_record_also_in_the_episode_window_links_once_under_h() -> None:
+    model = FakeModelProvider(_proposal(story_labels=["H1"]))
+
+    understood = await _understand(
+        model,
+        stories=Candidates(views=()),
+        episodes=(episode("a-3"),),
+        window=_tail(episode("a-3")),
+    )
+
+    (item,) = _payload(model)["channel_window"]
+    assert item["also_in_episode_window"] is True
+    assert understood.story_links == (activation("a-3"),)
+    assert len(model.calls) == 1
+
+
+async def test_a_one_exchange_supplied_item_links_the_window_episode_s_activation() -> None:
+    window = SuppliedWindow(
+        ChannelContext(history=(ChannelContextItem(text="Trip plans", item_id=address("a-2")),))
+    )
+    model = FakeModelProvider(_proposal(story_labels=["H1"]))
+
+    understood = await _understand(
+        model, stories=Candidates(views=()), episodes=(episode("a-2"),), window=window
+    )
+
+    (item,) = _payload(model)["channel_window"]
+    assert item["also_in_episode_window"] is True
+    assert _payload(model)["episode_window"].startswith("missing")
+    assert understood.story_links == (activation("a-2"),)
+    assert understood.grounding_dropped == 0
+    assert len(model.calls) == 1
+
+
+async def test_a_withheld_tail_record_takes_no_label_to_cite() -> None:
+    bad = _proposal(story_labels=["H1", "H2"])
+    model = FakeModelProvider.scripted(bad, bad)
+
+    understood = await _understand(
+        model,
+        stories=Candidates(views=()),
+        episodes=None,
+        window=_tail(episode("a-3", placement=OWNER_ONLY), episode("a-4")),
+        audience=UNBOUNDED,
+    )
+
+    # ADR-0276 §4:9: on a turn of unbounded audience the owner-placed record reaches no
+    # rendering and no label, so the one H label is the record that was admitted.
+    (item,) = _payload(model)["channel_window"]
+    assert item["label"] == "H1"
+    assert '"H2"' in _statement(model)
+    assert understood.story_links == (activation("a-4"),)
+    assert understood.grounding_dropped == 1
+
+
+async def test_a_transcript_message_s_h_label_is_dropped_and_counted_after_one_repair() -> None:
+    message = TranscriptMessage(
+        conversation_id="c-1",
+        position=1,
+        written_at=AT,
+        author=MessageAuthor.USER,
+        text="Plan the camping trip to Riverside.",
+        device_id="phone",
+        message_id="m-1",
+    )
+    bad = _proposal(story_labels=["H1", "S1"])
+    model = FakeModelProvider.scripted(bad, bad)
+
+    understood = await _understand(
+        model,
+        stories=Candidates(views=(_TRIP,)),
+        episodes=(episode("a-2"),),
+        window=TranscriptWindow(CONVERSATION, (message,)),
+    )
+
+    assert len(model.calls) == 2
+    statement = _statement(model)
+    assert "no other H label" in statement
+    assert '"H1"' in statement
+    assert understood.story_links == (story("story:trip"),)
+    assert understood.grounding_dropped == 1
+
+
+async def test_a_supplied_item_naming_an_episode_the_window_does_not_hold_is_a_defect() -> None:
+    # The item's id is a stored episode's id, but the episode window does not hold that
+    # episode: a supplied identifier establishes nothing, and nothing is fetched for it.
+    window = SuppliedWindow(
+        ChannelContext(history=(ChannelContextItem(text="Trip plans", item_id=address("a-9")),))
+    )
+    bad = _proposal(story_labels=["H1"])
+    model = FakeModelProvider.scripted(bad, bad)
+
+    understood = await _understand(
+        model, stories=Candidates(views=()), episodes=(episode("a-2"),), window=window
+    )
+
+    (item,) = _payload(model)["channel_window"]
+    assert "also_in_episode_window" not in item
+    assert "no other H label" in _statement(model)
+    assert understood.story_links == ()
+    assert understood.grounding_dropped == 1
+
+
+async def test_a_tail_record_of_no_activation_is_not_a_story_label() -> None:
+    legacy = episode("a-3").model_copy(update={"processing_record": None})
+    bad = _proposal(story_labels=["H1"])
+    model = FakeModelProvider.scripted(bad, bad)
+
+    understood = await _understand(
+        model, stories=Candidates(views=()), episodes=None, window=_tail(legacy)
+    )
+
+    assert len(model.calls) == 2
+    assert understood.story_links == ()
+    assert understood.grounding_dropped == 1
+
+
+async def test_the_instruction_names_which_h_labels_a_story_label_may_cite() -> None:
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, stories=Candidates(views=(_TRIP,)))
+
+    instruction = _instruction(model)
+    assert "earlier exchange of this conversation as the assistant recorded it" in instruction
+    assert "marked as also in the episode window" in instruction
+    assert "No other H label may be named in `story_labels`." in instruction

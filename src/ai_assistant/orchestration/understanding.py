@@ -30,9 +30,13 @@ page, its newest pending notes and its latest episodes, which take no label — 
 wrote it and whether it is marked, and a marked one as outside content, never as the
 user's words (§4:6). The proposal's ``story_labels`` name the matters the input belongs
 with: an ``S`` label resolves to its story, and a ``P`` or ``M`` label naming an episode
-to that episode's activation. A story label resolving to nothing, to a channel item or
-to a semantic record is a label defect, repaired once and then dropped and counted
-(§6:8). Where the candidates could not be read, or there are none, the section says so.
+to that episode's activation. So does an ``H`` label naming a channel item that is a
+stored episode the pass admitted — a record of the conversation's tail, or an item that
+is one exchange with an episode of the episode window — read off the records the pass
+already holds and nothing fetched (ADR-0301 §1). A story label resolving to nothing, to
+any other channel item or to a semantic record is a label defect, repaired once and
+then dropped and counted (§6:8). Where the candidates could not be read, or there are
+none, the section says so.
 
 **Two windows, two label sequences** (§3). The **channel window** is what the channel
 supplied — ``ChannelContext.history`` then ``reply_to`` — or, on the conversation
@@ -210,8 +214,12 @@ _STORIES: Final = (
     "content is what a source reported, never something the user said.\n"
     "\n"
     "In `story_labels`, name the matters this input belongs to: the S labels of the "
-    "stories, and the P or M labels of the earlier episodes, that it belongs with as "
-    "one matter. A link says the input belongs to that matter and nothing more. One "
+    "stories, and the labels of the earlier episodes, that it belongs with as one "
+    "matter. An earlier episode is named by its P or M label, or by the H label of a "
+    "channel window item described as an earlier exchange of this conversation as the "
+    "assistant recorded it, or marked as also in the episode window. No other H label "
+    "may be named in `story_labels`. A link says the input belongs to that matter and "
+    "nothing more. One "
     "input may belong to several matters. An input that belongs to none is linked to "
     "none, and its `story_labels` is empty.\n"
     "\n"
@@ -604,9 +612,10 @@ class _Brief:
     #: rendered no recalled section at all (ADR-0281 §7).
     recalled_count: int | None = None
     #: What a story label resolves to (ADR-0300 §6:7): an ``S`` label its story, a
-    #: ``P`` or ``M`` label naming an episode that episode's activation. A label not
-    #: here — a channel item, a semantic record, an episode of no activation, or
-    #: nothing rendered — is a story-label defect (§6:8).
+    #: ``P`` or ``M`` label naming an episode that episode's activation, and an ``H``
+    #: label naming a stored episode the pass admitted that episode's activation
+    #: (ADR-0301 §1). A label not here — any other channel item, a semantic record, an
+    #: episode of no activation, or nothing rendered — is a story-label defect (§6:8).
     story_members: dict[str, StoryMember] = field(default_factory=dict)
     #: How many ``S`` labels the stories section rendered; ``None`` where the call
     #: rendered no stories section at all (ADR-0300 §6:5).
@@ -750,6 +759,14 @@ class UnderstandingStage:
             also = None if item.identifier is None else merged.get(item.identifier)
             rendered_items.append(item.rendering(label, also, excerpt_chars=self._excerpt_chars))
             labels[label] = item.referent
+            # ADR-0301 §1: an item that is a stored episode the pass admitted — a tail
+            # record, admitted above, or one exchange with an admitted episode of the
+            # episode window — is a story label for that episode's activation, read off
+            # the records already held. A transcript message, a supplied item matching
+            # no episode the window holds, and anything withheld are not.
+            stored = item.episode if item.episode is not None else also
+            if stored is not None:
+                _member_of(stored, label, story_members)
         rendered_episodes: list[dict[str, object]] = []
         for record in (record for record in window_episodes if record.id not in shared):
             label = f"P{len(rendered_episodes) + 1}"
@@ -1292,13 +1309,22 @@ def _label_statement(
         parts.append(
             f"These elements are grounded `supplied` but name no label: {', '.join(unnamed)}."
         )
-    if unlinkable:
-        # ADR-0300 §6:8: a story label resolves to a story, or to an episode's
-        # activation; a channel item and a semantic record are neither.
+    # ADR-0300 §6:8: a story label resolves to a story, or to an episode's activation;
+    # a semantic record is neither, and a channel item is one only where it is a
+    # stored episode the pass admitted (ADR-0301 §1). Any other H label is named as
+    # the defect it is.
+    channel = [label for label in unlinkable if _names_channel_item(label, brief)]
+    other = [label for label in unlinkable if not _names_channel_item(label, brief)]
+    if channel:
         parts.append(
-            "These story labels name no story and no earlier episode in the episode "
-            f"window or the recalled section: {_shown(unlinkable)}."
+            "These story labels name a channel window item that is not an earlier "
+            "episode a story can hold: only an H label whose item is described as an "
+            "earlier exchange of this conversation as the assistant recorded it, or is "
+            "marked as also in the episode window, may be named in `story_labels`, and "
+            f"no other H label: {_shown(channel)}."
         )
+    if other:
+        parts.append(f"These story labels name no story and no earlier episode: {_shown(other)}.")
     rendered = [
         _sequence("H", brief.channel_count, "channel window"),
         _sequence("P", brief.episode_count, "episode window"),
@@ -1315,6 +1341,12 @@ def _label_statement(
         "rendered, and ground a reading no labelled item supports as `inferred`."
     )
     return " ".join(parts)
+
+
+def _names_channel_item(label: str, brief: _Brief) -> bool:
+    """Whether ``label`` is an ``H`` label this call rendered, as an exact lookup."""
+    referent = brief.labels.get(label)
+    return referent is not None and referent.kind == "channel_item"
 
 
 def _shown(labels: Sequence[str]) -> str:
@@ -1433,7 +1465,10 @@ def _resolved(
 
 
 def _member_of(record: EpisodicMemory, label: str, story_members: dict[str, StoryMember]) -> None:
-    """Record what a ``P`` or ``M`` label names as a story label: the episode's activation.
+    """Record what a label naming an episode names as a story label: its activation.
+
+    A ``P`` or ``M`` label (ADR-0300 §6:7), or an ``H`` label naming a stored episode
+    the pass admitted (ADR-0301 §1), which resolves exactly as a ``P`` label would.
 
     An episode that records no activation is the episode of nothing a story can hold, so
     its label is not a story label at all, and naming it as one is a defect (ADR-0300

@@ -156,6 +156,32 @@ async def test_an_earlier_episode_in_no_story_starts_one_with_the_activation() -
     ]
 
 
+async def test_a_follow_up_links_the_conversation_s_earlier_turn_through_its_h_label() -> None:
+    """ADR-0301 §1: the earlier turn reaches the call only as H1, and still starts a story."""
+    stories = _stories()
+    model = FakeModelProvider.scripted(STATED_PROPOSAL, _proposal(story_labels=["H1"]))
+    harness = _harness(FakeMemoryStore(now=lambda: AT), stories, model=model)
+    first = await harness.engine.converse("Plan the camping trip.", timeout=_BUDGET)
+    assert first.conversation_id is not None
+    (earlier,) = [
+        r.processing_record.activation_id
+        for r in await harness.memory.export()
+        if isinstance(r, EpisodicMemory) and r.processing_record
+    ]
+
+    await harness.engine.converse(_TURN, timeout=_BUDGET, conversation_id=first.conversation_id)
+
+    (item,) = json.loads(model.calls[1].messages[1].content)["channel_window"]
+    assert item["label"] == "H1"
+    record = await _captured(harness, address(earlier))
+    assert record.understanding[-1].story_links == (activation(earlier),)
+    (started,) = (await stories.stories()).stories
+    assert await _members(stories, started.story_id) == [
+        (activation(earlier), StoryActor.UNDERSTANDING),
+        (activation(record.activation_id), StoryActor.UNDERSTANDING),
+    ]
+
+
 async def test_an_input_linked_to_nothing_still_records_the_decision() -> None:
     stories = _stories()
     harness = _harness(
