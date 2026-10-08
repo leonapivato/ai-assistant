@@ -655,6 +655,35 @@ async def test_decisions_are_placed_by_the_stories_as_they_stand_after_a_merge()
     )
 
 
+async def test_a_decision_made_by_rule_this_run_is_shown_after_a_merge_moves_it() -> None:
+    stories = _stories()
+    memory = await memory_of(episode("a-1"), episode("b-1"), episode("c-1"))
+    trip = await _story(stories, "a-1")
+    other = await _story(stories, "b-1")
+    third = await _story(stories, "c-1")
+    first = await _raise(stories, trip, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other))
+    assert (await stories.merge(trip, other, actor=StoryActor.OWNER)).refusal is None
+    await _raise(stories, third, _TWO)
+    # Once the first flag is left by rule on `other`, `other` is merged into `third`
+    # before the second flag, on `third`, is decided.
+    landed = _merging_on(stories, "stories", 3, other, third)
+    model = FakeModelProvider(_LEAVE)
+
+    report = await _pass(model, stories, memory).run()
+
+    assert landed == [True]
+    assert (report.left_by_rule, report.decided) == (1, 1)
+    (shown,) = _shown(model)["decisions"]
+    assert (shown["outcome"], shown["flag"], shown["stories_its_flag_concerns"]) == (
+        "left",
+        "like_another",
+        ["S1"],
+    )
+    assert await _decisions(stories, other) == [
+        (first, StoryDecision.LEFT, StoryActor.MATTERS_PASS)
+    ]
+
+
 async def test_an_understanding_flags_stories_are_read_after_its_episode_froze() -> None:
     stories = _stories()
     trip = await _story(stories, "a-1")

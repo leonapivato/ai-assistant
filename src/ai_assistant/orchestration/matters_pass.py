@@ -743,7 +743,9 @@ class MattersPass:
             tally.exhausted = False
             return
         run.calls += 1
-        # The decisions it is shown are read from these stories' logs as they now are.
+        # The decisions it is shown are read from the logs of these stories, and of every
+        # story merged into them, as they now are: a decision this run made by rule, or
+        # another writer's since, is among them.
         run.records = await reread(run.records, self._stories, concerned)
         result, touched = await self._decide(run.records, flag, concerned)
         tally.count(result)

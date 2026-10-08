@@ -355,9 +355,12 @@ async def read_records(stories: StoryStore, *, versions: bool) -> StoryRecords:
 async def reread(
     records: StoryRecords, stories: StoryStore, story_ids: Iterable[str]
 ) -> StoryRecords:
-    """``records`` with the headers and change logs of ``story_ids`` read again.
+    """``records`` with ``story_ids`` read again, and every story merged into them.
 
-    A story ``records`` did not hold, such as one a split or a create minted since, is
+    The header and change log of each story named, then of each story its ``absorbed``
+    lines name, and theirs in turn, each once: the decisions recorded for a story are
+    on all of their logs (§3:6), so none of them is left as an earlier read had it. A
+    story ``records`` did not hold, such as one a split or a create minted since, is
     added. Version logs are kept as they were: no membership write appends a version.
 
     Raises:
@@ -366,13 +369,20 @@ async def reread(
     headers = dict(records.headers)
     logs = dict(records.logs)
     versions = dict(records.versions)
-    for story_id in dict.fromkeys(story_ids):
+    done: set[str] = set()
+    queue = list(dict.fromkeys(story_ids))
+    while queue:
+        story_id = queue.pop(0)
+        if story_id in done:
+            continue
+        done.add(story_id)
         header = await stories.header(story_id)
         if header is None:
             continue
         headers[story_id] = header
         logs[story_id] = await read_log(stories, story_id)
         versions.setdefault(story_id, ())
+        queue.extend(_absorbed(logs[story_id]))
     return StoryRecords(headers=headers, logs=logs, versions=versions)
 
 
