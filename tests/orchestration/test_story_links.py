@@ -7,6 +7,9 @@ prompt renders in ``test_understanding_stories.py``.
 
 from __future__ import annotations
 
+import asyncio
+import itertools
+from datetime import timedelta
 from itertools import count
 from typing import TYPE_CHECKING, Final
 
@@ -37,7 +40,7 @@ from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksSt
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import StoryMember
+    from ai_assistant.core.types import StoryHeader, StoryMember, StoryViewPage
 
 BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
@@ -175,6 +178,26 @@ async def test_a_short_view_is_the_first_lines_the_newest_notes_and_the_latest_e
     assert [record.id for record in view.episodes] == [address("a-3"), address("a-2")]
 
 
+async def test_the_latest_episodes_are_the_latest_by_occurrence_not_by_link_order() -> None:
+    """A merge appends the absorbed story's members (ADR-0289 §3), old or not."""
+    stories = _stories()
+    recent = await _story(stories, activation("r-1"), activation("r-2"))
+    old = await _story(stories, activation("o-1"), activation("o-2"))
+    await stories.merge(old, recent, actor=StoryActor.OWNER)
+    earlier = AT - timedelta(days=30)
+    memory = await memory_of(
+        episode("r-1", at=AT - timedelta(hours=2)),
+        episode("r-2", at=AT - timedelta(hours=1)),
+        episode("o-1", at=earlier),
+        episode("o-2", at=earlier + timedelta(hours=1)),
+    )
+    window = (episode("r-2", at=AT - timedelta(hours=1)),)
+
+    (view,) = (await _candidates(stories, memory).assemble(window, audience=BOUNDED)).views
+
+    assert [record.id for record in view.episodes] == [address("r-2"), address("r-1")]
+
+
 async def test_a_story_with_no_page_shows_its_pending_notes_and_episodes() -> None:
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
@@ -306,6 +329,12 @@ def test_the_short_view_s_numbers_are_bounded(limit: int, notes: int, episodes: 
 # --- the story-links stage (§6:12, §6:13) --------------------------------------------
 
 
+async def _view(stories: FakeStoryStore, story_id: str) -> StoryViewPage:
+    view = await stories.view(story_id)
+    assert view is not None
+    return view
+
+
 async def _lines_of(stories: FakeStoryStore, story_id: str) -> list[tuple[StoryChange, str | None]]:
     page = await stories.log(story_id)
     assert page is not None
@@ -346,6 +375,44 @@ async def test_a_link_to_a_merged_story_follows_it_to_where_it_went() -> None:
 
     assert decision.linked == (last,)
     assert (StoryChange.ADDED, "now") in await _lines_of(stories, last)
+
+
+async def test_every_merge_is_followed_however_long_the_chain() -> None:
+    stories = _stories()
+    chain = [await _story(stories, activation(f"a-{index}")) for index in range(70)]
+    for absorbed, into in itertools.pairwise(chain):
+        await stories.merge(absorbed, into, actor=StoryActor.OWNER)
+
+    decision = await StoryLinksStage(stories=stories).record([story(chain[0])], activation_id="now")
+
+    assert (decision.linked, decision.refused) == ((chain[-1],), ())
+
+
+async def test_two_activations_linking_one_unstoried_episode_start_one_story() -> None:
+    """§6:12's read-then-create, run for two activations at once, starts one story."""
+    stories = _stories()
+    reads = stories.stories_of
+
+    async def yielding(member: StoryMember) -> tuple[StoryHeader, ...]:
+        # Hand the loop to the other activation between the read and the write.
+        await asyncio.sleep(0)
+        return await reads(member)
+
+    stories.stories_of = yielding  # type: ignore[method-assign]  # an interleaving point
+    stage = StoryLinksStage(stories=stories)
+
+    first, second = await asyncio.gather(
+        stage.record([activation("e-1")], activation_id="a"),
+        stage.record([activation("e-1")], activation_id="b"),
+    )
+
+    assert first.started is not None
+    assert (second.started, second.linked) == (None, (first.started,))
+    assert [entry.member for entry in (await _view(stories, first.started)).entries] == [
+        activation("e-1"),
+        activation("a"),
+        activation("b"),
+    ]
 
 
 async def test_an_earlier_episode_s_stories_take_the_activation() -> None:

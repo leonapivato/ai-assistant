@@ -10,8 +10,9 @@ window's episodes belong to, each looked up with ``StoryStore.stories_of`` in th
 window's order, then the stories recall's kept episodes belong to, which a caller hands
 in already in §6:1's order. A story already a candidate is not repeated. Each candidate
 is read as a **short view**: the first lines of its current page, its newest pending
-notes and its latest episodes, the episodes fetched with ``MemoryStore.get_many`` under
-ADR-0282 §2:6-§2:8 and the lines and notes kept under ADR-0300 §11's default
+notes and its latest episodes by occurrence, the episodes fetched with
+``MemoryStore.get_many`` under ADR-0282 §2:6-§2:8 and the lines and notes kept under
+ADR-0300 §11's default
 (:mod:`~ai_assistant.orchestration.story_privacy`). A ``StoryStoreError`` leaves no
 candidates, and the decision says the stories could not be read.
 
@@ -21,9 +22,10 @@ actor ``understanding`` and the activation as trigger: the activation is linked 
 each linked story, following a story merged since to the story it was merged into; it
 is linked into every story a linked earlier episode belongs to by then; and the earlier
 episodes that belong to no story by then start one new story, holding them and the
-activation. It is failure-tolerant: a ``StoryStoreError`` records the decision
-``failed``. What it records is bookkeeping, as the hub records understanding's own
-record, and not an action planning chooses (§6:14).
+activation. One activation's links are recorded at a time, so two activations linking
+the same unstoried episode start one story, not two. It is failure-tolerant: a
+``StoryStoreError`` records the decision ``failed``. What it records is bookkeeping, as
+the hub records understanding's own record, and not an action planning chooses (§6:14).
 
 Neither is saved with the episode (§12:3): the candidates are the understanding phase's
 part of the working episode, the decision the stage's, and both live for the pass.
@@ -34,9 +36,9 @@ episode content (ADR-0275 §8).
 
 from __future__ import annotations
 
-from collections import deque
+import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -78,12 +80,6 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-#: How many merges the stage follows from one linked story before it records the
-#: refusal it holds. A merged story is never written and never a merge target, so a
-#: chain is finite; the bound is what keeps a store that contradicts itself from
-#: holding the pass.
-_MERGE_HOPS: Final = 64
-
 
 # --- the candidates --------------------------------------------------------------
 
@@ -97,7 +93,8 @@ class ShortView:
         lines: The first lines of its current page that may be shown, in page order;
             empty where no page has been written or none of them may be shown.
         notes: Its newest pending notes that may be shown, newest first.
-        episodes: Its latest episodes that were fetched and admitted, newest first.
+        episodes: Its latest episodes by occurrence among those fetched and admitted,
+            newest first.
     """
 
     story_id: str
@@ -134,7 +131,7 @@ class _Read:
     lines: tuple[StoryPageLine, ...]
     cited: dict[StoryNoteId, StoryNote]
     notes: tuple[StoryNote, ...]
-    latest: tuple[str, ...]
+    members: tuple[str, ...]
 
     def addresses(self) -> list[str]:
         """The episodes this view's privacy and its episodes need, in that order."""
@@ -143,19 +140,29 @@ class _Read:
             for note in (*self.cited.values(), *self.notes)
             if note.rests_on is not None
         ]
-        return [episode_address(activation) for activation in (*rests, *self.latest)]
+        return [episode_address(activation) for activation in (*rests, *self.members)]
 
-    def view(self, visibility: PageVisibility, admitted: dict[str, EpisodicMemory]) -> ShortView:
-        """The short view, kept under §11's default."""
+    def view(
+        self, visibility: PageVisibility, admitted: dict[str, EpisodicMemory], *, episodes: int
+    ) -> ShortView:
+        """The short view, kept under §11's default.
+
+        Its episodes are the latest by occurrence among the members that came back
+        admitted — ``(occurred_at, id)`` descending, ADR-0276 §4's recency order — and
+        never by link order, which a merge or a move makes say nothing about time
+        (ADR-0289 §3: a merge appends the absorbed story's members).
+        """
+        held = [
+            record
+            for activation in self.members
+            if (record := admitted.get(episode_address(activation))) is not None
+        ]
+        held.sort(key=lambda record: (record.occurred_at, record.id), reverse=True)
         return ShortView(
             story_id=self.story_id,
             lines=tuple(line for line in self.lines if visibility.line(line, self.cited)),
             notes=tuple(note for note in self.notes if visibility.note(note)),
-            episodes=tuple(
-                record
-                for activation in self.latest
-                if (record := admitted.get(episode_address(activation))) is not None
-            ),
+            episodes=tuple(held[:episodes]),
         )
 
 
@@ -244,7 +251,7 @@ class StoryCandidates:
         ]
         admitted = {record.id: record for record in admitted_to_understanding(audience, episodes)}
         visibility = PageVisibility.of(admitted.values(), owner_notes=admits_owner_placed(audience))
-        views = tuple(read.view(visibility, admitted) for read in reads)
+        views = tuple(read.view(visibility, admitted, episodes=self._episodes) for read in reads)
         _log.info(
             "story_candidates",
             stage="understanding",
@@ -274,7 +281,7 @@ class StoryCandidates:
         return list(chosen)[: self._limit]
 
     async def _read(self, story_id: str) -> _Read | None:
-        """One candidate's current page, the notes its first lines cite, and its latest."""
+        """One candidate's current page, the notes its first lines cite, and its members."""
         state = await self._stories.current_page(story_id)
         if state is None:
             return None
@@ -289,7 +296,7 @@ class StoryCandidates:
             lines=lines,
             cited=cited,
             notes=newest,
-            latest=await self._latest(story_id, state),
+            members=await self._members(story_id, state),
         )
 
     async def _notes_cited(
@@ -320,17 +327,22 @@ class StoryCandidates:
                 return found
             cursor = page.next_cursor
 
-    async def _latest(self, story_id: str, state: StoryPageState) -> tuple[str, ...]:
-        """The story's latest activation members, newest first, by link order."""
+    async def _members(self, story_id: str, state: StoryPageState) -> tuple[str, ...]:
+        """The story's activation members, every one: its latest are chosen by occurrence.
+
+        Link order says nothing about when an episode occurred once a merge or a move
+        has appended older members (ADR-0289 §3), so the whole membership is read and
+        the episodes' own instants decide which are the latest.
+        """
         if state.story.merged_into is not None:
             return ()
-        latest: deque[str] = deque(maxlen=self._episodes)
+        members: list[str] = []
         cursor: int | None = None
         while True:
             page = await self._stories.view(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
             if page is None:
                 break
-            latest.extend(
+            members.extend(
                 entry.member.id
                 for entry in page.entries
                 if entry.member.kind is StoryMemberKind.ACTIVATION
@@ -338,7 +350,7 @@ class StoryCandidates:
             if page.next_cursor is None or page.next_cursor == cursor:
                 break
             cursor = page.next_cursor
-        return tuple(reversed(latest))
+        return tuple(members)
 
 
 # --- the story-links stage ------------------------------------------------------
@@ -375,6 +387,14 @@ class StoryLinksStage:
     It holds the story store and nothing else; what it writes, it writes with the
     actor ``understanding`` and the activation as trigger (ADR-0289 §4:4 as ADR-0300
     supersedes it).
+
+    **One activation's links are recorded at a time.** "The earlier episodes that
+    belong to no story by then" (§6:12) is a read and then a create, two transactions;
+    two activations linking the same unstoried episode at once would each read *none*
+    and start two stories where the rule starts one. The stage holds one lock across
+    each run, so the second reads the story the first started and links into it. The
+    hub is one resident process per data directory, so a lock in the process is the
+    whole of the serialization the rule needs.
     """
 
     def __init__(self, *, stories: StoryStore) -> None:
@@ -384,6 +404,7 @@ class StoryLinksStage:
             stories: The story store the engine surface writes too.
         """
         self._stories = stories
+        self._serial = asyncio.Lock()
 
     async def record(
         self, links: Sequence[StoryMember], *, activation_id: str
@@ -401,18 +422,19 @@ class StoryLinksStage:
         """
         writes = _Writes(self._stories, activation_id)
         try:
-            unstoried: list[StoryMember] = []
-            for member in links:
-                if member.kind is StoryMemberKind.STORY:
-                    await writes.link(member.id)
-                    continue
-                stories = await self._stories.stories_of(member)
-                if not stories:
-                    unstoried.append(member)
-                for header in stories:
-                    await writes.link(header.story_id)
-            if unstoried:
-                await writes.start(unstoried)
+            async with self._serial:
+                unstoried: list[StoryMember] = []
+                for member in links:
+                    if member.kind is StoryMemberKind.STORY:
+                        await writes.link(member.id)
+                        continue
+                    stories = await self._stories.stories_of(member)
+                    if not stories:
+                        unstoried.append(member)
+                    for header in stories:
+                        await writes.link(header.story_id)
+                if unstoried:
+                    await writes.start(unstoried)
         except StoryStoreError as exc:
             _log.warning("story_links_failed", stage="story_links")
             return writes.decision(StageOutcome.FAILED, error=exc)
@@ -439,10 +461,18 @@ class _Writes:
         self.refused: list[StoryRefusal] = []
 
     async def link(self, story_id: str) -> None:
-        """Link the activation into ``story_id``, following a merge to where it went."""
+        """Link the activation into ``story_id``, following a merge to where it went.
+
+        Every merge is followed, however long the chain: a merged story is never written
+        and never a merge target, so a chain ends at a story that is not merged. A
+        target named twice is a store contradicting itself, and its refusal is recorded
+        rather than followed for ever.
+        """
         target = story_id
+        followed: set[str] = set()
         refusal: StoryRefusal | None = None
-        for _ in range(_MERGE_HOPS):
+        while target not in followed:
+            followed.add(target)
             outcome = await self._stories.link(
                 target,
                 [self._activation],
