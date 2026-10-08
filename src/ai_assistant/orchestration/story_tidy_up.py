@@ -132,6 +132,12 @@ class TidyUpResult(StrEnum):
     STORE_REFUSED = "store_refused"
     """The store refused the page write, a lost race included (§3:10)."""
 
+    MEMBERS_MOVED = "members_moved"
+    """An episode the run read left the story while the completion was out (a split
+    or a move), so the page was not written: a safety-net note resting on it would
+    be left on a story that no longer holds it (#2761). The episode stays pending on
+    the story it went to, so nothing is lost."""
+
     FAILED = "failed"
     """A store or the provider raised, or the run's budget expired."""
 
@@ -542,10 +548,39 @@ class StoryTidyUp:
             draft = _checked(proposal, reading)
         except _Refused as refused:
             return TidyUpOutcome(TidyUpResult.REFUSED, problem=str(refused))
-        written = await self._stories.write_page(story_id, draft, as_of=state.as_of)
+        return await self._write(story_id, draft, as_of=state.as_of)
+
+    async def _write(self, story_id: str, draft: StoryPageDraft, *, as_of: int) -> TidyUpOutcome:
+        """Write the checked draft, unless an episode it rests on has left the story."""
+        if await self._members_moved(story_id, draft):
+            return TidyUpOutcome(TidyUpResult.MEMBERS_MOVED)
+        written = await self._stories.write_page(story_id, draft, as_of=as_of)
         if written.refusal is not None:
             return TidyUpOutcome(TidyUpResult.STORE_REFUSED, refusal=written.refusal)
         return TidyUpOutcome(TidyUpResult.WRITTEN, version=written.version)
+
+    async def _members_moved(self, story_id: str, draft: StoryPageDraft) -> bool:
+        """Whether an episode the draft takes in, or a safety-net note rests on, left the story.
+
+        Membership is re-read just before the write: ``as_of`` refuses a page version
+        written since the read (§3:10), never a split or a move, which would otherwise
+        leave a safety-net note resting on an activation its story no longer holds.
+        Each such episode was pending at the read and no version can have taken it in
+        since without the write being refused, so one still held is still pending.
+
+        **This narrows the race; it does not close it.** A split or a move landing
+        between this read and the write is not seen. The remaining window is waived
+        under the coordinator's ruling on PR #2758, and the atomic refusal inside
+        ``write_page``'s transaction is #2761. A story gone or merged by now is left
+        to the write, which refuses it.
+        """
+        wanted = {*draft.took_in_episodes, *(note.rests_on for note in draft.safety_net)}
+        if not wanted:
+            return False
+        state = await self._stories.current_page(story_id)
+        if state is None or state.story.merged_into is not None:
+            return False
+        return not wanted <= set(state.pending_episodes)
 
     async def _episodes(self, pending: Sequence[str]) -> list[_Episode]:
         """§5:2: the pending member episodes that are frozen and held, in link order."""

@@ -572,6 +572,49 @@ async def test_a_run_that_lost_a_race_is_refused_by_the_store_and_writes_nothing
     assert [line.text for line in state.page.lines] == ["Rival."]
 
 
+@pytest.mark.parametrize("how", ["split", "move"])
+async def test_an_episode_leaving_the_story_while_the_completion_is_out_writes_nothing(
+    how: str,
+) -> None:
+    stories = _stories()
+    memory = await memory_of(episode("a-1"), episode("a-2"))
+    trip = await _story(stories, "a-1", "a-2")
+    elsewhere = await _story(stories, "a-1") if how == "move" else None
+    moved: list[str] = []
+
+    async def away() -> None:
+        if elsewhere is None:
+            outcome = await stories.split(trip, [activation("a-2")], actor=StoryActor.OWNER)
+        else:
+            outcome = await stories.move(
+                trip, elsewhere, [activation("a-2")], actor=StoryActor.OWNER
+            )
+        assert outcome.story_id is not None
+        moved.append(outcome.story_id)
+
+    model = _Gated(
+        _reply([("A camping trip.", ["T1"])], safety_net=[("E2", "Settled in a-2.")]),
+        before=away,
+    )
+    model.gate.set()
+
+    outcome = await _tidy_up(model, stories, memory).run(trip)
+
+    # #2761's race, narrowed: no safety-net note is left resting on an episode the
+    # story no longer holds, and the moved episode is still pending where it went.
+    assert outcome.result is TidyUpResult.MEMBERS_MOVED
+    listed = await stories.notes(trip)
+    assert listed is not None
+    assert listed.notes == ()
+    state = await stories.current_page(trip)
+    assert state is not None
+    assert (state.page, state.pending_episodes) == (None, ("a-1",))
+    (destination,) = moved
+    there = await stories.current_page(destination)
+    assert there is not None
+    assert "a-2" in there.pending_episodes
+
+
 async def test_a_store_error_or_an_expired_budget_fails_the_run_and_frees_the_story() -> None:
     stories, memory, trip = await _trip()
     model = _Gated(_reply([("A camping trip.", ["N1"])]))
