@@ -1,10 +1,21 @@
 # 289. A story store holds which experiences belong to the same matter
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0300 (§2:1's *no text*, for the page alone; §3:14's reads, in the additions alone; §4:4, for writes the hub makes outside the engine surface; §4:6 whole)
 - Date: 2026-10-04
 - Scope: [M40](https://github.com/leonapivato/ai-assistant/milestone/7), the story capability.
 - Dependency: ADR-0286 and ADR-0287, implemented at `032b30d1`.
 - Authorization: the owner worked out the design of stories between 2026-10-02 and 2026-10-04, recorded as direction on the wiki's Stories page, and on 2026-10-04 delayed forgetting stories to a later milestone. The same day the owner accepted proposal #2672 ("looks good"), including its recommendation that M40 build no producer in the hub, and the dispatcher assigned 0289, the next number on `main`. That authorizes drafting and numbering, not ratification or implementation.
+- Partially superseded: 2026-10-08 by ADR-0300 — four scopes. §2:1's *no text of any
+  kind*, for the page alone: a story has a page whose entries and current page hold
+  text, while its header carries what §2:1 lists and §2:7 stands. §3:14's *five reads
+  and no others*, in the additions alone: the store also answers the page's reads. §4:4,
+  for the writes the hub makes outside the engine surface: understanding's links carry
+  `understanding`, the matters pass's changes `matters_pass` and planning's `planning`,
+  and every write through the engine surface still carries `owner`. §4:6, whole: stages,
+  the tidy-up and the matters pass read and write stories, and their prompts include
+  them. Every other clause stands, §2:6 included. These scoped replacements take effect
+  on ratification of ADR-0300. This reciprocal header record accompanies the numbered
+  draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 

@@ -1,10 +1,19 @@
 # 282. Phases read and write the working episode, and recall searches past the windows
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0300 (§2:5's *only those*, for recall's story lookups alone; §2:4's *no other record* and §5:1's single fetch, for the candidate stories alone)
 - Date: 2026-09-29
 - Scope: [M39](https://github.com/leonapivato/ai-assistant/milestone/6), [#2607](https://github.com/leonapivato/ai-assistant/issues/2607).
 - Dependency: ADR-0281 and ADR-0280, both implemented at `d974519b`; ADR-0276.
 - Authorization: the owner accepted proposal #2606 on 2026-09-29, choosing its option A (the working episode kept in memory, the saved episode unchanged), and directed its conversion into this ADR and the start of the work. Option B, saving each phase's reads with the episode, is [#2608](https://github.com/leonapivato/ai-assistant/issues/2608). The dispatcher assigned the next available number, 0282. That authorizes drafting and numbering, not ratification or implementation.
+- Partially superseded: 2026-10-08 by ADR-0300 — two scopes. §2:5's *and only those*,
+  for recall alone: recall also looks up the stories each episode it keeps belongs to.
+  §2:4's *and fetches no other record* and §5:1's single `MemoryStore.get_many`, for the
+  candidate stories alone: before understanding renders, the understanding phase looks
+  up the stories of the episode window's episodes, reads each candidate's short view
+  from the story store, and fetches each candidate's latest episodes, under §2:6–§2:8
+  otherwise. Every other clause stands. These scoped replacements take effect on
+  ratification of ADR-0300. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; the ratified body below is preserved.
 - **Partially supersedes** [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) — **one scope.** **§4:1's wiring**, in its *wires into the stage* and *it receives the selector's records* parts alone: the selector runs in §3's windows stage, which records the window's ids, and the understanding stage receives the window's records as §5 below fetches them. The selector itself, its walls (§4:2–§4:4), the disclosure predicate (§4:9–§4:13) and the rendering stand. Every other clause stands.
 - **Partially supersedes** [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) — **two scopes.** **§3:5's working set and §4:1–§4:3's enums and table, in the additions alone**: the window decision, the stage `windows`, the rule `windows_unassembled` and its row. **§3:7's list of wrapped stages, for understanding alone**: understanding runs over the working episode as §5 below states, with the same effects. Every other clause stands.
 - **Partially supersedes** [ADR-0281](0281-recall-runs-before-understanding-and-understanding-reads-what-it-found.md) — **four scopes.** **§3:2's `limit`**: each band's search asks for §4's search limit instead of `RECALL_ITEM_LIMIT`. **§3:3's filling rule, in the addition alone**: a record the windows already hold is not kept. **§7:1's first sentence, in its *receives the records recall kept* part alone**: the understanding stage receives them as §5 below fetches them. **§6:4's last sentence**, *"The records the search returned are held on `ActivationState` for the pass for the understanding stage to render"*: recall's part holds §4:3 below's ids and scores and no record; the recall result held on `ActivationState` and written once at capture, and every other part of §6:4, stand. Every other clause stands, `RECALL_ITEM_LIMIT` as the number kept included.

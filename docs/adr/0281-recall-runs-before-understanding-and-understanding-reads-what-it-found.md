@@ -1,6 +1,6 @@
 # 281. Recall runs before understanding, and understanding reads what it found
 
-- Status: Partially superseded by ADR-0282 (§3:2's `limit`; §3:3's filling rule, in the addition alone; §6:4's last sentence; §7:1's first sentence, in its *receives the records recall kept* part alone) and ADR-0284 (§4:4's and §6:3's informational-event test) and ADR-0286 (§6:4's written-once rule)
+- Status: Partially superseded by ADR-0282 (§3:2's `limit`; §3:3's filling rule, in the addition alone; §6:4's last sentence; §7:1's first sentence, in its *receives the records recall kept* part alone) and ADR-0284 (§4:4's and §6:3's informational-event test) and ADR-0286 (§6:4's written-once rule) and ADR-0300 (§1:3's *nothing else* and §6:1's `RecalledItem`, in the additions alone; §7:1's *any other read*, for the candidate stories alone)
 - Date: 2026-09-27
 - Scope: [M39](https://github.com/leonapivato/ai-assistant/milestone/6).
 - Dependency: ADR-0280 and its milestone M38; ADR-0276 and ADR-0275.
@@ -22,6 +22,14 @@
 - Partially superseded: 2026-10-03 by ADR-0286 — one scope. §6:4's *written once, at
   capture*: the recall result is written when the recall stage ends (ADR-0286 §3). Every
   other clause stands. These replacements take effect on ratification of ADR-0286. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-08 by ADR-0300 — three scopes. §1:3's *nothing else*, in
+  the addition alone: recall also looks up the stories the episodes it keeps belong to,
+  by identity and never by search. §6:1's `RecalledItem`, in the addition alone: it
+  gains `stories`. §7:1's *or memory from any other read*, for the candidate stories
+  alone: understanding also receives each candidate story's latest episodes. Every other
+  clause stands. These scoped replacements take effect on ratification of ADR-0300. This
   reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   prior supersessions and the ratified body below are preserved.
 - **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **four scopes.** **§8:5's constant `content` for inspection-only records, where the record carries an understanding**: its `content` is that understanding's `meaning` instead (§3 below); the constant stands for every record without one, and `disposition=None`, the archive rule and every other clause stand. **§4's `EpisodeProcessingRecord` field set, in the addition alone**: the record gains §6 below's `recall` field; every existing field, value and validator stands. **§7:4's rule that all automatic model-facing episodic reads request eligibility `True`, for one consumer**: recall's read (§3 below) requests no eligibility. **§9:6's exclusion of the trigger's raw input text from automatic model inputs, for one consumer and one field**: the trigger's exact input text or transcript of a recalled episode is admitted to the understanding stage's rendering of it (§7 below), as ADR-0276 admitted it to the episode window, and nothing else is.
