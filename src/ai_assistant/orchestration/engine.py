@@ -202,6 +202,7 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryMember,
     StoryMemberKind,
+    StoryNoteAuthor,
     StoryOutcome,
     TextChannelPayload,
     TextChannelResult,
@@ -222,6 +223,8 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
     secret_value,
     story_members,
+    story_move_members,
+    story_note_text,
     user_message,
 )
 from ai_assistant.orchestration.activation_coordinator import ActivationCoordinator
@@ -338,8 +341,15 @@ from ai_assistant.orchestration.speech import (
     synthesize_within,
     transcribe_within,
 )
-from ai_assistant.orchestration.stories import fitted, resolved_view, unknown_activation
+from ai_assistant.orchestration.stories import (
+    fitted,
+    owner_page,
+    resolved_view,
+    unknown_activation,
+)
 from ai_assistant.orchestration.story_links import StoryLinksDecision
+from ai_assistant.orchestration.story_standing import OWNER_READER
+from ai_assistant.orchestration.story_standing import story_standing as standing_of
 from ai_assistant.orchestration.traces import Observation, OperationTraces
 from ai_assistant.orchestration.understanding import (
     ChannelWindow,
@@ -414,7 +424,10 @@ if TYPE_CHECKING:
         SpokenDeliveryReport,
         StoryHeader,
         StoryLogPage,
+        StoryNoteOutcome,
         StoryPage,
+        StoryPageView,
+        StoryStanding,
         StoryView,
         TranscriptPage,
         UserMessage,
@@ -6479,6 +6492,72 @@ class Engine:
         stories = self._story_store()
         member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=named)
         return await self._tracked(stories.stories_of(member), "activation_stories", checked=True)
+
+    # --- the story commands (ADR-0300 §8) -----------------------------------
+    #
+    # Four more over the same store, the reads for the owner as reader and the writes
+    # as the owner. The shared logic is `orchestration/stories.py`'s page read and
+    # `orchestration/story_standing.py`'s standing, which the canonical fake engine
+    # calls too.
+
+    async def story_page(self, story_id: Identifier) -> StoryPageView | None:
+        """Read a story's page as the owner is shown it (ADR-0300 §8:3, §11)."""
+        self._reject_if_closing()
+        target = identifier(story_id, name="story_id")
+        check_arguments("story_page", max_bytes=self._max_payload_bytes, story_id=target)
+        stories = self._story_store()
+        return await self._tracked(
+            owner_page(stories, self._memory, target), "story_page", checked=True
+        )
+
+    async def story_standing(self, story_id: Identifier) -> StoryStanding | None:
+        """Read where a story's matter stands, worked out for the owner (ADR-0300 §8:1)."""
+        self._reject_if_closing()
+        target = identifier(story_id, name="story_id")
+        check_arguments("story_standing", max_bytes=self._max_payload_bytes, story_id=target)
+        stories = self._story_store()
+        return await self._tracked(
+            standing_of(stories, self._memory, target, reader=OWNER_READER),
+            "story_standing",
+            checked=True,
+        )
+
+    async def add_story_note(self, story_id: Identifier, text: str) -> StoryNoteOutcome:
+        """Add a note to a story's page, written by the owner (ADR-0300 §8:3)."""
+        self._reject_if_closing()
+        target = identifier(story_id, name="story_id")
+        written = story_note_text(text)
+        check_arguments(
+            "add_story_note", max_bytes=self._max_payload_bytes, story_id=target, text=written
+        )
+        stories = self._story_store()
+        return await self._tracked(
+            stories.append_note(target, written, author=StoryNoteAuthor.OWNER),
+            "add_story_note",
+            checked=True,
+        )
+
+    async def move_story_members(
+        self, story_id: Identifier, to: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Move activation members from one story to another, as the owner (ADR-0300 §3:14)."""
+        self._reject_if_closing()
+        source = identifier(story_id, name="story_id")
+        target = identifier(to, name="to")
+        named = story_move_members(source, target, members)
+        check_arguments(
+            "move_story_members",
+            max_bytes=self._max_payload_bytes,
+            story_id=source,
+            to=target,
+            members=named,
+        )
+        stories = self._story_store()
+        return await self._tracked(
+            stories.move(source, target, named, actor=StoryActor.OWNER),
+            "move_story_members",
+            checked=True,
+        )
 
     async def beliefs(
         self,

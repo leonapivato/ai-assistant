@@ -78,6 +78,8 @@ from ai_assistant.core.types import (
     checked_chat_devices,
     secret_value,
     story_members,
+    story_move_members,
+    story_note_text,
     user_message,
 )
 from ai_assistant.wire import envelope as env
@@ -165,8 +167,11 @@ if TYPE_CHECKING:
         StoryHeader,
         StoryLogPage,
         StoryMember,
+        StoryNoteOutcome,
         StoryOutcome,
         StoryPage,
+        StoryPageView,
+        StoryStanding,
         StoryView,
         TranscriptPage,
         TurnOutcome,
@@ -786,6 +791,42 @@ class HubClient:
         named = identifier(activation_id, name="activation_id")
         return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
             "activation_stories", activation_id=named
+        )
+
+    # --- the story commands (ADR-0300 §8) -----------------------------------
+    #
+    # Refused here as the engine refuses them, before any frame is written, for the
+    # reason the story methods above give.
+
+    async def story_page(self, story_id: Identifier) -> StoryPageView | None:
+        """Read a story's page as the owner is shown it (ADR-0300 §8:3, §11)."""
+        target = identifier(story_id, name="story_id")
+        return await self._call("story_page", story_id=target)  # type: ignore[no-any-return]
+
+    async def story_standing(self, story_id: Identifier) -> StoryStanding | None:
+        """Read where a story's matter stands, worked out for the owner (ADR-0300 §8:1)."""
+        target = identifier(story_id, name="story_id")
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "story_standing", story_id=target
+        )
+
+    async def add_story_note(self, story_id: Identifier, text: str) -> StoryNoteOutcome:
+        """Add a note to a story's page, written by the owner (ADR-0300 §8:3)."""
+        target = identifier(story_id, name="story_id")
+        written = story_note_text(text)
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "add_story_note", story_id=target, text=written
+        )
+
+    async def move_story_members(
+        self, story_id: Identifier, to: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Move activation members from one story to another, as the owner (ADR-0300 §3:14)."""
+        source = identifier(story_id, name="story_id")
+        target = identifier(to, name="to")
+        named = story_move_members(source, target, members)
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "move_story_members", story_id=source, to=target, members=named
         )
 
     async def beliefs(

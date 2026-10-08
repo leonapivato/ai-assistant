@@ -2462,7 +2462,11 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     as unknown (ADR-0280 §7:4). The field defaults to empty, so a record written
 #:     before it validates unchanged: no ``schema_version`` moves and the
 #:     episode-record format marker does not advance.
-PROTOCOL_VERSION: Final[int] = 83
+#: 84: ADR-0300 §8:3 adds the four story commands to the promoted ``AssistantEngine``
+#:     method set — ``story_page``, ``story_standing``, ``add_story_note`` and
+#:     ``move_story_members`` — and the page's types and ``StoryStanding`` with the
+#:     types they carry, which first reach an engine method here (§12:2).
+PROTOCOL_VERSION: Final[int] = 84
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

@@ -51,7 +51,9 @@ class PageVisibility:
 
     Attributes:
         activations: The activations whose episodes the reader may be shown: each
-            fetched, not open, and admitted by the reader's own predicate.
+            fetched and admitted by the reader's own rule — for a model-facing
+            reader never open (ADR-0286 §6) and through its audience predicate, and
+            for the owner reading directly every episode the store holds.
         owner_notes: Whether a record placed for the owner alone may be shown to the
             reader, which decides every note the user wrote directly.
     """
