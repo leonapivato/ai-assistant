@@ -18,7 +18,9 @@ Three things the engine adds to the story store, and nothing else:
 
 Shared by :class:`~ai_assistant.orchestration.engine.Engine` and the canonical fake
 engine, so the two cannot answer one call two ways. No stage, phase, rule or prompt
-reads anything here (§4).
+reads the surface's checks, views or fits (§4): what understanding is shown of a story,
+and what its stage writes, are :mod:`~ai_assistant.orchestration.story_links`' (ADR-0300
+§6), which shares only :func:`episode_address`, the one spelling of an episode's address.
 """
 
 from __future__ import annotations

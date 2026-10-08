@@ -87,6 +87,8 @@ from ai_assistant.core.types import (
     SemanticMemory,
     StageEntry,
     StageOutcome,
+    StoryMember,
+    StoryMemberKind,
     TimeWindow,
     UnderstandingGround,
     UnderstandingOmission,
@@ -1521,6 +1523,51 @@ class MemoryStoreContract:
         assert omitted.processing_record is not None
         assert omitted.processing_record.understanding == ()
         assert omitted.processing_record.understanding_omitted is UnderstandingOmission.NOT_REACHED
+
+    async def test_an_understandings_story_links_and_their_stage_survive_the_round_trip(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0300 §12:1 under ADR-0280 §7:4: the shape the story links add, carried whole.
+
+        The links are pinned in an order that is neither kind-sorted nor id-sorted,
+        because §6:7 keeps proposal order, and beside a ``story_links`` entry due to
+        ``story_links_unrecorded`` — the two enum members the change adds to the record.
+        """
+        linked = _activation_episode("linked")
+        assert linked.processing_record is not None
+        links = (
+            StoryMember(kind=StoryMemberKind.STORY, id="story:b"),
+            StoryMember(kind=StoryMemberKind.ACTIVATION, id="activation-a"),
+            StoryMember(kind=StoryMemberKind.STORY, id="story:a"),
+        )
+        version = ActivationUnderstanding(
+            version=1,
+            recorded_at=_IN_WINDOW,
+            producer=UnderstandingProducer.INTERPRETATION,
+            meaning="the canoe is booked for the camping trip",
+            meaning_ground=UnderstandingGround.STATED,
+            story_links=links,
+        )
+        entries = (
+            StageEntry(
+                stage=ControllerStage.STORY_LINKS,
+                due=ControllerRule.STORY_LINKS_UNRECORDED,
+                started_at=_STORE_NOW,
+                ended_at=_IN_WINDOW,
+                outcome=StageOutcome.FAILED,
+            ),
+            *ended_pass(_IN_WINDOW),
+        )
+        record = linked.processing_record.model_copy(
+            update={"understanding": (version,), "understanding_omitted": None, "stages": entries}
+        )
+        await store.add(linked.model_copy(update={"processing_record": record}))
+
+        got = await store.get("linked")
+        assert isinstance(got, EpisodicMemory)
+        assert got.processing_record is not None
+        assert got.processing_record.understanding[0].story_links == links
+        assert got.processing_record.stages == entries
 
     async def test_a_processing_records_stage_record_survives_the_round_trip(
         self, store: MemoryStore
