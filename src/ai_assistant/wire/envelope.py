@@ -2446,7 +2446,12 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``AssistantEngine`` method set — its chunk ``ChatStreamChunk``, its end
 #:     ``ChatStreamEnd`` and the types they carry — with the heartbeat interval and
 #:     the dead-peer timeout below, which both ends read.
-PROTOCOL_VERSION: Final[int] = 80
+#: 81: ADR-0300 §3:15 adds ``understanding``, ``planning`` and ``matters_pass`` to
+#:     ``StoryActor``, which the engine's story view and story log carry, so a client
+#:     at 80 would refuse a line a hub at 81 writes (§12:2, ADR-0124 §9:2). The page's
+#:     own types reach no engine method yet; the lane adding the story commands moves
+#:     the version again (§8:3).
+PROTOCOL_VERSION: Final[int] = 81
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

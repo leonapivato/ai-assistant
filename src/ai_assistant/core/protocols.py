@@ -255,8 +255,16 @@ if TYPE_CHECKING:
         StoryHeader,
         StoryLogPage,
         StoryMember,
+        StoryNoteAuthor,
+        StoryNoteId,
+        StoryNoteList,
+        StoryNoteOutcome,
         StoryOutcome,
         StoryPage,
+        StoryPageDraft,
+        StoryPageOutcome,
+        StoryPageState,
+        StoryPageVersionList,
         StoryView,
         StoryViewPage,
         TimeWindow,
@@ -12546,6 +12554,31 @@ class StoryStore(Protocol):
     **Merged stories are followed, never written.** A write to a merged story, or one
     naming a merged story as a member, is refused with the story it was merged into.
     Reading a merged story returns its header, so a caller follows it (§3).
+
+    **A story's page** (ADR-0300 §3). Beside each story the store keeps its
+    **notes** (the page's entries) and its **current page**, with a **version log**
+    recording the current page's history by identity. A note carries its text, who
+    wrote it, the activation it rests on (nothing, for a note ``owner`` wrote),
+    whether outside content fed it, and the store's clock reading; none of it
+    changes once written, and no note is removed. Only the current page is kept as
+    text, and the version log is append-only and holds identities and instants only.
+
+    **Pending.** A note or an activation member is pending on a story from when it
+    comes to the story — written to it, linked into it, or brought by a merge, a
+    split or a move — until a version of that story's page records taking it in. A
+    page write takes in exactly the pending notes and episodes it names that were
+    pending at the read it was built on, its ``as_of``: what becomes pending while a
+    run is out stays pending after the run's write, and what a merge, a split or a
+    move brought into a story is pending there whatever another story's version
+    took in.
+
+    **Membership writes carry notes**, each in the operation's own transaction: a
+    merge moves the absorbed story's notes to the story it is merged into; a split
+    moves every note resting on an activation it moves, and the notes ``owner``
+    wrote that it names; a move of activation members moves every note resting on a
+    moved activation. The store still reads no other store (ADR-0289 §1:3), and
+    refuses a page write only on what ADR-0300 §3 states and on an identity naming
+    nothing it holds: the hub's checks on a tidy-up's output (§5) are the hub's.
     """
 
     async def create(
@@ -12620,7 +12653,8 @@ class StoryStore(Protocol):
         """Remove ``members`` from a story, each logged as ``removed`` (ADR-0289 §3).
 
         A member not in the story is passed over, with no log line. A story left with
-        no members stays as a story with no members.
+        no members stays as a story with no members. The notes resting on a removed
+        activation stay on the story (ADR-0300, *What stays open*).
 
         Args:
             story_id: The story to remove from.
@@ -12656,7 +12690,8 @@ class StoryStore(Protocol):
         then removed from every story that held it, logged ``removed`` on each, and B
         is added to each such story that does not already hold B and is not B,
         logged ``added``. A is left with no members, and records B as the story it
-        was merged into.
+        was merged into. Every note A holds moves to B, in the same transaction, and
+        is pending on B, as is each activation member added to B (ADR-0300 §3).
 
         Args:
             story_id: The story absorbed, A.
@@ -12682,6 +12717,7 @@ class StoryStore(Protocol):
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        notes: Sequence[StoryNoteId] = (),
     ) -> StoryOutcome:
         """Move a non-empty subset of a story's members into a new story (ADR-0289 §3).
 
@@ -12690,11 +12726,18 @@ class StoryStore(Protocol):
         ``split_off`` naming the other. The moved members keep A's link order. C is
         not made a member of A.
 
+        In the same transaction it moves to C every note A holds resting on an
+        activation it moves, and each note named in ``notes`` that A holds and
+        ``owner`` wrote; a note named that is not one of those is passed over, as a
+        member not held is by an unlink. Every other note stays on A. What C
+        receives is pending on C (ADR-0300 §3).
+
         Args:
             story_id: The story split, A.
             members: The members to move, every one a current member of A.
             actor: Who is splitting.
             trigger: The activation that triggered it, where there was one.
+            notes: The notes the user wrote directly that go with the split.
 
         Returns:
             C's id, or a refusal: ``no_members``, ``unknown_story``,
@@ -12702,6 +12745,45 @@ class StoryStore(Protocol):
 
         Raises:
             ValueError: If an argument is malformed.
+            StoryStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def move(
+        self,
+        story_id: Identifier,
+        to: Identifier,
+        members: Sequence[StoryMember],
+        *,
+        actor: StoryActor,
+        trigger: Identifier | None = None,
+    ) -> StoryOutcome:
+        """Move activation members from one story to another (ADR-0300 §3).
+
+        Each member is removed from the first story, logged ``removed`` there, and
+        added to the second where the second does not already hold it, logged
+        ``added`` there; one the second already holds keeps its entry as it was.
+        Every note the first story holds resting on a moved activation moves to the
+        second. All of it is one transaction, and what the second story receives is
+        pending there.
+
+        Args:
+            story_id: The story moved from.
+            to: The story moved to, another story.
+            members: The activation members to move, every one a current member of
+                the first story.
+            actor: Who is moving.
+            trigger: The activation that triggered it, where there was one.
+
+        Returns:
+            The second story's id with the count of lines appended, or a refusal:
+            ``no_members``; ``unknown_story`` or ``merged_story`` for either side,
+            the first story first; or ``not_a_member`` naming a member the first
+            story does not hold.
+
+        Raises:
+            ValueError: If an argument is malformed: a story member named, or the
+                two stories the same.
             StoryStoreError: If the store cannot be read or written.
         """
         ...
@@ -12794,6 +12876,146 @@ class StoryStore(Protocol):
 
         Raises:
             ValueError: If the member is malformed.
+            StoryStoreError: If the store cannot be read.
+        """
+        ...
+
+    # --- the page (ADR-0300 §3) ----------------------------------------------
+
+    async def append_note(
+        self,
+        story_id: Identifier,
+        text: str,
+        *,
+        author: StoryNoteAuthor,
+        rests_on: Identifier | None = None,
+        outside: bool = False,
+    ) -> StoryNoteOutcome:
+        """Write a note to a story's page, pending there (ADR-0300 §3).
+
+        The note is stamped with the store's clock and an identity the store
+        assigns. A tidy-up's notes are written with its page, by :meth:`write_page`,
+        never here.
+
+        Args:
+            story_id: The story the note is for.
+            text: The note's text, non-blank, within ``STORY_NOTE_MAX_CHARS``.
+            author: ``planning`` or ``owner``.
+            rests_on: The activation the note rests on; ``None`` exactly for
+                ``owner``.
+            outside: Whether outside content fed it; never for ``owner``.
+
+        Returns:
+            The note as written, or a refusal: ``unknown_story``, or
+            ``merged_story`` naming where the story went.
+
+        Raises:
+            ValueError: If an argument is malformed, including an author of
+                ``tidy_up`` or a resting or a mark the author does not admit.
+            StoryStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def write_page(
+        self,
+        story_id: Identifier,
+        draft: StoryPageDraft,
+        *,
+        as_of: int,
+    ) -> StoryPageOutcome:
+        """Write a new current page with its safety-net notes and its version.
+
+        One transaction (ADR-0300 §3): the safety-net notes are written by
+        ``tidy_up`` with identities the store assigns, each line's ``cites_new``
+        resolved to them; the new current page replaces the old one, whose text is
+        discarded; and the version is appended, recording the notes each line
+        cites, the safety-net notes, what it took in, its supersession marks and
+        its flags. It takes in exactly the notes and episodes the draft names that
+        were pending on the story at ``as_of``; a name that was not is not recorded
+        as taken in, and stays pending where it is pending. A refused write writes
+        nothing.
+
+        Args:
+            story_id: The story whose page is written.
+            draft: The page and what is written beside it.
+            as_of: The ``as_of`` of the :meth:`current_page` read the page was
+                built on.
+
+        Returns:
+            The version appended, or a refusal, checked in this order:
+            ``unknown_story``; ``merged_story``; ``page_moved_on`` where a version
+            has been written since ``as_of``, so the version the page was built on
+            is no longer the current one; ``unknown_note`` for a note a line cites
+            or a mark names that the store does not hold; ``unknown_story`` for a
+            flag naming a story the store does not hold; and ``over_cap`` where the
+            lines that are not the user's own notes exceed
+            ``STORY_PAGE_CAP_CHARS``.
+
+        Raises:
+            ValueError: If an argument is malformed, including an ``as_of`` the
+                store has not reached or a flag naming the story written.
+            StoryStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def current_page(self, story_id: Identifier) -> StoryPageState | None:
+        """Read a story's current page with the notes and episodes pending on it.
+
+        One consistent read, carrying the ``as_of`` a page built on it is written
+        with. A merged story reads as it was left: its notes went to the story it
+        was merged into, so nothing is pending on it.
+
+        Returns:
+            The state, or ``None`` where the store holds no such story.
+
+        Raises:
+            ValueError: If the id is malformed.
+            StoryStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def notes(
+        self,
+        story_id: Identifier,
+        *,
+        cursor: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> StoryNoteList | None:
+        """Read a page of the notes a story holds, in the order they were written.
+
+        Args:
+            story_id: The story to read.
+            cursor: ``None`` for the first page, else a page's ``next_cursor``.
+            limit: The most notes the page holds, in ``[1, MAX_STORY_PAGE]``.
+
+        Returns:
+            The page, or ``None`` where the store holds no such story.
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def page_versions(
+        self,
+        story_id: Identifier,
+        *,
+        cursor: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> StoryPageVersionList | None:
+        """Read a page of a story's version log, oldest first.
+
+        Args:
+            story_id: The story to read.
+            cursor: ``None`` for the first page, else a page's ``next_cursor``.
+            limit: The most versions the page holds, in ``[1, MAX_STORY_PAGE]``.
+
+        Returns:
+            The page, or ``None`` where the store holds no such story.
+
+        Raises:
+            ValueError: If an argument is malformed.
             StoryStoreError: If the store cannot be read.
         """
         ...
