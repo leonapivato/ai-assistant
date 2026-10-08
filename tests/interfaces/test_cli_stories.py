@@ -37,9 +37,14 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     StoryActor,
     StoryChange,
+    StoryDecision,
     StoryDraftLine,
     StoryEffectState,
+    StoryFlag,
+    StoryFlagKind,
+    StoryFlagName,
     StoryHeader,
+    StoryLogLine,
     StoryLogPage,
     StoryMember,
     StoryMemberKind,
@@ -282,6 +287,14 @@ def test_link_unlink_split_and_merge_reach_the_engine_and_say_what_they_left(
     )
 
 
+#: A tidy-up's flag, by the name ADR-0302 §2 gives it.
+_TIDY_UP_FLAG = StoryFlagName(
+    story="story:x",
+    version=7,
+    flag=StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story="story:y"),
+)
+
+
 def _refusals() -> list[tuple[StoryRefusal, str]]:
     member = _activation("a-1")
     return [
@@ -313,6 +326,18 @@ def _refusals() -> list[tuple[StoryRefusal, str]]:
         (
             StoryRefusal(reason=StoryRefusalReason.UNKNOWN_ACTIVATION, member=member),
             'activation "a-1" has no episode record',
+        ),
+        (
+            StoryRefusal(reason=StoryRefusalReason.UNKNOWN_FLAG, flag=_TIDY_UP_FLAG),
+            'no record holds flag like_another naming story "story:y" raised by version 7 '
+            'of story "story:x"',
+        ),
+        (
+            StoryRefusal(
+                reason=StoryRefusalReason.ALREADY_DECIDED,
+                flag=StoryFlagName(activation="a-1"),
+            ),
+            'the flag on activation "a-1" linking it into several stories was already decided',
         ),
     ]
 
@@ -616,6 +641,61 @@ def test_list_pages_newest_first_with_a_continuation(
 
 def test_every_change_has_a_rendering() -> None:
     assert set(story_inspection.CHANGE_TEXT) == set(StoryChange)
+
+
+def test_every_decision_has_a_rendering() -> None:
+    assert set(story_inspection.DECISION_TEXT) == set(StoryDecision)
+
+
+def test_show_renders_a_decision_with_its_outcome_and_the_flag_by_identity() -> None:
+    """ADR-0302 §8:2: a ``decided`` line names its outcome and the flag it answers."""
+    header = StoryHeader(story_id="story:x", created_at=_AT, merged_into=None)
+
+    def decided(sequence: int, flag: StoryFlagName, outcome: StoryDecision) -> StoryLogLine:
+        return StoryLogLine(
+            sequence=sequence,
+            story_id="story:x",
+            change=StoryChange.DECIDED,
+            member=None,
+            other_story=None,
+            actor=StoryActor.MATTERS_PASS,
+            trigger=None,
+            at=_AT,
+            answers=flag,
+            outcome=outcome,
+        )
+
+    two_matters = StoryFlagName(
+        story="story:x", version=11, flag=StoryFlag(kind=StoryFlagKind.TWO_MATTERS)
+    )
+    log = (
+        StoryLogLine(
+            sequence=1,
+            story_id="story:x",
+            change=StoryChange.CREATED,
+            member=None,
+            other_story=None,
+            actor=StoryActor.OWNER,
+            trigger=None,
+            at=_AT,
+        ),
+        decided(9, _TIDY_UP_FLAG, StoryDecision.LEFT),
+        decided(12, two_matters, StoryDecision.SPLIT),
+        decided(14, StoryFlagName(activation="a-1"), StoryDecision.GROUPED),
+    )
+    buffer = StringIO()
+    story_inspection.render_story(
+        Console(file=buffer, force_terminal=False, width=400),
+        story_inspection.StoryRead(header, 0, (), log),
+    )
+    assert buffer.getvalue().splitlines()[-3:] == [
+        f"  #9 {_AT.isoformat()} matters_pass: decided left as they were, answering flag "
+        'like_another naming story "story:y" raised by version 7 of story "story:x"',
+        f"  #12 {_AT.isoformat()} matters_pass: decided split, answering flag two_matters "
+        'raised by version 11 of story "story:x"',
+        f"  #14 {_AT.isoformat()} matters_pass: decided grouped under a larger story, "
+        'answering the flag on activation "a-1" linking it into several stories',
+    ]
 
 
 def test_an_id_cannot_forge_a_line_or_drive_the_terminal() -> None:
@@ -943,6 +1023,16 @@ def _page_refusals() -> list[tuple[StoryPageRefusal, str]]:
         (
             StoryPageRefusal(reason=StoryPageRefusalReason.OVER_CAP, story_id="story:x"),
             f'the page of story "story:x" is over its cap of {STORY_PAGE_CAP_CHARS} characters',
+        ),
+        (
+            StoryPageRefusal(
+                reason=StoryPageRefusalReason.NOT_HELD, story_id="story:x", activation="a-2"
+            ),
+            'story "story:x" does not hold activation "a-2"',
+        ),
+        (
+            StoryPageRefusal(reason=StoryPageRefusalReason.NOT_HELD, story_id="story:x", note=9),
+            'story "story:x" does not hold note #9',
         ),
     ]
 
