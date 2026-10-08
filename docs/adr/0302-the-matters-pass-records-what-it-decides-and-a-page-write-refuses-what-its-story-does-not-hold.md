@@ -1,6 +1,6 @@
 # 302. The matters pass records what it decides, and a page write refuses what its story does not hold
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-08
 - Scope: [M42](https://github.com/leonapivato/ai-assistant/milestone/9): what the matters pass records of each flag it decides, and what a story's page write refuses ([#2761](https://github.com/leonapivato/ai-assistant/issues/2761)), and which route-table row ADR-0300's story commands take.
 - Dependency: ADR-0300, whose §3 [#2750](https://github.com/leonapivato/ai-assistant/pull/2750) and §5 [#2758](https://github.com/leonapivato/ai-assistant/pull/2758) implemented; ADR-0289, implemented.
