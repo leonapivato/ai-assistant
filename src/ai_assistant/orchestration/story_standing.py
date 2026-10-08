@@ -98,10 +98,14 @@ async def story_standing(
 ) -> StoryStanding | None:
     """Assemble where a story's matter stands, for one reader (ADR-0300 §8:1).
 
-    The clean view is read page by page and each page's episodes with one
-    ``MemoryStore.get_many``, so a story changed between two pages is read as it
-    stood at each; nothing here is one snapshot of both stores, and nothing needs to
-    be, since nothing is stored from it.
+    The clean view is read page by page, then every activation member's episode with
+    one ``MemoryStore.get_many``, then the stories the story is part of. A story
+    written between those reads is read as it stood at each, and nothing here is one
+    snapshot of both stores; nothing needs to be, since nothing is stored from it.
+    Each member and each related story is shown once all the same, as the latest
+    read saw it: a member unlinked and linked again between two pages is kept at its
+    later entry, and a story the reverse lookup names as one the story is part of is
+    not also listed as one it contains.
 
     Args:
         stories: The story store.
@@ -124,23 +128,30 @@ async def story_standing(
         return None
     if page.story.merged_into is not None:
         return StoryStanding(story=page.story)
-    entries = list(page.entries)
-    shown = await _shown(memory, page.entries, reader)
+    entries: dict[StoryMember, StoryEntry] = {}
+    _keep_latest(entries, page.entries)
     cursor = page.next_cursor
     while cursor is not None:
         more = await stories.view(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
         if more is None:
             break
-        entries.extend(more.entries)
-        shown.extend(await _shown(memory, more.entries, reader))
+        _keep_latest(entries, more.entries)
         cursor = more.next_cursor
-    recent, earlier = _timeline(shown)
+    members = list(entries.values())
+    recent, earlier = _timeline(await _shown(memory, members, reader))
     return StoryStanding(
         story=page.story,
         recent=recent,
         earlier=earlier,
-        related=await _related(stories, page.story, entries),
+        related=await _related(stories, page.story, members),
     )
+
+
+def _keep_latest(entries: dict[StoryMember, StoryEntry], page: Sequence[StoryEntry]) -> None:
+    """Add a page's entries in link order, a member read twice kept at its later entry."""
+    for entry in page:
+        entries.pop(entry.member, None)
+        entries[entry.member] = entry
 
 
 async def _shown(
@@ -219,7 +230,12 @@ def _moment(record: EpisodicMemory, activation_id: str) -> StoryStandingEpisode:
 async def _related(
     stories: StoryStore, story: StoryHeader, entries: Sequence[StoryEntry]
 ) -> tuple[StoryRelated, ...]:
-    """The stories ``story`` is part of, newest first, then those it contains, in link order."""
+    """The stories ``story`` is part of, newest first, then those it contains, in link order.
+
+    The reverse lookup is read after ``entries``, so where a story was moved from
+    inside ``story`` to around it between the two reads, the later read decides and
+    it is listed once, as a story ``story`` is part of.
+    """
     related: list[StoryRelated] = []
     member = StoryMember(kind=StoryMemberKind.STORY, id=story.story_id)
     for parent in await stories.stories_of(member):
@@ -229,8 +245,9 @@ async def _related(
                 relation=StoryRelation.PART_OF, story_id=parent.story_id, member_count=count
             )
         )
+    parents = {item.story_id for item in related}
     for entry in entries:
-        if entry.member.kind is StoryMemberKind.STORY:
+        if entry.member.kind is StoryMemberKind.STORY and entry.member.id not in parents:
             count = await _member_count(stories, entry.member.id, story.story_id)
             related.append(
                 StoryRelated(

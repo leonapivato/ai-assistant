@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
 from ai_assistant.core.types import (
+    DEFAULT_PAGE_SIZE,
     MAX_STORY_PAGE,
     STORY_STANDING_RECENT,
     ActivationUnderstanding,
@@ -40,6 +41,11 @@ from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, Unbound
 from ai_assistant.orchestration.story_standing import OWNER_READER, story_standing
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 from ai_assistant.testing.activation import ended_pass
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from ai_assistant.core.types import StoryHeader, StoryViewPage
 
 _AT: Final = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
 _NOW: Final = _AT + timedelta(days=30)
@@ -143,6 +149,39 @@ class _World:
     async def episodes(self, *records: EpisodicMemory) -> None:
         for record in records:
             await self.memory.add(record)
+
+
+class _Interleaved:
+    """The two reads the assembler makes of a story store, with a write landing between.
+
+    ``before_next_page`` runs once, before the first read of a page after the first;
+    ``before_reverse_lookup`` once, before the reverse lookup of related stories.
+    """
+
+    def __init__(
+        self,
+        inner: FakeStoryStore,
+        *,
+        before_next_page: Callable[[], Awaitable[None]] | None = None,
+        before_reverse_lookup: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        self._inner = inner
+        self._before_next_page = before_next_page
+        self._before_reverse_lookup = before_reverse_lookup
+
+    async def view(
+        self, story_id: str, *, cursor: int | None = None, limit: int = DEFAULT_PAGE_SIZE
+    ) -> StoryViewPage | None:
+        if cursor is not None and (hook := self._before_next_page) is not None:
+            self._before_next_page = None
+            await hook()
+        return await self._inner.view(story_id, cursor=cursor, limit=limit)
+
+    async def stories_of(self, member: StoryMember) -> tuple[StoryHeader, ...]:
+        if (hook := self._before_reverse_lookup) is not None:
+            self._before_reverse_lookup = None
+            await hook()
+        return await self._inner.stories_of(member)
 
 
 async def test_story_standing_unknown_story_is_none() -> None:
@@ -352,3 +391,62 @@ async def test_story_standing_a_merged_story_carries_its_header_alone() -> None:
     assert standing.story.merged_into == kept
     assert standing.recent == ()
     assert standing.related == ()
+
+
+async def test_story_standing_a_member_relinked_between_pages_is_shown_once() -> None:
+    world = _World()
+    total = MAX_STORY_PAGE + 1
+    ids = [f"m{index:03d}" for index in range(total)]
+    # The first member read is also the newest episode, so a duplicate would show twice.
+    await world.episodes(
+        *(
+            _episode(id_, at=_AT + timedelta(minutes=total if index == 0 else index))
+            for index, id_ in enumerate(ids)
+        )
+    )
+    story = await world.story(*(_activation(id_) for id_ in ids))
+
+    async def relink_the_first() -> None:
+        await world.stories.unlink(story, [_activation(ids[0])], actor=StoryActor.OWNER)
+        await world.stories.link(story, [_activation(ids[0])], actor=StoryActor.OWNER)
+
+    stories = _Interleaved(world.stories, before_next_page=relink_the_first)
+
+    standing = await story_standing(
+        stories,  # type: ignore[arg-type]  # the two reads the assembler makes, interleaved
+        world.memory,
+        story,
+        reader=OWNER_READER,
+    )
+
+    assert standing is not None
+    shown = [moment.activation_id for moment in standing.recent]
+    assert shown[0] == ids[0]
+    assert len(set(shown)) == len(shown)
+    assert standing.earlier is not None
+    assert standing.earlier.episodes == total - STORY_STANDING_RECENT
+
+
+async def test_story_standing_a_story_moved_around_it_between_reads_is_listed_once() -> None:
+    world = _World()
+    await world.episodes(_episode("a"), _episode("b"))
+    inner = await world.story(_activation("a"))
+    story = await world.story(_activation("b"), _story_member(inner))
+
+    async def turn_it_inside_out() -> None:
+        await world.stories.unlink(story, [_story_member(inner)], actor=StoryActor.OWNER)
+        await world.stories.link(inner, [_story_member(story)], actor=StoryActor.OWNER)
+
+    stories = _Interleaved(world.stories, before_reverse_lookup=turn_it_inside_out)
+
+    standing = await story_standing(
+        stories,  # type: ignore[arg-type]  # the two reads the assembler makes, interleaved
+        world.memory,
+        story,
+        reader=OWNER_READER,
+    )
+
+    assert standing is not None
+    assert standing.related == (
+        StoryRelated(relation=StoryRelation.PART_OF, story_id=inner, member_count=2),
+    )
