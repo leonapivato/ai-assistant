@@ -205,8 +205,15 @@ tidy-up's flag needs no wait: its version is written whole, in one transaction.
 > understanding flag fewer than two of whose stories still hold its activation.
 
 > **Normative.** For each flag it decides, the pass is shown the decisions recorded for
-> each story the flag concerns (§3), and its instruction states that a flag raised again after
-> a decision is decided as before unless what came to those stories since bears on it.
+> each story the flag concerns (§3): first those whose flags concern the same stories as
+> this one, then the rest, each group newest first, up to a number the lane that builds
+> it sets as a composition-root constant.
+
+> **Normative.** The pass's instruction states that a flag raised again after a decision
+> is decided as before unless what came to those stories since bears on it.
+
+The bound limits what a prompt is shown, never what is kept: every decision stays in the
+change log, and the store's `already_decided` check reads all of them.
 
 > **Normative.** Where the store refuses the change the pass chose for a reason other
 > than `unknown_flag` or `already_decided`, the stories stay as they are and the pass
@@ -384,8 +391,8 @@ the pass's by the decisions on each flag's stories.
   answers no flag; a flag it settled is recorded `left` by rule (§5), and any other the
   pass decides on the stories as they then stand.
 - **Decisions do not expire.** If the test hub shows an old decision suppressing a flag
-  it should not, a bound on which decisions the tidy-up is shown is the place to add
-  one.
+  it should not, which decisions the tidy-up and the pass are shown, beyond their
+  bounds, is the place to change.
 
 ## Alternatives considered
 
