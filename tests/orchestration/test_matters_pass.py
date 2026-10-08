@@ -556,6 +556,29 @@ async def test_a_run_whose_reading_outlasts_its_budget_still_decides_one_flag() 
     assert len(model.calls) == 2
 
 
+def _merging_on(
+    stories: FakeStoryStore, method: str, call: int, absorbed: str, into: str
+) -> list[bool]:
+    """``stories``, its ``method`` merging ``absorbed`` into ``into`` on its ``call``th call.
+
+    Returns a one-item list that turns true once the merge has landed.
+    """
+    original = getattr(stories, method)
+    calls = 0
+    landed = [False]
+
+    async def merging(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == call:
+            assert (await stories.merge(absorbed, into, actor=StoryActor.OWNER)).refusal is None
+            landed[0] = True
+        return await original(*args, **kwargs)
+
+    setattr(stories, method, merging)
+    return landed
+
+
 async def test_a_merge_after_the_runs_reading_is_followed_before_the_rule() -> None:
     stories = _stories()
     memory = await memory_of(episode("a-1"), episode("b-1"), episode("c-1"), episode("x-1"))
@@ -563,25 +586,73 @@ async def test_a_merge_after_the_runs_reading_is_followed_before_the_rule() -> N
     other = await _story(stories, "b-1")
     third = await _story(stories, "c-1")
     await _linked_twice(stories, "x-1", trip, other)
-    header = stories.header
-    merged = False
-
-    async def merging_first(story_id: str) -> Any:
-        nonlocal merged
-        if not merged:
-            merged = True
-            assert (await stories.merge(trip, third, actor=StoryActor.OWNER)).refusal is None
-        return await header(story_id)
-
-    stories.header = merging_first  # type: ignore[method-assign]  # a merge lands meanwhile
+    # The first two reads of the stories are the run's discovery; the third is the
+    # flag's own read of where each story went.
+    landed = _merging_on(stories, "stories", 3, trip, third)
     model = FakeModelProvider(_LEAVE)
 
     report = await _pass(model, stories, memory).run()
 
     # `other` and `third` both hold x-1 now: the flag's stories did not come together.
-    assert merged
+    assert landed == [True]
     assert (report.left_by_rule, report.decided) == (0, 1)
     assert [story["label"] for story in _shown(model)["stories"]] == ["S1", "S2"]
+
+
+async def test_a_merge_during_the_rules_membership_read_defers_the_flag() -> None:
+    stories = _stories()
+    memory = await memory_of(episode("a-1"), episode("b-1"), episode("c-1"), episode("x-1"))
+    trip = await _story(stories, "a-1")
+    other = await _story(stories, "b-1")
+    third = await _story(stories, "c-1")
+    flag = await _linked_twice(stories, "x-1", trip, other)
+    # `trip` no longer holds x-1, so the rule would answer on the stories as read; the
+    # merge into `third`, which does, lands as their membership is looked up.
+    assert (await stories.unlink(trip, [activation("x-1")], actor=StoryActor.OWNER)).refusal is None
+    assert (await stories.link(third, [activation("x-1")], actor=StoryActor.OWNER)).refusal is None
+    landed = _merging_on(stories, "stories_of", 1, other, third)
+    model = FakeModelProvider(_LEAVE)
+    matters = _pass(model, stories, memory)
+
+    deferred = await matters.run()
+
+    assert landed == [True]
+    assert (deferred.raced, deferred.left_by_rule) == (1, 0)
+    for story_id in (trip, other, third):
+        assert await _decisions(stories, story_id) == []
+
+    # Read again whole, `trip` and `third` are its stories, and only `third` holds it.
+    settled = await matters.run()
+
+    assert settled.left_by_rule == 1
+    assert await _decisions(stories, third) == [(flag, StoryDecision.LEFT, StoryActor.MATTERS_PASS)]
+
+
+async def test_decisions_are_placed_by_the_stories_as_they_stand_after_a_merge() -> None:
+    stories = _stories()
+    memory = await memory_of(episode("a-1"), episode("b-1"), episode("c-1"))
+    trip = await _story(stories, "a-1")
+    other = await _story(stories, "b-1")
+    third = await _story(stories, "c-1")
+    like = StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other)
+    earlier = await _raise(stories, trip, like)
+    assert (await stories.leave_flag(earlier, actor=StoryActor.MATTERS_PASS)).refusal is None
+    unrelated = await _raise(stories, third, _TWO)
+    assert (await stories.leave_flag(unrelated, actor=StoryActor.MATTERS_PASS)).refusal is None
+    await _raise(stories, trip, like)
+    # After discovery, before the flag is decided, `trip` is merged into `third`.
+    landed = _merging_on(stories, "stories", 2, trip, third)
+    model = FakeModelProvider(_LEAVE)
+
+    await _pass(model, stories, memory, decisions=1).run()
+
+    assert landed == [True]
+    (shown,) = _shown(model)["decisions"]
+    # The earlier decision on the same pair, now `third` and `other`, comes first.
+    assert (shown["stories_its_flag_concerns"], shown["other_stories_its_flag_concerns"]) == (
+        ["S1", "S2"],
+        0,
+    )
 
 
 async def test_an_understanding_flags_stories_are_read_after_its_episode_froze() -> None:

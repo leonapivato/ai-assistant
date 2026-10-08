@@ -30,7 +30,7 @@ here, so nothing of it can reach a log line (ADR-0275 §8).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.types import (
@@ -59,7 +59,6 @@ __all__ = [
     "RecordedDecision",
     "StoryRecords",
     "decisions_of",
-    "followed_now",
     "read_records",
     "recorded_decisions",
     "reread",
@@ -127,9 +126,12 @@ def _is_understandings_line(line: StoryLogLine) -> bool:
     )
 
 
-@dataclass(frozen=True, slots=True)
 class StoryRecords:
     """What one read of the story store holds of its flags and decisions.
+
+    Its indexes, understanding's lines by activation and the set of flags a decision
+    answers, are each built once, on first use, in one walk of the logs; a copy with
+    fresh headers (:meth:`with_headers`) shares them, since headers carry no line.
 
     Attributes:
         headers: Every story's header, by id.
@@ -138,22 +140,42 @@ class StoryRecords:
             read did not ask for them.
     """
 
-    headers: dict[str, StoryHeader]
-    logs: dict[str, tuple[StoryLogLine, ...]]
-    versions: dict[str, tuple[StoryPageVersion, ...]] = field(default_factory=dict)
-    _understanding: dict[str, list[StoryLogLine]] = field(init=False, repr=False)
+    __slots__ = ("_decided", "_understanding", "headers", "logs", "versions")
 
-    def __post_init__(self) -> None:
-        """Index understanding's lines by their activation, in sequence order."""
-        index: dict[str, list[StoryLogLine]] = {}
-        for lines in self.logs.values():
-            for line in lines:
-                if _is_understandings_line(line):
-                    assert line.member is not None  # noqa: S101 — _is_understandings_line's own test
-                    index.setdefault(line.member.id, []).append(line)
-        for indexed in index.values():
-            indexed.sort(key=lambda line: line.sequence)
-        object.__setattr__(self, "_understanding", index)
+    def __init__(
+        self,
+        *,
+        headers: dict[str, StoryHeader],
+        logs: dict[str, tuple[StoryLogLine, ...]],
+        versions: dict[str, tuple[StoryPageVersion, ...]] | None = None,
+    ) -> None:
+        """Hold one read's records; nothing is walked until a question needs it."""
+        self.headers = headers
+        self.logs = logs
+        self.versions = {} if versions is None else versions
+        self._understanding: dict[str, list[StoryLogLine]] | None = None
+        self._decided: frozenset[StoryFlagName] | None = None
+
+    def with_headers(self, headers: dict[str, StoryHeader]) -> StoryRecords:
+        """These records with ``headers`` in place of their own, sharing their indexes."""
+        fresh = StoryRecords(headers=headers, logs=self.logs, versions=self.versions)
+        fresh._understanding = self._understanding
+        fresh._decided = self._decided
+        return fresh
+
+    def _lines(self) -> dict[str, list[StoryLogLine]]:
+        """Understanding's lines by their activation, in sequence order, built once."""
+        if self._understanding is None:
+            index: dict[str, list[StoryLogLine]] = {}
+            for lines in self.logs.values():
+                for line in lines:
+                    if _is_understandings_line(line):
+                        assert line.member is not None  # noqa: S101 — _is_understandings_line's own test
+                        index.setdefault(line.member.id, []).append(line)
+            for indexed in index.values():
+                indexed.sort(key=lambda line: line.sequence)
+            self._understanding = index
+        return self._understanding
 
     def followed(self, story_id: str) -> str:
         """The story ``story_id`` was merged into, through every merge, or itself.
@@ -174,7 +196,7 @@ class StoryRecords:
     def raised(self, flag: StoryFlagName) -> tuple[str, ...]:
         """The stories ``flag`` concerns as raised, before following merges (§2:3)."""
         if flag.activation is not None:
-            return _unique(line.story_id for line in self._understanding.get(flag.activation, ()))
+            return _unique(line.story_id for line in self._lines().get(flag.activation, ()))
         assert flag.story is not None  # noqa: S101 — StoryFlagName's own rule
         assert flag.flag is not None  # noqa: S101 — StoryFlagName's own rule
         named = flag.flag.story
@@ -199,7 +221,7 @@ class StoryRecords:
                             sequence=version.version,
                         )
                     )
-        for activation, lines in self._understanding.items():
+        for activation, lines in self._lines().items():
             firsts: dict[str, StoryLogLine] = {}
             for line in lines:
                 firsts.setdefault(line.story_id, line)
@@ -218,13 +240,15 @@ class StoryRecords:
         return raised
 
     def decided(self) -> frozenset[StoryFlagName]:
-        """Every flag a ``decided`` line answers."""
-        return frozenset(
-            line.answers
-            for lines in self.logs.values()
-            for line in lines
-            if line.change is StoryChange.DECIDED and line.answers is not None
-        )
+        """Every flag a ``decided`` line answers, worked out once."""
+        if self._decided is None:
+            self._decided = frozenset(
+                line.answers
+                for lines in self.logs.values()
+                for line in lines
+                if line.change is StoryChange.DECIDED and line.answers is not None
+            )
+        return self._decided
 
     def decisions_for(self, story_id: str) -> list[RecordedDecision]:
         """The decisions recorded for ``story_id`` (§3:6), one per flag, newest first."""
@@ -350,27 +374,6 @@ async def reread(
         logs[story_id] = await read_log(stories, story_id)
         versions.setdefault(story_id, ())
     return StoryRecords(headers=headers, logs=logs, versions=versions)
-
-
-async def followed_now(stories: StoryStore, story_id: str) -> str:
-    """The story ``story_id`` is merged into now, through every merge, or itself.
-
-    Read from the store's headers as they stand, not from a :class:`StoryRecords`
-    read earlier, so a merge since is followed. A story the store does not hold is
-    answered as itself.
-
-    Raises:
-        StoryStoreError: If the store cannot be read.
-    """
-    seen = {story_id}
-    while (header := await stories.header(story_id)) is not None and (
-        onward := header.merged_into
-    ) is not None:
-        if onward in seen:  # pragma: no cover — a merged story is never merged into
-            return story_id
-        seen.add(onward)
-        story_id = onward
-    return story_id
 
 
 async def recorded_decisions(stories: StoryStore, story_id: str) -> list[RecordedDecision]:
