@@ -779,6 +779,16 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
     **``ConversationInputOptions``, ``TurnReference`` and ``SpokenDeliveryReport`` left
     it with ADR-0284 §3:1**, because ``RecordedChannelTrigger`` lost ``conversation``,
     the one path by which the composing stage's graph reached them.
+
+    **``StoryMember`` joined it with ADR-0300 §6:7**, because ``ActivationUnderstanding``
+    — in this graph since ADR-0276 §7 — gained ``story_links``. The judgement, made
+    rather than assumed: ADR-0289 §2 closes the model at two fields with
+    ``extra="forbid"``, a member of a closed enumeration and an identifier — a story
+    id the story store minted or an activation id the hub minted — and §2:7 holds that
+    no field of a story holds free text. Neither admits a ``SecretStr``. **Every
+    ``story_links`` is empty on every record a deployment without the story-links stage
+    captures**, and on one with it each link names a story or an activation and nothing
+    of what either holds.
     """
     # ADR-0275: processing metadata joins the in-process record graph. Its
     # fields are identifiers, closed values, clocks and caller-supplied Tier 1
@@ -838,6 +848,7 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
         "SemanticMemory",
         "SpokenDelivery",
         "StageEntry",
+        "StoryMember",
         "StepCondition",
         "StepExecution",
         "StepFailure",
