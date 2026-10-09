@@ -163,6 +163,36 @@ async def test_a_turn_linking_into_a_story_with_a_pending_note_starts_a_tidy_up_
     assert (model.calls, model.in_activation) == (1, [False])
 
 
+async def test_a_cancellation_landing_once_the_freeze_is_confirmed_still_starts_the_run() -> None:
+    """ADR-0303 §5:9: the episode froze, so the run is owed whatever ends the call."""
+    stories = _stories()
+    trip = (await stories.create([activation("a-1")], actor=StoryActor.OWNER)).story_id
+    assert trip is not None
+    memory = await memory_of(episode("a-1", at=_NOW), now=_NOW)
+    model = FakeModelProvider(_PAGE)
+    harness = _harness(memory, stories, _tidy_up(model, stories, memory), labels=["S1"])
+    coordinator = harness.engine._activation_coordinator
+    finish = coordinator.finish
+    frozen: list[bool] = []
+
+    async def cancelled_after(state: ActivationState, **kwargs: Any) -> Any:
+        await finish(state, **kwargs)
+        frozen.append(state.capture is not None and state.capture.frozen)
+        raise asyncio.CancelledError
+
+    coordinator.finish = cancelled_after  # type: ignore[method-assign]  # the one seam the case cuts
+
+    with pytest.raises(asyncio.CancelledError):
+        await harness.engine.converse(_TURN, timeout=_BUDGET)
+    await _drained(harness)
+
+    assert frozen == [True]
+    assert len(model.calls) == 1
+    state = await stories.current_page(trip)
+    assert state is not None
+    assert state.page is not None
+
+
 async def test_a_turn_linking_into_no_story_starts_no_tidy_up() -> None:
     stories = _stories()
     memory = await memory_of(episode("a-1", at=_NOW), now=_NOW)

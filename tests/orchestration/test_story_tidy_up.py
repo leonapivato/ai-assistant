@@ -27,6 +27,8 @@ from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     STORY_NOTE_MAX_CHARS,
     STORY_PAGE_CAP_CHARS,
+    BeliefBand,
+    MemorySource,
     Message,
     Role,
     StoryActor,
@@ -587,6 +589,42 @@ async def test_one_bound_counts_the_stories_shown_shared_and_searched_together()
     (shown,) = _shown(model)["other_stories"]
     assert shown["shown_because"] == "an episode read here also belongs to it"
     assert shared != trip
+
+
+async def test_no_band_is_searched_once_the_bound_is_filled() -> None:
+    """A search the run has no use for can neither fail it nor spend its budget."""
+    stories = _stories()
+    alike = episode("a-9", text="Saturdays at Riverside for camping, maybe.")
+    asserted = alike.model_copy(
+        update={
+            "provenance": alike.provenance.model_copy(
+                update={"source": MemorySource.USER_ASSERTED, "confidence": 1.0}
+            )
+        }
+    )
+    memory = await memory_of(episode("a-1", text=_USER_INPUT), asserted)
+    trip = await _story(stories, "a-1")
+    await _story(stories, "a-9")
+    search = memory.search
+    searched: list[tuple[BeliefBand, ...]] = []
+
+    async def first_band_only(query: str, **kwargs: Any) -> Any:
+        bands = tuple(kwargs["bands"])
+        searched.append(bands)
+        if bands != (BeliefBand.ASSERTED,):
+            msg = "the memory store could not be searched"
+            raise MemoryStoreError(msg)
+        return await search(query, **kwargs)
+
+    memory.search = first_band_only  # type: ignore[method-assign]  # the one seam the case cuts
+    model = FakeModelProvider(_reply(["A camping trip."]))
+
+    outcome = await _tidy_up(model, stories, memory, other_stories=1).run(trip)
+
+    assert outcome.result is TidyUpResult.WRITTEN
+    assert searched == [(BeliefBand.ASSERTED,)]
+    (shown,) = _shown(model)["other_stories"]
+    assert shown["shown_because"].startswith("a search found an episode of it")
 
 
 async def test_a_story_found_by_search_with_no_page_is_shown_as_such_and_not_recorded() -> None:

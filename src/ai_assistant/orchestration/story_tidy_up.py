@@ -850,11 +850,15 @@ class StoryTidyUp:
         recall reads a kept episode's stories (ADR-0300 §7:1). The story's own members
         are passed over, so they take no slot, and each search asks for as many more
         as it may pass over (ADR-0282 §4). An open episode is passed over too: no
-        model is shown one (ADR-0286 §6:4).
+        model is shown one (ADR-0286 §6:4). Once the bound is filled no further band is
+        searched, so a search the run has no use for can neither fail it nor spend
+        its budget.
         """
         own = frozenset(episode_address(activation_id) for activation_id in linked)
         limit = self._other_stories + len(own)
         for band in _BANDS:
+            if len(chosen) >= self._other_stories:
+                return
             found = await self._memory.search(
                 query, limit=limit, kinds=(MemoryKind.EPISODIC,), bands=(band,)
             )
