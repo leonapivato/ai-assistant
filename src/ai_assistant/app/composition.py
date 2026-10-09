@@ -301,6 +301,13 @@ UNDERSTANDING_VERSION_LIMIT: Final = 8
 #: initial value, unmeasured; a story already a candidate is not repeated.
 UNDERSTANDING_STORY_CANDIDATES: Final = 5
 
+#: How many of a story's notes its page view lists, newest first, before it counts the
+#: rest (ADR-0303 §10:2). The view lists them so the owner can name them in a command,
+#: so it is sized to hold every note of an ordinary matter: twenty at their bound of
+#: 2,000 characters is about 40,000 characters, beside a page capped at 8,000, well
+#: inside a frame's payload limit.
+STORY_PAGE_VIEW_NOTES: Final = 20
+
 #: How much of each candidate a short view shows (ADR-0300 §6:2), chosen here as §6:2
 #: and §3:17 have the building lane choose them. A short view is for recognising the
 #: matter, not for its account, which planning is given whole (§8). **Lines: 3** — the
@@ -2309,8 +2316,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # rather than left as a claim. There is no type that could say so — both
             # parameters take the same class — so it is a property of *this* wiring.
             parked_reads=parked_read_operations,
-            # ADR-0289 §4's nine story methods read and write this store.
+            # ADR-0289 §4's nine story methods read and write this store, and the
+            # story page view lists this many notes (ADR-0303 §10:2).
             stories=stories,
+            story_page_notes=STORY_PAGE_VIEW_NOTES,
             # ADR-0300 §6: the candidate stories understanding is shown, read from the
             # same story store and the one memory store, and the stage that records
             # its links there with the actor `understanding`. Wired together, as the

@@ -289,3 +289,10 @@ def test_the_two_story_pieces_are_wired_together_and_beside_understanding() -> N
             story_candidates=candidates,
             story_links=StoryLinksStage(stories=stories),
         )
+
+
+def test_the_story_page_view_lists_at_least_one_note() -> None:
+    """ADR-0303 §10:2's bound is the composition root's, and a bound of none is refused."""
+    memory = FakeMemoryStore(now=lambda: AT)
+    with pytest.raises(ConfigurationError, match="ADR-0303 §10:2"):
+        Harness(memory=memory, stories=_stories(), story_page_notes=0)

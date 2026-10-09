@@ -123,6 +123,7 @@ from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.parked_reads import ParkedReadOperations
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
+from ai_assistant.orchestration.stories import DEFAULT_STORY_PAGE_VIEW_NOTES
 from ai_assistant.orchestration.understanding import RecentEpisodes, WindowsStage
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
@@ -710,6 +711,8 @@ class Harness:
         stories: StoryStore | None = None,
         story_candidates: StoryCandidates | None = None,
         story_links: StoryLinksStage | None = None,
+        # ADR-0303 §10:2's bound on the story page view's notes.
+        story_page_notes: int = DEFAULT_STORY_PAGE_VIEW_NOTES,
         # ADR-0300 §5's interim tidy-up run, test-hub scaffolding removed at the
         # cutover. `None` is every other case's deployment: no tidy-up is started.
         interim_tidy_up: InterimTidyUp | None = None,
@@ -1031,6 +1034,7 @@ class Harness:
             ),
             recall=recall,
             stories=stories,
+            story_page_notes=story_page_notes,
             story_candidates=story_candidates,
             story_links=story_links,
             interim_tidy_up=interim_tidy_up,

@@ -24,11 +24,13 @@ says so.
 **The candidate stories** (ADR-0300 §6) render as a fourth section, ``stories``,
 labelled ``S1``, ``S2``… in the candidates' order, only where the understanding phase
 assembled candidates for the pass: each story's short view — the first lines of its
-page, its newest pending notes and its latest episodes, which take no label — as
-:class:`~ai_assistant.orchestration.story_links.StoryCandidates` read it, under ADR-0300
-§11's default. Every line and note is quoted source data attributed by its record, who
-wrote it and whether it is marked, and a marked one as outside content, never as the
-user's words (§4:6). The proposal's ``story_labels`` name the matters the input belongs
+page and its mark, or that the page was withheld, its newest pending notes and its
+latest episodes, which take no label — as
+:class:`~ai_assistant.orchestration.story_links.StoryCandidates` read it, under ADR-0303
+§3's privacy default. The page and every note are quoted source data attributed by
+their records, the page as the tidy-up's and marked or not, a note by who wrote it and
+whether it is marked, and a marked one as outside content, never as the user's words
+(ADR-0303 §3:7, §3:8). The proposal's ``story_labels`` name the matters the input belongs
 with: an ``S`` label resolves to its story, and a ``P`` or ``M`` label naming an episode
 to that episode's activation. So does an ``H`` label naming a channel item that links
 to an activation (ADR-0303 §7): a record of the conversation's tail, or an item that is
@@ -312,13 +314,19 @@ _STORIES_UNREADABLE: Final = "missing: the stories could not be read, so none is
 
 #: A short view's parts where they render nothing.
 _NO_LINES: Final = "missing: no line of this story's page is shown"
+#: A page written but withheld from this pass's audience (ADR-0303 §3:11): the reader is
+#: told a page exists that it is not shown, and nothing of it, its mark included.
+_PAGE_WITHHELD: Final = (
+    "missing: this story has a page, withheld here because not everything behind it may "
+    "be shown to this audience"
+)
 _NO_NOTES: Final = "missing: no note is waiting to be folded into this story's page"
 _NO_EPISODES: Final = "missing: no episode of this story is shown"
 
 _STORY_ITEM: Final = "a story: the assistant's memory of one matter"
 
 #: Who wrote a note, as a short view renders it: the note's own record of its author,
-#: never a reading of its text (ADR-0300 §4:6).
+#: never a reading of its text (ADR-0303 §3:7).
 _NOTE_AUTHOR_TEXT: Final = {
     StoryNoteAuthor.PLANNING: "the assistant, while working on this matter",
     StoryNoteAuthor.TIDY_UP: "the assistant, tidying this story's page",
@@ -881,8 +889,10 @@ class UnderstandingStage:
     def _short_view(self, label: str, view: ShortView) -> dict[str, object]:
         """One candidate under its label: page lines, newest notes, latest episodes (§6:2).
 
-        Each line and note is attributed by its record — who wrote it and whether it is
-        marked — and never by its text (ADR-0300 §4:6). The episodes take no label
+        The page and each note are attributed by their records — the page as the
+        tidy-up's and marked or not, a note by who wrote it and whether it is marked —
+        and never by their text (ADR-0303 §3:7). A withheld page is said to be withheld,
+        and nothing of it is rendered (§3:11). The episodes take no label
         (§6:5), and render through the projection with an outside input's text not
         admitted: ADR-0284 §8:5 admits it in the episode window and the recalled
         section alone.
@@ -896,7 +906,11 @@ class UnderstandingStage:
         rendered: dict[str, object] = {
             "label": label,
             "item": _STORY_ITEM,
-            "page": [_page_line(line) for line in view.lines] or _NO_LINES,
+            "page": (
+                _PAGE_WITHHELD
+                if view.withheld
+                else [_page_line(line) for line in view.lines] or _NO_LINES
+            ),
         }
         if view.outside:
             rendered["page_outside_content"] = _PAGE_OUTSIDE_TEXT

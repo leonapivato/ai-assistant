@@ -211,6 +211,28 @@ async def test_the_candidates_render_under_s_labels_attributed_by_their_records(
     assert second["latest_episodes"].startswith("missing:")
 
 
+async def test_a_withheld_page_is_said_to_be_withheld_and_nothing_of_it_is_rendered() -> None:
+    """ADR-0303 §3:11: the reader is told a page was withheld, and is shown none of it."""
+    model = FakeModelProvider(_proposal())
+    withheld = ShortView(
+        story_id="story:withheld",
+        lines=(),
+        notes=_TRIP.notes,
+        episodes=(),
+        withheld=True,
+    )
+
+    await _understand(model, stories=Candidates(views=(withheld, _RUNNING)))
+
+    first, second = _payload(model)["stories"]
+    assert first["page"].startswith("missing:")
+    assert "withheld" in first["page"]
+    assert "page_outside_content" not in first
+    # The notes are decided on their own (§3:9), and a story with no page is not withheld.
+    assert len(first["newest_notes"]) == 2
+    assert "withheld" not in second["page"]
+
+
 async def test_the_instruction_states_what_a_link_says_and_asks_for_story_labels() -> None:
     model = FakeModelProvider(_proposal())
 

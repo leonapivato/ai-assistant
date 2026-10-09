@@ -17,10 +17,9 @@ Four things the engine adds to the story store, and nothing else:
   limit is re-read at a smaller page size, so the caller gets the largest page that
   fits with a cursor resuming after it, rather than a refusal.
 * **The owner's page** (:func:`owner_page`, ADR-0303 §10:2). A story's current page
-  and its mark, and its newest notes with whether each is pending, under ADR-0303 §3's
-  default for the owner as reader: decided by
-  :class:`~ai_assistant.orchestration.story_privacy.PageVisibility`, the one statement
-  of that rule.
+  and its mark, or that it was withheld, and its newest notes with whether each is
+  pending, under ADR-0303 §3's default for the owner as reader: decided by
+  :mod:`~ai_assistant.orchestration.story_privacy`, the one statement of that rule.
 
 Shared by :class:`~ai_assistant.orchestration.engine.Engine` and the canonical fake
 engine, so the two cannot answer one call two ways. No stage, phase, rule or prompt
@@ -48,7 +47,7 @@ from ai_assistant.core.types import (
     StoryView,
 )
 from ai_assistant.orchestration.payloads import canonical_payload, check_payload
-from ai_assistant.orchestration.story_privacy import PageVisibility
+from ai_assistant.orchestration.story_privacy import PageVisibility, behind
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -145,12 +144,11 @@ async def resolved_view(
     )
 
 
-#: How many of a story's notes the owner's page view lists, newest first (ADR-0303
-#: §10:2). ADR-0303 makes it a composition-root constant; until the lane that rebuilds
-#: the view (§12:3) wires it there, both engines read this default. Twenty notes at
-#: their bound of 2,000 characters is about 40,000 characters, beside a page capped at
-#: 8,000, well inside a frame's payload limit.
-STORY_PAGE_VIEW_NOTES: Final = 20
+#: How many of a story's notes the owner's page view lists, newest first, where its
+#: caller names no bound (ADR-0303 §10:2). The composition root wires its own constant,
+#: ``STORY_PAGE_VIEW_NOTES``, into the engine; this is the default the canonical fake
+#: engine and an engine built without one read.
+DEFAULT_STORY_PAGE_VIEW_NOTES: Final = 20
 
 #: How many times the owner's page is read before the reads are given up as never
 #: agreeing. Each attempt brackets the notes between two reads of the page's state, and
@@ -162,10 +160,10 @@ _PAGE_READS: Final = 5
 
 async def owner_page(
     stories: StoryStore,
-    memory: MemoryStore,  # noqa: ARG001 — the episodes §3:7's walk reads, once it is built
+    memory: MemoryStore,
     story_id: str,
     *,
-    notes: int = STORY_PAGE_VIEW_NOTES,
+    notes: int = DEFAULT_STORY_PAGE_VIEW_NOTES,
 ) -> StoryPageView | None:
     """Read a story's page as the owner is shown it (ADR-0303 §10:2).
 
@@ -177,11 +175,17 @@ async def owner_page(
     ``as_of`` reports (ADR-0300 §3:8), so two reads naming one ``as_of`` bracket a
     listing no such write landed inside, and each note listed is shown pending exactly
     as it stood. A write to another story advances it too, and costs a read again, not
-    a wrong answer. The owner may be shown a record placed for the
-    owner alone, so every note is shown (§3:6), and so is the page under
-    :class:`~ai_assistant.orchestration.story_privacy.PageVisibility`'s interim rule;
-    §3:7's walk, which withholds a page an open or forgotten episode stands behind, is
-    ADR-0303 §12:3's lane's, and reads ``memory``.
+    a wrong answer.
+
+    **Under ADR-0303 §3's default, for the owner as reader.** The owner may be shown a
+    record placed for the owner alone, so every note is shown (§3:9). The page is shown
+    only where everything behind it may be (§3:11): the version that wrote it is walked
+    (:func:`~ai_assistant.orchestration.story_privacy.behind`), and every episode behind
+    it is looked up in ``memory``, where the owner may be shown every record the store
+    holds, an open one included, as the owner's direct inspection reads every record
+    (ADR-0275 §7, §10). An episode no longer there, forgotten or expired, withholds the
+    page (§3:12), as does a version the walk cannot read. The version log is
+    append-only, so walking it after the bracketed reads answers for the page they read.
 
     Returns:
         The page, or ``None`` where the store holds no such story. A merged story's
@@ -200,16 +204,36 @@ async def owner_page(
             return StoryPageView(story=state.story)
         held = await _all_notes(stories, story_id)
         if await stories.current_page(story_id) == state:
-            return _page_view(state, held, notes=notes)
+            shown = state.page is not None and await _owner_may_see(
+                stories, memory, story_id, state.page.version
+            )
+            return _page_view(state, held, notes=notes, shown=shown)
     msg = "the story was written while its page was read, every time it was read"
     raise StoryStoreError(msg)
 
 
-def _page_view(state: StoryPageState, held: list[StoryNote], *, notes: int) -> StoryPageView:
+async def _owner_may_see(
+    stories: StoryStore, memory: MemoryStore, story_id: str, version: int
+) -> bool:
+    """Whether the owner may be shown the page ``version`` wrote (ADR-0303 §3:11)."""
+    standing = await behind(stories, story_id, version)
+    if not standing.complete:
+        return False
+    found = (
+        await memory.get_many([episode_address(activation) for activation in standing.episodes])
+        if standing.episodes
+        else {}
+    )
+    episodes = [record for record in found.values() if isinstance(record, EpisodicMemory)]
+    return PageVisibility.of(episodes, owner_notes=True).page(standing)
+
+
+def _page_view(
+    state: StoryPageState, held: list[StoryNote], *, notes: int, shown: bool
+) -> StoryPageView:
     """The owner's view of a page read as ``state`` stood, with every note it held."""
     page = state.page
     visibility = PageVisibility(activations=frozenset(), owner_notes=True)
-    shown = page is not None and visibility.page()
     newest = [note for note in reversed(held) if visibility.note(note)][:notes]
     pending = {note.note_id for note in state.pending_notes}
     return StoryPageView(

@@ -342,6 +342,7 @@ from ai_assistant.orchestration.speech import (
     transcribe_within,
 )
 from ai_assistant.orchestration.stories import (
+    DEFAULT_STORY_PAGE_VIEW_NOTES,
     fitted,
     owner_page,
     resolved_view,
@@ -2567,6 +2568,18 @@ def _check_story_wiring(
         raise ConfigurationError(msg)
 
 
+def _story_page_bound(notes: int) -> int:
+    """ADR-0303 §10:2's bound on the story page view's notes, refused below one.
+
+    Raises:
+        ConfigurationError: If ``notes`` is below 1, a view that could list no note.
+    """
+    if notes < 1:
+        msg = "the story page view lists at least one note (ADR-0303 §10:2)"
+        raise ConfigurationError(msg)
+    return notes
+
+
 def _story_links_expired(working: _ActivationPass) -> Exception | None:
     """ADR-0300 §6:13 under ADR-0281 §5: the story-links stage's deadline is the pass's.
 
@@ -3072,6 +3085,7 @@ class Engine:
         reconciliation: ReconciliationStage | None = None,
         parked_reads: ParkedReadOperations | None = None,
         stories: StoryStore | None = None,
+        story_page_notes: int = DEFAULT_STORY_PAGE_VIEW_NOTES,
         story_candidates: StoryCandidates | None = None,
         story_links: StoryLinksStage | None = None,
         interim_tidy_up: InterimTidyUp | None = None,
@@ -3467,6 +3481,9 @@ class Engine:
                 ``ConfigurationError`` rather than answering as though no story existed.
                 The stages that read and write stories hold their own reference to the
                 same store (ADR-0300 §6), so the engine surface's own use is unchanged.
+            story_page_notes: How many of a story's notes :meth:`story_page` lists,
+                newest first, before it counts the rest (ADR-0303 §10:2) — the
+                composition root's ``STORY_PAGE_VIEW_NOTES``. At least 1.
             story_candidates: ADR-0300 §6's assembler of understanding's candidate
                 stories, which the understanding phase runs before the stage renders —
                 or ``None``, and then no stories section is rendered. Wired together
@@ -3862,6 +3879,7 @@ class Engine:
         self._recall = recall
         self._story_candidates = story_candidates
         self._story_links = story_links
+        self._story_page_notes = _story_page_bound(story_page_notes)
         if interim_tidy_up is not None and story_links is None:
             msg = (
                 "the interim tidy-up runs after the story-links stage, so it is wired "
@@ -6589,13 +6607,15 @@ class Engine:
     # calls too.
 
     async def story_page(self, story_id: Identifier) -> StoryPageView | None:
-        """Read a story's page as the owner is shown it (ADR-0300 §8:3, §11)."""
+        """Read a story's page as the owner is shown it (ADR-0303 §10:2, §3:9-§3:12)."""
         self._reject_if_closing()
         target = identifier(story_id, name="story_id")
         check_arguments("story_page", max_bytes=self._max_payload_bytes, story_id=target)
         stories = self._story_store()
         return await self._tracked(
-            owner_page(stories, self._memory, target), "story_page", checked=True
+            owner_page(stories, self._memory, target, notes=self._story_page_notes),
+            "story_page",
+            checked=True,
         )
 
     async def story_standing(self, story_id: Identifier) -> StoryStanding | None:
