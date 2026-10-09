@@ -33374,7 +33374,7 @@ class StoryPageView(BaseModel):
     the current page and ``tidied_at`` when, which is when the page was last tidied,
     both ``None`` where no version has been written. ``lines`` are the current page's
     lines, in page order, and ``outside`` its mark (§3:4), which every view shows
-    (§3:9); unless ``withheld`` says the page was withheld from this reader (§3:7),
+    (§3:8); unless ``withheld`` says the page was withheld from this reader (§3:11),
     when neither is carried: a flag, never the text, so a reader knows a page exists
     that it is not shown. ``notes`` are the story's notes, newest first, up to the
     view's bound, each with its id, its mark and whether it is pending, and

@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, assert_never
 
+from ai_assistant.core.errors import OversizedValueError
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     STORY_PAGE_CAP_CHARS,
@@ -34,6 +36,8 @@ from ai_assistant.interfaces.episode_inspection import summary_fields
 from ai_assistant.wire.errors import ProtocolError
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from rich.console import Console
 
     from ai_assistant.core.protocols import AssistantEngine
@@ -248,8 +252,68 @@ def render_outcome(console: Console, applied: str, outcome: StoryOutcome) -> boo
     return True
 
 
-def render_listing(console: Console, page: StoryPage) -> None:
-    """Render a page of stories, newest first, with its continuation."""
+@dataclass(frozen=True, slots=True)
+class StoryListing:
+    """A page of stories with what each one's page shows of it (ADR-0303 §10:3).
+
+    Attributes:
+        page: The page of stories, newest first.
+        pages: Each listed story's page view, by story id, read through the engine's
+            story page command; a merged story has none, nor does one whose page
+            was too large to read.
+        oversized: The ids of the stories whose page was too large to read.
+    """
+
+    page: StoryPage
+    pages: Mapping[str, StoryPageView]
+    oversized: frozenset[str]
+
+
+async def read_listing(engine: AssistantEngine, *, cursor: int | None, limit: int) -> StoryListing:
+    """Read a page of stories, then each unmerged one's page (ADR-0303 §10:3).
+
+    The first line comes from the story page command the engine already answers, so
+    neither the engine surface nor the story store gains a read for it. A page too
+    large for one reply is noted rather than failing the whole listing.
+    """
+    page = await engine.stories(cursor=cursor, limit=limit)
+    pages: dict[str, StoryPageView] = {}
+    oversized: set[str] = set()
+    for header in page.stories:
+        if header.merged_into is not None:
+            continue
+        try:
+            view = await engine.story_page(header.story_id)
+        except OversizedValueError:
+            oversized.add(header.story_id)
+            continue
+        if view is not None:
+            pages[header.story_id] = view
+    return StoryListing(page, MappingProxyType(pages), frozenset(oversized))
+
+
+def _first_line(listing: StoryListing, story_id: str) -> str | None:
+    """What the listing shows of a story's page: its first line, or that it is withheld."""
+    if story_id in listing.oversized:
+        return "  Page: too large to read here."
+    view = listing.pages.get(story_id)
+    if view is None or view.story.merged_into is not None:
+        return None
+    if view.withheld:
+        return "  Page: withheld, since not everything behind it may be shown."
+    if not view.lines:
+        return None
+    marked = f"{OUTSIDE} " if view.outside else ""
+    return f"  {marked}{quoted(view.lines[0].text)}"
+
+
+def render_listing(console: Console, listing: StoryListing) -> None:
+    """Render a page of stories, newest first, with its continuation.
+
+    Beside each story, its current page's first line where it has one, labelled
+    where the page is marked (ADR-0303 §3:8), or that the page was withheld.
+    """
+    page = listing.page
     if not page.stories:
         _print(console, "No stories.")
     for header in page.stories:
@@ -257,6 +321,9 @@ def render_listing(console: Console, page: StoryPage) -> None:
         if header.merged_into is not None:
             text += f"  merged into {quoted(header.merged_into)}"
         _print(console, text)
+        first = _first_line(listing, header.story_id)
+        if first is not None:
+            _print(console, first)
     if page.next_cursor is not None:
         _print(console, f"Next cursor: {page.next_cursor}")
         console.print("Use --cursor to read the next page.")

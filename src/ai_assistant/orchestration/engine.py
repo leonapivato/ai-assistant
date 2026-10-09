@@ -203,6 +203,7 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     StoryNoteAuthor,
+    StoryNoteId,
     StoryOutcome,
     TextChannelPayload,
     TextChannelResult,
@@ -224,6 +225,7 @@ from ai_assistant.core.types import (
     secret_value,
     story_members,
     story_move_members,
+    story_note_ids,
     story_note_text,
     user_message,
 )
@@ -6497,18 +6499,32 @@ class Engine:
         )
 
     async def split_story(
-        self, story_id: Identifier, members: Sequence[StoryMember]
+        self,
+        story_id: Identifier,
+        members: Sequence[StoryMember],
+        *,
+        notes: Sequence[StoryNoteId] = (),
     ) -> StoryOutcome:
-        """Split ``members`` off a story into a new one, as the owner (ADR-0289 §§3-4)."""
+        """Split ``members`` off a story into a new one, as the owner (ADR-0289 §§3-4).
+
+        The notes named go with them, as ADR-0303 §6 and §10:1 state.
+        """
         self._reject_if_closing()
         source = identifier(story_id, name="story_id")
         named = story_members(members)
+        going = story_note_ids(notes)
         check_arguments(
-            "split_story", max_bytes=self._max_payload_bytes, story_id=source, members=named
+            "split_story",
+            max_bytes=self._max_payload_bytes,
+            story_id=source,
+            members=named,
+            notes=going,
         )
         stories = self._story_store()
         return await self._tracked(
-            stories.split(source, named, actor=StoryActor.OWNER), "split_story", checked=True
+            stories.split(source, named, actor=StoryActor.OWNER, notes=going),
+            "split_story",
+            checked=True,
         )
 
     async def story(
@@ -6646,23 +6662,33 @@ class Engine:
         )
 
     async def move_story_members(
-        self, story_id: Identifier, to: Identifier, members: Sequence[StoryMember]
+        self,
+        story_id: Identifier,
+        to: Identifier,
+        members: Sequence[StoryMember],
+        *,
+        notes: Sequence[StoryNoteId] = (),
     ) -> StoryOutcome:
-        """Move activation members from one story to another, as the owner (ADR-0300 §3:14)."""
+        """Move activation members from one story to another, as the owner (ADR-0300 §3:14).
+
+        The notes named go with them, as ADR-0303 §6 and §10:1 state.
+        """
         self._reject_if_closing()
         source = identifier(story_id, name="story_id")
         target = identifier(to, name="to")
         named = story_move_members(source, target, members)
+        going = story_note_ids(notes)
         check_arguments(
             "move_story_members",
             max_bytes=self._max_payload_bytes,
             story_id=source,
             to=target,
             members=named,
+            notes=going,
         )
         stories = self._story_store()
         return await self._tracked(
-            stories.move(source, target, named, actor=StoryActor.OWNER),
+            stories.move(source, target, named, actor=StoryActor.OWNER, notes=going),
             "move_story_members",
             checked=True,
         )

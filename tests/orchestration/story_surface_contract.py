@@ -9,8 +9,8 @@ write, the activation check on create and link only, the view's resolution of
 activation and story members, and the reads' pages fitting the payload limit; and,
 for ADR-0300 §8's story commands, the owner's page as ADR-0303 §10:2 shapes it and §3
 withholds it, where
-the matter stands for the owner, the owner's note, and a move that checks no activation
-and carries no note it does not name.
+the matter stands for the owner, the owner's note, a move that checks no activation,
+and a split or a move that carries exactly the notes it names (§10:1).
 """
 
 from __future__ import annotations
@@ -602,6 +602,78 @@ class StorySurfaceContract:
         empty = await subject.engine.move_story_members(source, target, [])
         assert empty.refusal is not None
         assert empty.refusal.reason is StoryRefusalReason.NO_MEMBERS
+
+    async def test_a_split_or_a_move_carries_exactly_the_notes_it_names(
+        self, story_surface: StorySurfaceSubject
+    ) -> None:
+        """ADR-0303 §6:1-§6:2, §10:1: the named notes go, pending; the rest stay put.
+
+        A note written during a moved activation goes only where named, and a named
+        note the story moved from does not hold is passed over, changing nothing.
+        """
+        subject = story_surface
+        await _seeded(subject, "a1", "a2", "a3", "a4")
+        source = await _created(subject, act("a1"), act("a2"), act("a3"))
+        target = await _created(subject, act("a4"))
+        stories = subject.stories
+        during = await stories.append_note(
+            source, "Riverside", author=StoryNoteAuthor.PLANNING, written_during="a1"
+        )
+        own = await subject.engine.add_story_note(source, "No Fridays")
+        elsewhere = await subject.engine.add_story_note(target, "Canoe booked")
+        assert during.note is not None
+        assert own.note is not None
+        assert elsewhere.note is not None
+
+        split = await subject.engine.split_story(
+            source, [act("a1")], notes=[own.note.note_id, elsewhere.note.note_id]
+        )
+        assert split.refusal is None
+        assert split.story_id is not None
+        off = await subject.engine.story_page(split.story_id)
+        assert off is not None
+        assert off.notes == (StoryPageViewNote(note=own.note, pending=True),)
+        kept = await subject.engine.story_page(source)
+        assert kept is not None
+        assert [shown.note for shown in kept.notes] == [during.note]
+        there = await subject.engine.story_page(target)
+        assert there is not None
+        assert [shown.note for shown in there.notes] == [elsewhere.note]
+
+        moved = await subject.engine.move_story_members(
+            source, target, [act("a2")], notes=(during.note.note_id, own.note.note_id)
+        )
+        assert moved.refusal is None
+        assert moved.story_id == target
+        arrived = await subject.engine.story_page(target)
+        assert arrived is not None
+        assert arrived.notes == (
+            StoryPageViewNote(note=elsewhere.note, pending=True),
+            StoryPageViewNote(note=during.note, pending=True),
+        )
+        emptied = await subject.engine.story_page(source)
+        assert emptied is not None
+        assert emptied.notes == ()
+        off_again = await subject.engine.story_page(split.story_id)
+        assert off_again is not None
+        assert [shown.note for shown in off_again.notes] == [own.note]
+
+    async def test_a_malformed_note_named_by_a_split_or_a_move_is_refused_before_any_write(
+        self, story_surface: StorySurfaceSubject
+    ) -> None:
+        subject = story_surface
+        await _seeded(subject, "a1", "a2")
+        source = await _created(subject, act("a1"), act("a2"))
+        target = await _created(subject, act("a2"))
+        for notes in ([0], [-1], [2**63], ["1"], [True], "1"):
+            with pytest.raises(ValueError, match="note"):
+                await subject.engine.split_story(source, [act("a1")], notes=notes)  # type: ignore[arg-type]
+            with pytest.raises(ValueError, match="note"):
+                await subject.engine.move_story_members(source, target, [act("a1")], notes=notes)  # type: ignore[arg-type]
+        view = await subject.engine.story(source)
+        assert view is not None
+        assert [m.member for m in view.members] == [act("a1"), act("a2")]
+        assert len((await subject.engine.stories()).stories) == 2
 
     async def test_a_page_too_large_for_the_limit_is_refused_as_oversized(
         self, story_surface: StorySurfaceSubject
