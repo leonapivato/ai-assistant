@@ -5,8 +5,8 @@
 - Scope: [M42](https://github.com/leonapivato/ai-assistant/milestone/9), after its acceptance run [#2772](https://github.com/leonapivato/ai-assistant/issues/2772): what a story's page is, how its marks and privacy are decided, how notes move, which place-window items understanding may link, what a flag is, and what planning's story calls are. It closes [#2773](https://github.com/leonapivato/ai-assistant/issues/2773), [#2774](https://github.com/leonapivato/ai-assistant/issues/2774), [#2777](https://github.com/leonapivato/ai-assistant/issues/2777) and [#2771](https://github.com/leonapivato/ai-assistant/issues/2771).
 - Dependency: ADR-0300, ADR-0301 and ADR-0302, implemented at `f1dace5a`.
 - Authorization: the acceptance run #2772 found the page's design wrong at the root (#2773). On 2026-10-08 the owner ruled each point this decision records, walking through each with the dispatcher, who assigned 0303. That authorizes drafting and numbering, not ratification or implementation.
-- **Changes a `core` surface.** `StoryStore`'s page operations and its `merge`, `split`, `move` and `leave_flag` change, `AssistantEngine`'s `merge_stories`, `split_story` and `move_story_members` gain a keyword, and the story page's types, `StoryDecision` and `StoryPageView` change (§§4, 6, 8 and 10 below): a Protocol change under golden rule 5, merged ratified before anything implements it.
-- **Partially supersedes** [ADR-0300](0300-a-story-keeps-a-page-of-notes-and-where-its-matter-stands-is-worked-out-from-records.md) — **these scopes.** **§2:2's third precedence, in its reason alone**: the episodes take precedence over the page because the page is written from them, not because it cites them. **§2:4's *"the fields §3 lists"***: the fields §§2–4 below list. **§3:1's *"what it rests on"* and §3:3, whole**: a note records the activation it was written during as plain history (§2 below). **§3:5, whole**: no supersession mark. **§3:6's *"the entries it came from by identity, and whether it is marked"* and its first line's being required**: a line is its text, the page carries one mark, and a page may be empty (§4 below). **§3:7's citations, safety-net entries and supersession marks**: the version records what it took in, its flags and its mark (§4 below). **§3:10's *"together with its safety-net entries"***. **§3:12, §3:13 and §3:14's *"and moves every entry resting on a moved activation"***: a note goes with a merge, a split or a move only where the change names it (§6 below). **§3:17's second sentence**: the cap binds every line. **§4:3, whole; §4:4, whole; §4:5's and §4:6's *line* and *entry*, for the page**: the mark is the page's, decided by rule (§3 below). **§5:2's reads, in the addition alone**: an episode's notes are read with it. **§5:4's *"safety-net entries"* and *"supersession marks"***. **§5:5, whole**. **§5:6, whole**: the instruction §5 below states. **§5:7, whole**: the checks §5 below states. **§5:9, whole**. **§5:12's *"for each story into which the story-links stage (§6) links an activation"***: the run starts when that activation's episode is frozen. **§6:3's second sentence**: the page and its notes are shown under §3 below. **§6:1's sources and their order**: the place window's stories come first (§7 below). **§6:7's resolution and §6:8, for place-window items**: as §7 below states. **§8:5's *"Lines and entries"***: the page and its notes. **§9:1's *"Planning starts one only by its start call (§10)"***: planning also starts one by a split or a grouping. **§9:2's second sentence, whole**. **§9:5's *"The moved episode's entries go with it (§3)"*, and its list of who fixes a link, in the addition alone**: planning fixes one too. **§10:2's *"resting on the activation's episode"***. **§10:3's last sentence and §10:5's table, in the additions alone**: planning's further story calls (§9 below). **§10:6's *"a marked line"***: a marked page. **§10:8's *"and no other record holds them"***. **§11:1, whole**: §3 below. Every other clause stands, §3:8, §3:9, §4:1, §4:2, §4:7, §5:3, §5:8, §5:10, §5:11, §6:12 and §12 included.
+- **Changes a `core` surface.** `StoryStore`'s page operations and its `split`, `move` and `leave_flag` change, `AssistantEngine`'s `split_story` and `move_story_members` gain a keyword, and the story page's types, `StoryDecision` and `StoryPageView` change (§§4, 6, 8 and 10 below): a Protocol change under golden rule 5, merged ratified before anything implements it.
+- **Partially supersedes** [ADR-0300](0300-a-story-keeps-a-page-of-notes-and-where-its-matter-stands-is-worked-out-from-records.md) — **these scopes.** **§2:2's third precedence, in its reason alone**: the episodes take precedence over the page because the page is written from them, not because it cites them. **§2:4's *"the fields §3 lists"***: the fields §§2–4 below list. **§3:1's *"what it rests on"* and §3:3, whole**: a note records the activation it was written during as plain history (§2 below). **§3:5, whole**: no supersession mark. **§3:6's *"the entries it came from by identity, and whether it is marked"* and its first line's being required**: a line is its text, the page carries one mark, and a page may be empty (§4 below). **§3:7's citations, safety-net entries and supersession marks**: the version records what it took in, its flags and its mark (§4 below). **§3:10's *"together with its safety-net entries"***. **§3:13 and §3:14's *"and moves every entry resting on a moved activation"***: a note goes with a split or a move only where the change names it (§6 below). **§3:17's second sentence**: the cap binds every line. **§4:3, whole; §4:4, whole; §4:5's and §4:6's *line* and *entry*, for the page**: the mark is the page's, decided by rule (§3 below). **§5:2's reads, in the addition alone**: an episode's notes are read with it. **§5:4's *"safety-net entries"* and *"supersession marks"***. **§5:5, whole**. **§5:6, whole**: the instruction §5 below states. **§5:7, whole**: the checks §5 below states. **§5:9, whole**. **§5:12's *"for each story into which the story-links stage (§6) links an activation"***: the run starts when that activation's episode is frozen. **§6:3's second sentence**: the page and its notes are shown under §3 below. **§6:1's sources and their order**: the place window's stories come first (§7 below). **§6:7's resolution and §6:8, for place-window items**: as §7 below states. **§8:5's *"Lines and entries"***: the page and its notes. **§9:1's *"Planning starts one only by its start call (§10)"***: planning also starts one by a split or a grouping. **§9:2's second sentence, whole**. **§9:5's *"The moved episode's entries go with it (§3)"*, and its list of who fixes a link, in the addition alone**: planning fixes one too. **§10:2's *"resting on the activation's episode"***. **§10:3's last sentence and §10:5's table, in the additions alone**: planning's further story calls (§9 below). **§10:6's *"a marked line"***: a marked page. **§10:8's *"and no other record holds them"***. **§11:1, whole**: §3 below. Every other clause stands, §3:8, §3:9, §3:12, §4:1, §4:2, §4:7, §5:3, §5:8, §5:10, §5:11, §6:12 and §12 included.
 - **Partially supersedes** [ADR-0301](0301-a-story-label-may-name-an-earlier-episode-the-channel-window-shows.md) — **four scopes.** **§1:2 and §1:3, for what becomes of the label**: a story label naming an item that resolves to no activation is dropped quietly and counted, and is no label defect (§7 below). **§1:3's list, for a transcript message the reader's bookkeeping records**: it resolves (§7 below). **§1:4, in the addition alone**: the resolution also reads the place window's link records, which the window brings with it. **§1:6, whole**: the instruction §7 below states. §1:1's resolution stands, as the record of which activation took in a tail record or a one-exchange item, and so do §1:5, §2 and §3.
 - **Partially supersedes** [ADR-0302](0302-the-matters-pass-records-what-it-decides-and-a-page-write-refuses-what-its-story-does-not-hold.md) — **six scopes.** **§2:2, whole, and §2:3's understanding arm**: understanding raises no flag (§8 below). **§3:3's members, in the addition alone**: `not_applied`. **§4:1's operation, in the addition alone**: `leave_flag` also records `not_applied`. **§5:2, whole, and §5:3's understanding arm**. **§5:6's first sentence's *"records the flag `left`"***: it records `not_applied`. **§7:2's and §7:4's safety-net arm**: there are no safety-net notes. Every other clause stands, §2:1, §2:4, §3:1, §3:2, §3:4–§3:6, §4:2–§4:6, §5:1, §5:4, §5:5, §6, §7:1, §7:3 and §7:5 included.
 - **Partially supersedes** [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md) — **one scope.** **§10:1, in the addition alone**: a kind whose medium holds a history but no stable item ids may declare an episode window instead (§7 below). Every other clause stands, §10:2 included.
@@ -56,8 +56,10 @@ the details they leave open.
   direct note is never marked as outside content. The tidy-up's instruction says the
   user's newer statement wins, the user's stated requirements stay until the user
   changes them, and finished next steps and answered questions drop off.
-- **C. Moving notes.** A merge, a split or a move does not carry notes by their episode;
-  whoever makes the change names the notes that go.
+- **C. Moving notes.** A split or a move does not carry notes by their episode; whoever
+  makes the change names the notes that go. A merge carries all of the absorbed story's
+  notes, because a merge says the two are one matter: the owner ruled so on 2026-10-08,
+  correcting a first wording of C that named merges too.
 - **D. The place window.** An item in it links to the activation that took it in or
   wrote it; the records use the medium's own item ids; the candidates are those
   activations' stories, this place's first, then the episode window's, then recall's; an
@@ -312,22 +314,24 @@ episode.
 
 ### 6. Moving notes
 
-> **Normative.** A merge, a split or a move carries no note by the activation it was
-> written during. It carries exactly the notes it names, each of them a note the story
-> it moves from holds.
+> **Normative.** A split or a move carries no note by the activation it was written
+> during. It carries exactly the notes it names, each of them a note the story it moves
+> from holds.
 
-> **Normative.** `StoryStore.merge`, `StoryStore.split` and `StoryStore.move` each take
-> the notes that go, defaulting to none. Each named note the story moved from holds moves
-> to the other story in the operation's transaction and is pending there; a named note
-> it does not hold is passed over, as `split` passes one over today.
+> **Normative.** `StoryStore.split` and `StoryStore.move` each take the notes that go,
+> defaulting to none. Each named note the story moved from holds moves to the other
+> story in the operation's transaction and is pending there; a named note it does not
+> hold is passed over, as `split` passes one over today.
 
-> **Normative.** A note a merge does not name stays on the merged story, which keeps it
-> and from which it is read on request.
+> **Normative.** A merge carries every note the absorbed story holds to the story it is
+> merged into, in the merge's transaction, as ADR-0300 §3:12 states, because a merge
+> says the two stories are one matter. It names no note.
 
 > **Normative.** An unlink moves no note.
 
-> **Normative.** Whoever makes the change names the notes that go: planning in its call
-> (§9), the matters pass in its reply (§8), or the user in the story command (§10).
+> **Normative.** Whoever makes a split or a move names the notes that go: planning in
+> its call (§9), the matters pass in its reply (§8), or the user in the story command
+> (§10).
 
 A user's note moved by planning or the pass keeps its words; only the story it sits on
 changes, and the change log shows the move, as the owner ruled on #2771.
@@ -416,7 +420,7 @@ A `not_applied` decision answers its flag as `left` does: the store's `already_d
 check holds for it, so the pass does not retry it, and a later flag raised on something
 new is decided shown it (ADR-0302 §5:4).
 
-> **Normative.** For a merge, a split or a move, the matters pass is shown the notes of
+> **Normative.** For a split or a move, the matters pass is shown the notes of
 > the story the change moves from, each by a label of the run's, newest first, up to a
 > composition-root constant, and its reply names by label the notes that go.
 
@@ -441,14 +445,14 @@ new is decided shown it (ADR-0302 §5:4).
 | --- | --- | --- |
 | **Unlink from a story** | A story, and an activation or a story it holds | Yes: a member the story no longer holds is passed over |
 | **Move members** | The story moved from, the story moved to, the activation members, and the notes that go | Yes: a repeat names members the first story no longer holds and is refused, changing nothing |
-| **Merge stories** | The story absorbed, the story it joins, and the notes that go | Yes: a repeat names a merged story and is refused, changing nothing |
+| **Merge stories** | The story absorbed and the story it joins; every note of the absorbed story goes with it | Yes: a repeat names a merged story and is refused, changing nothing |
 | **Split a story** | The story, the members that leave, and the notes that go | Yes: a repeat names members the story no longer holds and is refused, changing nothing |
 | **Group under a larger story** | The stories grouped; optionally the larger story's first notes | No: a second identical grouping in one activation is refused as already done |
 
 > **Normative.** A note call writes a note by `planning` recording the activation it was
 > written during, with the mark §3 gives it.
 
-> **Normative.** Planning names the notes that go with a move, a merge or a split by the
+> **Normative.** Planning names the notes that go with a move or a split by the
 > labels the view it was given renders, and the phases' decision says how that view
 > labels them.
 
@@ -458,9 +462,9 @@ adds (ADR-0300 §6:14), and the matters pass stays background maintenance (ADR-0
 
 ### 10. The story commands and the views
 
-> **Normative.** `AssistantEngine`'s `merge_stories`, `split_story` and
-> `move_story_members` each take the notes that go, defaulting to none, and pass them
-> to the store as §6 states.
+> **Normative.** `AssistantEngine`'s `split_story` and `move_story_members` each take
+> the notes that go, defaulting to none, and pass them to the store as §6 states.
+> `merge_stories` is unchanged, and its merge carries every note.
 
 > **Normative.** The story page view carries the current page's lines and its mark, or
 > that it was withheld; the story's notes, newest first up to a composition-root
@@ -471,7 +475,7 @@ adds (ADR-0300 §6:14), and the matters pass stays background maintenance (ADR-0
 > line where it has one, read through the engine's story page command, so neither the
 > engine surface nor the store gains a read for it.
 
-> **Normative.** The CLI's merge, split and move commands take the notes that go.
+> **Normative.** The CLI's split and move commands take the notes that go.
 
 > **Normative.** The story commands stay CLI-only for M42. No browser or gateway surface
 > carries them under this decision, and ADR-0289 §5:4 and ADR-0300 §8:4 stand.
@@ -486,8 +490,8 @@ from one by record. It lists the notes so that the user can name them in a comma
 > through `StoryLogLine`) advances `PROTOCOL_VERSION` in that change, on ADR-0300
 > §12:2.
 
-> **Normative.** The change that gives `merge_stories`, `split_story` and
-> `move_story_members` their notes advances `PROTOCOL_VERSION` in that change.
+> **Normative.** The change that gives `split_story` and `move_story_members` their
+> notes advances `PROTOCOL_VERSION` in that change.
 
 > **Normative.** The place window's linking changes no shape the wire carries and no
 > shape of `EpisodicMemory.processing_record`: `story_links` holds the same
@@ -528,7 +532,7 @@ Planning's calls (§9) are built by the phases.
 | Earlier decision | What changes |
 | --- | --- |
 | ADR-0300 §§2–6, §§8–11 | As this ADR's header states |
-| ADR-0300 §3:8, §3:9, §5:3, §5:8, §5:10, §5:11 | Nothing: pending, the cap's existence, the rendering, the refusal of a failed output, one run at a time and nobody waiting stand |
+| ADR-0300 §3:8, §3:9, §3:12, §5:3, §5:8, §5:10, §5:11 | Nothing: pending, the cap's existence, a merge carrying every note, the rendering, the refusal of a failed output, one run at a time and nobody waiting stand |
 | ADR-0300 §6:12, §6:14, §7, §12 | Nothing: the links' writing, their being bookkeeping, recall's stories and the wire rule stand |
 | ADR-0301 §1:2–§1:4, §1:6 | As this ADR's header states |
 | ADR-0301 §1:1, §1:5, §2 | Nothing: §1:1 is the record a tail or one-exchange item links by |
@@ -562,7 +566,7 @@ whole page where ADR-0300 withheld a line. An activation that reads a marked pag
 as having read outside content, so the notes it writes are marked too. Notes
 are shown to a reader only where the owner's own records are, so a reader on a wider
 audience sees no note. The page loses the user's verbatim notes as a guarantee and keeps
-them as an instruction. A merge that names no note leaves its notes on the merged story.
+them as an instruction.
 A `StoryStore` triad, a store migration, two `PROTOCOL_VERSION` steps, and six rework
 lanes on a milestone that was code-complete.
 
@@ -578,10 +582,7 @@ lanes on a milestone that was code-complete.
   says when a page no longer carries outside content.
 - **Episode notes** (#2723): what they are and who writes them; this decision reads them
   where they exist.
-- **How planning sees notes to name them** in a move, a merge or a split: the phases'
-  view.
-- **Whether a merge should carry its notes by default.** Under C it carries what it
-  names; a merged story keeps the rest, readable on request.
+- **How planning sees notes to name them** in a move or a split: the phases' view.
 - **Notes beyond the page view's bound** cannot be named from the CLI until a read pages
   them.
 - **Searching pages themselves** for lookalikes, rather than episodes: the tidy-up's
@@ -612,6 +613,9 @@ lanes on a milestone that was code-complete.
   both together reads no further store.
 - **A label naming a not-linkable item stays a label defect.** It costs a repair
   completion on the user's critical path (#2776) for a label that cannot be repaired.
+- **A merge naming the notes that go**, as a split and a move do. A merge says the two
+  stories are one matter, so every note is about the story it joins; one left behind
+  would sit on a story nothing reads again.
 - **A new operation for `not_applied`.** It would be a second operation recording that no
   story changed; `leave_flag` already is one.
 - **The story list's first line through the store.** It widens `StoryStore` and the

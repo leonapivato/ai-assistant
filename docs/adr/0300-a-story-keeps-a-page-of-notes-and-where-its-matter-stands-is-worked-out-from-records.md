@@ -33,8 +33,8 @@
   §4:3, §4:4 and §11:1). A note records the activation it was written during as
   history no rule reads (§3:1, §3:3, §10:2). Safety-net entries, supersession marks
   and every rule special to the user's own notes retire (§3:5, §3:17's second
-  sentence, §5:5–§5:7, §5:9). A merge, a split or a move carries exactly the notes it
-  names (§3:12–§3:14, §9:5). The place window's stories are the first candidates and
+  sentence, §5:5–§5:7, §5:9). A split or a move carries exactly the notes it names,
+  and a merge still carries every note (§3:13, §3:14, §9:5). The place window's stories are the first candidates and
   a label naming an item that links to no activation is dropped without a repair
   (§6:1, §6:7, §6:8). Understanding raises no flag (§9:2's second sentence).
   Planning gains unlink, move, merge, split and group (§9:1, §10:3, §10:5). The
