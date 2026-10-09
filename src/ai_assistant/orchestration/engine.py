@@ -10086,9 +10086,12 @@ class Engine:
                             raise
                     except Exception:
                         capture_loss("terminal", "failed")
-                    # ADR-0303 §5:9's interim run, at the freeze: test-hub scaffolding,
-                    # removed at the cutover with `story_tidy_up_interim`.
-                    self._start_interim_tidy_ups(state)
+                    finally:
+                        # ADR-0303 §5:9's interim run, at the freeze, a cancellation
+                        # that lands once the freeze is confirmed included: test-hub
+                        # scaffolding, removed at the cutover with
+                        # `story_tidy_up_interim`.
+                        self._start_interim_tidy_ups(state)
                 failure = _stopped_failure(state, failure)
                 if failure is not None:
                     raise failure
