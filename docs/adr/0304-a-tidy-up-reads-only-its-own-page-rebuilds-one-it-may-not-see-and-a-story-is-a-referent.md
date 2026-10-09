@@ -344,11 +344,14 @@ a page whose walk no longer reaches that story.
   enforces that. The activation a note was written during is history that no rule reads
   (ADR-0303 §2:4). So a rebuild after a conversation is forgotten drops the forgotten
   episodes, but still reads every note the story holds, including one written during a
-  forgotten activation. Before the phases, the only notes are the user's own direct
-  notes, which record no activation, so nothing is affected today. Once planning writes
-  notes, a note written during a forgotten activation carries what it says into the
-  rebuilt page. What forgetting does to notes belongs to the learning design with the
-  rest of forgetting.
+  forgotten activation. Before the phases, nothing new writes a note during an
+  activation: the only new notes are the user's own direct notes, which record none.
+  But a test hub's store migrated under ADR-0303 §4:8 still holds the safety-net notes
+  earlier tidy-ups wrote, each recording the activation it rested on (ADR-0303 §4:6). A rebuild
+  there reads such a note back even after that activation's conversation is forgotten.
+  Once planning writes notes, any note written during a forgotten activation carries
+  what it says into the rebuilt page. What forgetting does to notes belongs to the
+  learning design with the rest of forgetting.
 - **Forgetting**, the rest of it: an immediate rebuild on forgetting, and what
   forgetting does to a `story` or `episode` referent's excerpt in a later activation's
   record and to anything else that copied text. The learning design (ADR-0300).
