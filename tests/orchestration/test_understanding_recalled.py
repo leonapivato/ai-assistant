@@ -171,8 +171,11 @@ async def test_recalled_records_render_under_m_labels_in_recalls_order() -> None
         "last_updated": EARLIER.isoformat(),
         "fact": "The dentist is Dr Rao.",
         "fact_cut_to_first_chars": False,
+        # ADR-0305 §3: on every pass, whether or not a stories section renders beside it.
+        "not_linkable": True,
     }
     assert second["label"] == "M2"
+    assert "not_linkable" not in second
     assert second["item"] == "an earlier exchange on capture modality text"
     assert second["occurred_at"] == EARLIER.isoformat()
     assert second["response"] == "Booked for Friday."

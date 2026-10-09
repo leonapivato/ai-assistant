@@ -17,7 +17,8 @@ with ``MemoryStore.get_many`` under ADR-0282 §2:6-§2:8. The summary and notes 
 under ADR-0304 §4's minimum (:mod:`~ai_assistant.orchestration.story_privacy`): each
 note, and the summary, is shown only where the pass's audience admits a record placed
 for the owner alone (ADR-0303 §3:9, ADR-0304 §4:1); otherwise the view says the summary
-was withheld (§4:2). Nothing behind a summary is read to decide it (§4:3). A
+was withheld (§4:2), and says nothing about notes (ADR-0305 §4). Nothing behind a
+summary is read to decide it (§4:3). A
 ``StoryStoreError`` leaves no candidates, and the decision says the stories could not be
 read.
 
@@ -104,6 +105,10 @@ class ShortView:
             a record placed for the owner alone may not be shown to it (ADR-0304 §4:1,
             §4:2): the view carries neither its lines nor its mark, and the reader is
             told.
+        notes_withheld: No note may be shown to this reader, since a record placed
+            for the owner alone may not be (ADR-0303 §3:9): the view carries none,
+            and renders nothing about its notes — neither that it has none nor that
+            any was withheld (ADR-0305 §4).
     """
 
     story_id: str
@@ -112,6 +117,7 @@ class ShortView:
     episodes: tuple[EpisodicMemory, ...]
     outside: bool = False
     withheld: bool = False
+    notes_withheld: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +189,9 @@ class _Read:
             outside=self.outside and shown,
             withheld=self.written and not shown,
             notes=tuple(note for note in self.notes if visibility.note(note)),
+            # ADR-0305 §4: the question that withholds every note on this pass (§3:9),
+            # asked once, so a pass that may not be shown notes is told nothing of them.
+            notes_withheld=not visibility.owner_records,
             episodes=tuple(record for id_ in latest if (record := fetched.get(id_)) is not None),
         )
 

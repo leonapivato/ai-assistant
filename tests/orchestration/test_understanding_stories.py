@@ -8,13 +8,16 @@ activation resolves to it, as a ``P`` label naming that activation's episode wou
 one naming an item that links to nothing is rendered not linkable and is dropped and
 counted with no repair (ADR-0303 §7, ADR-0301 §1:1). An ``S`` label cited in
 ``meaning_labels``, a reference or a relationship resolves to a ``story`` referent with
-no repair, and links nothing (ADR-0304 §8). Which candidates are assembled is
+no repair, and links nothing (ADR-0304 §8). A recalled fact named as a story label is
+dropped and counted with no repair, and a pass that may not be shown a note is told
+nothing about notes (ADR-0305). Which candidates are assembled is
 ``test_story_links.py``'s.
 """
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
@@ -28,6 +31,7 @@ from story_support import (
     activation,
     address,
     episode,
+    memory_of,
     story,
 )
 
@@ -46,6 +50,7 @@ from ai_assistant.core.types import (
     RecallOutcome,
     RecallProvenance,
     SemanticMemory,
+    StoryActor,
     StoryNote,
     StoryNoteAuthor,
     StorySummaryLine,
@@ -54,7 +59,7 @@ from ai_assistant.core.types import (
     UnderstandingReferent,
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
-from ai_assistant.orchestration.story_links import Candidates, ShortView
+from ai_assistant.orchestration.story_links import Candidates, ShortView, StoryCandidates
 from ai_assistant.orchestration.understanding import (
     ConversationWindow,
     SuppliedWindow,
@@ -62,7 +67,7 @@ from ai_assistant.orchestration.understanding import (
     UnderstandingStage,
     place_window_links,
 )
-from ai_assistant.testing import FakeModelProvider
+from ai_assistant.testing import FakeModelProvider, FakeStoryStore
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ActivationUnderstanding, EpisodicMemory
@@ -243,6 +248,78 @@ async def test_a_withheld_summary_is_said_to_be_withheld_and_nothing_of_it_is_re
     assert "withheld" not in second["summary"]
 
 
+# --- ADR-0305 §4: notes withheld from an audience are absent -----------------------
+
+
+@pytest.mark.parametrize("notes", [_TRIP.notes, ()], ids=["notes pending", "no note pending"])
+async def test_a_view_that_may_not_show_notes_renders_no_notes_part(
+    notes: tuple[StoryNote, ...],
+) -> None:
+    """#2807: no note, no statement that none is waiting, and none that any was withheld.
+
+    Whether the story holds a pending note or none, the part is left out alike, so its
+    presence says nothing (ADR-0305 §4). The summary keeps its withheld statement and
+    the latest episodes still render (ADR-0304 §4:2).
+    """
+    model = FakeModelProvider(_proposal())
+    hidden = ShortView(
+        story_id="story:trip",
+        lines=(),
+        notes=notes,
+        episodes=_TRIP.episodes,
+        withheld=True,
+        notes_withheld=True,
+    )
+
+    await _understand(model, stories=Candidates(views=(hidden,)), audience=UNBOUNDED)
+
+    (view,) = _payload(model)["stories"]
+    assert "newest_notes" not in view
+    assert "note" not in json.dumps(view)
+    assert "this audience may not be shown it" in view["summary"]
+    assert len(view["latest_episodes"]) == 1
+
+
+async def test_a_spoken_pass_with_a_pending_owner_note_is_told_nothing_of_notes() -> None:
+    """#2807, composed: the candidates as assembled for an unbounded audience, rendered.
+
+    Owner note #57's shape: pending on the camping story, written by the owner. The
+    short view a spoken pass reads renders no notes part; a bounded pass's renders it.
+    """
+    ids = itertools.count(1)
+    stories = FakeStoryStore(now=lambda: AT, new_id=lambda: f"{next(ids)}")
+    created = await stories.create((activation("a-1"),), actor=StoryActor.OWNER)
+    assert created.story_id is not None
+    await stories.append_note(
+        created.story_id,
+        "Plans changed again: we'll arrive at Riverside on Friday evening after all.",
+        author=StoryNoteAuthor.OWNER,
+    )
+    window = (episode("a-1"),)
+    assembler = StoryCandidates(
+        stories=stories, memory=await memory_of(*window), limit=5, lines=3, notes=2, episodes=2
+    )
+    spoken = FakeModelProvider(_proposal())
+    bounded = FakeModelProvider(_proposal())
+
+    await _understand(
+        spoken,
+        stories=await assembler.assemble(window, audience=UNBOUNDED),
+        episodes=None,
+        audience=UNBOUNDED,
+    )
+    await _understand(bounded, stories=await assembler.assemble(window, audience=BOUNDED))
+
+    (view,) = _payload(spoken)["stories"]
+    assert "newest_notes" not in view
+    assert "Friday evening" not in spoken.calls[0].messages[1].content
+    (note,) = _payload(bounded)["stories"][0]["newest_notes"]
+    assert "Friday evening" in note["text"]
+    # §4: the instruction is the same whether or not the pass may be shown notes.
+    assert _instruction(spoken) == _instruction(bounded)
+    assert "withheld" not in _instruction(spoken)
+
+
 async def test_the_instruction_states_what_a_link_says_and_asks_for_story_labels() -> None:
     model = FakeModelProvider(_proposal())
 
@@ -317,7 +394,7 @@ async def test_story_labels_resolve_to_stories_and_earlier_activations_in_order_
 # --- §6:8: a defective story label ------------------------------------------------------
 
 
-@pytest.mark.parametrize("label", ["S3", "M1", "P9", "H9", "trip"])
+@pytest.mark.parametrize("label", ["S3", "M2", "P9", "H9", "trip"])
 async def test_a_defective_story_label_is_repaired_once_then_dropped_and_counted(
     label: str,
 ) -> None:
@@ -357,6 +434,75 @@ async def test_an_episode_of_no_activation_is_not_a_story_label() -> None:
 
     assert understood.story_links == ()
     assert understood.grounding_dropped == 1
+
+
+# --- ADR-0305 §3: a remembered fact is never a story link -----------------------------
+
+
+async def test_a_recalled_fact_named_as_a_story_label_is_dropped_with_no_repair() -> None:
+    """#2808: the re-check's reply, ``["S5", "M1", "M2", "M3"]`` with M3 a fact.
+
+    The fact's label links nothing: it is dropped and counted in ``grounding_dropped``,
+    and calls for no second completion, so the reply passes with one (ADR-0305 §3).
+    """
+    model = FakeModelProvider.scripted(_proposal(story_labels=["S1", "M1", "M2", "M3"]))
+
+    understood = await _understand(
+        model,
+        stories=Candidates(views=(_TRIP,)),
+        recalled=(episode("a-7"), episode("a-8"), _FACT),
+    )
+
+    assert len(model.calls) == 1
+    assert understood.story_links == (story("story:trip"), activation("a-7"), activation("a-8"))
+    assert understood.grounding_dropped == 1
+
+
+async def test_a_fact_s_label_is_not_named_by_a_repair_another_defect_calls_for() -> None:
+    """ADR-0305 §3: the repair statement does not name it, and the second output's is dropped."""
+    model = FakeModelProvider.scripted(
+        _proposal(story_labels=["S9", "M1"]), _proposal(story_labels=["S1", "M1"])
+    )
+
+    understood = await _understand(model, stories=Candidates(views=(_TRIP,)), recalled=(_FACT,))
+
+    assert len(model.calls) == 2
+    statement = _statement(model)
+    assert '"S9"' in statement
+    assert '"M1"' not in statement
+    assert understood.story_links == (story("story:trip"),)
+    assert understood.grounding_dropped == 1
+
+
+async def test_a_fact_s_label_cited_outside_story_labels_still_resolves_to_its_memory() -> None:
+    """ADR-0305 §3 with ADR-0281 §7:5: only its story label links nothing."""
+    model = FakeModelProvider.scripted(
+        _proposal(meaning_ground="supplied", meaning_labels=["M1"], story_labels=["M1"])
+    )
+
+    understood = await _understand(model, stories=Candidates(views=(_TRIP,)), recalled=(_FACT,))
+
+    assert len(model.calls) == 1
+    (referent,) = understood.meaning_referents
+    assert (referent.kind, referent.id) == ("memory", "fact-1")
+    assert understood.meaning_ground is UnderstandingGround.SUPPLIED
+    assert understood.story_links == ()
+    assert understood.grounding_dropped == 1
+
+
+async def test_a_recalled_fact_is_marked_not_linkable_and_the_instruction_says_why() -> None:
+    """ADR-0305 §3: the place window's mark, and the stories paragraph's sentence."""
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, stories=Candidates(views=(_TRIP,)), recalled=(episode("a-7"), _FACT))
+
+    shown_episode, shown_fact = _payload(model)["recalled"]
+    assert shown_fact["not_linkable"] is True
+    assert "not_linkable" not in shown_episode
+    assert (
+        "A remembered fact is never a story link: its M label is marked `not_linkable` and "
+        "links nothing in `story_labels`." in _instruction(model)
+    )
 
 
 # --- ADR-0304 §8: an S label cited as a referent ---------------------------------------

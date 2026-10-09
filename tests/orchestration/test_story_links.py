@@ -327,6 +327,8 @@ async def test_an_unbounded_audience_is_shown_no_note_and_no_summary_and_is_told
 
     (seen,) = unbounded.views
     assert (seen.lines, seen.outside, seen.notes, seen.withheld) == ((), False, (), True)
+    # ADR-0305 §4: the view is to say nothing about its notes.
+    assert seen.notes_withheld
     assert [record.id for record in seen.episodes] == [address("a-1")]
     # §6:3 with ADR-0282 §2:8: the refused episode is neither fetched nor recorded.
     assert address("a-2") not in (*unbounded.fetched, *unbounded.missing)
@@ -335,7 +337,26 @@ async def test_an_unbounded_audience_is_shown_no_note_and_no_summary_and_is_told
     assert whole.outside
     assert not whole.withheld
     assert [note.text for note in whole.notes] == ["my own words"]
+    assert not whole.notes_withheld
     assert [record.id for record in whole.episodes] == [address("a-2"), address("a-1")]
+
+
+@pytest.mark.parametrize(
+    ("audience", "withheld"), [(UNBOUNDED, True), (BOUNDED, False)], ids=["unbounded", "bounded"]
+)
+async def test_a_story_with_no_note_is_withheld_its_notes_alike(
+    audience: BoundedAudienceSupply | UnboundedAudienceSupply, *, withheld: bool
+) -> None:
+    """ADR-0305 §4: the pass decides it, never whether the story holds a note."""
+    stories = _stories()
+    await _story(stories, activation("a-1"))
+    window = (episode("a-1"),)
+    memory = await memory_of(*window)
+
+    (seen,) = (await _candidates(stories, memory).assemble(window, audience=audience)).views
+
+    assert seen.notes == ()
+    assert seen.notes_withheld is withheld
 
 
 async def _episodes_summary(
