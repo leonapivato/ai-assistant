@@ -97,6 +97,7 @@ from ai_assistant.core.types import (
     InputOrigin,
     MemoryKind,
     Message,
+    RecordedChannelTrigger,
     Role,
     StoryFlag,
     StoryFlagKind,
@@ -733,7 +734,12 @@ class StoryTidyUp:
         return await self._every_note_marked(story_id) and await self._every_member_outside(linked)
 
     async def _every_member_outside(self, linked: Mapping[str, int]) -> bool:
-        """Whether every activation member's trigger ``origin`` is ``outside``, by record."""
+        """Whether every activation member's trigger ``origin`` is ``outside``, by record.
+
+        The trigger is read off the stored processing record itself, never through
+        the model-facing projection, which refuses an open episode: an open member is
+        read here, and nothing of it reaches the model.
+        """
         if not linked:
             return True
         addresses = {activation_id: episode_address(activation_id) for activation_id in linked}
@@ -742,7 +748,12 @@ class StoryTidyUp:
             record = found.get(address)
             if not isinstance(record, EpisodicMemory) or activation_of(record) != activation_id:
                 return False
-            if project_episode(record, excerpt_chars=1).origin is not InputOrigin.OUTSIDE:
+            processing = record.processing_record
+            if (
+                processing is None
+                or not isinstance(processing.trigger, RecordedChannelTrigger)
+                or processing.trigger.origin is not InputOrigin.OUTSIDE
+            ):
                 return False
         return True
 
