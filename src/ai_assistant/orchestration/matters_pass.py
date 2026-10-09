@@ -50,10 +50,11 @@ mapped back to the story or the activation this run read, so a decision about an
 it was not shown cannot be written.
 
 **The reply's decision** is the one JSON object in it of a decision's shape. Prose
-before it is passed over; a reply holding no such object, two that differ, one inside a
-larger JSON value, or anything but a closing code fence after the last of them is no
-decision, because what follows a decision may be the model changing its mind, and the
-pass does not read prose to tell.
+before it is passed over; a reply holding no such object, two that differ, one after a
+brace or bracket that opens no whole JSON value, or anything but a closing code fence
+after the last of them is no decision, because a decision is never taken out of an
+unfinished value, and what follows a decision may be the model changing its mind,
+which the pass does not read prose to tell.
 
 **A refusal** (§5:6). Where the store refuses the chosen change for a reason other
 than ``unknown_flag`` or ``already_decided``, the stories stay as they are and the flag
@@ -348,9 +349,7 @@ _PROPOSED: Final[TypeAdapter[_Leave | _Merge | _Split | _Move | _Group]] = TypeA
 
 _DECODER: Final = json.JSONDecoder()
 _FENCE: Final = "```"
-#: A comma after the end of a JSON value: a string, an array, an object, a number or
-#: a literal.
-_VALUE_THEN_COMMA: Final = re.compile(r'(?:["\]}0-9]|\btrue|\bfalse|\bnull)\s*,\Z')
+_OPENER: Final = re.compile(r"[\[{]")
 
 
 class _Refused(Exception):  # noqa: N818 — a control-flow signal inside the checks, never raised out
@@ -368,39 +367,35 @@ def _decision(text: str) -> _Leave | _Merge | _Split | _Move | _Group | None:
         return None
 
 
-def _objects(body: str) -> Iterator[tuple[int, int]]:
-    """Where each outermost JSON object in ``body`` starts and ends, left to right.
+def _openers(body: str) -> Iterator[tuple[int, int | None]]:
+    """Each brace or bracket in ``body`` outside a JSON value read whole, left to right.
 
-    An opening brace that does not start a whole JSON object is passed over, so prose
-    holding a brace hides no object after it; an object found is skipped whole, so an
-    object inside it is never taken for one of its own.
+    Each comes with where the JSON value it opens ends, or ``None`` where it opens no
+    whole value: an unfinished one, a malformed one, or prose. A value read whole is
+    skipped, so nothing inside it is ever taken for a value of its own.
     """
-    start = body.find("{")
-    while start != -1:
+    found = _OPENER.search(body)
+    while found is not None:
+        start = found.start()
         try:
             _, end = _DECODER.raw_decode(body, start)
         except ValueError, RecursionError:
-            start = body.find("{", start + 1)
+            yield start, None
+            found = _OPENER.search(body, start + 1)
             continue
         yield start, end
-        start = body.find("{", end)
+        found = _OPENER.search(body, end)
 
 
-def _in_a_value(before: str) -> bool:
-    """Whether an object after ``before`` stands as a member or an element of a value.
-
-    In JSON an object is a member's value after its key's colon, and an element after
-    an array's opening bracket or after a comma ending an earlier element; it is an
-    object's first member nowhere, so an opening brace before it is an unfinished
-    object's. Prose ending in a colon or a comma after a word, as in "my decision:" or
-    "on reflection,", is neither.
-    """
-    text = before.rstrip()
-    if text.endswith(("[", "{")):
-        return True
-    if text.endswith(","):
-        return _VALUE_THEN_COMMA.search(text) is not None
-    return text.endswith(":") and text[:-1].rstrip().endswith('"')
+def _unfenced(content: str) -> str:
+    """``content`` stripped, and without one Markdown code fence enclosing all of it."""
+    body = content.strip()
+    if body.startswith(_FENCE) and body.endswith(_FENCE) and len(body) >= 2 * len(_FENCE):
+        body = body[len(_FENCE) : -len(_FENCE)]
+        newline = body.find("\n")
+        if newline != -1 and body[:newline].strip() in {"", "json", "JSON"}:
+            body = body[newline + 1 :]
+    return body
 
 
 def _parsed(content: str) -> _Leave | _Merge | _Split | _Move | _Group:
@@ -418,30 +413,31 @@ def _parsed(content: str) -> _Leave | _Merge | _Split | _Move | _Group:
     - nothing but whitespace and a closing code fence may follow the last of them, so
       a reply that goes on after its decision, which may be the model changing its
       mind, is not taken as the decision it went on from;
-    - none may stand where a JSON value's member or element would, so a decision
-      inside a larger value the reply left unfinished, cut off or malformed, is not
-      taken out of it (a finished one is passed over whole, decision and all).
+    - no brace or bracket opening no whole JSON value may come before one, so a
+      decision is never taken out of a value the reply left unfinished or malformed,
+      which is where it would otherwise sit (a whole value is passed over, decision
+      and all). A bracket in prose before it refuses it too, the cheaper of the two
+      errors.
 
     Raises:
         _Unparsed: If the reply holds no one decision, saying which way.
     """
-    body = content.strip()
-    if body.startswith(_FENCE) and body.endswith(_FENCE) and len(body) >= 2 * len(_FENCE):
-        body = body[len(_FENCE) : -len(_FENCE)]
-        newline = body.find("\n")
-        if newline != -1 and body[:newline].strip() in {"", "json", "JSON"}:
-            body = body[newline + 1 :]
+    body = _unfenced(content)
     whole = _decision(body)
     if whole is not None:
         return whole
     found: list[_Leave | _Merge | _Split | _Move | _Group] = []
     after = 0
-    for start, end in _objects(body):
-        decision = _decision(body[start:end])
+    unfinished = False
+    for start, end in _openers(body):
+        if end is None:
+            unfinished = True
+            continue
+        decision = _decision(body[start:end]) if body[start] == "{" else None
         if decision is None:
             continue
-        if _in_a_value(body[:start]):
-            msg = "the reply's decision is inside a larger JSON value"
+        if unfinished:
+            msg = "the reply's decision follows a brace or bracket opening no whole JSON value"
             raise _Unparsed(msg)
         found.append(decision)
         after = end

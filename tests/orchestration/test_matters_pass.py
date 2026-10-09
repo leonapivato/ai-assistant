@@ -438,6 +438,7 @@ async def test_a_reply_that_fails_to_parse_or_a_check_writes_nothing(reply: str)
 
 _SPLIT: Final = json.dumps({"decision": "split", "story": "S1", "episodes": ["E2"]})
 _REASONING: Final = "S1 holds a camping trip and, in E2, the dentist: two matters."
+_UNFINISHED: Final = "the reply's decision follows a brace or bracket opening no whole JSON value"
 
 
 async def _split_flag() -> tuple[FakeStoryStore, MemoryStore, str]:
@@ -456,17 +457,21 @@ async def _split_flag() -> tuple[FakeStoryStore, MemoryStore, str]:
         f"{_REASONING}\n\n{_SPLIT}",
         f"{_REASONING}\n```json\n{_SPLIT}\n```",
         f"{_REASONING} So, as I said: {_SPLIT}\n\n{_SPLIT}",
-        f'The flag reads {{"kind": "two_matters"}}, and {{this}} is prose.\n{_SPLIT}',
+        f'The flag reads {{"kind": "two_matters"}} on ["S1"], one story.\n{_SPLIT}',
         f"```json\n{_SPLIT}\n```",
         f"{_REASONING} On reflection, {_SPLIT}",
+        f"For S1, {_SPLIT}",
+        f'It says "two matters", {_SPLIT}',
     ],
     ids=[
         "prose-first",
         "prose-then-fence",
         "repeated",
-        "other-objects-first",
+        "whole-values-first",
         "fenced",
         "after-a-comma-in-prose",
+        "after-a-label-and-a-comma",
+        "after-a-quotation-and-a-comma",
     ],
 )
 async def test_a_decision_after_prose_is_taken(reply: str) -> None:
@@ -493,17 +498,12 @@ async def test_a_decision_after_prose_is_taken(reply: str) -> None:
             "parse",
             "the reply holds two different decisions",
         ),
-        (
-            f'{{"candidate": {_SPLIT}',
-            "parse",
-            "the reply's decision is inside a larger JSON value",
-        ),
-        (f"[{_SPLIT}", "parse", "the reply's decision is inside a larger JSON value"),
-        (
-            f'{_REASONING}\n```json\n["one", {_SPLIT}',
-            "parse",
-            "the reply's decision is inside a larger JSON value",
-        ),
+        (f'{{"candidate": {_SPLIT}', "parse", _UNFINISHED),
+        (f"[{_SPLIT}", "parse", _UNFINISHED),
+        (f'{_REASONING}\n```json\n["one", {_SPLIT}', "parse", _UNFINISHED),
+        (f"[null {_SPLIT}", "parse", _UNFINISHED),
+        (f'{{"note": "a ] and a }}", {_SPLIT}', "parse", _UNFINISHED),
+        (f"{_REASONING} E2 [in S1] differs.\n{_SPLIT}", "parse", _UNFINISHED),
         (
             f"{_REASONING}\n" + json.dumps({"decision": "merge", "story": "S1", "into": "S1"}),
             "check",
@@ -523,6 +523,9 @@ async def test_a_decision_after_prose_is_taken(reply: str) -> None:
         "cut-off-object",
         "cut-off-array",
         "cut-off-array-element",
+        "malformed-array",
+        "closers-in-a-cut-off-string",
+        "bracket-in-prose",
         "merge-itself",
         "unshown",
     ],
