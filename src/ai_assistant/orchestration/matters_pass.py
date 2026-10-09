@@ -50,9 +50,10 @@ mapped back to the story or the activation this run read, so a decision about an
 it was not shown cannot be written.
 
 **The reply's decision** is the one JSON object in it of a decision's shape. Prose
-before it is passed over; a reply holding no such object, two that differ, or anything
-but a closing code fence after the last of them is no decision, because what follows a
-decision may be the model changing its mind, and the pass does not read prose to tell.
+before it is passed over; a reply holding no such object, two that differ, one inside a
+larger JSON value, or anything but a closing code fence after the last of them is no
+decision, because what follows a decision may be the model changing its mind, and the
+pass does not read prose to tell.
 
 **A refusal** (§5:6). Where the store refuses the chosen change for a reason other
 than ``unknown_flag`` or ``already_decided``, the stories stay as they are and the flag
@@ -76,6 +77,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Final, Literal
@@ -346,6 +348,9 @@ _PROPOSED: Final[TypeAdapter[_Leave | _Merge | _Split | _Move | _Group]] = TypeA
 
 _DECODER: Final = json.JSONDecoder()
 _FENCE: Final = "```"
+#: A comma after the end of a JSON value: a string, an array, an object, a number or
+#: a literal.
+_VALUE_THEN_COMMA: Final = re.compile(r'(?:["\]}0-9]|\btrue|\bfalse|\bnull)\s*,\Z')
 
 
 class _Refused(Exception):  # noqa: N818 — a control-flow signal inside the checks, never raised out
@@ -381,6 +386,23 @@ def _objects(body: str) -> Iterator[tuple[int, int]]:
         start = body.find("{", end)
 
 
+def _in_a_value(before: str) -> bool:
+    """Whether an object after ``before`` stands as a member or an element of a value.
+
+    In JSON an object is a member's value after its key's colon, and an element after
+    an array's opening bracket or after a comma ending an earlier element; it is an
+    object's first member nowhere, so an opening brace before it is an unfinished
+    object's. Prose ending in a colon or a comma after a word, as in "my decision:" or
+    "on reflection,", is neither.
+    """
+    text = before.rstrip()
+    if text.endswith(("[", "{")):
+        return True
+    if text.endswith(","):
+        return _VALUE_THEN_COMMA.search(text) is not None
+    return text.endswith(":") and text[:-1].rstrip().endswith('"')
+
+
 def _parsed(content: str) -> _Leave | _Merge | _Split | _Move | _Group:
     """The reply's one decision: never a partial one, and never one of two.
 
@@ -395,7 +417,10 @@ def _parsed(content: str) -> _Leave | _Merge | _Split | _Move | _Group:
       weighs one decision and gives another is not taken as either;
     - nothing but whitespace and a closing code fence may follow the last of them, so
       a reply that goes on after its decision, which may be the model changing its
-      mind, is not taken as the decision it went on from.
+      mind, is not taken as the decision it went on from;
+    - none may stand where a JSON value's member or element would, so a decision
+      inside a larger value the reply left unfinished, cut off or malformed, is not
+      taken out of it (a finished one is passed over whole, decision and all).
 
     Raises:
         _Unparsed: If the reply holds no one decision, saying which way.
@@ -413,9 +438,13 @@ def _parsed(content: str) -> _Leave | _Merge | _Split | _Move | _Group:
     after = 0
     for start, end in _objects(body):
         decision = _decision(body[start:end])
-        if decision is not None:
-            found.append(decision)
-            after = end
+        if decision is None:
+            continue
+        if _in_a_value(body[:start]):
+            msg = "the reply's decision is inside a larger JSON value"
+            raise _Unparsed(msg)
+        found.append(decision)
+        after = end
     if not found:
         msg = "the reply holds no decision"
         raise _Unparsed(msg)
