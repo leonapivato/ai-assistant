@@ -1,6 +1,6 @@
 # 303. A story's page is free notes rewritten whole, and the place window links each item to its activation
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-08
 - Scope: [M42](https://github.com/leonapivato/ai-assistant/milestone/9), after its acceptance run [#2772](https://github.com/leonapivato/ai-assistant/issues/2772): what a story's page is, how its marks and privacy are decided, how notes move, which place-window items understanding may link, what a flag is, and what planning's story calls are. It closes [#2773](https://github.com/leonapivato/ai-assistant/issues/2773), [#2774](https://github.com/leonapivato/ai-assistant/issues/2774), [#2777](https://github.com/leonapivato/ai-assistant/issues/2777) and [#2771](https://github.com/leonapivato/ai-assistant/issues/2771).
 - Dependency: ADR-0300, ADR-0301 and ADR-0302, implemented at `f1dace5a`.
