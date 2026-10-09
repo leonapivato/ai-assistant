@@ -357,6 +357,7 @@ from ai_assistant.orchestration.understanding import (
     SuppliedWindow,
     TranscriptWindow,
     fetch_held,
+    place_window_links,
 )
 from ai_assistant.orchestration.verification import Comparison, compare
 
@@ -12722,7 +12723,10 @@ class Engine:
     ) -> Candidates | None:
         """ADR-0300 §6:1-§6:4: the candidate stories, written on the working episode.
 
-        The window's stories are looked up from the episodes the fetch admitted, in the
+        First the stories of the activations the place window's items link to, newest
+        item first, as the stage will resolve its labels (ADR-0303 §7:9): the window the
+        windows stage holds, with the links the sensor brought with it. Then the episode
+        window's stories, looked up from the episodes the fetch admitted, in the
         window's order; a pass that takes no episode window has none of its own. Then
         recall's (§7): the stories its kept episodes belong to, as its decision recorded
         them, the item with the higher search score first, from the items whose records
@@ -12734,10 +12738,16 @@ class Engine:
             return None
         recalled = working.recalled
         admitted = frozenset(record.id for record in fetched.recalled)
+        windows = working.windows
         candidates = await self._story_candidates.assemble(
             fetched.episodes or (),
             audience=working.supply,
             recalled=() if recalled is None else recalled.stories(admitted),
+            place=()
+            if windows is None
+            else place_window_links(
+                windows.channel, audience=working.supply, episodes=fetched.episodes
+            ),
         )
         working.story_candidates = candidates
         return candidates

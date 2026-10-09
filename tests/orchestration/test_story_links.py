@@ -121,6 +121,49 @@ async def test_recall_s_stories_join_after_the_window_s_and_are_not_repeated() -
     assert [view.story_id for view in candidates.views] == [windowed, recalled]
 
 
+async def test_the_place_window_s_stories_come_first_then_the_window_s_then_recall_s() -> None:
+    """ADR-0303 §7:9: the place window's linked activations' stories, newest item first."""
+    stories = _stories()
+    windowed = await _story(stories, activation("a-1"))
+    older = await _story(stories, activation("p-1"))
+    newer = await _story(stories, activation("p-2"), activation("a-1"))
+    recalled = await _story(stories, activation("a-9"))
+    window = (episode("a-1"),)
+    memory = await memory_of(*window)
+
+    candidates = await _candidates(stories, memory).assemble(
+        window, audience=BOUNDED, recalled=(recalled, older), place=("p-2", "p-1")
+    )
+
+    assert [view.story_id for view in candidates.views] == [newer, older, windowed, recalled]
+
+
+async def test_the_place_window_s_stories_stop_at_the_limit_too() -> None:
+    stories = _stories()
+    first = await _story(stories, activation("p-1"))
+    second = await _story(stories, activation("p-2"))
+    await _story(stories, activation("a-1"))
+    window = (episode("a-1"),)
+    memory = await memory_of(*window)
+
+    candidates = await _candidates(stories, memory, limit=2).assemble(
+        window, audience=BOUNDED, place=("p-1", "p-2")
+    )
+
+    assert [view.story_id for view in candidates.views] == [first, second]
+
+
+async def test_a_running_activation_s_stories_are_candidates() -> None:
+    """ADR-0303 §7:7: an activation still running, whose episode is open, may be linked."""
+    stories = _stories()
+    running = await _story(stories, activation("p-1"))
+    memory = await memory_of(episode("p-1", open_=True))
+
+    candidates = await _candidates(stories, memory).assemble((), audience=BOUNDED, place=("p-1",))
+
+    assert [view.story_id for view in candidates.views] == [running]
+
+
 async def test_an_episode_recording_no_activation_belongs_to_no_story() -> None:
     stories = _stories()
     await _story(stories, activation("a-1"))

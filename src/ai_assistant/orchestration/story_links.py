@@ -5,10 +5,12 @@ recall are.
 
 **The candidates** (:class:`StoryCandidates`, §6:1-§6:4). Before the understanding
 stage renders, the understanding phase assembles up to
-``UNDERSTANDING_STORY_CANDIDATES`` candidate stories: first the stories the episode
-window's episodes belong to, each looked up with ``StoryStore.stories_of`` in the
-window's order, then the stories recall's kept episodes belong to, which a caller hands
-in already in §6:1's order. A story already a candidate is not repeated. Each candidate
+``UNDERSTANDING_STORY_CANDIDATES`` candidate stories (ADR-0303 §7:9): first the stories
+of the activations the place window's items link to, newest item first; then the
+stories the episode window's episodes belong to, in the window's order, each looked up
+with ``StoryStore.stories_of``; then the stories recall's kept episodes belong to, which
+a caller hands in already in ADR-0300 §6:1's order. A story already a candidate is not
+repeated. Each candidate
 is read as a **short view**: the first lines of its current page and the page's mark,
 its newest pending notes and its latest episodes by occurrence, the episodes fetched
 with ``MemoryStore.get_many`` under ADR-0282 §2:6-§2:8 and the page and notes kept
@@ -222,6 +224,7 @@ class StoryCandidates:
         *,
         audience: TurnSupply,
         recalled: Sequence[str] = (),
+        place: Sequence[str] = (),
     ) -> Candidates:
         """The candidates for one pass, each read as a short view.
 
@@ -234,6 +237,10 @@ class StoryCandidates:
                 order — the item with the higher recorded search score first, as
                 :meth:`~ai_assistant.orchestration.recall.Recalled.stories` gives them.
                 They join after the window's (§7).
+            place: The activations the place window's items link to, newest item
+                first, as
+                :func:`~ai_assistant.orchestration.understanding.place_window_links`
+                gives them. Their stories come first (ADR-0303 §7:9).
 
         Returns:
             The candidates, or none with ``unreadable`` set where a story-store read
@@ -244,7 +251,7 @@ class StoryCandidates:
                 fetch would.
         """
         try:
-            chosen = await self._chosen(window, recalled)
+            chosen = await self._chosen(place, window, recalled)
             reads = [read for story_id in chosen if (read := await self._read(story_id))]
         except StoryStoreError:
             _log.warning("story_candidates_unreadable", stage="understanding")
@@ -289,15 +296,20 @@ class StoryCandidates:
         ]
         return {record.id: record for record in admitted_to_understanding(audience, episodes)}
 
-    async def _chosen(self, window: Sequence[EpisodicMemory], recalled: Sequence[str]) -> list[str]:
-        """§6:1's order: the window's episodes' stories, then recall's, each once."""
+    async def _chosen(
+        self, place: Sequence[str], window: Sequence[EpisodicMemory], recalled: Sequence[str]
+    ) -> list[str]:
+        """ADR-0303 §7:9's order: the place window's, the episode window's, recall's, once.
+
+        An activation still running may be linked (§7:7), so a place-window item's is
+        looked up as any other.
+        """
         chosen: dict[str, None] = {}
-        for record in window:
+        windowed = (activation_of(record) for record in window)
+        activations = dict.fromkeys([*place, *(one for one in windowed if one is not None)])
+        for activation in activations:
             if len(chosen) >= self._limit:
                 break
-            activation = activation_of(record)
-            if activation is None:
-                continue
             member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
             for header in await self._stories.stories_of(member):
                 chosen.setdefault(header.story_id)

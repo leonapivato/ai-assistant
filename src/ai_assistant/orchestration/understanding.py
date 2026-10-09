@@ -30,13 +30,17 @@ page, its newest pending notes and its latest episodes, which take no label — 
 wrote it and whether it is marked, and a marked one as outside content, never as the
 user's words (§4:6). The proposal's ``story_labels`` name the matters the input belongs
 with: an ``S`` label resolves to its story, and a ``P`` or ``M`` label naming an episode
-to that episode's activation. So does an ``H`` label naming a channel item that is a
-stored episode the pass admitted — a record of the conversation's tail, or an item that
-is one exchange with an episode of the episode window — read off the records the pass
-already holds and nothing fetched (ADR-0301 §1). A story label resolving to nothing, to
-any other channel item or to a semantic record is a label defect, repaired once and
-then dropped and counted (§6:8). Where the candidates could not be read, or there are
-none, the section says so.
+to that episode's activation. So does an ``H`` label naming a channel item that links
+to an activation (ADR-0303 §7): a record of the conversation's tail, or an item that is
+one exchange with an episode of the episode window, to its episode's activation
+(ADR-0301 §1:1); a transcript message to the activation the chat reader's bookkeeping
+records as having taken it in, which the reader brings with the window. All of it is
+read off what the pass already holds, and nothing is fetched. An item that links to no
+activation is rendered marked ``not_linkable``, and a story label naming it is dropped
+and counted, with no repair (ADR-0303 §7:5, §7:6). A story label resolving to nothing
+rendered or to a semantic record is a label defect, repaired once and then dropped and
+counted (§6:8). Where the candidates could not be read, or there are none, the section
+says so.
 
 **Two windows, two label sequences** (§3). The **channel window** is what the channel
 supplied — ``ChannelContext.history`` then ``reply_to`` — or, on the conversation
@@ -80,6 +84,7 @@ import json
 # value is read lazily and must resolve when it is (#1706).
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -120,8 +125,7 @@ from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.story_privacy import activation_of
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-    from datetime import datetime
+    from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.protocols import MemoryStore, ModelProvider
     from ai_assistant.core.types import (
@@ -146,12 +150,17 @@ __all__ = [
     "SuppliedWindow",
     "TranscriptWindow",
     "UnderstandingStage",
+    "place_window_links",
 ]
 
 _log = structlog.get_logger(__name__)
 
 #: The page bound :meth:`~ai_assistant.core.protocols.MemoryStore.episodes` admits.
 _MAX_PAGE: Final = 100
+
+#: The time of an item that carries none, in :func:`place_window_links`' order. Only a
+#: transcript's items carry none, and they are ordered by position.
+_NO_TIME: Final = datetime.min.replace(tzinfo=UTC)
 
 #: How many unresolvable labels the repair statement names, and how much of each. The
 #: labels are the model's own strings, so the statement bounds them rather than echoing
@@ -207,6 +216,13 @@ _RECALLED: Final = (
 #: nothing and costs the one repair completion (ADR-0276 §6:2).
 _S_LABEL_CITED: Final = "An S label names a story and is cited in `story_labels` alone."
 
+#: Which H labels a story label may name (ADR-0303 §7:8): any item the place window
+#: renders, save one marked not linkable, whose label links nothing (§7:5, §7:6).
+_NOT_LINKABLE_CITED: Final = (
+    "Any H label may be named in `story_labels` except one whose item is marked "
+    "`not_linkable`, which links nothing."
+)
+
 #: ADR-0300 §6's paragraph, rendered only where the understanding phase assembled
 #: candidate stories, so a pass with none keeps the instruction it had. Its second half
 #: is §6:9's: a link says the input belongs to the matter and nothing more, one input
@@ -226,10 +242,9 @@ _STORIES: Final = (
     "In `story_labels`, name the matters this input belongs to: the S labels of the "
     "stories, and the labels of the earlier episodes, that it belongs with as one "
     "matter. An earlier episode is named by its P or M label, or by the H label of a "
-    "channel window item described as an earlier exchange of this conversation as the "
-    "assistant recorded it, or marked as also in the episode window. No other H label "
-    "may be named in `story_labels`. A link says the input belongs to that matter and "
-    "nothing more. One "
+    "channel window item, which names the earlier exchange that item belongs to. "
+    + _NOT_LINKABLE_CITED
+    + " A link says the input belongs to that matter and nothing more. One "
     "input may belong to several matters. An input that belongs to none is linked to "
     "none, and its `story_labels` is empty.\n"
     "\n" + _S_LABEL_CITED + " Never cite one in `meaning_labels`, in a reference or in a "
@@ -373,12 +388,20 @@ class TranscriptWindow:
         replied_to: Each earlier message an input message replies to that
             ``messages`` does not already show, ascending — a deleted one as its
             marker (§4:5, §5:8).
+        links: The activation each message of ``messages`` and ``replied_to`` links
+            to, by its position, where the reader's bookkeeping records one as having
+            taken it in (ADR-0303 §7:1-§7:3, ADR-0293 §6:6). The reader brings it with
+            the window, so the understanding phase reads no further store to resolve
+            a message. A message missing here links to nothing: an assistant's
+            message, whose writer nothing records yet (ADR-0303 §7's closing
+            paragraph), or one no activation took in.
     """
 
     conversation: ChannelIdentity
     messages: tuple[TranscriptMessage, ...]
     input_messages: tuple[TranscriptMessage, ...] = ()
     replied_to: tuple[TranscriptMessage | DeletedMessage, ...] = ()
+    links: Mapping[int, str] = field(default_factory=dict)
 
 
 type ChannelWindow = SuppliedWindow | ConversationWindow | TranscriptWindow
@@ -633,9 +656,11 @@ class _Brief:
     recalled_count: int | None = None
     #: What a story label resolves to (ADR-0300 §6:7): an ``S`` label its story, a
     #: ``P`` or ``M`` label naming an episode that episode's activation, and an ``H``
-    #: label naming a stored episode the pass admitted that episode's activation
-    #: (ADR-0301 §1). A label not here — any other channel item, a semantic record, an
-    #: episode of no activation, or nothing rendered — is a story-label defect (§6:8).
+    #: label naming a place-window item that links to an activation that activation
+    #: (ADR-0303 §7:4). An ``H`` label not here names an item that links to nothing,
+    #: and is dropped and counted with no repair (§7:6); any other label not here — a
+    #: semantic record, an episode of no activation, or nothing rendered — is a
+    #: story-label defect (ADR-0300 §6:8).
     story_members: dict[str, StoryMember] = field(default_factory=dict)
     #: How many ``S`` labels the stories section rendered; ``None`` where the call
     #: rendered no stories section at all (ADR-0300 §6:5).
@@ -765,28 +790,29 @@ class UnderstandingStage:
         stories: Candidates | None,
     ) -> _Brief:
         """Render the prompt, filtering each window's stored records first (§3, §4)."""
-        items = _channel_items(window, audience)
-        shared = frozenset(item.identifier for item in items if item.identifier is not None)
-        window_episodes: tuple[EpisodicMemory, ...] = ()
-        if episodes is not None:
-            window_episodes = admitted_to_understanding(audience, episodes)
-        merged = {record.id: record for record in window_episodes if record.id in shared}
+        placed = _Placed.of(window, audience, episodes)
+        shared = placed.shared
+        window_episodes = placed.episodes
         labels: dict[str, UnderstandingReferent] = {}
         story_members: dict[str, StoryMember] = {}
         rendered_items: list[dict[str, object]] = []
-        for index, item in enumerate(items, start=1):
+        for index, one in enumerate(placed.items, start=1):
             label = f"H{index}"
-            also = None if item.identifier is None else merged.get(item.identifier)
-            rendered_items.append(item.rendering(label, also, excerpt_chars=self._excerpt_chars))
-            labels[label] = item.referent
-            # ADR-0301 §1: an item that is a stored episode the pass admitted — a tail
-            # record, admitted above, or one exchange with an admitted episode of the
-            # episode window — is a story label for that episode's activation, read off
-            # the records already held. A transcript message, a supplied item matching
-            # no episode the window holds, and anything withheld are not.
-            stored = item.episode if item.episode is not None else also
-            if stored is not None:
-                _member_of(stored, label, story_members)
+            rendered_items.append(
+                one.item.rendering(
+                    label,
+                    one.also,
+                    excerpt_chars=self._excerpt_chars,
+                    linkable=one.link is not None,
+                )
+            )
+            labels[label] = one.item.referent
+            # ADR-0303 §7:4: an item that links to an activation is a story label for
+            # it, as a P label naming that activation's episode is: a tail record or a
+            # one-exchange item by its stored episode (ADR-0301 §1:1), a transcript
+            # message by the reader's bookkeeping. Anything withheld has no label.
+            if one.link is not None:
+                story_members[label] = StoryMember(kind=StoryMemberKind.ACTIVATION, id=one.link)
         rendered_episodes: list[dict[str, object]] = []
         for record in (record for record in window_episodes if record.id not in shared):
             label = f"P{len(rendered_episodes) + 1}"
@@ -923,8 +949,14 @@ class UnderstandingStage:
         unresolved = [label for label in _labels_of(proposal) if label not in brief.labels]
         unnamed = _unnamed_supplied(proposal)
         # ADR-0300 §6:8: a story label naming nothing a link can be made to is a label
-        # defect, and takes part in the one repair completion.
-        unlinkable = [label for label in proposal.story_labels if label not in brief.story_members]
+        # defect, and takes part in the one repair completion — except one naming a
+        # place-window item that links to no activation, which is dropped and counted
+        # with no repair (ADR-0303 §7:6).
+        unlinkable = [
+            label
+            for label in proposal.story_labels
+            if label not in brief.story_members and not _names_channel_item(label, brief)
+        ]
         if not unresolved and not unnamed and not unlinkable:
             return proposal, None
         return proposal, _Problem(
@@ -944,6 +976,96 @@ class _Problem:
 
 
 @dataclass(frozen=True, slots=True)
+class _PlacedItem:
+    """One item of the place window, what it shares with the episode window, its link."""
+
+    item: _ChannelItem
+    also: EpisodicMemory | None
+    link: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Placed:
+    """The place window's items as one pass renders them, each with its link (ADR-0303 §7).
+
+    One reading, shared by the rendering and by the candidates' assembly, so the
+    activations the candidates are read for are exactly those the labels resolve to.
+
+    Attributes:
+        items: The items in rendering order, stored records already filtered (§4).
+        shared: The stored ids of the items, ADR-0276 §3's *same exchange* ids.
+        episodes: The episode window's records the audience admits, in its order.
+    """
+
+    items: tuple[_PlacedItem, ...]
+    shared: frozenset[str]
+    episodes: tuple[EpisodicMemory, ...]
+
+    @classmethod
+    def of(
+        cls,
+        window: ChannelWindow,
+        audience: TurnSupply,
+        episodes: Sequence[EpisodicMemory] | None,
+    ) -> _Placed:
+        """Read the window's items and resolve each one's link off the records held."""
+        items = _channel_items(window, audience)
+        shared = frozenset(item.identifier for item in items if item.identifier is not None)
+        admitted: tuple[EpisodicMemory, ...] = ()
+        if episodes is not None:
+            admitted = admitted_to_understanding(audience, episodes)
+        merged = {record.id: record for record in admitted if record.id in shared}
+        placed: list[_PlacedItem] = []
+        for item in items:
+            also = None if item.identifier is None else merged.get(item.identifier)
+            placed.append(_PlacedItem(item, also, item.linked(also)))
+        return cls(items=tuple(placed), shared=shared, episodes=admitted)
+
+
+def place_window_links(
+    window: ChannelWindow,
+    *,
+    audience: TurnSupply,
+    episodes: Sequence[EpisodicMemory] | None,
+) -> tuple[str, ...]:
+    """The activations the place window's items link to, newest item first, each once.
+
+    ADR-0303 §7:9's first source of candidates, read off exactly the items and links
+    the stage renders: the window filtered for the pass's audience, so a withheld
+    record brings no story, and each item's link as the stage resolves it. A
+    transcript's newest message is the one latest in its conversation; a stored
+    episode's item is ordered by when its episode occurred, which is the only time a
+    supplied item carries. An activation linked by several items takes the place of
+    its newest.
+
+    Args:
+        window: The pass's place window, as the windows stage holds it.
+        audience: The pass's audience posture.
+        episodes: The episode window's records as the understanding phase fetched
+            them, which a one-exchange supplied item links through; ``None`` where the
+            pass takes no episode window.
+
+    Returns:
+        The activation ids, newest item first.
+    """
+    placed = _Placed.of(window, audience, episodes)
+    linked = [one for one in placed.items if one.link is not None]
+    linked.sort(key=_newness, reverse=True)
+    return tuple(dict.fromkeys(one.link for one in linked if one.link is not None))
+
+
+def _newness(one: _PlacedItem) -> tuple[int, datetime, str]:
+    """How new an item is: its position in a transcript, else its stored episode's time.
+
+    One window holds one kind of item, so only one part of the key ever differs.
+    """
+    stored = one.item.episode if one.item.episode is not None else one.also
+    if stored is None:
+        return (one.item.position or 0, _NO_TIME, "")
+    return (one.item.position or 0, stored.occurred_at, stored.id)
+
+
+@dataclass(frozen=True, slots=True)
 class _ChannelItem:
     """One item of the channel window, with the referent its label resolves to.
 
@@ -951,17 +1073,29 @@ class _ChannelItem:
     conversation's tail, which renders through the projection (ADR-0284 §8:3,
     superseding ADR-0276 §3:1's *"on ADR-0221's existing rendering"*); ``body`` is
     what any other item renders.
+
+    ``link`` is the activation the item links to by its own record (ADR-0303 §7:1): a
+    tail record's, as ADR-0301 §1:1 resolves it, and a transcript message's, as the
+    reader's bookkeeping records it. A supplied item has none of its own, and links
+    only where it is one exchange with an episode of the episode window (§1:1).
+    ``position`` is a transcript message's place in its conversation, the medium's
+    own item id (ADR-0303 §7:2), and what orders the window newest first.
     """
 
     identifier: str | None
     body: dict[str, object]
     referent: UnderstandingReferent
     episode: EpisodicMemory | None = None
+    link: str | None = None
+    position: int | None = None
 
     def rendering(
-        self, label: str, also: EpisodicMemory | None, *, excerpt_chars: int
+        self, label: str, also: EpisodicMemory | None, *, excerpt_chars: int, linkable: bool
     ) -> dict[str, object]:
         """The item under its label, marked where it is also in the episode window.
+
+        An item that links to no activation is marked not linkable (ADR-0303 §7:5),
+        the one mark the place window gains: a story label naming it links nothing.
 
         ``also`` is the episode-window record the item names, where it names one: its
         status, reason, verdicts and understanding ride here, rendered once (§3). A
@@ -991,7 +1125,20 @@ class _ChannelItem:
             # §3: one exchange, rendered once, here; what the episode window would have
             # added about it — its status and what was understood then — rides here too.
             rendered["also_in_episode_window"] = True
+        if not linkable:
+            rendered["not_linkable"] = True
         return rendered
+
+    def linked(self, also: EpisodicMemory | None) -> str | None:
+        """The activation the item links to, where it links to one (ADR-0303 §7:1, §7:3).
+
+        Its own record's, or, for a supplied item that is one exchange with an episode
+        of the episode window, that episode's (ADR-0301 §1:1). Read off the records the
+        pass already holds: nothing is fetched (ADR-0301 §1:4).
+        """
+        if self.link is not None:
+            return self.link
+        return None if also is None else activation_of(also)
 
 
 def _channel_items(window: ChannelWindow, audience: TurnSupply) -> list[_ChannelItem]:
@@ -1046,8 +1193,11 @@ def _transcript_items(window: TranscriptWindow) -> list[_ChannelItem]:
     """
     source = _channel_text(window.conversation)
     first = min((one.position for one in window.input_messages), default=None)
-    items = [_message_item(one, source, _TRANSCRIPT_ITEM, first) for one in window.messages]
-    items.extend(_message_item(one, source, _REPLIED_TO_ITEM, first) for one in window.replied_to)
+    links = window.links
+    items = [_message_item(one, source, _TRANSCRIPT_ITEM, first, links) for one in window.messages]
+    items.extend(
+        _message_item(one, source, _REPLIED_TO_ITEM, first, links) for one in window.replied_to
+    )
     return items
 
 
@@ -1069,9 +1219,17 @@ def _input_message(message: TranscriptMessage) -> dict[str, object]:
 
 
 def _message_item(
-    message: TranscriptMessage | DeletedMessage, source: str, role: str, first: int | None
+    message: TranscriptMessage | DeletedMessage,
+    source: str,
+    role: str,
+    first: int | None,
+    links: Mapping[int, str],
 ) -> _ChannelItem:
-    """One message of the transcript, quoted as the medium holds it (ADR-0293 §5:2)."""
+    """One message of the transcript, quoted as the medium holds it (ADR-0293 §5:2).
+
+    It links to the activation the reader's bookkeeping records as having taken it in,
+    where it records one (ADR-0303 §7:3).
+    """
     body: dict[str, object] = {"item": role, "position": message.position}
     excerpt = ""
     if isinstance(message, DeletedMessage):
@@ -1096,6 +1254,8 @@ def _message_item(
             source=source,
             excerpt=excerpt,
         ),
+        link=links.get(message.position),
+        position=message.position,
     )
 
 
@@ -1119,6 +1279,7 @@ def _tail_item(record: MemoryRecord, source: str) -> _ChannelItem:
             kind="channel_item", id=record.id, source=source, excerpt=excerpt
         ),
         episode=record,
+        link=activation_of(record),
     )
 
 
@@ -1333,21 +1494,12 @@ def _label_statement(
             f"These elements are grounded `supplied` but name no label: {', '.join(unnamed)}."
         )
     # ADR-0300 §6:8: a story label resolves to a story, or to an episode's activation;
-    # a semantic record is neither, and a channel item is one only where it is a
-    # stored episode the pass admitted (ADR-0301 §1). Any other H label is named as
-    # the defect it is.
-    channel = [label for label in unlinkable if _names_channel_item(label, brief)]
-    other = [label for label in unlinkable if not _names_channel_item(label, brief)]
-    if channel:
+    # a semantic record is neither. An H label naming an item that links to nothing is
+    # no defect (ADR-0303 §7:6), so it is never among these.
+    if unlinkable:
         parts.append(
-            "These story labels name a channel window item that is not an earlier "
-            "episode a story can hold: only an H label whose item is described as an "
-            "earlier exchange of this conversation as the assistant recorded it, or is "
-            "marked as also in the episode window, may be named in `story_labels`, and "
-            f"no other H label: {_shown(channel)}."
+            f"These story labels name no story and no earlier episode: {_shown(unlinkable)}."
         )
-    if other:
-        parts.append(f"These story labels name no story and no earlier episode: {_shown(other)}.")
     rendered = [
         _sequence("H", brief.channel_count, "channel window"),
         _sequence("P", brief.episode_count, "episode window"),
@@ -1488,10 +1640,10 @@ def _resolved(
 
 
 def _member_of(record: EpisodicMemory, label: str, story_members: dict[str, StoryMember]) -> None:
-    """Record what a label naming an episode names as a story label: its activation.
+    """Record what a ``P`` or ``M`` label naming an episode names as a story label.
 
-    A ``P`` or ``M`` label (ADR-0300 §6:7), or an ``H`` label naming a stored episode
-    the pass admitted (ADR-0301 §1), which resolves exactly as a ``P`` label would.
+    Its activation (ADR-0300 §6:7), as an ``H`` label naming a place-window item that
+    links to one resolves to that activation (ADR-0303 §7:4).
 
     An episode that records no activation is the episode of nothing a story can hold, so
     its label is not a story label at all, and naming it as one is a defect (ADR-0300
