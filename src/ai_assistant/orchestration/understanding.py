@@ -17,14 +17,15 @@ the candidate stories (ADR-0300 §6, superseding ADR-0276 §1:5 for those alone)
 records as the understanding phase fetched them (ADR-0282 §5). A recalled record either
 window already rendered stays there only. A recalled episode
 takes the episode window's projection; a recalled semantic record renders its fact,
-cut with the cut disclosed, its last update and an attribution by band, and its label
-resolves to a ``memory`` referent. Where recall kept nothing, or failed, the section
-says so.
+cut with the cut disclosed, its last update and an attribution by band, marked
+``not_linkable`` on every pass (ADR-0305 §3), and its label resolves to a ``memory``
+referent. Where recall kept nothing, or failed, the section says so.
 
 **The candidate stories** (ADR-0300 §6) render as a fourth section, ``stories``,
 labelled ``S1``, ``S2``… in the candidates' order, only where the understanding phase
 assembled candidates for the pass: each story's short view — the first lines of its
-summary and its mark, or that the summary was withheld, its newest pending notes and its
+summary and its mark, or that the summary was withheld, its newest pending notes, or
+nothing about its notes on a pass that may not be shown them (ADR-0305 §4), and its
 latest episodes, which take no label — as
 :class:`~ai_assistant.orchestration.story_links.StoryCandidates` read it, under ADR-0303
 §3's privacy default. The summary and every note are quoted source data attributed by
@@ -39,10 +40,11 @@ one exchange with an episode of the episode window, to its episode's activation
 records as having taken it in, which the reader brings with the window. All of it is
 read off what the pass already holds, and nothing is fetched. An item that links to no
 activation is rendered marked ``not_linkable``, and a story label naming it is dropped
-and counted, with no repair (ADR-0303 §7:5, §7:6). A story label resolving to nothing
-rendered or to a semantic record is a label defect, repaired once and then dropped and
-counted (§6:8). An ``S`` label is also cited wherever a label may be — in
-``meaning_labels``, a reference or a relationship — and resolves there to a ``story``
+and counted, with no repair (ADR-0303 §7:5, §7:6); so is one naming a recalled semantic
+record, which is never a story link (ADR-0305 §3). A story label resolving to nothing
+rendered, or to an episode recording no activation, is a label defect, repaired once
+and then dropped and counted (§6:8). An ``S`` label is also cited wherever a label may
+be — in ``meaning_labels``, a reference or a relationship — and resolves there to a ``story``
 referent, grounding a reading ``supplied`` as any label does; cited outside
 ``story_labels`` it links nothing (ADR-0304 §8). Where the candidates could not be read,
 or there are none, the section says so.
@@ -233,6 +235,13 @@ _NOT_LINKABLE_CITED: Final = (
     "`not_linkable`, which links nothing."
 )
 
+#: A remembered fact is never a story link (ADR-0305 §3): its ``M`` label is marked not
+#: linkable, and links nothing in ``story_labels``.
+_FACT_NOT_LINKABLE: Final = (
+    "A remembered fact is never a story link: its M label is marked `not_linkable` and "
+    "links nothing in `story_labels`."
+)
+
 #: ADR-0300 §6's paragraph, rendered only where the understanding phase assembled
 #: candidate stories, so a pass with none keeps the instruction it had. Its second half
 #: is §6:9's: a link says the input belongs to the matter and nothing more, one input
@@ -253,6 +262,8 @@ _STORIES: Final = (
     "matter. An earlier episode is named by its P or M label, or by the H label of a "
     "channel window item, which names the earlier exchange that item belongs to. "
     + _NOT_LINKABLE_CITED
+    + " "
+    + _FACT_NOT_LINKABLE
     + " A link says the input belongs to that matter and nothing more. One "
     "input may belong to several matters. An input that belongs to none is linked to "
     "none, and its `story_labels` is empty.\n"
@@ -671,8 +682,9 @@ class _Brief:
     #: ``P`` or ``M`` label naming an episode that episode's activation, and an ``H``
     #: label naming a place-window item that links to an activation that activation
     #: (ADR-0303 §7:4). An ``H`` label not here names an item that links to nothing,
-    #: and is dropped and counted with no repair (§7:6); any other label not here — a
-    #: semantic record, an episode of no activation, or nothing rendered — is a
+    #: and an ``M`` label naming a recalled semantic record names a fact, which is never
+    #: a story link: each is dropped and counted with no repair (§7:6, ADR-0305 §3). Any
+    #: other label not here — an episode of no activation, or nothing rendered — is a
     #: story-label defect (ADR-0300 §6:8).
     story_members: dict[str, StoryMember] = field(default_factory=dict)
     #: How many ``S`` labels the stories section rendered; ``None`` where the call
@@ -905,7 +917,9 @@ class UnderstandingStage:
         The summary and each note are attributed by their records — the summary as the
         tidy-up's and marked or not, a note by who wrote it and whether it is marked —
         and never by their text (ADR-0303 §3:7). A withheld summary is said to be withheld,
-        and nothing of it is rendered (ADR-0304 §4:2). The episodes take no label
+        and nothing of it is rendered (ADR-0304 §4:2). On a pass that may not be shown a
+        note, the notes part is not rendered at all: it says neither that none is waiting
+        nor that any was withheld (ADR-0305 §4). The episodes take no label
         (§6:5), and render through the projection with an outside input's text not
         admitted: ADR-0284 §8:5 admits it in the episode window and the recalled
         section alone.
@@ -927,7 +941,8 @@ class UnderstandingStage:
         }
         if view.outside:
             rendered["summary_outside_content"] = _SUMMARY_OUTSIDE_TEXT
-        rendered["newest_notes"] = [_story_note(note) for note in view.notes] or _NO_NOTES
+        if not view.notes_withheld:
+            rendered["newest_notes"] = [_story_note(note) for note in view.notes] or _NO_NOTES
         rendered["latest_episodes"] = episodes or _NO_EPISODES
         return rendered
 
@@ -977,12 +992,13 @@ class UnderstandingStage:
         unnamed = _unnamed_supplied(proposal)
         # ADR-0300 §6:8: a story label naming nothing a link can be made to is a label
         # defect, and takes part in the one repair completion — except one naming a
-        # place-window item that links to no activation, which is dropped and counted
-        # with no repair (ADR-0303 §7:6).
+        # place-window item that links to no activation (ADR-0303 §7:6) or a recalled
+        # fact (ADR-0305 §3), each marked not linkable, which is dropped and counted
+        # with no repair.
         unlinkable = [
             label
             for label in proposal.story_labels
-            if label not in brief.story_members and not _names_channel_item(label, brief)
+            if label not in brief.story_members and not _marked_not_linkable(label, brief)
         ]
         if not unresolved and not unnamed and not unlinkable:
             return proposal, None
@@ -1444,7 +1460,12 @@ class _RecalledFact:
         return cls(record=record, fact=fact or "", cut=cut)
 
     def rendering(self, label: str) -> dict[str, object]:
-        """The fact under its ``M`` label, attributed by its band and never by its text."""
+        """The fact under its ``M`` label, attributed by its band and never by its text.
+
+        It is marked not linkable on every pass, on the place window's key, whether or
+        not a stories section renders beside it: a remembered fact is never a story
+        link (ADR-0305 §3).
+        """
         provenance = self.record.provenance
         return {
             "label": label,
@@ -1452,6 +1473,7 @@ class _RecalledFact:
             "last_updated": provenance.last_updated.isoformat(),
             "fact": self.fact,
             "fact_cut_to_first_chars": self.cut,
+            "not_linkable": True,
         }
 
     def referent(self) -> UnderstandingReferent:
@@ -1520,9 +1542,9 @@ def _label_statement(
         parts.append(
             f"These elements are grounded `supplied` but name no label: {', '.join(unnamed)}."
         )
-    # ADR-0300 §6:8: a story label resolves to a story, or to an episode's activation;
-    # a semantic record is neither. An H label naming an item that links to nothing is
-    # no defect (ADR-0303 §7:6), so it is never among these.
+    # ADR-0300 §6:8: a story label resolves to a story, or to an episode's activation.
+    # An H label naming an item that links to nothing (ADR-0303 §7:6), and an M label
+    # naming a recalled fact (ADR-0305 §3), are no defect, so neither is among these.
     if unlinkable:
         parts.append(
             f"These story labels name no story and no earlier episode: {_shown(unlinkable)}."
@@ -1545,10 +1567,15 @@ def _label_statement(
     return " ".join(parts)
 
 
-def _names_channel_item(label: str, brief: _Brief) -> bool:
-    """Whether ``label`` is an ``H`` label this call rendered, as an exact lookup."""
+def _marked_not_linkable(label: str, brief: _Brief) -> bool:
+    """Whether ``label`` names something rendered whose kind may be marked not linkable.
+
+    An exact lookup: an ``H`` label this call rendered (ADR-0303 §7:5), or an ``M``
+    label naming a recalled semantic record (ADR-0305 §3). Read beside
+    ``story_members``, which holds every ``H`` label that does link; a fact never does.
+    """
     referent = brief.labels.get(label)
-    return referent is not None and referent.kind == "channel_item"
+    return referent is not None and referent.kind in {"channel_item", "memory"}
 
 
 def _shown(labels: Sequence[str]) -> str:
