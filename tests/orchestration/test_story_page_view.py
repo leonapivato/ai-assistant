@@ -14,7 +14,12 @@ import pytest
 from story_support import AT, activation
 
 from ai_assistant.core.errors import StoryStoreError
-from ai_assistant.core.types import DEFAULT_PAGE_SIZE, StoryActor, StoryNoteAuthor
+from ai_assistant.core.types import (
+    DEFAULT_PAGE_SIZE,
+    StoryActor,
+    StoryNoteAuthor,
+    StoryPageDraft,
+)
 from ai_assistant.orchestration.stories import STORY_PAGE_VIEW_NOTES, owner_page
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 
@@ -85,11 +90,57 @@ async def test_a_note_written_while_the_notes_are_read_is_shown_pending() -> Non
     assert [(shown.note.note_id, shown.pending) for shown in view.notes] == [(appended[0], True)]
 
 
-async def test_a_write_to_another_story_does_not_make_the_reads_disagree() -> None:
+async def test_a_note_written_and_moved_away_while_the_notes_are_read_is_not_shown() -> None:
+    """Appended, listed, then moved with its member before the second read (round 2's case).
+
+    The story's own state is as it was, but the store's counter is not, so the reads are
+    made again, and the note, no longer the story's, is not shown taken in.
+    """
+    stories = FakeStoryStore(now=lambda: AT)
+    story_id = await _story(stories)
+    elsewhere = await _story(stories)
+    state = await stories.current_page(story_id)
+    assert state is not None
+    taken = await stories.write_page(
+        story_id,
+        StoryPageDraft(took_in_episodes=("a-1",), outside=False),
+        as_of=state.as_of,
+    )
+    assert taken.version is not None
+    listing = stories.notes
+    moved: list[int] = []
+
+    async def appending_then_moving(
+        story_id: str, *, cursor: int | None = None, limit: int = DEFAULT_PAGE_SIZE
+    ) -> StoryNoteList | None:
+        if moved:
+            return await listing(story_id, cursor=cursor, limit=limit)
+        late = await stories.append_note(story_id, "late", author=StoryNoteAuthor.OWNER)
+        assert late.note is not None
+        moved.append(late.note.note_id)
+        listed = await listing(story_id, cursor=cursor, limit=limit)
+        away = await stories.move(
+            story_id, elsewhere, [activation("a-1")], actor=StoryActor.OWNER, notes=moved
+        )
+        assert away.refusal is None
+        return listed
+
+    stories.notes = appending_then_moving  # type: ignore[method-assign]  # an interleaving point
+
+    view = await owner_page(stories, _memory(), story_id)
+
+    assert view is not None
+    assert view.notes == ()
+    there = await owner_page(stories, _memory(), elsewhere)
+    assert there is not None
+    assert [(shown.note.note_id, shown.pending) for shown in there.notes] == [(moved[0], True)]
+
+
+async def test_a_write_to_another_story_costs_a_read_again_and_no_wrong_answer() -> None:
     stories = FakeStoryStore(now=lambda: AT)
     story_id = await _story(stories)
     other = await _story(stories)
-    _writing_while_notes_are_read(stories, other, times=5)
+    _writing_while_notes_are_read(stories, other, times=1)
     reads = stories.current_page
     count = 0
 
@@ -104,7 +155,7 @@ async def test_a_write_to_another_story_does_not_make_the_reads_disagree() -> No
 
     assert view is not None
     assert view.notes == ()
-    assert count == 2
+    assert count == 4
 
 
 async def test_a_story_written_through_every_read_is_a_store_error() -> None:
