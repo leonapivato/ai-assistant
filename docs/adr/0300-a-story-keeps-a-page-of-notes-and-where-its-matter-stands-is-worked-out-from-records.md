@@ -1,6 +1,6 @@
 # 300. A story keeps a page of notes, and where its matter stands is worked out from records
 
-- Status: Partially superseded by ADR-0301 (§6:7's resolution, in the addition alone; §6:8's *or to a channel item*, for a stored episode the pass admitted) and ADR-0302 (§3:10's page write, §5:2's reads, §5:6's instruction and §9:3's matters pass, each in the addition alone) and ADR-0303 (the page's citations, safety-net entries, supersession marks and owner-note rules; how notes move; the page's mark and privacy; the place window's candidates and labels; understanding's flag; planning's further story calls; each as ADR-0303's header scopes it) and ADR-0304 (the page's names, in the renaming alone)
+- Status: Partially superseded by ADR-0301 (§6:7's resolution, in the addition alone; §6:8's *or to a channel item*, for a stored episode the pass admitted) and ADR-0302 (§3:10's page write, §5:2's reads, §5:6's instruction and §9:3's matters pass, each in the addition alone) and ADR-0303 (the page's citations, safety-net entries, supersession marks and owner-note rules; how notes move; the page's mark and privacy; the place window's candidates and labels; understanding's flag; planning's further story calls; each as ADR-0303's header scopes it) and ADR-0304 (§3:14's and §9:3's move, in the additions alone; the page's names, in the renaming alone)
 - Date: 2026-10-08
 - Scope: what the assistant keeps about a matter: a story's page and its tidy-up, understanding linking an activation to stories, recall bringing the stories of what it finds, the views, the matters pass and the story commands. Its own milestone, built before the phases after understanding ([#2723](https://github.com/leonapivato/ai-assistant/pull/2723)) and live with them.
 - Dependency: ADR-0289, ADR-0276, ADR-0280, ADR-0281 and ADR-0282, all implemented at `04df86c0`.
@@ -43,11 +43,13 @@
   replacements take effect on ratification of ADR-0303. This reciprocal header
   record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
-- Partially superseded: 2026-10-09 by ADR-0304 — one scope. The page's names, in the
+- Partially superseded: 2026-10-09 by ADR-0304 — two scopes. The page's names, in the
   renaming alone: a story's page is called its summary, and the names in the code, the
   wire and the CLI follow; this body keeps its wording, and where it says *page* for a
-  story's page it means the summary. Every other clause stands. This scoped replacement
-  takes effect on ratification of ADR-0304. This reciprocal header record accompanies
+  story's page it means the summary. §3:14 and §9:3's *move members*, in the additions
+  alone: a move may carry notes and no member, and a note it carries is logged on each
+  story. Every other clause stands. These scoped replacements take effect on
+  ratification of ADR-0304. This reciprocal header record accompanies
   the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified
   body below are preserved.
 - **Partially supersedes** [ADR-0289](0289-a-story-store-holds-which-experiences-belong-to-the-same-matter.md) — **four scopes.** **§2:1's *"It carries no title, summary, state, owner or text of any kind"*, for the page alone**: a story has a page, whose entries and current page hold text (§3 below); the story's header carries what §2:1 lists and nothing more, and §2:7 stands, so no field of a story, a view entry or a log line holds free text. **§3:14's *"five reads and no others"*, in the additions alone**: the store also answers the page's reads (§3 below). **§4:4, for the writes the hub makes outside the engine surface**: understanding's links and the stories it starts carry the actor `understanding` and the activation as trigger (§6 below), the matters pass's changes carry `matters_pass` (§9 below), and planning's, once the phases build it, `planning` (§10 below); every write through the engine surface still carries `owner` and no trigger. **§4:6, whole**: understanding, recall, the story-links stage, the tidy-up and the matters pass read or write stories, and the tidy-up's, understanding's and the matters pass's prompts include them (§§5–9 below). Every other clause stands, §2:6 included: its own last sentence provides for the actor members this ADR adds.
