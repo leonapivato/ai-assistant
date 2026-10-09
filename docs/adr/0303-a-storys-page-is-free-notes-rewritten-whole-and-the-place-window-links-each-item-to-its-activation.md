@@ -1,6 +1,6 @@
 # 303. A story's page is free notes rewritten whole, and the place window links each item to its activation
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0304 (§3:3's pages a run reads; §3:10's walk; §4:1's and §4:3's fields, in the additions alone; §5:1's reads, for a rebuild alone; §5:7's last sentence)
 - Date: 2026-10-08
 - Scope: [M42](https://github.com/leonapivato/ai-assistant/milestone/9), after its acceptance run [#2772](https://github.com/leonapivato/ai-assistant/issues/2772): what a story's page is, how its marks and privacy are decided, how notes move, which place-window items understanding may link, what a flag is, and what planning's story calls are. It closes [#2773](https://github.com/leonapivato/ai-assistant/issues/2773), [#2774](https://github.com/leonapivato/ai-assistant/issues/2774), [#2777](https://github.com/leonapivato/ai-assistant/issues/2777) and [#2771](https://github.com/leonapivato/ai-assistant/issues/2771).
 - Dependency: ADR-0300, ADR-0301 and ADR-0302, implemented at `f1dace5a`.
@@ -10,6 +10,18 @@
 - **Partially supersedes** [ADR-0301](0301-a-story-label-may-name-an-earlier-episode-the-channel-window-shows.md) — **four scopes.** **§1:2 and §1:3, for what becomes of the label**: a story label naming an item that resolves to no activation is dropped quietly and counted, and is no label defect (§7 below). **§1:3's list, for a transcript message the reader's bookkeeping records**: it resolves (§7 below). **§1:4, in the addition alone**: the resolution also reads the place window's link records, which the window brings with it. **§1:6, whole**: the instruction §7 below states. §1:1's resolution stands, as the record of which activation took in a tail record or a one-exchange item, and so do §1:5, §2 and §3.
 - **Partially supersedes** [ADR-0302](0302-the-matters-pass-records-what-it-decides-and-a-page-write-refuses-what-its-story-does-not-hold.md) — **six scopes.** **§2:2, whole, and §2:3's understanding arm**: understanding raises no flag (§8 below). **§3:3's members, in the addition alone**: `not_applied`. **§4:1's operation, in the addition alone**: `leave_flag` also records `not_applied`. **§5:2, whole, and §5:3's understanding arm**. **§5:6's first sentence's *"records the flag `left`"***: it records `not_applied`. **§7:2's and §7:4's safety-net arm**: there are no safety-net notes. Every other clause stands, §2:1, §2:4, §3:1, §3:2, §3:4–§3:6, §4:2–§4:6, §5:1, §5:4, §5:5, §6, §7:1, §7:3 and §7:5 included.
 - **Partially supersedes** [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md) — **one scope.** **§10:1, in the addition alone**: a kind whose medium holds a history but no stable item ids may declare an episode window instead (§7 below). Every other clause stands, §10:2 included.
+- Partially superseded: 2026-10-09 by ADR-0304 — five scopes. §3:3, whole: a run reads
+  only the page it replaces, and a rebuild reads none. §3:10, whole: what stands behind
+  a page version is what it took in and, unless it is rebuilt, what stands behind the
+  version before it on its own story's log; no other story's page stands behind it.
+  §4:1's and §4:3's fields, in the additions alone: a page write and its version also
+  carry whether the page was rebuilt. §5:1's reads, for a rebuild alone: where its
+  current page would be withheld from it, the tidy-up reads no current page and reads
+  every note and every held, frozen member episode. §5:7's last sentence, whole: a
+  story shown for the flag is not a page the run read, and nothing of its version is
+  recorded. Every other clause stands. These scoped replacements take effect on
+  ratification of ADR-0304. This reciprocal header record accompanies the numbered
+  draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
