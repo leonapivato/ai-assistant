@@ -313,8 +313,10 @@ is what the short view rendered, so a withheld summary gives an empty excerpt.
 
 A repeated note move names notes the first story no longer holds, so it is refused
 `no_notes` and changes nothing; that is the safe-to-repeat property ADR-0303 §9's table
-states for a move. Where the matters pass names notes that the hub's check drops (ADR-0303
-§8:8) and no episode, the store refuses the move `no_notes`, and the pass records the
+states for a move. Where the matters pass names no episode and every note it names is one
+the hub's check drops (ADR-0303 §8:8), the move reaches the store with no member and no
+note and is refused `no_members`. Where its notes survive the check but the story no
+longer holds them by the write, it is refused `no_notes`. Either way the pass records the
 flag `not_applied` (ADR-0303 §8:6). A merge still carries every note and logs `absorbed`
 and `merged_into`, with no line for each note: a merge says the two stories are one
 matter, and every note goes.
