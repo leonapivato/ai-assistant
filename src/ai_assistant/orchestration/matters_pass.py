@@ -27,17 +27,17 @@ decision's lines on the stories as they stand in its own transaction (§3:4).
 **By rule** (§5:3). A ``like_another`` flag whose two stories have since become one is
 recorded ``left`` with no model call.
 
-**Otherwise one completion** decides it: merge, split, move members, group the stories
-under a larger one, or leave them (ADR-0300 §9:3). The pass is shown the stories the
-flag concerns, each with its summary, its newest notes and its latest episodes, and the
-decisions recorded for those stories, first those whose flags concern the same
-stories, then the rest, each group newest first, up to its bound (§5:4). Its
-instruction says a flag raised again after a decision is decided as before unless what
-came to those stories since bears on it (§5:5). Each episode is shown once, under one
-label, with every story shown that holds it (#2775). The summary and every note are
-quoted source data attributed by their records, never by their text (ADR-0303 §3:7):
-the summary as the tidy-up's, with its mark beside it, and each note by who wrote it and
-its mark.
+**Otherwise one completion** decides it: merge, split, move members or notes, group the
+stories under a larger one, or leave them (ADR-0300 §9:3, ADR-0304 §9). The pass is
+shown the stories the flag concerns, each with its summary, its newest notes and its
+latest episodes, and the decisions recorded for those stories, first those whose flags
+concern the same stories, then the rest, each group newest first, up to its bound
+(§5:4). Its instruction says a flag raised again after a decision is decided as before
+unless what came to those stories since bears on it (§5:5). Each episode is shown once,
+under one label, with every story shown that holds it (#2775). The summary and every
+note are quoted source data attributed by their records, never by their text (ADR-0303
+§3:7): the summary as the tidy-up's, with its mark beside it, and each note by who wrote
+it and its mark.
 
 **The notes that go** (ADR-0303 §6, §8:7-§8:8). Each story is shown its notes, newest
 first, up to a bound, each under a label of the run's, so a split or a move can name
@@ -46,6 +46,13 @@ named notes only those the run showed held by the story the change moves from; a
 other name is dropped before the write and counted. The store then moves exactly the
 notes named, and no note by the activation it was written during. A merge names none:
 it carries every note of the story absorbed.
+
+**A move may name notes alone** (ADR-0304 §9), by label and no episode, so a note left
+on the wrong story moves without an episode. Where every note it names is one the hub's
+check drops, or it names none, it reaches the store with no member and no note and is
+refused ``no_members``; where its notes survive the check but the story no longer holds
+them by the write, it is refused ``no_notes``. Either way the flag is recorded
+``not_applied``, as for any refusal below.
 
 The reply names what it was shown by label, and the labels are the run's: each is
 mapped back to the story, the activation or the note this run read, so a decision about
@@ -275,10 +282,11 @@ _INSTRUCTION: Final = (
     "held by `story`, move to a new story. The notes named in `notes`, each shown under "
     "`story`, go with them: name the notes about the matter that moves, the user's own "
     "notes included. Every note not named stays.\n"
-    "- `move`: some episodes of one story belong to another. The episodes named, each "
-    "held by `from`, move to `to`, and the notes named in `notes`, each shown under "
-    "`from`, go with them; every note not named stays. Moving an episode `to` already "
-    "holds takes it out of `from`.\n"
+    "- `move`: some episodes or notes of one story belong to another. The episodes "
+    "named, each held by `from`, move to `to`, and the notes named in `notes`, each shown "
+    "under `from`, go with them; every note not named stays. Moving an episode `to` "
+    "already holds takes it out of `from`. A move may name notes alone, with `episodes` "
+    "empty, when only notes sit on the wrong story.\n"
     "- `group`: separate matters are parts of a larger one. The stories named in "
     "`stories` are grouped under `under`, the story shown that is the larger matter, "
     "or under a new story when `under` is null.\n"
@@ -303,7 +311,8 @@ _INSTRUCTION: Final = (
     '"episodes": ["<E label>"], "notes": ["<N label>"]}\n'
     '{"decision": "group", "stories": ["<S label>"], "under": "<S label>"}, '
     "or with `under` null for a new story.\n"
-    "`notes` may be an empty list where no note goes. A reply that goes on after its "
+    "`notes` may be an empty list where no note goes, and a move's `episodes` may be "
+    "empty where it moves notes alone. A reply that goes on after its "
     "object, or holds two different decisions, is not taken as a decision."
 )
 
@@ -352,11 +361,13 @@ class _Split(BaseModel):
 
 
 class _Move(BaseModel):
+    """A move: its episodes may be none where it names notes alone (ADR-0304 §9)."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
     decision: Literal["move"]
     source: str = Field(alias="from")
     to: str
-    episodes: tuple[str, ...] = Field(min_length=1)
+    episodes: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
 
 

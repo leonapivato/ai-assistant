@@ -314,7 +314,7 @@ def _first_line(listing: StoryListing, story_id: str) -> str | None:
     if view is None or view.story.merged_into is not None:
         return None
     if view.withheld:
-        return "  Summary: withheld, since not everything behind it may be shown."
+        return "  Summary: withheld from this reader."
     if not view.lines:
         return None
     marked = f"{OUTSIDE} " if view.outside else ""
@@ -570,7 +570,7 @@ def render_summary(console: Console, view: StorySummaryView) -> None:
     else:
         lines.append(f"Last tidied: {view.tidied_at.isoformat()} (version {view.version})")
         if view.withheld:
-            lines.append("Summary: withheld, since not everything behind it may be shown.")
+            lines.append("Summary: withheld from this reader.")
         else:
             lines.append(f"Summary: {OUTSIDE}" if view.outside else "Summary:")
             lines.extend(_summary_line(line) for line in view.lines)

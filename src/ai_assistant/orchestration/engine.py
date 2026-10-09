@@ -6623,7 +6623,7 @@ class Engine:
     # calls too.
 
     async def story_summary(self, story_id: Identifier) -> StorySummaryView | None:
-        """Read a story's summary as the owner is shown it (ADR-0303 §10:2, §3:9-§3:12)."""
+        """Read a story's summary as the owner is shown it (ADR-0303 §10:2, ADR-0304 §4)."""
         self._reject_if_closing()
         target = identifier(story_id, name="story_id")
         check_arguments("story_summary", max_bytes=self._max_payload_bytes, story_id=target)

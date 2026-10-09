@@ -39,7 +39,6 @@ from ai_assistant.core.types import (
     StorySummaryDraft,
     StorySummaryLine,
     StorySummaryRefusalReason,
-    StorySummaryVersionName,
 )
 from ai_assistant.orchestration.story_tidy_up import StoryTidyUp, TidyUpResult
 from ai_assistant.testing import FakeModelProvider, FakeStoryStore
@@ -250,6 +249,30 @@ async def test_the_instruction_states_what_adr_0303_has_it_state() -> None:
         "The summary does not repeat the records",
         "`two_matters`",
         "`like_another`",
+    ):
+        assert clause in instruction
+    # Retired whole by ADR-0303, restated by ADR-0304 §7 without their marks.
+    for clause in (
+        "A vague later remark leaves an earlier statement of the user's standing: only "
+        "the user's later, clear words replace it.",
+        "It says only what that source reported: do not blend sources in one line",
+    ):
+        assert clause in instruction
+
+
+async def test_the_instruction_states_what_adr_0304_has_it_state_of_the_other_stories() -> None:
+    """ADR-0304 §6:2-§6:3: shown only for the flag, nothing copied, sharing no reason."""
+    stories, memory, trip = await _trip()
+    model = FakeModelProvider(_reply(["A camping trip."]))
+
+    await _tidy_up(model, stories, memory).run(trip)
+
+    instruction = model.calls[0].messages[0].content
+    for clause in (
+        "The other stories are shown only so that you can judge the flag about them below",
+        "nothing of theirs is copied onto this summary",
+        "a separate story that looks like the same matter as this one",
+        "Sharing an episode is not by itself a reason to raise it",
     ):
         assert clause in instruction
     # Nothing of ADR-0300's retired protocol is asked for (ADR-0303 §5:2).
@@ -526,13 +549,9 @@ async def test_flags_name_the_other_stories_shown_by_identity() -> None:
         StoryFlag(kind=StoryFlagKind.TWO_MATTERS),
         StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other),
     )
-    # ADR-0303 §3:3: the other story's summary it was shown is recorded by its version.
-    theirs = await stories.current_summary(other)
-    assert theirs is not None
-    assert theirs.summary is not None
-    assert outcome.version.read_pages == (
-        StorySummaryVersionName(story=other, version=theirs.summary.version),
-    )
+    # ADR-0304 §3: a story shown for the flag is not a summary the run read, so the
+    # version records nothing of it.
+    assert outcome.version.read_pages == ()
 
 
 async def _lookalike() -> tuple[FakeStoryStore, FakeMemoryStore, str, str]:
@@ -549,8 +568,8 @@ async def _lookalike() -> tuple[FakeStoryStore, FakeMemoryStore, str, str]:
     return stories, memory, trip, alike
 
 
-async def test_a_story_a_search_finds_is_shown_by_its_first_line_and_recorded_as_read() -> None:
-    """ADR-0303 §5:7: lookalikes are found by search, not only by a shared episode."""
+async def test_a_story_a_search_finds_is_shown_by_its_first_line_and_not_recorded() -> None:
+    """ADR-0303 §5:7: lookalikes are found by search; ADR-0304 §3: none of them is read."""
     stories, memory, trip, alike = await _lookalike()
     model = FakeModelProvider(
         _reply(["A camping trip."], flags=[{"kind": "like_another", "story": "S1"}])
@@ -563,12 +582,7 @@ async def test_a_story_a_search_finds_is_shown_by_its_first_line_and_recorded_as
     assert shown["what_its_summary_says_the_matter_is"]["text"] == "Riverside camping."
     assert outcome.version is not None
     assert outcome.version.flags == (StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=alike),)
-    theirs = await stories.current_summary(alike)
-    assert theirs is not None
-    assert theirs.summary is not None
-    assert outcome.version.read_pages == (
-        StorySummaryVersionName(story=alike, version=theirs.summary.version),
-    )
+    assert outcome.version.read_pages == ()
 
 
 async def test_the_search_keeps_only_what_reaches_recalls_threshold() -> None:
@@ -663,8 +677,8 @@ async def test_a_failed_search_fails_the_run_and_writes_nothing() -> None:
     assert await _summary(stories, trip) is None
 
 
-async def test_a_marked_summary_of_another_story_marks_the_summary_it_is_shown_for() -> None:
-    """ADR-0303 §3:4: a summary the run read counts, another story's included."""
+async def test_a_marked_summary_of_another_story_marks_nothing_it_is_shown_for() -> None:
+    """ADR-0304 §3: a story shown for the flag is not read, so its mark spreads nowhere (#2794)."""
     stories, memory, trip = await _trip()
     other = await _story(stories, "a-1")
     await _note(stories, other, "A parks notice says the loop closes.", outside=True)
@@ -678,7 +692,28 @@ async def test_a_marked_summary_of_another_story_marks_the_summary_it_is_shown_f
     outcome = await _tidy_up(model, stories, memory).run(trip)
 
     (shown,) = _shown(model)["other_stories"]
+    # Shown marked, so the model knows what it judges the flag on; it marks nothing.
     assert shown["outside_content"] is True
+    assert outcome.version is not None
+    assert outcome.version.outside is False
+    assert outcome.version.read_pages == ()
+
+
+async def test_a_marked_current_summary_still_marks_the_summary_that_replaces_it() -> None:
+    """ADR-0303 §3:4 stands: the summary a run replaces is the one summary it reads."""
+    stories, memory, trip = await _trip()
+    await _note(stories, trip, "A parks notice says the loop closes.", outside=True)
+    await _tidy_up(
+        FakeModelProvider(_reply(["Riverside; a parks notice says the loop closes."])),
+        stories,
+        memory,
+    ).run(trip)
+    await _note(stories, trip, "Saturday works.")
+    model = FakeModelProvider(_reply(["A camping trip on Saturday."]))
+
+    outcome = await _tidy_up(model, stories, memory).run(trip)
+
+    assert _shown(model)["current_summary"]["outside_content"] is True
     assert outcome.version is not None
     assert outcome.version.outside is True
 

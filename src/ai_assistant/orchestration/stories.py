@@ -17,8 +17,8 @@ Four things the engine adds to the story store, and nothing else:
   limit is re-read at a smaller page size, so the caller gets the largest page that
   fits with a cursor resuming after it, rather than a refusal.
 * **The owner's summary** (:func:`owner_summary`, ADR-0303 §10:2). A story's summary
-  and its mark, or that it was withheld, and its newest notes with whether each is
-  pending, under ADR-0303 §3's default for the owner as reader: decided by
+  and its mark, and its newest notes with whether each is pending, under ADR-0304 §4's
+  minimum for the owner as reader: decided by
   :mod:`~ai_assistant.orchestration.story_privacy`, the one statement of that rule.
 
 Shared by :class:`~ai_assistant.orchestration.engine.Engine` and the canonical fake
@@ -47,7 +47,7 @@ from ai_assistant.core.types import (
     StoryView,
 )
 from ai_assistant.orchestration.payloads import canonical_payload, check_payload
-from ai_assistant.orchestration.story_privacy import SummaryVisibility, behind
+from ai_assistant.orchestration.story_privacy import SummaryVisibility
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -158,9 +158,14 @@ DEFAULT_STORY_SUMMARY_VIEW_NOTES: Final = 20
 _SUMMARY_READS: Final = 5
 
 
+#: The owner reading directly may be shown every record placed for the owner alone, so
+#: every note and the summary (ADR-0303 §3:9, ADR-0304 §4:1).
+_OWNER: Final = SummaryVisibility(owner_records=True)
+
+
 async def owner_summary(
     stories: StoryStore,
-    memory: MemoryStore,
+    memory: MemoryStore,  # noqa: ARG001 — the canonical fake engine passes it; #2803
     story_id: str,
     *,
     notes: int = DEFAULT_STORY_SUMMARY_VIEW_NOTES,
@@ -177,15 +182,10 @@ async def owner_summary(
     as it stood. A write to another story advances it too, and costs a read again, not
     a wrong answer.
 
-    **Under ADR-0303 §3's default, for the owner as reader.** The owner may be shown a
-    record placed for the owner alone, so every note is shown (§3:9). The summary is shown
-    only where everything behind it may be (§3:11): the version that wrote it is walked
-    (:func:`~ai_assistant.orchestration.story_privacy.behind`), and every episode behind
-    it is looked up in ``memory``, where the owner may be shown every record the store
-    holds, an open one included, as the owner's direct inspection reads every record
-    (ADR-0275 §7, §10). An episode no longer there, forgotten or expired, withholds the
-    summary (§3:12), as does a version the walk cannot read. The version log is
-    append-only, so walking it after the bracketed reads answers for the summary they read.
+    **Under ADR-0304 §4's minimum, for the owner as reader.** The owner may be shown a
+    record placed for the owner alone, so every note is shown (ADR-0303 §3:9) and so is
+    the summary (ADR-0304 §4:1), whatever stands behind it (§4:3): no version log is
+    walked and no episode is looked up, and ``memory`` is read for nothing.
 
     Returns:
         The summary, or ``None`` where the store holds no such story. A merged story's
@@ -194,7 +194,6 @@ async def owner_summary(
     Raises:
         StoryStoreError: If the story store cannot be read, or the story was written
             between every one of :data:`_SUMMARY_READS` bracketed reads.
-        MemoryStoreError: If an episode cannot be read.
     """
     for _ in range(_SUMMARY_READS):
         state = await stories.current_summary(story_id)
@@ -204,37 +203,18 @@ async def owner_summary(
             return StorySummaryView(story=state.story)
         held = await _all_notes(stories, story_id)
         if await stories.current_summary(story_id) == state:
-            shown = state.summary is not None and await _owner_may_see(
-                stories, memory, story_id, state.summary.version
-            )
-            return _summary_view(state, held, notes=notes, shown=shown)
+            return _summary_view(state, held, notes=notes)
     msg = "the story was written while its summary was read, every time it was read"
     raise StoryStoreError(msg)
 
 
-async def _owner_may_see(
-    stories: StoryStore, memory: MemoryStore, story_id: str, version: int
-) -> bool:
-    """Whether the owner may be shown the summary ``version`` wrote (ADR-0303 §3:11)."""
-    standing = await behind(stories, story_id, version)
-    if not standing.complete:
-        return False
-    found = (
-        await memory.get_many([episode_address(activation) for activation in standing.episodes])
-        if standing.episodes
-        else {}
-    )
-    episodes = [record for record in found.values() if isinstance(record, EpisodicMemory)]
-    return SummaryVisibility.of(episodes, owner_notes=True).summary(standing)
-
-
 def _summary_view(
-    state: StorySummaryState, held: list[StoryNote], *, notes: int, shown: bool
+    state: StorySummaryState, held: list[StoryNote], *, notes: int
 ) -> StorySummaryView:
     """The owner's view of a summary read as ``state`` stood, with every note it held."""
     summary = state.summary
-    visibility = SummaryVisibility(activations=frozenset(), owner_notes=True)
-    newest = [note for note in reversed(held) if visibility.note(note)][:notes]
+    shown = summary is not None and _OWNER.summary()
+    newest = [note for note in reversed(held) if _OWNER.note(note)][:notes]
     pending = {note.note_id for note in state.pending_notes}
     return StorySummaryView(
         story=state.story,

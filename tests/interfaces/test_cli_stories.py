@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from io import StringIO
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import pytest
@@ -48,6 +49,7 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     StoryNoteAuthor,
+    StoryPage,
     StoryRefusal,
     StoryRefusalReason,
     StoryRelation,
@@ -676,7 +678,7 @@ def _tidied(
 def test_list_shows_each_summary_first_line_its_mark_or_that_it_was_withheld(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
-    """ADR-0303 §10:3, read through the story summary command; §3:8 and §3:11 shown."""
+    """ADR-0303 §10:3, read through the story summary command; §3:8 and ADR-0304 §4 shown."""
     engine = _engine(_episode(_FROZEN), _episode(_OPEN, open_=True))
     plain = _create(engine, _activation(_FROZEN))
     _tidied(engine, plain, "A camping trip\nin May", "No Fridays")
@@ -704,12 +706,24 @@ def test_list_shows_each_summary_first_line_its_mark_or_that_it_was_withheld(
         ("story_summary", {"story_id": story}) for story in (never, empty, marked, plain)
     ]
 
+    # ADR-0304 §4:3, §5: forgetting what a summary took in withholds nothing from the owner.
     assert asyncio.run(engine.episode_memory.delete(f"activation:{_FROZEN}"))
     _clear(output)
     assert _invoke("story", "list")[0] == 0, output.getvalue()
-    withheld = "  Summary: withheld, since not everything behind it may be shown."
-    shown = [line for line in output.getvalue().splitlines() if not line.startswith("Story ")]
-    assert shown == [withheld, withheld, withheld]
+    assert output.getvalue().splitlines() == lines
+
+    # A view that says the summary was withheld is rendered as such, and nothing of it.
+    header = StoryHeader(story_id="story:w", created_at=_AT, merged_into=None)
+    listing = story_inspection.StoryListing(
+        StoryPage(stories=(header,), next_cursor=None),
+        MappingProxyType(
+            {"story:w": StorySummaryView(story=header, version=4, tidied_at=_AT, withheld=True)}
+        ),
+        frozenset(),
+    )
+    buffer = StringIO()
+    story_inspection.render_listing(Console(file=buffer, force_terminal=False, width=400), listing)
+    assert buffer.getvalue().splitlines()[1:] == ["  Summary: withheld from this reader."]
 
 
 def test_list_says_a_summary_too_large_to_read_rather_than_failing(
@@ -1086,7 +1100,7 @@ def test_summary_renders_a_withheld_summary_an_empty_one_and_the_notes_beyond_th
         (
             StorySummaryView(story=header, version=4, tidied_at=_AT, withheld=True, more_notes=3),
             [
-                "Summary: withheld, since not everything behind it may be shown.",
+                "Summary: withheld from this reader.",
                 "Notes, newest first: 3",
                 "  and 3 older notes not shown.",
             ],
