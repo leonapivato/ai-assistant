@@ -171,9 +171,13 @@ outside content says so in its words, and the page's mark (§3) says that some l
 > **Normative.** An **outside episode** is one whose trigger's `origin` is `outside`
 > (ADR-0284 §2:1), or whose activation's record of what it read shows outside content.
 
+> **Normative.** The pages a tidy-up's run **reads** are the current page it replaces
+> and each other story's page it is shown for its flags (§5), each as the version that
+> wrote it.
+
 > **Normative.** The current page is **marked** where the run that wrote it read a
-> marked note, an outside episode, or a marked current page. The hub sets the mark by
-> that rule, never by the model's output.
+> marked note, an outside episode, or a marked page. The hub sets the mark by that rule,
+> never by the model's output.
 
 A marked page stays marked through every later tidy-up, because each run reads the page
 it replaces: provenance travels, and a page that once took in "the email said" keeps
@@ -199,28 +203,44 @@ nothing, so neither test survives.
 > **Normative.** Until privacy is designed, a note is shown to a reader only where a
 > record placed for the owner alone may be shown to that reader, whoever wrote it.
 
+> **Normative.** What stands **behind** a page version is every note and every episode
+> it took in, and what stands behind each page version its run read: so, through the
+> page each run replaced, everything every earlier version of that story took in, and
+> through each other story's page a run was shown, everything behind that page's
+> version, however many stories that reaches.
+
 > **Normative.** Until privacy is designed, the current page is shown to a reader only
-> where every note and every episode that any version of that story's page took in may
-> be shown to that reader. Otherwise none of it is shown, and the reader is told that a
-> page was withheld.
+> where everything behind it may be shown to that reader. Otherwise none of it is
+> shown, and the reader is told that a page was withheld.
 
 > **Normative.** An episode or a note behind a page that the reader's caller cannot
 > establish may be shown, because it is open, forgotten, no longer held or not looked
 > up, withholds the page.
 
-The test reads the version log's identities and the reader's own answers about episodes
+The test reads the version logs' identities and the reader's own answers about episodes
 and the owner's records, as `PageVisibility` does today; it reads no line's text. It is
 cumulative because each run reads the page it replaces, so whatever any version took in
-may still be on the page.
+may still be on the page; and it follows the other stories' pages a run was shown,
+because a line shown for a flag may still have been copied onto the page. A story's page
+can reach its own earlier versions through another's, so the walk visits each version
+once.
 
 ### 4. The store
 
 > **Normative.** A page write takes the new current page's lines, the notes and episodes
-> its run read and so takes in, its flags and its mark, and writes no note.
+> its run read and so takes in, the other stories' page versions its run read, its
+> flags and its mark, and writes no note.
+
+> **Normative.** An other story's page version a page write names is checked only as an
+> identity the store holds, refused `unknown_story` where the store holds no such story
+> and malformed, a `ValueError`, where it names the story written or a version that
+> story has not reached. It is never a member, so ADR-0302 §7's `not_held` does not
+> apply to it.
 
 > **Normative.** The **version log** stays append-only, identities, instants and
 > enumerations only. Each version records when it was written, the notes and the
-> episodes it took in, the flags it raised, and whether the page it wrote is marked.
+> episodes it took in, the other stories' page versions its run read (§3), the flags it
+> raised, and whether the page it wrote is marked.
 
 > **Normative.** `StoryStore.write_page` refuses as ADR-0300 §3:10 and ADR-0302 §7 state,
 > less what this decision retires: no line cites a note, so it answers `unknown_note`
@@ -238,8 +258,9 @@ may still be on the page.
 > **Normative.** The store's file is migrated in place under a new layout version: every
 > note is kept, its resting activation becoming the activation it was written during;
 > every version and the current page's text are kept; what a version recorded of each
-> line's citations, its safety-net notes and its supersession marks is dropped; and the
-> current page is marked where any of its lines was.
+> line's citations, its safety-net notes and its supersession marks is dropped; a
+> version written before records no other story's page version; and the current page
+> is marked where any of its lines was.
 
 Nothing of ADR-0300 is live outside a test hub until the phases' cutover (ADR-0300
 §13), so no record outside a test hub carries what the migration drops.
@@ -272,7 +293,8 @@ Nothing of ADR-0300 is live outside a test hub until the phases' cutover (ADR-03
 > the other stories its episodes belong to, the stories of the episodes a search of the
 > memory store finds, as recall searches it (ADR-0281), with a query built from what the
 > run reads; each story is shown by its current page's first line, and no more than a
-> composition-root constant counts them all.
+> composition-root constant counts them all. Each page so shown is a page the run read
+> (§3), and its version is recorded with the version the run writes.
 
 > **Normative.** A tidy-up does not start on a story to which nothing but outside
 > content has come: every activation member's trigger `origin` is `outside`, and every
@@ -535,7 +557,9 @@ judgment. A refused change is recorded as what happened.
 
 **What it costs.** Every guarantee that rode a line's citation now rides the page as a
 whole: one mark for the page, sticky across versions, and a privacy test over everything
-any version took in, which withholds a whole page where ADR-0300 withheld a line. Notes
+behind it, the other stories' pages its runs were shown included, which withholds a
+whole page where ADR-0300 withheld a line. An activation that reads a marked page counts
+as having read outside content, so the notes it writes are marked too. Notes
 are shown to a reader only where the owner's own records are, so a reader on a wider
 audience sees no note. The page loses the user's verbatim notes as a guarantee and keeps
 them as an instruction. A merge that names no note leaves its notes on the merged story.
@@ -546,8 +570,8 @@ lanes on a milestone that was code-complete.
 
 - **Privacy** beyond §3's default, which withholds every note from a reader on a wider
   audience than the owner's own records and a whole page with it; and the cost of the
-  page's test, which reads everything any version took in. If the test hub shows the
-  cost, a version may record what its run established.
+  page's test, which walks everything behind the page, other stories' pages included.
+  If the test hub shows the cost, a version may record what its run established.
 - **Forgetting**, all of it, now including what forgetting an episode a page took in does
   to the page, which §3's test withholds.
 - **Whether a page's mark can ever be cleared.** It is cleared only by a decision that
