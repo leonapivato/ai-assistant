@@ -162,6 +162,7 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     StoryNoteAuthor,
+    StoryNoteId,
     StoryOutcome,
     TextChannelPayload,
     TextChannelResult,
@@ -183,6 +184,7 @@ from ai_assistant.core.types import (
     secret_value,
     story_members,
     story_move_members,
+    story_note_ids,
     story_note_text,
     user_message,
 )
@@ -2895,16 +2897,25 @@ class FakeAssistantEngine:
         return self._checked(outcome, "merge_stories")
 
     async def split_story(
-        self, story_id: Identifier, members: Sequence[StoryMember]
+        self,
+        story_id: Identifier,
+        members: Sequence[StoryMember],
+        *,
+        notes: Sequence[StoryNoteId] = (),
     ) -> StoryOutcome:
-        """Split ``members`` off a story into a new one, as the owner (ADR-0289 §§3-4)."""
+        """Split ``members`` off a story into a new one, with the notes named (ADR-0303 §10:1)."""
         source = identifier(story_id, name="story_id")
         named = story_members(members)
+        going = story_note_ids(notes)
         check_arguments(
-            "split_story", max_bytes=self._max_payload_bytes, story_id=source, members=named
+            "split_story",
+            max_bytes=self._max_payload_bytes,
+            story_id=source,
+            members=named,
+            notes=going,
         )
-        self.calls.append(("split_story", {"story_id": source, "members": named}))
-        outcome = await self.story_store.split(source, named, actor=StoryActor.OWNER)
+        self.calls.append(("split_story", {"story_id": source, "members": named, "notes": going}))
+        outcome = await self.story_store.split(source, named, actor=StoryActor.OWNER, notes=going)
         return self._checked(outcome, "split_story")
 
     async def story(
@@ -3022,23 +3033,35 @@ class FakeAssistantEngine:
         return self._checked(outcome, "add_story_note")
 
     async def move_story_members(
-        self, story_id: Identifier, to: Identifier, members: Sequence[StoryMember]
+        self,
+        story_id: Identifier,
+        to: Identifier,
+        members: Sequence[StoryMember],
+        *,
+        notes: Sequence[StoryNoteId] = (),
     ) -> StoryOutcome:
-        """Move activation members from one story to another, as the owner (ADR-0300 §3:14)."""
+        """Move activation members between stories, with the notes named (ADR-0303 §10:1)."""
         source = identifier(story_id, name="story_id")
         target = identifier(to, name="to")
         named = story_move_members(source, target, members)
+        going = story_note_ids(notes)
         check_arguments(
             "move_story_members",
             max_bytes=self._max_payload_bytes,
             story_id=source,
             to=target,
             members=named,
+            notes=going,
         )
         self.calls.append(
-            ("move_story_members", {"story_id": source, "to": target, "members": named})
+            (
+                "move_story_members",
+                {"story_id": source, "to": target, "members": named, "notes": going},
+            )
         )
-        outcome = await self.story_store.move(source, target, named, actor=StoryActor.OWNER)
+        outcome = await self.story_store.move(
+            source, target, named, actor=StoryActor.OWNER, notes=going
+        )
         return self._checked(outcome, "move_story_members")
 
     async def beliefs(

@@ -15097,12 +15097,32 @@ class AssistantEngine(Protocol):
         ...
 
     async def split_story(
-        self, story_id: Identifier, members: Sequence[StoryMember]
+        self,
+        story_id: Identifier,
+        members: Sequence[StoryMember],
+        *,
+        notes: Sequence[StoryNoteId] = (),
     ) -> StoryOutcome:
         """Split ``members`` off a story into a new one, as the owner (ADR-0289 §§3-4).
 
+        Exactly the notes named in ``notes`` that the story holds go to the new
+        story, in the split's transaction, and are pending there; a note named that
+        it does not hold is passed over, and no note goes by the activation it was
+        written during (ADR-0303 §6:1-§6:2, §10:1). Every other note stays.
+
+        Args:
+            story_id: The story split.
+            members: The members that leave it, every one a current member.
+            notes: The notes that go with them; none by default.
+
+        Returns:
+            The new story's id, or a refusal: ``no_members``, ``unknown_story``,
+            ``merged_story``, or ``not_a_member`` naming a member the story does
+            not hold.
+
         Raises:
-            ValueError: If an argument is malformed.
+            ValueError: If an argument is malformed: a note id that is not an
+                integer in ``[1, 2**63)`` among them.
             StoryStoreError: If the story store cannot be read or written.
         """
         ...
@@ -15172,21 +15192,25 @@ class AssistantEngine(Protocol):
     # --- the story commands (ADR-0300 §8) -----------------------------------
     #
     # **Four more, over the story's page and where its matter stands.** Each names its
-    # story by id. The reads show the owner what ADR-0300 §11's default lets a reader
-    # be shown, with lines and notes resting on outside content marked (§8:4); the
-    # writes carry the owner as author or actor and no triggering activation (ADR-0289
-    # §4:4). A move, like a merge or a split, moves members a story already holds and
-    # checks no activation's record (ADR-0289 §4:3). A refusal is an outcome, never an
-    # exception.
+    # story by id. The reads show the owner what ADR-0303 §3's default lets a reader be
+    # shown, with the page's mark and each note's (§3:8); the writes carry the owner as
+    # author or actor and no triggering activation (ADR-0289 §4:4). A move, like a
+    # merge or a split, moves members a story already holds and checks no activation's
+    # record (ADR-0289 §4:3); a move or a split carries exactly the notes it names
+    # (ADR-0303 §6). A refusal is an outcome, never an exception.
 
     async def story_page(self, story_id: Identifier) -> StoryPageView | None:
-        """Read a story's page as the owner is shown it (ADR-0300 §8:3, §11).
+        """Read a story's page as the owner is shown it (ADR-0300 §8:3, ADR-0303 §10:2).
 
-        Its current page's lines, the notes and the episodes pending on it, and
-        when it was last tidied. A note is shown where the episode it rests on may
-        be shown to the owner, which is any episode the memory store still holds,
-        an open one included; a note the owner wrote is always shown; and a line
-        is shown where every note it cites is. What is withheld is counted.
+        When the page was last tidied; the current page's lines and its mark, or
+        that the page was withheld; and the story's notes, newest first up to the
+        view's bound, each with its id, its mark and whether it is pending, with the
+        count of those beyond it. The page is shown only where everything behind it
+        may be shown to the owner, which is every episode the memory store still
+        holds, an open one included; one behind it that is no longer held withholds
+        the whole page, and the view says so rather than showing a line (ADR-0303
+        §3:10-§3:12). The notes are listed so that the owner can name them in a
+        split or a move.
 
         Returns:
             The page, or ``None`` where the store holds no such story. A merged
@@ -15195,7 +15219,7 @@ class AssistantEngine(Protocol):
         Raises:
             ValueError: If the id is malformed.
             StoryStoreError: If the story store cannot be read.
-            MemoryStoreError: If an episode a note rests on cannot be read.
+            MemoryStoreError: If an episode behind the page cannot be read.
         """
         ...
 
@@ -15238,11 +15262,27 @@ class AssistantEngine(Protocol):
         ...
 
     async def move_story_members(
-        self, story_id: Identifier, to: Identifier, members: Sequence[StoryMember]
+        self,
+        story_id: Identifier,
+        to: Identifier,
+        members: Sequence[StoryMember],
+        *,
+        notes: Sequence[StoryNoteId] = (),
     ) -> StoryOutcome:
         """Move activation members from one story to another, as the owner (ADR-0300 §3:14).
 
-        Every note resting on a moved activation goes with it, in one transaction.
+        Exactly the notes named in ``notes`` that the first story holds go to the
+        second with the members, in one transaction, and are pending there; a note
+        named that it does not hold is passed over, and no note goes by the
+        activation it was written during (ADR-0303 §6:1-§6:2, §10:1). Every other
+        note stays.
+
+        Args:
+            story_id: The story moved from.
+            to: The story moved to, another story.
+            members: The activation members to move, every one a current member of
+                the first story.
+            notes: The notes that go with them; none by default.
 
         Returns:
             The second story's id with the count of lines appended, or a refusal:
@@ -15251,8 +15291,9 @@ class AssistantEngine(Protocol):
             story does not hold.
 
         Raises:
-            ValueError: If an argument is malformed: a story member named, or the
-                two stories the same.
+            ValueError: If an argument is malformed: a story member named, the two
+                stories the same, or a note id that is not an integer in
+                ``[1, 2**63)``.
             StoryStoreError: If the story store cannot be read or written.
         """
         ...

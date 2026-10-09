@@ -372,6 +372,7 @@ from ai_assistant.core.types import (
     routed_listing_arm,
     secret_value,
     story_move_members,
+    story_note_ids,
     story_note_text,
 )
 from ai_assistant.interfaces import episode_inspection, story_inspection
@@ -1799,6 +1800,16 @@ _STORY_STORY_OPTION = typer.Option(
     callback=_present_ids,
     help="A story member, by its story id. Repeat for more.",
 )
+_STORY_NOTE_OPTION = typer.Option(
+    None,
+    "--note",
+    "-n",
+    help=(
+        "A note that goes with the members, by the number 'assistant story page' shows "
+        "after its #. Repeat for more. A note the story does not hold is passed over; "
+        "no note goes unless it is named."
+    ),
+)
 _STORY_ID_ARGUMENT = typer.Argument(
     ..., callback=_present_id, help="The story's id (see 'assistant story list')."
 )
@@ -1896,17 +1907,27 @@ def story_split(
     story_id: str = _STORY_ID_ARGUMENT,
     activation: list[str] | None = _STORY_ACTIVATION_OPTION,
     story: list[str] | None = _STORY_STORY_OPTION,
+    note: list[int] | None = _STORY_NOTE_OPTION,
 ) -> None:
-    """Move the members named out of a story into a new story."""
+    """Move the members named out of a story into a new story, with the notes named."""
     members = _story_members(activation, story)
+    notes = _story_notes(note)
     raise typer.Exit(
         asyncio.run(
             _write_story(
                 "Split the members named into new story",
-                lambda engine: engine.split_story(story_id, members),
+                lambda engine: engine.split_story(story_id, members, notes=notes),
             )
         )
     )
+
+
+def _story_notes(notes: list[int] | None) -> tuple[int, ...]:
+    """The notes a split or a move names (ADR-0303 §10:4), refused here if malformed."""
+    try:
+        return story_note_ids(notes or [])
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="'--note'") from exc
 
 
 @story_app.command("list")
@@ -1914,7 +1935,11 @@ def story_list(
     limit: int = typer.Option(DEFAULT_PAGE_SIZE, "--limit", help="How many stories at most."),
     cursor: int | None = typer.Option(None, "--cursor", help="A previous page's next cursor."),
 ) -> None:
-    """List every story, newest first."""
+    """List every story, newest first, each with its page's first line where it has one.
+
+    A page resting on outside content is labelled so, and a page withheld because not
+    everything behind it may be shown says so instead of showing a line.
+    """
     try:
         check_story_page(cursor, limit)
     except ValueError as exc:
@@ -1925,11 +1950,11 @@ def story_list(
 async def _list_stories(*, cursor: int | None, limit: int) -> int:
     try:
         engine = await _open_engine()
-        page = await engine.stories(cursor=cursor, limit=limit)
+        listing = await story_inspection.read_listing(engine, cursor=cursor, limit=limit)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
-    story_inspection.render_listing(console, page)
+    story_inspection.render_listing(console, listing)
     return _EXIT_OK
 
 
@@ -1982,11 +2007,12 @@ async def _read_story[T](
 
 @story_app.command("page")
 def story_page(story_id: str = _STORY_ID_ARGUMENT) -> None:
-    """Show a story's page: when it was last tidied, its lines, then what is pending.
+    """Show a story's page: when it was last tidied, its lines, then its notes.
 
-    A line or a note resting on outside content is labelled so. A note resting on an
-    episode no longer held, and a line citing one, are withheld and counted. A merged
-    story shows only the story it was merged into.
+    The page and a note resting on outside content are labelled so. A page behind
+    which an episode is no longer held is withheld whole, and says so. Each note
+    shows its number, by which a split or a move names it, and whether it is pending.
+    A merged story shows only the story it was merged into.
     """
     raise typer.Exit(
         asyncio.run(
@@ -2050,17 +2076,19 @@ def story_move(
         ..., "--to", callback=_present_id, help="The story they are moved into."
     ),
     activation: list[str] | None = _STORY_ACTIVATION_OPTION,
+    note: list[int] | None = _STORY_NOTE_OPTION,
 ) -> None:
-    """Move the activations named from one story to another, with the notes resting on them."""
+    """Move the activations named from one story to another, with the notes named."""
     try:
         members = story_move_members(story_id, to, _story_members(activation, None))
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    notes = _story_notes(note)
     raise typer.Exit(
         asyncio.run(
             _write_story(
                 "Moved to story",
-                lambda engine: engine.move_story_members(story_id, to, members),
+                lambda engine: engine.move_story_members(story_id, to, members, notes=notes),
             )
         )
     )

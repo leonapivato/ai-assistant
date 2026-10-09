@@ -488,13 +488,13 @@ def admitted_to_understanding[R: MemoryRecord](
 def admits_owner_placed(supply: TurnSupply) -> bool:
     """Whether a record placed for the owner alone may be shown to this audience.
 
-    ADR-0300 §11:1's test for a note the user wrote directly, which rests on no
-    episode: it is shown "only where a record placed for the owner alone may be
-    shown". That is :func:`admitted_to_understanding`'s own answer for an
-    ``OWNER``-placed record, read off the posture rather than off a record built to
-    ask it: on a channel of bounded audience the predicate withholds nothing, and on
-    one of unbounded audience :func:`_speakable` withholds every record whose reach
-    is not ``ANYONE``.
+    ADR-0303 §3:9's test for a note, whoever wrote it: it is shown "only where a
+    record placed for the owner alone may be shown to that reader". That is
+    :func:`admitted_to_understanding`'s own answer for an ``OWNER``-placed record,
+    read off the posture rather than off a record built to ask it: on a channel of
+    bounded audience the predicate withholds nothing, and on one of unbounded
+    audience :func:`_speakable` withholds every record whose reach is not
+    ``ANYONE``.
 
     Args:
         supply: The reader's audience posture.

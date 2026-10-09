@@ -2482,7 +2482,10 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``pending_episodes``, ``withheld_lines`` and ``withheld_notes``; and
 #:     ``StoryDecision`` gains ``not_applied``, which the engine's story log carries
 #:     through ``StoryLogLine``. A peer at 85 would refuse each (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 86
+#: 87: ADR-0303 §11:2 gives ``AssistantEngine.split_story`` and ``move_story_members``
+#:     the keyword ``notes``, the notes that go (§10:1), which the request carries;
+#:     a hub at 86 refuses the argument as one its signature does not declare.
+PROTOCOL_VERSION: Final[int] = 87
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

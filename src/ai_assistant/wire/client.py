@@ -79,6 +79,7 @@ from ai_assistant.core.types import (
     secret_value,
     story_members,
     story_move_members,
+    story_note_ids,
     story_note_text,
     user_message,
 )
@@ -167,6 +168,7 @@ if TYPE_CHECKING:
         StoryHeader,
         StoryLogPage,
         StoryMember,
+        StoryNoteId,
         StoryNoteOutcome,
         StoryOutcome,
         StoryPage,
@@ -740,13 +742,18 @@ class HubClient:
         )
 
     async def split_story(
-        self, story_id: Identifier, members: Sequence[StoryMember]
+        self,
+        story_id: Identifier,
+        members: Sequence[StoryMember],
+        *,
+        notes: Sequence[StoryNoteId] = (),
     ) -> StoryOutcome:
-        """Split ``members`` off a story into a new one, as the owner (ADR-0289 §§3-4)."""
+        """Split ``members`` off a story into a new one, with the notes named (ADR-0303 §10:1)."""
         source = identifier(story_id, name="story_id")
         named = story_members(members)
+        going = story_note_ids(notes)
         return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
-            "split_story", story_id=source, members=named
+            "split_story", story_id=source, members=named, notes=going
         )
 
     async def story(
@@ -819,14 +826,20 @@ class HubClient:
         )
 
     async def move_story_members(
-        self, story_id: Identifier, to: Identifier, members: Sequence[StoryMember]
+        self,
+        story_id: Identifier,
+        to: Identifier,
+        members: Sequence[StoryMember],
+        *,
+        notes: Sequence[StoryNoteId] = (),
     ) -> StoryOutcome:
-        """Move activation members from one story to another, as the owner (ADR-0300 §3:14)."""
+        """Move activation members between stories, with the notes named (ADR-0303 §10:1)."""
         source = identifier(story_id, name="story_id")
         target = identifier(to, name="to")
         named = story_move_members(source, target, members)
+        going = story_note_ids(notes)
         return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
-            "move_story_members", story_id=source, to=target, members=named
+            "move_story_members", story_id=source, to=target, members=named, notes=going
         )
 
     async def beliefs(

@@ -276,7 +276,7 @@ def test_link_unlink_split_and_merge_reach_the_engine_and_say_what_they_left(
     assert _invoke("story", "split", second, "-a", _OPEN)[0] == 0
     assert engine.calls[-1] == (
         "split_story",
-        {"story_id": second, "members": (_activation(_OPEN),)},
+        {"story_id": second, "members": (_activation(_OPEN),), "notes": ()},
     )
     split_off = asyncio.run(engine.stories()).stories[0].story_id
     assert f'new story "{split_off}"' in output.getvalue()
@@ -395,6 +395,10 @@ def test_a_refused_write_exits_non_zero_and_names_the_story_merged_into(
         ["move", "story:x", "--to", " story:x ", "-a", _FROZEN],
         ["move", "story:x", "--to", " ", "-a", _FROZEN],
         ["move", "story:x", "--to", "story:y", "-a", " "],
+        ["split", "story:x", "-a", _FROZEN, "--note", "0"],
+        ["split", "story:x", "-a", _FROZEN, "--note", "#3"],
+        ["move", "story:x", "--to", "story:y", "-a", _FROZEN, "-n", "-2"],
+        ["move", "story:x", "--to", "story:y", "-a", _FROZEN, "-n", str(2**63)],
     ],
 )
 def test_a_malformed_argument_is_a_usage_error_before_any_engine(
@@ -624,7 +628,10 @@ def test_list_pages_newest_first_with_a_continuation(
     assert asyncio.run(engine.merge_stories(absorbed, kept)).refusal is None
     _wire(monkeypatch, engine)
     assert _invoke("story", "list", "--limit", "1")[0] == 0
-    assert engine.calls[-1] == ("stories", {"cursor": None, "limit": 1})
+    assert engine.calls[-2:] == [
+        ("stories", {"cursor": None, "limit": 1}),
+        ("story_page", {"story_id": kept}),
+    ]
     first = output.getvalue().splitlines()
     assert first[0].startswith(f'Story "{kept}"  created ')
     cursor = first[1].removeprefix("Next cursor: ")
@@ -638,6 +645,131 @@ def test_list_pages_newest_first_with_a_continuation(
     output.seek(0)
     assert _invoke("story", "list")[0] == 0
     assert output.getvalue() == "No stories.\n"
+
+
+def _tidied(
+    engine: FakeAssistantEngine, story: Identifier, *lines: str, outside: bool = False
+) -> None:
+    """Write ``story``'s page as a tidy-up would, taking in its frozen episode."""
+    stories = engine.story_store
+    state = asyncio.run(stories.current_page(story))
+    assert state is not None
+    written = asyncio.run(
+        stories.write_page(
+            story,
+            StoryPageDraft(
+                lines=tuple(StoryPageLine(text=line) for line in lines),
+                took_in_notes=tuple(note.note_id for note in state.pending_notes),
+                took_in_episodes=(_FROZEN,),
+                outside=outside,
+            ),
+            as_of=state.as_of,
+        )
+    )
+    assert written.version is not None
+
+
+def test_list_shows_each_page_first_line_its_mark_or_that_it_was_withheld(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """ADR-0303 §10:3, read through the story page command; §3:8 and §3:11 shown."""
+    engine = _engine(_episode(_FROZEN), _episode(_OPEN, open_=True))
+    plain = _create(engine, _activation(_FROZEN))
+    _tidied(engine, plain, "A camping trip\nin May", "No Fridays")
+    marked = _create(engine, _activation(_FROZEN))
+    _tidied(engine, marked, "Riverside, per the campground's email", outside=True)
+    empty = _create(engine, _activation(_FROZEN))
+    _tidied(engine, empty)
+    never = _create(engine, _activation(_OPEN))
+    absorbed = _create(engine, _activation(_OPEN))
+    assert asyncio.run(engine.merge_stories(absorbed, never)).refusal is None
+    _wire(monkeypatch, engine)
+    assert _invoke("story", "list")[0] == 0, output.getvalue()
+    lines = output.getvalue().splitlines()
+    assert len(lines) == 7
+    assert lines[0].startswith(f'Story "{absorbed}"')
+    assert lines[0].endswith(f'merged into "{never}"')
+    assert lines[1].startswith(f'Story "{never}"')
+    assert lines[2].startswith(f'Story "{empty}"')
+    assert lines[3].startswith(f'Story "{marked}"')
+    assert lines[4] == '  [outside content] "Riverside, per the campground\'s email"'
+    assert lines[5].startswith(f'Story "{plain}"')
+    assert lines[6] == '  "A camping trip\\nin May"'
+    # A merged story's page is not asked for: its header says where it went.
+    assert [call for call in engine.calls if call[0] == "story_page"] == [
+        ("story_page", {"story_id": story}) for story in (never, empty, marked, plain)
+    ]
+
+    assert asyncio.run(engine.episode_memory.delete(f"activation:{_FROZEN}"))
+    _clear(output)
+    assert _invoke("story", "list")[0] == 0, output.getvalue()
+    withheld = "  Page: withheld, since not everything behind it may be shown."
+    shown = [line for line in output.getvalue().splitlines() if not line.startswith("Story ")]
+    assert shown == [withheld, withheld, withheld]
+
+
+def test_list_says_a_page_too_large_to_read_rather_than_failing(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    engine = _engine(_episode(_FROZEN), max_payload_bytes=2048)
+    large = _create(engine, _activation(_FROZEN))
+    for index in range(3):
+        written = asyncio.run(engine.add_story_note(large, f"{index} " + "n" * 800))
+        assert written.note is not None
+    small = _create(engine, _activation(_FROZEN))
+    _tidied(engine, small, "A short page")
+    _wire(monkeypatch, engine)
+    assert _invoke("story", "list")[0] == 0, output.getvalue()
+    lines = output.getvalue().splitlines()
+    assert lines[0].startswith(f'Story "{small}"')
+    assert lines[1] == '  "A short page"'
+    assert lines[2].startswith(f'Story "{large}"')
+    assert lines[3] == "  Page: too large to read here."
+
+
+def test_split_and_move_carry_the_notes_named(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """ADR-0303 §10:4: the notes that go are named by number; the rest stay."""
+    engine = _engine(_episode(_FROZEN), _episode(_OPEN, open_=True))
+    source = _create(engine, _activation(_FROZEN), _activation(_OPEN))
+    target = _create(engine, _activation(_OPEN))
+    first = asyncio.run(engine.add_story_note(source, "No Fridays")).note
+    second = asyncio.run(engine.add_story_note(source, "Riverside")).note
+    assert first is not None
+    assert second is not None
+    _wire(monkeypatch, engine)
+    code, _ = _invoke(
+        "story", "split", source, "-a", _FROZEN, "--note", str(first.note_id), "-n", "999"
+    )
+    assert code == 0, output.getvalue()
+    assert engine.calls[-1] == (
+        "split_story",
+        {"story_id": source, "members": (_activation(_FROZEN),), "notes": (first.note_id, 999)},
+    )
+    split_off = asyncio.run(engine.stories()).stories[0].story_id
+    off = asyncio.run(engine.story_page(split_off))
+    assert off is not None
+    assert [shown.note for shown in off.notes] == [first]
+    code, _ = _invoke(
+        "story", "move", source, "--to", target, "-a", _OPEN, "-n", str(second.note_id)
+    )
+    assert code == 0, output.getvalue()
+    assert engine.calls[-1] == (
+        "move_story_members",
+        {
+            "story_id": source,
+            "to": target,
+            "members": (_activation(_OPEN),),
+            "notes": (second.note_id,),
+        },
+    )
+    there = asyncio.run(engine.story_page(target))
+    assert there is not None
+    assert [shown.note for shown in there.notes] == [second]
+    left = asyncio.run(engine.story_page(source))
+    assert left is not None
+    assert left.notes == ()
 
 
 def test_every_change_has_a_rendering() -> None:
@@ -986,7 +1118,7 @@ def test_move_names_activations_only_and_says_where_they_went(
     assert code == 0, output.getvalue()
     assert engine.calls[-1] == (
         "move_story_members",
-        {"story_id": source, "to": target, "members": (_activation(_FROZEN),)},
+        {"story_id": source, "to": target, "members": (_activation(_FROZEN),), "notes": ()},
     )
     assert output.getvalue() == f'Moved to story "{target}"; 2 change-log lines appended.\n'
     _clear(output)
