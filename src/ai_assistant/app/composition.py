@@ -349,8 +349,10 @@ STORY_TIDY_UP_DECISIONS: Final = STORY_TIDY_UP_OTHER_STORIES
 #: drains over a few runs rather than in one long one; a flag decided by rule needs no
 #: completion and is not counted. **Episodes per story: 6**, its latest links, so a
 #: split or a move can name what came to the story most recently, which is where a
-#: page starts to look like two matters; the flag's own input is always shown besides.
-#: **Pending notes per story: 5**, its newest. **Excerpt: 1,000 characters**, half the
+#: page starts to look like two matters. **Notes per story: 5**, its newest, pending or
+#: not, each under a label a split or a move may name so that it goes too (ADR-0303
+#: §8:7), on the episodes' reasoning: the notes about the matter that moves are mostly
+#: the recent ones. **Excerpt: 1,000 characters**, half the
 #: tidy-up's, because a completion here is shown two or more stories' episodes and
 #: decides what they are about rather than folding in what was settled. A run's time
 #: is bounded by ``scheduler_run_budget``, consolidation's, on whose schedule it runs.

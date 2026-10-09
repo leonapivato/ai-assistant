@@ -3,14 +3,18 @@
 Read by the matters pass (§5) and by the tidy-up (§6); neither is a Protocol, and this
 module is the one place both work the two questions out from the store's own records.
 
-**What names a flag** (§2). A tidy-up's flag is named by the story whose page version
-recorded it, that version's number and the flag as recorded. Understanding's is named
-by its activation, and exists where ``added`` lines naming that activation, with the
-actor ``understanding`` and that activation as trigger, stand on two or more stories.
-The stories a flag **concerns** are, for a tidy-up's, the story that raised it and
-then, on ``like_another``, the story it names; for understanding's, each story holding
-one of those lines, in the order of their sequence numbers; each followed through
-merges to the story it was merged into, and each counted once, at its first place.
+**What names a flag** (§2, ADR-0303 §8:1-§8:3). A tidy-up's flags are the only flags:
+each is named by the story whose page version recorded it, that version's number and
+the flag as recorded. Understanding linking one input to two stories is that many links
+and raises none, so no flag is ever read from the change logs. A ``decided`` line that
+already answers a flag named by an activation, written before ADR-0303, stays in the
+log and is still read as a decision. The stories a flag **concerns** are, for a
+tidy-up's, the story that raised it and then, on ``like_another``, the story it names;
+for one named by an activation, as an earlier decision answering it names them, each
+story holding an ``added`` line naming that activation with the actor
+``understanding`` and that activation as trigger, in the order of their sequence
+numbers; each followed through merges to the story it was merged into, and each counted
+once, at its first place.
 
 **The decisions recorded for a story** (§3:6) are the ``decided`` lines on its own
 change log and on the change log of every story merged into it, directly or through a
@@ -19,10 +23,11 @@ line on each story its flag concerned, so the lines are gathered into one decisi
 flag answered: a flag is decided once (§5:1), so its lines are one decision's.
 
 **No store read answers either question**, and ADR-0302 left the read of undecided
-flags open (*What stays open*): the stories holding understanding's lines for an
-activation are found only by reading change logs. So :func:`read_records` reads every
-story's header and change log, and, for the pass, its version log, page by page. What
-that costs grows with the store, which the test hub is where to measure.
+flags open (*What stays open*): which flags a ``decided`` line answers, and the stories
+an earlier decision on an activation's flag concerns, are found only by reading change
+logs. So :func:`read_records` reads every story's header and change log, and, for the
+pass, its version log, page by page. What that costs grows with the store, which the
+test hub is where to measure.
 
 **It holds identities and instants only**: no story's page text and no note is read
 here, so nothing of it can reach a log line (ADR-0275 §8).
@@ -67,19 +72,15 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class RaisedFlag:
-    """A flag the store's records hold (ADR-0302 §2).
+    """A flag the store's records hold: a tidy-up's (ADR-0302 §2, ADR-0303 §8:3).
 
     Attributes:
         name: The flag's name, as a decision answers it.
         raised: The stories it concerns as raised, before any is followed through a
-            merge: for a tidy-up's flag the story that raised it, then on
-            ``like_another`` the story it names; for understanding's the stories
-            holding its lines, by their first line's sequence number.
-        at: When it was raised: the version's instant for a tidy-up's flag, and for
-            understanding's the instant of the line that made it a flag, its second
-            story's first.
-        sequence: A tie-break in the order flags were raised: the version number for
-            a tidy-up's, and that line's sequence number for understanding's.
+            merge: the story that raised it, then on ``like_another`` the story it
+            names.
+        at: When it was raised: the instant of the version that recorded it.
+        sequence: A tie-break in the order flags were raised: that version's number.
     """
 
     name: StoryFlagName
@@ -89,7 +90,7 @@ class RaisedFlag:
 
     @property
     def kind(self) -> StoryFlag | None:
-        """The flag a tidy-up raised, or ``None`` for understanding's."""
+        """The flag the tidy-up raised; never ``None`` from :meth:`StoryRecords.flags`."""
         return self.name.flag
 
 
@@ -116,7 +117,11 @@ def _unique(items: Iterable[str]) -> tuple[str, ...]:
 
 
 def _is_understandings_line(line: StoryLogLine) -> bool:
-    """Whether ``line`` is one of understanding's lines for its activation (§2:2)."""
+    """Whether ``line`` is one of understanding's lines for its activation (§2:2).
+
+    Read only for the stories an earlier decision answering an activation's flag
+    concerns: such lines raise no flag (ADR-0303 §8:1).
+    """
     return (
         line.change is StoryChange.ADDED
         and line.member is not None
