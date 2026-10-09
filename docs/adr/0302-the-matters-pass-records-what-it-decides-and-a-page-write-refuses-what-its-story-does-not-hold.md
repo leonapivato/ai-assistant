@@ -1,6 +1,6 @@
 # 302. The matters pass records what it decides, and a page write refuses what its story does not hold
 
-- Status: Partially superseded by ADR-0303 (§2:2, whole, and §2:3's understanding arm; §3:3's members and §4:1's operation, in the additions alone; §5:2, whole, and §5:3's understanding arm; §5:6's *records the flag `left`*; §7:2's and §7:4's safety-net arm)
+- Status: Partially superseded by ADR-0303 (§2:2, whole, and §2:3's understanding arm; §3:3's members and §4:1's operation, in the additions alone; §5:2, whole, and §5:3's understanding arm; §5:6's *records the flag `left`*; §7:2's and §7:4's safety-net arm) and ADR-0304 (the page's names, in the renaming alone)
 - Date: 2026-10-08
 - Scope: [M42](https://github.com/leonapivato/ai-assistant/milestone/9): what the matters pass records of each flag it decides, and what a story's page write refuses ([#2761](https://github.com/leonapivato/ai-assistant/issues/2761)), and which route-table row ADR-0300's story commands take.
 - Dependency: ADR-0300, whose §3 [#2750](https://github.com/leonapivato/ai-assistant/pull/2750) and §5 [#2758](https://github.com/leonapivato/ai-assistant/pull/2758) implemented; ADR-0289, implemented.
@@ -15,6 +15,13 @@
   stands. These scoped replacements take effect on ratification of ADR-0303. This
   reciprocal header record accompanies the numbered draft under ADR-0070 and
   ADR-0082; the ratified body below is preserved.
+- Partially superseded: 2026-10-09 by ADR-0304 — one scope. The page's names, in the
+  renaming alone: a story's page is called its summary, and the names in the code, the
+  wire and the CLI follow; this body keeps its wording, and where it says *page* for a
+  story's page it means the summary. Every other clause stands. This scoped replacement
+  takes effect on ratification of ADR-0304. This reciprocal header record accompanies
+  the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified
+  body below are preserved.
 - **Changes a `core` surface.** `StoryStore` gains an operation and a keyword on five, and `StoryChange`, `StoryLogLine`, `StoryRefusalReason`, `StoryRefusal`, `StoryPageRefusalReason` and `StoryPageRefusal` change (§§3, 4 and 7 below): a Protocol change under golden rule 5, merged ratified before anything implements it.
 - **Partially supersedes** [ADR-0300](0300-a-story-keeps-a-page-of-notes-and-where-its-matter-stands-is-worked-out-from-records.md) — **four scopes, each in the addition alone.** **§3:10's page write**: it is also refused where it rests on, or takes in, what its story does not hold (§7 below). **§5:2's reads**: a tidy-up also reads the decisions recorded on its story's change log (§6 below). **§5:6's instruction**: it also states when a decided flag is raised again (§6 below). **§9:3's matters pass**: it records each decision in the change log, decides each flag once, and is shown the decisions already recorded (§§3–5 below). Every other clause stands, §3:8, §3:12–§3:14, §5:4, §5:7, §5:8, §9:2, §9:5 and §9:6 included.
 - **Partially supersedes** [ADR-0298](0298-the-gateway-names-a-browser-device-on-each-request-and-the-hub-checks-every-request-by-one-table.md) — **one scope.** **§5:1's table, in the addition alone**: its command-or-query row also names `story_page`, `story_standing`, `add_story_note` and `move_story_members`, the story commands ADR-0300 §8:3 adds to `AssistantEngine` (§9 below). No other row changes, and every other clause stands, §5:3 and §5:4 included.
