@@ -226,6 +226,11 @@ def _migrate(conn: sqlite3.Connection, version: int) -> None:
 
     Version 1 holds no page, so its page tables are created by :data:`_SCHEMA` like any
     other missing table; versions 2 and 3 hold one, which :func:`_migrate_3` rewrites.
+
+    Raises:
+        StoryStoreError: If a stored record is not one the earlier layout wrote, of
+            whatever shape: a record read as JSON may hold anything, and none of it
+            escapes as another error past the caller's cleanup.
     """
     if version == 1:
         for statement in _MIGRATE_1:
@@ -234,7 +239,11 @@ def _migrate(conn: sqlite3.Connection, version: int) -> None:
         for statement in _MIGRATE_2:
             conn.execute(statement)
     if version in {2, 3}:
-        _migrate_3(conn)
+        try:
+            _migrate_3(conn)
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            msg = f"a stored page record is not one the earlier layout wrote: {exc}"
+            raise StoryStoreError(msg) from exc
 
 
 def _migrate_3(conn: sqlite3.Connection) -> None:
@@ -314,7 +323,11 @@ def _named_in(record: dict[str, Any]) -> list[object]:
     ):
         msg = "a stored page version's citations are not lists of note ids"
         raise StoryStoreError(msg)
-    return [*(note for line in lines for note in line), *safety_net]
+    named = [*(note for line in lines for note in line), *safety_net]
+    if not all(type(note) is int for note in named):
+        msg = "a stored page version's citations are not lists of note ids"
+        raise StoryStoreError(msg)
+    return named
 
 
 _ACTIVATION = StoryMemberKind.ACTIVATION.value
