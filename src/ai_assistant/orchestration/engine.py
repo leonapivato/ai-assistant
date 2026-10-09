@@ -3476,9 +3476,9 @@ class Engine:
                 then the ``story_links_unrecorded`` rule never answers.
             interim_tidy_up: ADR-0300 §5's interim run, test-hub scaffolding removed
                 at the cutover (:mod:`~ai_assistant.orchestration.story_tidy_up_interim`):
-                after the story-links stage decides, a tidy-up is started, and not
-                awaited, for each story it linked the activation into — or ``None``,
-                and then none is. Only beside ``story_links``.
+                once the activation's episode is frozen, a tidy-up is started, and not
+                awaited, for each story the story-links stage linked it into (ADR-0303
+                §5:9) — or ``None``, and then none is. Only beside ``story_links``.
             matters_pass: ADR-0300 §9:3's matters pass, which
                 :meth:`decide_story_flags` runs — or ``None``, and then that operation
                 refuses. Only beside ``stories``, the store it reads and writes.
@@ -10086,6 +10086,9 @@ class Engine:
                             raise
                     except Exception:
                         capture_loss("terminal", "failed")
+                    # ADR-0303 §5:9's interim run, at the freeze: test-hub scaffolding,
+                    # removed at the cutover with `story_tidy_up_interim`.
+                    self._start_interim_tidy_ups(state)
                 failure = _stopped_failure(state, failure)
                 if failure is not None:
                     raise failure
@@ -12790,20 +12793,24 @@ class Engine:
                     raise
                 raise late from None
         working.story_links = decision
-        self._start_interim_tidy_ups(decision)
         if decision.outcome is StageOutcome.DONE:
             return StageResult(StageOutcome.DONE)
         return StageResult(decision.outcome, decision.error, tolerated=True)
 
-    def _start_interim_tidy_ups(self, decision: StoryLinksDecision) -> None:
-        """ADR-0300 §5's interim run: start each tidy-up the decision calls for, unawaited.
+    def _start_interim_tidy_ups(self, state: ActivationState) -> None:
+        """ADR-0300 §5's interim run: start each tidy-up the pass's links call for, unawaited.
 
         Test-hub scaffolding, removed at the cutover with
-        :mod:`~ai_assistant.orchestration.story_tidy_up_interim`. Each run is a task of
-        its own in a fresh context, as a chat read is (:meth:`_spawn_read`), so it
-        carries neither the activation's state nor its correlation scope, and is
-        tracked so :meth:`aclose` drains it (ADR-0042 §2). The pass does not wait for
-        it, and its finishing starts nothing (§5).
+        :mod:`~ai_assistant.orchestration.story_tidy_up_interim`. Called once the
+        activation is finalized, and starting runs only where its episode's freeze is
+        confirmed: the run starts when the episode of an activation the story-links
+        stage linked into a story is frozen, not when the link is written (ADR-0303
+        §5:9), so the episode that linked the story is one the run can read. A pass
+        whose story-links stage made no decision, and one whose episode was not frozen,
+        starts none. Each run is a task of its own in a fresh context, as a chat read is
+        (:meth:`_spawn_read`), so it carries neither the activation's state nor its
+        correlation scope, and is tracked so :meth:`aclose` drains it (ADR-0042 §2).
+        Nobody waits for it, and its finishing starts nothing (§5).
 
         **None is started once shutdown has begun.** The drain awaits the tasks it
         found when it started, and ``_closing`` is set before it looks; a pass still
@@ -12813,7 +12820,15 @@ class Engine:
         """
         if self._interim_tidy_up is None or self._closing:
             return
-        for run in self._interim_tidy_up.runs(decision):
+        working = state.working
+        if (
+            state.capture is None
+            or not state.capture.frozen
+            or not isinstance(working, _ActivationPass)
+            or working.story_links is None
+        ):
+            return
+        for run in self._interim_tidy_up.runs(working.story_links):
             task = asyncio.get_running_loop().create_task(run, context=contextvars.Context())
             self._inflight.add(task)
             task.add_done_callback(self._inflight.discard)
