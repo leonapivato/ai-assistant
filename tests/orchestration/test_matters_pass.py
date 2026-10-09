@@ -458,8 +458,16 @@ async def _split_flag() -> tuple[FakeStoryStore, MemoryStore, str]:
         f"{_REASONING} So, as I said: {_SPLIT}\n\n{_SPLIT}",
         f'The flag reads {{"kind": "two_matters"}}, and {{this}} is prose.\n{_SPLIT}',
         f"```json\n{_SPLIT}\n```",
+        f"{_REASONING} On reflection, {_SPLIT}",
     ],
-    ids=["prose-first", "prose-then-fence", "repeated", "other-objects-first", "fenced"],
+    ids=[
+        "prose-first",
+        "prose-then-fence",
+        "repeated",
+        "other-objects-first",
+        "fenced",
+        "after-a-comma-in-prose",
+    ],
 )
 async def test_a_decision_after_prose_is_taken(reply: str) -> None:
     stories, memory, trip = await _split_flag()
@@ -486,6 +494,17 @@ async def test_a_decision_after_prose_is_taken(reply: str) -> None:
             "the reply holds two different decisions",
         ),
         (
+            f'{{"candidate": {_SPLIT}',
+            "parse",
+            "the reply's decision is inside a larger JSON value",
+        ),
+        (f"[{_SPLIT}", "parse", "the reply's decision is inside a larger JSON value"),
+        (
+            f'{_REASONING}\n```json\n["one", {_SPLIT}',
+            "parse",
+            "the reply's decision is inside a larger JSON value",
+        ),
+        (
             f"{_REASONING}\n" + json.dumps({"decision": "merge", "story": "S1", "into": "S1"}),
             "check",
             "a merge names one story on both sides",
@@ -496,7 +515,17 @@ async def test_a_decision_after_prose_is_taken(reply: str) -> None:
             "the reply names an episode this run did not show held by that story",
         ),
     ],
-    ids=["no-decision", "reconsiders", "goes-on", "two-decisions", "merge-itself", "unshown"],
+    ids=[
+        "no-decision",
+        "reconsiders",
+        "goes-on",
+        "two-decisions",
+        "cut-off-object",
+        "cut-off-array",
+        "cut-off-array-element",
+        "merge-itself",
+        "unshown",
+    ],
 )
 async def test_a_refused_reply_writes_nothing_and_logs_why_without_its_text(
     reply: str, failed: str, problem: str
