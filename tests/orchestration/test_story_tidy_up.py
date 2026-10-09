@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from story_support import AT, EVENTS, activation, episode, failing, memory_of
+from structlog.testing import capture_logs
 
 from ai_assistant.core.types import (
     Message,
@@ -374,6 +375,31 @@ async def test_an_output_that_fails_to_parse_or_a_check_is_refused_whole(reply: 
     await _refused(reply, stories, memory, trip)
 
 
+async def test_a_refused_output_is_logged_with_the_check_that_refused_it_and_no_text() -> None:
+    stories, memory, trip = await _trip()
+    reply = _reply([("A line citing nothing shown, at Riverside.", ["N9"])])
+
+    with capture_logs() as logs:
+        problem = await _refused(reply, stories, memory, trip)
+
+    # #2778: the code-owned problem, and nothing of the reply or the page.
+    assert problem == "a line cites something other than this story's notes"
+    assert logs == [
+        {
+            "event": "story_tidy_up",
+            "log_level": "info",
+            "stage": "tidy_up",
+            "result": "refused",
+            "problem": problem,
+            "refusal": None,
+            "lines": None,
+            "took_in_notes": None,
+            "took_in_episodes": None,
+        }
+    ]
+    assert "Riverside" not in str(logs)
+
+
 async def test_the_users_own_note_must_stay_a_line_as_written() -> None:
     stories, memory, trip = await _trip()
     await _note(stories, trip, "Bring the blue tent.", author=StoryNoteAuthor.OWNER)
@@ -681,11 +707,19 @@ async def test_a_run_that_lost_a_race_is_refused_by_the_store_and_writes_nothing
     model = _Gated(_reply([("A camping trip.", ["N1"])]), before=rival)
     model.gate.set()
 
-    outcome = await _tidy_up(model, stories, memory).run(trip)
+    with capture_logs() as logs:
+        outcome = await _tidy_up(model, stories, memory).run(trip)
 
     assert outcome.result is TidyUpResult.STORE_REFUSED
     assert outcome.refusal is not None
     assert outcome.refusal.reason is StoryPageRefusalReason.PAGE_MOVED_ON
+    # #2778: the hub's log says what the store refused the write for.
+    (logged,) = logs
+    assert (logged["result"], logged["problem"], logged["refusal"]) == (
+        "store_refused",
+        None,
+        "page_moved_on",
+    )
     state = await stories.current_page(trip)
     assert state is not None
     assert state.page is not None

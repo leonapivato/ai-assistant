@@ -572,6 +572,10 @@ class StoryTidyUp:
             "story_tidy_up",
             stage="tidy_up",
             result=outcome.result.value,
+            # Code-owned text and an enumeration: which check or parse refused the
+            # reply, and what the store refused the write for, never the reply's own.
+            problem=outcome.problem,
+            refusal=None if outcome.refusal is None else outcome.refusal.reason.value,
             lines=None if outcome.version is None else len(outcome.version.lines),
             took_in_notes=None if outcome.version is None else len(outcome.version.took_in_notes),
             took_in_episodes=(
