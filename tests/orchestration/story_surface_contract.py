@@ -7,7 +7,8 @@ What the story store itself owes is ``tests/memory/story_store_contract.py``'s; 
 suite asserts what the engine adds: the actor ``owner`` and no trigger on every
 write, the activation check on create and link only, the view's resolution of
 activation and story members, and the reads' pages fitting the payload limit; and,
-for ADR-0300 §8's story commands, the owner's page as ADR-0303 §10:2 shapes it, where
+for ADR-0300 §8's story commands, the owner's page as ADR-0303 §10:2 shapes it and §3
+withholds it, where
 the matter stands for the owner, the owner's note, and a move that checks no activation
 and carries no note it does not name.
 """
@@ -472,6 +473,44 @@ class StorySurfaceContract:
             StoryPageViewNote(note=from_email.note, pending=False),
         )
         assert page.more_notes == 0
+
+    async def test_a_page_behind_which_an_episode_was_forgotten_is_withheld(
+        self, story_surface: StorySurfaceSubject
+    ) -> None:
+        """ADR-0303 §3:11-§3:12: shown only where everything behind it may be.
+
+        A forgotten episode cannot be established, even for the owner, so the page is
+        withheld whole: the view says so, carries neither its lines nor its mark, and
+        still lists the notes, which §3:9 decides on their own.
+        """
+        subject = story_surface
+        await _seeded(subject, "a1", "a2")
+        story_id = await _created(subject, act("a1"), act("a2"))
+        own = await subject.engine.add_story_note(story_id, "No Fridays")
+        assert own.note is not None
+        stories = subject.stories
+        state = await stories.current_page(story_id)
+        assert state is not None
+        written = await stories.write_page(
+            story_id,
+            StoryPageDraft(
+                lines=(StoryPageLine(text="A camping trip; no Fridays"),),
+                took_in_notes=(own.note.note_id,),
+                took_in_episodes=("a1", "a2"),
+                outside=True,
+            ),
+            as_of=state.as_of,
+        )
+        assert written.version is not None
+        shown = await subject.engine.story_page(story_id)
+        assert shown is not None
+        assert (shown.withheld, shown.outside) == (False, True)
+        assert await subject.memory.delete("activation:a2")
+        page = await subject.engine.story_page(story_id)
+        assert page is not None
+        assert (page.withheld, page.lines, page.outside) == (True, (), False)
+        assert page.version == written.version.version
+        assert page.notes == (StoryPageViewNote(note=own.note, pending=False),)
 
     async def test_a_merged_or_unknown_story_page_and_standing(
         self, story_surface: StorySurfaceSubject

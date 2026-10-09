@@ -29,8 +29,15 @@ and each episode is shown only where it may be shown to that reader:
   what it reads (ADR-0282 §2:8), and never an open one, which is never a model input
   (ADR-0286 §6). An episode not shown is not counted either.
 
-An episode resting on outside content is marked, by the rule ADR-0300 §4:3 marks a
-note resting on an episode (§8, last normative).
+An **outside episode** is marked (ADR-0303 §3:2, §3:8): one whose trigger's ``origin``
+is ``outside``, or whose activation's record of what it read shows outside content.
+
+**Under ADR-0303 §3's privacy default.** Where a matter stands carries no page and no
+note: it is worked out from the records, and the page is the story page view's
+(:func:`~ai_assistant.orchestration.stories.owner_page`). So §3:9-§3:12, which decide
+a note and a page, have nothing of it to withhold, and what it shows each reader is
+exactly the episodes that reader may be shown, by the rule above, which is the rule a
+page's walk asks of the same reader about the episodes behind the page.
 
 This module is apart from :mod:`ai_assistant.orchestration.stories`, which is the
 engine's own story surface and documents that no stage reads it: planning reads

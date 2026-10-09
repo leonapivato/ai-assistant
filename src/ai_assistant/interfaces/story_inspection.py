@@ -94,7 +94,7 @@ RELATION_TEXT: dict[StoryRelation, str] = {
 }
 
 #: The label on a page, a note or an episode resting on outside content, so it is
-#: never read as the owner's own words (ADR-0300 §4:6, ADR-0303 §3:9).
+#: never read as the owner's own words (ADR-0303 §3:7, §3:8).
 OUTSIDE = "[outside content]"
 
 
@@ -473,7 +473,7 @@ def render_page(console: Console, view: StoryPageView) -> None:
 
     When it was last tidied, then the current page's lines with its mark, or that it
     was withheld, then the story's notes, newest first, each marked pending or not and
-    labelled where it rests on outside content (§3:9), and how many lie beyond them. A
+    labelled where it rests on outside content (§3:8), and how many lie beyond them. A
     merged story renders only the line naming the story it was merged into.
     """
     header = view.story
