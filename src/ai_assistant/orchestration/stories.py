@@ -154,9 +154,10 @@ STORY_PAGE_VIEW_NOTES: Final = 20
 
 #: How many times the owner's page is read before the reads are given up as never
 #: agreeing. Each attempt brackets the notes between two reads of the page's state, and
-#: one that a write to the story lands inside is read again; a story written that often
-#: while the owner reads it is answered with the store error the read already declares.
-_PAGE_READS: Final = 3
+#: one that a write lands inside is read again. The window is a few reads long, so a
+#: store written inside it this many times running is answered with the store error the
+#: read already declares, rather than with a view no one read.
+_PAGE_READS: Final = 5
 
 
 async def owner_page(
@@ -171,13 +172,12 @@ async def owner_page(
     The current page and what is pending on it are one read of the story store; the
     story's notes are then read page by page, and the newest ``notes`` of them listed,
     each with whether it is pending. The notes are read between two reads of the page's
-    state, and the view is built only where the two agree on this story, the store-wide
-    ``as_of`` aside: a note written to the story, brought to it, taken in, or taken from
-    it while pending changes that state, so each note listed is shown pending exactly as
-    it stood. A note already taken in that a split or a move takes away between the
-    reads is listed or not as the listing found it, and shown taken in, which it was.
-    Writes to other stories advance ``as_of`` too, and do not make the reads disagree.
-    The owner may be shown a record placed for the
+    state, and the view is built only where the two are the same read, ``as_of``
+    included: every write that adds, carries or takes in a note advances the counter
+    ``as_of`` reports (ADR-0300 §3:8), so two reads naming one ``as_of`` bracket a
+    listing no such write landed inside, and each note listed is shown pending exactly
+    as it stood. A write to another story advances it too, and costs a read again, not
+    a wrong answer. The owner may be shown a record placed for the
     owner alone, so every note is shown (§3:6), and so is the page under
     :class:`~ai_assistant.orchestration.story_privacy.PageVisibility`'s interim rule;
     §3:7's walk, which withholds a page an open or forgotten episode stands behind, is
@@ -199,8 +199,7 @@ async def owner_page(
         if state.story.merged_into is not None:
             return StoryPageView(story=state.story)
         held = await _all_notes(stories, story_id)
-        again = await stories.current_page(story_id)
-        if again is not None and again.model_copy(update={"as_of": state.as_of}) == state:
+        if await stories.current_page(story_id) == state:
             return _page_view(state, held, notes=notes)
     msg = "the story was written while its page was read, every time it was read"
     raise StoryStoreError(msg)
