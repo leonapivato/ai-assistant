@@ -1,10 +1,21 @@
 # 301. A story label may name an earlier episode the channel window shows
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0303 (§1:2's and §1:3's label defect, for an item that links to no activation; §1:3's list, for a transcript message the reader's bookkeeping records; §1:4, in the addition alone; §1:6, whole)
 - Date: 2026-10-08
 - Scope: [M42](https://github.com/leonapivato/ai-assistant/milestone/9), [#2753](https://github.com/leonapivato/ai-assistant/issues/2753): which labels understanding's story links may cite.
 - Dependency: ADR-0300, whose §6 [#2752](https://github.com/leonapivato/ai-assistant/pull/2752) implemented; ADR-0276 and ADR-0282, implemented.
 - Authorization: lane L2, building ADR-0300 §6 in #2752, found that the clauses as written leave a conversation's own earlier turns unlinkable and filed #2753 for a ruling. On 2026-10-08 the dispatcher ruled that an `H` label naming a channel item that is a stored activation episode resolves as a `P` label naming that episode would, left the conditions to this ADR, and assigned 0301. That authorizes drafting and numbering, not ratification or implementation.
+- Partially superseded: 2026-10-08 by ADR-0303 — four scopes. A story label naming a
+  place-window item that links to no activation is dropped and counted in
+  `grounding_dropped` and is no label defect, so it takes no part in the repair
+  (§1:2, §1:3). A transcript message the chat reader's bookkeeping records as taken in
+  resolves to that activation (§1:3's list). The resolution also reads the link
+  records the window brings with it (§1:4, in the addition alone). The instruction
+  lets a story label name any place-window item not marked not linkable (§1:6). §1:1
+  stands as the record a tail record or a one-exchange item links by, and so does
+  every other clause. These scoped replacements take effect on ratification of
+  ADR-0303. This reciprocal header record accompanies the numbered draft under
+  ADR-0070 and ADR-0082; the ratified body below is preserved.
 - **Decides no `core` surface.** No Protocol, type, field, enum member or validator changes: `story_labels` and `story_links` keep the shapes ADR-0300 §6:6–§6:7 give them, and only which labels resolve changes.
 - **Partially supersedes** [ADR-0300](0300-a-story-keeps-a-page-of-notes-and-where-its-matter-stands-is-worked-out-from-records.md) — **two scopes.** **§6:7's resolution, in the addition alone**: an `H` label naming a channel-window item that is a stored episode the pass admitted also resolves, to that episode's activation as an activation member (§1 below). **§6:8's *"or to a channel item"*, for those items alone**: such a label is not a label defect; an `H` label naming any other channel item still is. Every other clause stands, §6:1's candidates, §6:6's field, §6:9's instruction and §6:12's links included.
 
