@@ -200,10 +200,20 @@ _RECALLED: Final = (
     "\n"
 )
 
+#: Where an ``S`` label may be cited: one sentence, said by the instruction and by the
+#: repair statement alike, so the first reply is told what the repair would enforce
+#: (#2776). An ``S`` label resolves only as a story label (ADR-0300 §6:7); ADR-0300
+#: adds no referent a story could resolve to, so cited anywhere else it resolves to
+#: nothing and costs the one repair completion (ADR-0276 §6:2).
+_S_LABEL_CITED: Final = "An S label names a story and is cited in `story_labels` alone."
+
 #: ADR-0300 §6's paragraph, rendered only where the understanding phase assembled
 #: candidate stories, so a pass with none keeps the instruction it had. Its second half
 #: is §6:9's: a link says the input belongs to the matter and nothing more, one input
-#: may belong to several, and one that belongs to none is linked to none.
+#: may belong to several, and one that belongs to none is linked to none. Its last
+#: sentences say where an ``S`` label may be cited: a story resolves to no referent, so
+#: a reading only a story supports cannot stay ``supplied`` (ADR-0276 §6:4) and is
+#: ``inferred``.
 _STORIES: Final = (
     "The message also carries a stories section: the assistant's memory of matters "
     "that earlier episodes belong to, each labelled S1, S2, and so on. A story shows "
@@ -222,6 +232,10 @@ _STORIES: Final = (
     "nothing more. One "
     "input may belong to several matters. An input that belongs to none is linked to "
     "none, and its `story_labels` is empty.\n"
+    "\n" + _S_LABEL_CITED + " Never cite one in `meaning_labels`, in a reference or in a "
+    "relationship, not even to say the input does not belong with that story. A "
+    "reference that only a story places names no label, and a reading that only a "
+    "story supports is `inferred`.\n"
     "\n"
 )
 
@@ -1335,7 +1349,7 @@ def _label_statement(
         rendered.append(_sequence("S", brief.story_count, "stories section"))
     parts.append(f"The message rendered {', '.join(rendered[:-1])} and {rendered[-1]}.")
     if brief.story_count is not None:
-        parts.append("An S label names a story and is cited in `story_labels` alone.")
+        parts.append(_S_LABEL_CITED)
     parts.append(
         "Reply again with only the corrected JSON object. Name only labels that were "
         "rendered, and ground a reading no labelled item supports as `inferred`."

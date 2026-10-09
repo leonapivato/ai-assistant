@@ -217,6 +217,21 @@ async def test_the_instruction_states_what_a_link_says_and_asks_for_story_labels
     assert '"story_labels"' in instruction
 
 
+async def test_the_instruction_says_an_s_label_grounds_no_reading() -> None:
+    """#2776: an S label is cited in `story_labels` alone, never as a reading's ground."""
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, stories=Candidates(views=(_TRIP,)))
+
+    instruction = _instruction(model)
+    assert "An S label names a story and is cited in `story_labels` alone." in instruction
+    assert (
+        "Never cite one in `meaning_labels`, in a reference or in a relationship, not even "
+        "to say the input does not belong with that story." in instruction
+    )
+    assert "a reading that only a story supports is `inferred`" in instruction
+
+
 @pytest.mark.parametrize(
     ("candidates", "said"),
     [
@@ -315,6 +330,50 @@ async def test_an_s_label_cited_as_a_referent_resolves_to_nothing() -> None:
     statement = model.calls[1].messages[-1].content
     assert "An S label names a story and is cited in `story_labels` alone." in statement
     assert understood.meaning_referents == ()
+
+
+#: An S label cited outside `story_labels`, in each field that takes labels (#2776).
+_S_OUTSIDE_STORY_LABELS: Final[dict[str, dict[str, Any]]] = {
+    "meaning": {"meaning_ground": "supplied", "meaning_labels": ["S1"]},
+    "reference": {"references": [{"phrase": "the trip", "labels": ["S1"]}]},
+    "relationship": {
+        "relationships": [
+            {
+                "statement": "It does not belong with the trip.",
+                "labels": ["S1"],
+                "ground": "supplied",
+            }
+        ]
+    },
+}
+
+
+@pytest.mark.parametrize("field", list(_S_OUTSIDE_STORY_LABELS))
+async def test_the_instruction_says_of_an_s_label_what_the_repair_enforces(field: str) -> None:
+    """#2776: the first reply is told where an S label may be cited, in the repair's words.
+
+    Said only in the repair statement, the rule cost a second completion on most turns
+    about a matter. Every sentence of the statement about an S label is in the
+    instruction the first completion was given, word for word.
+    """
+    bad = _proposal(**_S_OUTSIDE_STORY_LABELS[field])
+    model = FakeModelProvider.scripted(bad, bad)
+
+    understood = await _understand(model, stories=Candidates(views=(_TRIP,)))
+
+    assert len(model.calls) == 2
+    said = [
+        sentence + "."
+        for sentence in _statement(model).split(". ")
+        if sentence.startswith("An S label")
+    ]
+    assert said
+    instruction = _instruction(model)
+    for sentence in said:
+        assert sentence in instruction
+    assert understood.meaning_referents == ()
+    assert all(reference.referents == () for reference in understood.references)
+    assert all(relationship.referents == () for relationship in understood.relationships)
 
 
 # --- ADR-0301 §1: an H label naming a stored episode the pass admitted ------------------
