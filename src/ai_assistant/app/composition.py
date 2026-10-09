@@ -301,20 +301,20 @@ UNDERSTANDING_VERSION_LIMIT: Final = 8
 #: initial value, unmeasured; a story already a candidate is not repeated.
 UNDERSTANDING_STORY_CANDIDATES: Final = 5
 
-#: How many of a story's notes its page view lists, newest first, before it counts the
+#: How many of a story's notes its summary view lists, newest first, before it counts the
 #: rest (ADR-0303 §10:2). The view lists them so the owner can name them in a command,
 #: so it is sized to hold every note of an ordinary matter: twenty at their bound of
-#: 2,000 characters is about 40,000 characters, beside a page capped at 8,000, well
+#: 2,000 characters is about 40,000 characters, beside a summary capped at 8,000, well
 #: inside a frame's payload limit.
-STORY_PAGE_VIEW_NOTES: Final = 20
+STORY_SUMMARY_VIEW_NOTES: Final = 20
 
 #: How much of each candidate a short view shows (ADR-0300 §6:2), chosen here as §6:2
 #: and §3:17 have the building lane choose them. A short view is for recognising the
 #: matter, not for its account, which planning is given whole (§8). **Lines: 3** — the
-#: page's first line says what the matter is (§3:6), and two more carry where it is
+#: summary's first line says what the matter is (§3:6), and two more carry where it is
 #: going; with five candidates that keeps the section at fifteen lines, each within
 #: ``STORY_NOTE_MAX_CHARS``. **Notes: 2** and **episodes: 2**, §6:2's ceilings taken
-#: whole: a pending note is what the page has not folded in yet, so on a page not
+#: whole: a pending note is what the summary has not folded in yet, so on a summary not
 #: tidied lately it is the freshest thing said about the matter; and the two latest
 #: meanings show what the matter was doing last, which is what an input continuing it
 #: would follow on from.
@@ -331,7 +331,7 @@ STORY_TIDY_UP_EXCERPT_CHARS: Final = UNDERSTANDING_EXCERPT_CHARS
 #: How many other stories a tidy-up shows for its *like another story* flag
 #: (ADR-0303 §5:7), counted together: the stories the episodes it reads also belong
 #: to, then the stories of the episodes its search of the memory store finds, each by
-#: its page's first line. Understanding's candidate count, so a tidy-up can name any
+#: its summary's first line. Understanding's candidate count, so a tidy-up can name any
 #: story that understanding could have linked the same episode into beside this one.
 STORY_TIDY_UP_OTHER_STORIES: Final = UNDERSTANDING_STORY_CANDIDATES
 
@@ -339,7 +339,7 @@ STORY_TIDY_UP_OTHER_STORIES: Final = UNDERSTANDING_STORY_CANDIDATES
 #: waits for a run, so the bound is not latency: it is what frees the story for a
 #: later run when a completion hangs, since at most one runs on a story at a time.
 #: Consolidation's per-run budget is five minutes for a whole chunk of records; a
-#: tidy-up is one page, so two.
+#: tidy-up is one summary, so two.
 STORY_TIDY_UP_BUDGET: Final = timedelta(minutes=2)
 
 #: How many decisions recorded for its story a tidy-up shows, newest first (ADR-0302
@@ -356,7 +356,7 @@ STORY_TIDY_UP_DECISIONS: Final = STORY_TIDY_UP_OTHER_STORIES
 #: drains over a few runs rather than in one long one; a flag decided by rule needs no
 #: completion and is not counted. **Episodes per story: 6**, its latest links, so a
 #: split or a move can name what came to the story most recently, which is where a
-#: page starts to look like two matters. **Notes per story: 5**, its newest, pending or
+#: summary starts to look like two matters. **Notes per story: 5**, its newest, pending or
 #: not, each under a label a split or a move may name so that it goes too (ADR-0303
 #: §8:7), on the episodes' reasoning: the notes about the matter that moves are mostly
 #: the recent ones. **Excerpt: 1,000 characters**, half the
@@ -2317,9 +2317,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # parameters take the same class — so it is a property of *this* wiring.
             parked_reads=parked_read_operations,
             # ADR-0289 §4's nine story methods read and write this store, and the
-            # story page view lists this many notes (ADR-0303 §10:2).
+            # story summary view lists this many notes (ADR-0303 §10:2).
             stories=stories,
-            story_page_notes=STORY_PAGE_VIEW_NOTES,
+            story_summary_notes=STORY_SUMMARY_VIEW_NOTES,
             # ADR-0300 §6: the candidate stories understanding is shown, read from the
             # same story store and the one memory store, and the stage that records
             # its links there with the actor `understanding`. Wired together, as the

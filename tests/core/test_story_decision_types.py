@@ -2,7 +2,7 @@
 
 What names a flag (:class:`StoryFlagName`), the ``decided`` line's two fields on
 :class:`StoryLogLine`, the ``flag`` a membership refusal names, and the activation or
-note a ``not_held`` page refusal names. Each rule is a model validator, so a value
+note a ``not_held`` summary refusal names. Each rule is a model validator, so a value
 breaking it never reaches a store, a peer or the CLI.
 """
 
@@ -24,10 +24,10 @@ from ai_assistant.core.types import (
     StoryLogLine,
     StoryMember,
     StoryMemberKind,
-    StoryPageRefusal,
-    StoryPageRefusalReason,
     StoryRefusal,
     StoryRefusalReason,
+    StorySummaryRefusal,
+    StorySummaryRefusalReason,
 )
 
 _AT = datetime(2026, 10, 8, tzinfo=UTC)
@@ -154,26 +154,28 @@ def test_a_flag_refusal_names_the_flag_and_no_other_refusal_does(
 
 
 def test_a_not_held_refusal_names_the_activation_or_the_note() -> None:
-    by_activation = StoryPageRefusal(
-        reason=StoryPageRefusalReason.NOT_HELD, story_id="story:a", activation="a1"
+    by_activation = StorySummaryRefusal(
+        reason=StorySummaryRefusalReason.NOT_HELD, story_id="story:a", activation="a1"
     )
     assert (by_activation.activation, by_activation.note) == ("a1", None)
-    by_note = StoryPageRefusal(reason=StoryPageRefusalReason.NOT_HELD, story_id="story:a", note=4)
+    by_note = StorySummaryRefusal(
+        reason=StorySummaryRefusalReason.NOT_HELD, story_id="story:a", note=4
+    )
     assert (by_note.activation, by_note.note) == (None, 4)
 
 
 @pytest.mark.parametrize(
     ("reason", "fields"),
     [
-        (StoryPageRefusalReason.NOT_HELD, {}),
-        (StoryPageRefusalReason.NOT_HELD, {"activation": "a1", "note": 4}),
-        (StoryPageRefusalReason.UNKNOWN_NOTE, {"note": 4, "activation": "a1"}),
-        (StoryPageRefusalReason.OVER_CAP, {"activation": "a1"}),
-        (StoryPageRefusalReason.OVER_CAP, {"note": 4}),
+        (StorySummaryRefusalReason.NOT_HELD, {}),
+        (StorySummaryRefusalReason.NOT_HELD, {"activation": "a1", "note": 4}),
+        (StorySummaryRefusalReason.UNKNOWN_NOTE, {"note": 4, "activation": "a1"}),
+        (StorySummaryRefusalReason.OVER_CAP, {"activation": "a1"}),
+        (StorySummaryRefusalReason.OVER_CAP, {"note": 4}),
     ],
 )
-def test_a_page_refusal_names_an_activation_only_on_not_held(
-    reason: StoryPageRefusalReason, fields: dict[str, Any]
+def test_a_summary_refusal_names_an_activation_only_on_not_held(
+    reason: StorySummaryRefusalReason, fields: dict[str, Any]
 ) -> None:
     with pytest.raises(ValidationError):
-        StoryPageRefusal(reason=reason, story_id="story:a", **fields)
+        StorySummaryRefusal(reason=reason, story_id="story:a", **fields)

@@ -2485,7 +2485,13 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #: 87: ADR-0303 §11:2 gives ``AssistantEngine.split_story`` and ``move_story_members``
 #:     the keyword ``notes``, the notes that go (§10:1), which the request carries;
 #:     a hub at 86 refuses the argument as one its signature does not declare.
-PROTOCOL_VERSION: Final[int] = 87
+#: 88: ADR-0304 §2 renames a story's page its summary: the command ``story_page``
+#:     becomes ``story_summary``; the types the story commands carry become
+#:     ``StorySummaryView``, ``StorySummaryViewNote``, ``StorySummaryLine``,
+#:     ``StorySummaryRefusal`` and ``StorySummaryRefusalReason``, whose
+#:     ``page_moved_on`` becomes ``summary_moved_on``. A peer at 87 calls a command a
+#:     hub at 88 does not route (ADR-0124 §9).
+PROTOCOL_VERSION: Final[int] = 88
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

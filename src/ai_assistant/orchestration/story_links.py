@@ -11,14 +11,14 @@ stories the episode window's episodes belong to, in the window's order, each loo
 with ``StoryStore.stories_of``; then the stories recall's kept episodes belong to, which
 a caller hands in already in ADR-0300 §6:1's order. A story already a candidate is not
 repeated. Each candidate
-is read as a **short view**: the first lines of its current page and the page's mark,
+is read as a **short view**: the first lines of its summary and the summary's mark,
 its newest pending notes and its latest episodes by occurrence, the episodes fetched
-with ``MemoryStore.get_many`` under ADR-0282 §2:6-§2:8. The page and notes are kept
+with ``MemoryStore.get_many`` under ADR-0282 §2:6-§2:8. The summary and notes are kept
 under ADR-0303 §3's default (:mod:`~ai_assistant.orchestration.story_privacy`): a note
 is shown only where the pass's audience admits a record placed for the owner alone
-(§3:9), and the page only where everything behind it may be shown to that audience
+(§3:9), and the summary only where everything behind it may be shown to that audience
 (§3:11), which is looked up in the same read, through the same predicate, as the
-members' episodes the latest are chosen from; otherwise the view says the page was
+members' episodes the latest are chosen from; otherwise the view says the summary was
 withheld. A ``StoryStoreError`` leaves no candidates, and the decision says the stories
 could not be read.
 
@@ -63,7 +63,7 @@ from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_privacy import (
     Behind,
-    PageVisibility,
+    SummaryVisibility,
     activation_of,
     behind,
 )
@@ -74,9 +74,9 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import MemoryStore, StoryStore
     from ai_assistant.core.types import (
         StoryNote,
-        StoryPageLine,
-        StoryPageState,
         StoryRefusal,
+        StorySummaryLine,
+        StorySummaryState,
     )
     from ai_assistant.orchestration.disclosure import TurnSupply
 
@@ -100,19 +100,19 @@ class ShortView:
 
     Attributes:
         story_id: The candidate story.
-        lines: The first lines of its current page, in page order, where the page may
-            be shown; empty where no page has been written or it may not be shown.
+        lines: The first lines of its summary, in order, where the summary may
+            be shown; empty where no summary has been written or it may not be shown.
         notes: Its newest pending notes that may be shown, newest first.
         episodes: Its latest episodes by occurrence among those fetched and admitted,
             newest first.
-        outside: The page's mark (ADR-0303 §3:4), wherever the page is shown (§3:8).
-        withheld: A page has been written and was withheld from this reader, since
+        outside: The summary's mark (ADR-0303 §3:4), wherever the summary is shown (§3:8).
+        withheld: A summary has been written and was withheld from this reader, since
             not everything behind it may be shown to it (§3:11): the view carries
             neither its lines nor its mark, and the reader is told.
     """
 
     story_id: str
-    lines: tuple[StoryPageLine, ...]
+    lines: tuple[StorySummaryLine, ...]
     notes: tuple[StoryNote, ...]
     episodes: tuple[EpisodicMemory, ...]
     outside: bool = False
@@ -145,12 +145,12 @@ class Candidates:
 class _Read:
     """What the store answered for one candidate, before the episodes are fetched.
 
-    ``behind`` is what stands behind its current page (ADR-0303 §3:10), or ``None``
-    where no page has been written.
+    ``behind`` is what stands behind its summary (ADR-0303 §3:10), or ``None``
+    where no summary has been written.
     """
 
     story_id: str
-    lines: tuple[StoryPageLine, ...]
+    lines: tuple[StorySummaryLine, ...]
     outside: bool
     notes: tuple[StoryNote, ...]
     members: tuple[str, ...]
@@ -161,7 +161,7 @@ class _Read:
         return [episode_address(member) for member in self.members]
 
     def behind_addresses(self) -> list[str]:
-        """The episodes behind its page, which decide whether the page is shown."""
+        """The episodes behind its summary, which decide whether the summary is shown."""
         if self.behind is None:
             return []
         return [episode_address(activation) for activation in sorted(self.behind.episodes)]
@@ -183,13 +183,13 @@ class _Read:
 
     def view(
         self,
-        visibility: PageVisibility,
+        visibility: SummaryVisibility,
         latest: tuple[str, ...],
         fetched: dict[str, EpisodicMemory],
     ) -> ShortView:
-        """The short view: its page and notes under ADR-0303 §3's default, its latest as fetched."""
+        """The short view: summary and notes under ADR-0303 §3's default, its latest as fetched."""
         written = self.behind is not None
-        shown = self.behind is not None and visibility.page(self.behind)
+        shown = self.behind is not None and visibility.summary(self.behind)
         return ShortView(
             story_id=self.story_id,
             lines=self.lines if shown else (),
@@ -224,7 +224,7 @@ class StoryCandidates:
             stories: The story store the candidates are read from.
             memory: The store a candidate's episodes are fetched from.
             limit: ``UNDERSTANDING_STORY_CANDIDATES`` (§6:1).
-            lines: How many of a current page's first lines a short view takes (§6:2).
+            lines: How many of a summary's first lines a short view takes (§6:2).
             notes: How many of the newest pending notes it takes, at most two.
             episodes: How many of the latest episodes it takes, at most two.
 
@@ -285,8 +285,8 @@ class StoryCandidates:
         # ADR-0282 §2:5, §2:8: the reads that choose, and only admitted ids chosen. Every
         # member is read once, through the audience predicate, to choose which members are
         # the latest; nothing refused is chosen or recorded. ADR-0303 §3:11-§3:12: in the
-        # same read, the episodes behind each page, through the same predicate, which
-        # decide whether the page may be shown and are neither chosen nor recorded.
+        # same read, the episodes behind each summary, through the same predicate, which
+        # decide whether the summary may be shown and are neither chosen nor recorded.
         chosen_from = await self._admitted(
             dict.fromkeys(
                 address
@@ -300,14 +300,16 @@ class StoryCandidates:
         # applied again, and what came back missing recorded beside what was fetched.
         fetched = tuple(dict.fromkeys(id_ for ids in latest for id_ in ids))
         held = await self._admitted(fetched, audience)
-        # ADR-0303 §3:12: the latest answer about each episode decides the page, so one
+        # ADR-0303 §3:12: the latest answer about each episode decides the summary, so one
         # the second fetch found gone or refused withholds it as surely as one the first
         # read did.
         answers = dict(chosen_from)
         for id_ in fetched:
             answers.pop(id_, None)
         answers |= held
-        visibility = PageVisibility.of(answers.values(), owner_notes=admits_owner_placed(audience))
+        visibility = SummaryVisibility.of(
+            answers.values(), owner_notes=admits_owner_placed(audience)
+        )
         views = tuple(
             read.view(visibility, ids, held) for read, ids in zip(reads, latest, strict=True)
         )
@@ -358,27 +360,29 @@ class StoryCandidates:
         return list(chosen)[: self._limit]
 
     async def _read(self, story_id: str) -> _Read | None:
-        """One candidate's current page's first lines and its mark, its notes and members.
+        """One candidate's summary's first lines and its mark, its notes and members.
 
-        And what stands behind its page (ADR-0303 §3:10), walked from the version that
-        wrote it: the log is append-only, so a walk made after the page was read answers
-        for that page.
+        And what stands behind its summary (ADR-0303 §3:10), walked from the version that
+        wrote it: the log is append-only, so a walk made after the summary was read answers
+        for that summary.
         """
-        state = await self._stories.current_page(story_id)
+        state = await self._stories.current_summary(story_id)
         if state is None:
             return None
-        page = state.page
+        summary = state.summary
         newest = tuple(reversed(state.pending_notes[-self._notes :]))
         return _Read(
             story_id=story_id,
-            lines=() if page is None else page.lines[: self._lines],
-            outside=page is not None and page.outside,
+            lines=() if summary is None else summary.lines[: self._lines],
+            outside=summary is not None and summary.outside,
             notes=newest,
             members=await self._members(story_id, state),
-            behind=None if page is None else await behind(self._stories, story_id, page.version),
+            behind=None
+            if summary is None
+            else await behind(self._stories, story_id, summary.version),
         )
 
-    async def _members(self, story_id: str, state: StoryPageState) -> tuple[str, ...]:
+    async def _members(self, story_id: str, state: StorySummaryState) -> tuple[str, ...]:
         """The story's activation members, every one: its latest are chosen by occurrence.
 
         Link order says nothing about when an episode occurred once a merge or a move

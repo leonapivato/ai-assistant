@@ -4,7 +4,7 @@ Read by the matters pass (§5) and by the tidy-up (§6); neither is a Protocol, 
 module is the one place both work the two questions out from the store's own records.
 
 **What names a flag** (§2, ADR-0303 §8:1-§8:3). A tidy-up's flags are the only flags:
-each is named by the story whose page version recorded it, that version's number and
+each is named by the story whose summary version recorded it, that version's number and
 the flag as recorded. Understanding linking one input to two stories is that many links
 and raises none, so no flag is ever read from the change logs. A ``decided`` line that
 already answers a flag named by an activation, written before ADR-0303, stays in the
@@ -29,7 +29,7 @@ logs. So :func:`read_records` reads every story's header and change log, and, fo
 pass, its version log, page by page. What that costs grows with the store, which the
 test hub is where to measure.
 
-**It holds identities and instants only**: no story's page text and no note is read
+**It holds identities and instants only**: no story's summary text and no note is read
 here, so nothing of it can reach a log line (ADR-0275 §8).
 """
 
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
         StoryFlag,
         StoryHeader,
         StoryLogLine,
-        StoryPageVersion,
+        StorySummaryVersion,
     )
 
 __all__ = [
@@ -152,7 +152,7 @@ class StoryRecords:
         *,
         headers: dict[str, StoryHeader],
         logs: dict[str, tuple[StoryLogLine, ...]],
-        versions: dict[str, tuple[StoryPageVersion, ...]] | None = None,
+        versions: dict[str, tuple[StorySummaryVersion, ...]] | None = None,
     ) -> None:
         """Hold one read's records; nothing is walked until a question needs it."""
         self.headers = headers
@@ -298,12 +298,12 @@ async def read_log(stories: StoryStore, story_id: str) -> tuple[StoryLogLine, ..
         cursor = page.next_cursor
 
 
-async def read_versions(stories: StoryStore, story_id: str) -> tuple[StoryPageVersion, ...]:
-    """Every version of ``story_id``'s page, oldest first; empty for no such story."""
-    versions: list[StoryPageVersion] = []
+async def read_versions(stories: StoryStore, story_id: str) -> tuple[StorySummaryVersion, ...]:
+    """Every version of ``story_id``'s summary, oldest first; empty for no such story."""
+    versions: list[StorySummaryVersion] = []
     cursor: int | None = None
     while True:
-        page = await stories.page_versions(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
+        page = await stories.summary_versions(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
         if page is None:
             return tuple(versions)
         versions.extend(page.versions)

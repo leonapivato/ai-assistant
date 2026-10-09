@@ -262,12 +262,12 @@ if TYPE_CHECKING:
         StoryNoteOutcome,
         StoryOutcome,
         StoryPage,
-        StoryPageDraft,
-        StoryPageOutcome,
-        StoryPageState,
-        StoryPageVersionList,
-        StoryPageView,
         StoryStanding,
+        StorySummaryDraft,
+        StorySummaryOutcome,
+        StorySummaryState,
+        StorySummaryVersionList,
+        StorySummaryView,
         StoryView,
         StoryViewPage,
         TimeWindow,
@@ -12558,21 +12558,21 @@ class StoryStore(Protocol):
     naming a merged story as a member, is refused with the story it was merged into.
     Reading a merged story returns its header, so a caller follows it (§3).
 
-    **A story's page** (ADR-0300 §3, ADR-0303 §§2-4). Beside each story the store
-    keeps its **notes** and its **current page**, with a **version log** recording the
-    current page's history by identity; nothing ties the notes to the page but that a
+    **A story's notes and summary** (ADR-0300 §3, ADR-0303 §§2-4, ADR-0304 §2). Beside
+    each story the store keeps its **notes** and its **summary**, with a **version log**
+    recording the summary's history by identity; nothing ties the notes to the summary but that a
     tidy-up reads the one and writes the other. A note carries its text, who wrote it,
     the activation it was written during (nothing, for a note ``owner`` wrote), its
     mark, and the store's clock reading; none of it changes once written, no note is
     removed, and no rule of the store reads the activation it was written during. The
-    current page is zero or more lines, each its text alone, and the page's mark. Only
-    the current page is kept as text, and the version log is append-only and holds
+    summary is zero or more lines, each its text alone, and the summary's mark. Only
+    the summary is kept as text, and the version log is append-only and holds
     identities, instants and enumerations only.
 
     **Pending.** A note or an activation member is pending on a story from when it
     comes to the story — written to it, linked into it, or brought by a merge, a
-    split or a move — until a version of that story's page records taking it in. A
-    page write takes in exactly the pending notes and episodes it names that were
+    split or a move — until a version of that story's summary records taking it in. A
+    summary write takes in exactly the pending notes and episodes it names that were
     pending at the read it was built on, its ``as_of``: what becomes pending while a
     run is out stays pending after the run's write, and what a merge, a split or a
     move brought into a story is pending there whatever another story's version
@@ -12583,9 +12583,9 @@ class StoryStore(Protocol):
     is merged into; a split and a move each move exactly the notes they name that the
     story moved from holds, and no note by the activation it was written during; an
     unlink moves no note. The store still reads no other store (ADR-0289 §1:3), and
-    refuses a page write only on what ADR-0300 §3, ADR-0302 §7 and ADR-0303 §4 state
+    refuses a summary write only on what ADR-0300 §3, ADR-0302 §7 and ADR-0303 §4 state
     and on an identity naming nothing it holds: the hub's checks on a tidy-up's output
-    are the hub's, and so is the page's mark, which the store records as it is given.
+    are the hub's, and so is the summary's mark, which the store records as it is given.
 
     **A decision on a flag is a line in the change log** (ADR-0302 §§2-4). A flag is
     named by identity, as :class:`~ai_assistant.core.types.StoryFlagName` gives it:
@@ -12972,7 +12972,7 @@ class StoryStore(Protocol):
         """
         ...
 
-    # --- the page (ADR-0300 §3) ----------------------------------------------
+    # --- the notes and the summary (ADR-0300 §3, ADR-0304 §2) -----------------
 
     async def append_note(
         self,
@@ -12983,7 +12983,7 @@ class StoryStore(Protocol):
         written_during: Identifier | None = None,
         outside: bool = False,
     ) -> StoryNoteOutcome:
-        """Write a note to a story's page, pending there (ADR-0303 §2, §4:7).
+        """Write a note to a story, pending there (ADR-0303 §2, §4:7).
 
         The note is stamped with the store's clock and an identity the store
         assigns. The tidy-up writes no note (§2:1), so nothing writes one as
@@ -13009,56 +13009,56 @@ class StoryStore(Protocol):
         """
         ...
 
-    async def write_page(
+    async def write_summary(
         self,
         story_id: Identifier,
-        draft: StoryPageDraft,
+        draft: StorySummaryDraft,
         *,
         as_of: int,
-    ) -> StoryPageOutcome:
-        """Write a new current page and its version, and no note (ADR-0303 §4).
+    ) -> StorySummaryOutcome:
+        """Write a new summary and its version, and no note (ADR-0303 §4).
 
-        One transaction: the new current page, its lines and its mark, replaces the
+        One transaction: the new summary, its lines and its mark, replaces the
         old one, whose text is discarded; and the version is appended, recording what
-        it took in, the other stories' page versions its run read, its flags and its
+        it took in, the other stories' summary versions its run read, its flags and its
         mark. It takes in exactly the notes and episodes the draft names that were
         pending on the story at ``as_of``; a name the story holds that was not is not
         recorded as taken in, and stays pending where it is pending. A draft taking in
         what the story does not hold when the write runs is refused (ADR-0302 §7). A
-        page version the draft names as read is checked only as an identity the store
+        summary version the draft names as read is checked only as an identity the store
         holds, never as a member (§4:2). A refused write writes nothing.
 
         Args:
-            story_id: The story whose page is written.
-            draft: The page and what is written beside it.
-            as_of: The ``as_of`` of the :meth:`current_page` read the page was
+            story_id: The story whose summary is written.
+            draft: The summary and what is written beside it.
+            as_of: The ``as_of`` of the :meth:`current_summary` read the summary was
                 built on.
 
         Returns:
             The version appended, or a refusal, checked in this order:
-            ``unknown_story``; ``merged_story``; ``page_moved_on`` where a version
-            has been written since ``as_of``, so the version the page was built on
+            ``unknown_story``; ``merged_story``; ``summary_moved_on`` where a version
+            has been written since ``as_of``, so the version the summary was built on
             is no longer the current one; ``unknown_story`` for a flag naming a
-            story the store does not hold, then for a page version read naming one;
+            story the store does not hold, then for a summary version read naming one;
             ``not_held`` for the first, in this order, of an episode named as taken
             in that is not one of its activation members and a note named as taken
             in that it does not hold, naming that activation or note; and
-            ``over_cap`` where the lines together exceed ``STORY_PAGE_CAP_CHARS``,
+            ``over_cap`` where the lines together exceed ``STORY_SUMMARY_CAP_CHARS``,
             every line counted. No write answers ``unknown_note``.
 
         Raises:
             ValueError: If an argument is malformed, including an ``as_of`` the
-                store has not reached, a flag naming the story written, or a page
+                store has not reached, a flag naming the story written, or a summary
                 version read naming the story written or a version that story's log
                 does not hold.
             StoryStoreError: If the store cannot be read or written.
         """
         ...
 
-    async def current_page(self, story_id: Identifier) -> StoryPageState | None:
-        """Read a story's current page with the notes and episodes pending on it.
+    async def current_summary(self, story_id: Identifier) -> StorySummaryState | None:
+        """Read a story's summary with the notes and episodes pending on it.
 
-        One consistent read, carrying the ``as_of`` a page built on it is written
+        One consistent read, carrying the ``as_of`` a summary built on it is written
         with. A merged story reads as it was left: its notes went to the story it
         was merged into, so nothing is pending on it.
 
@@ -13094,13 +13094,13 @@ class StoryStore(Protocol):
         """
         ...
 
-    async def page_versions(
+    async def summary_versions(
         self,
         story_id: Identifier,
         *,
         cursor: int | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
-    ) -> StoryPageVersionList | None:
+    ) -> StorySummaryVersionList | None:
         """Read a page of a story's version log, oldest first.
 
         Args:
@@ -15191,35 +15191,35 @@ class AssistantEngine(Protocol):
 
     # --- the story commands (ADR-0300 §8) -----------------------------------
     #
-    # **Four more, over the story's page and where its matter stands.** Each names its
+    # **Four more, over the story's summary and where its matter stands.** Each names its
     # story by id. The reads show the owner what ADR-0303 §3's default lets a reader be
-    # shown, with the page's mark and each note's (§3:8); the writes carry the owner as
+    # shown, with the summary's mark and each note's (§3:8); the writes carry the owner as
     # author or actor and no triggering activation (ADR-0289 §4:4). A move, like a
     # merge or a split, moves members a story already holds and checks no activation's
     # record (ADR-0289 §4:3); a move or a split carries exactly the notes it names
     # (ADR-0303 §6). A refusal is an outcome, never an exception.
 
-    async def story_page(self, story_id: Identifier) -> StoryPageView | None:
-        """Read a story's page as the owner is shown it (ADR-0300 §8:3, ADR-0303 §10:2).
+    async def story_summary(self, story_id: Identifier) -> StorySummaryView | None:
+        """Read a story's summary as the owner is shown it (ADR-0300 §8:3, ADR-0303 §10:2).
 
-        When the page was last tidied; the current page's lines and its mark, or
-        that the page was withheld; and the story's notes, newest first up to the
+        When the summary was last tidied; its lines and its mark, or
+        that the summary was withheld; and the story's notes, newest first up to the
         view's bound, each with its id, its mark and whether it is pending, with the
-        count of those beyond it. The page is shown only where everything behind it
+        count of those beyond it. The summary is shown only where everything behind it
         may be shown to the owner, which is every episode the memory store still
         holds, an open one included; one behind it that is no longer held withholds
-        the whole page, and the view says so rather than showing a line (ADR-0303
+        the whole summary, and the view says so rather than showing a line (ADR-0303
         §3:10-§3:12). The notes are listed so that the owner can name them in a
         split or a move.
 
         Returns:
-            The page, or ``None`` where the store holds no such story. A merged
+            The summary, or ``None`` where the store holds no such story. A merged
             story's carries its header alone.
 
         Raises:
             ValueError: If the id is malformed.
             StoryStoreError: If the story store cannot be read.
-            MemoryStoreError: If an episode behind the page cannot be read.
+            MemoryStoreError: If an episode behind the summary cannot be read.
         """
         ...
 
@@ -15244,10 +15244,10 @@ class AssistantEngine(Protocol):
     async def add_story_note(
         self, story_id: Identifier, text: NonBlankEncodableText
     ) -> StoryNoteOutcome:
-        """Add a note to a story's page, written by the owner (ADR-0300 §8:3).
+        """Add a note to a story, written by the owner (ADR-0300 §8:3).
 
         The note rests on nothing and is never marked as fed by outside content
-        (§3:3-§3:4); it is pending on the story until a version of its page takes
+        (§3:3-§3:4); it is pending on the story until a version of its summary takes
         it in.
 
         Returns:

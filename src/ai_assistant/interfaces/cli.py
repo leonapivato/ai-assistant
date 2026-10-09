@@ -1763,15 +1763,15 @@ async def _show_episode(episode_id: str, *, as_json: bool) -> int:
 # --- stories (ADR-0289 §5) -------------------------------------------------------
 
 #: The owner's story commands. **For testing**: this group is how the store's rules
-#: and a story's page are exercised by hand, and its help says so (ADR-0289 §5:1),
+#: and a story's summary are exercised by hand, and its help says so (ADR-0289 §5:1),
 #: ADR-0300 §8:4 adding the story commands under that clause. Rendering and argument
-#: parsing only: what a write may do, what of a page the owner is shown and where a
+#: parsing only: what a write may do, what of a summary the owner is shown and where a
 #: matter stands are the story store's and the engine's to decide.
 story_app = typer.Typer(
     name="story",
     help=(
         "For testing: create, link, unlink, merge, split, list and show stories by "
-        "hand; read a story's page and where its matter stands; add a note to its page; "
+        "hand; read a story's summary and where its matter stands; add a note to it; "
         "and move activations between stories. A story holds which experiences belong "
         "to the same matter. Name a member with --activation (an activation id) or "
         "--story (a story id)."
@@ -1805,7 +1805,7 @@ _STORY_NOTE_OPTION = typer.Option(
     "--note",
     "-n",
     help=(
-        "A note that goes with the members, by the number 'assistant story page' shows "
+        "A note that goes with the members, by the number 'assistant story summary' shows "
         "after its #. Repeat for more. A note the story does not hold is passed over; "
         "no note goes unless it is named."
     ),
@@ -1935,9 +1935,9 @@ def story_list(
     limit: int = typer.Option(DEFAULT_PAGE_SIZE, "--limit", help="How many stories at most."),
     cursor: int | None = typer.Option(None, "--cursor", help="A previous page's next cursor."),
 ) -> None:
-    """List every story, newest first, each with its page's first line where it has one.
+    """List every story, newest first, each with its summary's first line where it has one.
 
-    A page resting on outside content is labelled so, and a page withheld because not
+    A summary resting on outside content is labelled so, and a summary withheld because not
     everything behind it may be shown says so instead of showing a line.
     """
     try:
@@ -2005,11 +2005,11 @@ async def _read_story[T](
 # --- the story commands (ADR-0300 §8) ---------------------------------------------
 
 
-@story_app.command("page")
-def story_page(story_id: str = _STORY_ID_ARGUMENT) -> None:
-    """Show a story's page: when it was last tidied, its lines, then its notes.
+@story_app.command("summary")
+def story_summary(story_id: str = _STORY_ID_ARGUMENT) -> None:
+    """Show a story's summary: when it was last tidied, its lines, then its notes.
 
-    The page and a note resting on outside content are labelled so. A page behind
+    The summary and a note resting on outside content are labelled so. A summary behind
     which an episode is no longer held is withheld whole, and says so. Each note
     shows its number, by which a split or a move names it, and whether it is pending.
     A merged story shows only the story it was merged into.
@@ -2018,8 +2018,8 @@ def story_page(story_id: str = _STORY_ID_ARGUMENT) -> None:
         asyncio.run(
             _read_story(
                 story_id,
-                lambda engine: engine.story_page(story_id),
-                story_inspection.render_page,
+                lambda engine: engine.story_summary(story_id),
+                story_inspection.render_summary,
             )
         )
     )
@@ -2046,9 +2046,9 @@ def story_standing(story_id: str = _STORY_ID_ARGUMENT) -> None:
 @story_app.command("note")
 def story_note(
     story_id: str = _STORY_ID_ARGUMENT,
-    text: str = typer.Argument(..., help="The note, as you would write it on the page."),
+    text: str = typer.Argument(..., help="The note, as you would write it."),
 ) -> None:
-    """Add a note of your own to a story's page; it is pending until the page is tidied."""
+    """Add a note of your own to a story; it is pending until the summary is tidied."""
     try:
         written = story_note_text(text)
     except ValueError as exc:

@@ -56,7 +56,7 @@ _BUDGET: Final = timedelta(seconds=10)
 #: is written and frozen at it, and a store reading a later clock would find it expired.
 _NOW: Final = ENGINE_AT
 _TURN: Final = "The canoe is booked for Sunday."
-_PAGE: Final = json.dumps({"lines": ["A camping trip to Riverside."], "flags": []})
+_SUMMARY: Final = json.dumps({"lines": ["A camping trip to Riverside."], "flags": []})
 
 
 def _stories() -> FakeStoryStore:
@@ -131,28 +131,28 @@ async def test_a_turn_linking_into_a_story_with_a_pending_note_starts_a_tidy_up_
         trip, "Camping at Riverside.", author=StoryNoteAuthor.PLANNING, written_during="a-1"
     )
     memory = await memory_of(episode("a-1", at=_NOW), now=_NOW)
-    model = _Gated(_PAGE)
+    model = _Gated(_SUMMARY)
     harness = _harness(memory, stories, _tidy_up(model, stories, memory), labels=["S1"])
 
     # The turn returns while the tidy-up's completion is still held: nobody waits.
     await harness.engine.converse(_TURN, timeout=_BUDGET)
     await model.entered.wait()
-    state = await stories.current_page(trip)
+    state = await stories.current_summary(trip)
     assert state is not None
-    assert state.page is None
+    assert state.summary is None
 
     model.gate.set()
     await _drained(harness)
 
-    state = await stories.current_page(trip)
+    state = await stories.current_summary(trip)
     assert state is not None
-    assert state.page is not None
-    assert [line.text for line in state.page.lines] == ["A camping trip to Riverside."]
+    assert state.summary is not None
+    assert [line.text for line in state.summary.lines] == ["A camping trip to Riverside."]
     assert state.pending_notes == ()
     # ADR-0303 §5:9: started once the turn's episode was frozen, so the run read it
     # and took it in, beside the earlier episode: nothing is left pending.
     assert state.pending_episodes == ()
-    versions = await stories.page_versions(trip)
+    versions = await stories.summary_versions(trip)
     assert versions is not None
     (version,) = versions.versions
     assert len(version.took_in_episodes) == 2
@@ -169,7 +169,7 @@ async def test_a_cancellation_landing_once_the_freeze_is_confirmed_still_starts_
     trip = (await stories.create([activation("a-1")], actor=StoryActor.OWNER)).story_id
     assert trip is not None
     memory = await memory_of(episode("a-1", at=_NOW), now=_NOW)
-    model = FakeModelProvider(_PAGE)
+    model = FakeModelProvider(_SUMMARY)
     harness = _harness(memory, stories, _tidy_up(model, stories, memory), labels=["S1"])
     coordinator = harness.engine._activation_coordinator
     finish = coordinator.finish
@@ -188,9 +188,9 @@ async def test_a_cancellation_landing_once_the_freeze_is_confirmed_still_starts_
 
     assert frozen == [True]
     assert len(model.calls) == 1
-    state = await stories.current_page(trip)
+    state = await stories.current_summary(trip)
     assert state is not None
-    assert state.page is not None
+    assert state.summary is not None
 
 
 async def test_a_turn_linking_into_no_story_starts_no_tidy_up() -> None:
@@ -208,17 +208,17 @@ async def test_a_turn_linking_into_no_story_starts_no_tidy_up() -> None:
 async def test_a_story_the_rule_starts_is_tidied_from_the_earlier_episode_it_holds() -> None:
     stories = _stories()
     memory = await memory_of(episode("a-1", at=_NOW), now=_NOW)
-    model = FakeModelProvider(_PAGE)
+    model = FakeModelProvider(_SUMMARY)
     harness = _harness(memory, stories, _tidy_up(model, stories, memory), labels=["P1"])
 
     await harness.engine.converse(_TURN, timeout=_BUDGET)
     await _drained(harness)
 
     (started,) = (await stories.stories()).stories
-    state = await stories.current_page(started.story_id)
+    state = await stories.current_summary(started.story_id)
     assert state is not None
-    assert state.page is not None
-    versions = await stories.page_versions(started.story_id)
+    assert state.summary is not None
+    versions = await stories.summary_versions(started.story_id)
     assert versions is not None
     (version,) = versions.versions
     assert version.took_in_episodes[0] == "a-1"
@@ -338,7 +338,7 @@ async def test_a_frozen_episodes_links_start_their_runs() -> None:
     trip = (await stories.create([activation("a-1")], actor=StoryActor.OWNER)).story_id
     assert trip is not None
     memory = await memory_of(episode("a-1", at=_NOW), now=_NOW)
-    model = FakeModelProvider(_PAGE)
+    model = FakeModelProvider(_SUMMARY)
     harness = _harness(memory, stories, _tidy_up(model, stories, memory), labels=["S1"])
     before = set(harness.engine._inflight)
 

@@ -245,7 +245,7 @@ from ai_assistant.orchestration.recipient_grants import (
 from ai_assistant.orchestration.speech import SPOKEN_PARK_SENTENCE
 from ai_assistant.orchestration.stories import (
     fitted,
-    owner_page,
+    owner_summary,
     resolved_view,
     unknown_activation,
 )
@@ -296,8 +296,8 @@ if TYPE_CHECKING:
         StoryLogPage,
         StoryNoteOutcome,
         StoryPage,
-        StoryPageView,
         StoryStanding,
+        StorySummaryView,
         StoryView,
         TranscriptPage,
         UserMessage,
@@ -2999,17 +2999,17 @@ class FakeAssistantEngine:
 
     # --- the story commands (ADR-0300 §8) -----------------------------------
     #
-    # The engine's four, over the same store and the same shared logic: the page read
+    # The engine's four, over the same store and the same shared logic: the summary read
     # of `orchestration/stories.py` and the standing of
     # `orchestration/story_standing.py`, each for the owner as reader.
 
-    async def story_page(self, story_id: Identifier) -> StoryPageView | None:
-        """Read a story's page as the owner is shown it (ADR-0300 §8:3, §11)."""
+    async def story_summary(self, story_id: Identifier) -> StorySummaryView | None:
+        """Read a story's summary as the owner is shown it (ADR-0300 §8:3, §11)."""
         target = identifier(story_id, name="story_id")
-        check_arguments("story_page", max_bytes=self._max_payload_bytes, story_id=target)
-        self.calls.append(("story_page", {"story_id": target}))
-        page = await owner_page(self.story_store, self.episode_memory, target)
-        return self._checked(page, "story_page")
+        check_arguments("story_summary", max_bytes=self._max_payload_bytes, story_id=target)
+        self.calls.append(("story_summary", {"story_id": target}))
+        summary = await owner_summary(self.story_store, self.episode_memory, target)
+        return self._checked(summary, "story_summary")
 
     async def story_standing(self, story_id: Identifier) -> StoryStanding | None:
         """Read where a story's matter stands, worked out for the owner (ADR-0300 §8:1)."""
@@ -3022,7 +3022,7 @@ class FakeAssistantEngine:
         return self._checked(standing, "story_standing")
 
     async def add_story_note(self, story_id: Identifier, text: str) -> StoryNoteOutcome:
-        """Add a note to a story's page, written by the owner (ADR-0300 §8:3)."""
+        """Add a note to a story, written by the owner (ADR-0300 §8:3)."""
         target = identifier(story_id, name="story_id")
         written = story_note_text(text)
         check_arguments(

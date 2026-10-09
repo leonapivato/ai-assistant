@@ -5,7 +5,7 @@ a suite bound only to the double certifies the double while the real store drift
 Beside the binding are the properties of this backend alone: the owner-only file
 mode (ADR-0004 §4), durability across a reopen, the append-only log enforced by the
 database itself, the schema version and its migrations — ADR-0303 §4:8's included,
-which keeps every note and every page while dropping what a line cited, the
+which keeps every note and every summary while dropping what a line cited, the
 safety-net notes a version added and its supersession marks — and a store fault
 surfacing as ``StoryStoreError`` with nothing written — a decision's line included,
 which lands with the change it records or not at all (ADR-0302 §3:4).
@@ -48,9 +48,9 @@ from ai_assistant.core.types import (
     StoryFlagName,
     StoryNoteAuthor,
     StoryOutcome,
-    StoryPageLine,
-    StoryPageVersionName,
     StoryRefusalReason,
+    StorySummaryLine,
+    StorySummaryVersionName,
 )
 from ai_assistant.memory import SqliteStoryStore
 
@@ -207,9 +207,9 @@ async def test_a_corrupt_row_is_a_story_store_error(tmp_path: Path) -> None:
         reopened.close()
 
 
-# --- the page (ADR-0300 §3) -----------------------------------------------------
+# --- the notes and the summary (ADR-0300 §3) ------------------------------------
 
-#: ADR-0289's schema, version 1, as ``stories.db`` carried it before the page, with
+#: ADR-0289's schema, version 1, as ``stories.db`` carried it before the notes and the summary, with
 #: one story holding an activation and a story.
 _SCHEMA_1 = (
     "CREATE TABLE stories(id TEXT PRIMARY KEY, created_seq INTEGER NOT NULL UNIQUE, "
@@ -251,7 +251,7 @@ async def test_a_schema_one_file_is_migrated_with_every_activation_member_pendin
         state = await state_of(store, "story:old")
         assert state.pending_episodes == ("a1",)
         assert state.pending_notes == ()
-        assert state.page is None
+        assert state.summary is None
         note = await noted(store, "story:old", "After the migration.")
         assert note.note_id > state.as_of
         version = await written(
@@ -270,7 +270,7 @@ async def test_a_schema_one_file_is_migrated_with_every_activation_member_pendin
         check.close()
 
 
-async def test_the_page_survives_a_reopen_and_the_counter_keeps_rising(tmp_path: Path) -> None:
+async def test_the_summary_survives_a_reopen_and_the_counter_keeps_rising(tmp_path: Path) -> None:
     path = tmp_path / "stories.db"
     first = SqliteStoryStore(path=path, now=lambda: STORY_AT)
     story_id = await made(first, act("a1"))
@@ -282,13 +282,13 @@ async def test_the_page_survives_a_reopen_and_the_counter_keeps_rising(tmp_path:
         draft(line("A camping trip."), outside=True, took_in_notes=(note.note_id,)),
         as_of=read.as_of,
     )
-    page = (await state_of(first, story_id)).page
+    summary = (await state_of(first, story_id)).summary
     notes = await notes_of(first, story_id)
     first.close()
     second = SqliteStoryStore(path=path, now=lambda: STORY_AT)
     try:
         again = await state_of(second, story_id)
-        assert again.page == page
+        assert again.summary == summary
         assert again.pending_episodes == ("a1",)
         assert await notes_of(second, story_id) == notes
         assert await versions_of(second, story_id) == [version]
@@ -344,8 +344,8 @@ async def test_the_version_log_refuses_a_rewrite_or_a_removal(tmp_path: Path) ->
         conn.close()
 
 
-async def test_a_replaced_page_leaves_no_text_in_the_file(tmp_path: Path) -> None:
-    """Only the current page is kept as text (ADR-0300 §3:6), in the file as well."""
+async def test_a_replaced_summary_leaves_no_text_in_the_file(tmp_path: Path) -> None:
+    """Only the summary is kept as text (ADR-0300 §3:6), in the file as well."""
     path = tmp_path / "stories.db"
     store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
     old = "the-old-line-" + "q" * 64
@@ -413,8 +413,8 @@ async def test_a_backend_failure_carrying_notes_rolls_the_whole_operation_back(
         store.close()
 
 
-async def test_a_backend_failure_mid_page_write_writes_nothing(tmp_path: Path) -> None:
-    """The take-in and the page are undone when the version cannot be written."""
+async def test_a_backend_failure_mid_summary_write_writes_nothing(tmp_path: Path) -> None:
+    """The take-in and the summary are undone when the version cannot be written."""
     path = tmp_path / "stories.db"
     store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
     try:
@@ -428,7 +428,7 @@ async def test_a_backend_failure_mid_page_write_writes_nothing(tmp_path: Path) -
         )
         injector.commit()
         with pytest.raises(StoryStoreError, match="injected fault"):
-            await store.write_page(
+            await store.write_summary(
                 story_id,
                 draft(line("Line."), took_in_notes=(note.note_id,), took_in_episodes=("a1",)),
                 as_of=before[0].as_of,
@@ -445,15 +445,15 @@ async def test_a_backend_failure_mid_page_write_writes_nothing(tmp_path: Path) -
 @pytest.mark.parametrize(
     ("statement", "read"),
     [
-        ("UPDATE pages SET lines = 'not json'", "page"),
-        ("""UPDATE pages SET lines = '[{"text": "Line.", "cites": [2]}]'""", "page"),
-        ("UPDATE pages SET lines = 7", "page"),
-        ("UPDATE pages SET outside = 2", "page"),
+        ("UPDATE pages SET lines = 'not json'", "summary"),
+        ("""UPDATE pages SET lines = '[{"text": "Line.", "cites": [2]}]'""", "summary"),
+        ("UPDATE pages SET lines = 7", "summary"),
+        ("UPDATE pages SET outside = 2", "summary"),
         ("UPDATE notes SET outside = 2", "notes"),
         ("UPDATE versions SET record = '[1]'", "versions"),
     ],
 )
-async def test_a_corrupt_page_record_is_a_story_store_error(
+async def test_a_corrupt_summary_record_is_a_story_store_error(
     tmp_path: Path, statement: str, read: str
 ) -> None:
     path = tmp_path / "stories.db"
@@ -475,9 +475,9 @@ async def test_a_corrupt_page_record_is_a_story_store_error(
     conn.close()
     reopened = SqliteStoryStore(path=path, now=lambda: STORY_AT)
     reads: dict[str, Callable[[], Awaitable[object]]] = {
-        "page": lambda: reopened.current_page(story_id),
+        "summary": lambda: reopened.current_summary(story_id),
         "notes": lambda: reopened.notes(story_id),
-        "versions": lambda: reopened.page_versions(story_id),
+        "versions": lambda: reopened.summary_versions(story_id),
     }
     try:
         with pytest.raises(StoryStoreError):
@@ -489,7 +489,7 @@ async def test_a_corrupt_page_record_is_a_story_store_error(
 # --- decisions on flags (ADR-0302 §§3-4, §10) -----------------------------------
 
 #: ADR-0300's schema, version 2, as ``stories.db`` carried it before the decision
-#: lines: one story holding an activation, with a note and a page version raising a
+#: lines: one story holding an activation, with a note and a summary version raising a
 #: flag (the indexes and triggers this test does not need are left out).
 _SCHEMA_2 = (
     "CREATE TABLE stories(id TEXT PRIMARY KEY, created_seq INTEGER NOT NULL UNIQUE, "
@@ -549,8 +549,11 @@ async def test_a_schema_two_file_is_migrated_and_its_lines_stand_unchanged(
         assert after[:2] == lines
         assert (after[-1].answers, after[-1].outcome) == (flag, StoryDecision.LEFT)
         state = await state_of(store, "story:old")
-        assert state.page is not None
-        assert (state.page.lines, state.page.outside) == ((StoryPageLine(text="Line."),), False)
+        assert state.summary is not None
+        assert (state.summary.lines, state.summary.outside) == (
+            (StorySummaryLine(text="Line."),),
+            False,
+        )
         assert [note.written_during for note in await notes_of(store, "story:old")] == ["a1"]
     finally:
         store.close()
@@ -561,7 +564,7 @@ async def test_a_schema_two_file_is_migrated_and_its_lines_stand_unchanged(
         check.close()
 
 
-# --- ADR-0303 §4:8: the page's records migrated ----------------------------------
+# --- ADR-0303 §4:8: the notes' and the summary's records migrated ---------------
 
 #: ADR-0302's schema, version 3, as ``stories.db`` carried it before ADR-0303, with
 #: its indexes and triggers, which the migration must carry through a column renamed.
@@ -609,9 +612,9 @@ _SCHEMA_3_LAYOUT = (
 #: Two stories under that layout. ``story:old`` holds a planning note marked as
 #: outside content, the user's own note and a tidy-up's safety-net note; version 5
 #: cited the planning note, added the safety net and marked the user's note
-#: superseded; version 8, the current page's, cited the user's note and the safety net,
+#: superseded; version 8, the summary's, cited the user's note and the safety net,
 #: and its second line was marked. ``story:quiet`` has one version citing an unmarked
-#: note, whose page no line marks.
+#: note, whose summary no line marks.
 _SCHEMA_3_RECORDS = (
     "INSERT INTO stories VALUES('story:old', 1, 0, NULL)",
     "INSERT INTO stories VALUES('story:quiet', 3, 0, NULL)",
@@ -653,7 +656,7 @@ def _schema_3(path: Path) -> None:
     conn.close()
 
 
-async def test_a_schema_three_file_keeps_every_note_and_page_and_drops_what_adr_0303_retires(
+async def test_a_schema_three_file_keeps_every_note_and_summary_and_drops_what_adr_0303_retires(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "stories.db"
@@ -676,22 +679,26 @@ async def test_a_schema_three_file_keeps_every_note_and_page_and_drops_what_adr_
             (5, (1, 2), ("a1",), (), (StoryFlag(kind=StoryFlagKind.TWO_MATTERS),), True),
             (8, (), (), (), (), True),
         ]
-        page = (await state_of(store, "story:old")).page
-        assert page is not None
-        assert (page.version, page.outside) == (8, True)
-        assert page.lines == (StoryPageLine(text="Camping."), StoryPageLine(text="Booked Sunday."))
-        quiet = (await state_of(store, "story:quiet")).page
+        summary = (await state_of(store, "story:old")).summary
+        assert summary is not None
+        assert (summary.version, summary.outside) == (8, True)
+        assert summary.lines == (
+            StorySummaryLine(text="Camping."),
+            StorySummaryLine(text="Booked Sunday."),
+        )
+        quiet = (await state_of(store, "story:quiet")).summary
         assert quiet is not None
-        assert (quiet.lines, quiet.outside) == ((StoryPageLine(text="Quiet."),), False)
+        assert (quiet.lines, quiet.outside) == ((StorySummaryLine(text="Quiet."),), False)
         assert [v.outside for v in await versions_of(store, "story:quiet")] == [False]
-        # The migrated file is written as a fresh one is: a page may be read by its
+        # The migrated file is written as a fresh one is: a summary may be read by its
         # version, and a version after the counter's last reading follows it.
         read = await state_of(store, "story:quiet")
         later = await written(
             store,
             "story:quiet",
             draft(
-                line("Quieter."), read_pages=(StoryPageVersionName(story="story:old", version=8),)
+                line("Quieter."),
+                read_pages=(StorySummaryVersionName(story="story:old", version=8),),
             ),
             as_of=read.as_of,
         )

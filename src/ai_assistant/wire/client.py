@@ -172,8 +172,8 @@ if TYPE_CHECKING:
         StoryNoteOutcome,
         StoryOutcome,
         StoryPage,
-        StoryPageView,
         StoryStanding,
+        StorySummaryView,
         StoryView,
         TranscriptPage,
         TurnOutcome,
@@ -805,10 +805,10 @@ class HubClient:
     # Refused here as the engine refuses them, before any frame is written, for the
     # reason the story methods above give.
 
-    async def story_page(self, story_id: Identifier) -> StoryPageView | None:
-        """Read a story's page as the owner is shown it (ADR-0300 §8:3, §11)."""
+    async def story_summary(self, story_id: Identifier) -> StorySummaryView | None:
+        """Read a story's summary as the owner is shown it (ADR-0300 §8:3, §11)."""
         target = identifier(story_id, name="story_id")
-        return await self._call("story_page", story_id=target)  # type: ignore[no-any-return]
+        return await self._call("story_summary", story_id=target)  # type: ignore[no-any-return]
 
     async def story_standing(self, story_id: Identifier) -> StoryStanding | None:
         """Read where a story's matter stands, worked out for the owner (ADR-0300 §8:1)."""
@@ -818,7 +818,7 @@ class HubClient:
         )
 
     async def add_story_note(self, story_id: Identifier, text: str) -> StoryNoteOutcome:
-        """Add a note to a story's page, written by the owner (ADR-0300 §8:3)."""
+        """Add a note to a story, written by the owner (ADR-0300 §8:3)."""
         target = identifier(story_id, name="story_id")
         written = story_note_text(text)
         return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.

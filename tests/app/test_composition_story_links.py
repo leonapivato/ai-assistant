@@ -1,5 +1,5 @@
 """The composition root wires ADR-0300 §6's candidates and story-links stage, the story
-page view's bound (ADR-0303 §10:2), and their values."""
+summary view's bound (ADR-0303 §10:2), and their values."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 
 from ai_assistant.app import build_engine
 from ai_assistant.app.composition import (
-    STORY_PAGE_VIEW_NOTES,
     STORY_SHORT_VIEW_EPISODES,
     STORY_SHORT_VIEW_LINES,
     STORY_SHORT_VIEW_NOTES,
+    STORY_SUMMARY_VIEW_NOTES,
     UNDERSTANDING_STORY_CANDIDATES,
 )
 from ai_assistant.core.config import Settings
@@ -50,16 +50,16 @@ async def test_the_engine_is_built_with_both_story_pieces_over_its_one_story_sto
         await engine.aclose()
 
 
-def test_the_story_page_view_s_bound_is_this_lane_s() -> None:
+def test_the_story_summary_view_s_bound_is_this_lane_s() -> None:
     """ADR-0303 §10:2's composition-root constant."""
-    assert STORY_PAGE_VIEW_NOTES == 20
+    assert STORY_SUMMARY_VIEW_NOTES == 20
 
 
-async def test_the_engine_lists_the_root_s_number_of_notes_on_a_story_s_page(
+async def test_the_engine_lists_the_root_s_number_of_notes_on_a_story_s_summary(
     tmp_path: Path,
 ) -> None:
     engine = build_engine(Settings(), data_dir=tmp_path)
     try:
-        assert engine._story_page_notes == STORY_PAGE_VIEW_NOTES
+        assert engine._story_summary_notes == STORY_SUMMARY_VIEW_NOTES
     finally:
         await engine.aclose()

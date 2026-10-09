@@ -45,7 +45,7 @@ from ai_assistant.core.types import (
     SemanticMemory,
     StoryNote,
     StoryNoteAuthor,
-    StoryPageLine,
+    StorySummaryLine,
     TranscriptMessage,
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
@@ -90,8 +90,8 @@ def _note(note_id: int, text: str, **fields: Any) -> StoryNote:
 _TRIP: Final = ShortView(
     story_id="story:trip",
     lines=(
-        StoryPageLine(text="A camping trip to Riverside."),
-        StoryPageLine(text="The park says the lake is closed."),
+        StorySummaryLine(text="A camping trip to Riverside."),
+        StorySummaryLine(text="The park says the lake is closed."),
     ),
     outside=True,
     notes=(
@@ -189,30 +189,30 @@ async def test_the_candidates_render_under_s_labels_attributed_by_their_records(
 
     first, second = _payload(model)["stories"]
     assert (first["label"], second["label"]) == ("S1", "S2")
-    assert [line["text"] for line in first["page"]] == [
+    assert [line["text"] for line in first["summary"]] == [
         "A camping trip to Riverside.",
         "The park says the lake is closed.",
     ]
-    # ADR-0303 §3:8: a marked page or note is shown as outside content, never as the
+    # ADR-0303 §3:8: a marked summary or note is shown as outside content, never as the
     # user's words; a line carries no mark of its own (§2:7).
-    assert all("outside_content" not in line for line in first["page"])
-    assert "never something the user said" in first["page_outside_content"]
-    assert "page_outside_content" not in second
+    assert all("outside_content" not in line for line in first["summary"])
+    assert "never something the user said" in first["summary_outside_content"]
+    assert "summary_outside_content" not in second
     owner, outside = first["newest_notes"]
-    assert owner["written_by"] == "the user, writing on this story's page directly"
+    assert owner["written_by"] == "the user, writing on this story directly"
     assert "outside_content" not in owner
     assert "never something the user said" in outside["outside_content"]
     # §6:5: the episodes inside a short view take no label.
     (shown,) = first["latest_episodes"]
     assert "label" not in shown
     assert shown["input"] == "Book the canoe for Sunday."
-    assert second["page"].startswith("missing:")
+    assert second["summary"].startswith("missing:")
     assert second["newest_notes"].startswith("missing:")
     assert second["latest_episodes"].startswith("missing:")
 
 
-async def test_a_withheld_page_is_said_to_be_withheld_and_nothing_of_it_is_rendered() -> None:
-    """ADR-0303 §3:11: the reader is told a page was withheld, and is shown none of it."""
+async def test_a_withheld_summary_is_said_to_be_withheld_and_nothing_of_it_is_rendered() -> None:
+    """ADR-0303 §3:11: the reader is told a summary was withheld, and is shown none of it."""
     model = FakeModelProvider(_proposal())
     withheld = ShortView(
         story_id="story:withheld",
@@ -225,12 +225,12 @@ async def test_a_withheld_page_is_said_to_be_withheld_and_nothing_of_it_is_rende
     await _understand(model, stories=Candidates(views=(withheld, _RUNNING)))
 
     first, second = _payload(model)["stories"]
-    assert first["page"].startswith("missing:")
-    assert "withheld" in first["page"]
-    assert "page_outside_content" not in first
-    # The notes are decided on their own (§3:9), and a story with no page is not withheld.
+    assert first["summary"].startswith("missing:")
+    assert "withheld" in first["summary"]
+    assert "summary_outside_content" not in first
+    # The notes are decided on their own (§3:9), and a story with no summary is not withheld.
     assert len(first["newest_notes"]) == 2
-    assert "withheld" not in second["page"]
+    assert "withheld" not in second["summary"]
 
 
 async def test_the_instruction_states_what_a_link_says_and_asks_for_story_labels() -> None:

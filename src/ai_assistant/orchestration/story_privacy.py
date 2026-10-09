@@ -1,32 +1,32 @@
-"""The privacy default for a story's page: which of its notes and page a reader sees.
+"""The privacy default for a story's notes and summary: which of them a reader sees.
 
 ADR-0303 §3 rules it until privacy is designed. A note is shown to a reader only where
 a record placed for the owner alone may be shown to that reader, whoever wrote it
-(§3:9). The current page is shown only where **everything behind it** may be shown,
-and otherwise none of it is, the reader being told that a page was withheld (§3:11).
+(§3:9). The summary is shown only where **everything behind it** may be shown,
+and otherwise none of it is, the reader being told that a summary was withheld (§3:11).
 A note rests on nothing and a line cites nothing, so ADR-0300 §11:1's tests, which read
 the episode a note rested on and the notes a line cited, are gone.
 
-**What stands behind a page version** (:func:`behind`, §3:10) is every note and every
-episode it took in, and everything behind each page version its run read: the page it
-replaced, which is its story's previous version, and each other story's page the run
-was shown for its flags (``StoryPageVersion.read_pages``, §3:3). So it is cumulative
-over the story's own versions, and it follows other stories' pages however many
+**What stands behind a summary version** (:func:`behind`, §3:10) is every note and every
+episode it took in, and everything behind each summary version its run read: the summary it
+replaced, which is its story's previous version, and each other story's summary the run
+was shown for its flags (``StorySummaryVersion.read_pages``, §3:3). So it is cumulative
+over the story's own versions, and it follows other stories' summaries however many
 stories that reaches. It is read from the version logs alone, through
-``StoryStore.page_versions``, and each version is visited once, since a story's page
+``StoryStore.summary_versions``, and each version is visited once, since a story's summary
 can reach its own earlier versions through another's. No line's or note's text is
 read.
 
-**Each reader decides the rest with its own answers** (:class:`PageVisibility`): which
-of the episodes behind the page it may be shown, fetched and admitted by its own rule,
+**Each reader decides the rest with its own answers** (:class:`SummaryVisibility`): which
+of the episodes behind the summary it may be shown, fetched and admitted by its own rule,
 and whether it may be shown a record placed for the owner alone, which decides every
-note. An episode behind the page that the reader's caller cannot establish may be shown
+note. An episode behind the summary that the reader's caller cannot establish may be shown
 — open where the reader is never shown an open one, forgotten, no longer held, or not
-looked up — withholds the page (§3:12), and so does a version the walk cannot read.
+looked up — withholds the summary (§3:12), and so does a version the walk cannot read.
 
-**The rule is decided here once, for every reader of a page**: understanding's short
-views and the owner's story page view today, and planning's views once the phases build
-them. Nothing of ADR-0300's page is live outside a test hub until the phases' cutover
+**The rule is decided here once, for every reader of a summary**: understanding's short
+views and the owner's story summary view today, and planning's views once the phases build
+them. Nothing of ADR-0300's summary is live outside a test hub until the phases' cutover
 (ADR-0300 §13).
 """
 
@@ -41,9 +41,9 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from ai_assistant.core.protocols import StoryStore
-    from ai_assistant.core.types import EpisodicMemory, StoryNote, StoryPageVersion
+    from ai_assistant.core.types import EpisodicMemory, StoryNote, StorySummaryVersion
 
-__all__ = ["Behind", "PageVisibility", "activation_of", "behind"]
+__all__ = ["Behind", "SummaryVisibility", "activation_of", "behind"]
 
 
 def activation_of(record: EpisodicMemory) -> str | None:
@@ -59,14 +59,14 @@ def activation_of(record: EpisodicMemory) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class Behind:
-    """What stands behind one page version (ADR-0303 §3:10), by identity alone.
+    """What stands behind one summary version (ADR-0303 §3:10), by identity alone.
 
     Attributes:
         notes: Every note a version behind it took in, by note id.
         episodes: Every episode a version behind it took in, by activation id.
         complete: Whether every version the walk reached could be read. A version the
             store no longer answers for — of a story it no longer holds, or one its
-            story's log does not hold — stands behind the page unread, and withholds
+            story's log does not hold — stands behind the summary unread, and withholds
             it.
     """
 
@@ -76,20 +76,20 @@ class Behind:
 
 
 async def behind(stories: StoryStore, story_id: str, version: int) -> Behind:
-    """Walk everything behind ``story_id``'s page ``version`` (ADR-0303 §3:10).
+    """Walk everything behind ``story_id``'s summary ``version`` (ADR-0303 §3:10).
 
     The version and each earlier version on its story's log are behind it, because each
-    run reads the page it replaces; and so is everything behind each other story's page
+    run reads the summary it replaces; and so is everything behind each other story's summary
     version any of them read. One counter numbers every story's versions, so a story's
     earlier versions are those its log holds numbered below it. Each story's log is read
     once, and each version on it is visited at most once, however many paths reach it.
     The log is append-only, so a version read once is read for good, and a walk made
-    after the page was read answers for that page.
+    after the summary was read answers for that summary.
 
     Args:
         stories: The story store whose version logs are read.
-        story_id: The story whose page is asked about.
-        version: The version that wrote that page.
+        story_id: The story whose summary is asked about.
+        version: The version that wrote that summary.
 
     Returns:
         What stands behind it.
@@ -101,7 +101,7 @@ async def behind(stories: StoryStore, story_id: str, version: int) -> Behind:
     notes: set[int] = set()
     episodes: set[str] = set()
     complete = True
-    logs: dict[str, dict[int, StoryPageVersion] | None] = {}
+    logs: dict[str, dict[int, StorySummaryVersion] | None] = {}
     walked: dict[str, int] = {}
     wanted: list[tuple[str, int]] = [(story_id, version)]
     while wanted:
@@ -126,12 +126,12 @@ async def behind(stories: StoryStore, story_id: str, version: int) -> Behind:
     return Behind(notes=frozenset(notes), episodes=frozenset(episodes), complete=complete)
 
 
-async def _log(stories: StoryStore, story_id: str) -> dict[int, StoryPageVersion] | None:
+async def _log(stories: StoryStore, story_id: str) -> dict[int, StorySummaryVersion] | None:
     """A story's whole version log by version number, or ``None`` where it holds none."""
-    found: dict[int, StoryPageVersion] = {}
+    found: dict[int, StorySummaryVersion] = {}
     cursor: int | None = None
     while True:
-        listed = await stories.page_versions(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
+        listed = await stories.summary_versions(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
         if listed is None:
             return None if cursor is None else found
         found.update((entry.version, entry) for entry in listed.versions)
@@ -142,8 +142,8 @@ async def _log(stories: StoryStore, story_id: str) -> dict[int, StoryPageVersion
 
 
 @dataclass(frozen=True, slots=True)
-class PageVisibility:
-    """Which of a story's notes, and whether its page, one reader may be shown.
+class SummaryVisibility:
+    """Which of a story's notes, and whether its summary, one reader may be shown.
 
     Attributes:
         activations: The activations whose episodes the reader may be shown: each
@@ -158,7 +158,7 @@ class PageVisibility:
     owner_notes: bool
 
     @classmethod
-    def of(cls, episodes: Iterable[EpisodicMemory], *, owner_notes: bool) -> PageVisibility:
+    def of(cls, episodes: Iterable[EpisodicMemory], *, owner_notes: bool) -> SummaryVisibility:
         """The visibility for a reader who may be shown exactly ``episodes``.
 
         Args:
@@ -180,12 +180,12 @@ class PageVisibility:
         """Whether ``note`` may be shown: where an owner record may be, whoever wrote it."""
         return self.owner_notes
 
-    def page(self, behind: Behind) -> bool:
-        """Whether a page may be shown: where everything ``behind`` it may be (§3:11).
+    def summary(self, behind: Behind) -> bool:
+        """Whether a summary may be shown: where everything ``behind`` it may be (§3:11).
 
         Every note behind it may be shown exactly where an owner record may be
         (§3:9). Every episode behind it must be one the reader was found able to be
-        shown, so one not looked up withholds the page as surely as one refused
+        shown, so one not looked up withholds the summary as surely as one refused
         (§3:12); and a version the walk could not read withholds it too.
         """
         if not behind.complete:

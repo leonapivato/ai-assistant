@@ -2,13 +2,13 @@
 
 Rendering and read assembly only. Which writes are allowed, what a loop is and
 whether a member exists are the story store's and the engine's to decide (ADR-0289
-§§3-4); what of a page the owner is shown, and where a matter stands, are the
+§§3-4); what of a summary the owner is shown, and where a matter stands, are the
 engine's to work out (ADR-0300 §8, §11). This module states what they answered.
 
 **Every value the engine supplies is quoted** by :func:`quoted`: JSON-escaped, and
 any character that is still not printable escaped as well, so an id carrying a line
 break, an ANSI escape or a C1 control cannot pose as a line this adapter wrote. A
-page's lines, its notes and an episode's meaning are quoted the same way, and one
+summary's lines, its notes and an episode's meaning are quoted the same way, and one
 resting on outside content is labelled so, never shown as the owner's own words
 (ADR-0300 §4, §8:4).
 """
@@ -23,14 +23,14 @@ from typing import TYPE_CHECKING, assert_never
 from ai_assistant.core.errors import OversizedValueError
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
-    STORY_PAGE_CAP_CHARS,
+    STORY_SUMMARY_CAP_CHARS,
     StoryChange,
     StoryDecision,
     StoryEffectState,
     StoryMemberKind,
-    StoryPageRefusalReason,
     StoryRefusalReason,
     StoryRelation,
+    StorySummaryRefusalReason,
 )
 from ai_assistant.interfaces.episode_inspection import summary_fields
 from ai_assistant.wire.errors import ProtocolError
@@ -51,13 +51,13 @@ if TYPE_CHECKING:
         StoryNoteOutcome,
         StoryOutcome,
         StoryPage,
-        StoryPageLine,
-        StoryPageRefusal,
-        StoryPageView,
-        StoryPageViewNote,
         StoryRefusal,
         StoryStanding,
         StoryStandingEpisode,
+        StorySummaryLine,
+        StorySummaryRefusal,
+        StorySummaryView,
+        StorySummaryViewNote,
     )
 
 #: What each change-log line's change reads as. Spelled out per member so a member
@@ -97,7 +97,7 @@ RELATION_TEXT: dict[StoryRelation, str] = {
     StoryRelation.CONTAINS: "contains",
 }
 
-#: The label on a page, a note or an episode resting on outside content, so it is
+#: The label on a summary, a note or an episode resting on outside content, so it is
 #: never read as the owner's own words (ADR-0303 §3:7, §3:8).
 OUTSIDE = "[outside content]"
 
@@ -172,28 +172,30 @@ def refusal_text(refusal: StoryRefusal) -> str:
     return f"Refused ({refusal.reason.value}): {detail}."
 
 
-def page_refusal_text(refusal: StoryPageRefusal) -> str:
-    """Say why a write to a story's page was refused (ADR-0300 §3), as :func:`refusal_text`.
+def summary_refusal_text(refusal: StorySummaryRefusal) -> str:
+    """Say why a write to a story's summary was refused (ADR-0300 §3), as :func:`refusal_text`.
 
     Matched over every member of the closed enumeration, though a note the owner
-    adds can earn only ``unknown_story`` and ``merged_story``: the rest answer a page
+    adds can earn only ``unknown_story`` and ``merged_story``: the rest answer a summary
     write, which no command makes, and are rendered so that a member added later
     fails the coverage test rather than reaching the owner unrendered.
     """
     story = f"story {quoted(refusal.story_id)}"
     match refusal.reason:
-        case StoryPageRefusalReason.UNKNOWN_STORY:
+        case StorySummaryRefusalReason.UNKNOWN_STORY:
             detail = f"there is no {story}"
-        case StoryPageRefusalReason.MERGED_STORY:
+        case StorySummaryRefusalReason.MERGED_STORY:
             target = quoted(refusal.merged_into or "")
             detail = f"{story} was merged into story {target}"
-        case StoryPageRefusalReason.PAGE_MOVED_ON:
-            detail = f"the page of {story} was written again since it was read"
-        case StoryPageRefusalReason.UNKNOWN_NOTE:
+        case StorySummaryRefusalReason.SUMMARY_MOVED_ON:
+            detail = f"the summary of {story} was written again since it was read"
+        case StorySummaryRefusalReason.UNKNOWN_NOTE:
             detail = f"there is no note #{refusal.note}"
-        case StoryPageRefusalReason.OVER_CAP:
-            detail = f"the page of {story} is over its cap of {STORY_PAGE_CAP_CHARS} characters"
-        case StoryPageRefusalReason.NOT_HELD:
+        case StorySummaryRefusalReason.OVER_CAP:
+            detail = (
+                f"the summary of {story} is over its cap of {STORY_SUMMARY_CAP_CHARS} characters"
+            )
+        case StorySummaryRefusalReason.NOT_HELD:
             held = (
                 f"activation {quoted(refusal.activation)}"
                 if refusal.activation is not None
@@ -217,13 +219,13 @@ def render_note_outcome(console: Console, story_id: str, outcome: StoryNoteOutco
         ``True`` where the note was written, ``False`` where it was refused.
     """
     if outcome.refusal is not None:
-        _print(console, page_refusal_text(outcome.refusal))
+        _print(console, summary_refusal_text(outcome.refusal))
         return False
     note_id = 0 if outcome.note is None else outcome.note.note_id
     _print(
         console,
         f"Added note #{note_id} to story {quoted(story_id)}; "
-        "it is pending until the page is next tidied.",
+        "it is pending until the summary is next tidied.",
     )
     return True
 
@@ -254,53 +256,53 @@ def render_outcome(console: Console, applied: str, outcome: StoryOutcome) -> boo
 
 @dataclass(frozen=True, slots=True)
 class StoryListing:
-    """A page of stories with what each one's page shows of it (ADR-0303 §10:3).
+    """A page of stories with what each one's summary shows of it (ADR-0303 §10:3).
 
     Attributes:
         page: The page of stories, newest first.
-        pages: Each listed story's page view, by story id, read through the engine's
-            story page command; a merged story has none, nor does one whose page
+        summaries: Each listed story's summary view, by story id, read through the engine's
+            story summary command; a merged story has none, nor does one whose summary
             was too large to read.
-        oversized: The ids of the stories whose page was too large to read.
+        oversized: The ids of the stories whose summary was too large to read.
     """
 
     page: StoryPage
-    pages: Mapping[str, StoryPageView]
+    summaries: Mapping[str, StorySummaryView]
     oversized: frozenset[str]
 
 
 async def read_listing(engine: AssistantEngine, *, cursor: int | None, limit: int) -> StoryListing:
-    """Read a page of stories, then each unmerged one's page (ADR-0303 §10:3).
+    """Read a page of stories, then each unmerged one's summary (ADR-0303 §10:3).
 
-    The first line comes from the story page command the engine already answers, so
-    neither the engine surface nor the story store gains a read for it. A page too
+    The first line comes from the story summary command the engine already answers, so
+    neither the engine surface nor the story store gains a read for it. A summary too
     large for one reply is noted rather than failing the whole listing.
     """
     page = await engine.stories(cursor=cursor, limit=limit)
-    pages: dict[str, StoryPageView] = {}
+    summaries: dict[str, StorySummaryView] = {}
     oversized: set[str] = set()
     for header in page.stories:
         if header.merged_into is not None:
             continue
         try:
-            view = await engine.story_page(header.story_id)
+            view = await engine.story_summary(header.story_id)
         except OversizedValueError:
             oversized.add(header.story_id)
             continue
         if view is not None:
-            pages[header.story_id] = view
-    return StoryListing(page, MappingProxyType(pages), frozenset(oversized))
+            summaries[header.story_id] = view
+    return StoryListing(page, MappingProxyType(summaries), frozenset(oversized))
 
 
 def _first_line(listing: StoryListing, story_id: str) -> str | None:
-    """What the listing shows of a story's page: its first line, or that it is withheld."""
+    """What the listing shows of a story's summary: its first line, or that it is withheld."""
     if story_id in listing.oversized:
-        return "  Page: too large to read here."
-    view = listing.pages.get(story_id)
+        return "  Summary: too large to read here."
+    view = listing.summaries.get(story_id)
     if view is None or view.story.merged_into is not None:
         return None
     if view.withheld:
-        return "  Page: withheld, since not everything behind it may be shown."
+        return "  Summary: withheld, since not everything behind it may be shown."
     if not view.lines:
         return None
     marked = f"{OUTSIDE} " if view.outside else ""
@@ -310,8 +312,8 @@ def _first_line(listing: StoryListing, story_id: str) -> str | None:
 def render_listing(console: Console, listing: StoryListing) -> None:
     """Render a page of stories, newest first, with its continuation.
 
-    Beside each story, its current page's first line where it has one, labelled
-    where the page is marked (ADR-0303 §3:8), or that the page was withheld.
+    Beside each story, its summary's first line where it has one, labelled
+    where the summary is marked (ADR-0303 §3:8), or that the summary was withheld.
     """
     page = listing.page
     if not page.stories:
@@ -516,12 +518,12 @@ def _counted(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
-def _page_line(line: StoryPageLine) -> str:
-    """One line of the current page: its text, quoted. A line cites nothing."""
+def _summary_line(line: StorySummaryLine) -> str:
+    """One line of the summary: its text, quoted. A line cites nothing."""
     return f"  {quoted(line.text)}"
 
 
-def _note_line(shown: StoryPageViewNote) -> str:
+def _note_line(shown: StorySummaryViewNote) -> str:
     """One note: its id, when, who wrote it and during what, pending or not, and its text."""
     note = shown.note
     during = (
@@ -535,10 +537,10 @@ def _note_line(shown: StoryPageViewNote) -> str:
     )
 
 
-def render_page(console: Console, view: StoryPageView) -> None:
-    """Render a story's page as the owner is shown it (ADR-0303 §10:2).
+def render_summary(console: Console, view: StorySummaryView) -> None:
+    """Render a story's summary as the owner is shown it (ADR-0303 §10:2).
 
-    When it was last tidied, then the current page's lines with its mark, or that it
+    When it was last tidied, then the summary's lines with its mark, or that it
     was withheld, then the story's notes, newest first, each marked pending or not and
     labelled where it rests on outside content (§3:8), and how many lie beyond them. A
     merged story renders only the line naming the story it was merged into.
@@ -549,14 +551,14 @@ def render_page(console: Console, view: StoryPageView) -> None:
         return
     lines = [f"Story {quoted(header.story_id)}"]
     if view.version is None or view.tidied_at is None:
-        lines.append("Never tidied: no page has been written yet.")
+        lines.append("Never tidied: no summary has been written yet.")
     else:
         lines.append(f"Last tidied: {view.tidied_at.isoformat()} (version {view.version})")
         if view.withheld:
-            lines.append("Page: withheld, since not everything behind it may be shown.")
+            lines.append("Summary: withheld, since not everything behind it may be shown.")
         else:
-            lines.append(f"Page: {OUTSIDE}" if view.outside else "Page:")
-            lines.extend(_page_line(line) for line in view.lines)
+            lines.append(f"Summary: {OUTSIDE}" if view.outside else "Summary:")
+            lines.extend(_summary_line(line) for line in view.lines)
             if not view.lines:
                 lines.append("  (no line)")
     lines.append(f"Notes, newest first: {len(view.notes) + view.more_notes}")
