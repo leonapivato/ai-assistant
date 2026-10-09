@@ -20,7 +20,7 @@ from itertools import count
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from story_support import AT, EVENTS, activation, episode, failing, memory_of
+from story_support import AT, CONVERSATION, EVENTS, activation, episode, failing, memory_of
 from structlog.testing import capture_logs
 
 from ai_assistant.core.errors import MemoryStoreError
@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
+    from ai_assistant.core.types import ChannelIdentity
     from ai_assistant.testing import FakeMemoryStore
 
 _BUDGET: Final = timedelta(seconds=10)
@@ -758,6 +759,39 @@ async def test_a_member_whose_episode_is_not_held_is_not_taken_for_outside() -> 
     outcome = await _tidy_up(model, stories, memory).run(story)
 
     assert outcome.result is TidyUpResult.WRITTEN
+
+
+@pytest.mark.parametrize(
+    ("channel", "result"),
+    [(CONVERSATION, TidyUpResult.WRITTEN), (EVENTS, TidyUpResult.OUTSIDE_ONLY)],
+)
+async def test_an_open_members_origin_is_read_off_its_record_and_it_is_never_rendered(
+    channel: ChannelIdentity, result: TidyUpResult
+) -> None:
+    """An open user member lets the story be tidied; an open outside one does not.
+
+    Either way the open episode reaches no model and stays pending (ADR-0286 §6:4).
+    """
+    stories = _stories()
+    memory = await memory_of(
+        episode("a-1", text=_REPORT_INPUT, channel=EVENTS),
+        episode("a-2", text="Keep the campsite in mind.", channel=channel, open_=True),
+    )
+    story = await _story(stories, "a-1", "a-2")
+    model = FakeModelProvider(_reply(["A parks report."]))
+
+    outcome = await _tidy_up(model, stories, memory).run(story)
+
+    assert outcome.result is result
+    if outcome.result is TidyUpResult.WRITTEN:
+        (shown,) = _shown(model)["episodes"]
+        assert shown["label"] == "E1"
+        assert "Keep the campsite" not in model.calls[0].messages[1].content
+    else:
+        assert model.calls == []
+    state = await stories.current_page(story)
+    assert state is not None
+    assert "a-2" in state.pending_episodes
 
 
 # --- ADR-0302 §6: the decisions recorded for its story ---------------------------
