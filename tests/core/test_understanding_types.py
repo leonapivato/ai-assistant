@@ -359,3 +359,67 @@ def test_a_record_with_understanding_round_trips_through_its_dump() -> None:
     )
     assert EpisodeProcessingRecord.model_validate(record.model_dump(mode="json")) == record
     assert "understanding_omitted" in record.model_dump()
+
+
+# --- ADR-0304 §8: a story is a referent -------------------------------------------
+
+_STORY = UnderstandingReferent(
+    kind="story", id="story:riverside", source="story", excerpt="Camping at Riverside, 12-14 June"
+)
+
+
+def test_a_referent_may_name_a_story() -> None:
+    """§8: ``id`` the story's id, ``source`` the text ``story``, ``excerpt`` its first line."""
+    assert (_STORY.kind, _STORY.id, _STORY.source) == ("story", "story:riverside", "story")
+    # A withheld or empty summary renders no line, and the excerpt is then empty.
+    withheld = UnderstandingReferent(kind="story", id="story:2", source="story", excerpt="")
+    assert withheld.excerpt == ""
+    # The excerpt is cut on ADR-0276 §2:5's rule, and the bound is the type's.
+    with pytest.raises(ValidationError):
+        UnderstandingReferent(
+            kind="story",
+            id="story:1",
+            source="story",
+            excerpt="é" * (UNDERSTANDING_REFERENT_EXCERPT_CHARS + 1),
+        )
+
+
+def test_a_supplied_reading_may_rest_on_a_story_alone() -> None:
+    """§8: a reading an ``S`` label supports is ``supplied``, and names that story."""
+    recorded = _understanding(
+        meaning_ground=UnderstandingGround.SUPPLIED,
+        meaning_referents=(_STORY,),
+        references=(UnderstandingReference(phrase="Riverside", referents=(_STORY,)),),
+        relationships=(
+            UnderstandingRelationship(
+                statement="the plan changed for the Riverside trip",
+                referents=(_STORY,),
+                ground=UnderstandingGround.SUPPLIED,
+            ),
+        ),
+    )
+    assert recorded.meaning_referents == (_STORY,)
+
+
+def test_a_record_with_a_story_referent_round_trips_at_the_same_schema_version() -> None:
+    """§8: the kind rides ``EpisodicMemory.processing_record`` and alters no schema_version."""
+    record = _record(
+        understanding=(_understanding(meaning_referents=(_INPUT, _STORY)),),
+        understanding_omitted=None,
+    )
+    assert record.schema_version == 6
+    assert EpisodeProcessingRecord.model_validate_json(record.model_dump_json()) == record
+
+
+def test_a_record_written_before_the_story_kind_validates_unchanged() -> None:
+    """§8: a record of the four earlier kinds reads back exactly as it was written."""
+    earlier = (
+        _INPUT,
+        _EPISODE,
+        UnderstandingReferent(kind="channel_item", id=None, source="email", excerpt="x"),
+        UnderstandingReferent(kind="memory", id="m-1", source="semantic memory", excerpt="y"),
+    )
+    written = _record(
+        understanding=(_understanding(meaning_referents=earlier),), understanding_omitted=None
+    ).model_dump(mode="json")
+    assert EpisodeProcessingRecord.model_validate(written).model_dump(mode="json") == written
