@@ -1,6 +1,6 @@
 # 276. An activation is understood before it is associated, and the understanding is retained with its episode
 
-- Status: Partially superseded by ADR-0280 (§7's first clause, in its `schema_version` literal alone) and ADR-0281 (§1:5, in its *no retrieved memory* and *nothing else* parts alone; §2:5's referent kinds and §3:3's label scheme, in the additions alone; §5:1's *before any relevance read*, for recall's read alone) and ADR-0282 (§4:1's wiring, in its *wires into the stage* and *it receives the selector's records* parts alone) and ADR-0284 (§3:1's rendering; §4:6's projection; §4:8's report test) and ADR-0286 (§7:1's exactly-one rule, for an open record; §7:3's written-once and in-place rules) and ADR-0293 (§3:1's and §3:2's conversation-channel window, for every input but the quarantined spoken path's) and ADR-0300 (§1:5's, §3:7's last sentence's and §6:1's inputs, for the candidate stories alone; §2:1's field sets and §3:3's label scheme, in the additions alone)
+- Status: Partially superseded by ADR-0280 (§7's first clause, in its `schema_version` literal alone) and ADR-0281 (§1:5, in its *no retrieved memory* and *nothing else* parts alone; §2:5's referent kinds and §3:3's label scheme, in the additions alone; §5:1's *before any relevance read*, for recall's read alone) and ADR-0282 (§4:1's wiring, in its *wires into the stage* and *it receives the selector's records* parts alone) and ADR-0284 (§3:1's rendering; §4:6's projection; §4:8's report test) and ADR-0286 (§7:1's exactly-one rule, for an open record; §7:3's written-once and in-place rules) and ADR-0293 (§3:1's and §3:2's conversation-channel window, for every input but the quarantined spoken path's) and ADR-0300 (§1:5's, §3:7's last sentence's and §6:1's inputs, for the candidate stories alone; §2:1's field sets and §3:3's label scheme, in the additions alone) and ADR-0304 (§2:5's referent kinds, in the addition alone)
 - Date: 2026-09-22
 - Scope: [M37](https://github.com/leonapivato/ai-assistant/milestone/4), [#2544](https://github.com/leonapivato/ai-assistant/issues/2544).
 - Dependency: ADR-0274, ADR-0275 and their milestones M35 and M36.
@@ -61,6 +61,12 @@
   `ActivationUnderstanding` gains `story_links`. §3:3's label scheme, in the addition
   alone: a fourth sequence, `S`, for the candidate stories. §1:4 and every other clause
   stand. These scoped replacements take effect on ratification of ADR-0300. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-09 by ADR-0304 — one scope. §2:5's referent kinds, in
+  the addition alone: a fourth kind, `story`, which an `S` label cited in
+  `meaning_labels`, a reference or a relationship resolves to. Every other clause
+  stands. This scoped replacement takes effect on ratification of ADR-0304. This
   reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   prior supersessions and the ratified body below are preserved.
 - **Partially supersedes** [ADR-0274](0274-channel-input-and-reply-contract.md) — **one scope.** §5's third clause, *"The first conversational conversion does not insert supplied context into prompts, memory, conversation history, or authority records; its acceptance obligation is intact delivery to processing, not a new interpretation or reference-resolution behavior"*, in its **prompt** and **reference-resolution** halves alone: the understanding stage of §5 below renders supplied context into its own prompt as quoted data and resolves the input's references against it. Supplied context still reaches no memory, no conversation history and no authority record; §5's other three clauses — the orchestration-local resolved carrier, the separation from `ConversationLifecycle.history`, and *"a source label, claimed speaker, or replied-to item does not establish an assistant-authored message, an owner instruction, or permission"* — bind entire and are the floor §5 below is built on.
