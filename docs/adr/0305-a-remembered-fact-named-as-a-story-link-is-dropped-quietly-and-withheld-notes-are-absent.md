@@ -1,6 +1,6 @@
 # 305. A remembered fact named as a story link is dropped quietly, and withheld notes are absent
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Scope: [M42](https://github.com/leonapivato/ai-assistant/milestone/9), after its focused re-check [#2805](https://github.com/leonapivato/ai-assistant/issues/2805): what becomes of a recalled fact that understanding names among an input's story links, and what understanding is told about a story's notes on a pass that may not be shown them. It decides [#2808](https://github.com/leonapivato/ai-assistant/issues/2808) and [#2807](https://github.com/leonapivato/ai-assistant/issues/2807).
 - Dependency: ADR-0304, implemented at `4f7db56c`.
