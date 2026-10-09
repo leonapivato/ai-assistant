@@ -344,9 +344,9 @@ from ai_assistant.orchestration.speech import (
     transcribe_within,
 )
 from ai_assistant.orchestration.stories import (
-    DEFAULT_STORY_PAGE_VIEW_NOTES,
+    DEFAULT_STORY_SUMMARY_VIEW_NOTES,
     fitted,
-    owner_page,
+    owner_summary,
     resolved_view,
     unknown_activation,
 )
@@ -430,8 +430,8 @@ if TYPE_CHECKING:
         StoryLogPage,
         StoryNoteOutcome,
         StoryPage,
-        StoryPageView,
         StoryStanding,
+        StorySummaryView,
         StoryView,
         TranscriptPage,
         UserMessage,
@@ -865,7 +865,7 @@ def _noticed(count: int) -> Observation:
 def _matters_decided(report: MattersPassReport) -> Observation:
     """Read one matters-pass run onto its own ``OPERATION`` trace (ADR-0119 §8).
 
-    Code-owned counts only: no story id and nothing of any page (ADR-0004 §5).
+    Code-owned counts only: no story id and nothing of any summary (ADR-0004 §5).
 
     Args:
         report: What the run found and decided.
@@ -2570,14 +2570,14 @@ def _check_story_wiring(
         raise ConfigurationError(msg)
 
 
-def _story_page_bound(notes: int) -> int:
-    """ADR-0303 §10:2's bound on the story page view's notes, refused below one.
+def _story_summary_bound(notes: int) -> int:
+    """ADR-0303 §10:2's bound on the story summary view's notes, refused below one.
 
     Raises:
         ConfigurationError: If ``notes`` is below 1, a view that could list no note.
     """
     if notes < 1:
-        msg = "the story page view lists at least one note (ADR-0303 §10:2)"
+        msg = "the story summary view lists at least one note (ADR-0303 §10:2)"
         raise ConfigurationError(msg)
     return notes
 
@@ -3087,7 +3087,7 @@ class Engine:
         reconciliation: ReconciliationStage | None = None,
         parked_reads: ParkedReadOperations | None = None,
         stories: StoryStore | None = None,
-        story_page_notes: int = DEFAULT_STORY_PAGE_VIEW_NOTES,
+        story_summary_notes: int = DEFAULT_STORY_SUMMARY_VIEW_NOTES,
         story_candidates: StoryCandidates | None = None,
         story_links: StoryLinksStage | None = None,
         interim_tidy_up: InterimTidyUp | None = None,
@@ -3483,9 +3483,9 @@ class Engine:
                 ``ConfigurationError`` rather than answering as though no story existed.
                 The stages that read and write stories hold their own reference to the
                 same store (ADR-0300 §6), so the engine surface's own use is unchanged.
-            story_page_notes: How many of a story's notes :meth:`story_page` lists,
+            story_summary_notes: How many of a story's notes :meth:`story_summary` lists,
                 newest first, before it counts the rest (ADR-0303 §10:2) — the
-                composition root's ``STORY_PAGE_VIEW_NOTES``. At least 1.
+                composition root's ``STORY_SUMMARY_VIEW_NOTES``. At least 1.
             story_candidates: ADR-0300 §6's assembler of understanding's candidate
                 stories, which the understanding phase runs before the stage renders —
                 or ``None``, and then no stories section is rendered. Wired together
@@ -3881,7 +3881,7 @@ class Engine:
         self._recall = recall
         self._story_candidates = story_candidates
         self._story_links = story_links
-        self._story_page_notes = _story_page_bound(story_page_notes)
+        self._story_summary_notes = _story_summary_bound(story_summary_notes)
         if interim_tidy_up is not None and story_links is None:
             msg = (
                 "the interim tidy-up runs after the story-links stage, so it is wired "
@@ -6618,19 +6618,19 @@ class Engine:
     # --- the story commands (ADR-0300 §8) -----------------------------------
     #
     # Four more over the same store, the reads for the owner as reader and the writes
-    # as the owner. The shared logic is `orchestration/stories.py`'s page read and
+    # as the owner. The shared logic is `orchestration/stories.py`'s summary read and
     # `orchestration/story_standing.py`'s standing, which the canonical fake engine
     # calls too.
 
-    async def story_page(self, story_id: Identifier) -> StoryPageView | None:
-        """Read a story's page as the owner is shown it (ADR-0303 §10:2, §3:9-§3:12)."""
+    async def story_summary(self, story_id: Identifier) -> StorySummaryView | None:
+        """Read a story's summary as the owner is shown it (ADR-0303 §10:2, §3:9-§3:12)."""
         self._reject_if_closing()
         target = identifier(story_id, name="story_id")
-        check_arguments("story_page", max_bytes=self._max_payload_bytes, story_id=target)
+        check_arguments("story_summary", max_bytes=self._max_payload_bytes, story_id=target)
         stories = self._story_store()
         return await self._tracked(
-            owner_page(stories, self._memory, target, notes=self._story_page_notes),
-            "story_page",
+            owner_summary(stories, self._memory, target, notes=self._story_summary_notes),
+            "story_summary",
             checked=True,
         )
 
@@ -6647,7 +6647,7 @@ class Engine:
         )
 
     async def add_story_note(self, story_id: Identifier, text: str) -> StoryNoteOutcome:
-        """Add a note to a story's page, written by the owner (ADR-0300 §8:3)."""
+        """Add a note to a story, written by the owner (ADR-0300 §8:3)."""
         self._reject_if_closing()
         target = identifier(story_id, name="story_id")
         written = story_note_text(text)

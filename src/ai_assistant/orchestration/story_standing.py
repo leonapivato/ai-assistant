@@ -32,12 +32,12 @@ and each episode is shown only where it may be shown to that reader:
 An **outside episode** is marked (ADR-0303 §3:2, §3:8): one whose trigger's ``origin``
 is ``outside``, or whose activation's record of what it read shows outside content.
 
-**Under ADR-0303 §3's privacy default.** Where a matter stands carries no page and no
-note: it is worked out from the records, and the page is the story page view's
-(:func:`~ai_assistant.orchestration.stories.owner_page`). So §3:9-§3:12, which decide
-a note and a page, have nothing of it to withhold, and what it shows each reader is
+**Under ADR-0303 §3's privacy default.** Where a matter stands carries no summary and no
+note: it is worked out from the records, and the summary is the story summary view's
+(:func:`~ai_assistant.orchestration.stories.owner_summary`). So §3:9-§3:12, which decide
+a note and a summary, have nothing of it to withhold, and what it shows each reader is
 exactly the episodes that reader may be shown, by the rule above, which is the rule a
-page's walk asks of the same reader about the episodes behind the page.
+summary's walk asks of the same reader about the episodes behind the summary.
 
 This module is apart from :mod:`ai_assistant.orchestration.stories`, which is the
 engine's own story surface and documents that no stage reads it: planning reads

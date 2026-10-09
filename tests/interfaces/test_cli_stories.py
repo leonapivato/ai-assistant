@@ -19,8 +19,8 @@ from typer.testing import CliRunner
 from ai_assistant.core.config import Settings
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
-    STORY_PAGE_CAP_CHARS,
     STORY_STANDING_RECENT,
+    STORY_SUMMARY_CAP_CHARS,
     ChannelContext,
     ChannelIdentity,
     EpisodeProcessingRecord,
@@ -48,11 +48,6 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     StoryNoteAuthor,
-    StoryPageDraft,
-    StoryPageLine,
-    StoryPageRefusal,
-    StoryPageRefusalReason,
-    StoryPageView,
     StoryRefusal,
     StoryRefusalReason,
     StoryRelation,
@@ -60,6 +55,11 @@ from ai_assistant.core.types import (
     StoryStandingEarlier,
     StoryStandingEffect,
     StoryStandingEpisode,
+    StorySummaryDraft,
+    StorySummaryLine,
+    StorySummaryRefusal,
+    StorySummaryRefusalReason,
+    StorySummaryView,
     StoryView,
     UnderstandingOmission,
 )
@@ -202,7 +202,7 @@ def test_the_group_says_it_is_for_testing_and_lists_its_commands() -> None:
         "split",
         "list",
         "show",
-        "page",
+        "summary",
         "standing",
         "note",
         "move",
@@ -387,7 +387,7 @@ def test_a_refused_write_exits_non_zero_and_names_the_story_merged_into(
         ["list", "--limit", "0"],
         ["list", "--limit", str(MAX_STORY_PAGE + 1)],
         ["list", "--cursor", "-1"],
-        ["page", " "],
+        ["summary", " "],
         ["standing", ""],
         ["note", "story:x", "   "],
         ["note", "story:x", "x" * 2001],
@@ -630,7 +630,7 @@ def test_list_pages_newest_first_with_a_continuation(
     assert _invoke("story", "list", "--limit", "1")[0] == 0
     assert engine.calls[-2:] == [
         ("stories", {"cursor": None, "limit": 1}),
-        ("story_page", {"story_id": kept}),
+        ("story_summary", {"story_id": kept}),
     ]
     first = output.getvalue().splitlines()
     assert first[0].startswith(f'Story "{kept}"  created ')
@@ -650,15 +650,15 @@ def test_list_pages_newest_first_with_a_continuation(
 def _tidied(
     engine: FakeAssistantEngine, story: Identifier, *lines: str, outside: bool = False
 ) -> None:
-    """Write ``story``'s page as a tidy-up would, taking in its frozen episode."""
+    """Write ``story``'s summary as a tidy-up would, taking in its frozen episode."""
     stories = engine.story_store
-    state = asyncio.run(stories.current_page(story))
+    state = asyncio.run(stories.current_summary(story))
     assert state is not None
     written = asyncio.run(
-        stories.write_page(
+        stories.write_summary(
             story,
-            StoryPageDraft(
-                lines=tuple(StoryPageLine(text=line) for line in lines),
+            StorySummaryDraft(
+                lines=tuple(StorySummaryLine(text=line) for line in lines),
                 took_in_notes=tuple(note.note_id for note in state.pending_notes),
                 took_in_episodes=(_FROZEN,),
                 outside=outside,
@@ -669,10 +669,10 @@ def _tidied(
     assert written.version is not None
 
 
-def test_list_shows_each_page_first_line_its_mark_or_that_it_was_withheld(
+def test_list_shows_each_summary_first_line_its_mark_or_that_it_was_withheld(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
-    """ADR-0303 §10:3, read through the story page command; §3:8 and §3:11 shown."""
+    """ADR-0303 §10:3, read through the story summary command; §3:8 and §3:11 shown."""
     engine = _engine(_episode(_FROZEN), _episode(_OPEN, open_=True))
     plain = _create(engine, _activation(_FROZEN))
     _tidied(engine, plain, "A camping trip\nin May", "No Fridays")
@@ -695,20 +695,20 @@ def test_list_shows_each_page_first_line_its_mark_or_that_it_was_withheld(
     assert lines[4] == '  [outside content] "Riverside, per the campground\'s email"'
     assert lines[5].startswith(f'Story "{plain}"')
     assert lines[6] == '  "A camping trip\\nin May"'
-    # A merged story's page is not asked for: its header says where it went.
-    assert [call for call in engine.calls if call[0] == "story_page"] == [
-        ("story_page", {"story_id": story}) for story in (never, empty, marked, plain)
+    # A merged story's summary is not asked for: its header says where it went.
+    assert [call for call in engine.calls if call[0] == "story_summary"] == [
+        ("story_summary", {"story_id": story}) for story in (never, empty, marked, plain)
     ]
 
     assert asyncio.run(engine.episode_memory.delete(f"activation:{_FROZEN}"))
     _clear(output)
     assert _invoke("story", "list")[0] == 0, output.getvalue()
-    withheld = "  Page: withheld, since not everything behind it may be shown."
+    withheld = "  Summary: withheld, since not everything behind it may be shown."
     shown = [line for line in output.getvalue().splitlines() if not line.startswith("Story ")]
     assert shown == [withheld, withheld, withheld]
 
 
-def test_list_says_a_page_too_large_to_read_rather_than_failing(
+def test_list_says_a_summary_too_large_to_read_rather_than_failing(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
     engine = _engine(_episode(_FROZEN), max_payload_bytes=2048)
@@ -717,14 +717,14 @@ def test_list_says_a_page_too_large_to_read_rather_than_failing(
         written = asyncio.run(engine.add_story_note(large, f"{index} " + "n" * 800))
         assert written.note is not None
     small = _create(engine, _activation(_FROZEN))
-    _tidied(engine, small, "A short page")
+    _tidied(engine, small, "A short summary")
     _wire(monkeypatch, engine)
     assert _invoke("story", "list")[0] == 0, output.getvalue()
     lines = output.getvalue().splitlines()
     assert lines[0].startswith(f'Story "{small}"')
-    assert lines[1] == '  "A short page"'
+    assert lines[1] == '  "A short summary"'
     assert lines[2].startswith(f'Story "{large}"')
-    assert lines[3] == "  Page: too large to read here."
+    assert lines[3] == "  Summary: too large to read here."
 
 
 def test_split_and_move_carry_the_notes_named(
@@ -748,7 +748,7 @@ def test_split_and_move_carry_the_notes_named(
         {"story_id": source, "members": (_activation(_FROZEN),), "notes": (first.note_id, 999)},
     )
     split_off = asyncio.run(engine.stories()).stories[0].story_id
-    off = asyncio.run(engine.story_page(split_off))
+    off = asyncio.run(engine.story_summary(split_off))
     assert off is not None
     assert [shown.note for shown in off.notes] == [first]
     code, _ = _invoke(
@@ -764,10 +764,10 @@ def test_split_and_move_carry_the_notes_named(
             "notes": (second.note_id,),
         },
     )
-    there = asyncio.run(engine.story_page(target))
+    there = asyncio.run(engine.story_summary(target))
     assert there is not None
     assert [shown.note for shown in there.notes] == [second]
-    left = asyncio.run(engine.story_page(source))
+    left = asyncio.run(engine.story_summary(source))
     assert left is not None
     assert left.notes == ()
 
@@ -894,10 +894,10 @@ def _clear(output: StringIO) -> None:
     output.seek(0)
 
 
-def test_note_adds_the_owners_note_and_page_shows_it_pending(
+def test_note_adds_the_owners_note_and_summary_shows_it_pending(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
-    """§8:3: the note is the owner's, written as given, and the page shows it pending."""
+    """§8:3: the note is the owner's, written as given, and the summary shows it pending."""
     engine = _engine(_episode(_FROZEN))
     story = _create(engine, _activation(_FROZEN))
     _wire(monkeypatch, engine)
@@ -907,19 +907,19 @@ def test_note_adds_the_owners_note_and_page_shows_it_pending(
         "add_story_note",
         {"story_id": story, "text": " Leaning against Saturday "},
     )
-    page = asyncio.run(engine.story_page(story))
-    assert page is not None
-    (shown,) = page.notes
+    summary = asyncio.run(engine.story_summary(story))
+    assert summary is not None
+    (shown,) = summary.notes
     note = shown.note
     assert output.getvalue() == (
         f'Added note #{note.note_id} to story "{story}"; '
-        "it is pending until the page is next tidied.\n"
+        "it is pending until the summary is next tidied.\n"
     )
     _clear(output)
-    assert _invoke("story", "page", story)[0] == 0
+    assert _invoke("story", "summary", story)[0] == 0
     assert output.getvalue().splitlines() == [
         f'Story "{story}"',
-        "Never tidied: no page has been written yet.",
+        "Never tidied: no summary has been written yet.",
         "Notes, newest first: 1",
         f"  #{note.note_id} {note.written_at.isoformat()} owner [pending]: "
         '" Leaning against Saturday "',
@@ -940,10 +940,10 @@ def test_a_refused_note_exits_non_zero_naming_where_the_story_went(
     )
 
 
-def test_page_renders_the_tidied_page_its_mark_and_its_notes_newest_first(
+def test_summary_renders_the_tidied_summary_its_mark_and_its_notes_newest_first(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
-    """ADR-0303 §10:2: outside content is labelled on the page and on a note (§3:9)."""
+    """ADR-0303 §10:2: outside content is labelled on the summary and on a note (§3:9)."""
     engine = _engine(_episode(_FROZEN), _episode(_OPEN, open_=True))
     story = _create(engine, _activation(_FROZEN), _activation(_OPEN))
     stories = engine.story_store
@@ -957,15 +957,17 @@ def test_page_renders_the_tidied_page_its_mark_and_its_notes_newest_first(
         )
     )
     assert emailed.note is not None
-    state = asyncio.run(stories.current_page(story))
+    state = asyncio.run(stories.current_summary(story))
     assert state is not None
     written = asyncio.run(
-        stories.write_page(
+        stories.write_summary(
             story,
-            StoryPageDraft(
+            StorySummaryDraft(
                 lines=(
-                    StoryPageLine(text="A camping trip\nto Riverside, per the campground's email"),
-                    StoryPageLine(text="Booked Sunday"),
+                    StorySummaryLine(
+                        text="A camping trip\nto Riverside, per the campground's email"
+                    ),
+                    StorySummaryLine(text="Booked Sunday"),
                 ),
                 took_in_notes=(emailed.note.note_id,),
                 took_in_episodes=(_FROZEN,),
@@ -985,12 +987,12 @@ def test_page_renders_the_tidied_page_its_mark_and_its_notes_newest_first(
     )
     assert waiting.note is not None
     _wire(monkeypatch, engine)
-    assert _invoke("story", "page", story)[0] == 0, output.getvalue()
+    assert _invoke("story", "summary", story)[0] == 0, output.getvalue()
     assert output.getvalue().splitlines() == [
         f'Story "{story}"',
         f"Last tidied: {written.version.written_at.isoformat()} "
         f"(version {written.version.version})",
-        "Page: [outside content]",
+        "Summary: [outside content]",
         '  "A camping trip\\nto Riverside, per the campground\'s email"',
         '  "Booked Sunday"',
         "Notes, newest first: 2",
@@ -1000,28 +1002,28 @@ def test_page_renders_the_tidied_page_its_mark_and_its_notes_newest_first(
         f'during activation "{_FROZEN}": [outside content] '
         '"Riverside, per the campground\'s email"',
     ]
-    assert engine.calls[-1] == ("story_page", {"story_id": story})
+    assert engine.calls[-1] == ("story_summary", {"story_id": story})
 
 
-def test_page_renders_a_withheld_page_an_empty_one_and_the_notes_beyond_the_bound() -> None:
+def test_summary_renders_a_withheld_summary_an_empty_one_and_the_notes_beyond_the_bound() -> None:
     """ADR-0303 §3:7, §5:3, §10:2: the reader is told what it is not shown."""
     header = StoryHeader(story_id="story:a", created_at=_AT, merged_into=None)
     for view, expected in (
         (
-            StoryPageView(story=header, version=4, tidied_at=_AT, withheld=True, more_notes=3),
+            StorySummaryView(story=header, version=4, tidied_at=_AT, withheld=True, more_notes=3),
             [
-                "Page: withheld, since not everything behind it may be shown.",
+                "Summary: withheld, since not everything behind it may be shown.",
                 "Notes, newest first: 3",
                 "  and 3 older notes not shown.",
             ],
         ),
         (
-            StoryPageView(story=header, version=4, tidied_at=_AT, more_notes=1),
-            ["Page:", "  (no line)", "Notes, newest first: 1", "  and 1 older note not shown."],
+            StorySummaryView(story=header, version=4, tidied_at=_AT, more_notes=1),
+            ["Summary:", "  (no line)", "Notes, newest first: 1", "  and 1 older note not shown."],
         ),
     ):
         buffer = StringIO()
-        story_inspection.render_page(Console(file=buffer, force_terminal=False, width=400), view)
+        story_inspection.render_summary(Console(file=buffer, force_terminal=False, width=400), view)
         assert buffer.getvalue().splitlines()[2:] == expected
 
 
@@ -1085,7 +1087,7 @@ def test_standing_renders_what_was_done_and_the_earlier_episodes() -> None:
     ]
 
 
-def test_a_merged_story_page_and_standing_show_only_where_it_went(
+def test_a_merged_story_summary_and_standing_show_only_where_it_went(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
     engine = _engine(_episode(_FROZEN))
@@ -1094,13 +1096,13 @@ def test_a_merged_story_page_and_standing_show_only_where_it_went(
     assert asyncio.run(engine.merge_stories(absorbed, kept)).refusal is None
     _wire(monkeypatch, engine)
     merged = f'Story "{absorbed}" was merged into story "{kept}".\n'
-    assert _invoke("story", "page", absorbed)[0] == 0
+    assert _invoke("story", "summary", absorbed)[0] == 0
     assert output.getvalue() == merged
     _clear(output)
     assert _invoke("story", "standing", absorbed)[0] == 0
     assert output.getvalue() == merged
     _clear(output)
-    assert _invoke("story", "page", "story:absent")[0] == 1
+    assert _invoke("story", "summary", "story:absent")[0] == 1
     assert output.getvalue() == 'No story "story:absent".\n'
     _clear(output)
     assert _invoke("story", "standing", "story:absent")[0] == 1
@@ -1131,57 +1133,62 @@ def test_move_names_activations_only_and_says_where_they_went(
     assert output.getvalue() == "Refused (no_members): no member was named.\n"
 
 
-def _page_refusals() -> list[tuple[StoryPageRefusal, str]]:
+def _summary_refusals() -> list[tuple[StorySummaryRefusal, str]]:
     return [
         (
-            StoryPageRefusal(reason=StoryPageRefusalReason.UNKNOWN_STORY, story_id="story:x"),
+            StorySummaryRefusal(reason=StorySummaryRefusalReason.UNKNOWN_STORY, story_id="story:x"),
             'there is no story "story:x"',
         ),
         (
-            StoryPageRefusal(
-                reason=StoryPageRefusalReason.MERGED_STORY,
+            StorySummaryRefusal(
+                reason=StorySummaryRefusalReason.MERGED_STORY,
                 story_id="story:x",
                 merged_into="story:y",
             ),
             'story "story:x" was merged into story "story:y"',
         ),
         (
-            StoryPageRefusal(reason=StoryPageRefusalReason.PAGE_MOVED_ON, story_id="story:x"),
-            'the page of story "story:x" was written again since it was read',
+            StorySummaryRefusal(
+                reason=StorySummaryRefusalReason.SUMMARY_MOVED_ON, story_id="story:x"
+            ),
+            'the summary of story "story:x" was written again since it was read',
         ),
         (
-            StoryPageRefusal(
-                reason=StoryPageRefusalReason.UNKNOWN_NOTE, story_id="story:x", note=7
+            StorySummaryRefusal(
+                reason=StorySummaryRefusalReason.UNKNOWN_NOTE, story_id="story:x", note=7
             ),
             "there is no note #7",
         ),
         (
-            StoryPageRefusal(reason=StoryPageRefusalReason.OVER_CAP, story_id="story:x"),
-            f'the page of story "story:x" is over its cap of {STORY_PAGE_CAP_CHARS} characters',
+            StorySummaryRefusal(reason=StorySummaryRefusalReason.OVER_CAP, story_id="story:x"),
+            'the summary of story "story:x" is over its cap of '
+            f"{STORY_SUMMARY_CAP_CHARS} characters",
         ),
         (
-            StoryPageRefusal(
-                reason=StoryPageRefusalReason.NOT_HELD, story_id="story:x", activation="a-2"
+            StorySummaryRefusal(
+                reason=StorySummaryRefusalReason.NOT_HELD, story_id="story:x", activation="a-2"
             ),
             'story "story:x" does not hold activation "a-2"',
         ),
         (
-            StoryPageRefusal(reason=StoryPageRefusalReason.NOT_HELD, story_id="story:x", note=9),
+            StorySummaryRefusal(
+                reason=StorySummaryRefusalReason.NOT_HELD, story_id="story:x", note=9
+            ),
             'story "story:x" does not hold note #9',
         ),
     ]
 
 
-def test_every_page_refusal_reason_has_a_rendering() -> None:
-    covered = {refusal.reason for refusal, _ in _page_refusals()}
-    assert covered == set(StoryPageRefusalReason)
+def test_every_summary_refusal_reason_has_a_rendering() -> None:
+    covered = {refusal.reason for refusal, _ in _summary_refusals()}
+    assert covered == set(StorySummaryRefusalReason)
 
 
-@pytest.mark.parametrize(("refusal", "detail"), _page_refusals())
-def test_a_page_refusal_names_its_reason_and_what_it_was_refused_over(
-    refusal: StoryPageRefusal, detail: str
+@pytest.mark.parametrize(("refusal", "detail"), _summary_refusals())
+def test_a_summary_refusal_names_its_reason_and_what_it_was_refused_over(
+    refusal: StorySummaryRefusal, detail: str
 ) -> None:
-    assert story_inspection.page_refusal_text(refusal) == (
+    assert story_inspection.summary_refusal_text(refusal) == (
         f"Refused ({refusal.reason.value}): {detail}."
     )
 

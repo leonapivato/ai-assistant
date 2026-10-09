@@ -32553,7 +32553,7 @@ class StoryActor(StrEnum):
     A **closed** enumeration, added to and never renamed. ADR-0289 gives it one
     member; a later decision that builds a producer adds that producer's member,
     and ADR-0300 §3:15 adds the three that write stories outside the engine surface.
-    Who wrote a note on a story's page is :class:`StoryNoteAuthor`, not this.
+    Who wrote a note on a story is :class:`StoryNoteAuthor`, not this.
     """
 
     OWNER = "owner"
@@ -32731,23 +32731,23 @@ _STORY_OTHER_CHANGES: Final = frozenset(
 #
 # :class:`StoryFlagKind` and :class:`StoryFlag` are declared here, ahead of
 # :class:`StoryLogLine`, because ADR-0302 §3 has a ``decided`` line name the flag it
-# answers. They used to sit in the page's section below; the rule above
+# answers. They used to sit in the summary's section below; the rule above
 # :data:`Identifier` decides the move — a forward reference plus ``model_rebuild``
 # would have made a `core` type depend on an import-order side effect. Relocating a
 # type is not redefining it (ADR-0084 §4): nothing about either changed.
 
 
 class StoryFlagKind(StrEnum):
-    """What a tidy-up's flag says of the page it wrote (ADR-0300 §9:2).
+    """What a tidy-up's flag says of the summary it wrote (ADR-0300 §9:2).
 
     A **closed** enumeration, added to and never renamed.
     """
 
     TWO_MATTERS = "two_matters"
-    """The page looks like two matters."""
+    """The summary looks like two matters."""
 
     LIKE_ANOTHER = "like_another"
-    """The page looks like another story, which the flag names."""
+    """The summary looks like another story, which the flag names."""
 
 
 class StoryFlag(BaseModel):
@@ -32763,7 +32763,7 @@ class StoryFlag(BaseModel):
     @model_validator(mode="after")
     def _names_a_story_when_it_says_like_another(self) -> Self:
         if (self.kind is StoryFlagKind.LIKE_ANOTHER) != (self.story is not None):
-            msg = "a flag names another story exactly when it says the page looks like one"
+            msg = "a flag names another story exactly when it says the summary looks like one"
             raise ValueError(msg)
         return self
 
@@ -32771,7 +32771,7 @@ class StoryFlag(BaseModel):
 class StoryFlagName(BaseModel):
     """What names a flag, by identity only (ADR-0302 §2).
 
-    A flag a tidy-up raised is named by ``story``, the story whose page version
+    A flag a tidy-up raised is named by ``story``, the story whose summary version
     recorded it, ``version``, that version's number, and ``flag``, the flag as the
     version records it. The shape named by ``activation`` alone was understanding's
     flag (ADR-0302 §2:2), which ADR-0303 §8 retires: the store holds no such flag and
@@ -33039,20 +33039,20 @@ def story_members(members: object) -> tuple[StoryMember, ...]:
     return tuple(snapshot)
 
 
-# --- a story's page (ADR-0300 §3, ADR-0303 §§2-4) ---------------------------------
+# --- a story's notes and summary (ADR-0300 §3, ADR-0303 §§2-4, ADR-0304 §2) -------
 #
-# A story's page is two records the story store keeps beside the story: its
-# **notes**, here :class:`StoryNote`, and its **current page**, here
-# :class:`StoryCurrentPage`, with a **version log** of :class:`StoryPageVersion`
-# recording the current page's history by identity. ADR-0303 §2 makes the page a free
-# page of notes: nothing ties the two records together except that the tidy-up reads
-# the notes and writes the page, so a line cites nothing and a note rests on nothing.
-# ADR-0300 §3:6 keeps ``StoryEntry`` (a member in a story's clean view) and
-# ``StoryPage`` (a page of the list of stories) for what ADR-0289 made them, so an
-# entry is a *note* here, and a name beginning ``StoryPage`` is said of the page of
-# notes, never of that list.
+# The story store keeps two records beside each story: its **notes**, here
+# :class:`StoryNote`, and its **summary**, here :class:`StorySummary`, with a
+# **version log** of :class:`StorySummaryVersion` recording the summary's history by
+# identity. ADR-0303 §2 makes the notes free: nothing ties the two records together
+# except that the tidy-up reads the notes and writes the summary, so a line cites
+# nothing and a note rests on nothing. ADR-0304 §2 renamed what ADR-0300 to ADR-0303
+# call the story's page its summary. ADR-0300 §3:6 keeps ``StoryEntry`` (a member in
+# a story's clean view) and ``StoryPage`` (a page of the list of stories) for what
+# ADR-0289 made them, so an entry is a *note* here, and ``StoryPage``,
+# ``StoryViewPage`` and ``StoryLogPage`` keep *page* in its paged-read sense.
 
-#: The longest text a note may carry, and the longest any line of a current page may
+#: The longest text a note may carry, and the longest any line of a summary may
 #: carry, in characters (ADR-0300 §3:1, §3:17). Chosen from the episode excerpt the
 #: prompts that render an episode already bound it by, 2,000 characters
 #: (``UNDERSTANDING_EXCERPT_CHARS`` at the composition root, and the planner's and
@@ -33060,22 +33060,22 @@ def story_members(members: object) -> tuple[StoryMember, ...]:
 #: line is bounded the same.
 STORY_NOTE_MAX_CHARS: Final[int] = 2_000
 
-#: The current page's size cap, in characters, summed over every line (ADR-0300 §3:9,
-#: ADR-0303 §4:5): four of those excerpts, so planning, which is given the whole page
-#: of every story its activation belongs to (ADR-0300 §8), can hold a few pages beside
+#: The summary's size cap, in characters, summed over every line (ADR-0300 §3:9,
+#: ADR-0303 §4:5): four of those excerpts, so planning, which is given the whole summary
+#: of every story its activation belongs to (ADR-0300 §8), can hold a few summaries beside
 #: its episodes.
-STORY_PAGE_CAP_CHARS: Final[int] = 8_000
+STORY_SUMMARY_CAP_CHARS: Final[int] = 8_000
 
 type StoryNoteId = Annotated[PositiveInt, Field(strict=True, lt=_STORY_POSITION_BOUND)]
 """A note's identity: a number the story store assigns, unique across the store and
 ascending in the order notes are written, so a story's notes in identity order are
 its notes in the order they were written (ADR-0300 §3:1)."""
 
-type _StoryPageText = Annotated[NonBlankEncodableText, Field(max_length=STORY_NOTE_MAX_CHARS)]
+type _StoryText = Annotated[NonBlankEncodableText, Field(max_length=STORY_NOTE_MAX_CHARS)]
 
 
 class StoryNoteAuthor(StrEnum):
-    """Who wrote a note on a story's page (ADR-0300 §3:2, ADR-0303 §4:6).
+    """Who wrote a note on a story (ADR-0300 §3:2, ADR-0303 §4:6).
 
     A **closed** enumeration, added to and never renamed, and a separate one from
     :class:`StoryActor`: who made a membership change is not who wrote a note.
@@ -33085,7 +33085,7 @@ class StoryNoteAuthor(StrEnum):
     """Planning, through its note, start and grouping calls (ADR-0303 §2:1)."""
 
     TIDY_UP = "tidy_up"
-    """The tidy-up, as a safety-net note written with its page under ADR-0300 §5:5.
+    """The tidy-up, as a safety-net note written with its summary under ADR-0300 §5:5.
     Nothing writes a note as ``tidy_up`` from ADR-0303 on, and one written so before
     stays a note like any other (§4:6)."""
 
@@ -33094,7 +33094,7 @@ class StoryNoteAuthor(StrEnum):
 
 
 class StoryNote(BaseModel):
-    """One note on a story's page (ADR-0303 §2:3-§2:6, §3:1).
+    """One note on a story (ADR-0303 §2:3-§2:6, §3:1).
 
     ``text`` is anything at all within :data:`STORY_NOTE_MAX_CHARS`.
     ``written_during`` names the activation the note was written during, and is
@@ -33109,7 +33109,7 @@ class StoryNote(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     note_id: StoryNoteId
-    text: _StoryPageText
+    text: _StoryText
     author: StoryNoteAuthor
     written_during: Identifier | None
     outside: bool = Field(strict=True)
@@ -33127,39 +33127,39 @@ class StoryNote(BaseModel):
         return self
 
 
-class StoryPageLine(BaseModel):
-    """One line of a story's current page: its text, and nothing else (ADR-0303 §2:7).
+class StorySummaryLine(BaseModel):
+    """One line of a story's summary: its text, and nothing else (ADR-0303 §2:7).
 
-    A line cites nothing. That some line came from outside content is the page's mark
-    (:attr:`StoryCurrentPage.outside`), and the line's own words say which (§3:5).
+    A line cites nothing. That some line came from outside content is the summary's mark
+    (:attr:`StorySummary.outside`), and the line's own words say which (§3:5).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    text: _StoryPageText
+    text: _StoryText
 
 
-class StoryCurrentPage(BaseModel):
-    """A story's current page: zero or more lines, the first saying what the matter is.
+class StorySummary(BaseModel):
+    """A story's summary: zero or more lines, the first saying what the matter is.
 
-    Only the current page is kept as text: writing a new one discards the old one's
+    Only the summary is kept as text: writing a new one discards the old one's
     (ADR-0300 §3:6). ``version`` is the version that wrote it, and ``written_at`` when,
-    which is when the page was last tidied. ``lines`` may be empty: a tidy-up may write
-    no line (ADR-0303 §5:3). ``outside`` is the page's mark, as the version that wrote
+    which is when the summary was last tidied. ``lines`` may be empty: a tidy-up may write
+    no line (ADR-0303 §5:3). ``outside`` is the summary's mark, as the version that wrote
     it records it (§3:4).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     version: int = Field(strict=True, ge=1, lt=_STORY_POSITION_BOUND)
     written_at: UtcInstant
-    lines: tuple[StoryPageLine, ...]
+    lines: tuple[StorySummaryLine, ...]
     outside: bool = Field(strict=True)
 
 
-class StoryPageVersionName(BaseModel):
-    """Another story's page version a tidy-up's run read, by identity (ADR-0303 §3:3).
+class StorySummaryVersionName(BaseModel):
+    """Another story's summary version a tidy-up's run read, by identity (ADR-0303 §3:3).
 
-    ``story`` is the story whose page the run was shown, and ``version`` the version
-    that wrote that page. It is never a member of the story whose version records it,
+    ``story`` is the story whose summary the run was shown, and ``version`` the version
+    that wrote that summary. It is never a member of the story whose version records it,
     so whether that story holds it is never asked (§4:2).
     """
 
@@ -33168,13 +33168,15 @@ class StoryPageVersionName(BaseModel):
     version: int = Field(strict=True, ge=1, lt=_STORY_POSITION_BOUND)
 
 
-class StoryPageVersion(BaseModel):
-    """One version of a story's page, in the append-only version log (ADR-0303 §4:3).
+class StorySummaryVersion(BaseModel):
+    """One version of a story's summary, in the append-only version log (ADR-0303 §4:3).
 
     Identities, instants and enumerations only, and no field holds free text: when it
     was written; the notes and the episodes, by activation id, it took in; the other
-    stories' page versions its run read (§3:3); the flags it raised; and ``outside``,
-    whether the page it wrote is marked (§3:4).
+    stories' summary versions its run read (§3:3); the flags it raised; and ``outside``,
+    whether the summary it wrote is marked (§3:4). ``read_pages`` keeps its name: it is
+    a key of the record the version log stores, which ADR-0304 §2 lets keep it rather
+    than migrate the store.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -33182,25 +33184,25 @@ class StoryPageVersion(BaseModel):
     written_at: UtcInstant
     took_in_notes: tuple[StoryNoteId, ...] = ()
     took_in_episodes: tuple[Identifier, ...] = ()
-    read_pages: tuple[StoryPageVersionName, ...] = ()
+    read_pages: tuple[StorySummaryVersionName, ...] = ()
     flags: tuple[StoryFlag, ...] = ()
     outside: bool = Field(strict=True)
 
 
-class StoryPageState(BaseModel):
-    """A story's current page with everything pending on it (ADR-0300 §3:8, §3:10).
+class StorySummaryState(BaseModel):
+    """A story's summary with everything pending on it (ADR-0300 §3:8, §3:10).
 
-    ``page`` is ``None`` where no version has been written. ``pending_notes`` are
-    the notes the story holds that no version of its page has taken in since they
+    ``summary`` is ``None`` where no version has been written. ``pending_notes`` are
+    the notes the story holds that no version of its summary has taken in since they
     came to it, in the order they were written; ``pending_episodes`` are its
     activation members likewise, by activation id, in link order. ``as_of`` names
-    this read: a page built on it is written with it, which refuses the write where
+    this read: a summary built on it is written with it, which refuses the write where
     a version has been written since and takes in only what was pending at it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     story: StoryHeader
-    page: StoryCurrentPage | None
+    summary: StorySummary | None
     pending_notes: tuple[StoryNote, ...]
     pending_episodes: tuple[Identifier, ...]
     as_of: int = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
@@ -33218,7 +33220,7 @@ class StoryNoteList(BaseModel):
     next_cursor: int | None = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
 
 
-class StoryPageVersionList(BaseModel):
+class StorySummaryVersionList(BaseModel):
     """A page of a story's version log, oldest first (ADR-0300 §3:10).
 
     ``next_cursor`` is the version to resume after, or ``None`` on the last page.
@@ -33226,48 +33228,50 @@ class StoryPageVersionList(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     story: StoryHeader
-    versions: tuple[StoryPageVersion, ...]
+    versions: tuple[StorySummaryVersion, ...]
     next_cursor: int | None = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
 
 
-class StoryPageDraft(BaseModel):
-    """A new current page, with what the store records beside it (ADR-0303 §4:1).
+class StorySummaryDraft(BaseModel):
+    """A new summary, with what the store records beside it (ADR-0303 §4:1).
 
     Its lines, first line first, which may be none (§5:3); the pending notes and
-    episodes, by activation id, its run read and so takes in; the other stories' page
+    episodes, by activation id, its run read and so takes in; the other stories' summary
     versions its run read (§3:3); the flags it raises; and ``outside``, its mark, which
     the hub sets by §3:4's rule and never from a model's output. It writes no note.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    lines: tuple[StoryPageLine, ...] = ()
+    lines: tuple[StorySummaryLine, ...] = ()
     took_in_notes: tuple[StoryNoteId, ...] = ()
     took_in_episodes: tuple[Identifier, ...] = ()
-    read_pages: tuple[StoryPageVersionName, ...] = ()
+    read_pages: tuple[StorySummaryVersionName, ...] = ()
     flags: tuple[StoryFlag, ...] = ()
     outside: bool = Field(strict=True)
 
 
-class StoryPageRefusalReason(StrEnum):
-    """Why a write to a story's page was refused (ADR-0300 §3, ADR-0303 §4).
+class StorySummaryRefusalReason(StrEnum):
+    """Why a write to a story's summary was refused (ADR-0300 §3, ADR-0303 §4).
 
     A **closed** enumeration, added to and never renamed, kept apart from
     :class:`StoryRefusalReason`, whose members a membership write answers. A
-    refused page write writes nothing.
+    refused summary write writes nothing.
     """
 
     UNKNOWN_STORY = "unknown_story"
     """The write named a story the store does not hold: the story written to, the
-    story a flag names, or the story of another story's page version the run read
+    story a flag names, or the story of another story's summary version the run read
     (ADR-0303 §4:2). The refusal names it."""
 
     MERGED_STORY = "merged_story"
     """The write was to a merged story. The refusal names it and the story it was
     merged into."""
 
-    PAGE_MOVED_ON = "page_moved_on"
-    """A version of the story's page has been written since the read the page was
-    built on, so the version it was built on is no longer the current one."""
+    SUMMARY_MOVED_ON = "summary_moved_on"
+    """A version of the story's summary has been written since the read the summary was
+    built on, so the version it was built on is no longer the current one. Named
+    ``page_moved_on`` until ADR-0304 §2 renamed the page its summary, the one rename
+    this enumeration has had, made with a protocol step."""
 
     UNKNOWN_NOTE = "unknown_note"
     """Answered by no write since ADR-0303 §4:4: a line cites no note and nothing
@@ -33275,7 +33279,7 @@ class StoryPageRefusalReason(StrEnum):
     ``not_held``. Kept, since the enumeration is never renamed or narrowed."""
 
     OVER_CAP = "over_cap"
-    """The page's lines together exceed :data:`STORY_PAGE_CAP_CHARS`, every line
+    """The summary's lines together exceed :data:`STORY_SUMMARY_CAP_CHARS`, every line
     counted (ADR-0303 §4:5)."""
 
     NOT_HELD = "not_held"
@@ -33284,18 +33288,18 @@ class StoryPageRefusalReason(StrEnum):
     the note."""
 
 
-class StoryPageRefusal(BaseModel):
-    """Why a write to a story's page was refused, and what over (ADR-0300 §3).
+class StorySummaryRefusal(BaseModel):
+    """Why a write to a story's summary was refused, and what over (ADR-0300 §3).
 
     ``story_id`` names the story the refusal is about: the story written to, or the
-    unknown story a flag or a page version the run read names. ``merged_into`` is set
+    unknown story a flag or a summary version the run read names. ``merged_into`` is set
     exactly on ``merged_story``. ``note`` is set on ``unknown_note`` and on a
     ``not_held`` naming a note, and ``activation`` exactly on a ``not_held`` naming an
     activation; a ``not_held`` names one of the two, never both (ADR-0302 §7:3).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    reason: StoryPageRefusalReason
+    reason: StorySummaryRefusalReason
     story_id: Identifier
     merged_into: Identifier | None = None
     note: StoryNoteId | None = None
@@ -33304,19 +33308,19 @@ class StoryPageRefusal(BaseModel):
     @model_validator(mode="after")
     def _names_what_its_reason_needs(self) -> Self:
         reason = self.reason
-        if (reason is StoryPageRefusalReason.MERGED_STORY) != (self.merged_into is not None):
-            msg = "a page refusal names a merge target exactly when it refuses a merged story"
+        if (reason is StorySummaryRefusalReason.MERGED_STORY) != (self.merged_into is not None):
+            msg = "a summary refusal names a merge target exactly when it refuses a merged story"
             raise ValueError(msg)
-        if reason is StoryPageRefusalReason.NOT_HELD:
+        if reason is StorySummaryRefusalReason.NOT_HELD:
             if (self.note is None) == (self.activation is None):
                 msg = "a not_held refusal names the activation or the note, never both"
                 raise ValueError(msg)
             return self
-        if (reason is StoryPageRefusalReason.UNKNOWN_NOTE) != (self.note is not None):
-            msg = "a page refusal names a note exactly when it refuses an unknown one"
+        if (reason is StorySummaryRefusalReason.UNKNOWN_NOTE) != (self.note is not None):
+            msg = "a summary refusal names a note exactly when it refuses an unknown one"
             raise ValueError(msg)
         if self.activation is not None:
-            msg = "a page refusal names an activation only when the story does not hold it"
+            msg = "a summary refusal names an activation only when the story does not hold it"
             raise ValueError(msg)
         return self
 
@@ -33326,7 +33330,7 @@ class StoryNoteOutcome(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     note: StoryNote | None = None
-    refusal: StoryPageRefusal | None = None
+    refusal: StorySummaryRefusal | None = None
 
     @model_validator(mode="after")
     def _written_or_refused(self) -> Self:
@@ -33336,30 +33340,30 @@ class StoryNoteOutcome(BaseModel):
         return self
 
 
-class StoryPageOutcome(BaseModel):
-    """What a page write did: the version it appended, or why it was refused.
+class StorySummaryOutcome(BaseModel):
+    """What a summary write did: the version it appended, or why it was refused.
 
     The version names the notes and episodes the write took in, the other stories'
-    page versions it read, its flags and its mark.
+    summary versions it read, its flags and its mark.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    version: StoryPageVersion | None = None
-    refusal: StoryPageRefusal | None = None
+    version: StorySummaryVersion | None = None
+    refusal: StorySummaryRefusal | None = None
 
     @model_validator(mode="after")
     def _written_or_refused(self) -> Self:
         if (self.version is None) == (self.refusal is None):
-            msg = "a page outcome is either written, carrying its version, or refused"
+            msg = "a summary outcome is either written, carrying its version, or refused"
             raise ValueError(msg)
         return self
 
 
-class StoryPageViewNote(BaseModel):
-    """One of a story's notes as its page view lists it (ADR-0303 §10:2).
+class StorySummaryViewNote(BaseModel):
+    """One of a story's notes as its summary view lists it (ADR-0303 §10:2).
 
     ``note`` carries its id, its text, who wrote it and its mark; ``pending`` says
-    whether no version of the story's page has taken it in since it came to the story.
+    whether no version of the story's summary has taken it in since it came to the story.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -33367,20 +33371,20 @@ class StoryPageViewNote(BaseModel):
     pending: bool = Field(strict=True)
 
 
-class StoryPageView(BaseModel):
-    """A story's page as the owner is shown it (ADR-0303 §10:2).
+class StorySummaryView(BaseModel):
+    """A story's summary as the owner is shown it (ADR-0303 §10:2).
 
     What the story commands answer the owner. ``version`` is the version that wrote
-    the current page and ``tidied_at`` when, which is when the page was last tidied,
-    both ``None`` where no version has been written. ``lines`` are the current page's
-    lines, in page order, and ``outside`` its mark (§3:4), which every view shows
-    (§3:8); unless ``withheld`` says the page was withheld from this reader (§3:11),
-    when neither is carried: a flag, never the text, so a reader knows a page exists
+    the summary and ``tidied_at`` when, which is when the summary was last tidied,
+    both ``None`` where no version has been written. ``lines`` are the summary's
+    lines, in order, and ``outside`` its mark (§3:4), which every view shows
+    (§3:8); unless ``withheld`` says the summary was withheld from this reader (§3:11),
+    when neither is carried: a flag, never the text, so a reader knows a summary exists
     that it is not shown. ``notes`` are the story's notes, newest first, up to the
     view's bound, each with its id, its mark and whether it is pending, and
     ``more_notes`` counts the notes beyond it.
 
-    A merged story's page carries its header alone, naming where it went, as its
+    A merged story's summary carries its header alone, naming where it went, as its
     view and its standing do (ADR-0289 §3): its notes went with the merge.
     """
 
@@ -33388,22 +33392,22 @@ class StoryPageView(BaseModel):
     story: StoryHeader
     version: int | None = Field(default=None, strict=True, ge=1, lt=_STORY_POSITION_BOUND)
     tidied_at: UtcInstant | None = None
-    lines: tuple[StoryPageLine, ...] = ()
+    lines: tuple[StorySummaryLine, ...] = ()
     outside: bool = Field(default=False, strict=True)
     withheld: bool = Field(default=False, strict=True)
-    notes: tuple[StoryPageViewNote, ...] = ()
+    notes: tuple[StorySummaryViewNote, ...] = ()
     more_notes: int = Field(default=0, strict=True, ge=0, lt=_STORY_POSITION_BOUND)
 
     @model_validator(mode="after")
-    def _a_page_only_where_one_was_written(self) -> Self:
+    def _a_summary_only_where_one_was_written(self) -> Self:
         if (self.version is None) != (self.tidied_at is None):
-            msg = "a page view names its version exactly when it says when it was tidied"
+            msg = "a summary view names its version exactly when it says when it was tidied"
             raise ValueError(msg)
         if self.version is None and (self.lines or self.outside or self.withheld):
-            msg = "a story whose page was never written shows no page"
+            msg = "a story whose summary was never written shows no summary"
             raise ValueError(msg)
         if self.withheld and (self.lines or self.outside):
-            msg = "a withheld page carries neither its lines nor its mark"
+            msg = "a withheld summary carries neither its lines nor its mark"
             raise ValueError(msg)
         return self
 
@@ -33411,26 +33415,26 @@ class StoryPageView(BaseModel):
     def _notes_newest_first(self) -> Self:
         ids = [shown.note.note_id for shown in self.notes]
         if any(newer <= older for newer, older in pairwise(ids)):
-            msg = "a page view lists its notes newest first, each once"
+            msg = "a summary view lists its notes newest first, each once"
             raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
-    def _a_merged_story_shows_no_page(self) -> Self:
+    def _a_merged_story_shows_no_summary(self) -> Self:
         if self.story.merged_into is not None and (
             self.version is not None or self.notes or self.more_notes
         ):
-            msg = "a merged story's page view carries its header and nothing else"
+            msg = "a merged story's summary view carries its header and nothing else"
             raise ValueError(msg)
         return self
 
 
 #: The check a note's text passes: non-blank, encodable, within its bound (§3:1).
-_STORY_NOTE_TEXT: Final[TypeAdapter[str]] = TypeAdapter(_StoryPageText)
+_STORY_NOTE_TEXT: Final[TypeAdapter[str]] = TypeAdapter(_StoryText)
 
 
 def story_note_text(text: object) -> str:
-    """Refuse a note's text that no story page could hold (ADR-0300 §3:1).
+    """Refuse a note's text that no story could hold (ADR-0300 §3:1).
 
     Shared by every ``AssistantEngine`` implementation, so each refuses the same
     text before any I/O (ADR-0085 §9); the story store refuses it again.
@@ -33489,10 +33493,10 @@ def story_move_members(story_id: str, to: str, members: object) -> tuple[StoryMe
 
 
 def check_story_as_of(as_of: object) -> int:
-    """Refuse an ``as_of`` no page read could have returned.
+    """Refuse an ``as_of`` no summary read could have returned.
 
     Args:
-        as_of: The ``as_of`` of the page read a page was built on.
+        as_of: The ``as_of`` of the summary read a summary was built on.
 
     Returns:
         It, checked.
@@ -33501,7 +33505,7 @@ def check_story_as_of(as_of: object) -> int:
         ValueError: If it is not an exact ``int`` in ``[0, 2**63)``.
     """
     if type(as_of) is not int or not 0 <= as_of < _STORY_POSITION_BOUND:
-        msg = "a page's as_of must be an integer in [0, 2**63)"
+        msg = "a summary's as_of must be an integer in [0, 2**63)"
         raise ValueError(msg)
     return as_of
 
@@ -33535,7 +33539,7 @@ def story_note_ids(notes: object) -> tuple[int, ...]:
 # Worked out from the records each time a reader needs it, and never stored
 # (ADR-0300 §2:1, §8:1): what was done, when things happened, and the related
 # matters. Assembled per reader, so what one reader is shown need not be what another
-# is (§8, §11). No field holds a note or a line of the page; the one text is an
+# is (§8, §11). No field holds a note or a line of the summary; the one text is an
 # episode's understood meaning, read from the episode itself.
 
 #: How many of a matter's episodes its timeline shows one by one, most recent first;
@@ -33646,7 +33650,7 @@ class StoryRelated(BaseModel):
     """A related matter: a story one membership away, and how (ADR-0300 §8:1).
 
     Named by its id and its current member count, one level deep, as ADR-0289 §4:5
-    resolves a story member. A matter related but separate is a note on the page,
+    resolves a story member. A matter related but separate is a note on the story,
     not a link, so it is not here (ADR-0300 §8).
     """
 

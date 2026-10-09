@@ -31,10 +31,10 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryChange,
     StoryNoteAuthor,
-    StoryPageDraft,
-    StoryPageLine,
-    StoryPageVersionName,
     StoryRefusalReason,
+    StorySummaryDraft,
+    StorySummaryLine,
+    StorySummaryVersionName,
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
@@ -181,10 +181,10 @@ async def test_an_episode_recording_no_activation_belongs_to_no_story() -> None:
 # --- the short view (§6:2, §6:3) ----------------------------------------------------
 
 
-async def _paged(
+async def _summarised(
     stories: FakeStoryStore, story_id: str, *lines: str, outside: bool = False
 ) -> tuple[int, ...]:
-    """Write one note per line and a page of those lines, taking the notes in."""
+    """Write one note per line and a summary of those lines, taking the notes in."""
     ids = []
     for text in lines:
         written = await stories.append_note(
@@ -192,22 +192,22 @@ async def _paged(
         )
         assert written.note is not None
         ids.append(written.note.note_id)
-    state = await stories.current_page(story_id)
+    state = await stories.current_summary(story_id)
     assert state is not None
-    draft = StoryPageDraft(
-        lines=tuple(StoryPageLine(text=text) for text in lines),
+    draft = StorySummaryDraft(
+        lines=tuple(StorySummaryLine(text=text) for text in lines),
         took_in_notes=tuple(ids),
         outside=outside,
     )
-    written_page = await stories.write_page(story_id, draft, as_of=state.as_of)
-    assert written_page.refusal is None
+    written_summary = await stories.write_summary(story_id, draft, as_of=state.as_of)
+    assert written_summary.refusal is None
     return tuple(ids)
 
 
 async def test_a_short_view_is_the_first_lines_the_newest_notes_and_the_latest_episodes() -> None:
     stories = _stories()
     trip = await _story(stories, activation("a-1"), activation("a-2"), activation("a-3"))
-    await _paged(stories, trip, "A camping trip to Riverside.", "Leaning to Sunday.", "Canoe?")
+    await _summarised(stories, trip, "A camping trip to Riverside.", "Leaning to Sunday.", "Canoe?")
     for text in ("first pending", "second pending", "third pending"):
         await stories.append_note(trip, text, author=StoryNoteAuthor.PLANNING, written_during="a-2")
     window = (episode("a-1"),)
@@ -272,7 +272,7 @@ async def test_a_member_relinked_while_the_members_are_read_is_shown_once() -> N
     assert [record.id for record in view.episodes] == [address("a-000"), address("a-001")]
 
 
-async def test_a_story_with_no_page_shows_its_pending_notes_and_episodes() -> None:
+async def test_a_story_with_no_summary_shows_its_pending_notes_and_episodes() -> None:
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
     await stories.append_note(trip, "check the dog policy", author=StoryNoteAuthor.OWNER)
@@ -313,11 +313,11 @@ async def test_an_open_episode_is_not_shown_and_a_note_fetches_nothing() -> None
 # --- ADR-0303 §3's privacy default (§3:9-§3:12) -----------------------------------------
 
 
-async def test_an_unbounded_audience_is_shown_no_note_and_no_page_one_stands_behind() -> None:
-    """§3:9: a note is shown only where an owner record may be; §3:11: and a page with one."""
+async def test_an_unbounded_audience_is_shown_no_note_and_no_summary_one_stands_behind() -> None:
+    """§3:9: a note is shown only where an owner record may be; §3:11: and a summary with one."""
     stories = _stories()
     trip = await _story(stories, activation("a-1"), activation("a-2"))
-    await _paged(stories, trip, "shared line", "another shared line", outside=True)
+    await _summarised(stories, trip, "shared line", "another shared line", outside=True)
     await stories.append_note(trip, "my own words", author=StoryNoteAuthor.OWNER)
     window = (episode("a-1"),)
     memory = await memory_of(episode("a-1"), episode("a-2", placement=OWNER_ONLY))
@@ -338,19 +338,19 @@ async def test_an_unbounded_audience_is_shown_no_note_and_no_page_one_stands_beh
     assert [record.id for record in whole.episodes] == [address("a-2"), address("a-1")]
 
 
-async def _episodes_page(
+async def _episodes_summary(
     stories: FakeStoryStore,
     story_id: str,
     *episodes: str,
-    read: tuple[StoryPageVersionName, ...] = (),
+    read: tuple[StorySummaryVersionName, ...] = (),
 ) -> int:
-    """Write a page taking in ``episodes`` and no note, having read the ``read`` pages."""
-    state = await stories.current_page(story_id)
+    """Write a summary taking in ``episodes`` and no note, having read the ``read`` ones."""
+    state = await stories.current_summary(story_id)
     assert state is not None
-    written = await stories.write_page(
+    written = await stories.write_summary(
         story_id,
-        StoryPageDraft(
-            lines=(StoryPageLine(text="A camping trip to Riverside."),),
+        StorySummaryDraft(
+            lines=(StorySummaryLine(text="A camping trip to Riverside."),),
             took_in_episodes=episodes,
             read_pages=read,
             outside=False,
@@ -361,10 +361,10 @@ async def _episodes_page(
     return written.version.version
 
 
-async def test_a_page_with_nothing_behind_it_the_audience_may_not_see_is_shown_to_it() -> None:
+async def test_a_summary_with_nothing_behind_it_the_audience_may_not_see_is_shown_to_it() -> None:
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
-    await _episodes_page(stories, trip, "a-1")
+    await _episodes_summary(stories, trip, "a-1")
     window = (episode("a-1"),)
     memory = await memory_of(*window)
 
@@ -374,12 +374,14 @@ async def test_a_page_with_nothing_behind_it_the_audience_may_not_see_is_shown_t
     assert not seen.withheld
 
 
-async def test_a_page_an_earlier_version_of_which_took_in_a_refused_episode_is_withheld() -> None:
-    """§3:10: cumulative, because each run reads the page it replaces."""
+async def test_a_summary_an_earlier_version_of_which_took_in_a_refused_episode_is_withheld() -> (
+    None
+):
+    """§3:10: cumulative, because each run reads the summary it replaces."""
     stories = _stories()
     trip = await _story(stories, activation("a-1"), activation("a-2"))
-    await _episodes_page(stories, trip, "a-2")
-    await _episodes_page(stories, trip, "a-1")
+    await _episodes_summary(stories, trip, "a-2")
+    await _episodes_summary(stories, trip, "a-1")
     window = (episode("a-1"),)
     memory = await memory_of(episode("a-1"), episode("a-2", placement=OWNER_ONLY))
 
@@ -393,13 +395,13 @@ async def test_a_page_an_earlier_version_of_which_took_in_a_refused_episode_is_w
 
 
 @pytest.mark.parametrize("held", ["open", "forgotten"])
-async def test_a_page_behind_which_an_episode_cannot_be_established_is_withheld(
+async def test_a_summary_behind_which_an_episode_cannot_be_established_is_withheld(
     held: str,
 ) -> None:
     """§3:12: open, which no model is shown (ADR-0286 §6), or no longer held at all."""
     stories = _stories()
     trip = await _story(stories, activation("a-1"), activation("a-2"))
-    await _episodes_page(stories, trip, "a-1", "a-2")
+    await _episodes_summary(stories, trip, "a-1", "a-2")
     window = (episode("a-1"),)
     behind_it = () if held == "forgotten" else (episode("a-2", open_=True),)
     memory = await memory_of(episode("a-1"), *behind_it)
@@ -408,15 +410,17 @@ async def test_a_page_behind_which_an_episode_cannot_be_established_is_withheld(
 
     (seen,) = candidates.views
     assert (seen.lines, seen.outside, seen.withheld) == ((), False, True)
-    # The lookup decides the page, and is neither chosen nor recorded (ADR-0282 §2:7).
+    # The lookup decides the summary, and is neither chosen nor recorded (ADR-0282 §2:7).
     assert (candidates.fetched, candidates.missing) == ((address("a-1"),), ())
 
 
-async def test_a_page_an_episode_behind_which_is_forgotten_between_the_reads_is_withheld() -> None:
+async def test_a_summary_an_episode_behind_which_is_forgotten_between_the_reads_is_withheld() -> (
+    None
+):
     """§3:12 on the latest answer: chosen on the first read, gone on the second fetch."""
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
-    await _episodes_page(stories, trip, "a-1")
+    await _episodes_summary(stories, trip, "a-1")
     window = (episode("a-1"),)
     memory = await memory_of(*window)
     reading = memory.get_many
@@ -437,14 +441,16 @@ async def test_a_page_an_episode_behind_which_is_forgotten_between_the_reads_is_
     assert (candidates.fetched, candidates.missing) == ((address("a-1"),), (address("a-1"),))
 
 
-async def test_a_page_that_read_another_story_s_page_withholds_what_stands_behind_that() -> None:
-    """§3:10: a line shown for a flag may have been copied onto the page."""
+async def test_a_summary_that_read_another_story_s_summary_withholds_what_stands_behind_that() -> (
+    None
+):
+    """§3:10: a line shown for a flag may have been copied onto the summary."""
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
     other = await _story(stories, activation("b-1"))
-    shown_for_a_flag = await _episodes_page(stories, other, "b-1")
-    await _episodes_page(
-        stories, trip, "a-1", read=(StoryPageVersionName(story=other, version=shown_for_a_flag),)
+    shown_for_a_flag = await _episodes_summary(stories, other, "b-1")
+    await _episodes_summary(
+        stories, trip, "a-1", read=(StorySummaryVersionName(story=other, version=shown_for_a_flag),)
     )
     window = (episode("a-1"),)
     memory = await memory_of(episode("a-1"), episode("b-1", placement=OWNER_ONLY))
@@ -460,12 +466,12 @@ async def test_a_page_that_read_another_story_s_page_withholds_what_stands_behin
 # --- a story store that cannot be read (§6:4) ----------------------------------------
 
 
-@pytest.mark.parametrize("read", ["stories_of", "current_page", "view", "page_versions"])
+@pytest.mark.parametrize("read", ["stories_of", "current_summary", "view", "summary_versions"])
 async def test_a_story_store_error_leaves_no_candidates_and_says_so(read: str) -> None:
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
-    # A page, so every one of the four reads is made.
-    await _paged(stories, trip, "A camping trip.")
+    # A summary, so every one of the four reads is made.
+    await _summarised(stories, trip, "A camping trip.")
     window = (episode("a-1"),)
     memory = await memory_of(*window)
     stories = failing(stories, read)

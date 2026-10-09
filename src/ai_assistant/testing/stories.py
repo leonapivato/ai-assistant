@@ -5,10 +5,10 @@ clause the SQLite store holds and refusing everything it refuses, so a consumer
 verified against this one is verified against the contract rather than against a
 convenience: the clean view and the change log, the five membership reads, merge,
 split and move with their exceptions and the notes they carry, the loop refusal,
-each story's page — its notes, its current page with its mark, its version log and
+each story's notes and summary — its summary with its mark, its version log and
 what is pending on it — and the decisions on flags, written as ``decided`` lines
 with the change they record (ADR-0302 §§2-4), ``left`` or ``not_applied`` where none
-changed (ADR-0303 §8), and a page write refused over what its story does not hold
+changed (ADR-0303 §8), and a summary write refused over what its story does not hold
 (ADR-0302 §7).
 
 **Atomic by construction.** Every write computes its refusal and applies its changes
@@ -17,9 +17,9 @@ another — the property the durable store buys with one transaction. A merge wh
 result would close a loop is applied to a copy and discarded, so a refused write
 leaves nothing behind.
 
-**One counter for the page's records**, as the durable store keeps: a note's
+**One counter for the notes' and the summary's records**, as the durable store keeps: a note's
 identity, a version's, and the moment a note or an activation member became pending
-on a story are drawn from it, and a page read reports it as its ``as_of``.
+on a story are drawn from it, and a summary read reports it as its ``as_of``.
 """
 
 from __future__ import annotations
@@ -38,11 +38,10 @@ from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     STORY_ID_PREFIX,
-    STORY_PAGE_CAP_CHARS,
+    STORY_SUMMARY_CAP_CHARS,
     Identifier,
     StoryActor,
     StoryChange,
-    StoryCurrentPage,
     StoryDecision,
     StoryEntry,
     StoryFlagName,
@@ -58,15 +57,16 @@ from ai_assistant.core.types import (
     StoryNoteOutcome,
     StoryOutcome,
     StoryPage,
-    StoryPageDraft,
-    StoryPageOutcome,
-    StoryPageRefusal,
-    StoryPageRefusalReason,
-    StoryPageState,
-    StoryPageVersion,
-    StoryPageVersionList,
     StoryRefusal,
     StoryRefusalReason,
+    StorySummary,
+    StorySummaryDraft,
+    StorySummaryOutcome,
+    StorySummaryRefusal,
+    StorySummaryRefusalReason,
+    StorySummaryState,
+    StorySummaryVersion,
+    StorySummaryVersionList,
     StoryViewPage,
     check_story_as_of,
     check_story_page,
@@ -123,9 +123,10 @@ def _grouping(members: Sequence[StoryMember], answers: StoryFlagName | None) -> 
         raise ValueError(msg)
 
 
-# The page's argument checks and its cap rule, held here as the durable store holds
-# its own: they are the contract's admission rules, not semantics intrinsic to the
-# types (ADR-0016 §2), and the conformance suite keeps the two copies in step.
+# The notes' and the summary's argument checks and the cap rule, held here as the
+# durable store holds its own: they are the contract's admission rules, not semantics
+# intrinsic to the types (ADR-0016 §2), and the conformance suite keeps the two copies
+# in step.
 
 
 def _note_args(
@@ -149,17 +150,17 @@ def _note_args(
     return checked.text, checked.author, checked.written_during, checked.outside
 
 
-def _page_draft(story_id: str, draft: object) -> StoryPageDraft:
-    """Snapshot a page write's draft, refusing a flag or a page read naming its own story."""
-    if not isinstance(draft, StoryPageDraft):
-        msg = f"a page write takes a StoryPageDraft, got {type(draft).__name__}"
+def _summary_draft(story_id: str, draft: object) -> StorySummaryDraft:
+    """Snapshot a summary write's draft, refusing a flag or a summary read naming its story."""
+    if not isinstance(draft, StorySummaryDraft):
+        msg = f"a summary write takes a StorySummaryDraft, got {type(draft).__name__}"
         raise ValueError(msg)
-    snapshot = StoryPageDraft.model_validate(draft.model_dump())
+    snapshot = StorySummaryDraft.model_validate(draft.model_dump())
     if any(flag.story == story_id for flag in snapshot.flags):
-        msg = "a flag names another story, never the one whose page it is raised on"
+        msg = "a flag names another story, never the one whose summary it is raised on"
         raise ValueError(msg)
     if any(read.story == story_id for read in snapshot.read_pages):
-        msg = "a page version read is another story's, never the one whose page is written"
+        msg = "a summary version read is another story's, never the one whose summary is written"
         raise ValueError(msg)
     return snapshot
 
@@ -188,7 +189,7 @@ def _move_members(source: str, target: str, members: object) -> tuple[StoryMembe
     return named
 
 
-def _page_size(draft: StoryPageDraft) -> int:
+def _summary_size(draft: StorySummaryDraft) -> int:
     """The characters counted against the cap: every line (ADR-0303 §4:5)."""
     return sum(len(line.text) for line in draft.lines)
 
@@ -226,11 +227,11 @@ class _State:
     stories: dict[str, _Story] = field(default_factory=dict)
     log: list[StoryLogLine] = field(default_factory=list)
     notes: dict[int, _Held] = field(default_factory=dict)
-    pages: dict[str, StoryCurrentPage] = field(default_factory=dict)
-    versions: list[tuple[str, StoryPageVersion]] = field(default_factory=list)
+    summaries: dict[str, StorySummary] = field(default_factory=dict)
+    versions: list[tuple[str, StorySummaryVersion]] = field(default_factory=list)
 
 
-def _not_held(state: _State, story_id: str, draft: StoryPageDraft) -> StoryPageRefusal | None:
+def _not_held(state: _State, story_id: str, draft: StorySummaryDraft) -> StorySummaryRefusal | None:
     """The first thing a draft takes in that its story does not hold (ADR-0302 §7).
 
     The episodes taken in, then the notes taken in, each against what the story holds
@@ -239,14 +240,14 @@ def _not_held(state: _State, story_id: str, draft: StoryPageDraft) -> StoryPageR
     entries = state.stories[story_id].entries
     for activation in draft.took_in_episodes:
         if StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation) not in entries:
-            return StoryPageRefusal(
-                reason=StoryPageRefusalReason.NOT_HELD, story_id=story_id, activation=activation
+            return StorySummaryRefusal(
+                reason=StorySummaryRefusalReason.NOT_HELD, story_id=story_id, activation=activation
             )
     for note_id in draft.took_in_notes:
         held = state.notes.get(note_id)
         if held is None or held.story_id != story_id:
-            return StoryPageRefusal(
-                reason=StoryPageRefusalReason.NOT_HELD, story_id=story_id, note=note_id
+            return StorySummaryRefusal(
+                reason=StorySummaryRefusalReason.NOT_HELD, story_id=story_id, note=note_id
             )
     return None
 
@@ -775,15 +776,17 @@ class FakeStoryStore:
         decided = self._decide(state, checked, recorded, self._stamp(checked_actor, None))
         return StoryOutcome(story_id=decided[0], logged=len(decided))
 
-    # --- the page: writes (ADR-0300 §3) --------------------------------------
+    # --- the notes and the summary: writes (ADR-0300 §3) ----------------------
 
-    def _page_refusal(self, story_id: str) -> StoryPageRefusal | None:
+    def _summary_refusal(self, story_id: str) -> StorySummaryRefusal | None:
         story = self._state.stories.get(story_id)
         if story is None:
-            return StoryPageRefusal(reason=StoryPageRefusalReason.UNKNOWN_STORY, story_id=story_id)
+            return StorySummaryRefusal(
+                reason=StorySummaryRefusalReason.UNKNOWN_STORY, story_id=story_id
+            )
         if story.merged_into is not None:
-            return StoryPageRefusal(
-                reason=StoryPageRefusalReason.MERGED_STORY,
+            return StorySummaryRefusal(
+                reason=StorySummaryRefusalReason.MERGED_STORY,
                 story_id=story_id,
                 merged_into=story.merged_into,
             )
@@ -798,12 +801,12 @@ class FakeStoryStore:
         written_during: Identifier | None = None,
         outside: bool = False,
     ) -> StoryNoteOutcome:
-        """Write a note to a story's page, pending there (ADR-0303 §2, §4:7)."""
+        """Write a note to a story, pending there (ADR-0303 §2, §4:7)."""
         target = _checked_id(story_id)
         checked_text, checked_author, checked_during, checked_outside = _note_args(
             text, author=author, written_during=written_during, outside=outside
         )
-        if refused := self._page_refusal(target):
+        if refused := self._summary_refusal(target):
             return StoryNoteOutcome(refusal=refused)
         at = self._now()
         state = self._state
@@ -818,60 +821,62 @@ class FakeStoryStore:
         state.notes[note.note_id] = _Held(note=note, story_id=target, pending_since=note.note_id)
         return StoryNoteOutcome(note=note)
 
-    async def write_page(
+    async def write_summary(
         self,
         story_id: Identifier,
-        draft: StoryPageDraft,
+        draft: StorySummaryDraft,
         *,
         as_of: int,
-    ) -> StoryPageOutcome:
-        """Write a new current page and its version, and no note (ADR-0303 §4)."""
+    ) -> StorySummaryOutcome:
+        """Write a new summary and its version, and no note (ADR-0303 §4)."""
         target = _checked_id(story_id)
-        checked = _page_draft(target, draft)
+        checked = _summary_draft(target, draft)
         basis = check_story_as_of(as_of)
-        if refused := self._page_refusal(target):
-            return StoryPageOutcome(refusal=refused)
+        if refused := self._summary_refusal(target):
+            return StorySummaryOutcome(refusal=refused)
         state = self._state
         if basis > state.tick:
-            msg = "a page's as_of is one no read of this store has returned"
+            msg = "a summary's as_of is one no read of this store has returned"
             raise ValueError(msg)
         if refused := self._draft_refusal(state, target, checked, basis):
-            return StoryPageOutcome(refusal=refused)
+            return StorySummaryOutcome(refusal=refused)
         at = self._now()
-        return StoryPageOutcome(version=self._page_writes(state, target, checked, basis, at))
+        return StorySummaryOutcome(version=self._summary_writes(state, target, checked, basis, at))
 
     @staticmethod
     def _draft_refusal(
-        state: _State, story_id: str, draft: StoryPageDraft, as_of: int
-    ) -> StoryPageRefusal | None:
-        """The page's refusals after the story's own, in ADR-0303 §4:4's order."""
+        state: _State, story_id: str, draft: StorySummaryDraft, as_of: int
+    ) -> StorySummaryRefusal | None:
+        """The summary's refusals after the story's own, in ADR-0303 §4:4's order."""
         if any(sid == story_id and v.version > as_of for sid, v in state.versions):
-            return StoryPageRefusal(reason=StoryPageRefusalReason.PAGE_MOVED_ON, story_id=story_id)
+            return StorySummaryRefusal(
+                reason=StorySummaryRefusalReason.SUMMARY_MOVED_ON, story_id=story_id
+            )
         for flag in draft.flags:
             if flag.story is not None and flag.story not in state.stories:
-                return StoryPageRefusal(
-                    reason=StoryPageRefusalReason.UNKNOWN_STORY, story_id=flag.story
+                return StorySummaryRefusal(
+                    reason=StorySummaryRefusalReason.UNKNOWN_STORY, story_id=flag.story
                 )
         for read in draft.read_pages:
             if read.story not in state.stories:
-                return StoryPageRefusal(
-                    reason=StoryPageRefusalReason.UNKNOWN_STORY, story_id=read.story
+                return StorySummaryRefusal(
+                    reason=StorySummaryRefusalReason.UNKNOWN_STORY, story_id=read.story
                 )
             if not any(
                 sid == read.story and v.version == read.version for sid, v in state.versions
             ):
-                msg = "a page version read names a version its story's log does not hold"
+                msg = "a summary version read names a version its story's log does not hold"
                 raise ValueError(msg)
         if refused := _not_held(state, story_id, draft):
             return refused
-        if _page_size(draft) > STORY_PAGE_CAP_CHARS:
-            return StoryPageRefusal(reason=StoryPageRefusalReason.OVER_CAP, story_id=story_id)
+        if _summary_size(draft) > STORY_SUMMARY_CAP_CHARS:
+            return StorySummaryRefusal(reason=StorySummaryRefusalReason.OVER_CAP, story_id=story_id)
         return None
 
     @staticmethod
-    def _page_writes(
-        state: _State, story_id: str, draft: StoryPageDraft, as_of: int, at: datetime
-    ) -> StoryPageVersion:
+    def _summary_writes(
+        state: _State, story_id: str, draft: StorySummaryDraft, as_of: int, at: datetime
+    ) -> StorySummaryVersion:
         took_notes: list[int] = []
         for note_id in _unique(draft.took_in_notes):
             held = state.notes.get(note_id)
@@ -890,7 +895,7 @@ class FakeStoryStore:
             if since is not None and since <= as_of:
                 del pending[activation]
                 took_episodes.append(activation)
-        version = StoryPageVersion(
+        version = StorySummaryVersion(
             version=_tick(state),
             written_at=at,
             took_in_notes=tuple(took_notes),
@@ -900,7 +905,7 @@ class FakeStoryStore:
             outside=draft.outside,
         )
         state.versions.append((story_id, version))
-        state.pages[story_id] = StoryCurrentPage(
+        state.summaries[story_id] = StorySummary(
             version=version.version, written_at=at, lines=draft.lines, outside=draft.outside
         )
         return version
@@ -993,10 +998,10 @@ class FakeStoryStore:
         )
         return tuple(self._header_of(story_id, story) for story_id, story in holding)
 
-    # --- the page: reads (ADR-0300 §3) ---------------------------------------
+    # --- the notes and the summary: reads (ADR-0300 §3) -----------------------
 
-    async def current_page(self, story_id: Identifier) -> StoryPageState | None:
-        """Read a story's current page with the notes and episodes pending on it."""
+    async def current_summary(self, story_id: Identifier) -> StorySummaryState | None:
+        """Read a story's summary with the notes and episodes pending on it."""
         target = _checked_id(story_id)
         state = self._state
         story = state.stories.get(target)
@@ -1015,9 +1020,9 @@ class FakeStoryStore:
             for entry in sorted(story.entries.values(), key=lambda entry: entry.position)
             if entry.member.kind is StoryMemberKind.ACTIVATION and entry.member.id in story.pending
         ]
-        return StoryPageState(
+        return StorySummaryState(
             story=self._header_of(target, story),
-            page=state.pages.get(target),
+            summary=state.summaries.get(target),
             pending_notes=tuple(notes),
             pending_episodes=tuple(episodes),
             as_of=state.tick,
@@ -1052,13 +1057,13 @@ class FakeStoryStore:
             next_cursor=page[-1].note_id if len(rest) > limit else None,
         )
 
-    async def page_versions(
+    async def summary_versions(
         self,
         story_id: Identifier,
         *,
         cursor: int | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
-    ) -> StoryPageVersionList | None:
+    ) -> StorySummaryVersionList | None:
         """Read a page of a story's version log, oldest first."""
         target = _checked_id(story_id)
         check_story_page(cursor, limit)
@@ -1072,7 +1077,7 @@ class FakeStoryStore:
             if sid == target and version.version > after
         ]
         page = rest[:limit]
-        return StoryPageVersionList(
+        return StorySummaryVersionList(
             story=self._header_of(target, story),
             versions=tuple(page),
             next_cursor=page[-1].version if len(rest) > limit else None,

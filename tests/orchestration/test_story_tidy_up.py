@@ -1,7 +1,7 @@
 """The tidy-up operation (ADR-0303 §5): what it reads, renders, checks and writes.
 
-The page it writes is its lines' text alone, which may be none, with a mark set from
-records (§3:4), recording the other stories' page versions it was shown (§3:3), and
+The summary it writes is its lines' text alone, which may be none, with a mark set from
+records (§3:4), recording the other stories' summary versions it was shown (§3:3), and
 no note. Its reply is lines and flags and nothing else (§5:2).
 
 Each case runs :class:`StoryTidyUp` over the canonical fake story and memory stores
@@ -26,7 +26,7 @@ from structlog.testing import capture_logs
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     STORY_NOTE_MAX_CHARS,
-    STORY_PAGE_CAP_CHARS,
+    STORY_SUMMARY_CAP_CHARS,
     BeliefBand,
     MemorySource,
     Message,
@@ -36,10 +36,10 @@ from ai_assistant.core.types import (
     StoryFlagKind,
     StoryFlagName,
     StoryNoteAuthor,
-    StoryPageDraft,
-    StoryPageLine,
-    StoryPageRefusalReason,
-    StoryPageVersionName,
+    StorySummaryDraft,
+    StorySummaryLine,
+    StorySummaryRefusalReason,
+    StorySummaryVersionName,
 )
 from ai_assistant.orchestration.story_tidy_up import StoryTidyUp, TidyUpResult
 from ai_assistant.testing import FakeModelProvider, FakeStoryStore
@@ -134,16 +134,16 @@ async def _trip() -> tuple[FakeStoryStore, FakeMemoryStore, str]:
     return stories, memory, trip
 
 
-async def _page(stories: FakeStoryStore, story_id: str) -> list[str] | None:
-    state = await stories.current_page(story_id)
+async def _summary(stories: FakeStoryStore, story_id: str) -> list[str] | None:
+    state = await stories.current_summary(story_id)
     assert state is not None
-    return None if state.page is None else [line.text for line in state.page.lines]
+    return None if state.summary is None else [line.text for line in state.summary.lines]
 
 
 # --- what it reads and writes ------------------------------------------------------
 
 
-async def test_it_writes_a_page_taking_in_exactly_what_it_read() -> None:
+async def test_it_writes_a_summary_taking_in_exactly_what_it_read() -> None:
     stories, memory, trip = await _trip()
     model = FakeModelProvider(_reply(["A camping trip to Riverside.", "No Saturdays."]))
 
@@ -158,15 +158,15 @@ async def test_it_writes_a_page_taking_in_exactly_what_it_read() -> None:
     listed = await stories.notes(trip)
     assert listed is not None
     assert len(listed.notes) == 1
-    assert await _page(stories, trip) == ["A camping trip to Riverside.", "No Saturdays."]
-    state = await stories.current_page(trip)
+    assert await _summary(stories, trip) == ["A camping trip to Riverside.", "No Saturdays."]
+    state = await stories.current_summary(trip)
     assert state is not None
     assert (state.pending_notes, state.pending_episodes) == ((), ())
     assert len(model.calls) == 1
 
 
-async def test_a_first_page_is_written_from_episodes_alone() -> None:
-    """#2773: with no note at all, a page of lines citing nothing is written (§2:7)."""
+async def test_a_first_summary_is_written_from_episodes_alone() -> None:
+    """#2773: with no note at all, a summary of lines citing nothing is written (§2:7)."""
     stories = _stories()
     memory = await memory_of(episode("a-1", text="The thermostat reads 19 degrees."))
     story = await _story(stories, "a-1")
@@ -176,10 +176,10 @@ async def test_a_first_page_is_written_from_episodes_alone() -> None:
 
     assert outcome.result is TidyUpResult.WRITTEN
     assert _shown(model)["notes"] == []
-    assert await _page(stories, story) == ["The living room's heating.", "It read 19 degrees."]
+    assert await _summary(stories, story) == ["The living room's heating.", "It read 19 degrees."]
 
 
-async def test_an_output_with_no_line_writes_an_empty_page_taking_in_what_it_read() -> None:
+async def test_an_output_with_no_line_writes_an_empty_summary_taking_in_what_it_read() -> None:
     """ADR-0303 §5:2-§5:3: a version like any other, so nothing it read stays pending."""
     stories, memory, trip = await _trip()
     model = FakeModelProvider(_reply([]))
@@ -190,8 +190,8 @@ async def test_an_output_with_no_line_writes_an_empty_page_taking_in_what_it_rea
     assert outcome.version is not None
     assert outcome.version.took_in_episodes == ("a-1",)
     assert len(outcome.version.took_in_notes) == 1
-    assert await _page(stories, trip) == []
-    state = await stories.current_page(trip)
+    assert await _summary(stories, trip) == []
+    state = await stories.current_summary(trip)
     assert state is not None
     assert (state.pending_notes, state.pending_episodes) == ((), ())
 
@@ -204,7 +204,7 @@ async def test_the_prompt_quotes_its_records_under_labels_attributed_by_record()
     await _tidy_up(model, stories, memory).run(trip)
 
     shown = _shown(model)
-    assert shown["current_page"].startswith("missing:")
+    assert shown["current_summary"].startswith("missing:")
     planning, owner = shown["notes"]
     assert (planning["label"], planning["text"], planning["outside_content"]) == (
         "N1",
@@ -236,18 +236,18 @@ async def test_the_instruction_states_what_adr_0303_has_it_state() -> None:
         # §5:4: the newer statement wins, requirements stay, done and answered drop off.
         "The user's newer statement wins over an older one, whether either was said in "
         "an episode or written as a note",
-        "the older statement leaves the page",
-        "The user's stated requirements stay on the page until the user changes them",
+        "the older statement leaves the summary",
+        "The user's stated requirements stay in the summary until the user changes them",
         "A next step that is done, and a question that has been answered, drop off",
         # §5:5: the cap, and condensing to fit it.
-        f"at most {STORY_PAGE_CAP_CHARS} characters",
-        "Condense the page to fit within that",
+        f"at most {STORY_SUMMARY_CAP_CHARS} characters",
+        "Condense the summary to fit within that",
         # §3:5: a line resting on outside content says so in its words.
         "A line resting on outside content says so in its own words",
-        # §5:3 and §2:7: a page may be empty, and a line cites nothing.
+        # §5:3 and §2:7: a summary may be empty, and a line cites nothing.
         "write no line",
         "it cites nothing",
-        "The page does not repeat the records",
+        "The summary does not repeat the records",
         "`two_matters`",
         "`like_another`",
     ):
@@ -257,7 +257,7 @@ async def test_the_instruction_states_what_adr_0303_has_it_state() -> None:
         assert retired not in instruction
 
 
-async def test_an_outside_episodes_raw_input_is_never_rendered_and_it_marks_the_page() -> None:
+async def test_an_outside_episodes_raw_input_is_never_rendered_and_it_marks_the_summary() -> None:
     stories = _stories()
     memory = await memory_of(episode("a-1", text=_REPORT_INPUT, channel=EVENTS))
     trip = await _story(stories, "a-1")
@@ -274,14 +274,14 @@ async def test_an_outside_episodes_raw_input_is_never_rendered_and_it_marks_the_
     # ADR-0303 §3:4: the mark comes from records, never from the reply, which set none.
     assert outcome.version is not None
     assert outcome.version.outside is True
-    state = await stories.current_page(trip)
+    state = await stories.current_summary(trip)
     assert state is not None
-    assert state.page is not None
-    assert state.page.outside is True
+    assert state.summary is not None
+    assert state.summary.outside is True
 
 
-async def test_a_page_whose_run_read_a_marked_note_is_marked_and_stays_marked() -> None:
-    """ADR-0303 §3:4: each run reads the page it replaces, so the mark travels."""
+async def test_a_summary_whose_run_read_a_marked_note_is_marked_and_stays_marked() -> None:
+    """ADR-0303 §3:4: each run reads the summary it replaces, so the mark travels."""
     stories, memory, trip = await _trip()
     await _note(stories, trip, "The email says the gate code is 1234.", outside=True)
     model = FakeModelProvider(_reply(["A camping trip.", "Gate code 1234, per the email."]))
@@ -289,18 +289,18 @@ async def test_a_page_whose_run_read_a_marked_note_is_marked_and_stays_marked() 
     await _tidy_up(model, stories, memory).run(trip)
 
     assert _shown(model)["notes"][1]["outside_content"] is True
-    state = await stories.current_page(trip)
+    state = await stories.current_summary(trip)
     assert state is not None
-    assert state.page is not None
-    assert state.page.outside is True
+    assert state.summary is not None
+    assert state.summary.outside is True
     await _note(stories, trip, "Next: pack.")
     later = FakeModelProvider(_reply(["A camping trip.", "Gate code 1234, per the email."]))
     outcome = await _tidy_up(later, stories, memory).run(trip)
     assert outcome.version is not None
     assert outcome.version.outside is True
-    # ADR-0303 §3:7: the page is shown as the tidy-up's, and marked.
-    assert _shown(later)["current_page"] == {
-        "written_by": "the assistant, tidying this story's page",
+    # ADR-0303 §3:7: the summary is shown as the tidy-up's, and marked.
+    assert _shown(later)["current_summary"] == {
+        "written_by": "the assistant, tidying this story's summary",
         "outside_content": True,
         "lines": ["A camping trip.", "Gate code 1234, per the email."],
     }
@@ -317,7 +317,7 @@ async def test_an_open_episode_is_not_read_and_stays_pending() -> None:
     assert len(_shown(model)["episodes"]) == 1
     assert outcome.version is not None
     assert outcome.version.took_in_episodes == ("a-1",)
-    state = await stories.current_page(trip)
+    state = await stories.current_summary(trip)
     assert state is not None
     assert state.pending_episodes == ("a-2",)
 
@@ -346,7 +346,7 @@ async def test_an_unknown_or_merged_story_is_not_tidied() -> None:
     assert model.calls == []
 
 
-async def test_the_current_pages_lines_are_shown_as_text() -> None:
+async def test_the_current_summarys_lines_are_shown_as_text() -> None:
     """ADR-0303 §2:7: a line cites nothing, so none is shown citing a label."""
     stories, memory, trip = await _trip()
     await _tidy_up(FakeModelProvider(_reply(["A camping trip."])), stories, memory).run(trip)
@@ -357,8 +357,8 @@ async def test_the_current_pages_lines_are_shown_as_text() -> None:
 
     assert outcome.result is TidyUpResult.WRITTEN
     shown = _shown(model)
-    assert shown["current_page"] == {
-        "written_by": "the assistant, tidying this story's page",
+    assert shown["current_summary"] == {
+        "written_by": "the assistant, tidying this story's summary",
         "outside_content": False,
         "lines": ["A camping trip."],
     }
@@ -373,7 +373,7 @@ async def test_no_check_keeps_a_users_note_the_users_newer_statement_replaced() 
     """#2774: the user's note is weighed as anything the user says (ADR-0303 §2:6, §5:4).
 
     The run that takes in the user's note and the later statement replacing it writes
-    a page carrying the newer statement and not the note: no check requires the
+    a summary carrying the newer statement and not the note: no check requires the
     note's text, and nothing marks it superseded.
     """
     stories = _stories()
@@ -387,7 +387,7 @@ async def test_no_check_keeps_a_users_note_the_users_newer_statement_replaced() 
     outcome = await _tidy_up(model, stories, memory).run(trip)
 
     assert outcome.result is TidyUpResult.WRITTEN
-    assert await _page(stories, trip) == ["A camping trip.", "Showers are no longer required."]
+    assert await _summary(stories, trip) == ["A camping trip.", "Showers are no longer required."]
     # The note is kept as written: no note is removed (ADR-0303 §2:3).
     listed = await stories.notes(trip)
     assert listed is not None
@@ -404,9 +404,9 @@ async def _refused(reply: str, stories: FakeStoryStore, memory: FakeMemoryStore,
     assert outcome.problem is not None
     # ADR-0300 §5:8: refused whole, nothing written, and no second completion.
     assert len(model.calls) == 1
-    state = await stories.current_page(trip)
+    state = await stories.current_summary(trip)
     assert state is not None
-    assert state.page is None
+    assert state.summary is None
     assert len(state.pending_notes) >= 1
     return outcome.problem
 
@@ -452,16 +452,16 @@ async def test_an_output_that_fails_to_parse_or_a_check_is_refused_whole(
     assert await _refused(reply, stories, memory, trip) == problem
 
 
-async def test_lines_over_the_pages_cap_are_refused_whole_before_the_store_is_asked() -> None:
+async def test_lines_over_the_summarys_cap_are_refused_whole_before_the_store_is_asked() -> None:
     """ADR-0303 §5:6: every line counted; the store's ``over_cap`` is the backstop."""
     stories, memory, trip = await _trip()
-    lines = ["x" * STORY_NOTE_MAX_CHARS] * (STORY_PAGE_CAP_CHARS // STORY_NOTE_MAX_CHARS)
+    lines = ["x" * STORY_NOTE_MAX_CHARS] * (STORY_SUMMARY_CAP_CHARS // STORY_NOTE_MAX_CHARS)
     fits = ["A camping trip.", *lines[1:]]
-    assert sum(map(len, fits)) <= STORY_PAGE_CAP_CHARS < sum(map(len, [*lines, "y"]))
+    assert sum(map(len, fits)) <= STORY_SUMMARY_CAP_CHARS < sum(map(len, [*lines, "y"]))
 
     problem = await _refused(_reply([*lines, "y"]), stories, memory, trip)
 
-    assert problem == "the lines together exceed the page's cap"
+    assert problem == "the lines together exceed the summary's cap"
     outcome = await _tidy_up(FakeModelProvider(_reply(fits)), stories, memory).run(trip)
     assert outcome.result is TidyUpResult.WRITTEN
 
@@ -473,7 +473,7 @@ async def test_a_refused_output_is_logged_with_the_check_that_refused_it_and_no_
     with capture_logs() as logs:
         problem = await _refused(reply, stories, memory, trip)
 
-    # #2778: the code-owned problem, and nothing of the reply or the page.
+    # #2778: the code-owned problem, and nothing of the reply or the summary.
     assert problem == "a like-another flag names no story this run showed"
     assert logs == [
         {
@@ -519,19 +519,19 @@ async def test_flags_name_the_other_stories_shown_by_identity() -> None:
     (shown,) = _shown(model)["other_stories"]
     assert shown["label"] == "S1"
     assert shown["shown_because"] == "an episode read here also belongs to it"
-    assert shown["what_its_page_says_the_matter_is"]["text"] == "Riverside, again."
+    assert shown["what_its_summary_says_the_matter_is"]["text"] == "Riverside, again."
     assert shown["outside_content"] is False
     assert outcome.version is not None
     assert outcome.version.flags == (
         StoryFlag(kind=StoryFlagKind.TWO_MATTERS),
         StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other),
     )
-    # ADR-0303 §3:3: the other story's page it was shown is recorded by its version.
-    theirs = await stories.current_page(other)
+    # ADR-0303 §3:3: the other story's summary it was shown is recorded by its version.
+    theirs = await stories.current_summary(other)
     assert theirs is not None
-    assert theirs.page is not None
+    assert theirs.summary is not None
     assert outcome.version.read_pages == (
-        StoryPageVersionName(story=other, version=theirs.page.version),
+        StorySummaryVersionName(story=other, version=theirs.summary.version),
     )
 
 
@@ -560,14 +560,14 @@ async def test_a_story_a_search_finds_is_shown_by_its_first_line_and_recorded_as
 
     (shown,) = _shown(model)["other_stories"]
     assert shown["shown_because"].startswith("a search found an episode of it")
-    assert shown["what_its_page_says_the_matter_is"]["text"] == "Riverside camping."
+    assert shown["what_its_summary_says_the_matter_is"]["text"] == "Riverside camping."
     assert outcome.version is not None
     assert outcome.version.flags == (StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=alike),)
-    theirs = await stories.current_page(alike)
+    theirs = await stories.current_summary(alike)
     assert theirs is not None
-    assert theirs.page is not None
+    assert theirs.summary is not None
     assert outcome.version.read_pages == (
-        StoryPageVersionName(story=alike, version=theirs.page.version),
+        StorySummaryVersionName(story=alike, version=theirs.summary.version),
     )
 
 
@@ -628,7 +628,7 @@ async def test_no_band_is_searched_once_the_bound_is_filled() -> None:
     assert shown["shown_because"].startswith("a search found an episode of it")
 
 
-async def test_a_story_found_by_search_with_no_page_is_shown_as_such_and_not_recorded() -> None:
+async def test_a_story_found_by_search_with_no_summary_is_shown_as_such_and_not_recorded() -> None:
     stories = _stories()
     memory = await memory_of(
         episode("a-1", text=_USER_INPUT),
@@ -641,7 +641,7 @@ async def test_a_story_found_by_search_with_no_page_is_shown_as_such_and_not_rec
     outcome = await _tidy_up(model, stories, memory).run(trip)
 
     (shown,) = _shown(model)["other_stories"]
-    assert shown["what_its_page_says_the_matter_is"].startswith("missing:")
+    assert shown["what_its_summary_says_the_matter_is"].startswith("missing:")
     assert outcome.version is not None
     assert outcome.version.read_pages == ()
 
@@ -660,11 +660,11 @@ async def test_a_failed_search_fails_the_run_and_writes_nothing() -> None:
 
     assert outcome.result is TidyUpResult.FAILED
     assert model.calls == []
-    assert await _page(stories, trip) is None
+    assert await _summary(stories, trip) is None
 
 
-async def test_a_marked_page_of_another_story_marks_the_page_it_is_shown_for() -> None:
-    """ADR-0303 §3:4: a page the run read counts, another story's included."""
+async def test_a_marked_summary_of_another_story_marks_the_summary_it_is_shown_for() -> None:
+    """ADR-0303 §3:4: a summary the run read counts, another story's included."""
     stories, memory, trip = await _trip()
     other = await _story(stories, "a-1")
     await _note(stories, other, "A parks notice says the loop closes.", outside=True)
@@ -702,9 +702,9 @@ async def test_a_story_only_outside_content_has_come_to_is_not_tidied() -> None:
 
     assert outcome.result is TidyUpResult.OUTSIDE_ONLY
     assert model.calls == []
-    state = await stories.current_page(story)
+    state = await stories.current_summary(story)
     assert state is not None
-    assert state.page is None
+    assert state.summary is None
     assert state.pending_episodes == ("a-1", "a-2")
     assert len(state.pending_notes) == 1
 
@@ -789,7 +789,7 @@ async def test_an_open_members_origin_is_read_off_its_record_and_it_is_never_ren
         assert "Keep the campsite" not in model.calls[0].messages[1].content
     else:
         assert model.calls == []
-    state = await stories.current_page(story)
+    state = await stories.current_summary(story)
     assert state is not None
     assert "a-2" in state.pending_episodes
 
@@ -936,13 +936,13 @@ async def test_a_run_that_lost_a_race_is_refused_by_the_store_and_writes_nothing
     stories, memory, trip = await _trip()
 
     async def rival() -> None:
-        state = await stories.current_page(trip)
+        state = await stories.current_summary(trip)
         assert state is not None
         note = state.pending_notes[0].note_id
-        draft = StoryPageDraft(
-            lines=(StoryPageLine(text="Rival."),), took_in_notes=(note,), outside=False
+        draft = StorySummaryDraft(
+            lines=(StorySummaryLine(text="Rival."),), took_in_notes=(note,), outside=False
         )
-        written = await stories.write_page(trip, draft, as_of=state.as_of)
+        written = await stories.write_summary(trip, draft, as_of=state.as_of)
         assert written.version is not None
 
     model = _Gated(_reply(["A camping trip."]), before=rival)
@@ -953,15 +953,15 @@ async def test_a_run_that_lost_a_race_is_refused_by_the_store_and_writes_nothing
 
     assert outcome.result is TidyUpResult.STORE_REFUSED
     assert outcome.refusal is not None
-    assert outcome.refusal.reason is StoryPageRefusalReason.PAGE_MOVED_ON
+    assert outcome.refusal.reason is StorySummaryRefusalReason.SUMMARY_MOVED_ON
     # #2778: the hub's log says what the store refused the write for.
     (logged,) = logs
     assert (logged["result"], logged["problem"], logged["refusal"]) == (
         "store_refused",
         None,
-        "page_moved_on",
+        "summary_moved_on",
     )
-    assert await _page(stories, trip) == ["Rival."]
+    assert await _summary(stories, trip) == ["Rival."]
 
 
 @pytest.mark.parametrize("how", ["split", "move", "relink"])
@@ -989,12 +989,12 @@ async def test_an_episode_relinked_while_the_completion_is_out_writes_nothing(ho
 
     outcome = await _tidy_up(model, stories, memory).run(trip)
 
-    # #2761's race, narrowed: no page is written carrying what an episode the write
+    # #2761's race, narrowed: no summary is written carrying what an episode the write
     # would not take in said, and the episode is still pending wherever it now is.
     assert outcome.result is TidyUpResult.MEMBERS_MOVED
-    assert await _page(stories, trip) is None
+    assert await _summary(stories, trip) is None
     (now,) = where
-    there = await stories.current_page(now)
+    there = await stories.current_summary(now)
     assert there is not None
     assert "a-2" in there.pending_episodes
 
@@ -1008,7 +1008,7 @@ async def test_a_store_error_or_an_expired_budget_fails_the_run_and_frees_the_st
 
     assert expired.result is TidyUpResult.FAILED
     assert isinstance(expired.error, TimeoutError)
-    failing(stories, "current_page")
+    failing(stories, "current_summary")
     broken = await slow.run(trip)
     assert broken.result is TidyUpResult.FAILED
 

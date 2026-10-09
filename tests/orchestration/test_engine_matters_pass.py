@@ -25,8 +25,8 @@ from ai_assistant.core.types import (
     StoryFlag,
     StoryFlagKind,
     StoryNoteAuthor,
-    StoryPageDraft,
-    StoryPageLine,
+    StorySummaryDraft,
+    StorySummaryLine,
 )
 from ai_assistant.orchestration.matters_pass import MattersPass, MattersPassReport
 from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, FakeStoryStore
@@ -63,12 +63,12 @@ async def test_it_runs_the_pass_and_answers_its_report() -> None:
     assert trip is not None
     note = await stories.append_note(trip, "Riverside.", author=StoryNoteAuthor.OWNER)
     assert note.note is not None
-    state = await stories.current_page(trip)
+    state = await stories.current_summary(trip)
     assert state is not None
-    written = await stories.write_page(
+    written = await stories.write_summary(
         trip,
-        StoryPageDraft(
-            lines=(StoryPageLine(text="Riverside."),),
+        StorySummaryDraft(
+            lines=(StorySummaryLine(text="Riverside."),),
             took_in_notes=(note.note.note_id,),
             flags=(StoryFlag(kind=StoryFlagKind.TWO_MATTERS),),
             outside=False,

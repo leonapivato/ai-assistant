@@ -378,18 +378,19 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "StoryFlag",
         "StoryFlagKind",
         "StoryDecision",
-        # ADR-0300 §8's four story commands, and the types they carry: the page as the
-        # owner is shown it with its lines and notes, a note's outcome and its page
-        # refusal, and where the matter stands. ``StoryPageState`` and the version log
-        # stay store-side, because no method returns them.
-        "StoryPageView",
-        "StoryPageViewNote",
-        "StoryPageLine",
+        # ADR-0300 §8's four story commands, and the types they carry: the summary as
+        # the owner is shown it with its lines and notes, a note's outcome and its
+        # summary refusal, and where the matter stands. ``StorySummaryState`` and the
+        # version log stay store-side, because no method returns them. ADR-0304 §2
+        # renamed them from the page to the summary.
+        "StorySummaryView",
+        "StorySummaryViewNote",
+        "StorySummaryLine",
         "StoryNote",
         "StoryNoteAuthor",
         "StoryNoteOutcome",
-        "StoryPageRefusal",
-        "StoryPageRefusalReason",
+        "StorySummaryRefusal",
+        "StorySummaryRefusalReason",
         "StoryStanding",
         "StoryStandingEffect",
         "StoryEffectState",
@@ -825,6 +826,9 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     ``story_standing``, ``add_story_note`` and ``move_story_members`` — so the count
     rises to eighty. §8:4 rules that no browser or gateway surface carries them, and
     ADR-0289 §5:4 stands, so ADR-0177 §1's enumeration does not move either.
+
+    **ADR-0304 §2 renames one**, ``story_page`` to ``story_summary``, so the count
+    does not move.
     """
     assert len(_method_names()) == 80
 
@@ -1568,6 +1572,12 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     adapter is derived from the signature, so a hub at 86 refuses a request at 87
     naming ``notes``. **The method set does not move and stays at 80.**
 
+    **88 is ADR-0304 §2, under the first limb.** A story's page is renamed its
+    summary: ``story_page`` becomes ``story_summary``, a command the wire routes, and
+    the page's types the story commands carry take *summary* in their names, with
+    ``page_moved_on`` becoming ``summary_moved_on``. A client at 87 calls a command a
+    hub at 88 does not answer. **The method set does not move and stays at 80.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1576,7 +1586,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (80, 87), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (80, 88), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

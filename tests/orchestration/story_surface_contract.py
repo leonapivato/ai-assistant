@@ -7,7 +7,7 @@ What the story store itself owes is ``tests/memory/story_store_contract.py``'s; 
 suite asserts what the engine adds: the actor ``owner`` and no trigger on every
 write, the activation check on create and link only, the view's resolution of
 activation and story members, and the reads' pages fitting the payload limit; and,
-for ADR-0300 §8's story commands, the owner's page as ADR-0303 §10:2 shapes it and §3
+for ADR-0300 §8's story commands, the owner's summary as ADR-0303 §10:2 shapes it and §3
 withholds it, where
 the matter stands for the owner, the owner's note, a move that checks no activation,
 and a split or a move that carries exactly the notes it names (§10:1).
@@ -43,12 +43,12 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     StoryNoteAuthor,
-    StoryPageDraft,
-    StoryPageLine,
-    StoryPageRefusalReason,
-    StoryPageViewNote,
     StoryRefusalReason,
     StoryRelation,
+    StorySummaryDraft,
+    StorySummaryLine,
+    StorySummaryRefusalReason,
+    StorySummaryViewNote,
     UnderstandingOmission,
 )
 from ai_assistant.orchestration.payloads import canonical_payload
@@ -73,7 +73,7 @@ class StorySurfaceSubject:
     """An engine, the memory store its activation checks read, and its story store.
 
     The story store is the one the engine answers from, handed to the suite so it can
-    write what no command writes: planning's notes and a tidy-up's page.
+    write what no command writes: planning's notes and a tidy-up's summary.
     """
 
     engine: AssistantEngine
@@ -346,7 +346,7 @@ class StorySurfaceContract:
 
     # --- the story commands (ADR-0300 §8) ---------------------------------------
 
-    async def test_a_note_the_owner_adds_is_pending_on_the_page(
+    async def test_a_note_the_owner_adds_is_pending_on_the_summary(
         self, story_surface: StorySurfaceSubject
     ) -> None:
         """§8:3: written by ``owner``, recording no activation, unmarked, and pending."""
@@ -361,14 +361,14 @@ class StorySurfaceContract:
         assert note.written_during is None
         assert not note.outside
         assert note.text == "Leaning against Saturday"
-        page = await subject.engine.story_page(story_id)
-        assert page is not None
-        assert page.story.story_id == story_id
-        assert page.version is None
-        assert page.tidied_at is None
-        assert page.lines == ()
-        assert page.notes == (StoryPageViewNote(note=note, pending=True),)
-        assert (page.more_notes, page.outside, page.withheld) == (0, False, False)
+        summary = await subject.engine.story_summary(story_id)
+        assert summary is not None
+        assert summary.story.story_id == story_id
+        assert summary.version is None
+        assert summary.tidied_at is None
+        assert summary.lines == ()
+        assert summary.notes == (StorySummaryViewNote(note=note, pending=True),)
+        assert (summary.more_notes, summary.outside, summary.withheld) == (0, False, False)
         log = await subject.engine.story_log(story_id)
         assert log is not None
         assert len(log.lines) == 2  # a note is not a membership change
@@ -383,15 +383,15 @@ class StorySurfaceContract:
         await subject.engine.merge_stories(absorbed, kept)
         missing = await subject.engine.add_story_note("story:nowhere", "a note")
         assert missing.refusal is not None
-        assert missing.refusal.reason is StoryPageRefusalReason.UNKNOWN_STORY
+        assert missing.refusal.reason is StorySummaryRefusalReason.UNKNOWN_STORY
         assert missing.refusal.story_id == "story:nowhere"
         merged = await subject.engine.add_story_note(absorbed, "a note")
         assert merged.refusal is not None
-        assert merged.refusal.reason is StoryPageRefusalReason.MERGED_STORY
+        assert merged.refusal.reason is StorySummaryRefusalReason.MERGED_STORY
         assert merged.refusal.merged_into == kept
-        page = await subject.engine.story_page(kept)
-        assert page is not None
-        assert page.notes == ()
+        summary = await subject.engine.story_summary(kept)
+        assert summary is not None
+        assert summary.notes == ()
 
     async def test_a_malformed_note_or_move_is_refused_before_any_write(
         self, story_surface: StorySurfaceSubject
@@ -410,20 +410,20 @@ class StorySurfaceContract:
         with pytest.raises(ValueError, match="activation members only"):
             await subject.engine.move_story_members(story_id, other, [sub(other)])
         with pytest.raises(ValueError, match="story_id"):
-            await subject.engine.story_page("")
+            await subject.engine.story_summary("")
         with pytest.raises(ValueError, match="story_id"):
             await subject.engine.story_standing("")
-        page = await subject.engine.story_page(story_id)
-        assert page is not None
-        assert page.notes == ()
+        summary = await subject.engine.story_summary(story_id)
+        assert summary is not None
+        assert summary.notes == ()
         view = await subject.engine.story(story_id)
         assert view is not None
         assert [m.member for m in view.members] == [act("a1")]
 
-    async def test_the_page_shows_its_lines_its_mark_and_its_notes_newest_first(
+    async def test_the_summary_shows_its_lines_its_mark_and_its_notes_newest_first(
         self, story_surface: StorySurfaceSubject
     ) -> None:
-        """ADR-0303 §10:2: the tidied page and its mark, and every note with whether pending."""
+        """ADR-0303 §10:2: the tidied summary and its mark, and every note with whether pending."""
         subject = story_surface
         await _seeded(subject, "a1", "a2")
         story_id = await _created(subject, act("a1"), act("a2"))
@@ -438,14 +438,14 @@ class StorySurfaceContract:
         own = await subject.engine.add_story_note(story_id, "No Fridays")
         assert from_email.note is not None
         assert own.note is not None
-        state = await stories.current_page(story_id)
+        state = await stories.current_summary(story_id)
         assert state is not None
-        written = await stories.write_page(
+        written = await stories.write_summary(
             story_id,
-            StoryPageDraft(
+            StorySummaryDraft(
                 lines=(
-                    StoryPageLine(text="A camping trip; the campground's email gives Riverside"),
-                    StoryPageLine(text="No Fridays"),
+                    StorySummaryLine(text="A camping trip; the campground's email gives Riverside"),
+                    StorySummaryLine(text="No Fridays"),
                 ),
                 took_in_notes=tuple(note.note_id for note in state.pending_notes),
                 took_in_episodes=("a1", "a2"),
@@ -458,28 +458,28 @@ class StorySurfaceContract:
             story_id, "Waiting on the canoe", author=StoryNoteAuthor.PLANNING, written_during="a2"
         )
         assert later.note is not None
-        page = await subject.engine.story_page(story_id)
-        assert page is not None
-        assert page.version == written.version.version
-        assert page.tidied_at == written.version.written_at
-        assert [line.text for line in page.lines] == [
+        summary = await subject.engine.story_summary(story_id)
+        assert summary is not None
+        assert summary.version == written.version.version
+        assert summary.tidied_at == written.version.written_at
+        assert [line.text for line in summary.lines] == [
             "A camping trip; the campground's email gives Riverside",
             "No Fridays",
         ]
-        assert (page.outside, page.withheld) == (True, False)
-        assert page.notes == (
-            StoryPageViewNote(note=later.note, pending=True),
-            StoryPageViewNote(note=own.note, pending=False),
-            StoryPageViewNote(note=from_email.note, pending=False),
+        assert (summary.outside, summary.withheld) == (True, False)
+        assert summary.notes == (
+            StorySummaryViewNote(note=later.note, pending=True),
+            StorySummaryViewNote(note=own.note, pending=False),
+            StorySummaryViewNote(note=from_email.note, pending=False),
         )
-        assert page.more_notes == 0
+        assert summary.more_notes == 0
 
-    async def test_a_page_behind_which_an_episode_was_forgotten_is_withheld(
+    async def test_a_summary_behind_which_an_episode_was_forgotten_is_withheld(
         self, story_surface: StorySurfaceSubject
     ) -> None:
         """ADR-0303 §3:11-§3:12: shown only where everything behind it may be.
 
-        A forgotten episode cannot be established, even for the owner, so the page is
+        A forgotten episode cannot be established, even for the owner, so the summary is
         withheld whole: the view says so, carries neither its lines nor its mark, and
         still lists the notes, which §3:9 decides on their own.
         """
@@ -489,12 +489,12 @@ class StorySurfaceContract:
         own = await subject.engine.add_story_note(story_id, "No Fridays")
         assert own.note is not None
         stories = subject.stories
-        state = await stories.current_page(story_id)
+        state = await stories.current_summary(story_id)
         assert state is not None
-        written = await stories.write_page(
+        written = await stories.write_summary(
             story_id,
-            StoryPageDraft(
-                lines=(StoryPageLine(text="A camping trip; no Fridays"),),
+            StorySummaryDraft(
+                lines=(StorySummaryLine(text="A camping trip; no Fridays"),),
                 took_in_notes=(own.note.note_id,),
                 took_in_episodes=("a1", "a2"),
                 outside=True,
@@ -502,17 +502,17 @@ class StorySurfaceContract:
             as_of=state.as_of,
         )
         assert written.version is not None
-        shown = await subject.engine.story_page(story_id)
+        shown = await subject.engine.story_summary(story_id)
         assert shown is not None
         assert (shown.withheld, shown.outside) == (False, True)
         assert await subject.memory.delete("activation:a2")
-        page = await subject.engine.story_page(story_id)
-        assert page is not None
-        assert (page.withheld, page.lines, page.outside) == (True, (), False)
-        assert page.version == written.version.version
-        assert page.notes == (StoryPageViewNote(note=own.note, pending=False),)
+        summary = await subject.engine.story_summary(story_id)
+        assert summary is not None
+        assert (summary.withheld, summary.lines, summary.outside) == (True, (), False)
+        assert summary.version == written.version.version
+        assert summary.notes == (StorySummaryViewNote(note=own.note, pending=False),)
 
-    async def test_a_merged_or_unknown_story_page_and_standing(
+    async def test_a_merged_or_unknown_story_summary_and_standing(
         self, story_surface: StorySurfaceSubject
     ) -> None:
         subject = story_surface
@@ -521,18 +521,18 @@ class StorySurfaceContract:
         kept = await _created(subject, act("a2"))
         await subject.engine.add_story_note(absorbed, "Goes with the merge")
         await subject.engine.merge_stories(absorbed, kept)
-        page = await subject.engine.story_page(absorbed)
-        assert page is not None
-        assert page.story.merged_into == kept
-        assert (page.version, page.lines, page.notes) == (None, (), ())
-        moved = await subject.engine.story_page(kept)
+        summary = await subject.engine.story_summary(absorbed)
+        assert summary is not None
+        assert summary.story.merged_into == kept
+        assert (summary.version, summary.lines, summary.notes) == (None, (), ())
+        moved = await subject.engine.story_summary(kept)
         assert moved is not None
         assert [shown.note.text for shown in moved.notes] == ["Goes with the merge"]
         standing = await subject.engine.story_standing(absorbed)
         assert standing is not None
         assert standing.story.merged_into == kept
         assert standing.recent == ()
-        assert await subject.engine.story_page("story:nowhere") is None
+        assert await subject.engine.story_summary("story:nowhere") is None
         assert await subject.engine.story_standing("story:nowhere") is None
 
     async def test_where_the_matter_stands_for_the_owner(
@@ -586,10 +586,10 @@ class StorySurfaceContract:
         assert log.lines[-1].change is StoryChange.ADDED
         assert all(line.actor is StoryActor.OWNER for line in log.lines)
         assert all(line.trigger is None for line in log.lines)
-        page = await subject.engine.story_page(target)
-        assert page is not None
-        assert page.notes == ()
-        stayed = await subject.engine.story_page(source)
+        summary = await subject.engine.story_summary(target)
+        assert summary is not None
+        assert summary.notes == ()
+        stayed = await subject.engine.story_summary(source)
         assert stayed is not None
         assert [shown.note for shown in stayed.notes] == [during.note]
         refused = await subject.engine.move_story_members(source, target, [act("a3")])
@@ -630,13 +630,13 @@ class StorySurfaceContract:
         )
         assert split.refusal is None
         assert split.story_id is not None
-        off = await subject.engine.story_page(split.story_id)
+        off = await subject.engine.story_summary(split.story_id)
         assert off is not None
-        assert off.notes == (StoryPageViewNote(note=own.note, pending=True),)
-        kept = await subject.engine.story_page(source)
+        assert off.notes == (StorySummaryViewNote(note=own.note, pending=True),)
+        kept = await subject.engine.story_summary(source)
         assert kept is not None
         assert [shown.note for shown in kept.notes] == [during.note]
-        there = await subject.engine.story_page(target)
+        there = await subject.engine.story_summary(target)
         assert there is not None
         assert [shown.note for shown in there.notes] == [elsewhere.note]
 
@@ -645,16 +645,16 @@ class StorySurfaceContract:
         )
         assert moved.refusal is None
         assert moved.story_id == target
-        arrived = await subject.engine.story_page(target)
+        arrived = await subject.engine.story_summary(target)
         assert arrived is not None
         assert arrived.notes == (
-            StoryPageViewNote(note=elsewhere.note, pending=True),
-            StoryPageViewNote(note=during.note, pending=True),
+            StorySummaryViewNote(note=elsewhere.note, pending=True),
+            StorySummaryViewNote(note=during.note, pending=True),
         )
-        emptied = await subject.engine.story_page(source)
+        emptied = await subject.engine.story_summary(source)
         assert emptied is not None
         assert emptied.notes == ()
-        off_again = await subject.engine.story_page(split.story_id)
+        off_again = await subject.engine.story_summary(split.story_id)
         assert off_again is not None
         assert [shown.note for shown in off_again.notes] == [own.note]
 
@@ -675,10 +675,10 @@ class StorySurfaceContract:
         assert [m.member for m in view.members] == [act("a1"), act("a2")]
         assert len((await subject.engine.stories()).stories) == 2
 
-    async def test_a_page_too_large_for_the_limit_is_refused_as_oversized(
+    async def test_a_summary_too_large_for_the_limit_is_refused_as_oversized(
         self, story_surface: StorySurfaceSubject
     ) -> None:
-        """The page is read whole (§8:3); one over the limit earns the size refusal."""
+        """The summary is read whole (§8:3); one over the limit earns the size refusal."""
         subject = story_surface
         await _seeded(subject, "a1")
         story_id = await _created(subject, act("a1"))
@@ -686,4 +686,4 @@ class StorySurfaceContract:
             written = await subject.engine.add_story_note(story_id, f"{index} " + "n" * 800)
             assert written.note is not None
         with pytest.raises(OversizedValueError):
-            await subject.engine.story_page(story_id)
+            await subject.engine.story_summary(story_id)

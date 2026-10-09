@@ -12,13 +12,13 @@ target, a merge rewiring the absorbed story's holders, a split keeping link orde
 the loop refusal on a link and on a merge, refusals as typed outcomes that write
 nothing, and the five reads with their paging.
 
-And ADR-0300 §3's page as ADR-0303 §§2-6 remakes it: notes, immutable and never
+And ADR-0300 §3's notes and summary as ADR-0303 §§2-6 remakes them: notes, immutable and never
 removed, each recording the activation it was written during and its mark; the
-current page, lines that cite nothing and the page's mark, and its version log of
-what each run took in, the other stories' page versions it read, its flags and its
+summary, lines that cite nothing and the summary's mark, and its version log of
+what each run took in, the other stories' summary versions it read, its flags and its
 mark; pending, including what becomes pending while a run is out and what a merge, a
-split or a move brings; the page write, which writes no note, refused when the
-version it was built on is no longer current, over a page version read naming
+split or a move brings; the summary write, which writes no note, refused when the
+version it was built on is no longer current, over a summary version read naming
 nothing the store holds, and over the cap counting every line, writing nothing; the
 move; the notes a merge carries (every one) and a split or a move carries (exactly
 those named); and the actors ADR-0300 §3:15 adds.
@@ -28,7 +28,7 @@ being the only ones (ADR-0303 §8); the ``decided`` line each decision writes, a
 its change's lines and on the stories as they stand once it is applied (§3);
 ``leave_flag`` with ``left`` or ``not_applied``, the ``answers`` keyword and their
 refusals, checked after every check the operation makes and writing nothing when
-refused, one writer only answering a flag (§4); and the page write refused over what
+refused, one writer only answering a flag (§4); and the summary write refused over what
 its story does not hold, in its fixed place in the order (§7).
 
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
@@ -47,7 +47,7 @@ from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     STORY_ID_PREFIX,
     STORY_NOTE_MAX_CHARS,
-    STORY_PAGE_CAP_CHARS,
+    STORY_SUMMARY_CAP_CHARS,
     StoryActor,
     StoryChange,
     StoryDecision,
@@ -61,14 +61,14 @@ from ai_assistant.core.types import (
     StoryNoteAuthor,
     StoryNoteOutcome,
     StoryOutcome,
-    StoryPageDraft,
-    StoryPageLine,
-    StoryPageOutcome,
-    StoryPageRefusalReason,
-    StoryPageState,
-    StoryPageVersion,
-    StoryPageVersionName,
     StoryRefusalReason,
+    StorySummaryDraft,
+    StorySummaryLine,
+    StorySummaryOutcome,
+    StorySummaryRefusalReason,
+    StorySummaryState,
+    StorySummaryVersion,
+    StorySummaryVersionName,
 )
 
 if TYPE_CHECKING:
@@ -131,7 +131,7 @@ def refused(outcome: StoryOutcome, reason: StoryRefusalReason) -> None:
 
 
 async def everything(store: StoryStore) -> tuple[Any, ...]:
-    """Every story's header, view, log and page: the whole observable state."""
+    """Every story's header, view, log and summary: the whole observable state."""
     page = await store.stories(limit=MAX_STORY_PAGE)
     assert page.next_cursor is None
     state: list[Any] = []
@@ -139,9 +139,9 @@ async def everything(store: StoryStore) -> tuple[Any, ...]:
         state.append(header)
         state.append(await store.view(header.story_id, limit=MAX_STORY_PAGE))
         state.append(await store.log(header.story_id, limit=MAX_STORY_PAGE))
-        state.append(await store.current_page(header.story_id))
+        state.append(await store.current_summary(header.story_id))
         state.append(await store.notes(header.story_id, limit=MAX_STORY_PAGE))
-        state.append(await store.page_versions(header.story_id, limit=MAX_STORY_PAGE))
+        state.append(await store.summary_versions(header.story_id, limit=MAX_STORY_PAGE))
     return tuple(state)
 
 
@@ -167,36 +167,36 @@ async def noted(  # noqa: PLR0913 — the store, the story, the text, and the no
     return outcome.note
 
 
-async def state_of(store: StoryStore, story_id: str) -> StoryPageState:
-    """A story's current page with what is pending on it."""
-    state = await store.current_page(story_id)
+async def state_of(store: StoryStore, story_id: str) -> StorySummaryState:
+    """A story's summary with what is pending on it."""
+    state = await store.current_summary(story_id)
     assert state is not None
     return state
 
 
-def line(text: str) -> StoryPageLine:
-    """A line of a page: its text, and nothing else (ADR-0303 §2:7)."""
-    return StoryPageLine(text=text)
+def line(text: str) -> StorySummaryLine:
+    """A line of a summary: its text, and nothing else (ADR-0303 §2:7)."""
+    return StorySummaryLine(text=text)
 
 
-def draft(*lines: StoryPageLine, outside: bool = False, **rest: Any) -> StoryPageDraft:
+def draft(*lines: StorySummaryLine, outside: bool = False, **rest: Any) -> StorySummaryDraft:
     """A draft of ``lines``, unmarked unless ``outside``, and whatever else it records."""
-    return StoryPageDraft(lines=lines, outside=outside, **rest)
+    return StorySummaryDraft(lines=lines, outside=outside, **rest)
 
 
 async def written(
-    store: StoryStore, story_id: str, page: StoryPageDraft, *, as_of: int
-) -> StoryPageVersion:
-    """Write a page and return its version, failing on a refusal."""
-    outcome = await store.write_page(story_id, page, as_of=as_of)
+    store: StoryStore, story_id: str, summary: StorySummaryDraft, *, as_of: int
+) -> StorySummaryVersion:
+    """Write a summary and return its version, failing on a refusal."""
+    outcome = await store.write_summary(story_id, summary, as_of=as_of)
     assert outcome.refusal is None, outcome
     assert outcome.version is not None
     return outcome.version
 
 
-async def versions_of(store: StoryStore, story_id: str) -> list[StoryPageVersion]:
+async def versions_of(store: StoryStore, story_id: str) -> list[StorySummaryVersion]:
     """A story's whole version log."""
-    page = await store.page_versions(story_id, limit=MAX_STORY_PAGE)
+    page = await store.summary_versions(story_id, limit=MAX_STORY_PAGE)
     assert page is not None
     assert page.next_cursor is None
     return list(page.versions)
@@ -210,10 +210,10 @@ async def notes_of(store: StoryStore, story_id: str) -> list[StoryNote]:
     return list(page.notes)
 
 
-def page_refused(
-    outcome: StoryPageOutcome | StoryNoteOutcome, reason: StoryPageRefusalReason
+def summary_refused(
+    outcome: StorySummaryOutcome | StoryNoteOutcome, reason: StorySummaryRefusalReason
 ) -> None:
-    """Assert a page write or a note append was refused for ``reason``."""
+    """Assert a summary write or a note append was refused for ``reason``."""
     assert outcome.refusal is not None, outcome
     assert outcome.refusal.reason is reason
 
@@ -222,7 +222,7 @@ _PASS = StoryActor.MATTERS_PASS
 
 
 async def raised(store: StoryStore, story_id: str, flag: StoryFlag) -> StoryFlagName:
-    """Write a page of ``story_id`` raising ``flag``, and return the flag's name (§2:1)."""
+    """Write a summary of ``story_id`` raising ``flag``, and return the flag's name (§2:1)."""
     await noted(store, story_id, "Note.")
     read = await state_of(store, story_id)
     version = await written(store, story_id, draft(line("Line."), flags=(flag,)), as_of=read.as_of)
@@ -777,7 +777,7 @@ class StoryStoreContract:
         assert await notes_of(store, story_id) == [first, second]
         state = await state_of(store, story_id)
         assert state.pending_notes == (first, second)
-        assert state.page is None
+        assert state.summary is None
 
     async def test_a_note_keeps_its_text_byte_for_byte(self, store: StoryStore) -> None:
         story_id = await made(store, act("a1"))
@@ -842,11 +842,11 @@ class StoryStoreContract:
         unknown = await store.append_note(
             "story:nowhere", "n", author=StoryNoteAuthor.PLANNING, written_during="a"
         )
-        page_refused(unknown, StoryPageRefusalReason.UNKNOWN_STORY)
+        summary_refused(unknown, StorySummaryRefusalReason.UNKNOWN_STORY)
         assert unknown.refusal is not None
         assert unknown.refusal.story_id == "story:nowhere"
         merged = await store.append_note(absorbed, "n", author=StoryNoteAuthor.OWNER)
-        page_refused(merged, StoryPageRefusalReason.MERGED_STORY)
+        summary_refused(merged, StorySummaryRefusalReason.MERGED_STORY)
         assert merged.refusal is not None
         assert merged.refusal.merged_into == target
         assert await everything(store) == before
@@ -877,10 +877,10 @@ class StoryStoreContract:
             cursor = page.next_cursor
         assert seen == mine
 
-    async def test_an_unknown_story_has_no_page(self, store: StoryStore) -> None:
-        assert await store.current_page("story:nowhere") is None
+    async def test_an_unknown_story_has_no_summary(self, store: StoryStore) -> None:
+        assert await store.current_summary("story:nowhere") is None
         assert await store.notes("story:nowhere") is None
-        assert await store.page_versions("story:nowhere") is None
+        assert await store.summary_versions("story:nowhere") is None
 
     # --- pending (ADR-0300 §3:8) ---------------------------------------------
 
@@ -891,7 +891,7 @@ class StoryStoreContract:
         state = await state_of(store, story_id)
         assert state.pending_episodes == ("a2", "a1", "a3")
 
-    async def test_a_page_write_takes_in_what_it_names(self, store: StoryStore) -> None:
+    async def test_a_summary_write_takes_in_what_it_names(self, store: StoryStore) -> None:
         story_id = await made(store, act("a1"), act("a2"))
         note = await noted(store, story_id, "Camping at Riverside.")
         before = await state_of(store, story_id)
@@ -910,11 +910,11 @@ class StoryStoreContract:
         after = await state_of(store, story_id)
         assert after.pending_notes == ()
         assert after.pending_episodes == ("a2",)
-        assert after.page is not None
-        assert after.page.version == version.version
-        assert after.page.written_at == STORY_AT
-        assert after.page.lines == (StoryPageLine(text="A camping trip to Riverside."),)
-        assert after.page.outside is False
+        assert after.summary is not None
+        assert after.summary.version == version.version
+        assert after.summary.written_at == STORY_AT
+        assert after.summary.lines == (StorySummaryLine(text="A camping trip to Riverside."),)
+        assert after.summary.outside is False
         assert version.outside is False
 
     async def test_what_becomes_pending_while_a_run_is_out_stays_pending(
@@ -1003,34 +1003,34 @@ class StoryStoreContract:
         assert (await state_of(store, first)).pending_episodes == ()
         assert (await state_of(store, second)).pending_episodes == ("shared",)
 
-    # --- the page write (ADR-0300 §3:6, §3:7, §3:10) -------------------------
+    # --- the summary write (ADR-0300 §3:6, §3:7, §3:10) ----------------------
 
-    async def test_a_page_write_writes_no_note_and_records_its_mark(
+    async def test_a_summary_write_writes_no_note_and_records_its_mark(
         self, store: StoryStore
     ) -> None:
-        """ADR-0303 §4:1: the page's lines and its mark, as given, and no note."""
+        """ADR-0303 §4:1: the summary's lines and its mark, as given, and no note."""
         story_id = await made(store, act("a1"), act("a2"))
         note = await noted(store, story_id, "Riverside.")
         read = await state_of(store, story_id)
-        page = draft(
+        summary = draft(
             line("A camping trip to Riverside."),
             line("A parks notice said the lower loop closes on the 15th."),
             outside=True,
             took_in_notes=(note.note_id,),
             took_in_episodes=("a1", "a2"),
         )
-        version = await written(store, story_id, page, as_of=read.as_of)
+        version = await written(store, story_id, summary, as_of=read.as_of)
         assert version.outside is True
         assert version.read_pages == ()
         assert await notes_of(store, story_id) == [note]
         state = await state_of(store, story_id)
         assert state.pending_notes == ()
-        assert state.page is not None
-        assert state.page.lines == page.lines
-        assert state.page.outside is True
+        assert state.summary is not None
+        assert state.summary.lines == summary.lines
+        assert state.summary.outside is True
         assert await versions_of(store, story_id) == [version]
 
-    async def test_a_page_may_hold_no_line(self, store: StoryStore) -> None:
+    async def test_a_summary_may_hold_no_line(self, store: StoryStore) -> None:
         """ADR-0303 §5:3: a version like any other, so what it read stops being pending."""
         story_id = await made(store, act("a1"))
         note = await noted(store, story_id, "Nothing worth a line.")
@@ -1043,8 +1043,8 @@ class StoryStoreContract:
         )
         assert version.took_in_notes == (note.note_id,)
         state = await state_of(store, story_id)
-        assert state.page is not None
-        assert state.page.lines == ()
+        assert state.summary is not None
+        assert state.summary.lines == ()
         assert (state.pending_notes, state.pending_episodes) == ((), ())
 
     async def test_a_version_records_its_flags_its_reads_and_its_mark(
@@ -1072,9 +1072,9 @@ class StoryStoreContract:
             StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other),
         )
         reads = (
-            StoryPageVersionName(story=other, version=theirs.version),
-            StoryPageVersionName(story=merged, version=gone.version),
-            StoryPageVersionName(story=other, version=theirs.version),
+            StorySummaryVersionName(story=other, version=theirs.version),
+            StorySummaryVersionName(story=merged, version=gone.version),
+            StorySummaryVersionName(story=other, version=theirs.version),
         )
         version = await written(
             store,
@@ -1088,7 +1088,7 @@ class StoryStoreContract:
         assert version.written_at == STORY_AT
         assert await versions_of(store, story_id) == [version]
 
-    async def test_a_new_page_replaces_the_old_and_the_log_keeps_both(
+    async def test_a_new_summary_replaces_the_old_and_the_log_keeps_both(
         self, store: StoryStore
     ) -> None:
         story_id = await made(store, act("a1"))
@@ -1107,8 +1107,8 @@ class StoryStoreContract:
         )
         assert second.version > first.version
         state = await state_of(store, story_id)
-        assert state.page is not None
-        assert [ln.text for ln in state.page.lines] == ["New line.", "Another."]
+        assert state.summary is not None
+        assert [ln.text for ln in state.summary.lines] == ["New line.", "Another."]
         assert await versions_of(store, story_id) == [first, second]
 
     async def test_the_version_log_pages_oldest_first(self, store: StoryStore) -> None:
@@ -1123,10 +1123,10 @@ class StoryStoreContract:
             )
             for n in range(5)
         ]
-        seen: list[StoryPageVersion] = []
+        seen: list[StorySummaryVersion] = []
         cursor: int | None = None
         while True:
-            page = await store.page_versions(story_id, cursor=cursor, limit=2)
+            page = await store.summary_versions(story_id, cursor=cursor, limit=2)
             assert page is not None
             seen.extend(page.versions)
             if page.next_cursor is None:
@@ -1134,7 +1134,7 @@ class StoryStoreContract:
             cursor = page.next_cursor
         assert seen == made_versions
 
-    async def test_a_page_built_on_a_stale_read_is_refused_and_writes_nothing(
+    async def test_a_summary_built_on_a_stale_read_is_refused_and_writes_nothing(
         self, store: StoryStore
     ) -> None:
         story_id = await made(store, act("a1"))
@@ -1142,12 +1142,12 @@ class StoryStoreContract:
         stale = await state_of(store, story_id)
         await written(store, story_id, draft(line("First.")), as_of=stale.as_of)
         before = await everything(store)
-        outcome = await store.write_page(
+        outcome = await store.write_summary(
             story_id,
             draft(line("Second."), took_in_episodes=("a1",)),
             as_of=stale.as_of,
         )
-        page_refused(outcome, StoryPageRefusalReason.PAGE_MOVED_ON)
+        summary_refused(outcome, StorySummaryRefusalReason.SUMMARY_MOVED_ON)
         assert outcome.refusal is not None
         assert outcome.refusal.story_id == story_id
         assert await everything(store) == before
@@ -1155,7 +1155,7 @@ class StoryStoreContract:
     async def test_a_write_built_on_a_read_after_a_merge_is_not_stale(
         self, store: StoryStore
     ) -> None:
-        """Only a version of the story's own page moves it on."""
+        """Only a version of the story's own summary moves it on."""
         target = await made(store, act("a1"))
         absorbed = await made(store, act("a2"))
         await noted(store, target, "Note.")
@@ -1163,28 +1163,28 @@ class StoryStoreContract:
         await store.merge(absorbed, target, actor=_OWNER)
         await written(store, target, draft(line("The matter.")), as_of=read.as_of)
 
-    async def test_a_page_version_read_naming_an_unknown_story_is_refused(
+    async def test_a_summary_version_read_naming_an_unknown_story_is_refused(
         self, store: StoryStore
     ) -> None:
         """ADR-0303 §4:2: checked only as an identity the store holds."""
         story_id = await made(store, act("a1"))
         read = await state_of(store, story_id)
         before = await everything(store)
-        outcome = await store.write_page(
+        outcome = await store.write_summary(
             story_id,
             draft(
                 line("Line."),
-                read_pages=(StoryPageVersionName(story="story:nowhere", version=1),),
+                read_pages=(StorySummaryVersionName(story="story:nowhere", version=1),),
             ),
             as_of=read.as_of,
         )
-        page_refused(outcome, StoryPageRefusalReason.UNKNOWN_STORY)
+        summary_refused(outcome, StorySummaryRefusalReason.UNKNOWN_STORY)
         assert outcome.refusal is not None
         assert outcome.refusal.story_id == "story:nowhere"
         assert await everything(store) == before
 
     @pytest.mark.parametrize("wrong", ["itself", "unreached", "another's"])
-    async def test_a_page_version_read_naming_nothing_held_is_a_value_error(
+    async def test_a_summary_version_read_naming_nothing_held_is_a_value_error(
         self, store: StoryStore, wrong: str
     ) -> None:
         """Its own story, a version its story has not reached, or another story's version."""
@@ -1198,14 +1198,14 @@ class StoryStoreContract:
             store, story_id, draft(line("Mine.")), as_of=(await state_of(store, story_id)).as_of
         )
         named = {
-            "itself": StoryPageVersionName(story=story_id, version=mine.version),
-            "unreached": StoryPageVersionName(story=other, version=theirs.version + 10_000),
-            "another's": StoryPageVersionName(story=third, version=theirs.version),
+            "itself": StorySummaryVersionName(story=story_id, version=mine.version),
+            "unreached": StorySummaryVersionName(story=other, version=theirs.version + 10_000),
+            "another's": StorySummaryVersionName(story=third, version=theirs.version),
         }[wrong]
         read = await state_of(store, story_id)
         before = await everything(store)
-        with pytest.raises(ValueError, match="page version read"):
-            await store.write_page(
+        with pytest.raises(ValueError, match="summary version read"):
+            await store.write_summary(
                 story_id, draft(line("Line."), read_pages=(named,)), as_of=read.as_of
             )
         assert await everything(store) == before
@@ -1215,7 +1215,7 @@ class StoryStoreContract:
         await noted(store, story_id, "Note.")
         read = await state_of(store, story_id)
         before = await everything(store)
-        outcome = await store.write_page(
+        outcome = await store.write_summary(
             story_id,
             draft(
                 line("Line."),
@@ -1223,7 +1223,7 @@ class StoryStoreContract:
             ),
             as_of=read.as_of,
         )
-        page_refused(outcome, StoryPageRefusalReason.UNKNOWN_STORY)
+        summary_refused(outcome, StorySummaryRefusalReason.UNKNOWN_STORY)
         assert outcome.refusal is not None
         assert outcome.refusal.story_id == "story:nowhere"
         assert await everything(store) == before
@@ -1233,7 +1233,7 @@ class StoryStoreContract:
         await noted(store, story_id, "Note.")
         read = await state_of(store, story_id)
         with pytest.raises(ValueError, match="another story"):
-            await store.write_page(
+            await store.write_summary(
                 story_id,
                 draft(
                     line("Line."),
@@ -1242,18 +1242,20 @@ class StoryStoreContract:
                 as_of=read.as_of,
             )
 
-    async def test_a_page_to_an_unknown_or_merged_story_is_refused(self, store: StoryStore) -> None:
+    async def test_a_summary_to_an_unknown_or_merged_story_is_refused(
+        self, store: StoryStore
+    ) -> None:
         absorbed = await made(store, act("a"))
         target = await made(store, act("b"))
         await noted(store, absorbed, "Note.", on="a")
         read = await state_of(store, absorbed)
         await store.merge(absorbed, target, actor=_OWNER)
         before = await everything(store)
-        page = draft(line("Line."))
-        unknown = await store.write_page("story:nowhere", page, as_of=read.as_of)
-        page_refused(unknown, StoryPageRefusalReason.UNKNOWN_STORY)
-        merged = await store.write_page(absorbed, page, as_of=read.as_of)
-        page_refused(merged, StoryPageRefusalReason.MERGED_STORY)
+        summary = draft(line("Line."))
+        unknown = await store.write_summary("story:nowhere", summary, as_of=read.as_of)
+        summary_refused(unknown, StorySummaryRefusalReason.UNKNOWN_STORY)
+        merged = await store.write_summary(absorbed, summary, as_of=read.as_of)
+        summary_refused(merged, StorySummaryRefusalReason.MERGED_STORY)
         assert merged.refusal is not None
         assert merged.refusal.merged_into == target
         assert await everything(store) == before
@@ -1262,7 +1264,7 @@ class StoryStoreContract:
         """ADR-0303 §4:5: a line the user's note gave counts like any other (§2:6)."""
         story_id = await made(store, act("a1"))
         long = "y" * STORY_NOTE_MAX_CHARS
-        budget = STORY_PAGE_CAP_CHARS // STORY_NOTE_MAX_CHARS
+        budget = STORY_SUMMARY_CAP_CHARS // STORY_NOTE_MAX_CHARS
         theirs = [
             await noted(store, story_id, f"{n}{long[1:]}", author=StoryNoteAuthor.OWNER)
             for n in range(budget + 1)
@@ -1271,18 +1273,18 @@ class StoryStoreContract:
         fits = [line(n.text) for n in theirs[:budget]]
         await written(store, story_id, draft(*fits), as_of=read.as_of)
         before = await everything(store)
-        outcome = await store.write_page(
+        outcome = await store.write_summary(
             story_id,
             draft(*fits, line("z")),
             as_of=(await state_of(store, story_id)).as_of,
         )
-        page_refused(outcome, StoryPageRefusalReason.OVER_CAP)
-        verbatim = await store.write_page(
+        summary_refused(outcome, StorySummaryRefusalReason.OVER_CAP)
+        verbatim = await store.write_summary(
             story_id,
             draft(*(line(n.text) for n in theirs)),
             as_of=(await state_of(store, story_id)).as_of,
         )
-        page_refused(verbatim, StoryPageRefusalReason.OVER_CAP)
+        summary_refused(verbatim, StorySummaryRefusalReason.OVER_CAP)
         assert await everything(store) == before
 
     @pytest.mark.parametrize("as_of", [-1, 2**63, True, "0", None])
@@ -1292,7 +1294,7 @@ class StoryStoreContract:
         story_id = await made(store, act("a1"))
         await noted(store, story_id, "Note.")
         with pytest.raises(ValueError, match="as_of"):
-            await store.write_page(
+            await store.write_summary(
                 story_id,
                 draft(line("Line.")),
                 as_of=as_of,  # type: ignore[arg-type]
@@ -1304,13 +1306,13 @@ class StoryStoreContract:
         read = await state_of(store, story_id)
         before = await everything(store)
         with pytest.raises(ValueError, match="as_of"):
-            await store.write_page(story_id, draft(line("Line.")), as_of=read.as_of + 1)
+            await store.write_summary(story_id, draft(line("Line.")), as_of=read.as_of + 1)
         assert await everything(store) == before
 
     async def test_a_draft_that_is_not_one_is_a_value_error(self, store: StoryStore) -> None:
         story_id = await made(store, act("a1"))
-        with pytest.raises(ValueError, match="StoryPageDraft"):
-            await store.write_page(story_id, {"lines": []}, as_of=0)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="StorySummaryDraft"):
+            await store.write_summary(story_id, {"lines": []}, as_of=0)  # type: ignore[arg-type]
 
     # --- merge, split and move carry notes (ADR-0300 §3:12, ADR-0303 §6) ------
 
@@ -1325,14 +1327,14 @@ class StoryStoreContract:
         await written(
             store,
             absorbed,
-            draft(line("A's page."), took_in_notes=(taken.note_id,)),
+            draft(line("A's summary."), took_in_notes=(taken.note_id,)),
             as_of=read.as_of,
         )
         target_read = await state_of(store, target)
         await written(
             store,
             target,
-            draft(line("B's page."), took_in_episodes=("shared", "t")),
+            draft(line("B's summary."), took_in_episodes=("shared", "t")),
             as_of=target_read.as_of,
         )
         await store.merge(absorbed, target, actor=_OWNER)
@@ -1360,7 +1362,7 @@ class StoryStoreContract:
             store,
             source,
             draft(
-                line("Page."),
+                line("Summary."),
                 took_in_notes=(on_x.note_id, on_y.note_id, named.note_id, kept.note_id),
                 took_in_episodes=("x", "y"),
             ),
@@ -1454,7 +1456,7 @@ class StoryStoreContract:
         await written(
             store,
             source,
-            draft(line("Page."), took_in_notes=(note.note_id,)),
+            draft(line("Summary."), took_in_notes=(note.note_id,)),
             as_of=read.as_of,
         )
         await store.move(source, target, [act("x")], actor=_OWNER, notes=[note.note_id])
@@ -1895,9 +1897,9 @@ class StoryStoreContract:
             await store.leave_flag(StoryFlagName(activation="a1"), actor=7)  # type: ignore[arg-type]
         assert await everything(store) == before
 
-    # --- a page write refuses what its story does not hold (ADR-0302 §7) -----
+    # --- a summary write refuses what its story does not hold (ADR-0302 §7) --
 
-    async def test_a_page_built_before_a_split_took_its_episode_is_refused(
+    async def test_a_summary_built_before_a_split_took_its_episode_is_refused(
         self, store: StoryStore
     ) -> None:
         """#2761's probe: the split lands while the tidy-up's model call is out."""
@@ -1906,7 +1908,7 @@ class StoryStoreContract:
         read = await state_of(store, story_id)
         await store.split(story_id, [act("a-2")], actor=_OWNER)
         before = await everything(store)
-        outcome = await store.write_page(
+        outcome = await store.write_summary(
             story_id,
             draft(
                 line("The matter."),
@@ -1915,7 +1917,7 @@ class StoryStoreContract:
             ),
             as_of=read.as_of,
         )
-        page_refused(outcome, StoryPageRefusalReason.NOT_HELD)
+        summary_refused(outcome, StorySummaryRefusalReason.NOT_HELD)
         assert outcome.refusal is not None
         assert (outcome.refusal.activation, outcome.refusal.note) == ("a-2", None)
         assert outcome.refusal.story_id == story_id
@@ -1930,12 +1932,12 @@ class StoryStoreContract:
         read = await state_of(store, story_id)
         await store.move(story_id, other, [act("a2")], actor=_OWNER)
         before = await everything(store)
-        outcome = await store.write_page(
+        outcome = await store.write_summary(
             story_id,
             draft(line("The matter."), took_in_episodes=("a1", "a2")),
             as_of=read.as_of,
         )
-        page_refused(outcome, StoryPageRefusalReason.NOT_HELD)
+        summary_refused(outcome, StorySummaryRefusalReason.NOT_HELD)
         assert outcome.refusal is not None
         assert outcome.refusal.activation == "a2"
         assert await everything(store) == before
@@ -1958,12 +1960,12 @@ class StoryStoreContract:
             "missing": foreign.note_id + 10_000,
         }[where]
         before = await everything(store)
-        outcome = await store.write_page(
+        outcome = await store.write_summary(
             story_id,
             draft(line("The matter."), took_in_notes=(kept.note_id, named)),
             as_of=read.as_of,
         )
-        page_refused(outcome, StoryPageRefusalReason.NOT_HELD)
+        summary_refused(outcome, StorySummaryRefusalReason.NOT_HELD)
         assert outcome.refusal is not None
         assert (outcome.refusal.note, outcome.refusal.activation) == (named, None)
         assert await everything(store) == before
@@ -1979,10 +1981,10 @@ class StoryStoreContract:
             ({"took_in_episodes": ("a1",), "took_in_notes": (note.note_id, missing)}, missing),
         ]
         for rest, first in cases:
-            outcome = await store.write_page(
+            outcome = await store.write_summary(
                 story_id, draft(line("Line."), **rest), as_of=read.as_of
             )
-            page_refused(outcome, StoryPageRefusalReason.NOT_HELD)
+            summary_refused(outcome, StorySummaryRefusalReason.NOT_HELD)
             assert outcome.refusal is not None
             assert first in (outcome.refusal.activation, outcome.refusal.note)
 
@@ -1992,35 +1994,35 @@ class StoryStoreContract:
         story_id = await made(store, act("a1"))
         read = await state_of(store, story_id)
         unheld: dict[str, Any] = {"took_in_episodes": ("n1",)}
-        unknown_flag_story = await store.write_page(
+        unknown_flag_story = await store.write_summary(
             story_id,
             draft(
                 line("Line."),
                 flags=(StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story="story:nowhere"),),
-                read_pages=(StoryPageVersionName(story="story:elsewhere", version=1),),
+                read_pages=(StorySummaryVersionName(story="story:elsewhere", version=1),),
                 **unheld,
             ),
             as_of=read.as_of,
         )
-        page_refused(unknown_flag_story, StoryPageRefusalReason.UNKNOWN_STORY)
+        summary_refused(unknown_flag_story, StorySummaryRefusalReason.UNKNOWN_STORY)
         assert unknown_flag_story.refusal is not None
         assert unknown_flag_story.refusal.story_id == "story:nowhere"
-        unknown_read_story = await store.write_page(
+        unknown_read_story = await store.write_summary(
             story_id,
             draft(
                 line("Line."),
-                read_pages=(StoryPageVersionName(story="story:elsewhere", version=1),),
+                read_pages=(StorySummaryVersionName(story="story:elsewhere", version=1),),
                 **unheld,
             ),
             as_of=read.as_of,
         )
-        page_refused(unknown_read_story, StoryPageRefusalReason.UNKNOWN_STORY)
-        budget = STORY_PAGE_CAP_CHARS // STORY_NOTE_MAX_CHARS
+        summary_refused(unknown_read_story, StorySummaryRefusalReason.UNKNOWN_STORY)
+        budget = STORY_SUMMARY_CAP_CHARS // STORY_NOTE_MAX_CHARS
         over = [line("y" * STORY_NOTE_MAX_CHARS) for _ in range(budget + 1)]
-        not_held = await store.write_page(story_id, draft(*over, **unheld), as_of=read.as_of)
-        page_refused(not_held, StoryPageRefusalReason.NOT_HELD)
+        not_held = await store.write_summary(story_id, draft(*over, **unheld), as_of=read.as_of)
+        summary_refused(not_held, StorySummaryRefusalReason.NOT_HELD)
 
-    async def test_a_page_resting_on_what_the_story_holds_but_took_in_is_written(
+    async def test_a_summary_resting_on_what_the_story_holds_but_took_in_is_written(
         self, store: StoryStore
     ) -> None:
         """A name held but no longer pending is still passed over (ADR-0302 §7:5)."""

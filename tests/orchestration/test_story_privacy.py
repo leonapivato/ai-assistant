@@ -1,7 +1,7 @@
-"""ADR-0303 §3's privacy default: the walk behind a page, and what a reader is shown.
+"""ADR-0303 §3's privacy default: the walk behind a summary, and what a reader is shown.
 
 Decided from identities alone (§3:9-§3:12): the version logs say what stands behind a
-page, and the reader's own answers say which of it the reader may be shown.
+summary, and the reader's own answers say which of it the reader may be shown.
 """
 
 from __future__ import annotations
@@ -16,20 +16,20 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryNote,
     StoryNoteAuthor,
-    StoryPageDraft,
-    StoryPageLine,
-    StoryPageVersionName,
+    StorySummaryDraft,
+    StorySummaryLine,
+    StorySummaryVersionName,
 )
 from ai_assistant.orchestration.story_privacy import (
     Behind,
-    PageVisibility,
+    SummaryVisibility,
     activation_of,
     behind,
 )
 from ai_assistant.testing import FakeStoryStore
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import StoryPageVersionList
+    from ai_assistant.core.types import StorySummaryVersionList
 
 
 def _note(note_id: int, **fields: Any) -> StoryNote:
@@ -65,7 +65,7 @@ async def _note_on(stories: FakeStoryStore, story_id: str, text: str) -> int:
     return written.note.note_id
 
 
-async def _page(
+async def _summary(
     stories: FakeStoryStore,
     story_id: str,
     *,
@@ -73,16 +73,16 @@ async def _page(
     notes: tuple[int, ...] = (),
     read: tuple[tuple[str, int], ...] = (),
 ) -> int:
-    """Write a page taking in ``episodes`` and ``notes``, having read the ``read`` pages."""
-    state = await stories.current_page(story_id)
+    """Write a summary taking in ``episodes`` and ``notes``, having read the ``read`` ones."""
+    state = await stories.current_summary(story_id)
     assert state is not None
-    written = await stories.write_page(
+    written = await stories.write_summary(
         story_id,
-        StoryPageDraft(
-            lines=(StoryPageLine(text="A line."),),
+        StorySummaryDraft(
+            lines=(StorySummaryLine(text="A line."),),
             took_in_notes=notes,
             took_in_episodes=episodes,
-            read_pages=tuple(StoryPageVersionName(story=s, version=v) for s, v in read),
+            read_pages=tuple(StorySummaryVersionName(story=s, version=v) for s, v in read),
             outside=False,
         ),
         as_of=state.as_of,
@@ -95,12 +95,12 @@ async def _page(
 
 
 async def test_behind_a_version_is_everything_every_earlier_version_of_its_story_took_in() -> None:
-    """Each run reads the page it replaces, so what an earlier version took in stays."""
+    """Each run reads the summary it replaces, so what an earlier version took in stays."""
     stories = _stories()
     trip = await _story(stories, "a-1", "a-2")
     first_note = await _note_on(stories, trip, "No Fridays")
-    await _page(stories, trip, episodes=("a-1",), notes=(first_note,))
-    second = await _page(stories, trip, episodes=("a-2",))
+    await _summary(stories, trip, episodes=("a-1",), notes=(first_note,))
+    second = await _summary(stories, trip, episodes=("a-2",))
 
     found = await behind(stories, trip, second)
 
@@ -112,23 +112,25 @@ async def test_behind_a_version_is_everything_every_earlier_version_of_its_story
 async def test_behind_a_version_is_nothing_its_story_took_in_after_it() -> None:
     stories = _stories()
     trip = await _story(stories, "a-1", "a-2")
-    first = await _page(stories, trip, episodes=("a-1",))
-    await _page(stories, trip, episodes=("a-2",))
+    first = await _summary(stories, trip, episodes=("a-1",))
+    await _summary(stories, trip, episodes=("a-2",))
 
     assert (await behind(stories, trip, first)).episodes == frozenset({"a-1"})
 
 
-async def test_the_walk_follows_the_pages_a_run_read_into_other_stories_and_their_history() -> None:
+async def test_the_walk_follows_the_summaries_a_run_read_into_other_stories_and_their_history() -> (
+    None
+):
     """A line shown for a flag may have been copied, so what stands behind it stands here."""
     stories = _stories()
     trip = await _story(stories, "a-1")
     car = await _story(stories, "c-1", "c-2", "c-3")
     garage = await _story(stories, "g-1")
-    garage_read = await _page(stories, garage, episodes=("g-1",))
-    await _page(stories, car, episodes=("c-1",))
-    car_read = await _page(stories, car, episodes=("c-2",), read=((garage, garage_read),))
-    await _page(stories, car, episodes=("c-3",))  # after the version the trip read
-    version = await _page(stories, trip, episodes=("a-1",), read=((car, car_read),))
+    garage_read = await _summary(stories, garage, episodes=("g-1",))
+    await _summary(stories, car, episodes=("c-1",))
+    car_read = await _summary(stories, car, episodes=("c-2",), read=((garage, garage_read),))
+    await _summary(stories, car, episodes=("c-3",))  # after the version the trip read
+    version = await _summary(stories, trip, episodes=("a-1",), read=((car, car_read),))
 
     found = await behind(stories, trip, version)
 
@@ -137,23 +139,23 @@ async def test_the_walk_follows_the_pages_a_run_read_into_other_stories_and_thei
 
 
 async def test_the_walk_reads_each_story_s_log_once_and_ends_on_a_cycle() -> None:
-    """A story's page can reach its own earlier versions through another's."""
+    """A story's summary can reach its own earlier versions through another's."""
     stories = _stories()
     trip = await _story(stories, "a-1", "a-2")
     car = await _story(stories, "c-1")
-    trip_first = await _page(stories, trip, episodes=("a-1",))
-    car_first = await _page(stories, car, episodes=("c-1",), read=((trip, trip_first),))
-    version = await _page(stories, trip, episodes=("a-2",), read=((car, car_first),))
-    listing = stories.page_versions
+    trip_first = await _summary(stories, trip, episodes=("a-1",))
+    car_first = await _summary(stories, car, episodes=("c-1",), read=((trip, trip_first),))
+    version = await _summary(stories, trip, episodes=("a-2",), read=((car, car_first),))
+    listing = stories.summary_versions
     reads: list[str] = []
 
     async def counted(
         story_id: str, *, cursor: int | None = None, limit: int = DEFAULT_PAGE_SIZE
-    ) -> StoryPageVersionList | None:
+    ) -> StorySummaryVersionList | None:
         reads.append(story_id)
         return await listing(story_id, cursor=cursor, limit=limit)
 
-    stories.page_versions = counted  # type: ignore[method-assign]  # counting the reads
+    stories.summary_versions = counted  # type: ignore[method-assign]  # counting the reads
 
     found = await behind(stories, trip, version)
 
@@ -165,7 +167,7 @@ async def test_a_log_read_page_by_page_is_walked_whole() -> None:
     stories = _stories()
     trip = await _story(stories, *(f"a-{index}" for index in range(105)))
     for index in range(105):
-        version = await _page(stories, trip, episodes=(f"a-{index}",))
+        version = await _summary(stories, trip, episodes=(f"a-{index}",))
 
     found = await behind(stories, trip, version)
 
@@ -178,19 +180,19 @@ async def test_a_version_the_store_does_not_answer_for_leaves_the_walk_incomplet
     stories = _stories()
     trip = await _story(stories, "a-1")
     car = await _story(stories, "c-1")
-    car_read = await _page(stories, car, episodes=("c-1",))
-    version = await _page(stories, trip, episodes=("a-1",), read=((car, car_read),))
-    listing = stories.page_versions
+    car_read = await _summary(stories, car, episodes=("c-1",))
+    version = await _summary(stories, trip, episodes=("a-1",), read=((car, car_read),))
+    listing = stories.summary_versions
 
     async def car_gone(
         story_id: str, *, cursor: int | None = None, limit: int = DEFAULT_PAGE_SIZE
-    ) -> StoryPageVersionList | None:
+    ) -> StorySummaryVersionList | None:
         if story_id == car:
             return None
         return await listing(story_id, cursor=cursor, limit=limit)
 
     beyond = await behind(stories, trip, version + 1)
-    stories.page_versions = car_gone  # type: ignore[method-assign]  # a story no longer held
+    stories.summary_versions = car_gone  # type: ignore[method-assign]  # a story no longer held
     gone = await behind(stories, trip, version)
 
     assert not beyond.complete
@@ -205,40 +207,42 @@ def test_a_note_is_shown_where_an_owner_record_may_be_whoever_wrote_it() -> None
     """§3:9: the activation it was written during decides nothing (§2:4)."""
     episodes = [episode("a-1")]
     for note in (_PLANNED, _OWNER):
-        assert PageVisibility.of(episodes, owner_notes=True).note(note)
-        assert not PageVisibility.of(episodes, owner_notes=False).note(note)
+        assert SummaryVisibility.of(episodes, owner_notes=True).note(note)
+        assert not SummaryVisibility.of(episodes, owner_notes=False).note(note)
 
 
-def test_a_page_is_shown_only_where_every_episode_behind_it_may_be() -> None:
+def test_a_summary_is_shown_only_where_every_episode_behind_it_may_be() -> None:
     standing = Behind(notes=frozenset(), episodes=frozenset({"a-1", "a-2"}), complete=True)
 
-    assert PageVisibility.of([episode("a-1"), episode("a-2")], owner_notes=False).page(standing)
+    assert SummaryVisibility.of([episode("a-1"), episode("a-2")], owner_notes=False).summary(
+        standing
+    )
     # One not looked up, or refused, withholds it as surely (§3:12).
-    assert not PageVisibility.of([episode("a-1")], owner_notes=True).page(standing)
+    assert not SummaryVisibility.of([episode("a-1")], owner_notes=True).summary(standing)
 
 
-def test_a_page_with_a_note_behind_it_is_shown_only_where_an_owner_record_may_be() -> None:
+def test_a_summary_with_a_note_behind_it_is_shown_only_where_an_owner_record_may_be() -> None:
     standing = Behind(notes=frozenset({7}), episodes=frozenset({"a-1"}), complete=True)
 
-    assert PageVisibility.of([episode("a-1")], owner_notes=True).page(standing)
-    assert not PageVisibility.of([episode("a-1")], owner_notes=False).page(standing)
+    assert SummaryVisibility.of([episode("a-1")], owner_notes=True).summary(standing)
+    assert not SummaryVisibility.of([episode("a-1")], owner_notes=False).summary(standing)
 
 
-def test_an_incomplete_walk_withholds_the_page_from_every_reader() -> None:
+def test_an_incomplete_walk_withholds_the_summary_from_every_reader() -> None:
     standing = Behind(notes=frozenset(), episodes=frozenset(), complete=False)
 
-    assert not PageVisibility.of([episode("a-1")], owner_notes=True).page(standing)
+    assert not SummaryVisibility.of([episode("a-1")], owner_notes=True).summary(standing)
 
 
-def test_a_page_with_nothing_behind_it_is_shown_to_every_reader() -> None:
+def test_a_summary_with_nothing_behind_it_is_shown_to_every_reader() -> None:
     standing = Behind(notes=frozenset(), episodes=frozenset(), complete=True)
 
-    assert PageVisibility.of([], owner_notes=False).page(standing)
+    assert SummaryVisibility.of([], owner_notes=False).summary(standing)
 
 
 def test_an_episode_recording_no_activation_contributes_nothing() -> None:
     legacy = episode("a-1").model_copy(update={"processing_record": None})
 
     assert activation_of(legacy) is None
-    assert PageVisibility.of([legacy], owner_notes=False).activations == frozenset()
+    assert SummaryVisibility.of([legacy], owner_notes=False).activations == frozenset()
     assert activation_of(episode("a-1")) == "a-1"

@@ -1,4 +1,4 @@
-"""ADR-0303 §10:2: the page as a reader is shown it, and the story commands' argument checks."""
+"""ADR-0303 §10:2: the summary as a reader is shown it, and the story commands' argument checks."""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ from ai_assistant.core.types import (
     StoryMemberKind,
     StoryNote,
     StoryNoteAuthor,
-    StoryPageLine,
-    StoryPageView,
-    StoryPageViewNote,
+    StorySummaryLine,
+    StorySummaryView,
+    StorySummaryViewNote,
     story_move_members,
     story_note_text,
 )
@@ -25,7 +25,7 @@ from ai_assistant.core.types import (
 _AT: Final = datetime(2026, 10, 8, tzinfo=UTC)
 _STORY: Final = StoryHeader(story_id="story:a", created_at=_AT, merged_into=None)
 _MERGED: Final = StoryHeader(story_id="story:a", created_at=_AT, merged_into="story:b")
-_LINE: Final = StoryPageLine(text="A camping trip in October")
+_LINE: Final = StorySummaryLine(text="A camping trip in October")
 _NOTE: Final = StoryNote(
     note_id=2,
     text="Leaning against Saturday",
@@ -48,67 +48,69 @@ def _activation(activation_id: str) -> StoryMember:
     return StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation_id)
 
 
-def test_a_page_never_tidied_carries_its_notes_and_no_page() -> None:
+def test_a_summary_never_tidied_carries_its_notes_and_no_summary() -> None:
     """ADR-0303 §10:2: the notes, newest first, and the count beyond them."""
-    view = StoryPageView(
+    view = StorySummaryView(
         story=_STORY,
-        notes=(StoryPageViewNote(note=_NOTE, pending=True),),
+        notes=(StorySummaryViewNote(note=_NOTE, pending=True),),
         more_notes=1,
     )
     assert view.version is None
     assert view.tidied_at is None
     assert (view.lines, view.outside, view.withheld) == ((), False, False)
-    for page in ({"lines": (_LINE,)}, {"outside": True}, {"withheld": True}):
-        with pytest.raises(ValidationError, match="never written shows no page"):
-            StoryPageView.model_validate({"story": _STORY, **page})
+    for summary in ({"lines": (_LINE,)}, {"outside": True}, {"withheld": True}):
+        with pytest.raises(ValidationError, match="never written shows no summary"):
+            StorySummaryView.model_validate({"story": _STORY, **summary})
 
 
-def test_a_tidied_page_names_its_version_and_when_together() -> None:
-    view = StoryPageView(story=_STORY, version=3, tidied_at=_AT, lines=(_LINE,), outside=True)
+def test_a_tidied_summary_names_its_version_and_when_together() -> None:
+    view = StorySummaryView(story=_STORY, version=3, tidied_at=_AT, lines=(_LINE,), outside=True)
     assert (view.version, view.outside) == (3, True)
-    assert StoryPageView(story=_STORY, version=3, tidied_at=_AT).lines == ()
+    assert StorySummaryView(story=_STORY, version=3, tidied_at=_AT).lines == ()
     with pytest.raises(ValidationError, match="exactly when it says when"):
-        StoryPageView(story=_STORY, version=3)
+        StorySummaryView(story=_STORY, version=3)
     with pytest.raises(ValidationError, match="exactly when it says when"):
-        StoryPageView(story=_STORY, tidied_at=_AT)
+        StorySummaryView(story=_STORY, tidied_at=_AT)
 
 
-@pytest.mark.parametrize("page", [{"lines": (_LINE,)}, {"outside": True}])
-def test_a_withheld_page_carries_neither_its_lines_nor_its_mark(page: dict[str, object]) -> None:
+@pytest.mark.parametrize("summary", [{"lines": (_LINE,)}, {"outside": True}])
+def test_a_withheld_summary_carries_neither_its_lines_nor_its_mark(
+    summary: dict[str, object],
+) -> None:
     """ADR-0303 §3:7: none of it is shown, and the reader is told it was withheld."""
-    assert StoryPageView(story=_STORY, version=3, tidied_at=_AT, withheld=True).withheld
-    with pytest.raises(ValidationError, match="withheld page carries neither"):
-        StoryPageView.model_validate(
-            {"story": _STORY, "version": 3, "tidied_at": _AT, "withheld": True, **page}
+    assert StorySummaryView(story=_STORY, version=3, tidied_at=_AT, withheld=True).withheld
+    with pytest.raises(ValidationError, match="withheld summary carries neither"):
+        StorySummaryView.model_validate(
+            {"story": _STORY, "version": 3, "tidied_at": _AT, "withheld": True, **summary}
         )
 
 
 def test_the_notes_are_listed_newest_first_each_once() -> None:
-    newer = StoryPageViewNote(note=_PLANNED, pending=False)
-    older = StoryPageViewNote(note=_NOTE, pending=True)
-    assert StoryPageView(story=_STORY, notes=(newer, older)).notes == (newer, older)
+    newer = StorySummaryViewNote(note=_PLANNED, pending=False)
+    older = StorySummaryViewNote(note=_NOTE, pending=True)
+    assert StorySummaryView(story=_STORY, notes=(newer, older)).notes == (newer, older)
     for notes in ((older, newer), (older, older)):
         with pytest.raises(ValidationError, match="newest first"):
-            StoryPageView(story=_STORY, notes=notes)
+            StorySummaryView(story=_STORY, notes=notes)
 
 
 @pytest.mark.parametrize(
     "extra",
     [
         {"version": 1, "tidied_at": _AT},
-        {"notes": (StoryPageViewNote(note=_NOTE, pending=True),)},
+        {"notes": (StorySummaryViewNote(note=_NOTE, pending=True),)},
         {"more_notes": 1},
     ],
 )
-def test_a_merged_story_page_carries_its_header_alone(extra: dict[str, object]) -> None:
-    assert StoryPageView(story=_MERGED).story.merged_into == "story:b"
-    with pytest.raises(ValidationError, match="merged story's page view"):
-        StoryPageView.model_validate({"story": _MERGED, **extra})
+def test_a_merged_story_summary_carries_its_header_alone(extra: dict[str, object]) -> None:
+    assert StorySummaryView(story=_MERGED).story.merged_into == "story:b"
+    with pytest.raises(ValidationError, match="merged story's summary view"):
+        StorySummaryView.model_validate({"story": _MERGED, **extra})
 
 
 def test_the_count_beyond_the_notes_is_never_negative() -> None:
     with pytest.raises(ValidationError):
-        StoryPageView(story=_STORY, more_notes=-1)
+        StorySummaryView(story=_STORY, more_notes=-1)
 
 
 def test_a_note_records_an_activation_exactly_when_the_user_did_not_write_it() -> None:

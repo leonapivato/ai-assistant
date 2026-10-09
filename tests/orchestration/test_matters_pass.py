@@ -29,8 +29,8 @@ from ai_assistant.core.types import (
     StoryFlagName,
     StoryLogLine,
     StoryNoteAuthor,
-    StoryPageDraft,
-    StoryPageLine,
+    StorySummaryDraft,
+    StorySummaryLine,
 )
 from ai_assistant.orchestration.matters_pass import MattersPass
 from ai_assistant.testing import FakeModelProvider, FakeStoryStore
@@ -91,17 +91,17 @@ async def _story(stories: FakeStoryStore, *activations: str) -> str:
 
 
 async def _raise(stories: FakeStoryStore, story_id: str, flag: StoryFlag) -> StoryFlagName:
-    """A tidy-up's version of ``story_id``'s page raising ``flag``, and the flag's name."""
+    """A tidy-up's version of ``story_id``'s summary raising ``flag``, and the flag's name."""
     note = await stories.append_note(
         story_id, "Camping at Riverside.", author=StoryNoteAuthor.OWNER
     )
     assert note.note is not None
-    state = await stories.current_page(story_id)
+    state = await stories.current_summary(story_id)
     assert state is not None
-    written = await stories.write_page(
+    written = await stories.write_summary(
         story_id,
-        StoryPageDraft(
-            lines=(StoryPageLine(text="Camping at Riverside."),),
+        StorySummaryDraft(
+            lines=(StorySummaryLine(text="Camping at Riverside."),),
             took_in_notes=(note.note.note_id,),
             flags=(flag,),
             outside=False,
@@ -164,7 +164,7 @@ async def test_a_two_matters_flag_is_split_and_the_decision_recorded_on_its_stor
     assert shown["stories"][0]["episodes"] == ["E1", "E2"]
     assert [episode["label"] for episode in shown["episodes"]] == ["E1", "E2"]
     assert shown["episodes"][1]["the_users_own_input"] == "Book the dentist."
-    assert shown["stories"][0]["its_page"]["lines"] == ["Camping at Riverside."]
+    assert shown["stories"][0]["its_summary"]["lines"] == ["Camping at Riverside."]
 
 
 async def test_a_like_another_flag_is_merged_and_recorded_on_the_story_merged_into() -> None:
@@ -278,7 +278,7 @@ async def test_a_split_takes_the_notes_it_names_the_users_own_included() -> None
     ]
     assert await _notes(stories, trip) == ["Camping at Riverside."]
     # What arrives is pending on the new story, the user's words unchanged.
-    state = await stories.current_page(other)
+    state = await stories.current_summary(other)
     assert state is not None
     assert [note.text for note in state.pending_notes] == await _notes(stories, other)
     shown = _shown(model)["stories"][0]
@@ -397,17 +397,17 @@ async def test_the_notes_shown_are_the_newest_up_to_the_bound() -> None:
     assert _shown(none)["stories"][0]["notes"] == []
 
 
-async def test_the_page_and_the_notes_are_attributed_by_their_records() -> None:
-    """ADR-0303 §3:7: the page as the tidy-up's with its mark, a note by writer and mark."""
+async def test_the_summary_and_the_notes_are_attributed_by_their_records() -> None:
+    """ADR-0303 §3:7: the summary as the tidy-up's with its mark, a note by writer and mark."""
     stories = _stories()
     memory = await memory_of(episode("a-1"))
     trip = await _story(stories, "a-1")
-    state = await stories.current_page(trip)
+    state = await stories.current_summary(trip)
     assert state is not None
-    written = await stories.write_page(
+    written = await stories.write_summary(
         trip,
-        StoryPageDraft(
-            lines=(StoryPageLine(text="A parks notice said the lower loop closes."),),
+        StorySummaryDraft(
+            lines=(StorySummaryLine(text="A parks notice said the lower loop closes."),),
             flags=(_TWO,),
             outside=True,
         ),
@@ -421,10 +421,10 @@ async def test_the_page_and_the_notes_are_attributed_by_their_records() -> None:
     await _pass(model, stories, memory).run()
 
     shown = _shown(model)["stories"][0]
-    page = shown["its_page"]
-    assert page["written_by"] == "the assistant, tidying this story's page"
-    assert page["lines"] == ["A parks notice said the lower loop closes."]
-    assert "outside content" in page["outside_content"]
+    summary = shown["its_summary"]
+    assert summary["written_by"] == "the assistant, tidying this story's summary"
+    assert summary["lines"] == ["A parks notice said the lower loop closes."]
+    assert "outside content" in summary["outside_content"]
     planning, owner = shown["notes"]
     assert planning["written_by"] == "the assistant, while working on this matter"
     assert "never something the user said" in planning["outside_content"]
@@ -432,23 +432,23 @@ async def test_the_page_and_the_notes_are_attributed_by_their_records() -> None:
     assert "outside_content" not in owner
 
 
-async def test_an_unmarked_page_carries_no_mark() -> None:
+async def test_an_unmarked_summary_carries_no_mark() -> None:
     stories, memory, _ = await _split_flag()
     model = FakeModelProvider(_LEAVE)
 
     await _pass(model, stories, memory).run()
 
-    assert "outside_content" not in _shown(model)["stories"][0]["its_page"]
+    assert "outside_content" not in _shown(model)["stories"][0]["its_summary"]
 
 
-async def test_a_story_with_no_page_is_shown_as_missing_one() -> None:
+async def test_a_story_with_no_summary_is_shown_as_missing_one() -> None:
     stories, memory, trip, other = await _pair()
     model = FakeModelProvider(_LEAVE)
 
     await _pass(model, stories, memory).run()
 
     assert trip != other
-    assert _shown(model)["stories"][1]["its_page"].startswith("missing")
+    assert _shown(model)["stories"][1]["its_summary"].startswith("missing")
 
 
 # --- §5:3: no model call ---------------------------------------------------------------
@@ -686,7 +686,7 @@ async def test_a_refused_reply_writes_nothing_and_logs_why_without_its_text(
             "problem": problem,
         }
     ]
-    # Code-owned text only: nothing of the reply, the page or an episode.
+    # Code-owned text only: nothing of the reply, the summary or an episode.
     for text in ("camping", "dentist", "reconsider", "Riverside"):
         assert text not in str(logs)
 

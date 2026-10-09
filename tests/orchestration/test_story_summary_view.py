@@ -1,8 +1,8 @@
-"""The owner's page view (ADR-0303 §10:2): its bound, its privacy, and one consistent read.
+"""The owner's summary view (ADR-0303 §10:2): its bound, its privacy, and one consistent read.
 
 The story surface contract holds what every engine answers; this holds what it cannot
 reach under its payload limit — the view lists the newest notes up to its bound and
-counts the rest — what the owner is shown of a page under §3's default, walked over
+counts the rest — what the owner is shown of a summary under §3's default, walked over
 everything behind it, and what only an interleaving shows: a note's pending status is
 the one it had as the notes were read.
 """
@@ -19,15 +19,15 @@ from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     StoryActor,
     StoryNoteAuthor,
-    StoryPageDraft,
-    StoryPageLine,
-    StoryPageVersionName,
+    StorySummaryDraft,
+    StorySummaryLine,
+    StorySummaryVersionName,
 )
-from ai_assistant.orchestration.stories import DEFAULT_STORY_PAGE_VIEW_NOTES, owner_page
+from ai_assistant.orchestration.stories import DEFAULT_STORY_SUMMARY_VIEW_NOTES, owner_summary
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import StoryNoteList, StoryPageState
+    from ai_assistant.core.types import StoryNoteList, StorySummaryState
 
 
 async def _story(stories: FakeStoryStore) -> str:
@@ -48,7 +48,7 @@ async def test_the_view_lists_the_newest_notes_up_to_its_bound_and_counts_the_re
         outcome = await stories.append_note(story_id, f"note {index}", author=StoryNoteAuthor.OWNER)
         assert outcome.note is not None
         written.append(outcome.note)
-    view = await owner_page(stories, _memory(), story_id, notes=2)
+    view = await owner_summary(stories, _memory(), story_id, notes=2)
     assert view is not None
     assert [shown.note for shown in view.notes] == [written[3], written[2]]
     assert all(shown.pending for shown in view.notes)
@@ -56,10 +56,10 @@ async def test_the_view_lists_the_newest_notes_up_to_its_bound_and_counts_the_re
 
 
 def test_the_default_bound_is_a_positive_constant() -> None:
-    assert DEFAULT_STORY_PAGE_VIEW_NOTES > 0
+    assert DEFAULT_STORY_SUMMARY_VIEW_NOTES > 0
 
 
-# --- what the owner is shown of the page (ADR-0303 §3:9-§3:12) ----------------------
+# --- what the owner is shown of the summary (ADR-0303 §3:9-§3:12) -------------------
 
 
 async def _written(
@@ -67,16 +67,16 @@ async def _written(
     story_id: str,
     *,
     episodes: tuple[str, ...] = (),
-    read: tuple[StoryPageVersionName, ...] = (),
+    read: tuple[StorySummaryVersionName, ...] = (),
     outside: bool = False,
 ) -> int:
-    """Write a page of one line taking in the pending notes and ``episodes``."""
-    state = await stories.current_page(story_id)
+    """Write a summary of one line taking in the pending notes and ``episodes``."""
+    state = await stories.current_summary(story_id)
     assert state is not None
-    written = await stories.write_page(
+    written = await stories.write_summary(
         story_id,
-        StoryPageDraft(
-            lines=(StoryPageLine(text="A camping trip to Riverside."),),
+        StorySummaryDraft(
+            lines=(StorySummaryLine(text="A camping trip to Riverside."),),
             took_in_notes=tuple(note.note_id for note in state.pending_notes),
             took_in_episodes=episodes,
             read_pages=read,
@@ -88,21 +88,21 @@ async def _written(
     return written.version.version
 
 
-async def test_the_owner_is_shown_a_page_whose_episodes_and_notes_are_all_held() -> None:
+async def test_the_owner_is_shown_a_summary_whose_episodes_and_notes_are_all_held() -> None:
     """The owner may be shown every note (§3:9) and every record the store holds."""
     stories = FakeStoryStore(now=lambda: AT)
     story_id = await _story(stories)
     await stories.append_note(story_id, "No Fridays", author=StoryNoteAuthor.OWNER)
     await _written(stories, story_id, episodes=("a-1",), outside=True)
 
-    view = await owner_page(stories, await memory_of(episode("a-1")), story_id)
+    view = await owner_summary(stories, await memory_of(episode("a-1")), story_id)
 
     assert view is not None
     assert [line.text for line in view.lines] == ["A camping trip to Riverside."]
     assert (view.outside, view.withheld) == (True, False)
 
 
-async def test_a_page_an_earlier_version_took_in_a_forgotten_episode_is_withheld() -> None:
+async def test_a_summary_an_earlier_version_took_in_a_forgotten_episode_is_withheld() -> None:
     """§3:12: forgotten, it cannot be established, and the walk is cumulative (§3:10)."""
     stories = FakeStoryStore(now=lambda: AT)
     created = await stories.create([activation("a-1"), activation("a-2")], actor=StoryActor.OWNER)
@@ -112,18 +112,18 @@ async def test_a_page_an_earlier_version_took_in_a_forgotten_episode_is_withheld
     await stories.append_note(story_id, "No Fridays", author=StoryNoteAuthor.OWNER)
     version = await _written(stories, story_id, episodes=("a-2",), outside=True)
 
-    view = await owner_page(stories, await memory_of(episode("a-2")), story_id)
+    view = await owner_summary(stories, await memory_of(episode("a-2")), story_id)
 
     assert view is not None
-    # What a withheld page carries: that it was withheld, when it was tidied, its
+    # What a withheld summary carries: that it was withheld, when it was tidied, its
     # version, and the notes, which §3:9 decides on their own; never a line or the mark.
     assert (view.withheld, view.lines, view.outside) == (True, (), False)
     assert view.version == version
     assert [shown.note.text for shown in view.notes] == ["No Fridays"]
 
 
-async def test_a_page_that_read_a_page_resting_on_a_forgotten_episode_is_withheld() -> None:
-    """§3:10: through each other story's page a run was shown, everything behind it."""
+async def test_a_summary_that_read_a_summary_resting_on_a_forgotten_episode_is_withheld() -> None:
+    """§3:10: through each other story's summary a run was shown, everything behind it."""
     stories = FakeStoryStore(now=lambda: AT)
     story_id = await _story(stories)
     other = await stories.create([activation("b-1")], actor=StoryActor.OWNER)
@@ -133,11 +133,11 @@ async def test_a_page_that_read_a_page_resting_on_a_forgotten_episode_is_withhel
         stories,
         story_id,
         episodes=("a-1",),
-        read=(StoryPageVersionName(story=other.story_id, version=shown_for_a_flag),),
+        read=(StorySummaryVersionName(story=other.story_id, version=shown_for_a_flag),),
     )
 
-    kept = await owner_page(stories, await memory_of(episode("a-1"), episode("b-1")), story_id)
-    forgotten = await owner_page(stories, await memory_of(episode("a-1")), story_id)
+    kept = await owner_summary(stories, await memory_of(episode("a-1"), episode("b-1")), story_id)
+    forgotten = await owner_summary(stories, await memory_of(episode("a-1")), story_id)
 
     assert kept is not None
     assert not kept.withheld
@@ -145,13 +145,13 @@ async def test_a_page_that_read_a_page_resting_on_a_forgotten_episode_is_withhel
     assert forgotten.withheld
 
 
-async def test_the_owner_may_be_shown_a_page_behind_which_an_episode_is_still_open() -> None:
+async def test_the_owner_may_be_shown_a_summary_behind_which_an_episode_is_still_open() -> None:
     """The owner's direct inspection reads every record, an open one included."""
     stories = FakeStoryStore(now=lambda: AT)
     story_id = await _story(stories)
     await _written(stories, story_id, episodes=("a-1",))
 
-    view = await owner_page(stories, await memory_of(episode("a-1", open_=True)), story_id)
+    view = await owner_summary(stories, await memory_of(episode("a-1", open_=True)), story_id)
 
     assert view is not None
     assert not view.withheld
@@ -185,7 +185,7 @@ async def test_a_note_written_while_the_notes_are_read_is_shown_pending() -> Non
     story_id = await _story(stories)
     appended = _writing_while_notes_are_read(stories, story_id, times=1)
 
-    view = await owner_page(stories, _memory(), story_id)
+    view = await owner_summary(stories, _memory(), story_id)
 
     assert view is not None
     assert [(shown.note.note_id, shown.pending) for shown in view.notes] == [(appended[0], True)]
@@ -200,11 +200,11 @@ async def test_a_note_written_and_moved_away_while_the_notes_are_read_is_not_sho
     stories = FakeStoryStore(now=lambda: AT)
     story_id = await _story(stories)
     elsewhere = await _story(stories)
-    state = await stories.current_page(story_id)
+    state = await stories.current_summary(story_id)
     assert state is not None
-    taken = await stories.write_page(
+    taken = await stories.write_summary(
         story_id,
-        StoryPageDraft(took_in_episodes=("a-1",), outside=False),
+        StorySummaryDraft(took_in_episodes=("a-1",), outside=False),
         as_of=state.as_of,
     )
     assert taken.version is not None
@@ -228,11 +228,11 @@ async def test_a_note_written_and_moved_away_while_the_notes_are_read_is_not_sho
 
     stories.notes = appending_then_moving  # type: ignore[method-assign]  # an interleaving point
 
-    view = await owner_page(stories, _memory(), story_id)
+    view = await owner_summary(stories, _memory(), story_id)
 
     assert view is not None
     assert view.notes == ()
-    there = await owner_page(stories, _memory(), elsewhere)
+    there = await owner_summary(stories, _memory(), elsewhere)
     assert there is not None
     assert [(shown.note.note_id, shown.pending) for shown in there.notes] == [(moved[0], True)]
 
@@ -242,17 +242,17 @@ async def test_a_write_to_another_story_costs_a_read_again_and_no_wrong_answer()
     story_id = await _story(stories)
     other = await _story(stories)
     _writing_while_notes_are_read(stories, other, times=1)
-    reads = stories.current_page
+    reads = stories.current_summary
     count = 0
 
-    async def counted(story_id: str) -> StoryPageState | None:
+    async def counted(story_id: str) -> StorySummaryState | None:
         nonlocal count
         count += 1
         return await reads(story_id)
 
-    stories.current_page = counted  # type: ignore[method-assign]  # counting the reads
+    stories.current_summary = counted  # type: ignore[method-assign]  # counting the reads
 
-    view = await owner_page(stories, _memory(), story_id)
+    view = await owner_summary(stories, _memory(), story_id)
 
     assert view is not None
     assert view.notes == ()
@@ -265,4 +265,4 @@ async def test_a_story_written_through_every_read_is_a_store_error() -> None:
     _writing_while_notes_are_read(stories, story_id, times=100)
 
     with pytest.raises(StoryStoreError, match="every time it was read"):
-        await owner_page(stories, _memory(), story_id)
+        await owner_summary(stories, _memory(), story_id)

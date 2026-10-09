@@ -2,8 +2,8 @@
 
 The story store holds which experiences belong to the same matter: stories, their
 members, and an append-only log of every change, on its own file, ``stories.db``,
-in the data directory. Beside each story it keeps the story's page (ADR-0300 §3,
-ADR-0303 §§2-4): its notes, its current page, and the page's append-only version log.
+in the data directory. Beside each story it keeps the story's notes and summary
+(ADR-0300 §3, ADR-0303 §§2-4, ADR-0304 §2) and the summary's append-only version log.
 
 **Why this module lives in ``memory/`` while its contract does not.** ADR-0289 §1
 puts the store in ``memory/`` and makes ``StoryStore`` its own Protocol, not a
@@ -23,18 +23,18 @@ sequence number of the ``added`` line that put it there, which is unique across 
 store and ascending, so a page of the view resumes after a position and a merge that
 keeps an existing entry keeps its place by keeping its row.
 
-**The page's records, and one counter for them.** A note's identity, a version's,
+**The notes and the summary, and one counter for them.** A note's identity, a version's,
 and the moment a note or an activation member became pending on a story are all
-drawn from one counter (``ticks``), so they are comparable: a page read reports the
-counter as its ``as_of``, and a page write built on that read refuses where a
+drawn from one counter (``ticks``), so they are comparable: a summary read reports the
+counter as its ``as_of``, and a summary write built on that read refuses where a
 version newer than it exists and takes in only what was pending at it (ADR-0300
 §3:8). Pending is a column, ``pending_since``, on the note and on the member row:
 set when the note or the member comes to a story, cleared when a version takes it
 in. A note's own fields cannot be rewritten nor the note removed, by trigger; only
 which story holds it and whether it is pending there change. The version log is
-append-only by trigger, and the current page is the one record of the page kept as
+append-only by trigger, and the summary is the one record of the two kept as
 text, its lines and its mark, replaced whole by each write under ``secure_delete``,
-so the replaced page's text is overwritten rather than left in a freed page of the
+so the replaced summary's text is overwritten rather than left in a freed page of the
 file. No rule here reads the activation a note was written during (ADR-0303 §2:4):
 a split and a move carry exactly the notes they name (§6).
 
@@ -48,7 +48,7 @@ transaction, so two writers cannot both answer one flag. A tidy-up's flags are t
 only ones (ADR-0303 §8): a flag named by an activation is never held.
 
 The file is created owner-only (ADR-0004 §4). The membership records hold
-identities and instants only (ADR-0289 §2:7); the notes and the current page hold
+identities and instants only (ADR-0289 §2:7); the notes and the summary hold
 the text ADR-0300 §3 gives them, which is a fact about the owner's life as well.
 """
 
@@ -73,11 +73,10 @@ from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     STORY_ID_PREFIX,
-    STORY_PAGE_CAP_CHARS,
+    STORY_SUMMARY_CAP_CHARS,
     Identifier,
     StoryActor,
     StoryChange,
-    StoryCurrentPage,
     StoryDecision,
     StoryEntry,
     StoryFlagName,
@@ -93,15 +92,16 @@ from ai_assistant.core.types import (
     StoryNoteOutcome,
     StoryOutcome,
     StoryPage,
-    StoryPageDraft,
-    StoryPageOutcome,
-    StoryPageRefusal,
-    StoryPageRefusalReason,
-    StoryPageState,
-    StoryPageVersion,
-    StoryPageVersionList,
     StoryRefusal,
     StoryRefusalReason,
+    StorySummary,
+    StorySummaryDraft,
+    StorySummaryOutcome,
+    StorySummaryRefusal,
+    StorySummaryRefusalReason,
+    StorySummaryState,
+    StorySummaryVersion,
+    StorySummaryVersionList,
     StoryViewPage,
     check_story_as_of,
     check_story_page,
@@ -158,7 +158,7 @@ _SCHEMA: Final = (
     "BEGIN SELECT RAISE(ABORT, 'the story change log is append-only'); END",
     "CREATE TRIGGER IF NOT EXISTS log_never_removed BEFORE DELETE ON log "
     "BEGIN SELECT RAISE(ABORT, 'the story change log is append-only'); END",
-    # --- the page (ADR-0300 §3) ---
+    # --- the notes and the summary (ADR-0300 §3); the stored schema keeps ``pages`` ---
     "CREATE TABLE IF NOT EXISTS ticks(only INTEGER PRIMARY KEY CHECK (only = 0), "
     "value INTEGER NOT NULL)",
     "INSERT OR IGNORE INTO ticks(only, value) VALUES(0, 0)",
@@ -187,7 +187,7 @@ _SCHEMA: Final = (
 
 #: ADR-0289's layout, version 1, to this one. The member rows gain ``pending_since``,
 #: and every activation member is pending at the counter's start: no version of any
-#: page has been written, so none has taken one in (ADR-0300 §3:8). The page's tables
+#: summary has been written, so none has taken one in (ADR-0300 §3:8). The summary's tables
 #: are then created by :data:`_SCHEMA` like any other missing table.
 _MIGRATE_1: Final = (
     "ALTER TABLE members ADD COLUMN pending_since INTEGER",
@@ -210,7 +210,7 @@ _MIGRATE_2: Final = (
 #: note's resting activation becomes the activation it was written during, under a
 #: column renamed in place (SQLite renames it in the trigger guarding it as well); the
 #: index a move found notes by goes, as does the one understanding's flags were found
-#: by; and the current page gains its mark. The version log's trigger is dropped for
+#: by; and the summary gains its mark. The version log's trigger is dropped for
 #: the rewrite alone, and :data:`_SCHEMA` creates it again in the same transaction.
 _MIGRATE_3: Final = (
     "DROP INDEX IF EXISTS notes_resting",
@@ -224,7 +224,7 @@ _MIGRATE_3: Final = (
 def _migrate(conn: sqlite3.Connection, version: int) -> None:
     """Bring a file at an earlier layout ``version`` to this one, in the caller's transaction.
 
-    Version 1 holds no page, so its page tables are created by :data:`_SCHEMA` like any
+    Version 1 holds no summary, so its summary tables are created by :data:`_SCHEMA` like any
     other missing table; versions 2 and 3 hold one, which :func:`_migrate_3` rewrites.
 
     Raises:
@@ -242,20 +242,20 @@ def _migrate(conn: sqlite3.Connection, version: int) -> None:
         try:
             _migrate_3(conn)
         except (TypeError, ValueError, AttributeError, KeyError) as exc:
-            msg = f"a stored page record is not one the earlier layout wrote: {exc}"
+            msg = f"a stored summary record is not one the earlier layout wrote: {exc}"
             raise StoryStoreError(msg) from exc
 
 
 def _migrate_3(conn: sqlite3.Connection) -> None:
-    """Rewrite the page's records to this layout (ADR-0303 §4:8).
+    """Rewrite the notes' and the summary's records to this layout (ADR-0303 §4:8).
 
-    Every note is kept, and every version and the current page's text. What a version
+    Every note is kept, and every version and the summary's text. What a version
     recorded of each line's citations, its safety-net notes and its supersession marks
-    is dropped, and a version written before records no other story's page version.
-    The current page is marked where any of its lines was. A version's mark, which no
+    is dropped, and a version written before records no other story's summary version.
+    The summary is marked where any of its lines was. A version's mark, which no
     version recorded before, is set where a note it cited or added as a safety net is
-    marked, the rule the tidy-up marked a line by; the version that wrote the current
-    page is marked as that page is, so the two agree.
+    marked, the rule the tidy-up marked a line by; the version that wrote the
+    summary is marked as that summary is, so the two agree.
 
     Raises:
         StoryStoreError: If a stored record is not one the earlier layout wrote.
@@ -267,25 +267,25 @@ def _migrate_3(conn: sqlite3.Connection) -> None:
     for version, record in conn.execute("SELECT version, record FROM versions").fetchall():
         old = _decoded(_json_from, record)
         if not isinstance(old, dict):
-            msg = "a stored page version is not a record"
+            msg = "a stored summary version is not a record"
             raise StoryStoreError(msg)
         records[version] = old
     derived = {
         version: any(note in marked for note in _named_in(old)) for version, old in records.items()
     }
-    pages: dict[str, tuple[list[dict[str, Any]], bool]] = {}
+    summaries: dict[str, tuple[list[dict[str, Any]], bool]] = {}
     for story_id, version, lines in conn.execute(
         "SELECT story_id, version, lines FROM pages"
     ).fetchall():
         old_lines = _decoded(_json_from, lines)
         if not isinstance(old_lines, list) or not all(isinstance(x, dict) for x in old_lines):
-            msg = "a stored current page is not a list of lines"
+            msg = "a stored summary is not a list of lines"
             raise StoryStoreError(msg)
-        page_mark = derived.get(version, False) or any(
+        summary_mark = derived.get(version, False) or any(
             line.get("outside") is True for line in old_lines
         )
-        derived[version] = page_mark
-        pages[story_id] = (old_lines, page_mark)
+        derived[version] = summary_mark
+        summaries[story_id] = (old_lines, summary_mark)
     for version, old in records.items():
         kept = {
             "took_in_notes": old.get("took_in_notes", []),
@@ -297,12 +297,12 @@ def _migrate_3(conn: sqlite3.Connection) -> None:
         conn.execute(
             "UPDATE versions SET record = ? WHERE version = ?", (json.dumps(kept), version)
         )
-    for story_id, (old_lines, page_mark) in pages.items():
+    for story_id, (old_lines, summary_mark) in summaries.items():
         conn.execute(
             "UPDATE pages SET lines = ?, outside = ? WHERE story_id = ?",
             (
                 json.dumps([{"text": line.get("text")} for line in old_lines]),
-                int(page_mark),
+                int(summary_mark),
                 story_id,
             ),
         )
@@ -321,11 +321,11 @@ def _named_in(record: dict[str, Any]) -> list[object]:
         or not all(isinstance(line, list) for line in lines)
         or not isinstance(safety_net, list)
     ):
-        msg = "a stored page version's citations are not lists of note ids"
+        msg = "a stored summary version's citations are not lists of note ids"
         raise StoryStoreError(msg)
     named = [*(note for line in lines for note in line), *safety_net]
     if not all(type(note) is int for note in named):
-        msg = "a stored page version's citations are not lists of note ids"
+        msg = "a stored summary version's citations are not lists of note ids"
         raise StoryStoreError(msg)
     return named
 
@@ -480,7 +480,7 @@ def _unique[T](items: Sequence[T]) -> list[T]:
     return list(dict.fromkeys(items))
 
 
-# The page's argument checks and its cap rule. Held by each implementation rather
+# The notes' and the summary's argument checks and the cap rule. Held by each implementation rather
 # than in ``core/types.py``: they are this contract's admission rules, not semantics
 # intrinsic to the types they read (ADR-0016 §2), and the canonical fake holds its
 # own copy, which the conformance suite keeps in step with this one.
@@ -546,22 +546,22 @@ def _flag_text(flag: StoryFlagName) -> str:
     return json.dumps(flag.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
 
 
-def _page_draft(story_id: str, draft: object) -> StoryPageDraft:
-    """Snapshot a page write's draft by revalidation, as :func:`story_members` does.
+def _summary_draft(story_id: str, draft: object) -> StorySummaryDraft:
+    """Snapshot a summary write's draft by revalidation, as :func:`story_members` does.
 
     Raises:
-        ValueError: If it is not a :class:`StoryPageDraft`, a flag names the story
-            written, or a page version read names it (ADR-0303 §4:2).
+        ValueError: If it is not a :class:`StorySummaryDraft`, a flag names the story
+            written, or a summary version read names it (ADR-0303 §4:2).
     """
-    if not isinstance(draft, StoryPageDraft):
-        msg = f"a page write takes a StoryPageDraft, got {type(draft).__name__}"
+    if not isinstance(draft, StorySummaryDraft):
+        msg = f"a summary write takes a StorySummaryDraft, got {type(draft).__name__}"
         raise ValueError(msg)
-    snapshot = StoryPageDraft.model_validate(draft.model_dump())
+    snapshot = StorySummaryDraft.model_validate(draft.model_dump())
     if any(flag.story == story_id for flag in snapshot.flags):
-        msg = "a flag names another story, never the one whose page it is raised on"
+        msg = "a flag names another story, never the one whose summary it is raised on"
         raise ValueError(msg)
     if any(read.story == story_id for read in snapshot.read_pages):
-        msg = "a page version read is another story's, never the one whose page is written"
+        msg = "a summary version read is another story's, never the one whose summary is written"
         raise ValueError(msg)
     return snapshot
 
@@ -599,8 +599,8 @@ def _move_members(source: str, target: str, members: object) -> tuple[StoryMembe
     return named
 
 
-def _page_size(draft: StoryPageDraft) -> int:
-    """The characters a draft's lines count against ``STORY_PAGE_CAP_CHARS``: all of them.
+def _summary_size(draft: StorySummaryDraft) -> int:
+    """The characters a draft's lines count against ``STORY_SUMMARY_CAP_CHARS``: all of them.
 
     ADR-0303 §4:5: every line counts, the lines that came from the user's own notes
     included (§2:6).
@@ -649,7 +649,7 @@ class SqliteStoryStore:
             msg = f"failed to open story store at {self._path!r}: {exc}"
             raise StoryStoreError(msg) from exc
         try:
-            # Writing a new current page discards the old one's text (ADR-0300 §3:6),
+            # Writing a new summary discards the old one's text (ADR-0300 §3:6),
             # so the pages a replaced row frees are zeroed rather than left holding
             # it. Outside the transaction: a pragma issued inside one is ignored.
             conn.execute("PRAGMA secure_delete = ON")
@@ -798,16 +798,16 @@ class SqliteStoryStore:
 
     @staticmethod
     def _tick(conn: sqlite3.Connection) -> int:
-        """Advance the page's counter and return its new value (see the module docstring)."""
+        """Advance the store's one counter and return its new value (see the module docstring)."""
         conn.execute("UPDATE ticks SET value = value + 1 WHERE only = 0")
         return SqliteStoryStore._ticks(conn)
 
     @staticmethod
     def _ticks(conn: sqlite3.Connection) -> int:
-        """The page's counter as it stands."""
+        """The store's one counter as it stands."""
         row = conn.execute("SELECT value FROM ticks WHERE only = 0").fetchone()
         if row is None or type(row[0]) is not int or row[0] < 0:
-            msg = "the story store's page counter is missing or corrupt"
+            msg = "the story store's counter is missing or corrupt"
             raise StoryStoreError(msg)
         return int(row[0])
 
@@ -1379,7 +1379,7 @@ class SqliteStoryStore:
             decided = self._decide(conn, flag, outcome, stamp)
         return StoryOutcome(story_id=decided[0], logged=len(decided))
 
-    # --- the page: writes (ADR-0300 §3) --------------------------------------
+    # --- the notes and the summary: writes (ADR-0300 §3) ----------------------
 
     async def append_note(
         self,
@@ -1390,7 +1390,7 @@ class SqliteStoryStore:
         written_during: Identifier | None = None,
         outside: bool = False,
     ) -> StoryNoteOutcome:
-        """Write a note to a story's page, pending there (ADR-0303 §2, §4:7)."""
+        """Write a note to a story, pending there (ADR-0303 §2, §4:7)."""
         target = _checked_id(story_id)
         checked = _note_args(text, author=author, written_during=written_during, outside=outside)
         return await self._locked(self._append_note_sync, target, *checked)
@@ -1405,7 +1405,7 @@ class SqliteStoryStore:
     ) -> StoryNoteOutcome:
         at = self._now()
         with self._transaction("write a story note") as conn:
-            if refused := self._page_refusal(conn, story_id):
+            if refused := self._summary_refusal(conn, story_id):
                 return StoryNoteOutcome(refusal=refused)
             note_id = self._tick(conn)
             note = _decoded(
@@ -1440,73 +1440,79 @@ class SqliteStoryStore:
             ),
         )
 
-    def _page_refusal(self, conn: sqlite3.Connection, story_id: str) -> StoryPageRefusal | None:
-        """Refuse a page write to a story that is unknown or merged."""
+    def _summary_refusal(
+        self, conn: sqlite3.Connection, story_id: str
+    ) -> StorySummaryRefusal | None:
+        """Refuse a note or summary write to a story that is unknown or merged."""
         header = self._header(conn, story_id)
         if header is None:
-            return StoryPageRefusal(reason=StoryPageRefusalReason.UNKNOWN_STORY, story_id=story_id)
+            return StorySummaryRefusal(
+                reason=StorySummaryRefusalReason.UNKNOWN_STORY, story_id=story_id
+            )
         if header.merged_into is not None:
-            return StoryPageRefusal(
-                reason=StoryPageRefusalReason.MERGED_STORY,
+            return StorySummaryRefusal(
+                reason=StorySummaryRefusalReason.MERGED_STORY,
                 story_id=story_id,
                 merged_into=header.merged_into,
             )
         return None
 
-    async def write_page(
+    async def write_summary(
         self,
         story_id: Identifier,
-        draft: StoryPageDraft,
+        draft: StorySummaryDraft,
         *,
         as_of: int,
-    ) -> StoryPageOutcome:
-        """Write a new current page and its version, and no note (ADR-0303 §4)."""
+    ) -> StorySummaryOutcome:
+        """Write a new summary and its version, and no note (ADR-0303 §4)."""
         target = _checked_id(story_id)
-        checked = _page_draft(target, draft)
+        checked = _summary_draft(target, draft)
         basis = check_story_as_of(as_of)
-        return await self._locked(self._write_page_sync, target, checked, basis)
+        return await self._locked(self._write_summary_sync, target, checked, basis)
 
-    def _write_page_sync(
-        self, story_id: str, draft: StoryPageDraft, as_of: int
-    ) -> StoryPageOutcome:
+    def _write_summary_sync(
+        self, story_id: str, draft: StorySummaryDraft, as_of: int
+    ) -> StorySummaryOutcome:
         at = _instant_from(_to_micros(self._now()))
-        with self._transaction("write a story's page") as conn:
-            if refused := self._page_refusal(conn, story_id):
-                return StoryPageOutcome(refusal=refused)
+        with self._transaction("write a story's summary") as conn:
+            if refused := self._summary_refusal(conn, story_id):
+                return StorySummaryOutcome(refusal=refused)
             if as_of > self._ticks(conn):
-                msg = "a page's as_of is one no read of this store has returned"
+                msg = "a summary's as_of is one no read of this store has returned"
                 raise ValueError(msg)
             if refused := self._draft_refusal(conn, story_id, draft, as_of):
-                return StoryPageOutcome(refusal=refused)
-            version = self._page_writes(conn, story_id, draft, as_of, at)
-        return StoryPageOutcome(version=version)
+                return StorySummaryOutcome(refusal=refused)
+            version = self._summary_writes(conn, story_id, draft, as_of, at)
+        return StorySummaryOutcome(version=version)
 
     def _draft_refusal(
-        self, conn: sqlite3.Connection, story_id: str, draft: StoryPageDraft, as_of: int
-    ) -> StoryPageRefusal | None:
-        """The first of the page's refusals a draft meets after the story's own, if any.
+        self, conn: sqlite3.Connection, story_id: str, draft: StorySummaryDraft, as_of: int
+    ) -> StorySummaryRefusal | None:
+        """The first of the summary's refusals a draft meets after the story's own, if any.
 
-        ADR-0303 §4:4: ``page_moved_on``, a flag's unknown story, a page version read
+        ADR-0303 §4:4: ``summary_moved_on``, a flag's unknown story, a summary version read
         naming an unknown story (§4:2), ``not_held``, ``over_cap``.
 
         Raises:
-            ValueError: If a page version read names a version its story's log does not
+            ValueError: If a summary version read names a version its story's log does not
                 hold: an identity naming nothing is malformed (§4:2).
         """
         newest = conn.execute(
             "SELECT MAX(version) FROM versions WHERE story_id = ?", (story_id,)
         ).fetchone()[0]
         if newest is not None and newest > as_of:
-            return StoryPageRefusal(reason=StoryPageRefusalReason.PAGE_MOVED_ON, story_id=story_id)
+            return StorySummaryRefusal(
+                reason=StorySummaryRefusalReason.SUMMARY_MOVED_ON, story_id=story_id
+            )
         for flag in draft.flags:
             if flag.story is not None and self._header(conn, flag.story) is None:
-                return StoryPageRefusal(
-                    reason=StoryPageRefusalReason.UNKNOWN_STORY, story_id=flag.story
+                return StorySummaryRefusal(
+                    reason=StorySummaryRefusalReason.UNKNOWN_STORY, story_id=flag.story
                 )
         for read in draft.read_pages:
             if self._header(conn, read.story) is None:
-                return StoryPageRefusal(
-                    reason=StoryPageRefusalReason.UNKNOWN_STORY, story_id=read.story
+                return StorySummaryRefusal(
+                    reason=StorySummaryRefusalReason.UNKNOWN_STORY, story_id=read.story
                 )
             if (
                 conn.execute(
@@ -1515,17 +1521,17 @@ class SqliteStoryStore:
                 ).fetchone()
                 is None
             ):
-                msg = "a page version read names a version its story's log does not hold"
+                msg = "a summary version read names a version its story's log does not hold"
                 raise ValueError(msg)
         if refused := self._not_held(conn, story_id, draft):
             return refused
-        if _page_size(draft) > STORY_PAGE_CAP_CHARS:
-            return StoryPageRefusal(reason=StoryPageRefusalReason.OVER_CAP, story_id=story_id)
+        if _summary_size(draft) > STORY_SUMMARY_CAP_CHARS:
+            return StorySummaryRefusal(reason=StorySummaryRefusalReason.OVER_CAP, story_id=story_id)
         return None
 
     def _not_held(
-        self, conn: sqlite3.Connection, story_id: str, draft: StoryPageDraft
-    ) -> StoryPageRefusal | None:
+        self, conn: sqlite3.Connection, story_id: str, draft: StorySummaryDraft
+    ) -> StorySummaryRefusal | None:
         """The first thing a draft takes in that its story does not hold.
 
         ADR-0302 §7: the episodes taken in, then the notes taken in, each against what
@@ -1534,8 +1540,8 @@ class SqliteStoryStore:
         for activation in draft.took_in_episodes:
             member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
             if not self._holds(conn, story_id, member):
-                return StoryPageRefusal(
-                    reason=StoryPageRefusalReason.NOT_HELD,
+                return StorySummaryRefusal(
+                    reason=StorySummaryRefusalReason.NOT_HELD,
                     story_id=story_id,
                     activation=activation,
                 )
@@ -1544,20 +1550,20 @@ class SqliteStoryStore:
                 "SELECT 1 FROM notes WHERE id = ? AND story_id = ?", (note_id, story_id)
             ).fetchone()
             if row is None:
-                return StoryPageRefusal(
-                    reason=StoryPageRefusalReason.NOT_HELD, story_id=story_id, note=note_id
+                return StorySummaryRefusal(
+                    reason=StorySummaryRefusalReason.NOT_HELD, story_id=story_id, note=note_id
                 )
         return None
 
-    def _page_writes(
+    def _summary_writes(
         self,
         conn: sqlite3.Connection,
         story_id: str,
-        draft: StoryPageDraft,
+        draft: StorySummaryDraft,
         as_of: int,
         at: datetime,
-    ) -> StoryPageVersion:
-        """Take in, replace the page and append the version, writing no note (ADR-0303 §4)."""
+    ) -> StorySummaryVersion:
+        """Take in, replace the summary and append the version, writing no note (ADR-0303 §4)."""
         took_notes = [
             note_id
             for note_id in _unique(draft.took_in_notes)
@@ -1576,7 +1582,7 @@ class SqliteStoryStore:
                 (story_id, _ACTIVATION, activation, as_of),
             ).rowcount
         ]
-        version = StoryPageVersion(
+        version = StorySummaryVersion(
             version=self._tick(conn),
             written_at=at,
             took_in_notes=tuple(took_notes),
@@ -1732,20 +1738,20 @@ class SqliteStoryStore:
             ).fetchall()
         return tuple(_decoded(_header_from, row) for row in rows)
 
-    # --- the page: reads (ADR-0300 §3) ---------------------------------------
+    # --- the notes and the summary: reads (ADR-0300 §3) -----------------------
 
-    async def current_page(self, story_id: Identifier) -> StoryPageState | None:
-        """Read a story's current page with the notes and episodes pending on it."""
+    async def current_summary(self, story_id: Identifier) -> StorySummaryState | None:
+        """Read a story's summary with the notes and episodes pending on it."""
         target = _checked_id(story_id)
-        return await self._locked(self._current_page_sync, target)
+        return await self._locked(self._current_summary_sync, target)
 
-    def _current_page_sync(self, story_id: str) -> StoryPageState | None:
-        with self._transaction("read a story's page", immediate=False) as conn:
+    def _current_summary_sync(self, story_id: str) -> StorySummaryState | None:
+        with self._transaction("read a story's summary", immediate=False) as conn:
             header = self._header(conn, story_id)
             if header is None:
                 return None
             as_of = self._ticks(conn)
-            page_row = conn.execute(
+            summary_row = conn.execute(
                 "SELECT version, written_at, lines, outside FROM pages WHERE story_id = ?",
                 (story_id,),
             ).fetchone()
@@ -1759,12 +1765,12 @@ class SqliteStoryStore:
                 "AND pending_since IS NOT NULL ORDER BY position",
                 (story_id, _ACTIVATION),
             ).fetchall()
-        page = None if page_row is None else _decoded(_page_from, page_row)
+        summary = None if summary_row is None else _decoded(_summary_from, summary_row)
         notes = tuple(_decoded(_note_from, row) for row in note_rows)
         return _decoded(
-            lambda: StoryPageState(
+            lambda: StorySummaryState(
                 story=header,
-                page=page,
+                summary=summary,
                 pending_notes=notes,
                 pending_episodes=tuple(row[0] for row in episode_rows),
                 as_of=as_of,
@@ -1804,13 +1810,13 @@ class SqliteStoryStore:
             )
         )
 
-    async def page_versions(
+    async def summary_versions(
         self,
         story_id: Identifier,
         *,
         cursor: int | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
-    ) -> StoryPageVersionList | None:
+    ) -> StorySummaryVersionList | None:
         """Read a page of a story's version log, oldest first."""
         target = _checked_id(story_id)
         check_story_page(cursor, limit)
@@ -1818,8 +1824,8 @@ class SqliteStoryStore:
 
     def _versions_sync(
         self, story_id: str, cursor: int | None, limit: int
-    ) -> StoryPageVersionList | None:
-        with self._transaction("read a story's page versions", immediate=False) as conn:
+    ) -> StorySummaryVersionList | None:
+        with self._transaction("read a story's summary versions", immediate=False) as conn:
             header = self._header(conn, story_id)
             if header is None:
                 return None
@@ -1831,7 +1837,7 @@ class SqliteStoryStore:
         versions = [_decoded(_version_from, row) for row in rows[:limit]]
         more = len(rows) > limit
         return _decoded(
-            lambda: StoryPageVersionList(
+            lambda: StorySummaryVersionList(
                 story=header,
                 versions=tuple(versions),
                 next_cursor=versions[-1].version if more else None,
@@ -1897,9 +1903,9 @@ def _json_from(value: object) -> object:
     return json.loads(value)
 
 
-def _page_from(row: Sequence[Any]) -> StoryCurrentPage:
-    """Decode a stored current page: its version, instant, lines and mark."""
-    return StoryCurrentPage.model_validate(
+def _summary_from(row: Sequence[Any]) -> StorySummary:
+    """Decode a stored summary: its version, instant, lines and mark."""
+    return StorySummary.model_validate(
         {
             "version": row[0],
             "written_at": _instant_from(row[1]),
@@ -1909,12 +1915,12 @@ def _page_from(row: Sequence[Any]) -> StoryCurrentPage:
     )
 
 
-def _version_from(row: Sequence[Any]) -> StoryPageVersion:
+def _version_from(row: Sequence[Any]) -> StorySummaryVersion:
     """Decode one stored version: its number, instant and identity record."""
     record = _json_from(row[2])
     if not isinstance(record, dict):
-        msg = "a stored page version is not a record"
+        msg = "a stored summary version is not a record"
         raise ValueError(msg)
-    return StoryPageVersion.model_validate(
+    return StorySummaryVersion.model_validate(
         {**record, "version": row[0], "written_at": _instant_from(row[1])}
     )

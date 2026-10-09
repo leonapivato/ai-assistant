@@ -16,7 +16,7 @@ Four things the engine adds to the story store, and nothing else:
 * **The payload fit** (:func:`fitted`). A page too large for the contract's payload
   limit is re-read at a smaller page size, so the caller gets the largest page that
   fits with a cursor resuming after it, rather than a refusal.
-* **The owner's page** (:func:`owner_page`, ADR-0303 §10:2). A story's current page
+* **The owner's summary** (:func:`owner_summary`, ADR-0303 §10:2). A story's summary
   and its mark, or that it was withheld, and its newest notes with whether each is
   pending, under ADR-0303 §3's default for the owner as reader: decided by
   :mod:`~ai_assistant.orchestration.story_privacy`, the one statement of that rule.
@@ -40,20 +40,20 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     StoryMemberView,
-    StoryPageView,
-    StoryPageViewNote,
     StoryRefusal,
     StoryRefusalReason,
+    StorySummaryView,
+    StorySummaryViewNote,
     StoryView,
 )
 from ai_assistant.orchestration.payloads import canonical_payload, check_payload
-from ai_assistant.orchestration.story_privacy import PageVisibility, behind
+from ai_assistant.orchestration.story_privacy import SummaryVisibility, behind
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
-    from ai_assistant.core.types import StoryNote, StoryPageState
+    from ai_assistant.core.types import StoryNote, StorySummaryState
 
 
 def episode_address(activation_id: str) -> str:
@@ -144,32 +144,32 @@ async def resolved_view(
     )
 
 
-#: How many of a story's notes the owner's page view lists, newest first, where its
+#: How many of a story's notes the owner's summary view lists, newest first, where its
 #: caller names no bound (ADR-0303 §10:2). The composition root wires its own constant,
-#: ``STORY_PAGE_VIEW_NOTES``, into the engine; this is the default the canonical fake
+#: ``STORY_SUMMARY_VIEW_NOTES``, into the engine; this is the default the canonical fake
 #: engine and an engine built without one read.
-DEFAULT_STORY_PAGE_VIEW_NOTES: Final = 20
+DEFAULT_STORY_SUMMARY_VIEW_NOTES: Final = 20
 
-#: How many times the owner's page is read before the reads are given up as never
-#: agreeing. Each attempt brackets the notes between two reads of the page's state, and
+#: How many times the owner's summary is read before the reads are given up as never
+#: agreeing. Each attempt brackets the notes between two reads of the summary's state, and
 #: one that a write lands inside is read again. The window is a few reads long, so a
 #: store written inside it this many times running is answered with the store error the
 #: read already declares, rather than with a view no one read.
-_PAGE_READS: Final = 5
+_SUMMARY_READS: Final = 5
 
 
-async def owner_page(
+async def owner_summary(
     stories: StoryStore,
     memory: MemoryStore,
     story_id: str,
     *,
-    notes: int = DEFAULT_STORY_PAGE_VIEW_NOTES,
-) -> StoryPageView | None:
-    """Read a story's page as the owner is shown it (ADR-0303 §10:2).
+    notes: int = DEFAULT_STORY_SUMMARY_VIEW_NOTES,
+) -> StorySummaryView | None:
+    """Read a story's summary as the owner is shown it (ADR-0303 §10:2).
 
-    The current page and what is pending on it are one read of the story store; the
+    The summary and what is pending on it are one read of the story store; the
     story's notes are then read page by page, and the newest ``notes`` of them listed,
-    each with whether it is pending. The notes are read between two reads of the page's
+    each with whether it is pending. The notes are read between two reads of the summary's
     state, and the view is built only where the two are the same read, ``as_of``
     included: every write that adds, carries or takes in a note advances the counter
     ``as_of`` reports (ADR-0300 §3:8), so two reads naming one ``as_of`` bracket a
@@ -178,44 +178,44 @@ async def owner_page(
     a wrong answer.
 
     **Under ADR-0303 §3's default, for the owner as reader.** The owner may be shown a
-    record placed for the owner alone, so every note is shown (§3:9). The page is shown
+    record placed for the owner alone, so every note is shown (§3:9). The summary is shown
     only where everything behind it may be (§3:11): the version that wrote it is walked
     (:func:`~ai_assistant.orchestration.story_privacy.behind`), and every episode behind
     it is looked up in ``memory``, where the owner may be shown every record the store
     holds, an open one included, as the owner's direct inspection reads every record
     (ADR-0275 §7, §10). An episode no longer there, forgotten or expired, withholds the
-    page (§3:12), as does a version the walk cannot read. The version log is
-    append-only, so walking it after the bracketed reads answers for the page they read.
+    summary (§3:12), as does a version the walk cannot read. The version log is
+    append-only, so walking it after the bracketed reads answers for the summary they read.
 
     Returns:
-        The page, or ``None`` where the store holds no such story. A merged story's
+        The summary, or ``None`` where the store holds no such story. A merged story's
         carries its header alone.
 
     Raises:
         StoryStoreError: If the story store cannot be read, or the story was written
-            between every one of :data:`_PAGE_READS` bracketed reads.
+            between every one of :data:`_SUMMARY_READS` bracketed reads.
         MemoryStoreError: If an episode cannot be read.
     """
-    for _ in range(_PAGE_READS):
-        state = await stories.current_page(story_id)
+    for _ in range(_SUMMARY_READS):
+        state = await stories.current_summary(story_id)
         if state is None:
             return None
         if state.story.merged_into is not None:
-            return StoryPageView(story=state.story)
+            return StorySummaryView(story=state.story)
         held = await _all_notes(stories, story_id)
-        if await stories.current_page(story_id) == state:
-            shown = state.page is not None and await _owner_may_see(
-                stories, memory, story_id, state.page.version
+        if await stories.current_summary(story_id) == state:
+            shown = state.summary is not None and await _owner_may_see(
+                stories, memory, story_id, state.summary.version
             )
-            return _page_view(state, held, notes=notes, shown=shown)
-    msg = "the story was written while its page was read, every time it was read"
+            return _summary_view(state, held, notes=notes, shown=shown)
+    msg = "the story was written while its summary was read, every time it was read"
     raise StoryStoreError(msg)
 
 
 async def _owner_may_see(
     stories: StoryStore, memory: MemoryStore, story_id: str, version: int
 ) -> bool:
-    """Whether the owner may be shown the page ``version`` wrote (ADR-0303 §3:11)."""
+    """Whether the owner may be shown the summary ``version`` wrote (ADR-0303 §3:11)."""
     standing = await behind(stories, story_id, version)
     if not standing.complete:
         return False
@@ -225,26 +225,26 @@ async def _owner_may_see(
         else {}
     )
     episodes = [record for record in found.values() if isinstance(record, EpisodicMemory)]
-    return PageVisibility.of(episodes, owner_notes=True).page(standing)
+    return SummaryVisibility.of(episodes, owner_notes=True).summary(standing)
 
 
-def _page_view(
-    state: StoryPageState, held: list[StoryNote], *, notes: int, shown: bool
-) -> StoryPageView:
-    """The owner's view of a page read as ``state`` stood, with every note it held."""
-    page = state.page
-    visibility = PageVisibility(activations=frozenset(), owner_notes=True)
+def _summary_view(
+    state: StorySummaryState, held: list[StoryNote], *, notes: int, shown: bool
+) -> StorySummaryView:
+    """The owner's view of a summary read as ``state`` stood, with every note it held."""
+    summary = state.summary
+    visibility = SummaryVisibility(activations=frozenset(), owner_notes=True)
     newest = [note for note in reversed(held) if visibility.note(note)][:notes]
     pending = {note.note_id for note in state.pending_notes}
-    return StoryPageView(
+    return StorySummaryView(
         story=state.story,
-        version=None if page is None else page.version,
-        tidied_at=None if page is None else page.written_at,
-        lines=page.lines if shown and page is not None else (),
-        outside=page.outside if shown and page is not None else False,
-        withheld=page is not None and not shown,
+        version=None if summary is None else summary.version,
+        tidied_at=None if summary is None else summary.written_at,
+        lines=summary.lines if shown and summary is not None else (),
+        outside=summary.outside if shown and summary is not None else False,
+        withheld=summary is not None and not shown,
         notes=tuple(
-            StoryPageViewNote(note=note, pending=note.note_id in pending) for note in newest
+            StorySummaryViewNote(note=note, pending=note.note_id in pending) for note in newest
         ),
         more_notes=max(0, len(held) - len(newest)),
     )
