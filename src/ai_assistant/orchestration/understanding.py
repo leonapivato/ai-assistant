@@ -318,11 +318,11 @@ _STORIES_UNREADABLE: Final = "missing: the stories could not be read, so none is
 
 #: A short view's parts where they render nothing.
 _NO_LINES: Final = "missing: no line of this story's summary is shown"
-#: A summary written but withheld from this pass's audience (ADR-0303 §3:11): the reader is
-#: told a summary exists that it is not shown, and nothing of it, its mark included.
+#: A summary written but withheld from this pass's audience (ADR-0304 §4:1, §4:2): the reader
+#: is told a summary exists that this audience may not be shown, and nothing of it, its mark
+#: included. Nothing behind the summary is the reason (§4:3).
 _SUMMARY_WITHHELD: Final = (
-    "missing: this story has a summary, withheld here because not everything behind it may "
-    "be shown to this audience"
+    "missing: this story has a summary, withheld here because this audience may not be shown it"
 )
 _NO_NOTES: Final = "missing: no note is waiting to be folded into this story's summary"
 _NO_EPISODES: Final = "missing: no episode of this story is shown"
@@ -905,7 +905,7 @@ class UnderstandingStage:
         The summary and each note are attributed by their records — the summary as the
         tidy-up's and marked or not, a note by who wrote it and whether it is marked —
         and never by their text (ADR-0303 §3:7). A withheld summary is said to be withheld,
-        and nothing of it is rendered (§3:11). The episodes take no label
+        and nothing of it is rendered (ADR-0304 §4:2). The episodes take no label
         (§6:5), and render through the projection with an outside input's text not
         admitted: ADR-0284 §8:5 admits it in the episode window and the recalled
         section alone.

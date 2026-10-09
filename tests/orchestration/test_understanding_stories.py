@@ -217,7 +217,10 @@ async def test_the_candidates_render_under_s_labels_attributed_by_their_records(
 
 
 async def test_a_withheld_summary_is_said_to_be_withheld_and_nothing_of_it_is_rendered() -> None:
-    """ADR-0303 §3:11: the reader is told a summary was withheld, and is shown none of it."""
+    """ADR-0304 §4:2: the reader is told a summary was withheld, and is shown none of it.
+
+    The reason it is told is its audience's, never what stands behind the summary (§4:3).
+    """
     model = FakeModelProvider(_proposal())
     withheld = ShortView(
         story_id="story:withheld",
@@ -232,6 +235,8 @@ async def test_a_withheld_summary_is_said_to_be_withheld_and_nothing_of_it_is_re
     first, second = _payload(model)["stories"]
     assert first["summary"].startswith("missing:")
     assert "withheld" in first["summary"]
+    assert "this audience may not be shown it" in first["summary"]
+    assert "behind" not in first["summary"]
     assert "summary_outside_content" not in first
     # The notes are decided on their own (§3:9), and a story with no summary is not withheld.
     assert len(first["newest_notes"]) == 2
