@@ -162,6 +162,21 @@ read no page, so a mark that came only from a page whose content has dropped off
 off with it. The run starts, and passes over a story to which only outside content has
 come, exactly as before (ADR-0303 §5:8, §5:9).
 
+### 4a. What the tidy-up's instruction carries
+
+The two sentences below are in the running instruction today. ADR-0303 retired the
+clauses they came from, ADR-0300 §5:9 and §4:4, for the machinery around them, which
+was supersession marks and line citations. It did not retire the points themselves,
+which the owner agreed in the 2026-10-06 and 2026-10-07 design. This section states them
+again so that this text and the instruction agree.
+
+> **Normative.** The tidy-up's instruction states that a vague later remark leaves an
+> earlier statement of the user's standing: only the user's later, clear words replace
+> it.
+
+> **Normative.** The tidy-up's instruction states that a line resting on outside content
+> says only what its source reported, and does not blend sources in one line.
+
 ### 5. The store
 
 > **Normative.** `StoryPageDraft` and `StoryPageVersion` each gain `rebuilt`, a strict
@@ -291,6 +306,7 @@ that describe `read_pages` as what a run read may be corrected in lane 1.
 | ADR-0303 §3:4, §3:7, §3:11, §3:12 | Nothing: the mark's rule, the page reaching a model as quoted data, and the privacy test stand; what a run reads and what stands behind a page are what change beneath them |
 | ADR-0303 §4:2, §5:6, §5:8, §5:9, §8:1, §8:3 | Nothing: a named page version's check, the hub's checks, the outside-only rule, the interim run's start, one input's many links and the tidy-up's flags stand |
 | ADR-0300 §3:8, §5:2 | As this ADR's header states |
+| ADR-0300 §4:4, §5:9 | Retired whole by ADR-0303, as before. §4a restates the two instruction sentences they carried as this decision's own clauses, without their marks or supersession records |
 | ADR-0300 §6:5, §6:7, §6:8 | Nothing: the `S` label scheme, the links and a story label's defects stand; an `S` label also resolves outside `story_labels` (§7) |
 | ADR-0276 §2:5 | As this ADR's header states |
 | ADR-0276 §3:4, §6:2, §6:4 | Nothing: a label outside the rendered sequences resolves to nothing, and the one repair and its recording stand |
@@ -306,8 +322,9 @@ that describe `read_pages` as what a run read may be corrected in lane 1.
 **What becomes possible.** A mark says something again: a page is marked where something
 outside reached it through what its runs read, and a story shown beside it for a flag no
 longer counts. Forgetting a conversation withholds only the pages that took it in, and
-each of those is shown again once its next tidy-up rebuilds it, with the forgotten
-content gone from the page and from what the tidy-up's model is shown. The walk behind a
+each of those is shown again once its next tidy-up rebuilds it. The forgotten episodes'
+content is then gone from the page and from what the tidy-up's model is shown, except
+what a note carries (*What stays open*). The walk behind a
 page reads one story's log. Two different matters sharing an input stop costing two
 flags by the instruction's wording. A phrase naming a matter records which matter, and
 the third of understanding passes that paid a repair for it no longer do.
@@ -322,9 +339,19 @@ a page whose walk no longer reaches that story.
 
 **What stays open.**
 
-- **Forgetting**, the rest of it: an immediate rebuild on forgetting, what forgetting
-  does to notes, to a `story` or `episode` referent's excerpt in a later activation's
-  record, and to anything else that copied text. The learning design (ADR-0300).
+- **Forgetting does not reach notes, and a rebuild does not make forgetting complete.**
+  A note is never rewritten or removed (ADR-0300 §3:1, ADR-0303 §2:3), and the store
+  enforces that. The activation a note was written during is history that no rule reads
+  (ADR-0303 §2:4). So a rebuild after a conversation is forgotten drops the forgotten
+  episodes, but still reads every note the story holds, including one written during a
+  forgotten activation. Before the phases, the only notes are the user's own direct
+  notes, which record no activation, so nothing is affected today. Once planning writes
+  notes, a note written during a forgotten activation carries what it says into the
+  rebuilt page. What forgetting does to notes belongs to the learning design with the
+  rest of forgetting.
+- **Forgetting**, the rest of it: an immediate rebuild on forgetting, and what
+  forgetting does to a `story` or `episode` referent's excerpt in a later activation's
+  record and to anything else that copied text. The learning design (ADR-0300).
 - **Privacy** beyond ADR-0303 §3's default.
 - **Whether the flag still finds duplicates** that only the shared episode connected,
   once the instruction says sharing is not resemblance: the next acceptance run shows it.
