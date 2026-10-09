@@ -6665,13 +6665,14 @@ class Engine:
         self,
         story_id: Identifier,
         to: Identifier,
-        members: Sequence[StoryMember],
+        members: Sequence[StoryMember] = (),
         *,
         notes: Sequence[StoryNoteId] = (),
     ) -> StoryOutcome:
-        """Move activation members from one story to another, as the owner (ADR-0300 §3:14).
+        """Move activation members, notes, or both, as the owner (ADR-0300 §3:14).
 
-        The notes named go with them, as ADR-0303 §6 and §10:1 state.
+        The notes named go with them, as ADR-0303 §6 and §10:1 state, or on their
+        own where no member is named (ADR-0304 §9).
         """
         self._reject_if_closing()
         source = identifier(story_id, name="story_id")

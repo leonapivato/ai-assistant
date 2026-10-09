@@ -4,7 +4,8 @@ The triad's third artifact. A non-persistent store over dictionaries, holding ev
 clause the SQLite store holds and refusing everything it refuses, so a consumer
 verified against this one is verified against the contract rather than against a
 convenience: the clean view and the change log, the five membership reads, merge,
-split and move with their exceptions and the notes they carry, the loop refusal,
+split and move with their exceptions and the notes they carry, logged on both stories
+by a split or a move (ADR-0304 §9), a move of notes alone, the loop refusal,
 each story's notes and summary — its summary with its mark, its version log and
 what is pending on it — and the decisions on flags, written as ``decided`` lines
 with the change they record (ADR-0302 §§2-4), ``left`` or ``not_applied`` where none
@@ -366,6 +367,7 @@ class FakeStoryStore:
         member: StoryMember | None = None,
         other: str | None = None,
         decision: tuple[StoryFlagName, StoryDecision] | None = None,
+        note: int | None = None,
     ) -> int:
         state.sequence += 1
         state.log.append(
@@ -380,6 +382,7 @@ class FakeStoryStore:
                 at=stamp.at,
                 answers=None if decision is None else decision[0],
                 outcome=None if decision is None else decision[1],
+                note=note,
             )
         )
         return state.sequence
@@ -458,6 +461,24 @@ class FakeStoryStore:
             held = state.notes[note_id]
             held.story_id = to
             held.pending_since = _tick(state)
+
+    def _carry_logged(
+        self, state: _State, note_ids: Sequence[int], source: str, target: str, stamp: _Stamp
+    ) -> int:
+        """Carry notes a split or a move names, logging each on both stories (ADR-0304 §9:6).
+
+        Each note is logged ``note_moved_out`` on ``source`` and ``note_moved_in`` on
+        ``target``, in note order, and returns how many lines that appended.
+        """
+        for note_id in note_ids:
+            self._append(
+                state, source, StoryChange.NOTE_MOVED_OUT, stamp, other=target, note=note_id
+            )
+            self._append(
+                state, target, StoryChange.NOTE_MOVED_IN, stamp, other=source, note=note_id
+            )
+        self._carry(state, note_ids, target)
+        return 2 * len(note_ids)
 
     @staticmethod
     def _named_notes(state: _State, story_id: str, named: Sequence[int]) -> list[int]:
@@ -702,29 +723,30 @@ class FakeStoryStore:
         for member in moved:
             self._remove(state, source, member, stamp)
             self._add(state, split_off, member, stamp)
-        self._carry(state, carried, split_off)
+        noted = self._carry_logged(state, carried, source, split_off, stamp)
         decided = [] if flag is None else self._decide(state, flag, StoryDecision.SPLIT, stamp)
-        return StoryOutcome(story_id=split_off, logged=3 + 2 * len(moved) + len(decided))
+        return StoryOutcome(story_id=split_off, logged=3 + 2 * len(moved) + noted + len(decided))
 
     async def move(  # noqa: PLR0913 — ADR-0302 §4:2 and ADR-0303 §6:2 add keywords to this operation
         self,
         story_id: Identifier,
         to: Identifier,
-        members: Sequence[StoryMember],
+        members: Sequence[StoryMember] = (),
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
         notes: Sequence[StoryNoteId] = (),
         answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
-        """Move activation members from one story to another (ADR-0300 §3, ADR-0303 §6)."""
+        """Move activation members, notes, or both (ADR-0300 §3, ADR-0303 §6, ADR-0304 §9)."""
         source = _checked_id(story_id)
         target = _checked_id(to)
         named = _move_members(source, target, members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
         named_notes = story_note_ids(notes)
         flag = _answers(answers)
-        if not named:
+        # A move naming no member is a note move where it names a note (ADR-0304 §9:1-§9:2).
+        if not named and not named_notes:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         state = self._state
         if refused := self._story_refusal(state, source) or self._story_refusal(state, target):
@@ -740,6 +762,10 @@ class FakeStoryStore:
         moving = set(named)
         moved = [member for member in held if member in moving]
         carried = self._named_notes(state, source, named_notes)
+        if not named and not carried:
+            return StoryOutcome(
+                refusal=StoryRefusal(reason=StoryRefusalReason.NO_NOTES, story_id=source)
+            )
         if flag is not None and (refused := self._flag_refusal(state, flag)):
             return StoryOutcome(refusal=refused)
         stamp = self._stamp(checked_actor, checked_trigger)
@@ -751,7 +777,7 @@ class FakeStoryStore:
                 continue
             self._add(state, target, member, stamp)
             logged += 1
-        self._carry(state, carried, target)
+        logged += self._carry_logged(state, carried, source, target, stamp)
         if flag is not None:
             logged += len(self._decide(state, flag, StoryDecision.MOVED, stamp))
         return StoryOutcome(story_id=target, logged=logged)

@@ -31,6 +31,12 @@ refusals, checked after every check the operation makes and writing nothing when
 refused, one writer only answering a flag (§4); and the summary write refused over what
 its story does not hold, in its fixed place in the order (§7).
 
+And ADR-0304 §9: a move of notes alone, carrying exactly the named notes the story
+moved from holds and keeping every field of each, refused ``no_members`` where it
+names no note either and ``no_notes`` where the story holds none it names, in its
+fixed place in the order; and each note a split or a move carries logged on both
+stories, ``note_moved_out`` and ``note_moved_in``, where a merge logs none.
+
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
 """
@@ -120,6 +126,15 @@ def shape(lines: list[StoryLogLine]) -> list[tuple[StoryChange, str | None]]:
         target = line.member.id if line.member is not None else line.other_story
         named.append((line.change, target))
     return named
+
+
+def carried(lines: list[StoryLogLine]) -> list[tuple[StoryChange, int | None, str | None]]:
+    """Each line recording a carried note: its change, the note and the other story."""
+    return [
+        (line.change, line.note, line.other_story)
+        for line in lines
+        if line.change in {StoryChange.NOTE_MOVED_OUT, StoryChange.NOTE_MOVED_IN}
+    ]
 
 
 def refused(outcome: StoryOutcome, reason: StoryRefusalReason) -> None:
@@ -1375,9 +1390,17 @@ class StoryStoreContract:
             notes=[named.note_id, on_y.note_id, foreign.note_id, 999_999, on_y.note_id],
         )
         assert outcome.refusal is None
-        assert outcome.logged == 5
+        assert outcome.logged == 5 + 4
         split_off = outcome.story_id
         assert split_off is not None
+        assert carried(await logged(store, source)) == [
+            (StoryChange.NOTE_MOVED_OUT, on_y.note_id, split_off),
+            (StoryChange.NOTE_MOVED_OUT, named.note_id, split_off),
+        ]
+        assert carried(await logged(store, split_off)) == [
+            (StoryChange.NOTE_MOVED_IN, on_y.note_id, source),
+            (StoryChange.NOTE_MOVED_IN, named.note_id, source),
+        ]
         assert await notes_of(store, split_off) == [on_y, named]
         assert await notes_of(store, source) == [on_x, kept]
         assert await notes_of(store, elsewhere) == [foreign]
@@ -1391,8 +1414,11 @@ class StoryStoreContract:
         on_x = await noted(store, source, "On x.", on="x")
         outcome = await store.split(source, [act("x")], actor=_OWNER)
         assert outcome.story_id is not None
+        assert outcome.logged == 5
         assert await notes_of(store, outcome.story_id) == []
         assert await notes_of(store, source) == [on_x]
+        assert carried(await logged(store, source)) == []
+        assert carried(await logged(store, outcome.story_id)) == []
 
     @pytest.mark.parametrize("notes", ["1", [0], [True], [1.0], 3])
     async def test_a_split_or_a_move_naming_malformed_notes_is_a_value_error(
@@ -1429,17 +1455,27 @@ class StoryStoreContract:
         )
         assert outcome.refusal is None
         assert outcome.story_id == target
-        assert outcome.logged == 3
+        assert outcome.logged == 3 + 4
         assert await held(store, source) == [act("y")]
         assert await held(store, target) == [act("both"), act("t"), act("x")]
         after_view = await store.view(target)
         assert after_view is not None
         assert after_view.entries[0] == target_view.entries[0]
-        assert shape(await logged(store, source))[-2:] == [
+        assert shape(await logged(store, source))[-4:] == [
             (StoryChange.REMOVED, "x"),
             (StoryChange.REMOVED, "both"),
+            (StoryChange.NOTE_MOVED_OUT, target),
+            (StoryChange.NOTE_MOVED_OUT, target),
         ]
-        assert shape(await logged(store, target))[-1:] == [(StoryChange.ADDED, "x")]
+        assert shape(await logged(store, target))[-3:] == [
+            (StoryChange.ADDED, "x"),
+            (StoryChange.NOTE_MOVED_IN, source),
+            (StoryChange.NOTE_MOVED_IN, source),
+        ]
+        assert carried(await logged(store, source)) == [
+            (StoryChange.NOTE_MOVED_OUT, on_y.note_id, target),
+            (StoryChange.NOTE_MOVED_OUT, theirs.note_id, target),
+        ]
         assert await notes_of(store, source) == [on_x, on_both]
         assert await notes_of(store, target) == [on_y, theirs, foreign]
         state = await state_of(store, target)
@@ -1481,10 +1517,19 @@ class StoryStoreContract:
         assert outcome.refusal.member == act("nope")
         assert await everything(store) == before
 
-    async def test_a_move_naming_no_member_is_refused(self, store: StoryStore) -> None:
+    async def test_a_move_naming_no_member_and_no_note_is_refused(self, store: StoryStore) -> None:
+        """ADR-0304 §9:2: ``no_members``, before the stories are looked at."""
         source = await made(store, act("x"))
         target = await made(store, act("t"))
+        await noted(store, source, "On x.", on="x")
+        before = await everything(store)
         refused(await store.move(source, target, [], actor=_OWNER), StoryRefusalReason.NO_MEMBERS)
+        refused(await store.move(source, target, actor=_OWNER), StoryRefusalReason.NO_MEMBERS)
+        refused(
+            await store.move("story:nowhere", target, actor=_OWNER, notes=()),
+            StoryRefusalReason.NO_MEMBERS,
+        )
+        assert await everything(store) == before
 
     async def test_a_move_to_or_from_an_unknown_or_merged_story_is_refused(
         self, store: StoryStore
@@ -1518,6 +1563,153 @@ class StoryStoreContract:
         with pytest.raises(ValueError, match="another"):
             await store.move(source, source, [act("x")], actor=_OWNER)
         assert await everything(store) == before
+
+    # --- a note moves on its own (ADR-0304 §9) ---------------------------------
+
+    async def test_a_note_move_carries_exactly_the_held_notes_it_names(
+        self, store: StoryStore
+    ) -> None:
+        """§9:1, §9:6, §9:8: no member moves, and each note keeps every field of its own."""
+        source = await made(store, act("x"), act("y"))
+        target = await made(store, act("t"))
+        elsewhere = await made(store, act("z"))
+        on_x = await noted(store, source, "On x.", on="x", outside=True)
+        theirs = await noted(store, source, "The user's.", author=StoryNoteAuthor.OWNER)
+        on_y = await noted(store, source, "On y.", on="y")
+        foreign = await noted(store, elsewhere, "Elsewhere.", on="z")
+        read = await state_of(store, source)
+        await written(
+            store,
+            source,
+            draft(line("Summary."), took_in_notes=(on_x.note_id,), took_in_episodes=("x", "y")),
+            as_of=read.as_of,
+        )
+        source_members = await held(store, source)
+        target_members = await held(store, target)
+        outcome = await store.move(
+            source,
+            target,
+            actor=StoryActor.PLANNING,
+            trigger="act-7",
+            notes=[on_y.note_id, on_x.note_id, foreign.note_id, 999_999, on_x.note_id],
+        )
+        assert outcome == StoryOutcome(story_id=target, logged=4)
+        assert await held(store, source) == source_members
+        assert await held(store, target) == target_members
+        assert await notes_of(store, source) == [theirs]
+        assert await notes_of(store, target) == [on_x, on_y]
+        assert await notes_of(store, elsewhere) == [foreign]
+        state = await state_of(store, target)
+        assert state.pending_notes == (on_x, on_y)
+        assert state.pending_episodes == ("t",)
+        assert (await state_of(store, source)).pending_notes == (theirs,)
+        source_lines = (await logged(store, source))[-2:]
+        target_lines = (await logged(store, target))[-2:]
+        assert carried(source_lines) == [
+            (StoryChange.NOTE_MOVED_OUT, on_x.note_id, target),
+            (StoryChange.NOTE_MOVED_OUT, on_y.note_id, target),
+        ]
+        assert carried(target_lines) == [
+            (StoryChange.NOTE_MOVED_IN, on_x.note_id, source),
+            (StoryChange.NOTE_MOVED_IN, on_y.note_id, source),
+        ]
+        for each in (*source_lines, *target_lines):
+            assert each.member is None
+            assert each.actor is StoryActor.PLANNING
+            assert each.trigger == "act-7"
+            assert each.at == STORY_AT
+            assert (each.answers, each.outcome) == (None, None)
+
+    async def test_a_note_move_holding_none_of_its_notes_is_refused(
+        self, store: StoryStore
+    ) -> None:
+        """§9:3: ``no_notes``, naming the story moved from, and nothing changes."""
+        source = await made(store, act("x"))
+        target = await made(store, act("t"))
+        kept = await noted(store, source, "Stays.", on="x")
+        foreign = await noted(store, target, "Already there.", on="t")
+        before = await everything(store)
+        for notes in ([foreign.note_id], [999_999], [foreign.note_id, 999_999]):
+            outcome = await store.move(source, target, actor=_OWNER, notes=notes)
+            refused(outcome, StoryRefusalReason.NO_NOTES)
+            assert outcome.refusal is not None
+            assert outcome.refusal.story_id == source
+        assert await everything(store) == before
+        assert await notes_of(store, source) == [kept]
+
+    async def test_a_note_move_repeated_is_refused_and_changes_nothing(
+        self, store: StoryStore
+    ) -> None:
+        """ADR-0304 §9: the first story no longer holds the notes, so a repeat is safe."""
+        source = await made(store, act("x"))
+        target = await made(store, act("t"))
+        note = await noted(store, source, "Goes.", on="x")
+        first = await store.move(source, target, actor=_PASS, notes=[note.note_id])
+        assert first == StoryOutcome(story_id=target, logged=2)
+        before = await everything(store)
+        refused(
+            await store.move(source, target, actor=_PASS, notes=[note.note_id]),
+            StoryRefusalReason.NO_NOTES,
+        )
+        assert await everything(store) == before
+
+    async def test_a_note_move_is_refused_for_its_stories_before_its_notes(
+        self, store: StoryStore
+    ) -> None:
+        """§9:4: ``unknown_story`` or ``merged_story`` for either side, the first first."""
+        source = await made(store, act("x"))
+        absorbed = await made(store, act("a"))
+        target = await made(store, act("t"))
+        await store.merge(absorbed, target, actor=_OWNER)
+        before = await everything(store)
+        for args, reason, about in [
+            (
+                ("story:nowhere", "story:elsewhere"),
+                StoryRefusalReason.UNKNOWN_STORY,
+                "story:nowhere",
+            ),
+            ((source, "story:nowhere"), StoryRefusalReason.UNKNOWN_STORY, "story:nowhere"),
+            ((absorbed, "story:nowhere"), StoryRefusalReason.MERGED_STORY, absorbed),
+            ((source, absorbed), StoryRefusalReason.MERGED_STORY, absorbed),
+        ]:
+            outcome = await store.move(*args, actor=_OWNER, notes=[999_999])
+            refused(outcome, reason)
+            assert outcome.refusal is not None
+            assert outcome.refusal.story_id == about
+        assert await everything(store) == before
+
+    async def test_a_note_move_answering_records_moved_after_its_lines(
+        self, store: StoryStore
+    ) -> None:
+        """§9:4, ADR-0302 §4:2: the decision ``moved``, after the notes' lines."""
+        other = await made(store, act("b1"))
+        story_id = await made(store, act("a1"))
+        flag = await raised(
+            store, story_id, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other)
+        )
+        (note,) = await notes_of(store, story_id)
+        outcome = await store.move(story_id, other, actor=_PASS, notes=[note.note_id], answers=flag)
+        assert outcome == StoryOutcome(story_id=other, logged=2 + 2)
+        assert await held(store, story_id) == [act("a1")]
+        assert await notes_of(store, other) == [note]
+        for each, change in (
+            (story_id, StoryChange.NOTE_MOVED_OUT),
+            (other, StoryChange.NOTE_MOVED_IN),
+        ):
+            last_two = (await logged(store, each))[-2:]
+            assert [line.change for line in last_two] == [change, StoryChange.DECIDED]
+            assert last_two[1].outcome is StoryDecision.MOVED
+
+    async def test_a_merge_logs_no_line_for_the_notes_it_carries(self, store: StoryStore) -> None:
+        """ADR-0304 §9: a merge says the two stories are one matter, and every note goes."""
+        absorbed = await made(store, act("x"))
+        target = await made(store, act("t"))
+        note = await noted(store, absorbed, "Goes with the merge.", on="x")
+        outcome = await store.merge(absorbed, target, actor=_OWNER)
+        assert outcome == StoryOutcome(story_id=target, logged=2 + 2)
+        assert await notes_of(store, target) == [note]
+        assert carried(await logged(store, absorbed)) == []
+        assert carried(await logged(store, target)) == []
 
     async def test_an_unlink_leaves_the_notes_on_the_story(self, store: StoryStore) -> None:
         story_id = await made(store, act("x"), act("y"))
@@ -1815,9 +2007,14 @@ class StoryStoreContract:
         deepest = await made(store, act("b"))
         holds_x = await made(store, sub(await made(store, sub(deepest))))
         unknown = StoryFlagName(activation="never-raised")
+        note = await noted(store, target, "On t.", on="t")
         before = await everything(store)
         for attempt, reason in [
             (store.create([], actor=_PASS, answers=unknown), StoryRefusalReason.NO_MEMBERS),
+            (
+                store.move(target, outer, actor=_PASS, answers=unknown),
+                StoryRefusalReason.NO_MEMBERS,
+            ),
             (
                 store.link("story:nowhere", [sub(inner)], actor=_PASS, answers=unknown),
                 StoryRefusalReason.UNKNOWN_STORY,
@@ -1844,6 +2041,14 @@ class StoryStoreContract:
             ),
             (
                 store.move(target, outer, [act("t")], actor=_PASS, answers=unknown),
+                StoryRefusalReason.UNKNOWN_FLAG,
+            ),
+            (
+                store.move(target, outer, actor=_PASS, notes=[999_999], answers=unknown),
+                StoryRefusalReason.NO_NOTES,
+            ),
+            (
+                store.move(target, outer, actor=_PASS, notes=[note.note_id], answers=unknown),
                 StoryRefusalReason.UNKNOWN_FLAG,
             ),
         ]:

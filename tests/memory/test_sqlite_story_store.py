@@ -8,7 +8,9 @@ database itself, the schema version and its migrations — ADR-0303 §4:8's incl
 which keeps every note and every summary while dropping what a line cited, the
 safety-net notes a version added and its supersession marks — and a store fault
 surfacing as ``StoryStoreError`` with nothing written — a decision's line included,
-which lands with the change it records or not at all (ADR-0302 §3:4).
+which lands with the change it records or not at all (ADR-0302 §3:4). And ADR-0304
+§9:7's migration, which gives the log the note a carried note's line names and
+rewrites no line written before it.
 """
 
 from __future__ import annotations
@@ -265,7 +267,7 @@ async def test_a_schema_one_file_is_migrated_with_every_activation_member_pendin
         store.close()
     check = sqlite3.connect(path)
     try:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 5
     finally:
         check.close()
 
@@ -559,7 +561,7 @@ async def test_a_schema_two_file_is_migrated_and_its_lines_stand_unchanged(
         store.close()
     check = sqlite3.connect(path)
     try:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 5
     finally:
         check.close()
 
@@ -707,7 +709,7 @@ async def test_a_schema_three_file_keeps_every_note_and_summary_and_drops_what_a
         store.close()
     check = sqlite3.connect(path)
     try:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 5
         indexes = {row[0] for row in check.execute("SELECT name FROM sqlite_master")}
         assert {"notes_resting", "log_member"}.isdisjoint(indexes)
         with pytest.raises(sqlite3.DatabaseError, match="never rewritten"):
@@ -841,5 +843,118 @@ async def test_a_corrupt_decision_is_a_story_store_error(tmp_path: Path) -> None
     try:
         with pytest.raises(StoryStoreError, match="does not validate"):
             await reopened.log(story_id)
+    finally:
+        reopened.close()
+
+
+# --- ADR-0304 §9:7: the log gains the note a carried note's line names -----------
+
+#: ADR-0303's schema, version 4, as ``stories.db`` carried it before ADR-0304 §9: the
+#: log has no ``note`` column. One story holds an activation and a note.
+_SCHEMA_4 = (
+    "CREATE TABLE stories(id TEXT PRIMARY KEY, created_seq INTEGER NOT NULL UNIQUE, "
+    "created_at INTEGER NOT NULL, merged_into TEXT)",
+    "CREATE TABLE members(story_id TEXT NOT NULL, kind TEXT NOT NULL, "
+    "member_id TEXT NOT NULL, position INTEGER NOT NULL UNIQUE, linked_at INTEGER NOT NULL, "
+    "actor TEXT NOT NULL, pending_since INTEGER, PRIMARY KEY(story_id, kind, member_id))",
+    "CREATE TABLE log(sequence INTEGER PRIMARY KEY AUTOINCREMENT, story_id TEXT NOT NULL, "
+    "change TEXT NOT NULL, member_kind TEXT, member_id TEXT, other_story TEXT, "
+    "actor TEXT NOT NULL, trigger_id TEXT, at INTEGER NOT NULL, answers TEXT, outcome TEXT)",
+    "CREATE TRIGGER log_never_rewritten BEFORE UPDATE ON log "
+    "BEGIN SELECT RAISE(ABORT, 'the story change log is append-only'); END",
+    "CREATE TRIGGER log_never_removed BEFORE DELETE ON log "
+    "BEGIN SELECT RAISE(ABORT, 'the story change log is append-only'); END",
+    "CREATE TABLE ticks(only INTEGER PRIMARY KEY CHECK (only = 0), value INTEGER NOT NULL)",
+    "INSERT INTO ticks(only, value) VALUES(0, 3)",
+    "CREATE TABLE notes(id INTEGER PRIMARY KEY, story_id TEXT NOT NULL, text TEXT NOT NULL, "
+    "author TEXT NOT NULL, written_during TEXT, outside INTEGER NOT NULL, "
+    "written_at INTEGER NOT NULL, pending_since INTEGER)",
+    "CREATE TABLE pages(story_id TEXT PRIMARY KEY, version INTEGER NOT NULL, "
+    "written_at INTEGER NOT NULL, lines TEXT NOT NULL, outside INTEGER NOT NULL)",
+    "CREATE TABLE versions(version INTEGER PRIMARY KEY, story_id TEXT NOT NULL, "
+    "written_at INTEGER NOT NULL, record TEXT NOT NULL)",
+    "INSERT INTO stories VALUES('story:old', 1, 0, NULL)",
+    "INSERT INTO stories VALUES('story:new', 3, 0, NULL)",
+    "INSERT INTO log(sequence, story_id, change, actor, at) "
+    "VALUES(1, 'story:old', 'created', 'owner', 0)",
+    "INSERT INTO log(sequence, story_id, change, member_kind, member_id, actor, at) "
+    "VALUES(2, 'story:old', 'added', 'activation', 'a1', 'owner', 0)",
+    "INSERT INTO log(sequence, story_id, change, actor, at) "
+    "VALUES(3, 'story:new', 'created', 'owner', 0)",
+    "INSERT INTO members VALUES('story:old', 'activation', 'a1', 2, 0, 'owner', 1)",
+    "INSERT INTO notes VALUES(2, 'story:old', 'Goes.', 'planning', 'a1', 0, 0, 2)",
+    "PRAGMA user_version = 4",
+)
+
+
+async def test_a_schema_four_file_is_migrated_and_carries_a_note_logged(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "stories.db"
+    conn = sqlite3.connect(path)
+    for statement in _SCHEMA_4:
+        conn.execute(statement)
+    conn.commit()
+    conn.close()
+    store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    try:
+        before = await logged(store, "story:old")
+        assert [(line.change, line.note) for line in before] == [
+            (StoryChange.CREATED, None),
+            (StoryChange.ADDED, None),
+        ]
+        outcome = await store.move("story:old", "story:new", actor=StoryActor.OWNER, notes=[2])
+        assert outcome == StoryOutcome(story_id="story:new", logged=2)
+    finally:
+        store.close()
+    reopened = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    try:
+        after = await logged(reopened, "story:old")
+        assert after[:2] == before
+        assert (after[-1].change, after[-1].note, after[-1].other_story) == (
+            StoryChange.NOTE_MOVED_OUT,
+            2,
+            "story:new",
+        )
+        last = (await logged(reopened, "story:new"))[-1]
+        assert (last.change, last.note, last.other_story) == (
+            StoryChange.NOTE_MOVED_IN,
+            2,
+            "story:old",
+        )
+        assert [note.note_id for note in await notes_of(reopened, "story:new")] == [2]
+    finally:
+        reopened.close()
+    check = sqlite3.connect(path)
+    try:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 5
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            check.execute("UPDATE log SET note = 9")
+    finally:
+        check.close()
+
+
+async def test_a_corrupt_carried_note_is_a_story_store_error(tmp_path: Path) -> None:
+    """A note line naming no note, or a note on another line, is not a line the store wrote."""
+    path = tmp_path / "stories.db"
+    store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    try:
+        source = await made(store, act("x"))
+        target = await made(store, act("t"))
+        note = await noted(store, source, "Goes.", on="x")
+        await store.move(source, target, actor=StoryActor.OWNER, notes=[note.note_id])
+    finally:
+        store.close()
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TRIGGER log_never_rewritten")
+    conn.execute("UPDATE log SET note = NULL WHERE change = 'note_moved_out'")
+    conn.execute("UPDATE log SET note = 7 WHERE change = 'created'")
+    conn.commit()
+    conn.close()
+    reopened = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    try:
+        for story_id in (source, target):
+            with pytest.raises(StoryStoreError):
+                await reopened.log(story_id)
     finally:
         reopened.close()

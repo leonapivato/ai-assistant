@@ -340,6 +340,10 @@ def _refusals() -> list[tuple[StoryRefusal, str]]:
             ),
             'the flag on activation "a-1" linking it into several stories was already decided',
         ),
+        (
+            StoryRefusal(reason=StoryRefusalReason.NO_NOTES, story_id="story:x"),
+            'story "story:x" holds none of the notes named',
+        ),
     ]
 
 
@@ -770,6 +774,76 @@ def test_split_and_move_carry_the_notes_named(
     left = asyncio.run(engine.story_summary(source))
     assert left is not None
     assert left.notes == ()
+
+
+def test_move_may_name_notes_and_no_member_and_show_logs_them_on_both_stories(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """ADR-0304 §9: a note moves on its own, and each story's log shows it came or went."""
+    engine = _engine(_episode(_FROZEN), _episode(_OPEN, open_=True))
+    source = _create(engine, _activation(_FROZEN))
+    target = _create(engine, _activation(_OPEN))
+    note = asyncio.run(engine.add_story_note(source, "Fishing, not the dentist")).note
+    assert note is not None
+    _wire(monkeypatch, engine)
+    code, _ = _invoke("story", "move", source, "--to", target, "--note", str(note.note_id))
+    assert code == 0, output.getvalue()
+    assert engine.calls[-1] == (
+        "move_story_members",
+        {"story_id": source, "to": target, "members": (), "notes": (note.note_id,)},
+    )
+    assert output.getvalue() == f'Moved to story "{target}"; 2 change-log lines appended.\n'
+    there = asyncio.run(engine.story_summary(target))
+    assert there is not None
+    assert [(shown.note, shown.pending) for shown in there.notes] == [(note, True)]
+    for story, rendered in (
+        (source, f'moved out note #{note.note_id} to story "{target}"'),
+        (target, f'moved in note #{note.note_id} from story "{source}"'),
+    ):
+        _clear(output)
+        assert _invoke("story", "show", story)[0] == 0
+        log = asyncio.run(engine.story_log(story))
+        assert log is not None
+        last = log.lines[-1]
+        assert output.getvalue().splitlines()[-1] == (
+            f"  #{last.sequence} {last.at.isoformat()} owner: {rendered}"
+        )
+    _clear(output)
+    code, _ = _invoke("story", "move", source, "--to", target, "-n", str(note.note_id))
+    assert code == 1
+    assert output.getvalue() == (
+        f'Refused (no_notes): story "{source}" holds none of the notes named.\n'
+    )
+
+
+def test_show_renders_a_carried_note_with_its_trigger() -> None:
+    """ADR-0304 §9:6: the note, the other story, and the activation that triggered it."""
+    header = StoryHeader(story_id="story:x", created_at=_AT, merged_into=None)
+    log = tuple(
+        StoryLogLine(
+            sequence=sequence,
+            story_id="story:x",
+            change=change,
+            member=None,
+            other_story="story:y",
+            actor=StoryActor.MATTERS_PASS,
+            trigger="a-1",
+            at=_AT,
+            note=4,
+        )
+        for sequence, change in ((3, StoryChange.NOTE_MOVED_OUT), (5, StoryChange.NOTE_MOVED_IN))
+    )
+    buffer = StringIO()
+    story_inspection.render_story(
+        Console(file=buffer, force_terminal=False, width=400),
+        story_inspection.StoryRead(header, 0, (), log),
+    )
+    assert buffer.getvalue().splitlines()[-2:] == [
+        f'  #3 {_AT.isoformat()} matters_pass: moved out note #4 to story "story:y" '
+        '(triggered by activation "a-1")',
+        f'  #5 {_AT.isoformat()} matters_pass: moved in note #4 from story "story:y" '
+        '(triggered by activation "a-1")',
+    ]
 
 
 def test_every_change_has_a_rendering() -> None:

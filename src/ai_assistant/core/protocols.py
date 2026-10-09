@@ -12532,8 +12532,9 @@ class StoryStore(Protocol):
     members, each with the instant it was linked and the actor that linked it, in
     link order. The **change log** is append-only: each line carries a sequence
     number unique across the store, the story changed, what happened, the member
-    where there is one, the story on the other side of a merge or a split, the
-    actor, an optional triggering activation id and the store's clock reading. No
+    where there is one, the story on the other side of a merge or a split, the note
+    a split or a move carried where it records one (ADR-0304 §9:6), the actor, an
+    optional triggering activation id and the store's clock reading. No
     line is ever rewritten or removed, and no field of either record holds free
     text. Every operation that changes a story writes both **in one transaction**:
     either both change or neither does, and a refused operation writes nothing.
@@ -12549,10 +12550,10 @@ class StoryStore(Protocol):
     :class:`~ai_assistant.core.types.StoryRefusalReason`, and writes nothing. The
     checks are made in a fixed order — no members, then the story written to
     (unknown, then merged), then each story member named (unknown, then merged), then
-    the operation's own rule (self-merge, not a member, loop) — and the first that
-    fails is the one reported. :class:`~ai_assistant.core.errors.StoryStoreError` is
-    raised only where the store could not read or write its file, and a malformed
-    argument is a ``ValueError``.
+    the operation's own rule (self-merge, not a member, a note move's notes, loop) —
+    and the first that fails is the one reported.
+    :class:`~ai_assistant.core.errors.StoryStoreError` is raised only where the store
+    could not read or write its file, and a malformed argument is a ``ValueError``.
 
     **Merged stories are followed, never written.** A write to a merged story, or one
     naming a merged story as a member, is refused with the story it was merged into.
@@ -12736,7 +12737,8 @@ class StoryStore(Protocol):
         is added to each such story that does not already hold B and is not B,
         logged ``added``. A is left with no members, and records B as the story it
         was merged into. Every note A holds moves to B, in the same transaction, and
-        is pending on B, as is each activation member added to B (ADR-0300 §3).
+        is pending on B, as is each activation member added to B (ADR-0300 §3); no
+        line is logged for each note, since every note goes (ADR-0304 §9).
         Given ``answers``, it records the decision ``merged`` on the stories the flag
         concerns as they stand after the merge, so never on A (ADR-0302 §3:4).
 
@@ -12780,8 +12782,10 @@ class StoryStore(Protocol):
         that A holds, whoever wrote them; a note named that A does not hold is passed
         over, as a member not held is by an unlink, and no note moves by the
         activation it was written during (ADR-0303 §6). Every other note stays on A.
-        What C receives is pending on C (ADR-0300 §3). Given ``answers``, it records
-        the decision ``split`` on the stories the flag concerns (ADR-0302 §4:2).
+        Each note that goes is logged ``note_moved_out`` on A and ``note_moved_in``
+        on C, each line naming the note and the other story (ADR-0304 §9:6). What C
+        receives is pending on C (ADR-0300 §3). Given ``answers``, it records the
+        decision ``split`` on the stories the flag concerns (ADR-0302 §4:2).
 
         Args:
             story_id: The story split, A.
@@ -12806,30 +12810,36 @@ class StoryStore(Protocol):
         self,
         story_id: Identifier,
         to: Identifier,
-        members: Sequence[StoryMember],
+        members: Sequence[StoryMember] = (),
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
         notes: Sequence[StoryNoteId] = (),
         answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
-        """Move activation members from one story to another (ADR-0300 §3).
+        """Move activation members, notes, or both, from one story to another.
 
-        Each member is removed from the first story, logged ``removed`` there, and
-        added to the second where the second does not already hold it, logged
-        ``added`` there; one the second already holds keeps its entry as it was.
-        Exactly the notes named in ``notes`` that the first story holds move to the
-        second; a note named that it does not hold is passed over, and no note moves
-        by the activation it was written during (ADR-0303 §6). All of it is one
-        transaction, and what the second story receives is pending there. Given
-        ``answers``, it records the decision ``moved`` on the stories the flag
-        concerns (ADR-0302 §4:2).
+        ADR-0300 §3, ADR-0303 §6, ADR-0304 §9. Each member is removed from the first
+        story, logged ``removed`` there, and added to the second where the second
+        does not already hold it, logged ``added`` there; one the second already
+        holds keeps its entry as it was. Exactly the notes named in ``notes`` that
+        the first story holds move to the second, each logged ``note_moved_out`` on
+        the first and ``note_moved_in`` on the second, each line naming the note and
+        the other story; and no note moves by the activation it was written during.
+        A note keeps its text, its author, the activation it was written during, its
+        mark and when it was written. All of it is one transaction, and what the
+        second story receives is pending there. Given ``answers``, it records the
+        decision ``moved`` on the stories the flag concerns (ADR-0302 §4:2).
+
+        A **note move** names no member and one or more notes, and carries exactly
+        the named notes the first story holds. Where the move names members as well,
+        a named note the first story does not hold is passed over.
 
         Args:
             story_id: The story moved from.
             to: The story moved to, another story.
             members: The activation members to move, every one a current member of
-                the first story.
+                the first story; none by default.
             actor: Who is moving.
             trigger: The activation that triggered it, where there was one.
             notes: The notes that go with the move; none by default.
@@ -12837,9 +12847,11 @@ class StoryStore(Protocol):
 
         Returns:
             The second story's id with the count of lines appended, or a refusal:
-            ``no_members``; ``unknown_story`` or ``merged_story`` for either side,
-            the first story first; or ``not_a_member`` naming a member the first
-            story does not hold; then ``unknown_flag`` or ``already_decided``.
+            ``no_members`` where it names no member and no note; ``unknown_story``
+            or ``merged_story`` for either side, the first story first;
+            ``not_a_member`` naming a member the first story does not hold; or, for
+            a note move, ``no_notes`` naming the first story where it holds none of
+            the notes named; then ``unknown_flag`` or ``already_decided``.
 
         Raises:
             ValueError: If an argument is malformed: a story member named, or the
@@ -15265,30 +15277,34 @@ class AssistantEngine(Protocol):
         self,
         story_id: Identifier,
         to: Identifier,
-        members: Sequence[StoryMember],
+        members: Sequence[StoryMember] = (),
         *,
         notes: Sequence[StoryNoteId] = (),
     ) -> StoryOutcome:
-        """Move activation members from one story to another, as the owner (ADR-0300 §3:14).
+        """Move activation members, notes, or both, from one story to another, as the owner.
 
-        Exactly the notes named in ``notes`` that the first story holds go to the
-        second with the members, in one transaction, and are pending there; a note
-        named that it does not hold is passed over, and no note goes by the
-        activation it was written during (ADR-0303 §6:1-§6:2, §10:1). Every other
-        note stays.
+        ADR-0300 §3:14, ADR-0303 §6:1-§6:2 and §10:1, ADR-0304 §9. Exactly the notes
+        named in ``notes`` that the first story holds go to the second, in one
+        transaction with the members, and are pending there, each logged on both
+        stories; no note goes by the activation it was written during, and every
+        other note stays. A **note move** names no member and one or more notes;
+        where members are named as well, a named note the first story does not hold
+        is passed over.
 
         Args:
             story_id: The story moved from.
             to: The story moved to, another story.
             members: The activation members to move, every one a current member of
-                the first story.
-            notes: The notes that go with them; none by default.
+                the first story; none by default.
+            notes: The notes that go; none by default.
 
         Returns:
             The second story's id with the count of lines appended, or a refusal:
-            ``no_members``; ``unknown_story`` or ``merged_story`` for either side,
-            the first story first; or ``not_a_member`` naming a member the first
-            story does not hold.
+            ``no_members`` where it names no member and no note; ``unknown_story``
+            or ``merged_story`` for either side, the first story first;
+            ``not_a_member`` naming a member the first story does not hold; or, for
+            a note move, ``no_notes`` naming the first story where it holds none of
+            the notes named.
 
         Raises:
             ValueError: If an argument is malformed: a story member named, the two

@@ -32604,6 +32604,14 @@ class StoryChange(StrEnum):
     """The matters pass decided a flag concerning this story (ADR-0302 §3); the line
     names the flag it answers and the outcome, and no member or other story."""
 
+    NOTE_MOVED_OUT = "note_moved_out"
+    """A split or a move carried a note off this story (ADR-0304 §9:6); the line names
+    the note and the story it went to. A merge writes none."""
+
+    NOTE_MOVED_IN = "note_moved_in"
+    """A split or a move carried a note onto this story (ADR-0304 §9:6); the line names
+    the note and the story it came from. A merge writes none."""
+
 
 class StoryDecision(StrEnum):
     """What a decision on a flag was (ADR-0302 §3:3), one for each of ADR-0300 §9:3's answers.
@@ -32620,7 +32628,8 @@ class StoryDecision(StrEnum):
     """The story was split, by a split answering the flag."""
 
     MOVED = "moved"
-    """Members were moved between stories, by a move answering the flag."""
+    """Members or notes were moved between stories, by a move answering the flag
+    (ADR-0304 §9:1)."""
 
     GROUPED = "grouped"
     """The stories were grouped under a larger one, by a create or a link answering
@@ -32645,7 +32654,7 @@ class StoryRefusalReason(StrEnum):
 
     NO_MEMBERS = "no_members"
     """The write named no member: a create, a link, an unlink or a split with an
-    empty member list."""
+    empty member list, or a move naming no member and no note (ADR-0304 §9:2)."""
 
     UNKNOWN_STORY = "unknown_story"
     """The write named a story the store does not hold, as the story written to or
@@ -32681,6 +32690,10 @@ class StoryRefusalReason(StrEnum):
     ALREADY_DECIDED = "already_decided"
     """A write answering a flag named one a ``decided`` line already answers
     (ADR-0302 §4:4). The refusal names the flag."""
+
+    NO_NOTES = "no_notes"
+    """A note move, naming no member and one or more notes, named none the story moved
+    from holds (ADR-0304 §9:3). The refusal names the story moved from."""
 
 
 class StoryHeader(BaseModel):
@@ -32726,11 +32739,24 @@ class StoryViewPage(BaseModel):
     next_cursor: int | None = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
 
 
-#: The changes whose line names a member, and those whose line names another story.
+#: The changes whose line names a member, those whose line names another story, and
+#: those whose line names a note (ADR-0304 §9:6).
 _STORY_MEMBER_CHANGES: Final = frozenset({StoryChange.ADDED, StoryChange.REMOVED})
+_STORY_NOTE_CHANGES: Final = frozenset({StoryChange.NOTE_MOVED_OUT, StoryChange.NOTE_MOVED_IN})
 _STORY_OTHER_CHANGES: Final = frozenset(
-    {StoryChange.MERGED_INTO, StoryChange.ABSORBED, StoryChange.SPLIT_OFF}
+    {StoryChange.MERGED_INTO, StoryChange.ABSORBED, StoryChange.SPLIT_OFF, *_STORY_NOTE_CHANGES}
 )
+
+# :data:`StoryNoteId` is declared here, ahead of :class:`StoryLogLine`, because
+# ADR-0304 §9:7 has a line recording a carried note name it. It used to sit in the
+# notes' section below; the rule above :data:`Identifier` decides the move, as for
+# :class:`StoryFlagKind` and :class:`StoryFlag`. Relocating a type is not redefining
+# it (ADR-0084 §4): nothing about it changed.
+
+type StoryNoteId = Annotated[PositiveInt, Field(strict=True, lt=_STORY_POSITION_BOUND)]
+"""A note's identity: a number the story store assigns, unique across the store and
+ascending in the order notes are written, so a story's notes in identity order are
+its notes in the order they were written (ADR-0300 §3:1)."""
 
 
 # --- a flag, and the name a decision answers it by (ADR-0300 §9:2, ADR-0302 §2) ----
@@ -32812,7 +32838,10 @@ class StoryLogLine(BaseModel):
 
     ``sequence`` is unique across the store. ``member`` is present exactly on an
     ``added`` or ``removed`` line, and ``other_story`` exactly on a ``merged_into``,
-    ``absorbed`` or ``split_off`` line. ``trigger`` is the activation that
+    ``absorbed``, ``split_off``, ``note_moved_out`` or ``note_moved_in`` line.
+    ``note`` is present exactly on a ``note_moved_out`` or ``note_moved_in`` line
+    (ADR-0304 §9:7): the note a split or a move carried, the line's other story
+    being the one it went to or came from. ``trigger`` is the activation that
     triggered the change, where there was one. ``answers`` and ``outcome`` are
     present exactly on a ``decided`` line (ADR-0302 §3:2): the flag it answers, by
     the name §2 gives it, and what the decision was; a ``decided`` line names no
@@ -32831,6 +32860,7 @@ class StoryLogLine(BaseModel):
     at: UtcInstant
     answers: StoryFlagName | None = None
     outcome: StoryDecision | None = None
+    note: StoryNoteId | None = None
 
     @model_validator(mode="after")
     def _names_what_its_change_names(self) -> Self:
@@ -32838,7 +32868,12 @@ class StoryLogLine(BaseModel):
             msg = "a story log line names a member exactly when it adds or removes one"
             raise ValueError(msg)
         if (self.other_story is not None) != (self.change in _STORY_OTHER_CHANGES):
-            msg = "a story log line names another story exactly on a merge or a split"
+            msg = (
+                "a story log line names another story exactly on a merge, a split or a carried note"
+            )
+            raise ValueError(msg)
+        if (self.note is not None) != (self.change in _STORY_NOTE_CHANGES):
+            msg = "a story log line names a note exactly when it records a carried note"
             raise ValueError(msg)
         decided = self.change is StoryChange.DECIDED
         if (self.answers is not None) != decided or (self.outcome is not None) != decided:
@@ -32875,8 +32910,9 @@ class StoryRefusal(BaseModel):
     """Why a write to a story was refused, and what it was refused over (ADR-0289 §3).
 
     ``story_id`` names the story the refusal is about where there is one — the
-    unknown or merged story, the story merged into itself, or the story a loop
-    starts from — and ``merged_into`` names where a merged one went. ``member``
+    unknown or merged story, the story merged into itself, the story a loop
+    starts from, or the story a note move found none of its notes on — and
+    ``merged_into`` names where a merged one went. ``member``
     names the member at fault for ``not_a_member`` and ``unknown_activation``.
     ``loop`` names the stories forming the loop, in containment order starting at
     the story that would have contained itself, and is empty for every other reason.
@@ -32905,6 +32941,7 @@ class StoryRefusal(BaseModel):
             StoryRefusalReason.UNKNOWN_STORY,
             StoryRefusalReason.MERGED_STORY,
             StoryRefusalReason.SELF_MERGE,
+            StoryRefusalReason.NO_NOTES,
         }
         if needs_story and self.story_id is None:
             msg = f"a {reason.value} refusal names the story it is about"
@@ -32934,8 +32971,9 @@ class StoryOutcome(BaseModel):
     written by a link or an unlink, the one merged into by a merge, and the one moved
     to by a move (ADR-0300 §3:14) — and says
     how many change-log lines it appended, which is ``0`` where every member it
-    named was passed over. A write answering a flag counts its ``decided`` lines
-    among them, and a ``leave_flag`` names the first story it wrote a line on
+    named was passed over. A split or a move counts the two lines each note it
+    carries writes (ADR-0304 §9:6). A write answering a flag counts its ``decided``
+    lines among them, and a ``leave_flag`` names the first story it wrote a line on
     (ADR-0302 §4:1). A refused write appended nothing.
     """
 
@@ -33071,11 +33109,6 @@ STORY_NOTE_MAX_CHARS: Final[int] = 2_000
 #: of every story its activation belongs to (ADR-0300 §8), can hold a few summaries beside
 #: its episodes.
 STORY_SUMMARY_CAP_CHARS: Final[int] = 8_000
-
-type StoryNoteId = Annotated[PositiveInt, Field(strict=True, lt=_STORY_POSITION_BOUND)]
-"""A note's identity: a number the story store assigns, unique across the store and
-ascending in the order notes are written, so a story's notes in identity order are
-its notes in the order they were written (ADR-0300 §3:1)."""
 
 type _StoryText = Annotated[NonBlankEncodableText, Field(max_length=STORY_NOTE_MAX_CHARS)]
 

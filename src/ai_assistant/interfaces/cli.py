@@ -1805,9 +1805,9 @@ _STORY_NOTE_OPTION = typer.Option(
     "--note",
     "-n",
     help=(
-        "A note that goes with the members, by the number 'assistant story summary' shows "
-        "after its #. Repeat for more. A note the story does not hold is passed over; "
-        "no note goes unless it is named."
+        "A note that goes, by the number 'assistant story summary' shows after its #. "
+        "Repeat for more. A note the story does not hold is passed over; no note goes "
+        "unless it is named."
     ),
 )
 _STORY_ID_ARGUMENT = typer.Argument(
@@ -2070,7 +2070,7 @@ async def _note_story(story_id: str, text: str) -> int:
 @story_app.command("move")
 def story_move(
     story_id: str = typer.Argument(
-        ..., callback=_present_id, help="The story the activations are moved out of."
+        ..., callback=_present_id, help="The story the activations or notes are moved out of."
     ),
     to: str = typer.Option(
         ..., "--to", callback=_present_id, help="The story they are moved into."
@@ -2078,7 +2078,11 @@ def story_move(
     activation: list[str] | None = _STORY_ACTIVATION_OPTION,
     note: list[int] | None = _STORY_NOTE_OPTION,
 ) -> None:
-    """Move the activations named from one story to another, with the notes named."""
+    """Move the activations and notes named from one story to another.
+
+    Name notes and no activation to move only the notes (ADR-0304 §9); the move is
+    refused where the story holds none of them.
+    """
     try:
         members = story_move_members(story_id, to, _story_members(activation, None))
     except ValueError as exc:
