@@ -29,7 +29,9 @@ did not, and they are taken in as usual. A message never taken in is found by
 
 **The window** (§6:4, §6:5) is the conversation's recent transcript, read by the
 reader with the input and handed to the activation beside it: each message keeps its
-author, and the window informs and never authorizes.
+author, and the window informs and never authorizes. The reader brings its bookkeeping
+with it: the activation that took in each message of the window, where one did, which
+is what the message links to (ADR-0303 §7:3).
 
 **The adapter and the writer** (§9, §10). The reply the compose stage produced is
 written as one assistant message into the conversation the input came from; a pass
@@ -95,9 +97,10 @@ CHAT_WINDOW_SIZE: Final = 20
 #: default.
 CHAT_TURN_BUDGET: Final = timedelta(seconds=60)
 
-#: How many positions one ``take_in`` call marks: the store's own bound. Every message
-#: waiting is taken in together, as one input (ADR-0293 §6:3), so an input holding more
-#: is marked over several calls under the one activation's id.
+#: How many positions one ``take_in`` call marks, and one ``taken_in`` call reads: the
+#: store's own bound. Every message waiting is taken in together, as one input
+#: (ADR-0293 §6:3), so an input holding more is marked over several calls under the one
+#: activation's id.
 _MARK_CHUNK: Final = 1000
 
 #: The read of what waits asks for every waiting message: the store's own ceiling.
@@ -462,4 +465,22 @@ class ChatReader:
             messages=recent,
             input_messages=tuple(waiting),
             replied_to=tuple(replied),
+            links=await self._links(conversation_id, [one.position for one in (*recent, *replied)]),
         )
+
+    async def _links(self, conversation_id: str, positions: Sequence[int]) -> dict[int, str]:
+        """The activation that took in each window message, by the bookkeeping (§6:6).
+
+        Brought with the window, so the understanding phase reads no further store to
+        link a message (ADR-0303 §7:3). Read in as many calls as the store's bound
+        needs; a message no activation took in — every assistant's message among them —
+        is simply missing.
+        """
+        links: dict[int, str] = {}
+        for start in range(0, len(positions), _MARK_CHUNK):
+            links.update(
+                await self._conversations.taken_in(
+                    conversation_id, positions=positions[start : start + _MARK_CHUNK]
+                )
+            )
+        return links

@@ -3,15 +3,18 @@
 The stage alone, over a scripted model and hand-built short views: the fourth section,
 its ``S`` labels and the instruction (§6:5, §6:9), ``story_labels`` resolved into
 ``story_links`` (§6:6, §6:7), and a defective story label repaired once and then
-dropped and counted (§6:8). An ``H`` label naming a stored episode the pass admitted
-resolves as a ``P`` label naming it would, and any other ``H`` label stays a defect
-(ADR-0301 §1). Which candidates are assembled is ``test_story_links.py``'s.
+dropped and counted (§6:8). An ``H`` label naming a place-window item that links to an
+activation resolves to it, as a ``P`` label naming that activation's episode would, and
+one naming an item that links to nothing is rendered not linkable and is dropped and
+counted with no repair (ADR-0303 §7, ADR-0301 §1:1). Which candidates are assembled is
+``test_story_links.py``'s.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
@@ -52,6 +55,7 @@ from ai_assistant.orchestration.understanding import (
     SuppliedWindow,
     TranscriptWindow,
     UnderstandingStage,
+    place_window_links,
 )
 from ai_assistant.testing import FakeModelProvider
 
@@ -275,7 +279,7 @@ async def test_story_labels_resolve_to_stories_and_earlier_activations_in_order_
 # --- §6:8: a defective story label ------------------------------------------------------
 
 
-@pytest.mark.parametrize("label", ["H1", "S3", "M1", "P9", "trip"])
+@pytest.mark.parametrize("label", ["S3", "M1", "P9", "H9", "trip"])
 async def test_a_defective_story_label_is_repaired_once_then_dropped_and_counted(
     label: str,
 ) -> None:
@@ -288,12 +292,7 @@ async def test_a_defective_story_label_is_repaired_once_then_dropped_and_counted
 
     assert len(model.calls) == 2
     statement = model.calls[1].messages[-1].content
-    if label == "H1":
-        # ADR-0301 §1: the supplied item is no stored episode the pass admitted, and the
-        # repair statement names an H label citing it as the defect it is.
-        assert "no other H label" in statement
-    else:
-        assert "story labels name no story and no earlier episode" in statement
+    assert "story labels name no story and no earlier episode" in statement
     assert "S1 (the stories section)" in statement
     assert understood.story_links == (story("story:trip"),)
     assert understood.grounding_dropped == 1
@@ -301,7 +300,7 @@ async def test_a_defective_story_label_is_repaired_once_then_dropped_and_counted
 
 async def test_a_repaired_story_label_is_recorded() -> None:
     model = FakeModelProvider.scripted(
-        _proposal(story_labels=["H1"]), _proposal(story_labels=["S1"])
+        _proposal(story_labels=["S9"]), _proposal(story_labels=["S1"])
     )
 
     understood = await _understand(model, stories=Candidates(views=(_TRIP,)))
@@ -485,42 +484,128 @@ async def test_a_withheld_tail_record_takes_no_label_to_cite() -> None:
     assert understood.grounding_dropped == 1
 
 
-async def test_a_transcript_message_s_h_label_is_dropped_and_counted_after_one_repair() -> None:
-    message = TranscriptMessage(
+# --- ADR-0303 §7: an item that links to nothing, and the transcript's links ------------
+
+
+def _message(
+    position: int, text: str, *, author: MessageAuthor = MessageAuthor.USER
+) -> TranscriptMessage:
+    return TranscriptMessage(
         conversation_id="c-1",
-        position=1,
+        position=position,
         written_at=AT,
-        author=MessageAuthor.USER,
-        text="Plan the camping trip to Riverside.",
-        device_id="phone",
-        message_id="m-1",
+        author=author,
+        text=text,
+        device_id="phone" if author is MessageAuthor.USER else None,
+        message_id=f"m-{position}" if author is MessageAuthor.USER else None,
     )
-    bad = _proposal(story_labels=["H1", "S1"])
+
+
+#: A transcript of three messages: the user's two, which the reader's bookkeeping
+#: records as taken in by a-1 and a-2, and the assistant's reply between them, which
+#: nothing records the writer of before the phases (§7's closing paragraph).
+_TRANSCRIPT: Final = TranscriptWindow(
+    CONVERSATION,
+    (
+        _message(1, "Plan the camping trip to Riverside."),
+        _message(2, "Riverside has space.", author=MessageAuthor.ASSISTANT),
+        _message(3, "Book the canoe too."),
+    ),
+    links={1: "a-1", 3: "a-2"},
+)
+
+
+async def test_a_transcript_message_links_the_activation_that_took_it_in() -> None:
+    """§7:3, §7:4: the reader's bookkeeping, brought with the window, resolves an H label."""
+    model = FakeModelProvider(_proposal(story_labels=["H3", "H1", "S1"]))
+
+    understood = await _understand(
+        model, stories=Candidates(views=(_TRIP,)), episodes=(), window=_TRANSCRIPT
+    )
+
+    assert understood.story_links == (activation("a-2"), activation("a-1"), story("story:trip"))
+    assert understood.grounding_dropped == 0
+    assert len(model.calls) == 1
+
+
+async def test_an_item_that_links_to_nothing_is_rendered_not_linkable() -> None:
+    """§7:5: the assistant's message carries the mark; nothing else of the window changes."""
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, stories=Candidates(views=(_TRIP,)), episodes=(), window=_TRANSCRIPT)
+
+    first, reply, second = _payload(model)["channel_window"]
+    assert reply["not_linkable"] is True
+    assert "not_linkable" not in first
+    assert "not_linkable" not in second
+    # The rest of the item is rendered as it was before the mark (§7: "changes no
+    # rendering of it but the mark below").
+    assert {key: value for key, value in reply.items() if key != "not_linkable"} == {
+        "label": "H2",
+        "item": "a recent message of this conversation",
+        "position": 2,
+        "author": "the assistant",
+        "written_at": AT.isoformat(),
+        "text": "Riverside has space.",
+    }
+
+
+async def test_a_story_label_naming_an_unlinkable_item_is_dropped_and_counted_unrepaired() -> None:
+    """§7:6: no label defect, so no repair completion; the rest of the links stand."""
+    model = FakeModelProvider(_proposal(story_labels=["H2", "H1"]))
+
+    understood = await _understand(
+        model, stories=Candidates(views=()), episodes=(), window=_TRANSCRIPT
+    )
+
+    assert len(model.calls) == 1
+    assert understood.story_links == (activation("a-1"),)
+    assert understood.grounding_dropped == 1
+
+
+async def test_a_repair_called_for_by_another_defect_does_not_name_an_unlinkable_item() -> None:
+    """§7:6: an unlinkable item takes no part in the repair, whatever else calls for one."""
+    bad = _proposal(story_labels=["H2", "S9"])
     model = FakeModelProvider.scripted(bad, bad)
+
+    understood = await _understand(
+        model, stories=Candidates(views=(_TRIP,)), episodes=(), window=_TRANSCRIPT
+    )
+
+    assert len(model.calls) == 2
+    statement = _statement(model)
+    assert '"S9"' in statement
+    assert '"H2"' not in statement
+    assert understood.story_links == ()
+    assert understood.grounding_dropped == 2
+
+
+async def test_a_message_the_bookkeeping_records_no_activation_for_links_to_nothing() -> None:
+    """A message no activation is recorded as having taken in is rendered not linkable."""
+    model = FakeModelProvider(_proposal(story_labels=["H1"]))
 
     understood = await _understand(
         model,
         stories=Candidates(views=(_TRIP,)),
         episodes=(episode("a-2"),),
-        window=TranscriptWindow(CONVERSATION, (message,)),
+        window=TranscriptWindow(CONVERSATION, (_message(1, "Plan the camping trip."),)),
     )
 
-    assert len(model.calls) == 2
-    statement = _statement(model)
-    assert "no other H label" in statement
-    assert '"H1"' in statement
-    assert understood.story_links == (story("story:trip"),)
+    (item,) = _payload(model)["channel_window"]
+    assert item["not_linkable"] is True
+    assert len(model.calls) == 1
+    assert understood.story_links == ()
     assert understood.grounding_dropped == 1
 
 
-async def test_a_supplied_item_naming_an_episode_the_window_does_not_hold_is_a_defect() -> None:
+async def test_a_supplied_item_naming_an_episode_the_window_does_not_hold_links_nothing() -> None:
     # The item's id is a stored episode's id, but the episode window does not hold that
-    # episode: a supplied identifier establishes nothing, and nothing is fetched for it.
+    # episode: a supplied identifier establishes nothing, and nothing is fetched for it
+    # (ADR-0301 §1:1, §1:4). It is rendered not linkable, and naming it is dropped quietly.
     window = SuppliedWindow(
         ChannelContext(history=(ChannelContextItem(text="Trip plans", item_id=address("a-9")),))
     )
-    bad = _proposal(story_labels=["H1"])
-    model = FakeModelProvider.scripted(bad, bad)
+    model = FakeModelProvider(_proposal(story_labels=["H1"]))
 
     understood = await _understand(
         model, stories=Candidates(views=()), episodes=(episode("a-2"),), window=window
@@ -528,31 +613,97 @@ async def test_a_supplied_item_naming_an_episode_the_window_does_not_hold_is_a_d
 
     (item,) = _payload(model)["channel_window"]
     assert "also_in_episode_window" not in item
-    assert "no other H label" in _statement(model)
+    assert item["not_linkable"] is True
+    assert len(model.calls) == 1
     assert understood.story_links == ()
     assert understood.grounding_dropped == 1
 
 
-async def test_a_tail_record_of_no_activation_is_not_a_story_label() -> None:
+async def test_a_tail_record_of_no_activation_links_nothing() -> None:
     legacy = episode("a-3").model_copy(update={"processing_record": None})
-    bad = _proposal(story_labels=["H1"])
-    model = FakeModelProvider.scripted(bad, bad)
+    model = FakeModelProvider(_proposal(story_labels=["H1"]))
 
     understood = await _understand(
         model, stories=Candidates(views=()), episodes=None, window=_tail(legacy)
     )
 
-    assert len(model.calls) == 2
+    (item,) = _payload(model)["channel_window"]
+    assert item["not_linkable"] is True
+    assert len(model.calls) == 1
     assert understood.story_links == ()
     assert understood.grounding_dropped == 1
 
 
-async def test_the_instruction_names_which_h_labels_a_story_label_may_cite() -> None:
+async def test_a_linkable_item_carries_no_mark() -> None:
+    model = FakeModelProvider(_proposal())
+
+    await _understand(
+        model,
+        stories=Candidates(views=()),
+        episodes=(episode("a-2"),),
+        window=_tail(episode("a-2"), episode("a-3")),
+    )
+
+    assert all("not_linkable" not in item for item in _payload(model)["channel_window"])
+
+
+async def test_the_instruction_says_any_item_not_marked_not_linkable_may_be_named() -> None:
+    """§7:8, in the instruction the first completion is given."""
     model = FakeModelProvider(_proposal())
 
     await _understand(model, stories=Candidates(views=(_TRIP,)))
 
     instruction = _instruction(model)
-    assert "earlier exchange of this conversation as the assistant recorded it" in instruction
-    assert "marked as also in the episode window" in instruction
-    assert "No other H label may be named in `story_labels`." in instruction
+    assert (
+        "Any H label may be named in `story_labels` except one whose item is marked "
+        "`not_linkable`, which links nothing." in instruction
+    )
+    assert "No other H label may be named" not in instruction
+
+
+# --- ADR-0303 §7:9: the place window's links, newest item first -------------------------
+
+
+def test_a_transcript_s_links_are_newest_message_first_each_activation_once() -> None:
+    # Positions 1 and 2 were taken in together by a-1, as one input (ADR-0293 §6:3); the
+    # message replied to is shown after the recent ones but is older than position 4.
+    window = TranscriptWindow(
+        CONVERSATION,
+        (
+            _message(1, "Plan the camping trip."),
+            _message(2, "To Riverside."),
+            _message(4, "Riverside has space.", author=MessageAuthor.ASSISTANT),
+            _message(5, "Book the canoe."),
+        ),
+        replied_to=(_message(3, "Which weekend?"),),
+        links={1: "a-1", 2: "a-1", 3: "a-2", 5: "a-3"},
+    )
+
+    assert place_window_links(window, audience=BOUNDED, episodes=()) == ("a-3", "a-2", "a-1")
+
+
+def test_a_tail_s_links_are_newest_episode_first_and_a_withheld_record_brings_none() -> None:
+    window = _tail(
+        episode("a-3", at=AT - timedelta(hours=2)),
+        episode("a-4", at=AT - timedelta(hours=1), placement=OWNER_ONLY),
+        episode("a-5", at=AT),
+    )
+
+    assert place_window_links(window, audience=BOUNDED, episodes=None) == ("a-5", "a-4", "a-3")
+    # ADR-0276 §4:9: on a turn of unbounded audience the owner-placed record reaches no
+    # rendering and no label, so it brings no candidate either.
+    assert place_window_links(window, audience=UNBOUNDED, episodes=None) == ("a-5", "a-3")
+
+
+def test_a_supplied_item_links_only_as_one_exchange_with_the_episode_window() -> None:
+    window = SuppliedWindow(
+        ChannelContext(
+            history=(
+                ChannelContextItem(text="Trip plans", item_id=address("a-2")),
+                ChannelContextItem(text="Other plans", item_id=address("a-9")),
+            )
+        )
+    )
+
+    assert place_window_links(window, audience=BOUNDED, episodes=(episode("a-2"),)) == ("a-2",)
+    assert place_window_links(window, audience=BOUNDED, episodes=None) == ()
