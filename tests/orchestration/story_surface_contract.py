@@ -10,7 +10,9 @@ activation and story members, and the reads' pages fitting the payload limit; an
 for ADR-0300 §8's story commands, the owner's summary as ADR-0303 §10:2 shapes it and §3
 withholds it, where
 the matter stands for the owner, the owner's note, a move that checks no activation,
-and a split or a move that carries exactly the notes it names (§10:1).
+and a split or a move that carries exactly the notes it names (§10:1); and ADR-0304
+§9's move of notes alone, logged on both stories as the owner's, refused ``no_notes``
+where the story moved from holds none it names.
 """
 
 from __future__ import annotations
@@ -657,6 +659,43 @@ class StorySurfaceContract:
         off_again = await subject.engine.story_summary(split.story_id)
         assert off_again is not None
         assert [shown.note for shown in off_again.notes] == [own.note]
+
+    async def test_a_note_moves_on_its_own_as_the_owner(
+        self, story_surface: StorySurfaceSubject
+    ) -> None:
+        """ADR-0304 §9: no member named, the note goes pending and both logs record it."""
+        subject = story_surface
+        await _seeded(subject, "a1", "a2")
+        source = await _created(subject, act("a1"))
+        target = await _created(subject, act("a2"))
+        note = await subject.engine.add_story_note(source, "Fishing, not the dentist")
+        assert note.note is not None
+        note_id = note.note.note_id
+        moved = await subject.engine.move_story_members(source, target, notes=[note_id])
+        assert moved.refusal is None
+        assert (moved.story_id, moved.logged) == (target, 2)
+        for story_id, change, other in (
+            (source, StoryChange.NOTE_MOVED_OUT, target),
+            (target, StoryChange.NOTE_MOVED_IN, source),
+        ):
+            view = await subject.engine.story(story_id)
+            assert view is not None
+            assert len(view.members) == 1
+            log = await subject.engine.story_log(story_id)
+            assert log is not None
+            last = log.lines[-1]
+            assert (last.change, last.note, last.other_story) == (change, note_id, other)
+            assert (last.actor, last.trigger) == (StoryActor.OWNER, None)
+        arrived = await subject.engine.story_summary(target)
+        assert arrived is not None
+        assert arrived.notes == (StorySummaryViewNote(note=note.note, pending=True),)
+        again = await subject.engine.move_story_members(source, target, notes=[note_id])
+        assert again.refusal is not None
+        assert again.refusal.reason is StoryRefusalReason.NO_NOTES
+        assert again.refusal.story_id == source
+        none_named = await subject.engine.move_story_members(source, target)
+        assert none_named.refusal is not None
+        assert none_named.refusal.reason is StoryRefusalReason.NO_MEMBERS
 
     async def test_a_malformed_note_named_by_a_split_or_a_move_is_refused_before_any_write(
         self, story_surface: StorySurfaceSubject
