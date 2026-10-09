@@ -295,14 +295,19 @@ class StoryCandidates:
             ),
             audience,
         )
-        visibility = PageVisibility.of(
-            chosen_from.values(), owner_notes=admits_owner_placed(audience)
-        )
         latest = [read.latest(chosen_from, episodes=self._episodes) for read in reads]
         # §2:6-§2:8: the chosen ids fetched for their current versions, the predicate
         # applied again, and what came back missing recorded beside what was fetched.
         fetched = tuple(dict.fromkeys(id_ for ids in latest for id_ in ids))
         held = await self._admitted(fetched, audience)
+        # ADR-0303 §3:12: the latest answer about each episode decides the page, so one
+        # the second fetch found gone or refused withholds it as surely as one the first
+        # read did.
+        answers = dict(chosen_from)
+        for id_ in fetched:
+            answers.pop(id_, None)
+        answers |= held
+        visibility = PageVisibility.of(answers.values(), owner_notes=admits_owner_placed(audience))
         views = tuple(
             read.view(visibility, ids, held) for read, ids in zip(reads, latest, strict=True)
         )

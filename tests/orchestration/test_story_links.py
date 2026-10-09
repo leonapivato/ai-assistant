@@ -41,7 +41,9 @@ from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksSt
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import StoryHeader, StoryMember, StoryViewPage
+    from collections.abc import Mapping, Sequence
+
+    from ai_assistant.core.types import MemoryRecord, StoryHeader, StoryMember, StoryViewPage
 
 BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
@@ -408,6 +410,31 @@ async def test_a_page_behind_which_an_episode_cannot_be_established_is_withheld(
     assert (seen.lines, seen.outside, seen.withheld) == ((), False, True)
     # The lookup decides the page, and is neither chosen nor recorded (ADR-0282 §2:7).
     assert (candidates.fetched, candidates.missing) == ((address("a-1"),), ())
+
+
+async def test_a_page_an_episode_behind_which_is_forgotten_between_the_reads_is_withheld() -> None:
+    """§3:12 on the latest answer: chosen on the first read, gone on the second fetch."""
+    stories = _stories()
+    trip = await _story(stories, activation("a-1"))
+    await _episodes_page(stories, trip, "a-1")
+    window = (episode("a-1"),)
+    memory = await memory_of(*window)
+    reading = memory.get_many
+    reads = count()
+
+    async def forgetting(record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+        found = await reading(record_ids)
+        if not next(reads):
+            assert await memory.delete(address("a-1"))
+        return found
+
+    memory.get_many = forgetting  # type: ignore[method-assign]  # an interleaving point
+
+    candidates = await _candidates(stories, memory).assemble(window, audience=BOUNDED)
+
+    (seen,) = candidates.views
+    assert (seen.lines, seen.outside, seen.withheld, seen.episodes) == ((), False, True, ())
+    assert (candidates.fetched, candidates.missing) == ((address("a-1"),), (address("a-1"),))
 
 
 async def test_a_page_that_read_another_story_s_page_withholds_what_stands_behind_that() -> None:
