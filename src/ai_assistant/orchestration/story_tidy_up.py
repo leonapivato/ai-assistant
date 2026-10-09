@@ -6,8 +6,9 @@ An operation on the assistant's own records, orchestration-local and not a Proto
 model call is processing (ADR-0292 §12:4); what it writes is the assistant's own
 records.
 
-**What it reads** (ADR-0300 §5:2, ADR-0303 §5:1). The story's summary, every note
-pending on it, and its pending member episodes that are frozen. An open episode is not
+**What it reads** (ADR-0300 §5:2, ADR-0303 §5:1, ADR-0304 §3). The story's summary,
+the only summary a run reads, every note pending on it, and its pending member episodes
+that are frozen. An open episode is not
 read and stays pending for a later run, as does one the memory store no longer holds.
 And it reads the decisions recorded for the story (ADR-0302 §6:1): the ``decided``
 lines on its change log and on the change logs of the stories merged into it, newest
@@ -24,8 +25,11 @@ order, a record kept only at or above recall's threshold), with a query built fr
 what the run reads. The story's own members are passed over, and the search asks for
 as many more as it may pass over, as recall does with the windows' ids (ADR-0282 §4).
 Each story is shown by its summary's first line and that summary's mark, no more
-than the composition root's bound counts them all, and each summary so shown is a summary
-the run read: its version is recorded with the version the run writes (§3:3).
+than the composition root's bound counts them all. **A story shown for the flag is not a
+summary the run read** (ADR-0304 §3): it is there to judge the flag, it marks nothing,
+nothing of it is copied, and the run records nothing of it, so no version names
+``read_pages``. The instruction says so, and says that sharing an episode is not by
+itself a reason to raise the flag (ADR-0304 §6).
 
 **Nothing but outside content** (§5:8). A run does not start on a story whose every
 activation member's trigger ``origin`` is ``outside`` and whose every note is marked:
@@ -46,9 +50,12 @@ says (§2:6).
 **One completion** (§5:2) produces the new summary's lines and its flags, and nothing
 else; it may produce no line, and then an empty summary is written (§5:3). Its
 instruction states that the user's newer statement wins, that the user's requirements
-stay, that a done step and an answered question drop off (§5:4); the summary's cap, and
-that the summary is condensed to fit it (§5:5); and that a line resting on outside
-content says so in its words (§3:5). A line cites nothing (§2:7).
+stay, that a done step and an answered question drop off (§5:4); that a vague later
+remark leaves an earlier statement of the user's standing, only the user's later, clear
+words replacing it (ADR-0304 §7); the summary's cap, and that the summary is condensed
+to fit it (§5:5); and that a line resting on outside content says so in its words
+(§3:5), says only what its source reported, and does not blend sources (ADR-0304 §7). A
+line cites nothing (§2:7).
 
 **The hub's checks** (§5:6), by rule, before writing: the reply parses, every flag
 names what it may, and the lines fit the cap. An output that fails is refused whole,
@@ -59,7 +66,12 @@ writes nothing and makes no second completion (ADR-0300 §5:8); the store's
 the run read a marked note, an outside episode — its trigger's ``origin`` is
 ``outside`` or its provenance records outside content
 (:func:`~ai_assistant.core.types.rests_on_recorded_external_content`) — or a marked
-summary, the current summary or another story's it was shown.
+current summary. Another story's summary shown for the flag marks nothing, however it
+is marked (ADR-0304 §3).
+
+**No reader's rule** (ADR-0304 §4:4). The tidy-up is no reader of a summary under
+:mod:`~ai_assistant.orchestration.story_privacy`: it reads the story's summary and notes,
+and the other stories' first lines, whatever a reader would be shown of them.
 
 **The write** goes through ``StoryStore.write_summary`` with the ``as_of`` of the read
 it was built on, taking in exactly the pending notes and episodes it read, so a run
@@ -106,7 +118,6 @@ from ai_assistant.core.types import (
     StoryNoteAuthor,
     StorySummaryDraft,
     StorySummaryLine,
-    StorySummaryVersionName,
 )
 from ai_assistant.orchestration.episode_reads import is_open_episode, without_open_episodes
 from ai_assistant.orchestration.stories import episode_address
@@ -219,7 +230,8 @@ _INSTRUCTION: Final = (
     "\n"
     "Notes carry labels N1, N2, and so on; episodes E1, E2, and so on; other stories "
     "S1, S2, and so on. A note the user wrote directly counts exactly as what the user "
-    "says to the assistant in an episode.\n"
+    "says to the assistant in an episode. The other stories are shown only so that you "
+    "can judge the flag about them below: nothing of theirs is copied onto this summary.\n"
     "\n"
     "The new summary is zero or more short lines, the first saying what the matter is. "
     "Carry forward what still matters from the current summary, and fold in the notes and "
@@ -236,7 +248,7 @@ _INSTRUCTION: Final = (
     "and the older statement leaves the summary. The user's stated requirements stay in "
     "the summary until the user changes them. A next step that is done, and a question "
     "that has been answered, drop off. A vague later remark leaves an earlier statement "
-    "standing.\n"
+    "of the user's standing: only the user's later, clear words replace it.\n"
     "\n"
     'A line resting on outside content says so in its own words, such as "A parks '
     'notice said the lower loop closes on the 15th." It says only what that source '
@@ -248,10 +260,11 @@ _INSTRUCTION: Final = (
     "drop what matters least. A summary over it is refused.\n"
     "\n"
     "Raise a flag of kind `two_matters` when the summary looks like two matters, and a "
-    "flag of kind `like_another` naming an S label when it looks like the same matter "
-    "as that other story. The other stories are those an episode here also belongs to, "
-    "and those a search found episodes of that resemble what you read here. Raise none "
-    "otherwise.\n"
+    "flag of kind `like_another` naming an S label when that other story is a separate "
+    "story that looks like the same matter as this one. Sharing an episode is not by "
+    "itself a reason to raise it: one input about two matters belongs to both stories. "
+    "The other stories are those an episode here also belongs to, and those a search "
+    "found episodes of that resemble what you read here. Raise none otherwise.\n"
     "\n"
     "The decisions already recorded on flags about this story are listed under "
     "`decisions`, newest first: what was decided, the kind of flag it answered, and "
@@ -380,17 +393,18 @@ class _Episode:
 
 @dataclass(frozen=True, slots=True)
 class _Other:
-    """Another story the run was shown, by its summary's first line.
+    """Another story the run was shown for its flag, by its summary's first line.
 
-    ``version`` is the version that wrote the summary shown, and ``outside`` that summary's
-    mark, ``None`` and ``False`` where it has no summary. ``found_by_search`` says whether
-    it was shown because a search found it (§5:7) rather than because an episode the
-    run read also belongs to it.
+    It is not a summary the run read (ADR-0304 §3): nothing of it reaches the version
+    the run writes, its mark included. ``written`` says whether it has a summary, and
+    ``outside`` that summary's mark, ``False`` where it has none. ``found_by_search``
+    says whether it was shown because a search found it (§5:7) rather than because an
+    episode the run read also belongs to it.
     """
 
     story_id: str
     first_line: StorySummaryLine | None
-    version: int | None = None
+    written: bool = False
     outside: bool = False
     found_by_search: bool = False
 
@@ -401,7 +415,7 @@ class _Other:
             "label": label,
             "shown_because": _FOUND_BY_SEARCH if self.found_by_search else _SHARES_AN_EPISODE,
         }
-        if self.version is None:
+        if not self.written:
             rendered["what_its_summary_says_the_matter_is"] = _NO_SUMMARY
         elif line is None:
             rendered["what_its_summary_says_the_matter_is"] = _EMPTY_SUMMARY
@@ -410,7 +424,7 @@ class _Other:
                 "written_by": _SUMMARY_AUTHOR_TEXT,
                 "text": line.text,
             }
-        if self.version is not None:
+        if self.written:
             rendered["outside_content"] = self.outside
         return rendered
 
@@ -438,21 +452,16 @@ class _Reading:
         }
 
     def outside(self) -> bool:
-        """ADR-0303 §3:4: whether the run read a marked note, an outside episode or summary."""
+        """ADR-0303 §3:4: whether the run read a marked note, an outside episode or summary.
+
+        The only summary a run reads is the one it replaces (ADR-0304 §3): another
+        story shown for the flag marks nothing, however it is marked.
+        """
         summary = self.state.summary
         return (
             (summary is not None and summary.outside)
             or any(note.outside for note in self.notes.values())
             or any(episode.outside for episode in self.episodes.values())
-            or any(other.outside for other in self.others.values())
-        )
-
-    def read_pages(self) -> tuple[StorySummaryVersionName, ...]:
-        """ADR-0303 §3:3: the other stories' summary versions this run was shown."""
-        return tuple(
-            StorySummaryVersionName(story=other.story_id, version=other.version)
-            for other in self.others.values()
-            if other.version is not None
         )
 
     def payload(self) -> dict[str, object]:
@@ -842,7 +851,7 @@ class StoryTidyUp:
                 _Other(
                     story_id=other_id,
                     first_line=summary.lines[0] if summary is not None and summary.lines else None,
-                    version=None if summary is None else summary.version,
+                    written=summary is not None,
                     outside=summary is not None and summary.outside,
                     found_by_search=found_by_search,
                 )
@@ -911,7 +920,6 @@ def _checked(proposal: _Proposed, reading: _Reading) -> StorySummaryDraft:
             lines=lines,
             took_in_notes=tuple(note.note_id for note in reading.state.pending_notes),
             took_in_episodes=tuple(episode.activation_id for episode in reading.episodes.values()),
-            read_pages=reading.read_pages(),
             flags=_flags(proposal, reading),
             outside=reading.outside(),
         )

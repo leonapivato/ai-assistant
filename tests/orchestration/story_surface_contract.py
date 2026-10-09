@@ -476,14 +476,14 @@ class StorySurfaceContract:
         )
         assert summary.more_notes == 0
 
-    async def test_a_summary_behind_which_an_episode_was_forgotten_is_withheld(
+    async def test_a_summary_behind_which_an_episode_was_forgotten_is_still_shown(
         self, story_surface: StorySurfaceSubject
     ) -> None:
-        """ADR-0303 §3:11-§3:12: shown only where everything behind it may be.
+        """ADR-0304 §4:1, §4:3 and §5: the owner is shown a record placed for the owner.
 
-        A forgotten episode cannot be established, even for the owner, so the summary is
-        withheld whole: the view says so, carries neither its lines nor its mark, and
-        still lists the notes, which §3:9 decides on their own.
+        Nothing behind a summary decides whether it is shown, and forgetting reaches no
+        story, so a forgotten episode the summary took in withholds nothing: its lines,
+        its mark and its notes are shown as before (#2793, #2794).
         """
         subject = story_surface
         await _seeded(subject, "a1", "a2")
@@ -510,7 +510,7 @@ class StorySurfaceContract:
         assert await subject.memory.delete("activation:a2")
         summary = await subject.engine.story_summary(story_id)
         assert summary is not None
-        assert (summary.withheld, summary.lines, summary.outside) == (True, (), False)
+        assert (summary.withheld, summary.lines, summary.outside) == (False, shown.lines, True)
         assert summary.version == written.version.version
         assert summary.notes == (StorySummaryViewNote(note=own.note, pending=False),)
 

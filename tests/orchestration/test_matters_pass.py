@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     StoryFlagName,
     StoryLogLine,
     StoryNoteAuthor,
+    StoryRefusalReason,
     StorySummaryDraft,
     StorySummaryLine,
 )
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.protocols import MemoryStore
+    from ai_assistant.core.types import StoryOutcome
 
 _BUDGET: Final = timedelta(seconds=10)
 _LEAVE: Final = json.dumps({"decision": "leave"})
@@ -355,6 +357,104 @@ async def test_a_named_note_the_story_moved_from_does_not_hold_is_dropped(
     assert await _members(stories, other) == ["b-1", "a-2"]
     assert await _notes(stories, other) == ["The dentist's address."]
     assert await _notes(stories, trip) == ["Camping at Riverside.", "Bring the dentist's form."]
+
+
+def _recording_moves(stories: FakeStoryStore) -> list[StoryOutcome]:
+    """``stories.move``, recording what the store answered each move the pass made."""
+    moving = stories.move
+    answered: list[StoryOutcome] = []
+
+    async def recorded(*args: Any, **kwargs: Any) -> StoryOutcome:
+        outcome = await moving(*args, **kwargs)
+        answered.append(outcome)
+        return outcome
+
+    stories.move = recorded  # type: ignore[method-assign]  # recording the store's answers
+    return answered
+
+
+@pytest.mark.parametrize("episodes", [None, []])
+async def test_a_move_may_name_notes_alone_and_no_episode(episodes: list[str] | None) -> None:
+    """ADR-0304 §9: a note left on the wrong story moves without an episode (#2792)."""
+    stories, memory, trip, other = await _pair()
+    await _note(stories, trip, "The dentist is on Tuesday.")
+    decision: dict[str, Any] = {"decision": "move", "from": "S1", "to": "S2", "notes": ["N1"]}
+    if episodes is not None:
+        decision["episodes"] = episodes
+    model = FakeModelProvider(json.dumps(decision))
+    answered = _recording_moves(stories)
+
+    report = await _pass(model, stories, memory).run()
+
+    assert (report.decided, report.refused, report.notes_dropped) == (1, 0, 0)
+    assert [outcome.refusal for outcome in answered] == [None]
+    assert await _members(stories, trip) == ["a-1", "a-2"]
+    assert await _members(stories, other) == ["b-1"]
+    assert await _notes(stories, other) == ["The dentist is on Tuesday."]
+    assert await _notes(stories, trip) == ["Camping at Riverside."]
+    assert "A move may name notes alone, with `episodes` empty" in _instruction(model)
+
+
+@pytest.mark.parametrize("named", [[], ["N9"], ["N3", "S2"]])
+async def test_a_note_move_whose_named_notes_are_all_dropped_is_refused_and_not_applied(
+    named: list[str],
+) -> None:
+    """ADR-0304 §9: it reaches the store with no member and no note, refused ``no_members``."""
+    stories, memory, trip, other = await _pair()
+    await _note(stories, trip, "Bring the dentist's form.")
+    await _note(stories, other, "The dentist's address.")
+    model = FakeModelProvider(
+        json.dumps({"decision": "move", "from": "S1", "to": "S2", "notes": named})
+    )
+    answered = _recording_moves(stories)
+
+    report = await _pass(model, stories, memory).run()
+
+    assert (report.decided, report.left_after_refusal, report.notes_dropped) == (0, 1, len(named))
+    assert [
+        None if outcome.refusal is None else outcome.refusal.reason for outcome in answered
+    ] == [StoryRefusalReason.NO_MEMBERS]
+    assert [outcome for (_, outcome, _) in await _decisions(stories, trip)] == [
+        StoryDecision.NOT_APPLIED
+    ]
+    assert await _notes(stories, trip) == ["Camping at Riverside.", "Bring the dentist's form."]
+    assert await _notes(stories, other) == ["The dentist's address."]
+
+
+async def test_a_note_move_whose_notes_left_the_story_by_the_write_is_refused_and_not_applied() -> (
+    None
+):
+    """ADR-0304 §9: its notes survive the check, but the store refuses it ``no_notes``."""
+    stories, memory, trip, other = await _pair()
+    elsewhere = await _story(stories, "c-1")
+    form = await _note(stories, trip, "Bring the dentist's form.")
+    moving = stories.move
+    answered: list[StoryOutcome] = []
+
+    async def moved_away_first(*args: Any, **kwargs: Any) -> StoryOutcome:
+        if not answered:
+            away = await moving(trip, elsewhere, actor=StoryActor.OWNER, notes=[form])
+            assert away.refusal is None
+        outcome = await moving(*args, **kwargs)
+        answered.append(outcome)
+        return outcome
+
+    stories.move = moved_away_first  # type: ignore[method-assign]  # an interleaving point
+    model = FakeModelProvider(
+        json.dumps({"decision": "move", "from": "S1", "to": "S2", "notes": ["N1"]})
+    )
+
+    report = await _pass(model, stories, memory).run()
+
+    assert (report.decided, report.left_after_refusal, report.notes_dropped) == (0, 1, 0)
+    assert [
+        None if outcome.refusal is None else outcome.refusal.reason for outcome in answered
+    ] == [StoryRefusalReason.NO_NOTES]
+    assert [outcome for (_, outcome, _) in await _decisions(stories, trip)] == [
+        StoryDecision.NOT_APPLIED
+    ]
+    assert await _notes(stories, other) == []
+    assert await _notes(stories, elsewhere) == ["Bring the dentist's form."]
 
 
 async def test_a_merge_carries_every_note_and_names_none() -> None:

@@ -1,4 +1,4 @@
-"""ADR-0300 §6 and ADR-0303 §3: understanding's candidate stories and the story-links stage.
+"""ADR-0300 §6 and ADR-0304 §4: understanding's candidate stories and the story-links stage.
 
 The candidates (§6:1-§6:4) and the stage (§6:12-§6:13) over the canonical fakes, apart
 from any engine; what a pass records is in ``test_engine_story_links.py``, and what the
@@ -310,11 +310,11 @@ async def test_an_open_episode_is_not_shown_and_a_note_fetches_nothing() -> None
     assert (candidates.fetched, candidates.missing) == ((address("a-1"),), ())
 
 
-# --- ADR-0303 §3's privacy default (§3:9-§3:12) -----------------------------------------
+# --- ADR-0304 §4's privacy minimum (ADR-0303 §3:9) -----------------------------------
 
 
-async def test_an_unbounded_audience_is_shown_no_note_and_no_summary_one_stands_behind() -> None:
-    """§3:9: a note is shown only where an owner record may be; §3:11: and a summary with one."""
+async def test_an_unbounded_audience_is_shown_no_note_and_no_summary_and_is_told() -> None:
+    """ADR-0303 §3:9 for a note, ADR-0304 §4:1-§4:2 for the summary: owner records."""
     stories = _stories()
     trip = await _story(stories, activation("a-1"), activation("a-2"))
     await _summarised(stories, trip, "shared line", "another shared line", outside=True)
@@ -344,7 +344,7 @@ async def _episodes_summary(
     *episodes: str,
     read: tuple[StorySummaryVersionName, ...] = (),
 ) -> int:
-    """Write a summary taking in ``episodes`` and no note, having read the ``read`` ones."""
+    """Write a summary taking in ``episodes`` and no note, recorded as having read ``read``."""
     state = await stories.current_summary(story_id)
     assert state is not None
     written = await stories.write_summary(
@@ -361,7 +361,8 @@ async def _episodes_summary(
     return written.version.version
 
 
-async def test_a_summary_with_nothing_behind_it_the_audience_may_not_see_is_shown_to_it() -> None:
+async def test_an_unbounded_audience_is_told_a_summary_was_withheld_whatever_is_behind_it() -> None:
+    """ADR-0304 §4:3: a summary every episode behind which it may see is withheld still."""
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
     await _episodes_summary(stories, trip, "a-1")
@@ -370,54 +371,38 @@ async def test_a_summary_with_nothing_behind_it_the_audience_may_not_see_is_show
 
     (seen,) = (await _candidates(stories, memory).assemble(window, audience=UNBOUNDED)).views
 
-    assert [line.text for line in seen.lines] == ["A camping trip to Riverside."]
-    assert not seen.withheld
-
-
-async def test_a_summary_an_earlier_version_of_which_took_in_a_refused_episode_is_withheld() -> (
-    None
-):
-    """§3:10: cumulative, because each run reads the summary it replaces."""
-    stories = _stories()
-    trip = await _story(stories, activation("a-1"), activation("a-2"))
-    await _episodes_summary(stories, trip, "a-2")
-    await _episodes_summary(stories, trip, "a-1")
-    window = (episode("a-1"),)
-    memory = await memory_of(episode("a-1"), episode("a-2", placement=OWNER_ONLY))
-
-    unbounded = await _candidates(stories, memory).assemble(window, audience=UNBOUNDED)
-    bounded = await _candidates(stories, memory).assemble(window, audience=BOUNDED)
-
-    (seen,) = unbounded.views
-    assert (seen.lines, seen.withheld) == ((), True)
-    (whole,) = bounded.views
-    assert not whole.withheld
+    assert (seen.lines, seen.outside, seen.withheld) == ((), False, True)
 
 
 @pytest.mark.parametrize("held", ["open", "forgotten"])
-async def test_a_summary_behind_which_an_episode_cannot_be_established_is_withheld(
-    held: str,
-) -> None:
-    """§3:12: open, which no model is shown (ADR-0286 §6), or no longer held at all."""
+async def test_a_summary_is_shown_whatever_a_version_took_in(held: str) -> None:
+    """ADR-0304 §4:3, §5: no episode a version took in withholds it, forgotten or not.
+
+    Taken in by an earlier version and by the current one: still open, which no model
+    is shown (ADR-0286 §6), or no longer held at all.
+    """
     stories = _stories()
-    trip = await _story(stories, activation("a-1"), activation("a-2"))
-    await _episodes_summary(stories, trip, "a-1", "a-2")
+    trip = await _story(stories, activation("a-1"), activation("a-2"), activation("a-3"))
+    await _episodes_summary(stories, trip, "a-2")
+    await _episodes_summary(stories, trip, "a-1", "a-3")
     window = (episode("a-1"),)
-    behind_it = () if held == "forgotten" else (episode("a-2", open_=True),)
+    behind_it = {
+        "open": (episode("a-2", open_=True), episode("a-3", open_=True)),
+        "forgotten": (),
+    }[held]
     memory = await memory_of(episode("a-1"), *behind_it)
 
     candidates = await _candidates(stories, memory).assemble(window, audience=BOUNDED)
 
     (seen,) = candidates.views
-    assert (seen.lines, seen.outside, seen.withheld) == ((), False, True)
-    # The lookup decides the summary, and is neither chosen nor recorded (ADR-0282 §2:7).
-    assert (candidates.fetched, candidates.missing) == ((address("a-1"),), ())
+    assert [line.text for line in seen.lines] == ["A camping trip to Riverside."]
+    assert not seen.withheld
+    # Nothing behind the summary is looked up for it, chosen or recorded (ADR-0282 §2:7).
+    assert address("a-2") not in (*candidates.fetched, *candidates.missing)
 
 
-async def test_a_summary_an_episode_behind_which_is_forgotten_between_the_reads_is_withheld() -> (
-    None
-):
-    """§3:12 on the latest answer: chosen on the first read, gone on the second fetch."""
+async def test_a_summary_whose_episode_is_forgotten_between_the_reads_is_still_shown() -> None:
+    """Chosen on the first read, gone on the second fetch: missing, and the summary stands."""
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
     await _episodes_summary(stories, trip, "a-1")
@@ -437,14 +422,13 @@ async def test_a_summary_an_episode_behind_which_is_forgotten_between_the_reads_
     candidates = await _candidates(stories, memory).assemble(window, audience=BOUNDED)
 
     (seen,) = candidates.views
-    assert (seen.lines, seen.outside, seen.withheld, seen.episodes) == ((), False, True, ())
+    assert (seen.withheld, seen.episodes) == (False, ())
+    assert [line.text for line in seen.lines] == ["A camping trip to Riverside."]
     assert (candidates.fetched, candidates.missing) == ((address("a-1"),), (address("a-1"),))
 
 
-async def test_a_summary_that_read_another_story_s_summary_withholds_what_stands_behind_that() -> (
-    None
-):
-    """§3:10: a line shown for a flag may have been copied onto the summary."""
+async def test_a_summary_recorded_as_having_read_another_s_is_shown_and_reads_no_log() -> None:
+    """ADR-0304 §3:4: ``read_pages`` is history no rule reads, and no version log is read."""
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
     other = await _story(stories, activation("b-1"))
@@ -453,24 +437,26 @@ async def test_a_summary_that_read_another_story_s_summary_withholds_what_stands
         stories, trip, "a-1", read=(StorySummaryVersionName(story=other, version=shown_for_a_flag),)
     )
     window = (episode("a-1"),)
-    memory = await memory_of(episode("a-1"), episode("b-1", placement=OWNER_ONLY))
+    # b-1 forgotten, and every version log unreadable: neither is asked about.
+    memory = await memory_of(episode("a-1"))
+    unreadable = failing(stories, "summary_versions")
 
-    unbounded = await _candidates(stories, memory, limit=1).assemble(window, audience=UNBOUNDED)
+    candidates = await _candidates(unreadable, memory, limit=1).assemble(window, audience=BOUNDED)
 
-    (seen,) = unbounded.views
+    (seen,) = candidates.views
     assert seen.story_id == trip
-    assert seen.withheld
-    assert address("b-1") not in (*unbounded.fetched, *unbounded.missing)
+    assert not seen.withheld
+    assert not candidates.unreadable
 
 
 # --- a story store that cannot be read (§6:4) ----------------------------------------
 
 
-@pytest.mark.parametrize("read", ["stories_of", "current_summary", "view", "summary_versions"])
+@pytest.mark.parametrize("read", ["stories_of", "current_summary", "view"])
 async def test_a_story_store_error_leaves_no_candidates_and_says_so(read: str) -> None:
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
-    # A summary, so every one of the four reads is made.
+    # A summary, so every one of the three reads is made.
     await _summarised(stories, trip, "A camping trip.")
     window = (episode("a-1"),)
     memory = await memory_of(*window)
