@@ -321,10 +321,11 @@ STORY_SHORT_VIEW_EPISODES: Final = 2
 #: ``STORY_NOTE_MAX_CHARS``, was chosen from.
 STORY_TIDY_UP_EXCERPT_CHARS: Final = UNDERSTANDING_EXCERPT_CHARS
 
-#: How many other stories a tidy-up shows for ADR-0300 §9:2's *like another story*
-#: flag: the stories the episodes it reads also belong to, each by its page's first
-#: line. Understanding's candidate count, so a tidy-up can name any story that
-#: understanding could have linked the same episode into beside this one.
+#: How many other stories a tidy-up shows for its *like another story* flag
+#: (ADR-0303 §5:7), counted together: the stories the episodes it reads also belong
+#: to, then the stories of the episodes its search of the memory store finds, each by
+#: its page's first line. Understanding's candidate count, so a tidy-up can name any
+#: story that understanding could have linked the same episode into beside this one.
 STORY_TIDY_UP_OTHER_STORIES: Final = UNDERSTANDING_STORY_CANDIDATES
 
 #: How long one tidy-up may take, its one completion included (ADR-0300 §5). Nobody
@@ -2322,9 +2323,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             ),
             story_links=StoryLinksStage(stories=stories),
             # ADR-0300 §5's interim run — test-hub scaffolding, removed at the cutover
-            # with `orchestration.story_tidy_up_interim`: after the story-links stage
-            # links an activation into a story, a tidy-up of that story is started and
-            # not awaited. The operation runs on **consolidation's route**, the one
+            # with `orchestration.story_tidy_up_interim`: once the episode of an
+            # activation the story-links stage linked into a story is frozen, a tidy-up
+            # of that story is started and not awaited (ADR-0303 §5:9). Its lookalike
+            # search keeps what recall would, at recall's threshold for the embedder
+            # wired (§5:7). The operation runs on **consolidation's route**, the one
             # this deployment names for background work over the assistant's own
             # records (ADR-0285 §5): a tidy-up is that kind of work, nobody waits on
             # it, and one skipped or failed loses nothing (§5), so it needs no
@@ -2338,6 +2341,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                     other_stories=STORY_TIDY_UP_OTHER_STORIES,
                     decisions=STORY_TIDY_UP_DECISIONS,
                     budget=STORY_TIDY_UP_BUDGET,
+                    threshold=RECALL_THRESHOLDS[settings.embedder],
                 )
             ),
             # ADR-0300 §9:3's matters pass, as ADR-0302 §5 builds it, which the

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from ai_assistant.app import build_engine
 from ai_assistant.app.composition import (
+    RECALL_THRESHOLDS,
     STORY_TIDY_UP_BUDGET,
     STORY_TIDY_UP_EXCERPT_CHARS,
     STORY_TIDY_UP_OTHER_STORIES,
@@ -51,5 +52,8 @@ async def test_the_interim_run_tidies_over_the_one_story_store_on_consolidations
             STORY_TIDY_UP_OTHER_STORIES,
             STORY_TIDY_UP_BUDGET,
         )
+        # ADR-0303 §5:7: the lookalike search keeps what recall would, at recall's
+        # threshold for the embedder this deployment wires.
+        assert tidy_up._threshold == RECALL_THRESHOLDS[Settings().embedder]
     finally:
         await engine.aclose()

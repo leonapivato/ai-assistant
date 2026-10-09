@@ -2,24 +2,25 @@
 
 **Delete this module at the cutover.** Until the phases replace the turn loop, the
 engine starts a tidy-up by rule, without waiting for it, for each story into which
-the story-links stage (§6) links an activation and on whose page anything is
-pending. It is scaffolding for the test hub, it is not an action under ADR-0292
-§12:1-§12:2 in the scope ADR-0300's header gives, and it is **never** the phases'
-route to the tidy-up: once they land, the tidy-up is a call planning chooses (§10:4)
-and nothing adds it by rule.
+the story-links stage (§6) linked an activation, **once that activation's episode is
+frozen** and not when the link is written (ADR-0303 §5:9). It is scaffolding for the
+test hub, it is not an action under ADR-0292 §12:1-§12:2 in the scope ADR-0300's
+header gives, and it is **never** the phases' route to the tidy-up: once they land,
+the tidy-up is a call planning chooses (§10:4) and nothing adds it by rule.
 
 Everything the rule needs is here, so removing it is this file, the engine's
-``interim_tidy_up`` parameter with the one call after the story-links stage that
-uses it, and the composition root's wiring of it — each of which names this module.
+``interim_tidy_up`` parameter with the one call after the episode's freeze that uses
+it, and the composition root's wiring of it — each of which names this module.
 :class:`~ai_assistant.orchestration.story_tidy_up.StoryTidyUp` itself stays.
 
 **Nobody waits for it** (§5:11). The engine hands each run to its own tracked task
-and returns to the pass; a run's finishing starts nothing. **"Anything pending"** is
-the run's own first read: a story with no note pending and no frozen episode pending
-makes no completion and writes nothing, and the activation that linked it, still
-open while it runs, stays pending for a later run (§5:2). **One run per story at a
-time** is the operation's own rule, so a story linked by two activations at once is
-tidied by the first and the second does not start (§5:10).
+and returns; a run's finishing starts nothing. **"Anything pending"** is the run's own
+first read: a story with no note pending and no frozen episode pending makes no
+completion and writes nothing. Since the run starts only once the activation's
+episode is frozen, the episode that linked the story is one the run can read
+(ADR-0300 §5:2). **One run per story at a time** is the operation's own rule, so a
+story linked by two activations at once is tidied by the first and the second does
+not start (§5:10).
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ _log = structlog.get_logger(__name__)
 
 
 class InterimTidyUp:
-    """Start a tidy-up for each story the story-links stage linked into (ADR-0300 §5).
+    """Start a tidy-up for each story the story-links stage linked into (ADR-0303 §5:9).
 
     Test-hub scaffolding, removed at the cutover; see the module docstring.
     """
