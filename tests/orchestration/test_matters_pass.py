@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from story_support import AT, EVENTS, activation, episode, memory_of, story
+from structlog.testing import capture_logs
 
 from ai_assistant.core.types import (
     Message,
@@ -177,8 +178,9 @@ async def test_a_two_matters_flag_is_split_and_the_decision_recorded_on_its_stor
     shown = _shown(model)
     assert shown["flag"]["kind"] == "two_matters"
     assert [story["label"] for story in shown["stories"]] == ["S1"]
-    assert [episode["label"] for episode in shown["stories"][0]["episodes"]] == ["E1", "E2"]
-    assert shown["stories"][0]["episodes"][1]["the_users_own_input"] == "Book the dentist."
+    assert shown["stories"][0]["episodes"] == ["E1", "E2"]
+    assert [episode["label"] for episode in shown["episodes"]] == ["E1", "E2"]
+    assert shown["episodes"][1]["the_users_own_input"] == "Book the dentist."
     assert shown["stories"][0]["its_page"][0]["text"] == "Camping at Riverside."
 
 
@@ -232,6 +234,39 @@ async def test_an_understanding_flag_can_move_its_input_and_is_recorded_on_both_
     shown = _shown(model)
     assert shown["flag"]["kind"] == "one_input_in_several_stories"
     assert shown["flag"]["episode"] == "E2"
+
+
+async def test_an_input_linked_to_two_stories_is_shown_once_and_moved_out_of_one() -> None:
+    stories = _stories()
+    call = "Call the campground on Thursday."
+    memory = await memory_of(
+        episode("a-1"), episode("b-1", text="Book the dentist."), episode("x-1", text=call)
+    )
+    trip = await _story(stories, "a-1")
+    dentist = await _story(stories, "b-1")
+    flag = await _linked_twice(stories, "x-1", trip, dentist)
+    # #2775's decision: the input belongs to the trip, so it is moved out of the dentist
+    # story into the one already holding it.
+    model = FakeModelProvider(
+        json.dumps({"decision": "move", "from": "S2", "to": "S1", "episodes": ["E2"]})
+    )
+
+    report = await _pass(model, stories, memory).run()
+
+    shown = _shown(model)
+    # One input, one label, held by both stories: never one rendering per story.
+    assert shown["flag"]["episode"] == "E2"
+    assert [story["episodes"] for story in shown["stories"]] == [["E1", "E2"], ["E3", "E2"]]
+    assert [episode["label"] for episode in shown["episodes"]] == ["E1", "E2", "E3"]
+    assert [held["story"] for held in shown["episodes"][1]["held_by"]] == ["S1", "S2"]
+    assert model.calls[0].messages[1].content.count(call) == 1
+    assert report.decided == 1
+    assert await _members(stories, trip) == ["a-1", "x-1"]
+    assert await _members(stories, dentist) == ["b-1"]
+    for story_id in (trip, dentist):
+        assert await _decisions(stories, story_id) == [
+            (flag, StoryDecision.MOVED, StoryActor.MATTERS_PASS)
+        ]
 
 
 async def test_stories_are_grouped_under_a_new_story_holding_them() -> None:
@@ -399,6 +434,97 @@ async def test_a_reply_that_fails_to_parse_or_a_check_writes_nothing(reply: str)
     assert await _log(stories, trip) == before
 
 
+# --- the reply's decision (#2775) and what a refusal logs (#2778) ----------------------
+
+_SPLIT: Final = json.dumps({"decision": "split", "story": "S1", "episodes": ["E2"]})
+_REASONING: Final = "S1 holds a camping trip and, in E2, the dentist: two matters."
+
+
+async def _split_flag() -> tuple[FakeStoryStore, MemoryStore, str]:
+    stories = _stories()
+    memory = await memory_of(
+        episode("a-1", text="Plan the camping trip."), episode("a-2", text="Book the dentist.")
+    )
+    trip = await _story(stories, "a-1", "a-2")
+    await _raise(stories, trip, _TWO)
+    return stories, memory, trip
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        f"{_REASONING}\n\n{_SPLIT}",
+        f"{_REASONING}\n```json\n{_SPLIT}\n```",
+        f"{_REASONING} So, as I said: {_SPLIT}\n\n{_SPLIT}",
+        f'The flag reads {{"kind": "two_matters"}}, and {{this}} is prose.\n{_SPLIT}',
+        f"```json\n{_SPLIT}\n```",
+    ],
+    ids=["prose-first", "prose-then-fence", "repeated", "other-objects-first", "fenced"],
+)
+async def test_a_decision_after_prose_is_taken(reply: str) -> None:
+    stories, memory, trip = await _split_flag()
+
+    report = await _pass(FakeModelProvider(reply), stories, memory).run()
+
+    assert (report.decided, report.refused) == (1, 0)
+    assert await _members(stories, trip) == ["a-1"]
+
+
+@pytest.mark.parametrize(
+    ("reply", "failed", "problem"),
+    [
+        (_REASONING, "parse", "the reply holds no decision"),
+        (
+            f"{_SPLIT}\nWait, I need to reconsider: they are one matter.",
+            "parse",
+            "the reply goes on after its decision",
+        ),
+        (f"{_REASONING}\n{_SPLIT} That is all.", "parse", "the reply goes on after its decision"),
+        (
+            f"Either {_SPLIT} or, better, {_LEAVE}",
+            "parse",
+            "the reply holds two different decisions",
+        ),
+        (
+            f"{_REASONING}\n" + json.dumps({"decision": "merge", "story": "S1", "into": "S1"}),
+            "check",
+            "a merge names one story on both sides",
+        ),
+        (
+            json.dumps({"decision": "split", "story": "S1", "episodes": ["E9"]}),
+            "check",
+            "the reply names an episode this run did not show held by that story",
+        ),
+    ],
+    ids=["no-decision", "reconsiders", "goes-on", "two-decisions", "merge-itself", "unshown"],
+)
+async def test_a_refused_reply_writes_nothing_and_logs_why_without_its_text(
+    reply: str, failed: str, problem: str
+) -> None:
+    stories, memory, trip = await _split_flag()
+    before = await _log(stories, trip)
+
+    with capture_logs() as logs:
+        report = await _pass(FakeModelProvider(reply), stories, memory).run()
+
+    assert (report.refused, report.decided) == (1, 0)
+    assert await _log(stories, trip) == before
+    refused = [entry for entry in logs if entry["event"] == "matters_pass_refused"]
+    assert refused == [
+        {
+            "event": "matters_pass_refused",
+            "log_level": "info",
+            "stage": "matters_pass",
+            "flag": "two_matters",
+            "failed": failed,
+            "problem": problem,
+        }
+    ]
+    # Code-owned text only: nothing of the reply, the page or an episode.
+    for text in ("camping", "dentist", "reconsider", "Riverside"):
+        assert text not in str(logs)
+
+
 async def test_a_flag_whose_reply_failed_goes_behind_flags_that_have_not() -> None:
     stories = _stories()
     memory = await memory_of(episode("a-1"), episode("b-1"))
@@ -494,7 +620,7 @@ async def test_an_outside_episodes_input_is_never_shown_and_it_is_marked() -> No
     await _pass(model, stories, memory).run()
 
     assert "IGNORE PREVIOUS INSTRUCTIONS" not in model.calls[0].messages[1].content
-    shown = _shown(model)["stories"][0]["episodes"]
+    shown = _shown(model)["episodes"]
     assert "outside_content" in shown[1]
     assert "outside_content" not in shown[0]
 
@@ -510,10 +636,7 @@ async def test_an_open_member_episode_is_not_shown_and_cannot_be_named() -> None
 
     assert report.refused == 1
     shown = _shown(model)["stories"][0]
-    assert ([episode["label"] for episode in shown["episodes"]], shown["episodes_not_shown"]) == (
-        ["E1"],
-        1,
-    )
+    assert (shown["episodes"], shown["episodes_not_shown"]) == (["E1"], 1)
 
 
 # --- bounds ------------------------------------------------------------------------
