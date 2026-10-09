@@ -2491,7 +2491,10 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``StorySummaryRefusal`` and ``StorySummaryRefusalReason``, whose
 #:     ``page_moved_on`` becomes ``summary_moved_on``. A peer at 87 calls a command a
 #:     hub at 88 does not route (ADR-0124 §9).
-PROTOCOL_VERSION: Final[int] = 88
+#: 89: ADR-0304 §8 gives ``UnderstandingReferent.kind`` the member ``story``, inside the
+#:     understanding ``EpisodicMemory.processing_record`` carries; a peer at 88 would
+#:     refuse a record carrying a ``story`` referent (ADR-0280 §7:4).
+PROTOCOL_VERSION: Final[int] = 89
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

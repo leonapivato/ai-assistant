@@ -409,7 +409,8 @@ _OMISSIONS = ("routed", "no_text", "no_input", "failed", "not_reached")
 _GROUNDS = ("stated", "supplied", "inferred")
 #: ADR-0281 §7 adds ``memory``; the detail prints each kind's value as it is, so it
 #: renders with no table entry of its own.
-_REFERENT_KINDS = ("input", "channel_item", "episode", "memory")
+#: ADR-0304 §8 adds ``story``, rendered the same way.
+_REFERENT_KINDS = ("input", "channel_item", "episode", "memory", "story")
 
 
 def test_rendering_tables_cover_every_member_of_each_closed_enum() -> None:
@@ -544,7 +545,7 @@ def test_human_detail_renders_every_field_of_a_full_version_and_no_referent_deta
         "Understanding v3 (interpretation)",
         '  Meaning (inferred): "compare [bold]both[/bold] :smile: quotes\\n'
         'Understanding v9 (forged)"',
-        '  Reference "those two"; referent kinds: input, channel_item, episode, memory',
+        '  Reference "those two"; referent kinds: input, channel_item, episode, memory, story',
         '  Reference "the earlier one"; referent kinds: episode, episode',
         '  Reference "that"; referent kinds: none',
         '  Relationship (stated): "relationship stated"',

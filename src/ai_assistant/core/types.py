@@ -3478,10 +3478,16 @@ class UnderstandingReferent(BaseModel):
     episode's ``id`` is carried **exactly as stored** (ADR-0275 §10), a blank or
     whitespace-distinct address included; nothing resolves it on read, and a
     dangling ``id`` is an ordinary state (ADR-0276 §2).
+
+    ``story`` (ADR-0304 §8) names the matter an ``S`` label stands for: ``id`` the
+    story's id as the story store gave it, ``source`` the text ``story``, and
+    ``excerpt`` the first line of its summary as its short view rendered it, or empty
+    where the view rendered none. A story since merged is a dangling ``id`` like any
+    other, and a record written before the kind validates unchanged.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: Literal["input", "channel_item", "episode", "memory"]
+    kind: Literal["input", "channel_item", "episode", "memory", "story"]
     id: EncodableText | None = None
     source: NonBlankEncodableText | None = None
     excerpt: EncodableText = Field(max_length=UNDERSTANDING_REFERENT_EXCERPT_CHARS)
