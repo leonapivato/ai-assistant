@@ -2494,7 +2494,13 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #: 89: ADR-0304 §8 gives ``UnderstandingReferent.kind`` the member ``story``, inside the
 #:     understanding ``EpisodicMemory.processing_record`` carries; a peer at 88 would
 #:     refuse a record carrying a ``story`` referent (ADR-0280 §7:4).
-PROTOCOL_VERSION: Final[int] = 89
+#: 90: ADR-0304 §9 lets a move carry notes alone: ``StoryRefusalReason`` gains
+#:     ``no_notes``, which the engine's story writes carry; ``StoryChange`` gains
+#:     ``note_moved_out`` and ``note_moved_in`` and ``StoryLogLine`` gains ``note``,
+#:     which the engine's story log carries; and ``move_story_members`` takes its
+#:     members defaulting to none. A peer at 89 would refuse each new member and the
+#:     field (§9:10, ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 90
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

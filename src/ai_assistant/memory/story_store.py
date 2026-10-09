@@ -36,7 +36,9 @@ append-only by trigger, and the summary is the one record of the two kept as
 text, its lines and its mark, replaced whole by each write under ``secure_delete``,
 so the replaced summary's text is overwritten rather than left in a freed page of the
 file. No rule here reads the activation a note was written during (ADR-0303 §2:4):
-a split and a move carry exactly the notes they name (§6).
+a split and a move carry exactly the notes they name (§6), and log each on both
+stories, ``note_moved_out`` and ``note_moved_in`` in the log's ``note`` column
+(ADR-0304 §9:6); a merge carries every note and logs none of them.
 
 **A decision on a flag is a log line** (ADR-0302 §3). A ``decided`` line carries the
 flag it answers, as canonical JSON text of its identity in ``answers``, and the
@@ -125,10 +127,10 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 
 #: The schema this module writes, held in ``PRAGMA user_version``. A file carrying
 #: another version is refused at open rather than read under the wrong layout, except
-#: version 1, ADR-0289's layout, version 2, ADR-0300's, and version 3, ADR-0302's,
-#: which are migrated in place (see :data:`_MIGRATE_1`, :data:`_MIGRATE_2` and
-#: :func:`_migrate_3`).
-_SCHEMA_VERSION: Final = 4
+#: version 1, ADR-0289's layout, version 2, ADR-0300's, version 3, ADR-0302's, and
+#: version 4, ADR-0303's, which are migrated in place (see :data:`_MIGRATE_1`,
+#: :data:`_MIGRATE_2`, :func:`_migrate_3` and :data:`_MIGRATE_4`).
+_SCHEMA_VERSION: Final = 5
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -149,7 +151,7 @@ _SCHEMA: Final = (
     "sequence INTEGER PRIMARY KEY AUTOINCREMENT, story_id TEXT NOT NULL, "
     "change TEXT NOT NULL, member_kind TEXT, member_id TEXT, other_story TEXT, "
     "actor TEXT NOT NULL, trigger_id TEXT, at INTEGER NOT NULL, "
-    "answers TEXT, outcome TEXT)",
+    "answers TEXT, outcome TEXT, note INTEGER)",
     "CREATE INDEX IF NOT EXISTS log_story ON log(story_id, sequence)",
     # What a write answering a flag checks (ADR-0302 §4): a ``decided`` line answering
     # the flag.
@@ -221,6 +223,13 @@ _MIGRATE_3: Final = (
 )
 
 
+#: ADR-0303's layout, version 4, to this one (ADR-0304 §9:7), and every earlier one once
+#: its own steps have run. The log gains the note a ``note_moved_out`` or
+#: ``note_moved_in`` line carries; every line written before it carries none, as no
+#: other line does, so none is rewritten.
+_MIGRATE_4: Final = ("ALTER TABLE log ADD COLUMN note INTEGER",)
+
+
 def _migrate(conn: sqlite3.Connection, version: int) -> None:
     """Bring a file at an earlier layout ``version`` to this one, in the caller's transaction.
 
@@ -244,6 +253,9 @@ def _migrate(conn: sqlite3.Connection, version: int) -> None:
         except (TypeError, ValueError, AttributeError, KeyError) as exc:
             msg = f"a stored summary record is not one the earlier layout wrote: {exc}"
             raise StoryStoreError(msg) from exc
+    if version in {1, 2, 3, 4}:
+        for statement in _MIGRATE_4:
+            conn.execute(statement)
 
 
 def _migrate_3(conn: sqlite3.Connection) -> None:
@@ -658,7 +670,7 @@ class SqliteStoryStore:
             self._restrict_permissions()
             with transaction(conn, "prepare the story store", error=StoryStoreError):
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
-                if version not in {0, 1, 2, 3, _SCHEMA_VERSION}:
+                if version not in {0, 1, 2, 3, 4, _SCHEMA_VERSION}:
                     msg = (
                         f"the story store at {self._path!r} carries schema version "
                         f"{version}, and this build writes {_SCHEMA_VERSION}"
@@ -821,10 +833,11 @@ class SqliteStoryStore:
         member: StoryMember | None = None,
         other: str | None = None,
         decision: tuple[StoryFlagName, StoryDecision] | None = None,
+        note: int | None = None,
     ) -> int:
         cursor = conn.execute(
             "INSERT INTO log(story_id, change, member_kind, member_id, other_story, actor, "
-            "trigger_id, at, answers, outcome) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "trigger_id, at, answers, outcome, note) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 story_id,
                 change.value,
@@ -836,6 +849,7 @@ class SqliteStoryStore:
                 stamp.at,
                 None if decision is None else _flag_text(decision[0]),
                 None if decision is None else decision[1].value,
+                note,
             ),
         )
         sequence = cursor.lastrowid
@@ -946,6 +960,27 @@ class SqliteStoryStore:
                 "UPDATE notes SET story_id = ?, pending_since = ? WHERE id = ?",
                 (to, self._tick(conn), note_id),
             )
+
+    def _carry_logged(
+        self,
+        conn: sqlite3.Connection,
+        note_ids: Sequence[int],
+        source: str,
+        target: str,
+        stamp: _Stamp,
+    ) -> int:
+        """Carry notes a split or a move names, logging each on both stories (ADR-0304 §9:6).
+
+        Each note is logged ``note_moved_out`` on ``source`` and ``note_moved_in`` on
+        ``target``, in note order, and returns how many lines that appended.
+        """
+        for note_id in note_ids:
+            self._append(
+                conn, source, StoryChange.NOTE_MOVED_OUT, stamp, other=target, note=note_id
+            )
+            self._append(conn, target, StoryChange.NOTE_MOVED_IN, stamp, other=source, note=note_id)
+        self._carry_notes(conn, note_ids, target)
+        return 2 * len(note_ids)
 
     @staticmethod
     def _named_notes(conn: sqlite3.Connection, story_id: str, named: Sequence[int]) -> list[int]:
@@ -1277,22 +1312,22 @@ class SqliteStoryStore:
             for member in moved:
                 self._remove(conn, story_id, member, stamp)
                 self._add(conn, split_off, member, stamp)
-            self._carry_notes(conn, carried, split_off)
+            noted = self._carry_logged(conn, carried, story_id, split_off, stamp)
             decided = [] if flag is None else self._decide(conn, flag, StoryDecision.SPLIT, stamp)
-        return StoryOutcome(story_id=split_off, logged=3 + 2 * len(moved) + len(decided))
+        return StoryOutcome(story_id=split_off, logged=3 + 2 * len(moved) + noted + len(decided))
 
     async def move(  # noqa: PLR0913 — ADR-0302 §4:2 and ADR-0303 §6:2 add keywords to this operation
         self,
         story_id: Identifier,
         to: Identifier,
-        members: Sequence[StoryMember],
+        members: Sequence[StoryMember] = (),
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
         notes: Sequence[StoryNoteId] = (),
         answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
-        """Move activation members from one story to another (ADR-0300 §3, ADR-0303 §6)."""
+        """Move activation members, notes, or both (ADR-0300 §3, ADR-0303 §6, ADR-0304 §9)."""
         source = _checked_id(story_id)
         target = _checked_id(to)
         named = _move_members(source, target, members)
@@ -1320,7 +1355,8 @@ class SqliteStoryStore:
         notes: tuple[int, ...],
         flag: StoryFlagName | None,
     ) -> StoryOutcome:
-        if not members:
+        # A move naming no member is a note move where it names a note (ADR-0304 §9:1-§9:2).
+        if not members and not notes:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         stamp = self._stamp(actor, trigger)
         with self._transaction("move story members") as conn:
@@ -1338,6 +1374,10 @@ class SqliteStoryStore:
             moving = set(members)
             moved = [m for m in self._member_rows(conn, source) if m in moving]
             carried = self._named_notes(conn, source, notes)
+            if not members and not carried:
+                return StoryOutcome(
+                    refusal=StoryRefusal(reason=StoryRefusalReason.NO_NOTES, story_id=source)
+                )
             if flag is not None and (refused := self._flag_refusal(conn, flag)):
                 return StoryOutcome(refusal=refused)
             logged = 0
@@ -1348,7 +1388,7 @@ class SqliteStoryStore:
                     continue
                 self._add(conn, target, member, stamp)
                 logged += 1
-            self._carry_notes(conn, carried, target)
+            logged += self._carry_logged(conn, carried, source, target, stamp)
             if flag is not None:
                 logged += len(self._decide(conn, flag, StoryDecision.MOVED, stamp))
         return StoryOutcome(story_id=target, logged=logged)
@@ -1678,7 +1718,7 @@ class SqliteStoryStore:
                 return None
             rows = conn.execute(
                 "SELECT sequence, story_id, change, member_kind, member_id, other_story, "
-                "actor, trigger_id, at, answers, outcome FROM log "
+                "actor, trigger_id, at, answers, outcome, note FROM log "
                 "WHERE story_id = ? AND sequence > ? ORDER BY sequence LIMIT ?",
                 (story_id, -1 if cursor is None else cursor, limit + 1),
             ).fetchall()
@@ -1846,7 +1886,7 @@ class SqliteStoryStore:
 
 
 def _line_from(row: Sequence[Any]) -> StoryLogLine:
-    """Decode one stored log row, a ``decided`` line's flag and outcome included."""
+    """Decode one stored log row, a ``decided`` line's flag and outcome and a note included."""
     member = None if row[3] is None and row[4] is None else StoryMember(kind=row[3], id=row[4])
     answers = None if row[9] is None else StoryFlagName.model_validate(_json_from(row[9]))
     return StoryLogLine(
@@ -1860,6 +1900,7 @@ def _line_from(row: Sequence[Any]) -> StoryLogLine:
         at=_instant_from(row[8]),
         answers=answers,
         outcome=row[10],
+        note=row[11],
     )
 
 

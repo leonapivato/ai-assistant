@@ -70,6 +70,16 @@ CHANGE_TEXT: dict[StoryChange, str] = {
     StoryChange.ABSORBED: "absorbed",
     StoryChange.SPLIT_OFF: "split, the other side being",
     StoryChange.DECIDED: "decided",
+    StoryChange.NOTE_MOVED_OUT: "moved out",
+    StoryChange.NOTE_MOVED_IN: "moved in",
+}
+
+#: The word between a carried note and the other story its line names (ADR-0304 §9:6):
+#: the story it went to, or the one it came from. Every other line names the other
+#: story with none.
+_OTHER_STORY_TEXT: dict[StoryChange, str] = {
+    StoryChange.NOTE_MOVED_OUT: "to story",
+    StoryChange.NOTE_MOVED_IN: "from story",
 }
 
 #: What each decision on a flag reads as (ADR-0302 §3:3, §8:2), spelled out per
@@ -77,7 +87,7 @@ CHANGE_TEXT: dict[StoryChange, str] = {
 DECISION_TEXT: dict[StoryDecision, str] = {
     StoryDecision.MERGED: "merged",
     StoryDecision.SPLIT: "split",
-    StoryDecision.MOVED: "moved members",
+    StoryDecision.MOVED: "moved members or notes",
     StoryDecision.GROUPED: "grouped under a larger story",
     StoryDecision.LEFT: "left as they were",
     StoryDecision.NOT_APPLIED: "chose a change the store refused, so left as they were",
@@ -139,7 +149,7 @@ def flag_text(flag: StoryFlagName) -> str:
     return f"{kind} raised by version {flag.version} of story {quoted(flag.story or '')}"
 
 
-def refusal_text(refusal: StoryRefusal) -> str:
+def refusal_text(refusal: StoryRefusal) -> str:  # noqa: C901 — one arm per member of the closed StoryRefusalReason, so `assert_never` proves the match total
     """Say why a write was refused, naming the reason and what it was refused over."""
     story = "the story" if refusal.story_id is None else f"story {quoted(refusal.story_id)}"
     match refusal.reason:
@@ -167,6 +177,8 @@ def refusal_text(refusal: StoryRefusal) -> str:
         case StoryRefusalReason.ALREADY_DECIDED:
             flag = "the flag" if refusal.flag is None else flag_text(refusal.flag)
             detail = f"{flag} was already decided"
+        case StoryRefusalReason.NO_NOTES:
+            detail = f"{story} holds none of the notes named"
         case _:  # pragma: no cover — exhaustive over a closed enumeration
             assert_never(refusal.reason)
     return f"Refused ({refusal.reason.value}): {detail}."
@@ -463,7 +475,8 @@ def _log_line(line: StoryLogLine) -> str:
     """One change-log line: its sequence, instant, actor, change and what it names.
 
     A ``decided`` line names its outcome and the flag it answers, by identity
-    (ADR-0302 §8:2).
+    (ADR-0302 §8:2). A line recording a carried note names the note and the story it
+    went to or came from (ADR-0304 §9:6).
     """
     text = (
         f"  #{line.sequence} {line.at.isoformat()} {line.actor.value}: {CHANGE_TEXT[line.change]}"
@@ -474,8 +487,10 @@ def _log_line(line: StoryLogLine) -> str:
         text += f", answering {flag_text(line.answers)}"
     if line.member is not None:
         text += f" {member_text(line.member)}"
+    if line.note is not None:
+        text += f" note #{line.note}"
     if line.other_story is not None:
-        text += f" story {quoted(line.other_story)}"
+        text += f" {_OTHER_STORY_TEXT.get(line.change, 'story')} {quoted(line.other_story)}"
     if line.trigger is not None:
         text += f" (triggered by activation {quoted(line.trigger)})"
     return text

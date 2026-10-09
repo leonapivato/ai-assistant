@@ -829,11 +829,11 @@ class HubClient:
         self,
         story_id: Identifier,
         to: Identifier,
-        members: Sequence[StoryMember],
+        members: Sequence[StoryMember] = (),
         *,
         notes: Sequence[StoryNoteId] = (),
     ) -> StoryOutcome:
-        """Move activation members between stories, with the notes named (ADR-0303 §10:1)."""
+        """Move activation members, notes, or both, between stories (ADR-0304 §9)."""
         source = identifier(story_id, name="story_id")
         target = identifier(to, name="to")
         named = story_move_members(source, target, members)
