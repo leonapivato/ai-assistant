@@ -6,7 +6,9 @@ its ``S`` labels and the instruction (§6:5, §6:9), ``story_labels`` resolved i
 dropped and counted (§6:8). An ``H`` label naming a place-window item that links to an
 activation resolves to it, as a ``P`` label naming that activation's episode would, and
 one naming an item that links to nothing is rendered not linkable and is dropped and
-counted with no repair (ADR-0303 §7, ADR-0301 §1:1). Which candidates are assembled is
+counted with no repair (ADR-0303 §7, ADR-0301 §1:1). An ``S`` label cited in
+``meaning_labels``, a reference or a relationship resolves to a ``story`` referent with
+no repair, and links nothing (ADR-0304 §8). Which candidates are assembled is
 ``test_story_links.py``'s.
 """
 
@@ -30,6 +32,7 @@ from story_support import (
 )
 
 from ai_assistant.core.types import (
+    UNDERSTANDING_REFERENT_EXCERPT_CHARS,
     ActivationRecall,
     BeliefBand,
     ChannelContext,
@@ -47,6 +50,8 @@ from ai_assistant.core.types import (
     StoryNoteAuthor,
     StorySummaryLine,
     TranscriptMessage,
+    UnderstandingGround,
+    UnderstandingReferent,
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
 from ai_assistant.orchestration.story_links import Candidates, ShortView
@@ -246,19 +251,25 @@ async def test_the_instruction_states_what_a_link_says_and_asks_for_story_labels
     assert '"story_labels"' in instruction
 
 
-async def test_the_instruction_says_an_s_label_grounds_no_reading() -> None:
-    """#2776: an S label is cited in `story_labels` alone, never as a reading's ground."""
+async def test_the_instruction_says_where_an_s_label_may_be_cited_and_what_a_story_is() -> None:
+    """ADR-0304 §8:5: the instruction's three statements, and #2776's rule gone."""
     model = FakeModelProvider(_proposal())
 
     await _understand(model, stories=Candidates(views=(_TRIP,)))
 
     instruction = _instruction(model)
-    assert "An S label names a story and is cited in `story_labels` alone." in instruction
+    assert "An S label may be cited wherever a label may" in instruction
+    assert "Citing an S label outside `story_labels` links nothing" in instruction
     assert (
-        "Never cite one in `meaning_labels`, in a reference or in a relationship, not even "
-        "to say the input does not belong with that story." in instruction
+        "A story's summary and notes are the assistant's own record of the matter, "
+        "provisional and possibly out of date." in instruction
     )
-    assert "a reading that only a story supports is `inferred`" in instruction
+    assert "A reading an S label supports is `supplied`, as for any label." in instruction
+    assert "is cited in `story_labels` alone" not in instruction
+    assert "Never cite one" not in instruction
+    assert "story supports is `inferred`" not in instruction
+    # The T1 rename's join left "folded into thesummary"; the paragraph reads whole.
+    assert "folded into the summary" in instruction
 
 
 @pytest.mark.parametrize(
@@ -343,27 +354,21 @@ async def test_an_episode_of_no_activation_is_not_a_story_label() -> None:
     assert understood.grounding_dropped == 1
 
 
-async def test_an_s_label_cited_as_a_referent_resolves_to_nothing() -> None:
-    model = FakeModelProvider.scripted(
-        _proposal(meaning_ground="supplied", meaning_labels=["S1"]),
-        _proposal(meaning_ground="supplied", meaning_labels=["S1"]),
-    )
-
-    understood = await _understand(model, stories=Candidates(views=(_TRIP,)))
-
-    statement = model.calls[1].messages[-1].content
-    assert "An S label names a story and is cited in `story_labels` alone." in statement
-    assert understood.meaning_referents == ()
+# --- ADR-0304 §8: an S label cited as a referent ---------------------------------------
 
 
-#: An S label cited outside `story_labels`, in each field that takes labels (#2776).
+def _story_referent(story_id: str, excerpt: str) -> UnderstandingReferent:
+    return UnderstandingReferent(kind="story", id=story_id, source="story", excerpt=excerpt)
+
+
+#: An S label cited outside `story_labels`, in each field that takes labels (ADR-0304 §8:1).
 _S_OUTSIDE_STORY_LABELS: Final[dict[str, dict[str, Any]]] = {
     "meaning": {"meaning_ground": "supplied", "meaning_labels": ["S1"]},
-    "reference": {"references": [{"phrase": "the trip", "labels": ["S1"]}]},
+    "reference": {"references": [{"phrase": "Riverside", "labels": ["S1"]}]},
     "relationship": {
         "relationships": [
             {
-                "statement": "It does not belong with the trip.",
+                "statement": "It changes the plan for the trip.",
                 "labels": ["S1"],
                 "ground": "supplied",
             }
@@ -373,31 +378,136 @@ _S_OUTSIDE_STORY_LABELS: Final[dict[str, dict[str, Any]]] = {
 
 
 @pytest.mark.parametrize("field", list(_S_OUTSIDE_STORY_LABELS))
-async def test_the_instruction_says_of_an_s_label_what_the_repair_enforces(field: str) -> None:
-    """#2776: the first reply is told where an S label may be cited, in the repair's words.
+async def test_an_s_label_cited_as_a_referent_resolves_to_its_story(field: str) -> None:
+    """ADR-0304 §8:1, §8:4: no label defect, no repair, and a `story` referent recorded."""
+    model = FakeModelProvider.scripted(_proposal(**_S_OUTSIDE_STORY_LABELS[field]))
 
-    Said only in the repair statement, the rule cost a second completion on most turns
-    about a matter. Every sentence of the statement about an S label is in the
-    instruction the first completion was given, word for word.
+    understood = await _understand(model, stories=Candidates(views=(_TRIP,)))
+
+    assert len(model.calls) == 1
+    assert understood.grounding_dropped == 0
+    trip = _story_referent("story:trip", "A camping trip to Riverside.")
+    cited = (
+        understood.meaning_referents
+        + tuple(one for reference in understood.references for one in reference.referents)
+        + tuple(one for relation in understood.relationships for one in relation.referents)
+    )
+    assert cited == (trip,)
+
+
+async def test_a_reply_citing_s1_everywhere_passes_with_one_completion() -> None:
+    """#2795: a reply citing S1 in a reference, a relationship and its meaning is not repaired.
+
+    Fourteen of thirty-nine passes on #2792's hub paid the repair completion because the
+    model cited an S label there. Each resolves to the story; the readings it supports
+    stay `supplied` (§8:3); and none of it links the input to the story (§8:2).
     """
-    bad = _proposal(**_S_OUTSIDE_STORY_LABELS[field])
+    model = FakeModelProvider.scripted(
+        _proposal(
+            meaning="A change of plan for the Riverside trip.",
+            meaning_ground="supplied",
+            meaning_labels=["S1"],
+            references=[{"phrase": "Riverside", "labels": ["S1"]}],
+            relationships=[
+                {"statement": "It changes the trip's plan.", "labels": ["S1"], "ground": "supplied"}
+            ],
+        )
+    )
+
+    understood = await _understand(model, stories=Candidates(views=(_TRIP, _RUNNING)))
+
+    assert len(model.calls) == 1
+    trip = _story_referent("story:trip", "A camping trip to Riverside.")
+    assert understood.meaning_ground is UnderstandingGround.SUPPLIED
+    assert understood.meaning_referents == (trip,)
+    (reference,) = understood.references
+    assert reference.referents == (trip,)
+    (relationship,) = understood.relationships
+    assert relationship.referents == (trip,)
+    assert relationship.ground is UnderstandingGround.SUPPLIED
+    assert understood.grounding_dropped == 0
+    # §8:2: a link is made only by `story_labels`.
+    assert understood.story_links == ()
+
+
+async def test_an_s_label_both_linked_and_cited_resolves_each_way() -> None:
+    """The same S label names the matter in `story_labels` and the referent elsewhere."""
+    model = FakeModelProvider.scripted(
+        _proposal(
+            story_labels=["S2"],
+            references=[{"phrase": "the run", "labels": ["S2"]}],
+        )
+    )
+
+    understood = await _understand(model, stories=Candidates(views=(_TRIP, _RUNNING)))
+
+    assert len(model.calls) == 1
+    assert understood.story_links == (story("story:running"),)
+    (reference,) = understood.references
+    # A story with no summary line rendered gives an empty excerpt (§8:1).
+    assert reference.referents == (_story_referent("story:running", ""),)
+
+
+async def test_a_withheld_summary_gives_a_story_referent_an_empty_excerpt() -> None:
+    """ADR-0304 §8:1: the excerpt is what the short view rendered, and it rendered none."""
+    withheld = ShortView(
+        story_id="story:withheld", lines=_TRIP.lines, notes=(), episodes=(), withheld=True
+    )
+    model = FakeModelProvider.scripted(
+        _proposal(references=[{"phrase": "the trip", "labels": ["S1"]}])
+    )
+
+    understood = await _understand(model, stories=Candidates(views=(withheld,)))
+
+    (reference,) = understood.references
+    assert reference.referents == (_story_referent("story:withheld", ""),)
+    assert "A camping trip" not in model.calls[0].messages[1].content
+
+
+async def test_a_story_referent_s_excerpt_is_cut_to_the_referent_bound() -> None:
+    """ADR-0276 §2:5's bound, on the first line exactly as the short view rendered it."""
+    first = "x" * (UNDERSTANDING_REFERENT_EXCERPT_CHARS + 30)
+    long = ShortView(
+        story_id="story:long",
+        lines=(StorySummaryLine(text=first), StorySummaryLine(text="second")),
+        notes=(),
+        episodes=(),
+    )
+    model = FakeModelProvider.scripted(_proposal(meaning_labels=["S1"]))
+
+    understood = await _understand(model, stories=Candidates(views=(long,)))
+
+    (referent,) = understood.meaning_referents
+    assert referent.excerpt == first[:UNDERSTANDING_REFERENT_EXCERPT_CHARS]
+    assert _payload(model)["stories"][0]["summary"][0]["text"] == first
+
+
+async def test_an_unrendered_s_label_is_still_a_label_defect() -> None:
+    """ADR-0276 §3:4: an S label beyond the stories rendered resolves to nothing."""
+    bad = _proposal(references=[{"phrase": "the trip", "labels": ["S2"]}])
     model = FakeModelProvider.scripted(bad, bad)
 
     understood = await _understand(model, stories=Candidates(views=(_TRIP,)))
 
     assert len(model.calls) == 2
-    said = [
-        sentence + "."
-        for sentence in _statement(model).split(". ")
-        if sentence.startswith("An S label")
-    ]
-    assert said
-    instruction = _instruction(model)
-    for sentence in said:
-        assert sentence in instruction
-    assert understood.meaning_referents == ()
-    assert all(reference.referents == () for reference in understood.references)
-    assert all(relationship.referents == () for relationship in understood.relationships)
+    assert '"S2"' in _statement(model)
+    assert understood.references[0].referents == ()
+    assert understood.grounding_dropped == 1
+
+
+async def test_the_repair_statement_carries_no_rule_on_where_an_s_label_may_be_cited() -> None:
+    """ADR-0304 §8:6: a repair another defect calls for says nothing of citing S labels."""
+    bad = _proposal(meaning_labels=["S1", "P9"])
+    model = FakeModelProvider.scripted(bad, bad)
+
+    await _understand(model, stories=Candidates(views=(_TRIP,)))
+
+    statement = _statement(model)
+    assert '"P9"' in statement
+    assert '"S1"' not in statement
+    assert "S1 (the stories section)" in statement
+    assert "An S label" not in statement
+    assert "story_labels" not in statement
 
 
 # --- ADR-0301 §1: an H label naming a stored episode the pass admitted ------------------

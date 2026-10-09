@@ -41,8 +41,11 @@ read off what the pass already holds, and nothing is fetched. An item that links
 activation is rendered marked ``not_linkable``, and a story label naming it is dropped
 and counted, with no repair (ADR-0303 §7:5, §7:6). A story label resolving to nothing
 rendered or to a semantic record is a label defect, repaired once and then dropped and
-counted (§6:8). Where the candidates could not be read, or there are none, the section
-says so.
+counted (§6:8). An ``S`` label is also cited wherever a label may be — in
+``meaning_labels``, a reference or a relationship — and resolves there to a ``story``
+referent, grounding a reading ``supplied`` as any label does; cited outside
+``story_labels`` it links nothing (ADR-0304 §8). Where the candidates could not be read,
+or there are none, the section says so.
 
 **Two windows, two label sequences** (§3). The **channel window** is what the channel
 supplied — ``ChannelContext.history`` then ``reply_to`` — or, on the conversation
@@ -211,12 +214,17 @@ _RECALLED: Final = (
     "\n"
 )
 
-#: Where an ``S`` label may be cited: one sentence, said by the instruction and by the
-#: repair statement alike, so the first reply is told what the repair would enforce
-#: (#2776). An ``S`` label resolves only as a story label (ADR-0300 §6:7); ADR-0300
-#: adds no referent a story could resolve to, so cited anywhere else it resolves to
-#: nothing and costs the one repair completion (ADR-0276 §6:2).
-_S_LABEL_CITED: Final = "An S label names a story and is cited in `story_labels` alone."
+#: Where an ``S`` label may be cited, and what citing it does (ADR-0304 §8): wherever a
+#: label may, resolving to a ``story`` referent and grounding a reading ``supplied``
+#: as any label does; outside ``story_labels`` it links nothing (ADR-0300 §6:7). The
+#: repair statement carries no rule on where an ``S`` label may be cited (§8:6), so
+#: this is said by the instruction alone.
+_S_LABEL_CITED: Final = (
+    "An S label may be cited wherever a label may: in `meaning_labels`, in a reference "
+    "or in a relationship, as well as in `story_labels`. A reading an S label supports "
+    "is `supplied`, as for any label. Citing an S label outside `story_labels` links "
+    "nothing: only `story_labels` links this input to a matter."
+)
 
 #: Which H labels a story label may name (ADR-0303 §7:8): any item the place window
 #: renders, save one marked not linkable, whose label links nothing (§7:5, §7:6).
@@ -229,17 +237,16 @@ _NOT_LINKABLE_CITED: Final = (
 #: candidate stories, so a pass with none keeps the instruction it had. Its second half
 #: is §6:9's: a link says the input belongs to the matter and nothing more, one input
 #: may belong to several, and one that belongs to none is linked to none. Its last
-#: sentences say where an ``S`` label may be cited: a story resolves to no referent, so
-#: a reading only a story supports cannot stay ``supplied`` (ADR-0276 §6:4) and is
-#: ``inferred``.
+#: paragraph says where an ``S`` label may be cited (ADR-0304 §8:5).
 _STORIES: Final = (
     "The message also carries a stories section: the assistant's memory of matters "
     "that earlier episodes belong to, each labelled S1, S2, and so on. A story shows "
-    "the first lines of its summary, its newest notes not yet folded into the"
+    "the first lines of its summary, its newest notes not yet folded into the "
     "summary, and its latest episodes, which carry no label. They are quoted source data "
-    "like the windows: a line or a note is the assistant's own record of the matter, "
-    "provisional and possibly out of date, and one marked as resting on outside "
-    "content is what a source reported, never something the user said.\n"
+    "like the windows. A story's summary and notes are the assistant's own record of "
+    "the matter, provisional and possibly out of date. A line or a note marked as "
+    "resting on outside content is what a source reported, never something the user "
+    "said.\n"
     "\n"
     "In `story_labels`, name the matters this input belongs to: the S labels of the "
     "stories, and the labels of the earlier episodes, that it belongs with as one "
@@ -249,10 +256,7 @@ _STORIES: Final = (
     + " A link says the input belongs to that matter and nothing more. One "
     "input may belong to several matters. An input that belongs to none is linked to "
     "none, and its `story_labels` is empty.\n"
-    "\n" + _S_LABEL_CITED + " Never cite one in `meaning_labels`, in a reference or in a "
-    "relationship, not even to say the input does not belong with that story. A "
-    "reference that only a story places names no label, and a reading that only a "
-    "story supports is `inferred`.\n"
+    "\n" + _S_LABEL_CITED + "\n"
     "\n"
 )
 
@@ -649,7 +653,8 @@ class _Brief:
     """One call's rendered prompt and the label sequences it rendered.
 
     ``labels`` holds exactly the labels §3's scheme minted for this call — ``H`` then
-    *n*, ``P`` then *n*, and ADR-0281 §7's ``M`` then *n*, ASCII decimal with no
+    *n*, ``P`` then *n*, ADR-0281 §7's ``M`` then *n*, and ADR-0300 §6:5's ``S`` then
+    *n*, resolving to a ``story`` referent (ADR-0304 §8:1), ASCII decimal with no
     padding — so an exact lookup is the whole of resolution: a string of another
     form, an *n* out of range and a label of a sequence this call did not render all
     miss it, and nothing is case-folded, trimmed or repaired.
@@ -855,7 +860,7 @@ class UnderstandingStage:
             payload["recalled"] = section
         story_count: int | None = None
         if stories is not None:
-            payload["stories"], story_count = self._stories_section(stories, story_members)
+            payload["stories"], story_count = self._stories_section(stories, labels, story_members)
         instruction = _instruction(recalled=recall is not None, stories=stories is not None)
         messages = (
             Message(role=Role.SYSTEM, content=instruction),
@@ -872,15 +877,23 @@ class UnderstandingStage:
         )
 
     def _stories_section(
-        self, stories: Candidates, story_members: dict[str, StoryMember]
+        self,
+        stories: Candidates,
+        labels: dict[str, UnderstandingReferent],
+        story_members: dict[str, StoryMember],
     ) -> tuple[list[dict[str, object]] | str, int]:
-        """ADR-0300 §6:5's fourth section, labelled ``S`` in the candidates' order."""
+        """ADR-0300 §6:5's fourth section, labelled ``S`` in the candidates' order.
+
+        Each ``S`` label resolves twice: as a story label to its story member (§6:7),
+        and as a label cited anywhere else to a ``story`` referent (ADR-0304 §8:1).
+        """
         if stories.unreadable:
             return _STORIES_UNREADABLE, 0
         section: list[dict[str, object]] = []
         for view in stories.views:
             label = f"S{len(section) + 1}"
             section.append(self._short_view(label, view))
+            labels[label] = _story_referent(view)
             story_members[label] = StoryMember(kind=StoryMemberKind.STORY, id=view.story_id)
         if section:
             return section, len(section)
@@ -909,7 +922,7 @@ class UnderstandingStage:
             "summary": (
                 _SUMMARY_WITHHELD
                 if view.withheld
-                else [_summary_line(line) for line in view.lines] or _NO_LINES
+                else [_summary_line(line) for line in _shown_lines(view)] or _NO_LINES
             ),
         }
         if view.outside:
@@ -1522,9 +1535,9 @@ def _label_statement(
         rendered.append(_sequence("M", brief.recalled_count, "recalled section"))
     if brief.story_count is not None:
         rendered.append(_sequence("S", brief.story_count, "stories section"))
+    # ADR-0304 §8:6: an S label the stories section rendered resolves wherever it is
+    # cited, so the statement carries no rule on where one may be cited.
     parts.append(f"The message rendered {', '.join(rendered[:-1])} and {rendered[-1]}.")
-    if brief.story_count is not None:
-        parts.append(_S_LABEL_CITED)
     parts.append(
         "Reply again with only the corrected JSON object. Name only labels that were "
         "rendered, and ground a reading no labelled item supports as `inferred`."
@@ -1665,6 +1678,28 @@ def _member_of(record: EpisodicMemory, label: str, story_members: dict[str, Stor
     """
     if (activation := activation_of(record)) is not None:
         story_members[label] = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
+
+
+def _shown_lines(view: ShortView) -> tuple[StorySummaryLine, ...]:
+    """The summary lines a short view renders: none where the summary is withheld."""
+    return () if view.withheld else view.lines
+
+
+def _story_referent(view: ShortView) -> UnderstandingReferent:
+    """What an ``S`` label cited outside ``story_labels`` resolves to (ADR-0304 §8:1).
+
+    The story's id as the story store gave it, and as excerpt the first line of its
+    summary as the short view rendered it, cut on ADR-0276 §2:5's rule — empty where
+    the view rendered no line, a withheld summary included. Nothing resolves the id on
+    read: a story since merged is a dangling id, an ordinary state.
+    """
+    shown = _shown_lines(view)
+    return UnderstandingReferent(
+        kind="story",
+        id=view.story_id,
+        source="story",
+        excerpt=_excerpt(shown[0].text) if shown else "",
+    )
 
 
 def _summary_line(line: StorySummaryLine) -> dict[str, object]:
