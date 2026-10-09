@@ -383,6 +383,7 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         # refusal, and where the matter stands. ``StoryPageState`` and the version log
         # stay store-side, because no method returns them.
         "StoryPageView",
+        "StoryPageViewNote",
         "StoryPageLine",
         "StoryNote",
         "StoryNoteAuthor",
@@ -1553,6 +1554,14 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``activation``, on the story commands. A peer at 84 refuses a line or a refusal a
     hub at 85 may write. **The method set does not move and stays at 80.**
 
+    **86 is ADR-0303 §11:1, on wire-carried core types.** ``StoryNote`` records
+    ``written_during`` in place of ``rests_on``, ``StoryPageLine`` carries its text
+    alone, and ``StoryPageView`` carries the page's mark or that it was withheld and
+    the story's notes newest first (``StoryPageViewNote``), on the story commands; and
+    ``StoryDecision`` gains ``not_applied``, on the engine's story log. A peer at 85
+    refuses a page view or a line a hub at 86 may write. **The method set does not
+    move and stays at 80.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1561,7 +1570,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (80, 85), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (80, 86), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

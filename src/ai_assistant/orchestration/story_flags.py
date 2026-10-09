@@ -207,7 +207,13 @@ class StoryRecords:
         return _unique(self.followed(story_id) for story_id in self.raised(flag))
 
     def flags(self) -> list[RaisedFlag]:
-        """Every flag these records hold, in the order they were raised (§2)."""
+        """Every flag these records hold, in the order they were raised (§2).
+
+        A tidy-up's flags only (ADR-0303 §8): understanding linking one input to two
+        stories is that many links and no flag, so its lines raise none, and the store
+        refuses a write answering one ``unknown_flag``. They are still read for the
+        stories a ``decided`` line already answering one concerns (:meth:`raised`).
+        """
         raised: list[RaisedFlag] = []
         for story_id, versions in self.versions.items():
             for version in versions:
@@ -221,21 +227,6 @@ class StoryRecords:
                             sequence=version.version,
                         )
                     )
-        for activation, lines in self._lines().items():
-            firsts: dict[str, StoryLogLine] = {}
-            for line in lines:
-                firsts.setdefault(line.story_id, line)
-            if len(firsts) < 2:  # noqa: PLR2004 — §2:2's "two or more stories"
-                continue
-            second = list(firsts.values())[1]
-            raised.append(
-                RaisedFlag(
-                    name=StoryFlagName(activation=activation),
-                    raised=tuple(firsts),
-                    at=second.at,
-                    sequence=second.sequence,
-                )
-            )
         raised.sort(key=lambda flag: (flag.at, flag.sequence))
         return raised
 

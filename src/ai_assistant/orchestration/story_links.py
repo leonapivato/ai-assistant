@@ -9,12 +9,12 @@ stage renders, the understanding phase assembles up to
 window's episodes belong to, each looked up with ``StoryStore.stories_of`` in the
 window's order, then the stories recall's kept episodes belong to, which a caller hands
 in already in §6:1's order. A story already a candidate is not repeated. Each candidate
-is read as a **short view**: the first lines of its current page, its newest pending
-notes and its latest episodes by occurrence, the episodes fetched with
-``MemoryStore.get_many`` under ADR-0282 §2:6-§2:8 and the lines and notes kept under
-ADR-0300 §11's default
-(:mod:`~ai_assistant.orchestration.story_privacy`). A ``StoryStoreError`` leaves no
-candidates, and the decision says the stories could not be read.
+is read as a **short view**: the first lines of its current page and the page's mark,
+its newest pending notes and its latest episodes by occurrence, the episodes fetched
+with ``MemoryStore.get_many`` under ADR-0282 §2:6-§2:8 and the page and notes kept
+under ADR-0303 §3's default (:mod:`~ai_assistant.orchestration.story_privacy`). A
+``StoryStoreError`` leaves no candidates, and the decision says the stories could not
+be read.
 
 **The story-links stage** (:class:`StoryLinksStage`, §6:12-§6:14). Once understanding
 is a recorded version, the stage writes its links through the story store with the
@@ -63,7 +63,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import MemoryStore, StoryStore
     from ai_assistant.core.types import (
         StoryNote,
-        StoryNoteId,
         StoryPageLine,
         StoryPageState,
         StoryRefusal,
@@ -90,8 +89,9 @@ class ShortView:
 
     Attributes:
         story_id: The candidate story.
-        lines: The first lines of its current page that may be shown, in page order;
-            empty where no page has been written or none of them may be shown.
+        lines: The first lines of its current page, in page order, where the page may
+            be shown; empty where no page has been written or it may not be shown.
+        outside: The page's mark (ADR-0303 §3:4), carried only with its lines.
         notes: Its newest pending notes that may be shown, newest first.
         episodes: Its latest episodes by occurrence among those fetched and admitted,
             newest first.
@@ -101,6 +101,7 @@ class ShortView:
     lines: tuple[StoryPageLine, ...]
     notes: tuple[StoryNote, ...]
     episodes: tuple[EpisodicMemory, ...]
+    outside: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,8 +112,8 @@ class Candidates:
         views: The candidates' short views, in §6:1's order.
         unreadable: A story-store read raised ``StoryStoreError``, so there are no
             candidates and the section says the stories could not be read (§6:4).
-        fetched: The ids the views were fetched for — the latest episodes chosen, then
-            the episodes the notes rest on — in order, each once (ADR-0282 §2:7). Each
+        fetched: The ids the views were fetched for — the latest episodes chosen — in
+            order, each once (ADR-0282 §2:7). Each
             was admitted for the pass when it was chosen, so no id the audience
             predicate refuses enters here (§2:8).
         missing: The fetched ids that came back with no episode, an open one, or one
@@ -131,21 +132,13 @@ class _Read:
 
     story_id: str
     lines: tuple[StoryPageLine, ...]
-    cited: dict[StoryNoteId, StoryNote]
+    outside: bool
     notes: tuple[StoryNote, ...]
     members: tuple[str, ...]
 
-    def supports(self) -> list[str]:
-        """The episodes this view's notes rest on, which decide what of it is shown."""
-        return [
-            episode_address(note.rests_on)
-            for note in (*self.cited.values(), *self.notes)
-            if note.rests_on is not None
-        ]
-
     def addresses(self) -> list[str]:
-        """The episodes this view's privacy and its choice of episodes read, in order."""
-        return [*self.supports(), *(episode_address(member) for member in self.members)]
+        """The episodes this view's choice of episodes reads, in link order."""
+        return [episode_address(member) for member in self.members]
 
     def latest(self, admitted: dict[str, EpisodicMemory], *, episodes: int) -> tuple[str, ...]:
         """The ids of the latest ``episodes`` members by occurrence, among those admitted.
@@ -168,10 +161,12 @@ class _Read:
         latest: tuple[str, ...],
         fetched: dict[str, EpisodicMemory],
     ) -> ShortView:
-        """The short view: its lines and notes under §11's default, its latest as fetched."""
+        """The short view: its page and notes under ADR-0303 §3's default, its latest as fetched."""
+        shown = visibility.page()
         return ShortView(
             story_id=self.story_id,
-            lines=tuple(line for line in self.lines if visibility.line(line, self.cited)),
+            lines=self.lines if shown else (),
+            outside=self.outside and shown and bool(self.lines),
             notes=tuple(note for note in self.notes if visibility.note(note)),
             episodes=tuple(record for id_ in latest if (record := fetched.get(id_)) is not None),
         )
@@ -254,28 +249,16 @@ class StoryCandidates:
         except StoryStoreError:
             _log.warning("story_candidates_unreadable", stage="understanding")
             return Candidates(unreadable=True)
-        # ADR-0282 §2:5, §2:8: the reads that choose, and only admitted ids chosen. The
-        # episodes the notes rest on and every member are read once, through the audience
-        # predicate, to choose which members are the latest and which supporting episodes
-        # may be relied on; nothing refused is chosen or recorded.
+        # ADR-0282 §2:5, §2:8: the reads that choose, and only admitted ids chosen. Every
+        # member is read once, through the audience predicate, to choose which members are
+        # the latest; nothing refused is chosen or recorded.
         chosen_from = await self._admitted(
             dict.fromkeys(address for read in reads for address in read.addresses()), audience
         )
         latest = [read.latest(chosen_from, episodes=self._episodes) for read in reads]
-        supports = [address for read in reads for address in read.supports()]
-        # §2:6-§2:8: the chosen ids — the latest episodes and the admitted episodes the
-        # notes rest on — fetched for their current versions, the predicate applied
-        # again, and what came back missing recorded beside what was fetched. What of each
-        # page may be shown (§11:1) is decided from this fetch, not the choice: an
-        # episode forgotten or narrowed between the two withholds what rests on it.
-        fetched = tuple(
-            dict.fromkeys(
-                (
-                    *(id_ for ids in latest for id_ in ids),
-                    *(address for address in supports if address in chosen_from),
-                )
-            )
-        )
+        # §2:6-§2:8: the chosen ids fetched for their current versions, the predicate
+        # applied again, and what came back missing recorded beside what was fetched.
+        fetched = tuple(dict.fromkeys(id_ for ids in latest for id_ in ids))
         held = await self._admitted(fetched, audience)
         visibility = PageVisibility.of(held.values(), owner_notes=admits_owner_placed(audience))
         views = tuple(
@@ -323,51 +306,19 @@ class StoryCandidates:
         return list(chosen)[: self._limit]
 
     async def _read(self, story_id: str) -> _Read | None:
-        """One candidate's current page, the notes its first lines cite, and its members."""
+        """One candidate's current page's first lines and its mark, its notes and members."""
         state = await self._stories.current_page(story_id)
         if state is None:
             return None
-        lines = () if state.page is None else state.page.lines[: self._lines]
-        pending = {note.note_id: note for note in state.pending_notes}
-        wanted = {note_id for line in lines for note_id in line.cites}
-        cited = {note_id: pending[note_id] for note_id in wanted if note_id in pending}
-        cited |= await self._notes_cited(story_id, wanted - cited.keys())
+        page = state.page
         newest = tuple(reversed(state.pending_notes[-self._notes :]))
         return _Read(
             story_id=story_id,
-            lines=lines,
-            cited=cited,
+            lines=() if page is None else page.lines[: self._lines],
+            outside=page is not None and page.outside,
             notes=newest,
             members=await self._members(story_id, state),
         )
-
-    async def _notes_cited(
-        self, story_id: str, wanted: set[StoryNoteId]
-    ) -> dict[StoryNoteId, StoryNote]:
-        """The notes ``wanted`` names that the story holds, read page by page.
-
-        Notes are read in identity order, so the walk stops once it passes the
-        largest identity wanted. A note the story no longer holds is not found, and
-        the line citing it is then not shown (§11:1).
-        """
-        found: dict[StoryNoteId, StoryNote] = {}
-        if not wanted:
-            return found
-        last = max(wanted)
-        cursor: int | None = None
-        while True:
-            page = await self._stories.notes(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
-            if page is None:
-                return found
-            found |= {note.note_id: note for note in page.notes if note.note_id in wanted}
-            if (
-                page.next_cursor is None
-                or page.next_cursor == cursor
-                or page.next_cursor >= last
-                or found.keys() == wanted
-            ):
-                return found
-            cursor = page.next_cursor
 
     async def _members(self, story_id: str, state: StoryPageState) -> tuple[str, ...]:
         """The story's activation members, every one: its latest are chosen by occurrence.

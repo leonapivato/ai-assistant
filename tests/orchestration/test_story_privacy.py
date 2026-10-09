@@ -1,4 +1,4 @@
-"""ADR-0300 §11:1's privacy default, decided from identities alone."""
+"""ADR-0303 §3's privacy default, decided from identities alone."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import Any, Final
 
 from story_support import AT, episode
 
-from ai_assistant.core.types import StoryNote, StoryNoteAuthor, StoryPageLine
+from ai_assistant.core.types import StoryNote, StoryNoteAuthor
 from ai_assistant.orchestration.story_privacy import PageVisibility, activation_of
 
 
@@ -15,42 +15,29 @@ def _note(note_id: int, **fields: Any) -> StoryNote:
         "note_id": note_id,
         "text": "a note",
         "author": StoryNoteAuthor.PLANNING,
-        "rests_on": "a-1",
+        "written_during": "a-1",
         "outside": False,
         "written_at": AT,
     }
     return StoryNote.model_validate(values | fields)
 
 
-_SHOWN: Final = _note(1)
-_HIDDEN: Final = _note(2, rests_on="a-2")
-_OWNER: Final = _note(3, author=StoryNoteAuthor.OWNER, rests_on=None)
-_NOTES: Final = {note.note_id: note for note in (_SHOWN, _HIDDEN, _OWNER)}
+_PLANNED: Final = _note(1)
+_OWNER: Final = _note(3, author=StoryNoteAuthor.OWNER, written_during=None)
 
 
-def _line(*cites: int) -> StoryPageLine:
-    return StoryPageLine(text="a line", cites=cites, outside=False)
+def test_a_note_is_shown_where_an_owner_record_may_be_whoever_wrote_it() -> None:
+    """§3:6: the activation it was written during decides nothing (§2:4)."""
+    episodes = [episode("a-1")]
+    for note in (_PLANNED, _OWNER):
+        assert PageVisibility.of(episodes, owner_notes=True).note(note)
+        assert not PageVisibility.of(episodes, owner_notes=False).note(note)
 
 
-def test_a_note_is_shown_where_its_episode_may_be() -> None:
-    visibility = PageVisibility.of([episode("a-1")], owner_notes=False)
-
-    assert visibility.note(_SHOWN)
-    assert not visibility.note(_HIDDEN)
-
-
-def test_a_note_the_user_wrote_is_shown_where_an_owner_record_may_be() -> None:
-    assert PageVisibility.of([], owner_notes=True).note(_OWNER)
-    assert not PageVisibility.of([], owner_notes=False).note(_OWNER)
-
-
-def test_a_line_is_shown_only_where_every_note_it_cites_may_be() -> None:
-    visibility = PageVisibility.of([episode("a-1")], owner_notes=True)
-
-    assert visibility.line(_line(1, 3), _NOTES)
-    assert not visibility.line(_line(1, 2), _NOTES)
-    # A citation nobody handed in is undecidable, and withheld.
-    assert not visibility.line(_line(1, 9), _NOTES)
+def test_the_page_is_shown_where_an_owner_record_may_be_until_its_lane() -> None:
+    """The interim rule ADR-0303 §12:3's lane replaces with §3:7's walk."""
+    assert PageVisibility.of([], owner_notes=True).page()
+    assert not PageVisibility.of([episode("a-1")], owner_notes=False).page()
 
 
 def test_an_episode_recording_no_activation_contributes_nothing() -> None:

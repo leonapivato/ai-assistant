@@ -7,12 +7,10 @@ processing (ADR-0292 §12:4); what it writes is the assistant's own records.
 
 **What it reads** (§5:2). The story's current page, every note pending on it, and its
 pending member episodes that are frozen. An open episode is not read and stays
-pending for a later run, as does one the memory store no longer holds. To keep the
-page's lines and the user's own notes in view, it also reads the notes the current
-page cites that the story still holds, and the supersession marks earlier versions of
-this story's page made. To make §9:2's *like another story* flag possible it reads,
-by identity and never by search, the other stories the episodes it read also belong
-to, each with its current page's first line (the line saying what the matter is).
+pending for a later run, as does one the memory store no longer holds. To make §9:2's
+*like another story* flag possible it reads, by identity and never by search, the
+other stories the episodes it read also belong to, each with its current page's first
+line (the line saying what the matter is) and that page's mark.
 And it reads the decisions recorded for the story (ADR-0302 §6:1): the ``decided``
 lines on its change log and on the change logs of the stories merged into it, newest
 first and up to its bound, each rendered by its outcome, the flag it answers and the
@@ -34,20 +32,26 @@ a marked one is shown as outside content.
 **One completion** (§5:4) proposes safety-net notes, the new page's lines,
 supersession marks and flags, citing what it was shown by label; nothing else of its
 reply is read. The labels are the run's, never the model's ids: each is mapped back
-to the record this run read, so a citation of anything the run did not show cannot
-be written.
+to the record this run read.
 
-**The hub's checks** (§5:7), by rule, before writing: every line cites one of this
-story's notes or a safety-net note this run adds; every note the user wrote directly
-that is not superseded appears as a line with its text unchanged, citing it; a
-supersession mark names a note the user wrote and an episode this run took in whose
-input came from the user; each safety-net note rests on an episode this run took in;
-and every flag names what it may. **Marks come from records, never from the model**
-(§4:3, §4:4): a safety-net note is marked where its episode's trigger ``origin`` is
-``outside`` or the episode's provenance records outside content
-(:func:`~ai_assistant.core.types.rests_on_recorded_external_content`), and a line is
-marked exactly where a note it cites is. An output that fails to parse or any check
-is refused whole, writes nothing and makes no second completion (§5:8).
+**The hub's checks** (§5:7), by rule, before writing: every label a line cites is one
+of this story's notes shown or a safety-net note this run proposes; a supersession
+mark names a note the user wrote and an episode this run took in whose input came
+from the user; each safety-net note rests on an episode this run took in; and every
+flag names what it may. An output that fails to parse or any check is refused whole,
+writes nothing and makes no second completion (§5:8).
+
+**Interim, under ADR-0303 until its tidy-up lane (§12:2) rebuilds this module.** The
+store keeps no citation, safety-net note or supersession mark and writes no note
+(ADR-0303 §§2, 4), so what the reply proposes of those is checked as above and then
+not written: the page is its lines' text alone, and a safety-net note's words live
+on in the lines that cite it. No check requires a note the user wrote on the page
+(§2:6). **The page's mark comes from records, never from the model** (§3:4): it is
+set where the run read a marked note, an outside episode — its trigger's ``origin``
+is ``outside`` or its provenance records outside content
+(:func:`~ai_assistant.core.types.rests_on_recorded_external_content`) — or a marked
+page, the current page or another story's it was shown; and each other story's page
+version it was shown is recorded with the version it writes (§3:3).
 
 **The write** goes through ``StoryStore.write_page`` with the ``as_of`` of the read
 it was built on, taking in exactly the pending notes and episodes it read, so a run
@@ -82,16 +86,14 @@ from ai_assistant.core.types import (
     InputOrigin,
     Message,
     Role,
-    StoryChange,
-    StoryDraftLine,
     StoryFlag,
     StoryFlagKind,
     StoryMember,
     StoryMemberKind,
     StoryNoteAuthor,
     StoryPageDraft,
-    StorySafetyNetNote,
-    StorySupersession,
+    StoryPageLine,
+    StoryPageVersionName,
 )
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.stories import episode_address
@@ -111,8 +113,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         EpisodeProjection,
         StoryNote,
-        StoryNoteId,
-        StoryPageLine,
         StoryPageRefusal,
         StoryPageState,
         StoryPageVersion,
@@ -149,9 +149,8 @@ class TidyUpResult(StrEnum):
     MEMBERS_MOVED = "members_moved"
     """An episode the run read left the story, or was unlinked and linked again,
     while the run was out (a split, a move, an unlink), so the page was not written:
-    a safety-net note resting on it would rest on an activation the write does not
-    take in (#2761). The episode stays pending wherever it now is, so nothing is
-    lost."""
+    the page would carry what an episode the write does not take in said (#2761). The
+    episode stays pending wherever it now is, so nothing is lost."""
 
     FAILED = "failed"
     """A store or the provider raised, or the run's budget expired."""
@@ -262,7 +261,10 @@ _LINE_AUTHOR_TEXT: Final = "the assistant, tidying this story's page"
 _OUTSIDE_TEXT: Final = (
     "rests on outside content: what a source reported, never something the user said"
 )
-_SUPERSEDED_TEXT: Final = "superseded by the user's own later words: it need not be kept"
+_PAGE_OUTSIDE_TEXT: Final = (
+    "some of this page rests on outside content: what a source reported, never something "
+    "the user said; its lines' own words say which"
+)
 _NO_PAGE: Final = "missing: no page has been written for this story yet"
 _NO_OTHER_LINE: Final = "missing: no page has been written for this story yet"
 _THIS_STORY: Final = "this story"
@@ -280,7 +282,9 @@ class _ProposedNote(BaseModel):
 class _ProposedLine(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     text: str
-    cites: tuple[str, ...] = Field(min_length=1)
+    # A line may cite nothing: the current page it carries forward cites nothing either
+    # (ADR-0303 §2:7), and no citation is written.
+    cites: tuple[str, ...] = ()
 
 
 class _ProposedSupersession(BaseModel):
@@ -380,10 +384,16 @@ class _Episode:
 
 @dataclass(frozen=True, slots=True)
 class _Other:
-    """Another story an episode the run read also belongs to, and its first line."""
+    """Another story an episode the run read also belongs to, and its first line.
+
+    ``version`` is the version that wrote the page shown, and ``outside`` that page's
+    mark, both ``None`` and ``False`` where it has no page.
+    """
 
     story_id: str
     first_line: StoryPageLine | None
+    version: int | None = None
+    outside: bool = False
 
     def rendering(self, label: str) -> dict[str, object]:
         """The story under its label: what its page says the matter is, as data."""
@@ -397,7 +407,7 @@ class _Other:
                 "text": line.text,
             },
         }
-        if line.outside:
+        if self.outside:
             rendered["outside_content"] = _OUTSIDE_TEXT
         return rendered
 
@@ -411,60 +421,56 @@ class _Reading:
     notes: dict[str, StoryNote]
     episodes: dict[str, _Episode]
     others: dict[str, _Other]
-    superseded: frozenset[StoryNoteId]
     decisions: tuple[tuple[RecordedDecision, tuple[str, ...]], ...] = ()
 
-    def label_of(self) -> dict[StoryNoteId, str]:
-        """Each note's label, by its identity."""
-        return {note.note_id: label for label, note in self.notes.items()}
-
     def lines(self) -> list[dict[str, object]] | str:
-        """The current page's lines whose every note the story still holds, by label.
-
-        A line citing a note the story no longer holds (a split or a move took it) is
-        not shown: its words would be carried forward without the citation that
-        carried their provenance, and possibly their mark (§4:4, §4:6). The notes it
-        cites that the story still holds are shown all the same, so what they say can
-        be rebuilt from them.
-        """
+        """The current page's lines, each its text alone (ADR-0303 §2:7)."""
         page = self.state.page
-        if page is None:
+        if page is None or not page.lines:
             return _NO_PAGE
-        labels = self.label_of()
-        shown: list[dict[str, object]] = []
-        for line in page.lines:
-            if not all(note_id in labels for note_id in line.cites):
-                continue
-            cites = [labels[note_id] for note_id in line.cites]
-            rendered: dict[str, object] = {
-                "written_by": _LINE_AUTHOR_TEXT,
-                "text": line.text,
-                "cites": cites,
-            }
-            if line.outside or any(self.notes[label].outside for label in cites):
-                rendered["outside_content"] = _OUTSIDE_TEXT
-            shown.append(rendered)
-        return shown or _NO_PAGE
+        return [{"written_by": _LINE_AUTHOR_TEXT, "text": line.text} for line in page.lines]
+
+    def outside(self) -> bool:
+        """ADR-0303 §3:4: whether the run read a marked note, an outside episode or page."""
+        page = self.state.page
+        return (
+            (page is not None and page.outside)
+            or any(note.outside for note in self.notes.values())
+            or any(episode.outside for episode in self.episodes.values())
+            or any(other.outside for other in self.others.values())
+        )
+
+    def read_pages(self) -> tuple[StoryPageVersionName, ...]:
+        """ADR-0303 §3:3: the other stories' page versions this run was shown."""
+        return tuple(
+            StoryPageVersionName(story=other.story_id, version=other.version)
+            for other in self.others.values()
+            if other.version is not None
+        )
 
     def payload(self) -> dict[str, object]:
         """The one JSON object the model is shown."""
-        pending = {note.note_id for note in self.state.pending_notes}
         notes: list[dict[str, object]] = []
         for label, note in self.notes.items():
             rendered: dict[str, object] = {
                 "label": label,
                 "written_by": _NOTE_AUTHOR_TEXT[note.author],
                 "written_at": note.written_at.isoformat(),
-                "on_the_page_yet": note.note_id not in pending,
+                "on_the_page_yet": False,
                 "text": note.text,
             }
             if note.outside:
                 rendered["outside_content"] = _OUTSIDE_TEXT
-            if note.note_id in self.superseded:
-                rendered["superseded"] = _SUPERSEDED_TEXT
             notes.append(rendered)
+        page = self.state.page
+        marked: dict[str, object] = {}
+        if page is not None and page.lines and page.outside:
+            # A line carries no mark of its own (ADR-0303 §2:7): the page's mark is
+            # shown beside it, and its lines' words say which part it is.
+            marked["current_page_outside_content"] = _PAGE_OUTSIDE_TEXT
         return {
             "current_page": self.lines(),
+            **marked,
             "notes": notes,
             "episodes": [episode.rendering(label) for label, episode in self.episodes.items()],
             "other_stories": [other.rendering(label) for label, other in self.others.items()],
@@ -576,7 +582,6 @@ class StoryTidyUp:
             # reply, and what the store refused the write for, never the reply's own.
             problem=outcome.problem,
             refusal=None if outcome.refusal is None else outcome.refusal.reason.value,
-            lines=None if outcome.version is None else len(outcome.version.lines),
             took_in_notes=None if outcome.version is None else len(outcome.version.took_in_notes),
             took_in_episodes=(
                 None if outcome.version is None else len(outcome.version.took_in_episodes)
@@ -625,7 +630,7 @@ class StoryTidyUp:
     async def _members_moved(
         self, story_id: str, draft: StoryPageDraft, linked: Mapping[str, int]
     ) -> bool:
-        """Whether an episode the draft takes in, or a safety-net note rests on, was relinked.
+        """Whether an episode the draft takes in was relinked.
 
         ``as_of`` refuses a page version written since the read (§3:10), never a
         membership change, and a store takes in an episode only where it was pending
@@ -633,16 +638,15 @@ class StoryTidyUp:
         before the write, and each such episode must still be a member **by the same
         link**: the entry's ``position`` is the change-log line that added it, unique
         across the store, so a split, a move, or an unlink and a relink in between all
-        show as a change. Otherwise a safety-net note could be written resting on an
-        activation its story no longer holds, or on one it holds by a later link the
-        write does not take in.
+        show as a change. Otherwise the page could carry what an episode said that its
+        story no longer holds, or holds by a later link the write does not take in.
 
         **This narrows the race; it does not close it.** A change landing between the
         second read and the write is not seen. That window is waived under the
         coordinator's ruling on PR #2758, and the atomic refusal inside
         ``write_page``'s transaction is #2761.
         """
-        wanted = {*draft.took_in_episodes, *(note.rests_on for note in draft.safety_net)}
+        wanted = set(draft.took_in_episodes)
         if not wanted:
             return False
         now = await self._linked(story_id)
@@ -684,28 +688,16 @@ class StoryTidyUp:
     async def _reading(
         self, story_id: str, state: StoryPageState, episodes: list[_Episode]
     ) -> _Reading:
-        """The notes, the supersessions and the other stories, labelled for rendering."""
-        held = {note.note_id: note for note in state.pending_notes}
-        cited = {
-            note_id
-            for line in (() if state.page is None else state.page.lines)
-            for note_id in line.cites
-        }
-        held |= await self._held(story_id, cited - held.keys())
-        ordered = sorted(held.values(), key=lambda note: note.note_id)
+        """The pending notes, the episodes and the other stories, labelled for rendering."""
         return _Reading(
             story_id=story_id,
             state=state,
-            notes={f"N{index}": note for index, note in enumerate(ordered, start=1)},
+            notes={f"N{index}": note for index, note in enumerate(state.pending_notes, start=1)},
             episodes={f"E{index}": episode for index, episode in enumerate(episodes, start=1)},
             others={
                 f"S{index}": other
                 for index, other in enumerate(await self._others(story_id, episodes), start=1)
             },
-            superseded=await self._superseded(
-                story_id,
-                frozenset(n.note_id for n in ordered if n.author is StoryNoteAuthor.OWNER),
-            ),
             decisions=await self._recorded(story_id),
         )
 
@@ -730,90 +722,6 @@ class StoryTidyUp:
             records = StoryRecords(headers=await read_headers(self._stories), logs={})
         return tuple((decision, records.concerned(decision.flag)) for decision in decisions)
 
-    async def _held(self, story_id: str, wanted: set[StoryNoteId]) -> dict[StoryNoteId, StoryNote]:
-        """The notes ``wanted`` names that the story still holds, read page by page.
-
-        Notes are read in identity order, so the walk stops once it passes the largest
-        identity wanted. A note the story no longer holds is not found.
-        """
-        found: dict[StoryNoteId, StoryNote] = {}
-        if not wanted:
-            return found
-        last = max(wanted)
-        cursor: int | None = None
-        while True:
-            page = await self._stories.notes(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
-            if page is None:
-                return found
-            found |= {note.note_id: note for note in page.notes if note.note_id in wanted}
-            if (
-                page.next_cursor is None
-                or page.next_cursor == cursor
-                or page.next_cursor >= last
-                or found.keys() == wanted
-            ):
-                return found
-            cursor = page.next_cursor
-
-    async def _superseded(
-        self, story_id: str, owners: frozenset[StoryNoteId]
-    ) -> frozenset[StoryNoteId]:
-        """Which of the user's notes ``owners`` names a version has marked superseded.
-
-        A note is superseded from the version that marked it on (§3:5), whichever
-        story's page that version was of: a merge or a split moves a note, never the
-        version log that marked it. So the marks are read by the note's identity
-        from this story's version log, then, for any of ``owners`` still unmarked,
-        from the version logs of the stories this one's notes can have come from —
-        those its change log names on an ``absorbed`` or ``split_off`` line, and
-        theirs in turn — until every one is found marked or the lineage is walked.
-        A note only the user writes is moved only by a merge or a split (a move takes
-        only notes resting on an activation), so no other line can have brought one.
-        """
-        marked: set[StoryNoteId] = set()
-        seen: set[str] = set()
-        queue = [story_id]
-        while queue and not owners <= marked:
-            current = queue.pop(0)
-            if current in seen:
-                continue
-            seen.add(current)
-            marked |= await self._marks(current)
-            if not owners <= marked:
-                queue.extend(await self._lineage(current))
-        return frozenset(marked & owners)
-
-    async def _marks(self, story_id: str) -> set[StoryNoteId]:
-        """Every note a version of ``story_id``'s page marked superseded."""
-        marked: set[StoryNoteId] = set()
-        cursor: int | None = None
-        while True:
-            page = await self._stories.page_versions(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
-            if page is None:
-                return marked
-            marked |= {mark.note for version in page.versions for mark in version.supersessions}
-            if page.next_cursor is None or page.next_cursor == cursor:
-                return marked
-            cursor = page.next_cursor
-
-    async def _lineage(self, story_id: str) -> list[str]:
-        """The stories ``story_id``'s change log names as absorbed or split with it."""
-        named: dict[str, None] = {}
-        cursor: int | None = None
-        while True:
-            page = await self._stories.log(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
-            if page is None:
-                return list(named)
-            named |= dict.fromkeys(
-                line.other_story
-                for line in page.lines
-                if line.other_story is not None
-                and line.change in {StoryChange.ABSORBED, StoryChange.SPLIT_OFF}
-            )
-            if page.next_cursor is None or page.next_cursor == cursor:
-                return list(named)
-            cursor = page.next_cursor
-
     async def _others(self, story_id: str, episodes: Sequence[_Episode]) -> list[_Other]:
         """§9:2's material: the other stories the read episodes belong to, each once."""
         chosen: dict[str, None] = {}
@@ -829,8 +737,15 @@ class StoryTidyUp:
             state = await self._stories.current_page(other_id)
             if state is None or state.story.merged_into is not None:
                 continue
-            first = None if state.page is None else state.page.lines[0]
-            others.append(_Other(story_id=other_id, first_line=first))
+            page = state.page
+            others.append(
+                _Other(
+                    story_id=other_id,
+                    first_line=page.lines[0] if page is not None and page.lines else None,
+                    version=None if page is None else page.version,
+                    outside=page is not None and page.outside,
+                )
+            )
         return others
 
 
@@ -838,46 +753,40 @@ class StoryTidyUp:
 
 
 def _checked(proposal: _Proposed, reading: _Reading) -> StoryPageDraft:
-    """The proposal as a page draft, every §5:7 check passed and every mark from records.
+    """The proposal as a page draft, every §5:7 check passed and its mark from records.
 
     Raises:
         _Refused: If any check fails, naming it; the output is then refused whole.
     """
-    safety_net = tuple(_safety_net(note, reading) for note in proposal.safety_net)
-    supersessions = _supersessions(proposal, reading)
-    superseded = reading.superseded | {mark.note for mark in supersessions}
-    lines = tuple(_line(line, reading, safety_net) for line in proposal.lines)
-    for note in reading.notes.values():
-        if note.author is not StoryNoteAuthor.OWNER or note.note_id in superseded:
-            continue
-        if not any(line.text == note.text and note.note_id in line.cites for line in lines):
-            msg = "a note the user wrote directly, not superseded, is not a line as written"
-            raise _Refused(msg)
+    for note in proposal.safety_net:
+        _safety_net(note, reading)
+    _supersessions(proposal, reading)
+    lines = tuple(_line(line, reading, len(proposal.safety_net)) for line in proposal.lines)
     try:
         return StoryPageDraft(
             lines=lines,
-            safety_net=safety_net,
             took_in_notes=tuple(note.note_id for note in reading.state.pending_notes),
             took_in_episodes=tuple(episode.activation_id for episode in reading.episodes.values()),
-            supersessions=supersessions,
+            read_pages=reading.read_pages(),
             flags=_flags(proposal, reading),
+            outside=reading.outside(),
         )
     except ValidationError as exc:  # pragma: no cover — every part was validated above
         msg = "the page draft is malformed"
         raise _Refused(msg) from exc
 
 
-def _safety_net(proposed: _ProposedNote, reading: _Reading) -> StorySafetyNetNote:
-    """A safety-net note resting on an episode this run took in, marked by its record.
+def _safety_net(proposed: _ProposedNote, reading: _Reading) -> None:
+    """Check a proposed safety-net note: resting on an episode this run took in.
+
+    It is not written (ADR-0303 §2:1): its words live on in the lines that cite it.
 
     Raises:
         _Refused: If it rests on anything else, or its text is not a note's.
     """
-    episode = _episode(reading, proposed.episode)
+    _episode(reading, proposed.episode)
     try:
-        return StorySafetyNetNote(
-            text=proposed.text, rests_on=episode.activation_id, outside=episode.outside
-        )
+        StoryPageLine(text=proposed.text)  # a note's text is bounded as a line's is
     except ValidationError as exc:
         msg = "a safety-net note's text is blank, not encodable, or over a note's bound"
         raise _Refused(msg) from exc
@@ -897,32 +806,18 @@ def _episode(reading: _Reading, label: str) -> _Episode:
     return episode
 
 
-def _line(
-    proposed: _ProposedLine, reading: _Reading, safety_net: Sequence[StorySafetyNetNote]
-) -> StoryDraftLine:
-    """One line, citing this story's notes or this run's safety-net notes, marked by them.
+def _line(proposed: _ProposedLine, reading: _Reading, added: int) -> StoryPageLine:
+    """One line, every label it cites one of this story's notes shown or this run's ``T``s.
 
     Raises:
         _Refused: If it cites anything else, or its text is not a line's.
     """
-    cites: dict[StoryNoteId, None] = {}
-    cites_new: dict[int, None] = {}
-    outside = False
     for label in proposed.cites:
-        if (note := reading.notes.get(label)) is not None:
-            cites.setdefault(note.note_id)
-            outside = outside or note.outside
-            continue
-        index = _new_index(label, len(safety_net))
-        if index is None:
+        if label not in reading.notes and _new_index(label, added) is None:
             msg = "a line cites something other than this story's notes"
             raise _Refused(msg)
-        cites_new.setdefault(index)
-        outside = outside or safety_net[index].outside
     try:
-        return StoryDraftLine(
-            text=proposed.text, cites=tuple(cites), cites_new=tuple(cites_new), outside=outside
-        )
+        return StoryPageLine(text=proposed.text)
     except ValidationError as exc:
         msg = "a line's text is blank, not encodable, or over a note's bound"
         raise _Refused(msg) from exc
@@ -937,13 +832,14 @@ def _new_index(label: str, added: int) -> int | None:
     return {f"T{index}": index - 1 for index in range(1, added + 1)}.get(label)
 
 
-def _supersessions(proposal: _Proposed, reading: _Reading) -> tuple[StorySupersession, ...]:
-    """§5:7's marks: a note the user wrote, and an episode taken in carrying the user's input.
+def _supersessions(proposal: _Proposed, reading: _Reading) -> None:
+    """Check §5:7's marks: a note the user wrote, and an episode taken in with the user's input.
+
+    None is written (ADR-0303 §2:6).
 
     Raises:
         _Refused: If a mark names anything else.
     """
-    marks: dict[StorySupersession, None] = {}
     for proposed in proposal.supersessions:
         note = reading.notes.get(proposed.note)
         if note is None or note.author is not StoryNoteAuthor.OWNER:
@@ -953,8 +849,6 @@ def _supersessions(proposal: _Proposed, reading: _Reading) -> tuple[StorySuperse
         if not episode.from_user:
             msg = "a supersession mark names an episode whose input is not the user's"
             raise _Refused(msg)
-        marks.setdefault(StorySupersession(note=note.note_id, episode=episode.activation_id))
-    return tuple(marks)
 
 
 def _flags(proposal: _Proposed, reading: _Reading) -> tuple[StoryFlag, ...]:

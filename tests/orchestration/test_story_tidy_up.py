@@ -1,5 +1,9 @@
 """The tidy-up operation (ADR-0300 §5): what it reads, renders, checks and writes.
 
+As ADR-0303's store lane leaves it, until its tidy-up lane (§12:2) rebuilds it: the
+page it writes is its lines' text and a mark set from records (§3:4), recording the
+other stories' page versions it was shown (§3:3), and no note.
+
 Each case runs :class:`StoryTidyUp` over the canonical fake story and memory stores
 with a scripted provider, and asserts the prompt it rendered, the one completion it
 made and what the story store then holds. The engine's interim run is in
@@ -22,14 +26,14 @@ from ai_assistant.core.types import (
     Message,
     Role,
     StoryActor,
-    StoryDraftLine,
     StoryFlag,
     StoryFlagKind,
     StoryFlagName,
     StoryNoteAuthor,
     StoryPageDraft,
+    StoryPageLine,
     StoryPageRefusalReason,
-    StorySupersession,
+    StoryPageVersionName,
 )
 from ai_assistant.orchestration.story_tidy_up import StoryTidyUp, TidyUpResult
 from ai_assistant.testing import FakeModelProvider, FakeStoryStore
@@ -108,14 +112,14 @@ async def _note(  # noqa: PLR0913 — one knob per field of a note
     text: str,
     *,
     author: StoryNoteAuthor = StoryNoteAuthor.PLANNING,
-    rests_on: str | None = "a-1",
+    written_during: str | None = "a-1",
     outside: bool = False,
 ) -> int:
     written = await stories.append_note(
         story_id,
         text,
         author=author,
-        rests_on=None if author is StoryNoteAuthor.OWNER else rests_on,
+        written_during=None if author is StoryNoteAuthor.OWNER else written_during,
         outside=outside,
     )
     assert written.note is not None
@@ -149,7 +153,11 @@ async def test_it_writes_a_page_taking_in_exactly_what_it_read() -> None:
     assert outcome.version is not None
     assert outcome.version.took_in_episodes == ("a-1",)
     assert len(outcome.version.took_in_notes) == 1
-    assert len(outcome.version.safety_net) == 1
+    assert outcome.version.outside is False
+    # ADR-0303 §2:1: the tidy-up writes no note; the safety net's words live in the line.
+    listed = await stories.notes(trip)
+    assert listed is not None
+    assert len(listed.notes) == 1
     state = await stories.current_page(trip)
     assert state is not None
     assert state.page is not None
@@ -212,24 +220,20 @@ async def test_an_outside_episodes_raw_input_is_never_rendered_and_it_marks_what
     assert _REPORT_INPUT not in model.calls[0].messages[1].content
     assert ep["item"].startswith("a report received")
     assert "outside_content" in ep
-    # §4:3, §4:4: the marks come from records, never from the reply, which set none.
+    # ADR-0303 §3:4: the mark comes from records, never from the reply, which set none.
     assert outcome.version is not None
+    assert outcome.version.outside is True
     state = await stories.current_page(trip)
     assert state is not None
     assert state.page is not None
-    (line,) = state.page.lines
-    assert line.outside is True
+    assert state.page.outside is True
     listed = await stories.notes(trip)
     assert listed is not None
-    (safety,) = listed.notes
-    assert (safety.author, safety.rests_on, safety.outside) == (
-        StoryNoteAuthor.TIDY_UP,
-        "a-1",
-        True,
-    )
+    assert listed.notes == ()
 
 
-async def test_a_line_citing_a_marked_note_is_marked() -> None:
+async def test_a_page_whose_run_read_a_marked_note_is_marked_and_stays_marked() -> None:
+    """ADR-0303 §3:4: each run reads the page it replaces, so the mark travels."""
     stories, memory, trip = await _trip()
     await _note(stories, trip, "The email says the gate code is 1234.", outside=True)
     model = FakeModelProvider(
@@ -243,7 +247,15 @@ async def test_a_line_citing_a_marked_note_is_marked() -> None:
     state = await stories.current_page(trip)
     assert state is not None
     assert state.page is not None
-    assert [line.outside for line in state.page.lines] == [False, True]
+    assert state.page.outside is True
+    await _note(stories, trip, "Next: pack.")
+    later = FakeModelProvider(
+        _reply([("A camping trip.", []), ("Gate code 1234, per the email.", []), ("Pack.", ["N1"])])
+    )
+    outcome = await _tidy_up(later, stories, memory).run(trip)
+    assert outcome.version is not None
+    assert outcome.version.outside is True
+    assert "never something the user said" in _shown(later)["current_page_outside_content"]
 
 
 async def test_an_open_episode_is_not_read_and_stays_pending() -> None:
@@ -286,53 +298,24 @@ async def test_an_unknown_or_merged_story_is_not_tidied() -> None:
     assert model.calls == []
 
 
-async def test_the_current_pages_lines_are_shown_citing_by_label() -> None:
+async def test_the_current_pages_lines_are_shown_as_text() -> None:
+    """ADR-0303 §2:7: a line cites nothing, so none is shown citing a label."""
     stories, memory, trip = await _trip()
     tidy_up = _tidy_up(FakeModelProvider(_reply([("A camping trip.", ["N1"])])), stories, memory)
     await tidy_up.run(trip)
     await _note(stories, trip, "Next: check the dog policy.")
-    model = FakeModelProvider(
-        _reply([("A camping trip.", ["N1"]), ("Next: the dog policy.", ["N2"])])
-    )
+    model = FakeModelProvider(_reply([("A camping trip.", []), ("Next: the dog policy.", ["N1"])]))
 
     outcome = await _tidy_up(model, stories, memory).run(trip)
 
     assert outcome.result is TidyUpResult.WRITTEN
     shown = _shown(model)
     assert shown["current_page"] == [
-        {
-            "written_by": "the assistant, tidying this story's page",
-            "text": "A camping trip.",
-            "cites": ["N1"],
-        }
+        {"written_by": "the assistant, tidying this story's page", "text": "A camping trip."}
     ]
-    assert [n["on_the_page_yet"] for n in shown["notes"]] == [True, False]
+    assert "current_page_outside_content" not in shown
+    assert [n["text"] for n in shown["notes"]] == ["Next: check the dog policy."]
     assert shown["episodes"] == []
-
-
-async def test_a_line_citing_a_note_the_story_no_longer_holds_is_not_shown() -> None:
-    stories = _stories()
-    memory = await memory_of(episode("a-1"), episode("a-2", channel=EVENTS))
-    trip = await _story(stories, "a-1", "a-2")
-    await _note(stories, trip, "Camping at Riverside.")
-    await _note(
-        stories, trip, "The email says the gate code is 1234.", rests_on="a-2", outside=True
-    )
-    first = FakeModelProvider(
-        _reply([("Riverside.", ["N1"]), ("Riverside, gate code 1234 per the email.", ["N1", "N2"])])
-    )
-    assert (await _tidy_up(first, stories, memory).run(trip)).result is TidyUpResult.WRITTEN
-    # The outside note's activation is split away, and its note with it.
-    await stories.split(trip, [activation("a-2")], actor=StoryActor.OWNER)
-    await _note(stories, trip, "Next: pack.")
-    model = FakeModelProvider(_reply([("Riverside.", ["N1"]), ("Next: pack.", ["N2"])]))
-
-    await _tidy_up(model, stories, memory).run(trip)
-
-    shown = _shown(model)
-    # §4:4, §4:6: the line lost a citation, and with it its mark, so it is not carried.
-    assert [line["text"] for line in shown["current_page"]] == ["Riverside."]
-    assert [note["text"] for note in shown["notes"]] == ["Camping at Riverside.", "Next: pack."]
 
 
 # --- the hub's checks ---------------------------------------------------------------
@@ -392,7 +375,6 @@ async def test_a_refused_output_is_logged_with_the_check_that_refused_it_and_no_
             "result": "refused",
             "problem": problem,
             "refusal": None,
-            "lines": None,
             "took_in_notes": None,
             "took_in_episodes": None,
         }
@@ -400,30 +382,27 @@ async def test_a_refused_output_is_logged_with_the_check_that_refused_it_and_no_
     assert "Riverside" not in str(logs)
 
 
-async def test_the_users_own_note_must_stay_a_line_as_written() -> None:
+async def test_no_check_requires_the_users_own_note_on_the_page() -> None:
+    """ADR-0303 §2:6: the user's note is weighed as anything the user says."""
     stories, memory, trip = await _trip()
     await _note(stories, trip, "Bring the blue tent.", author=StoryNoteAuthor.OWNER)
+    model = FakeModelProvider(_reply([("A camping trip, with the blue tent.", ["N1", "N2"])]))
 
-    for reply in (
-        _reply([("A camping trip.", ["N1"])]),
-        _reply([("A camping trip.", ["N1"]), ("Bring the tent (blue).", ["N2"])]),
-        _reply([("A camping trip.", ["N1"]), ("Bring the blue tent.", ["N1"])]),
-    ):
-        await _refused(reply, stories, memory, trip)
+    outcome = await _tidy_up(model, stories, memory).run(trip)
 
-    kept = FakeModelProvider(
-        _reply([("A camping trip.", ["N1"]), ("Bring the blue tent.", ["N2"])])
-    )
-    assert (await _tidy_up(kept, stories, memory).run(trip)).result is TidyUpResult.WRITTEN
+    assert outcome.result is TidyUpResult.WRITTEN
+    assert outcome.version is not None
+    assert len(outcome.version.took_in_notes) == 2
 
 
-async def test_a_users_note_is_superseded_only_by_an_episode_of_the_users_own_input() -> None:
+async def test_a_supersession_mark_is_checked_and_written_nowhere() -> None:
+    """The reply's marks are still checked; ADR-0303 §2:6 records none."""
     stories = _stories()
     memory = await memory_of(
         episode("a-1", text="Saturday's fine now."), episode("a-2", channel=EVENTS)
     )
     trip = await _story(stories, "a-1", "a-2")
-    saturdays = await _note(stories, trip, "No Saturdays.", author=StoryNoteAuthor.OWNER)
+    await _note(stories, trip, "No Saturdays.", author=StoryNoteAuthor.OWNER)
     await _note(stories, trip, "Camping at Riverside.")
 
     # An outside episode, or a note the user did not write, is refused.
@@ -447,72 +426,9 @@ async def test_a_users_note_is_superseded_only_by_an_episode_of_the_users_own_in
     outcome = await _tidy_up(model, stories, memory).run(trip)
 
     assert outcome.result is TidyUpResult.WRITTEN
-    assert outcome.version is not None
-    assert outcome.version.supersessions == (StorySupersession(note=saturdays, episode="a-1"),)
-
-    # A later run is shown the note marked superseded, and need not keep it as a line.
-    await _note(stories, trip, "Next: book the site.")
-    later = FakeModelProvider(_reply([("Riverside.", ["N2"]), ("Next: book.", ["N4"])]))
-    assert (await _tidy_up(later, stories, memory).run(trip)).result is TidyUpResult.WRITTEN
-    first = _shown(later)["notes"][0]
-    assert (first["text"], "superseded" in first) == ("No Saturdays.", True)
-
-
-async def _superseding(stories: FakeStoryStore, memory: FakeMemoryStore, story_id: str) -> int:
-    """Write the user's "No Saturdays." on ``story_id`` and supersede it from ``a-1``."""
-    saturdays = await _note(stories, story_id, "No Saturdays.", author=StoryNoteAuthor.OWNER)
-    model = FakeModelProvider(
-        _reply(
-            [("Saturday's fine now.", ["T1"])],
-            safety_net=[("E1", "Saturday is fine now.")],
-            supersessions=[("N1", "E1")],
-        )
-    )
-    outcome = await _tidy_up(model, stories, memory).run(story_id)
-    assert outcome.version is not None
-    assert outcome.version.supersessions == (StorySupersession(note=saturdays, episode="a-1"),)
-    return saturdays
-
-
-async def test_a_note_superseded_before_a_merge_stays_superseded_after_it() -> None:
-    stories = _stories()
-    memory = await memory_of(episode("a-1", text="Saturday's fine now."))
-    absorbed = await _story(stories, "a-1")
-    into = await _story(stories, "a-1")
-    await _superseding(stories, memory, absorbed)
-    # The story merged into has already taken in the superseding episode.
-    first = FakeModelProvider(_reply([("A camping trip.", ["T1"])], safety_net=[("E1", "Trip.")]))
-    assert (await _tidy_up(first, stories, memory).run(into)).result is TidyUpResult.WRITTEN
-    await stories.merge(absorbed, into, actor=StoryActor.OWNER)
-    model = FakeModelProvider(_reply([("A camping trip.", ["N1"])]))
-
-    outcome = await _tidy_up(model, stories, memory).run(into)
-
-    assert outcome.result is TidyUpResult.WRITTEN
-    shown = {note["text"]: note for note in _shown(model)["notes"]}
-    assert "superseded" in shown["No Saturdays."]
-    assert _shown(model)["episodes"] == []
-
-
-async def test_a_note_superseded_before_a_split_stays_superseded_after_it() -> None:
-    stories = _stories()
-    memory = await memory_of(episode("a-1", text="Saturday's fine now."), episode("a-2"))
-    trip = await _story(stories, "a-1", "a-2")
-    # Take a-2 in first, so the superseding run reads a-1 alone, as E1.
-    await stories.unlink(trip, [activation("a-2")], actor=StoryActor.OWNER)
-    saturdays = await _superseding(stories, memory, trip)
-    await stories.link(trip, [activation("a-2")], actor=StoryActor.OWNER)
-    split = await stories.split(
-        trip, [activation("a-2")], actor=StoryActor.OWNER, notes=[saturdays]
-    )
-    assert split.story_id is not None
-    model = FakeModelProvider(_reply([("Riverside.", ["T1"])], safety_net=[("E1", "Riverside.")]))
-
-    outcome = await _tidy_up(model, stories, memory).run(split.story_id)
-
-    assert outcome.result is TidyUpResult.WRITTEN
-    (note,) = _shown(model)["notes"]
-    assert (note["text"], "superseded" in note) == ("No Saturdays.", True)
+    listed = await stories.notes(trip)
+    assert listed is not None
+    assert [note.text for note in listed.notes] == ["No Saturdays.", "Camping at Riverside."]
 
 
 async def test_flags_name_the_other_stories_shown_by_identity() -> None:
@@ -539,24 +455,49 @@ async def test_flags_name_the_other_stories_shown_by_identity() -> None:
         StoryFlag(kind=StoryFlagKind.TWO_MATTERS),
         StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other),
     )
+    # ADR-0303 §3:3: the other story's page it was shown is recorded by its version.
+    theirs = await stories.current_page(other)
+    assert theirs is not None
+    assert theirs.page is not None
+    assert outcome.version.read_pages == (
+        StoryPageVersionName(story=other, version=theirs.page.version),
+    )
+
+
+async def test_a_marked_page_of_another_story_marks_the_page_it_is_shown_for() -> None:
+    """ADR-0303 §3:4: a page the run read counts, another story's included."""
+    stories, memory, trip = await _trip()
+    other = await _story(stories, "a-1")
+    await _note(stories, other, "A parks notice says the loop closes.", outside=True)
+    await _tidy_up(
+        FakeModelProvider(_reply([("Riverside; the loop closes, per a notice.", ["N1"])])),
+        stories,
+        memory,
+    ).run(other)
+    model = FakeModelProvider(_reply([("A camping trip.", ["N1"])]))
+
+    outcome = await _tidy_up(model, stories, memory).run(trip)
+
+    (shown,) = _shown(model)["other_stories"]
+    assert "outside_content" in shown
+    assert outcome.version is not None
+    assert outcome.version.outside is True
 
 
 # --- ADR-0302 §6: the decisions recorded for its story ---------------------------
 
 
 async def _decided_trip() -> tuple[FakeStoryStore, FakeMemoryStore, str, str]:
-    """A trip whose two flags and an understanding flag were each decided ``left``.
+    """A trip whose two flags were each decided ``left``.
 
     The trip's first tidy-up raises ``two_matters`` and ``like_another`` naming
-    ``other``, which ``a-1`` also belongs to; then understanding links ``x-1`` into the
-    trip and into ``away``, a story no later tidy-up of the trip is shown. A new
-    episode ``a-2``, in both the trip and ``other``, and a new note are pending, so the
-    next tidy-up runs and is shown ``other``.
+    ``other``, which ``a-1`` also belongs to. A new episode ``a-2``, in both the trip
+    and ``other``, and a new note are pending, so the next tidy-up runs and is shown
+    ``other``. Understanding raises no flag (ADR-0303 §8), so none of its is decided.
     """
     stories, _memory, trip = await _trip()
     memory = await memory_of(episode("a-1", text=_USER_INPUT), episode("a-2"))
     other = await _story(stories, "a-1")
-    away = await _story(stories, "z-1")
     first = await _tidy_up(
         FakeModelProvider(
             _reply(
@@ -571,12 +512,6 @@ async def _decided_trip() -> tuple[FakeStoryStore, FakeMemoryStore, str, str]:
     for flag in first.version.flags:
         name = StoryFlagName(story=trip, version=first.version.version, flag=flag)
         assert (await stories.leave_flag(name, actor=StoryActor.MATTERS_PASS)).refusal is None
-    for story_id in (trip, away):
-        await stories.link(
-            story_id, [activation("x-1")], actor=StoryActor.UNDERSTANDING, trigger="x-1"
-        )
-    understood = StoryFlagName(activation="x-1")
-    assert (await stories.leave_flag(understood, actor=StoryActor.MATTERS_PASS)).refusal is None
     for story_id in (trip, other):
         await stories.link(story_id, [activation("a-2")], actor=StoryActor.OWNER)
     await _note(stories, trip, "Bring the canoe.")
@@ -601,8 +536,6 @@ async def test_it_is_shown_the_decisions_recorded_for_its_story_newest_first() -
         )
         for decision in shown["decisions"]
     ] == [
-        # Understanding's flag: the trip and `away`, which this run cannot name.
-        ("left", "one_input_in_several_stories", ["this story"], 1),
         ("left", "like_another", ["this story", "S1"], 0),
         ("left", "two_matters", ["this story"], 0),
     ]
@@ -621,9 +554,7 @@ async def test_the_decisions_it_is_shown_are_bounded() -> None:
     await _note(stories, trip, "Bring the paddles.")
     await _tidy_up(none, stories, memory, decisions=0).run(trip)
 
-    assert [decision["flag"] for decision in _shown(model)["decisions"]] == [
-        "one_input_in_several_stories"
-    ]
+    assert [decision["flag"] for decision in _shown(model)["decisions"]] == ["like_another"]
     assert _shown(none)["decisions"] == []
 
 
@@ -700,7 +631,9 @@ async def test_a_run_that_lost_a_race_is_refused_by_the_store_and_writes_nothing
         state = await stories.current_page(trip)
         assert state is not None
         note = state.pending_notes[0].note_id
-        draft = StoryPageDraft(lines=(StoryDraftLine(text="Rival.", cites=(note,), outside=False),))
+        draft = StoryPageDraft(
+            lines=(StoryPageLine(text="Rival."),), took_in_notes=(note,), outside=False
+        )
         written = await stories.write_page(trip, draft, as_of=state.as_of)
         assert written.version is not None
 
@@ -754,8 +687,8 @@ async def test_an_episode_relinked_while_the_completion_is_out_writes_nothing(ho
 
     outcome = await _tidy_up(model, stories, memory).run(trip)
 
-    # #2761's race, narrowed: no safety-net note is written resting on an episode the
-    # write would not take in, and the episode is still pending wherever it now is.
+    # #2761's race, narrowed: no page is written carrying what an episode the write
+    # would not take in said, and the episode is still pending wherever it now is.
     assert outcome.result is TidyUpResult.MEMBERS_MOVED
     listed = await stories.notes(trip)
     assert listed is not None

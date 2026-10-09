@@ -7,8 +7,9 @@ What the story store itself owes is ``tests/memory/story_store_contract.py``'s; 
 suite asserts what the engine adds: the actor ``owner`` and no trigger on every
 write, the activation check on create and link only, the view's resolution of
 activation and story members, and the reads' pages fitting the payload limit; and,
-for ADR-0300 §8's story commands, the owner's page under §11's default, where the
-matter stands for the owner, the owner's note, and a move that checks no activation.
+for ADR-0300 §8's story commands, the owner's page as ADR-0303 §10:2 shapes it, where
+the matter stands for the owner, the owner's note, and a move that checks no activation
+and carries no note it does not name.
 """
 
 from __future__ import annotations
@@ -38,12 +39,13 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     StoryActor,
     StoryChange,
-    StoryDraftLine,
     StoryMember,
     StoryMemberKind,
     StoryNoteAuthor,
     StoryPageDraft,
+    StoryPageLine,
     StoryPageRefusalReason,
+    StoryPageViewNote,
     StoryRefusalReason,
     StoryRelation,
     UnderstandingOmission,
@@ -346,7 +348,7 @@ class StorySurfaceContract:
     async def test_a_note_the_owner_adds_is_pending_on_the_page(
         self, story_surface: StorySurfaceSubject
     ) -> None:
-        """§8:3: written by ``owner``, resting on nothing, unmarked, and pending."""
+        """§8:3: written by ``owner``, recording no activation, unmarked, and pending."""
         subject = story_surface
         await _seeded(subject, "a1")
         story_id = await _created(subject, act("a1"))
@@ -355,7 +357,7 @@ class StorySurfaceContract:
         note = outcome.note
         assert note is not None
         assert note.author is StoryNoteAuthor.OWNER
-        assert note.rests_on is None
+        assert note.written_during is None
         assert not note.outside
         assert note.text == "Leaning against Saturday"
         page = await subject.engine.story_page(story_id)
@@ -364,9 +366,8 @@ class StorySurfaceContract:
         assert page.version is None
         assert page.tidied_at is None
         assert page.lines == ()
-        assert page.pending_notes == (note,)
-        assert page.pending_episodes == ("a1",)
-        assert (page.withheld_lines, page.withheld_notes) == (0, 0)
+        assert page.notes == (StoryPageViewNote(note=note, pending=True),)
+        assert (page.more_notes, page.outside, page.withheld) == (0, False, False)
         log = await subject.engine.story_log(story_id)
         assert log is not None
         assert len(log.lines) == 2  # a note is not a membership change
@@ -389,7 +390,7 @@ class StorySurfaceContract:
         assert merged.refusal.merged_into == kept
         page = await subject.engine.story_page(kept)
         assert page is not None
-        assert page.pending_notes == ()
+        assert page.notes == ()
 
     async def test_a_malformed_note_or_move_is_refused_before_any_write(
         self, story_surface: StorySurfaceSubject
@@ -413,33 +414,28 @@ class StorySurfaceContract:
             await subject.engine.story_standing("")
         page = await subject.engine.story_page(story_id)
         assert page is not None
-        assert page.pending_notes == ()
+        assert page.notes == ()
         view = await subject.engine.story(story_id)
         assert view is not None
         assert [m.member for m in view.members] == [act("a1")]
 
-    async def test_the_page_shows_its_lines_and_marks_and_withholds_what_rests_on_the_forgotten(
+    async def test_the_page_shows_its_lines_its_mark_and_its_notes_newest_first(
         self, story_surface: StorySurfaceSubject
     ) -> None:
-        """§8:3-§8:4, §11: the tidied page, marked, with the forgotten's notes withheld."""
+        """ADR-0303 §10:2: the tidied page and its mark, and every note with whether pending."""
         subject = story_surface
         await _seeded(subject, "a1", "a2")
-        await subject.memory.add(episode("running", running=True))
-        story_id = await _created(subject, act("a1"), act("a2"), act("running"))
+        story_id = await _created(subject, act("a1"), act("a2"))
         stories = subject.stories
         from_email = await stories.append_note(
             story_id,
             "The campground's email gives Riverside",
             author=StoryNoteAuthor.PLANNING,
-            rests_on="a1",
+            written_during="a1",
             outside=True,
-        )
-        on_a2 = await stories.append_note(
-            story_id, "Booked Sunday", author=StoryNoteAuthor.PLANNING, rests_on="a2"
         )
         own = await subject.engine.add_story_note(story_id, "No Fridays")
         assert from_email.note is not None
-        assert on_a2.note is not None
         assert own.note is not None
         state = await stories.current_page(story_id)
         assert state is not None
@@ -447,78 +443,35 @@ class StorySurfaceContract:
             story_id,
             StoryPageDraft(
                 lines=(
-                    StoryDraftLine(
-                        text="A camping trip, Riverside",
-                        cites=(from_email.note.note_id,),
-                        outside=True,
-                    ),
-                    StoryDraftLine(
-                        text="Booked Sunday", cites=(on_a2.note.note_id,), outside=False
-                    ),
-                    StoryDraftLine(text="No Fridays", cites=(own.note.note_id,), outside=False),
+                    StoryPageLine(text="A camping trip; the campground's email gives Riverside"),
+                    StoryPageLine(text="No Fridays"),
                 ),
                 took_in_notes=tuple(note.note_id for note in state.pending_notes),
                 took_in_episodes=("a1", "a2"),
+                outside=True,
             ),
             as_of=state.as_of,
         )
         assert written.version is not None
         later = await stories.append_note(
-            story_id, "Waiting on the canoe", author=StoryNoteAuthor.PLANNING, rests_on="running"
-        )
-        gone = await stories.append_note(
-            story_id, "Check the dog policy", author=StoryNoteAuthor.PLANNING, rests_on="a2"
+            story_id, "Waiting on the canoe", author=StoryNoteAuthor.PLANNING, written_during="a2"
         )
         assert later.note is not None
         page = await subject.engine.story_page(story_id)
         assert page is not None
         assert page.version == written.version.version
         assert page.tidied_at == written.version.written_at
-        assert [(line.text, line.outside) for line in page.lines] == [
-            ("A camping trip, Riverside", True),
-            ("Booked Sunday", False),
-            ("No Fridays", False),
+        assert [line.text for line in page.lines] == [
+            "A camping trip; the campground's email gives Riverside",
+            "No Fridays",
         ]
-        # A note resting on an open episode is shown to the owner, who reads every record.
-        assert [note.text for note in page.pending_notes] == [
-            "Waiting on the canoe",
-            "Check the dog policy",
-        ]
-        assert page.pending_episodes == ("running",)
-        assert await subject.memory.delete("activation:a2")
-        withheld = await subject.engine.story_page(story_id)
-        assert withheld is not None
-        assert [line.text for line in withheld.lines] == ["A camping trip, Riverside", "No Fridays"]
-        assert withheld.withheld_lines == 1
-        assert withheld.pending_notes == (later.note,)
-        assert withheld.withheld_notes == 1
-        assert gone.note is not None
-
-    async def test_a_note_resting_on_an_episode_with_no_processing_record_is_shown(
-        self, story_surface: StorySurfaceSubject
-    ) -> None:
-        """Held at its address is enough for the owner: no field of the record decides."""
-        subject = story_surface
-        at = STORY_SURFACE_AT
-        await subject.memory.add(
-            EpisodicMemory(
-                id="activation:bare",
-                content="captured",
-                occurred_at=at,
-                provenance=Provenance(
-                    source=MemorySource.OBSERVED, confidence=0.9, last_updated=at
-                ),
-            )
+        assert (page.outside, page.withheld) == (True, False)
+        assert page.notes == (
+            StoryPageViewNote(note=later.note, pending=True),
+            StoryPageViewNote(note=own.note, pending=False),
+            StoryPageViewNote(note=from_email.note, pending=False),
         )
-        story_id = await _created(subject, act("bare"))
-        written = await subject.stories.append_note(
-            story_id, "Rests on a bare record", author=StoryNoteAuthor.PLANNING, rests_on="bare"
-        )
-        assert written.note is not None
-        page = await subject.engine.story_page(story_id)
-        assert page is not None
-        assert page.pending_notes == (written.note,)
-        assert page.withheld_notes == 0
+        assert page.more_notes == 0
 
     async def test_a_merged_or_unknown_story_page_and_standing(
         self, story_surface: StorySurfaceSubject
@@ -532,10 +485,10 @@ class StorySurfaceContract:
         page = await subject.engine.story_page(absorbed)
         assert page is not None
         assert page.story.merged_into == kept
-        assert (page.version, page.lines, page.pending_notes) == (None, (), ())
+        assert (page.version, page.lines, page.notes) == (None, (), ())
         moved = await subject.engine.story_page(kept)
         assert moved is not None
-        assert [note.text for note in moved.pending_notes] == ["Goes with the merge"]
+        assert [shown.note.text for shown in moved.notes] == ["Goes with the merge"]
         standing = await subject.engine.story_standing(absorbed)
         assert standing is not None
         assert standing.story.merged_into == kept
@@ -566,18 +519,21 @@ class StorySurfaceContract:
             (StoryRelation.PART_OF, outer)
         ]
 
-    async def test_a_move_takes_the_notes_with_it_and_checks_no_activation(
+    async def test_a_move_checks_no_activation_and_carries_no_note_it_does_not_name(
         self, story_surface: StorySurfaceSubject
     ) -> None:
-        """ADR-0300 §3:14 as the owner; like a merge or a split, no record is read."""
+        """ADR-0300 §3:14 as the owner, no record read; ADR-0303 §6:1's notes stay put."""
         subject = story_surface
         await _seeded(subject, "a1", "a2", "a3")
         source = await _created(subject, act("a1"), act("a2"))
         target = await _created(subject, act("a3"))
-        resting = await subject.stories.append_note(
-            source, "Leaning against Saturday", author=StoryNoteAuthor.PLANNING, rests_on="a1"
+        during = await subject.stories.append_note(
+            source,
+            "Leaning against Saturday",
+            author=StoryNoteAuthor.PLANNING,
+            written_during="a1",
         )
-        assert resting.note is not None
+        assert during.note is not None
         assert await subject.memory.delete("activation:a1")
         moved = await subject.engine.move_story_members(source, target, [act("a1")])
         assert moved.refusal is None
@@ -593,8 +549,10 @@ class StorySurfaceContract:
         assert all(line.trigger is None for line in log.lines)
         page = await subject.engine.story_page(target)
         assert page is not None
-        # Moved, and withheld: its episode is forgotten, so §11 shows the owner a count.
-        assert page.withheld_notes == 1
+        assert page.notes == ()
+        stayed = await subject.engine.story_page(source)
+        assert stayed is not None
+        assert [shown.note for shown in stayed.notes] == [during.note]
         refused = await subject.engine.move_story_members(source, target, [act("a3")])
         assert refused.refusal is not None
         assert refused.refusal.reason is StoryRefusalReason.NOT_A_MEMBER

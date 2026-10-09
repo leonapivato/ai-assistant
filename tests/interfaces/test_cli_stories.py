@@ -38,7 +38,6 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryChange,
     StoryDecision,
-    StoryDraftLine,
     StoryEffectState,
     StoryFlag,
     StoryFlagKind,
@@ -50,8 +49,10 @@ from ai_assistant.core.types import (
     StoryMemberKind,
     StoryNoteAuthor,
     StoryPageDraft,
+    StoryPageLine,
     StoryPageRefusal,
     StoryPageRefusalReason,
+    StoryPageView,
     StoryRefusal,
     StoryRefusalReason,
     StoryRelation,
@@ -776,7 +777,8 @@ def test_note_adds_the_owners_note_and_page_shows_it_pending(
     )
     page = asyncio.run(engine.story_page(story))
     assert page is not None
-    (note,) = page.pending_notes
+    (shown,) = page.notes
+    note = shown.note
     assert output.getvalue() == (
         f'Added note #{note.note_id} to story "{story}"; '
         "it is pending until the page is next tidied.\n"
@@ -786,10 +788,9 @@ def test_note_adds_the_owners_note_and_page_shows_it_pending(
     assert output.getvalue().splitlines() == [
         f'Story "{story}"',
         "Never tidied: no page has been written yet.",
-        "Pending notes: 1",
-        f'  #{note.note_id} {note.written_at.isoformat()} owner: " Leaning against Saturday "',
-        "Pending episodes: 1",
-        f'  Activation "{_FROZEN}"',
+        "Notes, newest first: 1",
+        f"  #{note.note_id} {note.written_at.isoformat()} owner [pending]: "
+        '" Leaning against Saturday "',
     ]
 
 
@@ -807,30 +808,23 @@ def test_a_refused_note_exits_non_zero_naming_where_the_story_went(
     )
 
 
-def test_page_renders_the_tidied_page_marked_and_counts_what_is_withheld(
+def test_page_renders_the_tidied_page_its_mark_and_its_notes_newest_first(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
-    """§8:4: outside content is labelled; §11: what rests on the forgotten is counted."""
-    forgotten = "33333333-3333-4333-8333-333333333333"
-    engine = _engine(_episode(_FROZEN), _episode(_OPEN, open_=True), _episode(forgotten))
-    story = _create(engine, _activation(_FROZEN), _activation(_OPEN), _activation(forgotten))
+    """ADR-0303 §10:2: outside content is labelled on the page and on a note (§3:9)."""
+    engine = _engine(_episode(_FROZEN), _episode(_OPEN, open_=True))
+    story = _create(engine, _activation(_FROZEN), _activation(_OPEN))
     stories = engine.story_store
     emailed = asyncio.run(
         stories.append_note(
             story,
             "Riverside, per the campground's email",
             author=StoryNoteAuthor.PLANNING,
-            rests_on=_FROZEN,
+            written_during=_FROZEN,
             outside=True,
         )
     )
-    booked = asyncio.run(
-        stories.append_note(
-            story, "Booked Sunday", author=StoryNoteAuthor.PLANNING, rests_on=forgotten
-        )
-    )
     assert emailed.note is not None
-    assert booked.note is not None
     state = asyncio.run(stories.current_page(story))
     assert state is not None
     written = asyncio.run(
@@ -838,17 +832,12 @@ def test_page_renders_the_tidied_page_marked_and_counts_what_is_withheld(
             story,
             StoryPageDraft(
                 lines=(
-                    StoryDraftLine(
-                        text="A camping trip\nto Riverside",
-                        cites=(emailed.note.note_id,),
-                        outside=True,
-                    ),
-                    StoryDraftLine(
-                        text="Booked Sunday", cites=(booked.note.note_id,), outside=False
-                    ),
+                    StoryPageLine(text="A camping trip\nto Riverside, per the campground's email"),
+                    StoryPageLine(text="Booked Sunday"),
                 ),
-                took_in_notes=(emailed.note.note_id, booked.note.note_id),
-                took_in_episodes=(_FROZEN, forgotten),
+                took_in_notes=(emailed.note.note_id,),
+                took_in_episodes=(_FROZEN,),
+                outside=True,
             ),
             as_of=state.as_of,
         )
@@ -859,35 +848,49 @@ def test_page_renders_the_tidied_page_marked_and_counts_what_is_withheld(
             story,
             "Waiting on the canoe",
             author=StoryNoteAuthor.PLANNING,
-            rests_on=_OPEN,
-            outside=True,
-        )
-    )
-    asyncio.run(
-        stories.append_note(
-            story, "Dog policy?", author=StoryNoteAuthor.PLANNING, rests_on=forgotten
+            written_during=_OPEN,
         )
     )
     assert waiting.note is not None
-    assert asyncio.run(engine.episode_memory.delete(f"activation:{forgotten}"))
     _wire(monkeypatch, engine)
     assert _invoke("story", "page", story)[0] == 0, output.getvalue()
     assert output.getvalue().splitlines() == [
         f'Story "{story}"',
         f"Last tidied: {written.version.written_at.isoformat()} "
         f"(version {written.version.version})",
-        "Page:",
-        f'  [outside content] "A camping trip\\nto Riverside" (from #{emailed.note.note_id})',
-        "  1 line withheld: each cites a note whose episode is no longer held, "
-        "or one this story no longer holds.",
-        "Pending notes: 2",
+        "Page: [outside content]",
+        '  "A camping trip\\nto Riverside, per the campground\'s email"',
+        '  "Booked Sunday"',
+        "Notes, newest first: 2",
         f"  #{waiting.note.note_id} {waiting.note.written_at.isoformat()} planning "
-        f'on activation "{_OPEN}": [outside content] "Waiting on the canoe"',
-        "  1 note withheld: each rests on an episode that is no longer held.",
-        "Pending episodes: 1",
-        f'  Activation "{_OPEN}"',
+        f'during activation "{_OPEN}" [pending]: "Waiting on the canoe"',
+        f"  #{emailed.note.note_id} {emailed.note.written_at.isoformat()} planning "
+        f'during activation "{_FROZEN}": [outside content] '
+        '"Riverside, per the campground\'s email"',
     ]
     assert engine.calls[-1] == ("story_page", {"story_id": story})
+
+
+def test_page_renders_a_withheld_page_an_empty_one_and_the_notes_beyond_the_bound() -> None:
+    """ADR-0303 §3:7, §5:3, §10:2: the reader is told what it is not shown."""
+    header = StoryHeader(story_id="story:a", created_at=_AT, merged_into=None)
+    for view, expected in (
+        (
+            StoryPageView(story=header, version=4, tidied_at=_AT, withheld=True, more_notes=3),
+            [
+                "Page: withheld, since not everything behind it may be shown.",
+                "Notes, newest first: 3",
+                "  and 3 older notes not shown.",
+            ],
+        ),
+        (
+            StoryPageView(story=header, version=4, tidied_at=_AT, more_notes=1),
+            ["Page:", "  (no line)", "Notes, newest first: 1", "  and 1 older note not shown."],
+        ),
+    ):
+        buffer = StringIO()
+        story_inspection.render_page(Console(file=buffer, force_terminal=False, width=400), view)
+        assert buffer.getvalue().splitlines()[2:] == expected
 
 
 def test_standing_renders_the_timeline_and_the_related_matters(
