@@ -6629,7 +6629,7 @@ class Engine:
         check_arguments("story_summary", max_bytes=self._max_payload_bytes, story_id=target)
         stories = self._story_store()
         return await self._tracked(
-            owner_summary(stories, self._memory, target, notes=self._story_summary_notes),
+            owner_summary(stories, target, notes=self._story_summary_notes),
             "story_summary",
             checked=True,
         )

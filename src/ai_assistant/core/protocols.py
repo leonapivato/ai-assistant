@@ -15217,12 +15217,11 @@ class AssistantEngine(Protocol):
         When the summary was last tidied; its lines and its mark, or
         that the summary was withheld; and the story's notes, newest first up to the
         view's bound, each with its id, its mark and whether it is pending, with the
-        count of those beyond it. The summary is shown only where everything behind it
-        may be shown to the owner, which is every episode the memory store still
-        holds, an open one included; one behind it that is no longer held withholds
-        the whole summary, and the view says so rather than showing a line (ADR-0303
-        §3:10-§3:12). The notes are listed so that the owner can name them in a
-        split or a move.
+        count of those beyond it. The owner is shown the summary, as a record placed for
+        the owner alone, and nothing behind it decides that: no version log is walked
+        and no episode or note it took in withholds it, forgotten or not (ADR-0304
+        §4:1, §4:3). The notes are listed so that the owner can name them in a split
+        or a move.
 
         Returns:
             The summary, or ``None`` where the store holds no such story. A merged
@@ -15231,7 +15230,6 @@ class AssistantEngine(Protocol):
         Raises:
             ValueError: If the id is malformed.
             StoryStoreError: If the story store cannot be read.
-            MemoryStoreError: If an episode behind the summary cannot be read.
         """
         ...
 

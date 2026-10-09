@@ -1937,8 +1937,8 @@ def story_list(
 ) -> None:
     """List every story, newest first, each with its summary's first line where it has one.
 
-    A summary resting on outside content is labelled so, and a summary withheld because not
-    everything behind it may be shown says so instead of showing a line.
+    A summary resting on outside content is labelled so. You are shown every summary,
+    whatever it was written from.
     """
     try:
         check_story_page(cursor, limit)
@@ -2009,8 +2009,8 @@ async def _read_story[T](
 def story_summary(story_id: str = _STORY_ID_ARGUMENT) -> None:
     """Show a story's summary: when it was last tidied, its lines, then its notes.
 
-    The summary and a note resting on outside content are labelled so. A summary behind
-    which an episode is no longer held is withheld whole, and says so. Each note
+    The summary and a note resting on outside content are labelled so. You are shown the
+    summary whatever it was written from, a forgotten conversation included. Each note
     shows its number, by which a split or a move names it, and whether it is pending.
     A merged story shows only the story it was merged into.
     """

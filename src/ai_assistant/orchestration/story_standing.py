@@ -36,8 +36,8 @@ is ``outside``, or whose activation's record of what it read shows outside conte
 note: it is worked out from the records, and the summary is the story summary view's
 (:func:`~ai_assistant.orchestration.stories.owner_summary`). So §3:9-§3:12, which decide
 a note and a summary, have nothing of it to withhold, and what it shows each reader is
-exactly the episodes that reader may be shown, by the rule above, which is the rule a
-summary's walk asks of the same reader about the episodes behind the summary.
+exactly the episodes that reader may be shown, by the rule above. No episode it shows
+decides whether a summary is shown either: nothing behind a summary does (ADR-0304 §4:3).
 
 This module is apart from :mod:`ai_assistant.orchestration.stories`, which is the
 engine's own story surface and documents that no stage reads it: planning reads

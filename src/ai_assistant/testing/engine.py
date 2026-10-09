@@ -3008,7 +3008,7 @@ class FakeAssistantEngine:
         target = identifier(story_id, name="story_id")
         check_arguments("story_summary", max_bytes=self._max_payload_bytes, story_id=target)
         self.calls.append(("story_summary", {"story_id": target}))
-        summary = await owner_summary(self.story_store, self.episode_memory, target)
+        summary = await owner_summary(self.story_store, target)
         return self._checked(summary, "story_summary")
 
     async def story_standing(self, story_id: Identifier) -> StoryStanding | None:

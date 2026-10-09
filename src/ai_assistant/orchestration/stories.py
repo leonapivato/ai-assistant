@@ -165,7 +165,6 @@ _OWNER: Final = SummaryVisibility(owner_records=True)
 
 async def owner_summary(
     stories: StoryStore,
-    memory: MemoryStore,  # noqa: ARG001 — the canonical fake engine passes it; #2803
     story_id: str,
     *,
     notes: int = DEFAULT_STORY_SUMMARY_VIEW_NOTES,
@@ -185,7 +184,7 @@ async def owner_summary(
     **Under ADR-0304 §4's minimum, for the owner as reader.** The owner may be shown a
     record placed for the owner alone, so every note is shown (ADR-0303 §3:9) and so is
     the summary (ADR-0304 §4:1), whatever stands behind it (§4:3): no version log is
-    walked and no episode is looked up, and ``memory`` is read for nothing.
+    walked and no episode is looked up, so no memory store is read.
 
     Returns:
         The summary, or ``None`` where the store holds no such story. A merged story's
