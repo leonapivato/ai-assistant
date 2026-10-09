@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
-    from ai_assistant.core.types import StoryNote
+    from ai_assistant.core.types import StoryNote, StoryPageState
 
 
 def episode_address(activation_id: str) -> str:
@@ -152,6 +152,12 @@ async def resolved_view(
 #: 8,000, well inside a frame's payload limit.
 STORY_PAGE_VIEW_NOTES: Final = 20
 
+#: How many times the owner's page is read before the reads are given up as never
+#: agreeing. Each attempt brackets the notes between two reads of the page's state, and
+#: one that a write to the story lands inside is read again; a story written that often
+#: while the owner reads it is answered with the store error the read already declares.
+_PAGE_READS: Final = 3
+
 
 async def owner_page(
     stories: StoryStore,
@@ -164,7 +170,14 @@ async def owner_page(
 
     The current page and what is pending on it are one read of the story store; the
     story's notes are then read page by page, and the newest ``notes`` of them listed,
-    each with whether it is pending. The owner may be shown a record placed for the
+    each with whether it is pending. The notes are read between two reads of the page's
+    state, and the view is built only where the two agree on this story, the store-wide
+    ``as_of`` aside: a note written to the story, brought to it, taken in, or taken from
+    it while pending changes that state, so each note listed is shown pending exactly as
+    it stood. A note already taken in that a split or a move takes away between the
+    reads is listed or not as the listing found it, and shown taken in, which it was.
+    Writes to other stories advance ``as_of`` too, and do not make the reads disagree.
+    The owner may be shown a record placed for the
     owner alone, so every note is shown (§3:6), and so is the page under
     :class:`~ai_assistant.orchestration.story_privacy.PageVisibility`'s interim rule;
     §3:7's walk, which withholds a page an open or forgotten episode stands behind, is
@@ -175,18 +188,29 @@ async def owner_page(
         carries its header alone.
 
     Raises:
-        StoryStoreError: If the story store cannot be read.
+        StoryStoreError: If the story store cannot be read, or the story was written
+            between every one of :data:`_PAGE_READS` bracketed reads.
         MemoryStoreError: If an episode cannot be read.
     """
-    state = await stories.current_page(story_id)
-    if state is None:
-        return None
-    if state.story.merged_into is not None:
-        return StoryPageView(story=state.story)
+    for _ in range(_PAGE_READS):
+        state = await stories.current_page(story_id)
+        if state is None:
+            return None
+        if state.story.merged_into is not None:
+            return StoryPageView(story=state.story)
+        held = await _all_notes(stories, story_id)
+        again = await stories.current_page(story_id)
+        if again is not None and again.model_copy(update={"as_of": state.as_of}) == state:
+            return _page_view(state, held, notes=notes)
+    msg = "the story was written while its page was read, every time it was read"
+    raise StoryStoreError(msg)
+
+
+def _page_view(state: StoryPageState, held: list[StoryNote], *, notes: int) -> StoryPageView:
+    """The owner's view of a page read as ``state`` stood, with every note it held."""
     page = state.page
     visibility = PageVisibility(activations=frozenset(), owner_notes=True)
     shown = page is not None and visibility.page()
-    held = await _all_notes(stories, story_id)
     newest = [note for note in reversed(held) if visibility.note(note)][:notes]
     pending = {note.note_id for note in state.pending_notes}
     return StoryPageView(

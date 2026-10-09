@@ -713,18 +713,33 @@ async def test_a_schema_three_file_keeps_every_note_and_page_and_drops_what_adr_
         check.close()
 
 
+@pytest.mark.parametrize(
+    "statement",
+    [
+        """UPDATE versions SET record = '{"lines": 7}' WHERE version = 5""",
+        """UPDATE versions SET record = '{"lines": [[{}]]}' WHERE version = 5""",
+        """UPDATE versions SET record = '{"lines": [], "safety_net": [[4]]}' WHERE version = 5""",
+        """UPDATE versions SET record = '[5]' WHERE version = 5""",
+        """UPDATE versions SET record = 'not json' WHERE version = 5""",
+        """UPDATE pages SET lines = '[7]' WHERE story_id = 'story:old'""",
+        """UPDATE pages SET lines = '{"text": "x"}' WHERE story_id = 'story:old'""",
+    ],
+)
 async def test_a_schema_three_file_whose_records_are_not_its_own_is_refused(
-    tmp_path: Path,
+    tmp_path: Path, statement: str
 ) -> None:
-    """A record the migration cannot read is a store error, and the file is left as it was."""
+    """A record the migration cannot read, of any shape, is a store error and nothing else.
+
+    The file is left as it was: the migration's transaction rolls back whole.
+    """
     path = tmp_path / "stories.db"
     _schema_3(path)
     conn = sqlite3.connect(path)
     conn.execute("DROP TRIGGER versions_never_rewritten")
-    conn.execute("""UPDATE versions SET record = '{"lines": 7}' WHERE version = 5""")
+    conn.execute(statement)
     conn.commit()
     conn.close()
-    with pytest.raises(StoryStoreError, match="citations"):
+    with pytest.raises(StoryStoreError):
         SqliteStoryStore(path=path, now=lambda: STORY_AT)
     check = sqlite3.connect(path)
     try:
