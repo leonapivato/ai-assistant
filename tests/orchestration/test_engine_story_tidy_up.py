@@ -114,7 +114,7 @@ async def test_a_turn_linking_into_a_story_with_a_pending_note_starts_a_tidy_up_
     trip = (await stories.create([activation("a-1")], actor=StoryActor.OWNER)).story_id
     assert trip is not None
     await stories.append_note(
-        trip, "Camping at Riverside.", author=StoryNoteAuthor.PLANNING, rests_on="a-1"
+        trip, "Camping at Riverside.", author=StoryNoteAuthor.PLANNING, written_during="a-1"
     )
     memory = await memory_of(episode("a-1", at=AT), now=AT)
     model = _Gated(_PAGE)

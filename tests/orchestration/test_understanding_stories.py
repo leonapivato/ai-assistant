@@ -76,7 +76,7 @@ def _note(note_id: int, text: str, **fields: Any) -> StoryNote:
         "note_id": note_id,
         "text": text,
         "author": StoryNoteAuthor.PLANNING,
-        "rests_on": "a-1",
+        "written_during": "a-1",
         "outside": False,
         "written_at": AT,
     }
@@ -86,15 +86,16 @@ def _note(note_id: int, text: str, **fields: Any) -> StoryNote:
 _TRIP: Final = ShortView(
     story_id="story:trip",
     lines=(
-        StoryPageLine(text="A camping trip to Riverside.", cites=(1,), outside=False),
-        StoryPageLine(text="The park says the lake is closed.", cites=(2,), outside=True),
+        StoryPageLine(text="A camping trip to Riverside."),
+        StoryPageLine(text="The park says the lake is closed."),
     ),
+    outside=True,
     notes=(
         _note(
             4,
             "Waiting on your answer about the canoe.",
             author=StoryNoteAuthor.OWNER,
-            rests_on=None,
+            written_during=None,
         ),
         _note(3, "The campground emailed a new rate.", outside=True),
     ),
@@ -188,9 +189,11 @@ async def test_the_candidates_render_under_s_labels_attributed_by_their_records(
         "A camping trip to Riverside.",
         "The park says the lake is closed.",
     ]
-    # §4:6: a marked line or note is shown as outside content, never as the user's words.
-    assert "outside_content" not in first["page"][0]
-    assert "never something the user said" in first["page"][1]["outside_content"]
+    # ADR-0303 §3:8: a marked page or note is shown as outside content, never as the
+    # user's words; a line carries no mark of its own (§2:7).
+    assert all("outside_content" not in line for line in first["page"])
+    assert "never something the user said" in first["page_outside_content"]
+    assert "page_outside_content" not in second
     owner, outside = first["newest_notes"]
     assert owner["written_by"] == "the user, writing on this story's page directly"
     assert "outside_content" not in owner

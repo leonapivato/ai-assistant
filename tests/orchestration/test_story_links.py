@@ -1,4 +1,4 @@
-"""ADR-0300 §6 and §11: understanding's candidate stories and the story-links stage.
+"""ADR-0300 §6 and ADR-0303 §3: understanding's candidate stories and the story-links stage.
 
 The candidates (§6:1-§6:4) and the stage (§6:12-§6:13) over the canonical fakes, apart
 from any engine; what a pass records is in ``test_engine_story_links.py``, and what the
@@ -30,9 +30,9 @@ from ai_assistant.core.types import (
     StageOutcome,
     StoryActor,
     StoryChange,
-    StoryDraftLine,
     StoryNoteAuthor,
     StoryPageDraft,
+    StoryPageLine,
     StoryRefusalReason,
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
@@ -40,9 +40,7 @@ from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksSt
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-
-    from ai_assistant.core.types import MemoryRecord, StoryHeader, StoryMember, StoryViewPage
+    from ai_assistant.core.types import StoryHeader, StoryMember, StoryViewPage
 
 BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
@@ -137,23 +135,23 @@ async def test_an_episode_recording_no_activation_belongs_to_no_story() -> None:
 # --- the short view (§6:2, §6:3) ----------------------------------------------------
 
 
-async def _paged(stories: FakeStoryStore, story_id: str, *lines: str) -> tuple[int, ...]:
-    """Write one note per line and a page whose lines cite them in order."""
+async def _paged(
+    stories: FakeStoryStore, story_id: str, *lines: str, outside: bool = False
+) -> tuple[int, ...]:
+    """Write one note per line and a page of those lines, taking the notes in."""
     ids = []
     for text in lines:
         written = await stories.append_note(
-            story_id, text, author=StoryNoteAuthor.PLANNING, rests_on="a-1"
+            story_id, text, author=StoryNoteAuthor.PLANNING, written_during="a-1"
         )
         assert written.note is not None
         ids.append(written.note.note_id)
     state = await stories.current_page(story_id)
     assert state is not None
     draft = StoryPageDraft(
-        lines=tuple(
-            StoryDraftLine(text=text, cites=(note_id,), outside=False)
-            for text, note_id in zip(lines, ids, strict=True)
-        ),
+        lines=tuple(StoryPageLine(text=text) for text in lines),
         took_in_notes=tuple(ids),
+        outside=outside,
     )
     written_page = await stories.write_page(story_id, draft, as_of=state.as_of)
     assert written_page.refusal is None
@@ -165,7 +163,7 @@ async def test_a_short_view_is_the_first_lines_the_newest_notes_and_the_latest_e
     trip = await _story(stories, activation("a-1"), activation("a-2"), activation("a-3"))
     await _paged(stories, trip, "A camping trip to Riverside.", "Leaning to Sunday.", "Canoe?")
     for text in ("first pending", "second pending", "third pending"):
-        await stories.append_note(trip, text, author=StoryNoteAuthor.PLANNING, rests_on="a-2")
+        await stories.append_note(trip, text, author=StoryNoteAuthor.PLANNING, written_during="a-2")
     window = (episode("a-1"),)
     memory = await memory_of(episode("a-1"), episode("a-2"), episode("a-3"))
 
@@ -242,83 +240,39 @@ async def test_a_story_with_no_page_shows_its_pending_notes_and_episodes() -> No
     assert [record.id for record in view.episodes] == [address("a-1")]
 
 
-async def test_an_open_episode_is_neither_shown_nor_lets_its_notes_be() -> None:
+async def test_an_open_episode_is_not_shown_and_a_note_fetches_nothing() -> None:
+    """ADR-0303 §2:4: the activation a note was written during is read by no rule."""
     stories = _stories()
-    trip = await _story(stories, activation("a-1"), activation("a-2"))
+    trip = await _story(stories, activation("a-1"), activation("a-2"), activation("a-3"))
     await stories.append_note(
-        trip, "from the open one", author=StoryNoteAuthor.PLANNING, rests_on="a-2"
+        trip, "during the open one", author=StoryNoteAuthor.PLANNING, written_during="a-2"
+    )
+    await stories.append_note(
+        trip, "during an older one", author=StoryNoteAuthor.PLANNING, written_during="a-3"
     )
     window = (episode("a-1"),)
-    memory = await memory_of(episode("a-1"), episode("a-2", open_=True))
+    memory = await memory_of(
+        episode("a-1"), episode("a-2", open_=True), episode("a-3", at=AT - timedelta(days=1))
+    )
 
-    candidates = await _candidates(stories, memory).assemble(window, audience=BOUNDED)
+    candidates = await _candidates(stories, memory, episodes=1).assemble(window, audience=BOUNDED)
 
     (view,) = candidates.views
-    assert view.notes == ()
+    assert [note.text for note in view.notes] == ["during an older one", "during the open one"]
     assert [record.id for record in view.episodes] == [address("a-1")]
     # ADR-0282 §2:7-§2:8: only what was chosen, admitted, is fetched and recorded.
     assert (candidates.fetched, candidates.missing) == ((address("a-1"),), ())
 
 
-@pytest.mark.parametrize("change", ["forgotten", "narrowed"])
-async def test_an_episode_changed_between_the_choice_and_the_fetch_withholds_what_rests_on_it(
-    change: str,
-) -> None:
-    """§11:1 is decided from the fetch: what rests on a changed episode is not shown."""
+# --- ADR-0303 §3's default, as it stands until its views lane ----------------------------
+
+
+async def test_an_unbounded_audience_is_shown_no_note_and_no_page() -> None:
+    """§3:6: a note is shown only where an owner record may be; and, for now, the page."""
     stories = _stories()
     trip = await _story(stories, activation("a-1"), activation("a-2"))
-    written = await stories.append_note(
-        trip, "on a-2", author=StoryNoteAuthor.PLANNING, rests_on="a-2"
-    )
-    assert written.note is not None
-    state = await stories.current_page(trip)
-    assert state is not None
-    draft = StoryPageDraft(
-        lines=(StoryDraftLine(text="from a-2", cites=(written.note.note_id,), outside=False),),
-        took_in_notes=(written.note.note_id,),
-    )
-    assert (await stories.write_page(trip, draft, as_of=state.as_of)).refusal is None
-    await stories.append_note(trip, "also on a-2", author=StoryNoteAuthor.PLANNING, rests_on="a-2")
-    window = (episode("a-1"),)
-    memory = await memory_of(episode("a-1"), episode("a-2", at=AT + timedelta(minutes=1)))
-    reads = memory.get_many
-    calls = count()
-
-    async def changing(record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
-        found = dict(await reads(record_ids))
-        if next(calls) and address("a-2") in found:
-            # The second read, the fetch: a-2 changed after it was chosen.
-            if change == "forgotten":
-                del found[address("a-2")]
-            else:
-                found[address("a-2")] = found[address("a-2")].model_copy(
-                    update={"placement": OWNER_ONLY}
-                )
-        return found
-
-    memory.get_many = changing  # type: ignore[method-assign]  # an interleaving point
-
-    candidates = await _candidates(stories, memory).assemble(window, audience=UNBOUNDED)
-
-    (view,) = candidates.views
-    assert (view.lines, view.notes) == ((), ())
-    assert [record.id for record in view.episodes] == [address("a-1")]
-    assert candidates.fetched == (address("a-2"), address("a-1"))
-    assert candidates.missing == (address("a-2"),)
-
-
-# --- §11's default --------------------------------------------------------------------
-
-
-async def test_an_unbounded_audience_is_shown_nothing_resting_on_an_owner_placed_episode() -> None:
-    stories = _stories()
-    trip = await _story(stories, activation("a-1"), activation("a-2"))
-    # Both lines cite notes resting on a-1, which either audience may be shown.
-    await _paged(stories, trip, "shared line", "another shared line")
-    private_note = await stories.append_note(
-        trip, "about the private one", author=StoryNoteAuthor.PLANNING, rests_on="a-2"
-    )
-    assert private_note.note is not None
+    await _paged(stories, trip, "shared line", "another shared line", outside=True)
+    await stories.append_note(trip, "my own words", author=StoryNoteAuthor.OWNER)
     window = (episode("a-1"),)
     memory = await memory_of(episode("a-1"), episode("a-2", placement=OWNER_ONLY))
 
@@ -326,59 +280,25 @@ async def test_an_unbounded_audience_is_shown_nothing_resting_on_an_owner_placed
     bounded = await _candidates(stories, memory).assemble(window, audience=BOUNDED)
 
     (seen,) = unbounded.views
-    assert [line.text for line in seen.lines] == ["shared line", "another shared line"]
-    assert seen.notes == ()
+    assert (seen.lines, seen.outside, seen.notes) == ((), False, ())
     assert [record.id for record in seen.episodes] == [address("a-1")]
     # §6:3 with ADR-0282 §2:8: the refused episode is neither fetched nor recorded.
     assert address("a-2") not in (*unbounded.fetched, *unbounded.missing)
     (whole,) = bounded.views
-    assert [note.text for note in whole.notes] == ["about the private one"]
+    assert [line.text for line in whole.lines] == ["shared line", "another shared line"]
+    assert whole.outside
+    assert [note.text for note in whole.notes] == ["my own words"]
     assert [record.id for record in whole.episodes] == [address("a-2"), address("a-1")]
-
-
-async def test_a_line_citing_a_note_that_may_not_be_shown_is_not_shown() -> None:
-    stories = _stories()
-    trip = await _story(stories, activation("a-1"))
-    owner = await stories.append_note(trip, "my own words", author=StoryNoteAuthor.OWNER)
-    planning = await stories.append_note(
-        trip, "the assistant's", author=StoryNoteAuthor.PLANNING, rests_on="a-1"
-    )
-    assert owner.note is not None
-    assert planning.note is not None
-    state = await stories.current_page(trip)
-    assert state is not None
-    draft = StoryPageDraft(
-        lines=(
-            StoryDraftLine(text="A trip.", cites=(planning.note.note_id,), outside=False),
-            StoryDraftLine(text="my own words", cites=(owner.note.note_id,), outside=False),
-            StoryDraftLine(
-                text="Both.", cites=(planning.note.note_id, owner.note.note_id), outside=False
-            ),
-        ),
-        took_in_notes=(owner.note.note_id, planning.note.note_id),
-    )
-    assert (await stories.write_page(trip, draft, as_of=state.as_of)).refusal is None
-    window = (episode("a-1"),)
-    memory = await memory_of(*window)
-
-    unbounded = await _candidates(stories, memory).assemble(window, audience=UNBOUNDED)
-    bounded = await _candidates(stories, memory).assemble(window, audience=BOUNDED)
-
-    # §11:1: a note the user wrote directly is shown only where a record placed for the
-    # owner alone may be, and a line citing it carries its restriction.
-    assert [line.text for line in unbounded.views[0].lines] == ["A trip."]
-    assert [line.text for line in bounded.views[0].lines] == ["A trip.", "my own words", "Both."]
 
 
 # --- a story store that cannot be read (§6:4) ----------------------------------------
 
 
-@pytest.mark.parametrize("read", ["stories_of", "current_page", "notes", "view"])
+@pytest.mark.parametrize("read", ["stories_of", "current_page", "view"])
 async def test_a_story_store_error_leaves_no_candidates_and_says_so(read: str) -> None:
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
-    # A page whose line cites a note no longer pending, so every one of the four reads
-    # is made.
+    # A page, so every one of the three reads is made.
     await _paged(stories, trip, "A camping trip.")
     window = (episode("a-1"),)
     memory = await memory_of(*window)

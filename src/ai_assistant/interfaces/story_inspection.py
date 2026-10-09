@@ -44,13 +44,13 @@ if TYPE_CHECKING:
         StoryLogPage,
         StoryMember,
         StoryMemberView,
-        StoryNote,
         StoryNoteOutcome,
         StoryOutcome,
         StoryPage,
         StoryPageLine,
         StoryPageRefusal,
         StoryPageView,
+        StoryPageViewNote,
         StoryRefusal,
         StoryStanding,
         StoryStandingEpisode,
@@ -76,6 +76,7 @@ DECISION_TEXT: dict[StoryDecision, str] = {
     StoryDecision.MOVED: "moved members",
     StoryDecision.GROUPED: "grouped under a larger story",
     StoryDecision.LEFT: "left as they were",
+    StoryDecision.NOT_APPLIED: "chose a change the store refused, so left as they were",
 }
 
 #: What each state of a thing done reads as (ADR-0300 §8:1), spelled out per member
@@ -92,8 +93,8 @@ RELATION_TEXT: dict[StoryRelation, str] = {
     StoryRelation.CONTAINS: "contains",
 }
 
-#: The label on a line, a note or an episode resting on outside content, so it is
-#: never read as the owner's own words (ADR-0300 §4:6, §8:4).
+#: The label on a page, a note or an episode resting on outside content, so it is
+#: never read as the owner's own words (ADR-0300 §4:6, ADR-0303 §3:9).
 OUTSIDE = "[outside content]"
 
 
@@ -449,29 +450,31 @@ def _counted(count: int, noun: str) -> str:
 
 
 def _page_line(line: StoryPageLine) -> str:
-    """One line of the current page: its text, quoted, and the notes it cites."""
-    cites = ", ".join(f"#{note_id}" for note_id in line.cites)
-    marked = f"{OUTSIDE} " if line.outside else ""
-    return f"  {marked}{quoted(line.text)} (from {cites})"
+    """One line of the current page: its text, quoted. A line cites nothing."""
+    return f"  {quoted(line.text)}"
 
 
-def _note_line(note: StoryNote) -> str:
-    """One pending note: its id, when, who wrote it, what it rests on, and its text."""
-    rests = "" if note.rests_on is None else f" on activation {quoted(note.rests_on)}"
+def _note_line(shown: StoryPageViewNote) -> str:
+    """One note: its id, when, who wrote it and during what, pending or not, and its text."""
+    note = shown.note
+    during = (
+        "" if note.written_during is None else f" during activation {quoted(note.written_during)}"
+    )
+    pending = " [pending]" if shown.pending else ""
     marked = f"{OUTSIDE} " if note.outside else ""
     return (
-        f"  #{note.note_id} {note.written_at.isoformat()} {note.author.value}{rests}: "
-        f"{marked}{quoted(note.text)}"
+        f"  #{note.note_id} {note.written_at.isoformat()} {note.author.value}{during}"
+        f"{pending}: {marked}{quoted(note.text)}"
     )
 
 
 def render_page(console: Console, view: StoryPageView) -> None:
-    """Render a story's page as the owner is shown it (ADR-0300 §8:3).
+    """Render a story's page as the owner is shown it (ADR-0303 §10:2).
 
-    When it was last tidied, then the current page's lines, then the notes and the
-    episodes pending on it. A line or a note resting on outside content is labelled
-    so (§8:4), and what ADR-0300 §11's default withheld is counted. A merged story
-    renders only the line naming the story it was merged into.
+    When it was last tidied, then the current page's lines with its mark, or that it
+    was withheld, then the story's notes, newest first, each marked pending or not and
+    labelled where it rests on outside content (§3:9), and how many lie beyond them. A
+    merged story renders only the line naming the story it was merged into.
     """
     header = view.story
     if header.merged_into is not None:
@@ -482,23 +485,17 @@ def render_page(console: Console, view: StoryPageView) -> None:
         lines.append("Never tidied: no page has been written yet.")
     else:
         lines.append(f"Last tidied: {view.tidied_at.isoformat()} (version {view.version})")
-        lines.append("Page:")
-        lines.extend(_page_line(line) for line in view.lines)
-        if view.withheld_lines:
-            lines.append(
-                f"  {_counted(view.withheld_lines, 'line')} withheld: each cites a note "
-                "whose episode is no longer held, or one this story no longer holds."
-            )
-    notes = len(view.pending_notes) + view.withheld_notes
-    lines.append(f"Pending notes: {notes}")
-    lines.extend(_note_line(note) for note in view.pending_notes)
-    if view.withheld_notes:
-        lines.append(
-            f"  {_counted(view.withheld_notes, 'note')} withheld: "
-            "each rests on an episode that is no longer held."
-        )
-    lines.append(f"Pending episodes: {len(view.pending_episodes)}")
-    lines.extend(f"  Activation {quoted(item)}" for item in view.pending_episodes)
+        if view.withheld:
+            lines.append("Page: withheld, since not everything behind it may be shown.")
+        else:
+            lines.append(f"Page: {OUTSIDE}" if view.outside else "Page:")
+            lines.extend(_page_line(line) for line in view.lines)
+            if not view.lines:
+                lines.append("  (no line)")
+    lines.append(f"Notes, newest first: {len(view.notes) + view.more_notes}")
+    lines.extend(_note_line(shown) for shown in view.notes)
+    if view.more_notes:
+        lines.append(f"  and {_counted(view.more_notes, 'older note')} not shown.")
     _print(console, "\n".join(lines))
 
 

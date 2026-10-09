@@ -22,11 +22,11 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryChange,
     StoryDecision,
-    StoryDraftLine,
     StoryFlag,
     StoryFlagKind,
     StoryNoteAuthor,
     StoryPageDraft,
+    StoryPageLine,
 )
 from ai_assistant.orchestration.matters_pass import MattersPass, MattersPassReport
 from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, FakeStoryStore
@@ -68,9 +68,10 @@ async def test_it_runs_the_pass_and_answers_its_report() -> None:
     written = await stories.write_page(
         trip,
         StoryPageDraft(
-            lines=(StoryDraftLine(text="Riverside.", cites=(note.note.note_id,), outside=False),),
+            lines=(StoryPageLine(text="Riverside."),),
             took_in_notes=(note.note.note_id,),
             flags=(StoryFlag(kind=StoryFlagKind.TWO_MATTERS),),
+            outside=False,
         ),
         as_of=state.as_of,
     )

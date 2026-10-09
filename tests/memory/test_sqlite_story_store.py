@@ -4,13 +4,16 @@ The suite is bound to the production store as well as to the canonical fake, bec
 a suite bound only to the double certifies the double while the real store drifts.
 Beside the binding are the properties of this backend alone: the owner-only file
 mode (ADR-0004 §4), durability across a reopen, the append-only log enforced by the
-database itself, the schema version and its migrations, and a store fault surfacing as
-``StoryStoreError`` with nothing written — a decision's line included, which lands
-with the change it records or not at all (ADR-0302 §3:4).
+database itself, the schema version and its migrations — ADR-0303 §4:8's included,
+which keeps every note and every page while dropping what a line cited, the
+safety-net notes a version added and its supersession marks — and a store fault
+surfacing as ``StoryStoreError`` with nothing written — a decision's line included,
+which lands with the change it records or not at all (ADR-0302 §3:4).
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import stat
 from typing import TYPE_CHECKING
@@ -43,9 +46,11 @@ from ai_assistant.core.types import (
     StoryFlag,
     StoryFlagKind,
     StoryFlagName,
+    StoryNoteAuthor,
     StoryOutcome,
+    StoryPageLine,
+    StoryPageVersionName,
     StoryRefusalReason,
-    StorySafetyNetNote,
 )
 from ai_assistant.memory import SqliteStoryStore
 
@@ -252,7 +257,7 @@ async def test_a_schema_one_file_is_migrated_with_every_activation_member_pendin
         version = await written(
             store,
             "story:old",
-            draft(line("The matter.", note.note_id), took_in_episodes=("a1",)),
+            draft(line("The matter."), took_in_episodes=("a1",)),
             as_of=state.as_of,
         )
         assert version.took_in_episodes == ("a1",)
@@ -260,7 +265,7 @@ async def test_a_schema_one_file_is_migrated_with_every_activation_member_pendin
         store.close()
     check = sqlite3.connect(path)
     try:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 4
     finally:
         check.close()
 
@@ -274,11 +279,7 @@ async def test_the_page_survives_a_reopen_and_the_counter_keeps_rising(tmp_path:
     version = await written(
         first,
         story_id,
-        draft(
-            line("A camping trip.", note.note_id, new=(0,)),
-            safety_net=(StorySafetyNetNote(text="Booked.", rests_on="a1", outside=True),),
-            took_in_notes=(note.note_id,),
-        ),
+        draft(line("A camping trip."), outside=True, took_in_notes=(note.note_id,)),
         as_of=read.as_of,
     )
     page = (await state_of(first, story_id)).page
@@ -308,7 +309,7 @@ async def test_a_note_is_never_rewritten_or_removed_by_the_database(tmp_path: Pa
         for statement in (
             "UPDATE notes SET text = 'rewritten'",
             "UPDATE notes SET author = 'owner'",
-            "UPDATE notes SET rests_on = 'a2'",
+            "UPDATE notes SET written_during = 'a2'",
             "UPDATE notes SET outside = 1",
             "UPDATE notes SET written_at = 0",
         ):
@@ -325,11 +326,11 @@ async def test_the_version_log_refuses_a_rewrite_or_a_removal(tmp_path: Path) ->
     path = tmp_path / "stories.db"
     store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
     story_id = await made(store, act("a1"))
-    note = await noted(store, story_id, "Note.")
+    await noted(store, story_id, "Note.")
     await written(
         store,
         story_id,
-        draft(line("Line.", note.note_id)),
+        draft(line("Line.")),
         as_of=(await state_of(store, story_id)).as_of,
     )
     store.close()
@@ -350,17 +351,17 @@ async def test_a_replaced_page_leaves_no_text_in_the_file(tmp_path: Path) -> Non
     old = "the-old-line-" + "q" * 64
     try:
         story_id = await made(store, act("a1"))
-        note = await noted(store, story_id, "Note.")
+        await noted(store, story_id, "Note.")
         await written(
             store,
             story_id,
-            draft(line(old, note.note_id)),
+            draft(line(old)),
             as_of=(await state_of(store, story_id)).as_of,
         )
         await written(
             store,
             story_id,
-            draft(line("A new line.", note.note_id)),
+            draft(line("A new line.")),
             as_of=(await state_of(store, story_id)).as_of,
         )
     finally:
@@ -384,8 +385,9 @@ async def test_a_backend_failure_carrying_notes_rolls_the_whole_operation_back(
     try:
         source = await made(store, act("a"), act("b"))
         target = await made(store, act("c"))
-        await noted(store, source, "First on a.", on="a")
+        first = await noted(store, source, "First on a.", on="a")
         second = await noted(store, source, "Second on a.", on="a")
+        named = [first.note_id, second.note_id]
         before = await everything(store)
         injector = sqlite3.connect(path)
         injector.execute(
@@ -396,8 +398,10 @@ async def test_a_backend_failure_carrying_notes_rolls_the_whole_operation_back(
         injector.commit()
         attempts = {
             "merge": lambda: store.merge(source, target, actor=StoryActor.OWNER),
-            "split": lambda: store.split(source, [act("a")], actor=StoryActor.OWNER),
-            "move": lambda: store.move(source, target, [act("a")], actor=StoryActor.OWNER),
+            "split": lambda: store.split(source, [act("a")], actor=StoryActor.OWNER, notes=named),
+            "move": lambda: store.move(
+                source, target, [act("a")], actor=StoryActor.OWNER, notes=named
+            ),
         }
         with pytest.raises(StoryStoreError, match="injected fault"):
             await attempts[operation]()
@@ -410,7 +414,7 @@ async def test_a_backend_failure_carrying_notes_rolls_the_whole_operation_back(
 
 
 async def test_a_backend_failure_mid_page_write_writes_nothing(tmp_path: Path) -> None:
-    """The safety-net notes and the take-in are undone when the version cannot be written."""
+    """The take-in and the page are undone when the version cannot be written."""
     path = tmp_path / "stories.db"
     store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
     try:
@@ -426,12 +430,7 @@ async def test_a_backend_failure_mid_page_write_writes_nothing(tmp_path: Path) -
         with pytest.raises(StoryStoreError, match="injected fault"):
             await store.write_page(
                 story_id,
-                draft(
-                    line("Line.", note.note_id, new=(0,)),
-                    safety_net=(StorySafetyNetNote(text="Net.", rests_on="a1", outside=False),),
-                    took_in_notes=(note.note_id,),
-                    took_in_episodes=("a1",),
-                ),
+                draft(line("Line."), took_in_notes=(note.note_id,), took_in_episodes=("a1",)),
                 as_of=before[0].as_of,
             )
         assert (await state_of(store, story_id), await notes_of(store, story_id)) == before
@@ -447,8 +446,9 @@ async def test_a_backend_failure_mid_page_write_writes_nothing(tmp_path: Path) -
     ("statement", "read"),
     [
         ("UPDATE pages SET lines = 'not json'", "page"),
-        ("UPDATE pages SET lines = '[]'", "page"),
+        ("""UPDATE pages SET lines = '[{"text": "Line.", "cites": [2]}]'""", "page"),
         ("UPDATE pages SET lines = 7", "page"),
+        ("UPDATE pages SET outside = 2", "page"),
         ("UPDATE notes SET outside = 2", "notes"),
         ("UPDATE versions SET record = '[1]'", "versions"),
     ],
@@ -459,11 +459,11 @@ async def test_a_corrupt_page_record_is_a_story_store_error(
     path = tmp_path / "stories.db"
     store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
     story_id = await made(store, act("a1"))
-    note = await noted(store, story_id, "Note.")
+    await noted(store, story_id, "Note.")
     await written(
         store,
         story_id,
-        draft(line("Line.", note.note_id)),
+        draft(line("Line.")),
         as_of=(await state_of(store, story_id)).as_of,
     )
     store.close()
@@ -548,8 +548,184 @@ async def test_a_schema_two_file_is_migrated_and_its_lines_stand_unchanged(
         after = await logged(store, "story:old")
         assert after[:2] == lines
         assert (after[-1].answers, after[-1].outcome) == (flag, StoryDecision.LEFT)
+        state = await state_of(store, "story:old")
+        assert state.page is not None
+        assert (state.page.lines, state.page.outside) == ((StoryPageLine(text="Line."),), False)
+        assert [note.written_during for note in await notes_of(store, "story:old")] == ["a1"]
     finally:
         store.close()
+    check = sqlite3.connect(path)
+    try:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 4
+    finally:
+        check.close()
+
+
+# --- ADR-0303 §4:8: the page's records migrated ----------------------------------
+
+#: ADR-0302's schema, version 3, as ``stories.db`` carried it before ADR-0303, with
+#: its indexes and triggers, which the migration must carry through a column renamed.
+_SCHEMA_3_LAYOUT = (
+    "CREATE TABLE stories(id TEXT PRIMARY KEY, created_seq INTEGER NOT NULL UNIQUE, "
+    "created_at INTEGER NOT NULL, merged_into TEXT)",
+    "CREATE TABLE members(story_id TEXT NOT NULL, kind TEXT NOT NULL, "
+    "member_id TEXT NOT NULL, position INTEGER NOT NULL UNIQUE, linked_at INTEGER NOT NULL, "
+    "actor TEXT NOT NULL, pending_since INTEGER, PRIMARY KEY(story_id, kind, member_id))",
+    "CREATE INDEX members_order ON members(story_id, position)",
+    "CREATE INDEX members_reverse ON members(kind, member_id)",
+    "CREATE TABLE log(sequence INTEGER PRIMARY KEY AUTOINCREMENT, story_id TEXT NOT NULL, "
+    "change TEXT NOT NULL, member_kind TEXT, member_id TEXT, other_story TEXT, "
+    "actor TEXT NOT NULL, trigger_id TEXT, at INTEGER NOT NULL, answers TEXT, outcome TEXT)",
+    "CREATE INDEX log_story ON log(story_id, sequence)",
+    "CREATE INDEX log_member ON log(member_kind, member_id)",
+    "CREATE INDEX log_answers ON log(answers) WHERE answers IS NOT NULL",
+    "CREATE TRIGGER log_never_rewritten BEFORE UPDATE ON log "
+    "BEGIN SELECT RAISE(ABORT, 'the story change log is append-only'); END",
+    "CREATE TRIGGER log_never_removed BEFORE DELETE ON log "
+    "BEGIN SELECT RAISE(ABORT, 'the story change log is append-only'); END",
+    "CREATE TABLE ticks(only INTEGER PRIMARY KEY CHECK (only = 0), value INTEGER NOT NULL)",
+    "INSERT INTO ticks(only, value) VALUES(0, 9)",
+    "CREATE TABLE notes(id INTEGER PRIMARY KEY, story_id TEXT NOT NULL, text TEXT NOT NULL, "
+    "author TEXT NOT NULL, rests_on TEXT, outside INTEGER NOT NULL, "
+    "written_at INTEGER NOT NULL, pending_since INTEGER)",
+    "CREATE INDEX notes_story ON notes(story_id, id)",
+    "CREATE INDEX notes_resting ON notes(story_id, rests_on)",
+    "CREATE TRIGGER notes_never_rewritten "
+    "BEFORE UPDATE OF id, text, author, rests_on, outside, written_at ON notes "
+    "BEGIN SELECT RAISE(ABORT, 'a story note is never rewritten'); END",
+    "CREATE TRIGGER notes_never_removed BEFORE DELETE ON notes "
+    "BEGIN SELECT RAISE(ABORT, 'a story note is never removed'); END",
+    "CREATE TABLE pages(story_id TEXT PRIMARY KEY, version INTEGER NOT NULL, "
+    "written_at INTEGER NOT NULL, lines TEXT NOT NULL)",
+    "CREATE TABLE versions(version INTEGER PRIMARY KEY, story_id TEXT NOT NULL, "
+    "written_at INTEGER NOT NULL, record TEXT NOT NULL)",
+    "CREATE INDEX versions_story ON versions(story_id, version)",
+    "CREATE TRIGGER versions_never_rewritten BEFORE UPDATE ON versions "
+    "BEGIN SELECT RAISE(ABORT, 'the page version log is append-only'); END",
+    "CREATE TRIGGER versions_never_removed BEFORE DELETE ON versions "
+    "BEGIN SELECT RAISE(ABORT, 'the page version log is append-only'); END",
+)
+
+#: Two stories under that layout. ``story:old`` holds a planning note marked as
+#: outside content, the user's own note and a tidy-up's safety-net note; version 5
+#: cited the planning note, added the safety net and marked the user's note
+#: superseded; version 8, the current page's, cited the user's note and the safety net,
+#: and its second line was marked. ``story:quiet`` has one version citing an unmarked
+#: note, whose page no line marks.
+_SCHEMA_3_RECORDS = (
+    "INSERT INTO stories VALUES('story:old', 1, 0, NULL)",
+    "INSERT INTO stories VALUES('story:quiet', 3, 0, NULL)",
+    "INSERT INTO log(sequence, story_id, change, actor, at) "
+    "VALUES(1, 'story:old', 'created', 'owner', 0)",
+    "INSERT INTO log(sequence, story_id, change, member_kind, member_id, actor, at) "
+    "VALUES(2, 'story:old', 'added', 'activation', 'a1', 'owner', 0)",
+    "INSERT INTO log(sequence, story_id, change, actor, at) "
+    "VALUES(3, 'story:quiet', 'created', 'owner', 0)",
+    "INSERT INTO members VALUES('story:old', 'activation', 'a1', 2, 0, 'owner', NULL)",
+    "INSERT INTO notes VALUES(1, 'story:old', 'Lower loop closes.', 'planning', 'a1', 1, 0, NULL)",
+    "INSERT INTO notes VALUES(2, 'story:old', 'No Saturdays.', 'owner', NULL, 0, 0, NULL)",
+    "INSERT INTO notes VALUES(4, 'story:old', 'Booked Sunday.', 'tidy_up', 'a1', 0, 0, NULL)",
+    "INSERT INTO notes VALUES(6, 'story:quiet', 'Quiet.', 'planning', 'a9', 0, 0, NULL)",
+    "INSERT INTO versions VALUES(5, 'story:old', 0, "
+    """'{"lines": [[1]], "safety_net": [4], "took_in_notes": [1, 2], """
+    """"took_in_episodes": ["a1"], "supersessions": [{"note": 2, "episode": "a1"}], """
+    """"flags": [{"kind": "two_matters"}]}')""",
+    "INSERT INTO versions VALUES(7, 'story:quiet', 0, "
+    """'{"lines": [[6]], "safety_net": [], "took_in_notes": [6], "took_in_episodes": [], """
+    """"supersessions": [], "flags": []}')""",
+    "INSERT INTO versions VALUES(8, 'story:old', 0, "
+    """'{"lines": [[2], [4]], "safety_net": [], "took_in_notes": [], """
+    """"took_in_episodes": [], "supersessions": [], "flags": []}')""",
+    "INSERT INTO pages VALUES('story:old', 8, 0, "
+    """'[{"text": "Camping.", "cites": [2], "outside": false}, """
+    """{"text": "Booked Sunday.", "cites": [4], "outside": true}]')""",
+    "INSERT INTO pages VALUES('story:quiet', 7, 0, "
+    """'[{"text": "Quiet.", "cites": [6], "outside": false}]')""",
+    "PRAGMA user_version = 3",
+)
+
+
+def _schema_3(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    for statement in (*_SCHEMA_3_LAYOUT, *_SCHEMA_3_RECORDS):
+        conn.execute(statement)
+    conn.commit()
+    conn.close()
+
+
+async def test_a_schema_three_file_keeps_every_note_and_page_and_drops_what_adr_0303_retires(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "stories.db"
+    _schema_3(path)
+    store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    try:
+        notes = await notes_of(store, "story:old")
+        assert [
+            (note.note_id, note.author, note.written_during, note.outside) for note in notes
+        ] == [
+            (1, StoryNoteAuthor.PLANNING, "a1", True),
+            (2, StoryNoteAuthor.OWNER, None, False),
+            (4, StoryNoteAuthor.TIDY_UP, "a1", False),
+        ]
+        versions = await versions_of(store, "story:old")
+        assert [
+            (v.version, v.took_in_notes, v.took_in_episodes, v.read_pages, v.flags, v.outside)
+            for v in versions
+        ] == [
+            (5, (1, 2), ("a1",), (), (StoryFlag(kind=StoryFlagKind.TWO_MATTERS),), True),
+            (8, (), (), (), (), True),
+        ]
+        page = (await state_of(store, "story:old")).page
+        assert page is not None
+        assert (page.version, page.outside) == (8, True)
+        assert page.lines == (StoryPageLine(text="Camping."), StoryPageLine(text="Booked Sunday."))
+        quiet = (await state_of(store, "story:quiet")).page
+        assert quiet is not None
+        assert (quiet.lines, quiet.outside) == ((StoryPageLine(text="Quiet."),), False)
+        assert [v.outside for v in await versions_of(store, "story:quiet")] == [False]
+        # The migrated file is written as a fresh one is: a page may be read by its
+        # version, and a version after the counter's last reading follows it.
+        read = await state_of(store, "story:quiet")
+        later = await written(
+            store,
+            "story:quiet",
+            draft(
+                line("Quieter."), read_pages=(StoryPageVersionName(story="story:old", version=8),)
+            ),
+            as_of=read.as_of,
+        )
+        assert later.version > 9
+    finally:
+        store.close()
+    check = sqlite3.connect(path)
+    try:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 4
+        indexes = {row[0] for row in check.execute("SELECT name FROM sqlite_master")}
+        assert {"notes_resting", "log_member"}.isdisjoint(indexes)
+        with pytest.raises(sqlite3.DatabaseError, match="never rewritten"):
+            check.execute("UPDATE notes SET written_during = 'a2'")
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            check.execute("UPDATE versions SET record = '{}'")
+        for (record,) in check.execute("SELECT record FROM versions"):
+            assert {"lines", "safety_net", "supersessions"}.isdisjoint(json.loads(record))
+    finally:
+        check.close()
+
+
+async def test_a_schema_three_file_whose_records_are_not_its_own_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A record the migration cannot read is a store error, and the file is left as it was."""
+    path = tmp_path / "stories.db"
+    _schema_3(path)
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TRIGGER versions_never_rewritten")
+    conn.execute("""UPDATE versions SET record = '{"lines": 7}' WHERE version = 5""")
+    conn.commit()
+    conn.close()
+    with pytest.raises(StoryStoreError, match="citations"):
+        SqliteStoryStore(path=path, now=lambda: STORY_AT)
     check = sqlite3.connect(path)
     try:
         assert check.execute("PRAGMA user_version").fetchone()[0] == 3

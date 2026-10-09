@@ -313,6 +313,12 @@ _LINE_AUTHOR_TEXT: Final = "the assistant, tidying this story's page"
 _OUTSIDE_TEXT: Final = (
     "rests on outside content: what a source reported, never something the user said"
 )
+#: A marked page's mark, said of the page because a line carries none (ADR-0303 §3:4):
+#: the lines' own words say which part came from outside.
+_PAGE_OUTSIDE_TEXT: Final = (
+    "some of this page rests on outside content: what a source reported, never something "
+    "the user said; its lines' own words say which"
+)
 
 _UNPARSEABLE: Final = (
     "Your reply was not one JSON object of the required shape, so it could not be "
@@ -861,13 +867,16 @@ class UnderstandingStage:
             ).described()
             for record in view.episodes
         ]
-        return {
+        rendered: dict[str, object] = {
             "label": label,
             "item": _STORY_ITEM,
             "page": [_page_line(line) for line in view.lines] or _NO_LINES,
-            "newest_notes": [_page_note(note) for note in view.notes] or _NO_NOTES,
-            "latest_episodes": episodes or _NO_EPISODES,
         }
+        if view.outside:
+            rendered["page_outside_content"] = _PAGE_OUTSIDE_TEXT
+        rendered["newest_notes"] = [_page_note(note) for note in view.notes] or _NO_NOTES
+        rendered["latest_episodes"] = episodes or _NO_EPISODES
+        return rendered
 
     def _recalled_section(
         self,
@@ -1493,11 +1502,11 @@ def _member_of(record: EpisodicMemory, label: str, story_members: dict[str, Stor
 
 
 def _page_line(line: StoryPageLine) -> dict[str, object]:
-    """One line of a story's page, attributed by its record and never by its text."""
-    rendered: dict[str, object] = {"written_by": _LINE_AUTHOR_TEXT, "text": line.text}
-    if line.outside:
-        rendered["outside_content"] = _OUTSIDE_TEXT
-    return rendered
+    """One line of a story's page, attributed by its record and never by its text.
+
+    A line carries no mark of its own: the page's mark is rendered beside the page.
+    """
+    return {"written_by": _LINE_AUTHOR_TEXT, "text": line.text}
 
 
 def _page_note(note: StoryNote) -> dict[str, object]:

@@ -300,6 +300,11 @@ _NOTE_AUTHOR_TEXT: Final = {
     StoryNoteAuthor.OWNER: "the user, writing on this story's page directly: the user's own note",
 }
 _LINE_AUTHOR_TEXT: Final = "the assistant, tidying this story's page"
+#: A marked page's mark (ADR-0303 §3:4), said of the page because a line carries none.
+_PAGE_OUTSIDE_TEXT: Final = (
+    "some of this page rests on outside content: what a source reported, never something "
+    "the user said; its lines' own words say which"
+)
 _OUTSIDE_TEXT: Final = (
     "rests on outside content: what a source reported, never something the user said"
 )
@@ -584,12 +589,7 @@ class _Reading:
         page = story.state.page
         lines: list[dict[str, object]] | str = _NO_PAGE
         if page is not None:
-            lines = []
-            for line in page.lines:
-                rendered: dict[str, object] = {"written_by": _LINE_AUTHOR_TEXT, "text": line.text}
-                if line.outside:
-                    rendered["outside_content"] = _OUTSIDE_TEXT
-                lines.append(rendered)
+            lines = [{"written_by": _LINE_AUTHOR_TEXT, "text": line.text} for line in page.lines]
         pending = story.state.pending_notes
         shown = pending[-notes:] if notes else ()
         # The labels of the episodes shown that it holds, in its own link order.
@@ -598,9 +598,15 @@ class _Reading:
             for entry in story.activations
             if entry.member.id in self._episode_labels
         ]
+        marked: dict[str, object] = {}
+        if page is not None and page.outside:
+            # A line carries no mark of its own (ADR-0303 §2:7): the page's mark is
+            # rendered beside the page, and the lines' words say which part it is.
+            marked["its_page_outside_content"] = _PAGE_OUTSIDE_TEXT
         return {
             "label": label,
             "its_page": lines,
+            **marked,
             "notes_not_yet_on_its_page": [_note(note) for note in reversed(shown)],
             "notes_not_shown": len(pending) - len(shown),
             "episodes": episodes,

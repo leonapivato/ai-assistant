@@ -1,24 +1,25 @@
-"""ADR-0300 §11's privacy default: which of a story page's lines and notes a reader sees.
+"""The privacy default for a story's page: which of its notes and page a reader sees.
 
-Until privacy is designed, a note is shown to a reader only where the episode it
-rests on may be shown to that reader, and a note the user wrote directly only where a
-record placed for the owner alone may be shown. A line is shown only where every note
-it cites may be shown, so a line copying the user's direct note carries that note's
-restriction (§11:1).
+ADR-0303 §3 rules it for now: a note is shown to a reader only where a record placed
+for the owner alone may be shown to that reader, whoever wrote it (§3:6), and the
+current page only where everything behind it may be shown (§3:7, §3:8). A note rests
+on nothing and a line cites nothing, so ADR-0300 §11:1's tests, which read the episode
+a note rested on and the notes a line cited, are gone.
 
 **The rule is decided here once, for every reader of a page.** Understanding's short
-views (§6) are its first reader; where the matter stands (§8), the story commands and
-planning (§10) read pages too, and each answers the same two questions about its own
-reader — which episodes may that reader be shown, and may it be shown a record placed
-for the owner alone — and hands the answers to :class:`PageVisibility`. What may be
-shown is decided from identities and those two answers alone: no note's or line's text
-is read to decide it.
+views are its first reader; the story commands read pages too, and each answers the
+same two questions about its own reader — which episodes may that reader be shown,
+and may it be shown a record placed for the owner alone — and hands the answers to
+:class:`PageVisibility`. What may be shown is decided from identities and those two
+answers alone: no note's or line's text is read to decide it.
 
-**Undecidable is withheld.** A line citing a note the reader's caller did not hand
-in — one the store no longer holds on this story, or one never looked up — is not
-shown, because nothing establishes that its citation may be. A note resting on an
-episode that is open, forgotten or refused by the reader's predicate is withheld the
-same way: its caller hands in no episode for it.
+**Interim, until ADR-0303 §12:3's lane.** :meth:`PageVisibility.page` shows a page
+exactly where a record placed for the owner alone may be shown: every note is such a
+record (§3:6), so a page that took one in can be shown nowhere wider. The walk §3:7
+asks for, over every note and episode behind every version a page's runs read, which
+also withholds a page an open or forgotten episode stands behind (§3:8), is that
+lane's, with the views it rebuilds. Nothing of ADR-0300's page is live outside a test
+hub until the phases' cutover (ADR-0300 §13).
 """
 
 from __future__ import annotations
@@ -27,9 +28,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable
 
-    from ai_assistant.core.types import EpisodicMemory, StoryNote, StoryNoteId, StoryPageLine
+    from ai_assistant.core.types import EpisodicMemory, StoryNote
 
 __all__ = ["PageVisibility", "activation_of"]
 
@@ -47,7 +48,7 @@ def activation_of(record: EpisodicMemory) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class PageVisibility:
-    """Which of a page's notes and lines one reader may be shown (ADR-0300 §11:1).
+    """Which of a story's notes, and whether its page, one reader may be shown.
 
     Attributes:
         activations: The activations whose episodes the reader may be shown: each
@@ -55,7 +56,8 @@ class PageVisibility:
             reader never open (ADR-0286 §6) and through its audience predicate, and
             for the owner reading directly every episode the store holds.
         owner_notes: Whether a record placed for the owner alone may be shown to the
-            reader, which decides every note the user wrote directly.
+            reader, which decides every note (ADR-0303 §3:6) and, until ADR-0303
+            §12:3's lane, the page.
     """
 
     activations: frozenset[str]
@@ -80,14 +82,10 @@ class PageVisibility:
             owner_notes=owner_notes,
         )
 
-    def note(self, note: StoryNote) -> bool:
-        """Whether ``note`` may be shown: its episode may, or, unrested, an owner record may."""
-        if note.rests_on is None:
-            return self.owner_notes
-        return note.rests_on in self.activations
+    def note(self, note: StoryNote) -> bool:  # noqa: ARG002 — §3:6 reads nothing of the note
+        """Whether ``note`` may be shown: where an owner record may be, whoever wrote it."""
+        return self.owner_notes
 
-    def line(self, line: StoryPageLine, notes: Mapping[StoryNoteId, StoryNote]) -> bool:
-        """Whether ``line`` may be shown: every note it cites is in ``notes`` and may be."""
-        return all(
-            (cited := notes.get(note_id)) is not None and self.note(cited) for note_id in line.cites
-        )
+    def page(self) -> bool:
+        """Whether the current page may be shown: for now, where an owner record may be."""
+        return self.owner_notes

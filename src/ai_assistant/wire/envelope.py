@@ -2473,7 +2473,16 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     writes carry; and ``not_held`` to ``StoryPageRefusalReason`` and ``activation`` to
 #:     ``StoryPageRefusal``, which the story commands carry. A peer at 84 would refuse a
 #:     ``decided`` line or a new refusal (ADR-0300 §12:2, ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 85
+#: 86: ADR-0303 §11:1 changes the story page's types the engine's story methods carry:
+#:     ``StoryNote`` records ``written_during`` in place of ``rests_on``;
+#:     ``StoryPageLine`` carries its text alone, without ``cites`` and ``outside``;
+#:     ``StoryPageView`` carries the page's lines and its mark or that it was withheld,
+#:     and the story's notes newest first with whether each is pending
+#:     (``StoryPageViewNote``) and how many lie beyond, in place of ``pending_notes``,
+#:     ``pending_episodes``, ``withheld_lines`` and ``withheld_notes``; and
+#:     ``StoryDecision`` gains ``not_applied``, which the engine's story log carries
+#:     through ``StoryLogLine``. A peer at 85 would refuse each (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 86
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

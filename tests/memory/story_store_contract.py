@@ -12,18 +12,24 @@ target, a merge rewiring the absorbed story's holders, a split keeping link orde
 the loop refusal on a link and on a merge, refusals as typed outcomes that write
 nothing, and the five reads with their paging.
 
-And ADR-0300 §3's page: notes, immutable and never removed; the current page and
-its version log; pending, including what becomes pending while a run is out and what
-a merge, a split or a move brings; the page write refused when the version it was
-built on is no longer current, writing nothing; the move; the notes merge, split
-and move carry; and the actors §3:15 adds.
+And ADR-0300 §3's page as ADR-0303 §§2-6 remakes it: notes, immutable and never
+removed, each recording the activation it was written during and its mark; the
+current page, lines that cite nothing and the page's mark, and its version log of
+what each run took in, the other stories' page versions it read, its flags and its
+mark; pending, including what becomes pending while a run is out and what a merge, a
+split or a move brings; the page write, which writes no note, refused when the
+version it was built on is no longer current, over a page version read naming
+nothing the store holds, and over the cap counting every line, writing nothing; the
+move; the notes a merge carries (every one) and a split or a move carries (exactly
+those named); and the actors ADR-0300 §3:15 adds.
 
-And ADR-0302: what names a flag and which stories it concerns (§2); the ``decided``
-line each decision writes, after its change's lines and on the stories as they stand
-once it is applied (§3); ``leave_flag``, the ``answers`` keyword and their refusals,
-checked after every check the operation makes and writing nothing when refused,
-one writer only answering a flag (§4); and the page write refused over what its
-story does not hold, in its fixed place in the order (§7).
+And ADR-0302: what names a flag and which stories it concerns (§2), a tidy-up's flags
+being the only ones (ADR-0303 §8); the ``decided`` line each decision writes, after
+its change's lines and on the stories as they stand once it is applied (§3);
+``leave_flag`` with ``left`` or ``not_applied``, the ``answers`` keyword and their
+refusals, checked after every check the operation makes and writing nothing when
+refused, one writer only answering a flag (§4); and the page write refused over what
+its story does not hold, in its fixed place in the order (§7).
 
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
@@ -45,7 +51,6 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryChange,
     StoryDecision,
-    StoryDraftLine,
     StoryFlag,
     StoryFlagKind,
     StoryFlagName,
@@ -62,9 +67,8 @@ from ai_assistant.core.types import (
     StoryPageRefusalReason,
     StoryPageState,
     StoryPageVersion,
+    StoryPageVersionName,
     StoryRefusalReason,
-    StorySafetyNetNote,
-    StorySupersession,
 )
 
 if TYPE_CHECKING:
@@ -150,12 +154,12 @@ async def noted(  # noqa: PLR0913 — the store, the story, the text, and the no
     author: StoryNoteAuthor = StoryNoteAuthor.PLANNING,
     outside: bool = False,
 ) -> StoryNote:
-    """Append a note and return it, failing on a refusal; ``on=None`` for ``owner``."""
+    """Append a note and return it, failing on a refusal; ``on`` is ignored for ``owner``."""
     outcome = await store.append_note(
         story_id,
         text,
         author=author,
-        rests_on=None if author is StoryNoteAuthor.OWNER else on,
+        written_during=None if author is StoryNoteAuthor.OWNER else on,
         outside=outside,
     )
     assert outcome.refusal is None, outcome
@@ -170,16 +174,14 @@ async def state_of(store: StoryStore, story_id: str) -> StoryPageState:
     return state
 
 
-def line(
-    text: str, *cites: int, new: tuple[int, ...] = (), outside: bool = False
-) -> StoryDraftLine:
-    """A draft line citing ``cites`` and the safety-net notes at indexes ``new``."""
-    return StoryDraftLine(text=text, cites=cites, cites_new=new, outside=outside)
+def line(text: str) -> StoryPageLine:
+    """A line of a page: its text, and nothing else (ADR-0303 §2:7)."""
+    return StoryPageLine(text=text)
 
 
-def draft(*lines: StoryDraftLine, **rest: Any) -> StoryPageDraft:
-    """A draft of ``lines`` and whatever else it writes."""
-    return StoryPageDraft(lines=lines, **rest)
+def draft(*lines: StoryPageLine, outside: bool = False, **rest: Any) -> StoryPageDraft:
+    """A draft of ``lines``, unmarked unless ``outside``, and whatever else it records."""
+    return StoryPageDraft(lines=lines, outside=outside, **rest)
 
 
 async def written(
@@ -221,11 +223,9 @@ _PASS = StoryActor.MATTERS_PASS
 
 async def raised(store: StoryStore, story_id: str, flag: StoryFlag) -> StoryFlagName:
     """Write a page of ``story_id`` raising ``flag``, and return the flag's name (§2:1)."""
-    note = await noted(store, story_id, "Note.")
+    await noted(store, story_id, "Note.")
     read = await state_of(store, story_id)
-    version = await written(
-        store, story_id, draft(line("Line.", note.note_id), flags=(flag,)), as_of=read.as_of
-    )
+    version = await written(store, story_id, draft(line("Line."), flags=(flag,)), as_of=read.as_of)
     return StoryFlagName(story=story_id, version=version.version, flag=flag)
 
 
@@ -768,10 +768,10 @@ class StoryStoreContract:
         second = await noted(store, story_id, "No Saturdays.", author=StoryNoteAuthor.OWNER)
         assert first.text == "Leaning against Saturday."
         assert first.author is StoryNoteAuthor.PLANNING
-        assert first.rests_on == "a1"
+        assert first.written_during == "a1"
         assert first.outside is True
         assert first.written_at == STORY_AT
-        assert second.rests_on is None
+        assert second.written_during is None
         assert second.outside is False
         assert second.note_id > first.note_id
         assert await notes_of(store, story_id) == [first, second]
@@ -787,7 +787,7 @@ class StoryStoreContract:
         assert (await notes_of(store, story_id))[0].text == text
 
     @pytest.mark.parametrize(
-        ("author", "rests_on", "outside"),
+        ("author", "written_during", "outside"),
         [
             (StoryNoteAuthor.OWNER, "a1", False),
             (StoryNoteAuthor.OWNER, None, True),
@@ -799,7 +799,7 @@ class StoryStoreContract:
         ],
     )
     async def test_a_note_its_author_does_not_admit_is_a_value_error(
-        self, store: StoryStore, author: object, rests_on: object, outside: object
+        self, store: StoryStore, author: object, written_during: object, outside: object
     ) -> None:
         story_id = await made(store, act("a1"))
         before = await everything(store)
@@ -808,7 +808,7 @@ class StoryStoreContract:
                 story_id,
                 "a note",
                 author=author,  # type: ignore[arg-type]
-                rests_on=rests_on,  # type: ignore[arg-type]
+                written_during=written_during,  # type: ignore[arg-type]
                 outside=outside,  # type: ignore[arg-type]
             )
         assert await everything(store) == before
@@ -823,7 +823,7 @@ class StoryStoreContract:
                 story_id,
                 text,  # type: ignore[arg-type]
                 author=StoryNoteAuthor.PLANNING,
-                rests_on="a1",
+                written_during="a1",
             )
         assert await notes_of(store, story_id) == []
 
@@ -840,7 +840,7 @@ class StoryStoreContract:
         await store.merge(absorbed, target, actor=_OWNER)
         before = await everything(store)
         unknown = await store.append_note(
-            "story:nowhere", "n", author=StoryNoteAuthor.PLANNING, rests_on="a"
+            "story:nowhere", "n", author=StoryNoteAuthor.PLANNING, written_during="a"
         )
         page_refused(unknown, StoryPageRefusalReason.UNKNOWN_STORY)
         assert unknown.refusal is not None
@@ -851,13 +851,13 @@ class StoryStoreContract:
         assert merged.refusal.merged_into == target
         assert await everything(store) == before
 
-    async def test_a_note_may_rest_on_an_activation_the_story_does_not_hold(
+    async def test_a_note_may_record_an_activation_the_story_does_not_hold(
         self, store: StoryStore
     ) -> None:
         """Planning may write to any story by id (ADR-0300 §10); the store reads no other."""
         story_id = await made(store, act("a1"))
         note = await noted(store, story_id, "From elsewhere.", on="elsewhere")
-        assert note.rests_on == "elsewhere"
+        assert note.written_during == "elsewhere"
 
     async def test_notes_page_in_the_order_they_were_written(self, store: StoryStore) -> None:
         story_id = await made(store, act("a1"))
@@ -899,7 +899,7 @@ class StoryStoreContract:
             store,
             story_id,
             draft(
-                line("A camping trip to Riverside.", note.note_id),
+                line("A camping trip to Riverside."),
                 took_in_notes=(note.note_id,),
                 took_in_episodes=("a1",),
             ),
@@ -913,11 +913,9 @@ class StoryStoreContract:
         assert after.page is not None
         assert after.page.version == version.version
         assert after.page.written_at == STORY_AT
-        assert after.page.lines == (
-            StoryPageLine(
-                text="A camping trip to Riverside.", cites=(note.note_id,), outside=False
-            ),
-        )
+        assert after.page.lines == (StoryPageLine(text="A camping trip to Riverside."),)
+        assert after.page.outside is False
+        assert version.outside is False
 
     async def test_what_becomes_pending_while_a_run_is_out_stays_pending(
         self, store: StoryStore
@@ -931,7 +929,7 @@ class StoryStoreContract:
             store,
             story_id,
             draft(
-                line("The matter.", first.note_id),
+                line("The matter."),
                 took_in_notes=(first.note_id, late.note_id),
                 took_in_episodes=("a1", "a2"),
             ),
@@ -948,14 +946,14 @@ class StoryStoreContract:
     ) -> None:
         """It came to the story again after the read, whatever its id says."""
         story_id = await made(store, act("a1"))
-        note = await noted(store, story_id, "Note.")
+        await noted(store, story_id, "Note.")
         read = await state_of(store, story_id)
         await store.unlink(story_id, [act("a1")], actor=_OWNER)
         await store.link(story_id, [act("a1")], actor=_OWNER)
         version = await written(
             store,
             story_id,
-            draft(line("The matter.", note.note_id), took_in_episodes=("a1",)),
+            draft(line("The matter."), took_in_episodes=("a1",)),
             as_of=read.as_of,
         )
         assert version.took_in_episodes == ()
@@ -969,7 +967,7 @@ class StoryStoreContract:
             store,
             story_id,
             draft(
-                line("The matter.", note.note_id),
+                line("The matter."),
                 took_in_notes=(note.note_id, note.note_id),
                 took_in_episodes=("a1", "a1"),
             ),
@@ -982,7 +980,7 @@ class StoryStoreContract:
             store,
             story_id,
             draft(
-                line("The matter.", note.note_id),
+                line("The matter."),
                 took_in_notes=(note.note_id,),
                 took_in_episodes=("a1",),
             ),
@@ -994,12 +992,12 @@ class StoryStoreContract:
     async def test_one_storys_version_takes_in_nothing_on_another(self, store: StoryStore) -> None:
         first = await made(store, act("shared"))
         second = await made(store, act("shared"))
-        note = await noted(store, first, "Note.", on="shared")
+        await noted(store, first, "Note.", on="shared")
         read = await state_of(store, first)
         await written(
             store,
             first,
-            draft(line("The matter.", note.note_id), took_in_episodes=("shared",)),
+            draft(line("The matter."), took_in_episodes=("shared",)),
             as_of=read.as_of,
         )
         assert (await state_of(store, first)).pending_episodes == ()
@@ -1007,62 +1005,86 @@ class StoryStoreContract:
 
     # --- the page write (ADR-0300 §3:6, §3:7, §3:10) -------------------------
 
-    async def test_a_page_write_adds_its_safety_net_notes_cited_by_identity(
+    async def test_a_page_write_writes_no_note_and_records_its_mark(
         self, store: StoryStore
     ) -> None:
+        """ADR-0303 §4:1: the page's lines and its mark, as given, and no note."""
         story_id = await made(store, act("a1"), act("a2"))
         note = await noted(store, story_id, "Riverside.")
         read = await state_of(store, story_id)
         page = draft(
-            line("A camping trip to Riverside.", note.note_id),
-            line("Booked for Sunday.", new=(0,), outside=True),
-            line("Both.", note.note_id, new=(1, 0)),
-            safety_net=(
-                StorySafetyNetNote(text="Booked Sunday.", rests_on="a2", outside=True),
-                StorySafetyNetNote(text="Dog allowed.", rests_on="a1", outside=False),
-            ),
+            line("A camping trip to Riverside."),
+            line("A parks notice said the lower loop closes on the 15th."),
+            outside=True,
             took_in_notes=(note.note_id,),
             took_in_episodes=("a1", "a2"),
         )
         version = await written(store, story_id, page, as_of=read.as_of)
-        net = version.safety_net
-        assert len(net) == 2
-        assert net[0] < net[1] < version.version
-        assert version.lines == ((note.note_id,), (net[0],), (note.note_id, net[1], net[0]))
-        notes = await notes_of(store, story_id)
-        assert [n.note_id for n in notes] == [note.note_id, *net]
-        added = notes[1:]
-        assert [n.author for n in added] == [StoryNoteAuthor.TIDY_UP] * 2
-        assert [(n.text, n.rests_on, n.outside) for n in added] == [
-            ("Booked Sunday.", "a2", True),
-            ("Dog allowed.", "a1", False),
-        ]
-        assert all(n.written_at == STORY_AT for n in added)
+        assert version.outside is True
+        assert version.read_pages == ()
+        assert await notes_of(store, story_id) == [note]
         state = await state_of(store, story_id)
         assert state.pending_notes == ()
         assert state.page is not None
-        assert [ln.cites for ln in state.page.lines] == list(version.lines)
-        assert [ln.outside for ln in state.page.lines] == [False, True, False]
+        assert state.page.lines == page.lines
+        assert state.page.outside is True
         assert await versions_of(store, story_id) == [version]
 
-    async def test_a_version_records_its_marks_and_flags(self, store: StoryStore) -> None:
+    async def test_a_page_may_hold_no_line(self, store: StoryStore) -> None:
+        """ADR-0303 §5:3: a version like any other, so what it read stops being pending."""
+        story_id = await made(store, act("a1"))
+        note = await noted(store, story_id, "Nothing worth a line.")
+        read = await state_of(store, story_id)
+        version = await written(
+            store,
+            story_id,
+            draft(took_in_notes=(note.note_id,), took_in_episodes=("a1",)),
+            as_of=read.as_of,
+        )
+        assert version.took_in_notes == (note.note_id,)
+        state = await state_of(store, story_id)
+        assert state.page is not None
+        assert state.page.lines == ()
+        assert (state.pending_notes, state.pending_episodes) == ((), ())
+
+    async def test_a_version_records_its_flags_its_reads_and_its_mark(
+        self, store: StoryStore
+    ) -> None:
         story_id = await made(store, act("a1"))
         other = await made(store, act("a9"))
-        mine = await noted(store, story_id, "No Saturdays.", author=StoryNoteAuthor.OWNER)
+        merged = await made(store, act("a8"))
+        theirs = await written(
+            store,
+            other,
+            draft(line("The other matter.")),
+            as_of=(await state_of(store, other)).as_of,
+        )
+        gone = await written(
+            store,
+            merged,
+            draft(line("A merged matter.")),
+            as_of=(await state_of(store, merged)).as_of,
+        )
+        await store.merge(merged, other, actor=_OWNER)
         read = await state_of(store, story_id)
-        marks = (StorySupersession(note=mine.note_id, episode="a1"),)
         flags = (
             StoryFlag(kind=StoryFlagKind.TWO_MATTERS),
             StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other),
         )
+        reads = (
+            StoryPageVersionName(story=other, version=theirs.version),
+            StoryPageVersionName(story=merged, version=gone.version),
+            StoryPageVersionName(story=other, version=theirs.version),
+        )
         version = await written(
             store,
             story_id,
-            draft(line("Saturday's fine now.", mine.note_id), supersessions=marks, flags=flags),
+            draft(line("Saturday's fine now."), flags=flags, read_pages=reads, outside=True),
             as_of=read.as_of,
         )
-        assert version.supersessions == marks
         assert version.flags == flags
+        assert version.read_pages == reads[:2]
+        assert version.outside is True
         assert version.written_at == STORY_AT
         assert await versions_of(store, story_id) == [version]
 
@@ -1070,17 +1092,17 @@ class StoryStoreContract:
         self, store: StoryStore
     ) -> None:
         story_id = await made(store, act("a1"))
-        note = await noted(store, story_id, "Note.")
+        await noted(store, story_id, "Note.")
         first = await written(
             store,
             story_id,
-            draft(line("Old line.", note.note_id)),
+            draft(line("Old line.")),
             as_of=(await state_of(store, story_id)).as_of,
         )
         second = await written(
             store,
             story_id,
-            draft(line("New line.", note.note_id), line("Another.", note.note_id)),
+            draft(line("New line."), line("Another.")),
             as_of=(await state_of(store, story_id)).as_of,
         )
         assert second.version > first.version
@@ -1091,12 +1113,12 @@ class StoryStoreContract:
 
     async def test_the_version_log_pages_oldest_first(self, store: StoryStore) -> None:
         story_id = await made(store, act("a1"))
-        note = await noted(store, story_id, "Note.")
+        await noted(store, story_id, "Note.")
         made_versions = [
             await written(
                 store,
                 story_id,
-                draft(line(f"Line {n}.", note.note_id)),
+                draft(line(f"Line {n}.")),
                 as_of=(await state_of(store, story_id)).as_of,
             )
             for n in range(5)
@@ -1116,17 +1138,13 @@ class StoryStoreContract:
         self, store: StoryStore
     ) -> None:
         story_id = await made(store, act("a1"))
-        note = await noted(store, story_id, "Note.")
+        await noted(store, story_id, "Note.")
         stale = await state_of(store, story_id)
-        await written(store, story_id, draft(line("First.", note.note_id)), as_of=stale.as_of)
+        await written(store, story_id, draft(line("First.")), as_of=stale.as_of)
         before = await everything(store)
         outcome = await store.write_page(
             story_id,
-            draft(
-                line("Second.", note.note_id),
-                safety_net=(StorySafetyNetNote(text="Net.", rests_on="a1", outside=False),),
-                took_in_episodes=("a1",),
-            ),
+            draft(line("Second."), took_in_episodes=("a1",)),
             as_of=stale.as_of,
         )
         page_refused(outcome, StoryPageRefusalReason.PAGE_MOVED_ON)
@@ -1140,54 +1158,67 @@ class StoryStoreContract:
         """Only a version of the story's own page moves it on."""
         target = await made(store, act("a1"))
         absorbed = await made(store, act("a2"))
-        note = await noted(store, target, "Note.")
+        await noted(store, target, "Note.")
         read = await state_of(store, target)
         await store.merge(absorbed, target, actor=_OWNER)
-        await written(store, target, draft(line("The matter.", note.note_id)), as_of=read.as_of)
+        await written(store, target, draft(line("The matter.")), as_of=read.as_of)
 
-    @pytest.mark.parametrize("where", ["line", "mark"])
-    async def test_a_page_naming_a_note_the_store_does_not_hold_is_refused(
-        self, store: StoryStore, where: str
+    async def test_a_page_version_read_naming_an_unknown_story_is_refused(
+        self, store: StoryStore
     ) -> None:
+        """ADR-0303 §4:2: checked only as an identity the store holds."""
         story_id = await made(store, act("a1"))
-        note = await noted(store, story_id, "Note.")
-        read = await state_of(store, story_id)
-        missing = note.note_id + 10_000
-        page = (
-            draft(line("Line.", note.note_id, missing))
-            if where == "line"
-            else draft(
-                line("Line.", note.note_id),
-                supersessions=(StorySupersession(note=missing, episode="a1"),),
-            )
-        )
-        before = await everything(store)
-        outcome = await store.write_page(story_id, page, as_of=read.as_of)
-        page_refused(outcome, StoryPageRefusalReason.UNKNOWN_NOTE)
-        assert outcome.refusal is not None
-        assert outcome.refusal.note == missing
-        assert await everything(store) == before
-
-    async def test_a_page_may_cite_a_note_of_another_story(self, store: StoryStore) -> None:
-        """Whether a cited note is this story's is the hub's check (§5), not the store's."""
-        story_id = await made(store, act("a1"))
-        other = await made(store, act("a2"))
-        foreign = await noted(store, other, "Elsewhere.", on="a2")
-        read = await state_of(store, story_id)
-        version = await written(
-            store, story_id, draft(line("Line.", foreign.note_id)), as_of=read.as_of
-        )
-        assert version.lines == ((foreign.note_id,),)
-
-    async def test_a_flag_naming_an_unknown_story_is_refused(self, store: StoryStore) -> None:
-        story_id = await made(store, act("a1"))
-        note = await noted(store, story_id, "Note.")
         read = await state_of(store, story_id)
         before = await everything(store)
         outcome = await store.write_page(
             story_id,
             draft(
-                line("Line.", note.note_id),
+                line("Line."),
+                read_pages=(StoryPageVersionName(story="story:nowhere", version=1),),
+            ),
+            as_of=read.as_of,
+        )
+        page_refused(outcome, StoryPageRefusalReason.UNKNOWN_STORY)
+        assert outcome.refusal is not None
+        assert outcome.refusal.story_id == "story:nowhere"
+        assert await everything(store) == before
+
+    @pytest.mark.parametrize("wrong", ["itself", "unreached", "another's"])
+    async def test_a_page_version_read_naming_nothing_held_is_a_value_error(
+        self, store: StoryStore, wrong: str
+    ) -> None:
+        """Its own story, a version its story has not reached, or another story's version."""
+        story_id = await made(store, act("a1"))
+        other = await made(store, act("a2"))
+        third = await made(store, act("a3"))
+        theirs = await written(
+            store, other, draft(line("Other.")), as_of=(await state_of(store, other)).as_of
+        )
+        mine = await written(
+            store, story_id, draft(line("Mine.")), as_of=(await state_of(store, story_id)).as_of
+        )
+        named = {
+            "itself": StoryPageVersionName(story=story_id, version=mine.version),
+            "unreached": StoryPageVersionName(story=other, version=theirs.version + 10_000),
+            "another's": StoryPageVersionName(story=third, version=theirs.version),
+        }[wrong]
+        read = await state_of(store, story_id)
+        before = await everything(store)
+        with pytest.raises(ValueError, match="page version read"):
+            await store.write_page(
+                story_id, draft(line("Line."), read_pages=(named,)), as_of=read.as_of
+            )
+        assert await everything(store) == before
+
+    async def test_a_flag_naming_an_unknown_story_is_refused(self, store: StoryStore) -> None:
+        story_id = await made(store, act("a1"))
+        await noted(store, story_id, "Note.")
+        read = await state_of(store, story_id)
+        before = await everything(store)
+        outcome = await store.write_page(
+            story_id,
+            draft(
+                line("Line."),
                 flags=(StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story="story:nowhere"),),
             ),
             as_of=read.as_of,
@@ -1199,13 +1230,13 @@ class StoryStoreContract:
 
     async def test_a_flag_naming_its_own_story_is_a_value_error(self, store: StoryStore) -> None:
         story_id = await made(store, act("a1"))
-        note = await noted(store, story_id, "Note.")
+        await noted(store, story_id, "Note.")
         read = await state_of(store, story_id)
         with pytest.raises(ValueError, match="another story"):
             await store.write_page(
                 story_id,
                 draft(
-                    line("Line.", note.note_id),
+                    line("Line."),
                     flags=(StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=story_id),),
                 ),
                 as_of=read.as_of,
@@ -1214,11 +1245,11 @@ class StoryStoreContract:
     async def test_a_page_to_an_unknown_or_merged_story_is_refused(self, store: StoryStore) -> None:
         absorbed = await made(store, act("a"))
         target = await made(store, act("b"))
-        note = await noted(store, absorbed, "Note.", on="a")
+        await noted(store, absorbed, "Note.", on="a")
         read = await state_of(store, absorbed)
         await store.merge(absorbed, target, actor=_OWNER)
         before = await everything(store)
-        page = draft(line("Line.", note.note_id))
+        page = draft(line("Line."))
         unknown = await store.write_page("story:nowhere", page, as_of=read.as_of)
         page_refused(unknown, StoryPageRefusalReason.UNKNOWN_STORY)
         merged = await store.write_page(absorbed, page, as_of=read.as_of)
@@ -1227,34 +1258,8 @@ class StoryStoreContract:
         assert merged.refusal.merged_into == target
         assert await everything(store) == before
 
-    async def test_the_cap_binds_every_line_but_the_users_own_notes(
-        self, store: StoryStore
-    ) -> None:
-        story_id = await made(store, act("a1"))
-        long = "y" * STORY_NOTE_MAX_CHARS
-        theirs = [
-            await noted(store, story_id, f"{n}{long[1:]}", author=StoryNoteAuthor.OWNER)
-            for n in range(5)
-        ]
-        planning = await noted(store, story_id, "Planning's note.")
-        read = await state_of(store, story_id)
-        own_lines = [line(n.text, n.note_id) for n in theirs]
-        budget = STORY_PAGE_CAP_CHARS // STORY_NOTE_MAX_CHARS
-        other_lines = [line(long, planning.note_id) for _ in range(budget)]
-        version = await written(store, story_id, draft(*own_lines, *other_lines), as_of=read.as_of)
-        assert len(version.lines) == len(theirs) + budget
-        before = await everything(store)
-        outcome = await store.write_page(
-            story_id,
-            draft(*own_lines, *other_lines, line("z", planning.note_id)),
-            as_of=(await state_of(store, story_id)).as_of,
-        )
-        page_refused(outcome, StoryPageRefusalReason.OVER_CAP)
-        assert await everything(store) == before
-
-    async def test_a_line_altering_the_users_note_counts_against_the_cap(
-        self, store: StoryStore
-    ) -> None:
+    async def test_the_cap_binds_every_line_the_users_own_included(self, store: StoryStore) -> None:
+        """ADR-0303 §4:5: a line the user's note gave counts like any other (§2:6)."""
         story_id = await made(store, act("a1"))
         long = "y" * STORY_NOTE_MAX_CHARS
         budget = STORY_PAGE_CAP_CHARS // STORY_NOTE_MAX_CHARS
@@ -1263,32 +1268,43 @@ class StoryStoreContract:
             for n in range(budget + 1)
         ]
         read = await state_of(store, story_id)
-        reworded = [line(n.text[:-1] + "!", n.note_id) for n in theirs]
-        outcome = await store.write_page(story_id, draft(*reworded), as_of=read.as_of)
+        fits = [line(n.text) for n in theirs[:budget]]
+        await written(store, story_id, draft(*fits), as_of=read.as_of)
+        before = await everything(store)
+        outcome = await store.write_page(
+            story_id,
+            draft(*fits, line("z")),
+            as_of=(await state_of(store, story_id)).as_of,
+        )
         page_refused(outcome, StoryPageRefusalReason.OVER_CAP)
+        verbatim = await store.write_page(
+            story_id,
+            draft(*(line(n.text) for n in theirs)),
+            as_of=(await state_of(store, story_id)).as_of,
+        )
+        page_refused(verbatim, StoryPageRefusalReason.OVER_CAP)
+        assert await everything(store) == before
 
     @pytest.mark.parametrize("as_of", [-1, 2**63, True, "0", None])
     async def test_a_malformed_as_of_is_a_value_error(
         self, store: StoryStore, as_of: object
     ) -> None:
         story_id = await made(store, act("a1"))
-        note = await noted(store, story_id, "Note.")
+        await noted(store, story_id, "Note.")
         with pytest.raises(ValueError, match="as_of"):
             await store.write_page(
                 story_id,
-                draft(line("Line.", note.note_id)),
+                draft(line("Line.")),
                 as_of=as_of,  # type: ignore[arg-type]
             )
 
     async def test_an_as_of_no_read_returned_is_a_value_error(self, store: StoryStore) -> None:
         story_id = await made(store, act("a1"))
-        note = await noted(store, story_id, "Note.")
+        await noted(store, story_id, "Note.")
         read = await state_of(store, story_id)
         before = await everything(store)
         with pytest.raises(ValueError, match="as_of"):
-            await store.write_page(
-                story_id, draft(line("Line.", note.note_id)), as_of=read.as_of + 1
-            )
+            await store.write_page(story_id, draft(line("Line.")), as_of=read.as_of + 1)
         assert await everything(store) == before
 
     async def test_a_draft_that_is_not_one_is_a_value_error(self, store: StoryStore) -> None:
@@ -1296,7 +1312,7 @@ class StoryStoreContract:
         with pytest.raises(ValueError, match="StoryPageDraft"):
             await store.write_page(story_id, {"lines": []}, as_of=0)  # type: ignore[arg-type]
 
-    # --- merge, split and move carry notes (ADR-0300 §3:12-§3:14) ------------
+    # --- merge, split and move carry notes (ADR-0300 §3:12, ADR-0303 §6) ------
 
     async def test_a_merge_carries_every_note_pending_into_the_target(
         self, store: StoryStore
@@ -1309,14 +1325,14 @@ class StoryStoreContract:
         await written(
             store,
             absorbed,
-            draft(line("A's page.", taken.note_id), took_in_notes=(taken.note_id,)),
+            draft(line("A's page."), took_in_notes=(taken.note_id,)),
             as_of=read.as_of,
         )
         target_read = await state_of(store, target)
         await written(
             store,
             target,
-            draft(line("B's page.", taken.note_id), took_in_episodes=("shared", "t")),
+            draft(line("B's page."), took_in_episodes=("shared", "t")),
             as_of=target_read.as_of,
         )
         await store.merge(absorbed, target, actor=_OWNER)
@@ -1328,9 +1344,8 @@ class StoryStoreContract:
         assert (await state_of(store, absorbed)).pending_episodes == ()
         assert await notes_of(store, target) == [taken, theirs]
 
-    async def test_a_split_carries_the_notes_on_what_it_moves_and_those_it_names(
-        self, store: StoryStore
-    ) -> None:
+    async def test_a_split_carries_exactly_the_notes_it_names(self, store: StoryStore) -> None:
+        """Whoever wrote them, and none by the activation it was written during (§6:1-§6:2)."""
         source = await made(store, act("x"), act("y"))
         on_x = await noted(store, source, "On x.", on="x")
         on_y = await noted(store, source, "On y.", on="y")
@@ -1345,7 +1360,7 @@ class StoryStoreContract:
             store,
             source,
             draft(
-                line("Page.", on_x.note_id),
+                line("Page."),
                 took_in_notes=(on_x.note_id, on_y.note_id, named.note_id, kept.note_id),
                 took_in_episodes=("x", "y"),
             ),
@@ -1355,40 +1370,61 @@ class StoryStoreContract:
             source,
             [act("x")],
             actor=_OWNER,
-            notes=[named.note_id, on_y.note_id, foreign.note_id, 999_999],
+            notes=[named.note_id, on_y.note_id, foreign.note_id, 999_999, on_y.note_id],
         )
         assert outcome.refusal is None
         assert outcome.logged == 5
         split_off = outcome.story_id
         assert split_off is not None
-        assert await notes_of(store, split_off) == [on_x, named]
-        assert await notes_of(store, source) == [on_y, kept]
+        assert await notes_of(store, split_off) == [on_y, named]
+        assert await notes_of(store, source) == [on_x, kept]
         assert await notes_of(store, elsewhere) == [foreign]
         state = await state_of(store, split_off)
-        assert state.pending_notes == (on_x, named)
+        assert state.pending_notes == (on_y, named)
         assert state.pending_episodes == ("x",)
         assert (await state_of(store, source)).pending_notes == ()
 
+    async def test_a_split_naming_no_note_carries_none(self, store: StoryStore) -> None:
+        source = await made(store, act("x"), act("y"))
+        on_x = await noted(store, source, "On x.", on="x")
+        outcome = await store.split(source, [act("x")], actor=_OWNER)
+        assert outcome.story_id is not None
+        assert await notes_of(store, outcome.story_id) == []
+        assert await notes_of(store, source) == [on_x]
+
     @pytest.mark.parametrize("notes", ["1", [0], [True], [1.0], 3])
-    async def test_a_split_naming_malformed_notes_is_a_value_error(
+    async def test_a_split_or_a_move_naming_malformed_notes_is_a_value_error(
         self, store: StoryStore, notes: object
     ) -> None:
         source = await made(store, act("x"))
+        target = await made(store, act("t"))
         before = await everything(store)
         with pytest.raises(ValueError, match="note"):
             await store.split(source, [act("x")], actor=_OWNER, notes=notes)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="note"):
+            await store.move(source, target, [act("x")], actor=_OWNER, notes=notes)  # type: ignore[arg-type]
         assert await everything(store) == before
 
-    async def test_a_move_carries_members_and_their_notes(self, store: StoryStore) -> None:
+    async def test_a_move_carries_members_and_exactly_the_notes_it_names(
+        self, store: StoryStore
+    ) -> None:
+        """Whoever wrote them, and none by the activation it was written during (§6:1-§6:2)."""
         source = await made(store, act("x"), act("y"), act("both"))
         target = await made(store, act("both"), act("t"))
         on_x = await noted(store, source, "On x.", on="x")
         on_y = await noted(store, source, "On y.", on="y")
         on_both = await noted(store, source, "On both.", on="both")
         theirs = await noted(store, source, "The user's.", author=StoryNoteAuthor.OWNER)
+        foreign = await noted(store, target, "Already there.", on="t")
         target_view = await store.view(target)
         assert target_view is not None
-        outcome = await store.move(source, target, [act("both"), act("x")], actor=_OWNER)
+        outcome = await store.move(
+            source,
+            target,
+            [act("both"), act("x")],
+            actor=_OWNER,
+            notes=[theirs.note_id, on_y.note_id, foreign.note_id, 999_999],
+        )
         assert outcome.refusal is None
         assert outcome.story_id == target
         assert outcome.logged == 3
@@ -1402,10 +1438,10 @@ class StoryStoreContract:
             (StoryChange.REMOVED, "both"),
         ]
         assert shape(await logged(store, target))[-1:] == [(StoryChange.ADDED, "x")]
-        assert await notes_of(store, source) == [on_y, theirs]
-        assert await notes_of(store, target) == [on_x, on_both]
+        assert await notes_of(store, source) == [on_x, on_both]
+        assert await notes_of(store, target) == [on_y, theirs, foreign]
         state = await state_of(store, target)
-        assert state.pending_notes == (on_x, on_both)
+        assert state.pending_notes == (on_y, theirs, foreign)
         assert state.pending_episodes == ("both", "t", "x")
 
     async def test_a_moved_note_is_pending_on_its_new_story_though_taken_in_on_the_old(
@@ -1418,10 +1454,10 @@ class StoryStoreContract:
         await written(
             store,
             source,
-            draft(line("Page.", note.note_id), took_in_notes=(note.note_id,)),
+            draft(line("Page."), took_in_notes=(note.note_id,)),
             as_of=read.as_of,
         )
-        await store.move(source, target, [act("x")], actor=_OWNER)
+        await store.move(source, target, [act("x")], actor=_OWNER, notes=[note.note_id])
         assert (await state_of(store, target)).pending_notes == (note,)
 
     async def test_a_move_records_its_actor_and_trigger(self, store: StoryStore) -> None:
@@ -1509,6 +1545,46 @@ class StoryStoreContract:
         assert last.at == STORY_AT
         assert await held(store, story_id) == members
 
+    async def test_leave_flag_records_not_applied_where_a_change_was_refused(
+        self, store: StoryStore
+    ) -> None:
+        """ADR-0303 §8:4-§8:6: no story changed, and the flag is answered as ``left`` is."""
+        story_id = await made(store, act("a1"), act("a2"))
+        flag = await raised(store, story_id, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        members = await held(store, story_id)
+        outcome = await store.leave_flag(flag, actor=_PASS, outcome=StoryDecision.NOT_APPLIED)
+        assert outcome == StoryOutcome(story_id=story_id, logged=1)
+        last = (await logged(store, story_id))[-1]
+        assert (last.change, last.answers, last.outcome) == (
+            StoryChange.DECIDED,
+            flag,
+            StoryDecision.NOT_APPLIED,
+        )
+        assert await held(store, story_id) == members
+        again = await store.leave_flag(flag, actor=_PASS)
+        refused(again, StoryRefusalReason.ALREADY_DECIDED)
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            StoryDecision.MERGED,
+            StoryDecision.SPLIT,
+            StoryDecision.MOVED,
+            StoryDecision.GROUPED,
+            "left_alone",
+            None,
+        ],
+    )
+    async def test_leave_flag_with_an_outcome_that_changes_a_story_is_a_value_error(
+        self, store: StoryStore, outcome: object
+    ) -> None:
+        story_id = await made(store, act("a1"))
+        flag = await raised(store, story_id, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        before = await everything(store)
+        with pytest.raises(ValueError):  # noqa: PT011 — any validation message will do
+            await store.leave_flag(flag, actor=_PASS, outcome=outcome)  # type: ignore[arg-type]
+        assert await everything(store) == before
+
     async def test_a_like_another_decision_is_written_on_both_stories_in_order(
         self, store: StoryStore
     ) -> None:
@@ -1525,49 +1601,26 @@ class StoryStoreContract:
         assert [line.answers for line in (first, second)] == [flag, flag]
         assert {line.outcome for line in (first, second)} == {StoryDecision.LEFT}
 
-    async def test_an_understanding_flag_concerns_each_story_holding_its_lines(
-        self, store: StoryStore
-    ) -> None:
-        """In the order of those lines' sequence numbers, not of the stories' creation."""
-        earlier = await made(store, act("x"))
-        later = await linked_by_understanding(store, None, "a1")
-        await linked_by_understanding(store, earlier, "a1")
-        flag = StoryFlagName(activation="a1")
-        outcome = await store.leave_flag(flag, actor=_PASS)
-        assert outcome == StoryOutcome(story_id=later, logged=2)
-        assert (await logged(store, later))[-1].answers == flag
-        assert (await logged(store, earlier))[-1].answers == flag
-
-    async def test_an_activation_understanding_linked_into_one_story_is_no_flag(
-        self, store: StoryStore
-    ) -> None:
-        """Only understanding's own lines, triggered by that activation, make the flag."""
-        story_id = await linked_by_understanding(store, None, "a1")
-        await store.link(await made(store, act("x")), [act("a1")], actor=_OWNER, trigger="a1")
-        await store.link(
-            await made(store, act("y")),
-            [act("a1")],
-            actor=StoryActor.UNDERSTANDING,
-            trigger="a2",
-        )
-        assert story_id
-        before = await everything(store)
-        flag = StoryFlagName(activation="a1")
-        outcome = await store.leave_flag(flag, actor=_PASS)
-        refused(outcome, StoryRefusalReason.UNKNOWN_FLAG)
-        assert outcome.refusal is not None
-        assert outcome.refusal.flag == flag
-        assert await everything(store) == before
-
-    async def test_a_flag_stays_a_flag_once_its_stories_no_longer_hold_it(
-        self, store: StoryStore
-    ) -> None:
-        """Its lines stand, so the pass can record it ``left`` (ADR-0302 §5:3)."""
+    async def test_a_flag_named_by_an_activation_is_never_held(self, store: StoryStore) -> None:
+        """ADR-0303 §8:1-§8:2: one input linked to two stories is two links, not a flag."""
         first = await linked_by_understanding(store, None, "a1")
         second = await linked_by_understanding(store, None, "a1")
-        await store.unlink(second, [act("a1")], actor=_OWNER)
-        outcome = await store.leave_flag(StoryFlagName(activation="a1"), actor=_PASS)
-        assert outcome == StoryOutcome(story_id=first, logged=2)
+        await linked_by_understanding(store, first, "a2")
+        await linked_by_understanding(store, second, "a2")
+        before = await everything(store)
+        flag = StoryFlagName(activation="a1")
+        for attempt in (
+            store.leave_flag(flag, actor=_PASS),
+            store.leave_flag(flag, actor=_PASS, outcome=StoryDecision.NOT_APPLIED),
+            store.merge(first, second, actor=_PASS, answers=flag),
+            store.move(first, second, [act("a2")], actor=_PASS, answers=flag),
+            store.create([sub(first), sub(second)], actor=_PASS, answers=flag),
+        ):
+            outcome = await attempt
+            refused(outcome, StoryRefusalReason.UNKNOWN_FLAG)
+            assert outcome.refusal is not None
+            assert outcome.refusal.flag == flag
+        assert await everything(store) == before
 
     @pytest.mark.parametrize("wrong", ["version", "story", "kind", "named"])
     async def test_a_flag_no_version_recorded_is_unknown(
@@ -1856,8 +1909,7 @@ class StoryStoreContract:
         outcome = await store.write_page(
             story_id,
             draft(
-                line("The matter.", note.note_id, new=(0,)),
-                safety_net=(StorySafetyNetNote(text="On a-2.", rests_on="a-2", outside=False),),
+                line("The matter."),
                 took_in_notes=(note.note_id,),
                 took_in_episodes=("a-1", "a-2"),
             ),
@@ -1874,13 +1926,13 @@ class StoryStoreContract:
     ) -> None:
         story_id = await made(store, act("a1"), act("a2"))
         other = await made(store, act("b1"))
-        note = await noted(store, story_id, "On a1.")
+        await noted(store, story_id, "On a1.")
         read = await state_of(store, story_id)
         await store.move(story_id, other, [act("a2")], actor=_OWNER)
         before = await everything(store)
         outcome = await store.write_page(
             story_id,
-            draft(line("The matter.", note.note_id), took_in_episodes=("a1", "a2")),
+            draft(line("The matter."), took_in_episodes=("a1", "a2")),
             as_of=read.as_of,
         )
         page_refused(outcome, StoryPageRefusalReason.NOT_HELD)
@@ -1899,7 +1951,7 @@ class StoryStoreContract:
         foreign = await noted(store, other, "Elsewhere.", on="b1")
         read = await state_of(store, story_id)
         if where == "moved":
-            await store.move(story_id, other, [act("a2")], actor=_OWNER)
+            await store.move(story_id, other, [act("a2")], actor=_OWNER, notes=[moving.note_id])
         named = {
             "moved": moving.note_id,
             "elsewhere": foreign.note_id,
@@ -1908,7 +1960,7 @@ class StoryStoreContract:
         before = await everything(store)
         outcome = await store.write_page(
             story_id,
-            draft(line("The matter.", kept.note_id), took_in_notes=(kept.note_id, named)),
+            draft(line("The matter."), took_in_notes=(kept.note_id, named)),
             as_of=read.as_of,
         )
         page_refused(outcome, StoryPageRefusalReason.NOT_HELD)
@@ -1917,53 +1969,54 @@ class StoryStoreContract:
         assert await everything(store) == before
 
     async def test_not_held_reports_the_first_in_the_drafts_order(self, store: StoryStore) -> None:
-        """The safety-net notes in order, then the episodes, then the notes taken in."""
+        """The episodes taken in, then the notes taken in."""
         story_id = await made(store, act("a1"))
         note = await noted(store, story_id, "Note.")
         read = await state_of(store, story_id)
         missing = note.note_id + 10_000
-        net = (
-            StorySafetyNetNote(text="Held.", rests_on="a1", outside=False),
-            StorySafetyNetNote(text="Not held.", rests_on="n1", outside=False),
-            StorySafetyNetNote(text="Not held either.", rests_on="n2", outside=False),
-        )
         cases: list[tuple[dict[str, Any], str | int]] = [
-            ({"safety_net": net, "took_in_episodes": ("n3",), "took_in_notes": (missing,)}, "n1"),
             ({"took_in_episodes": ("a1", "n3", "n4"), "took_in_notes": (missing,)}, "n3"),
             ({"took_in_episodes": ("a1",), "took_in_notes": (note.note_id, missing)}, missing),
         ]
         for rest, first in cases:
             outcome = await store.write_page(
-                story_id, draft(line("Line.", note.note_id), **rest), as_of=read.as_of
+                story_id, draft(line("Line."), **rest), as_of=read.as_of
             )
             page_refused(outcome, StoryPageRefusalReason.NOT_HELD)
             assert outcome.refusal is not None
             assert first in (outcome.refusal.activation, outcome.refusal.note)
 
-    async def test_not_held_comes_after_unknown_note_and_a_flags_story_and_before_the_cap(
+    async def test_not_held_comes_after_the_stories_a_draft_names_and_before_the_cap(
         self, store: StoryStore
     ) -> None:
         story_id = await made(store, act("a1"))
-        note = await noted(store, story_id, "Note.")
         read = await state_of(store, story_id)
-        unheld = {"took_in_episodes": ("n1",)}
-        missing = note.note_id + 10_000
-        unknown_note = await store.write_page(
-            story_id, draft(line("Line.", missing), **unheld), as_of=read.as_of
-        )
-        page_refused(unknown_note, StoryPageRefusalReason.UNKNOWN_NOTE)
-        unknown_story = await store.write_page(
+        unheld: dict[str, Any] = {"took_in_episodes": ("n1",)}
+        unknown_flag_story = await store.write_page(
             story_id,
             draft(
-                line("Line.", note.note_id),
+                line("Line."),
                 flags=(StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story="story:nowhere"),),
+                read_pages=(StoryPageVersionName(story="story:elsewhere", version=1),),
                 **unheld,
             ),
             as_of=read.as_of,
         )
-        page_refused(unknown_story, StoryPageRefusalReason.UNKNOWN_STORY)
+        page_refused(unknown_flag_story, StoryPageRefusalReason.UNKNOWN_STORY)
+        assert unknown_flag_story.refusal is not None
+        assert unknown_flag_story.refusal.story_id == "story:nowhere"
+        unknown_read_story = await store.write_page(
+            story_id,
+            draft(
+                line("Line."),
+                read_pages=(StoryPageVersionName(story="story:elsewhere", version=1),),
+                **unheld,
+            ),
+            as_of=read.as_of,
+        )
+        page_refused(unknown_read_story, StoryPageRefusalReason.UNKNOWN_STORY)
         budget = STORY_PAGE_CAP_CHARS // STORY_NOTE_MAX_CHARS
-        over = [line("y" * STORY_NOTE_MAX_CHARS, note.note_id) for _ in range(budget + 1)]
+        over = [line("y" * STORY_NOTE_MAX_CHARS) for _ in range(budget + 1)]
         not_held = await store.write_page(story_id, draft(*over, **unheld), as_of=read.as_of)
         page_refused(not_held, StoryPageRefusalReason.NOT_HELD)
 
@@ -1977,7 +2030,7 @@ class StoryStoreContract:
         await written(
             store,
             story_id,
-            draft(line("Line.", note.note_id), took_in_notes=(note.note_id,)),
+            draft(line("Line."), took_in_notes=(note.note_id,)),
             as_of=first.as_of,
         )
         again = await state_of(store, story_id)
@@ -1985,8 +2038,7 @@ class StoryStoreContract:
             store,
             story_id,
             draft(
-                line("Line.", note.note_id, new=(0,)),
-                safety_net=(StorySafetyNetNote(text="Net.", rests_on="a1", outside=False),),
+                line("Line."),
                 took_in_notes=(note.note_id,),
                 took_in_episodes=("a1",),
             ),

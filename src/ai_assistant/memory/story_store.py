@@ -2,8 +2,8 @@
 
 The story store holds which experiences belong to the same matter: stories, their
 members, and an append-only log of every change, on its own file, ``stories.db``,
-in the data directory. Beside each story it keeps the story's page (ADR-0300 §3):
-its notes, its current page, and the page's append-only version log.
+in the data directory. Beside each story it keeps the story's page (ADR-0300 §3,
+ADR-0303 §§2-4): its notes, its current page, and the page's append-only version log.
 
 **Why this module lives in ``memory/`` while its contract does not.** ADR-0289 §1
 puts the store in ``memory/`` and makes ``StoryStore`` its own Protocol, not a
@@ -33,8 +33,10 @@ set when the note or the member comes to a story, cleared when a version takes i
 in. A note's own fields cannot be rewritten nor the note removed, by trigger; only
 which story holds it and whether it is pending there change. The version log is
 append-only by trigger, and the current page is the one record of the page kept as
-text, replaced whole by each write under ``secure_delete``, so the replaced page's
-text is overwritten rather than left in a freed page of the file.
+text, its lines and its mark, replaced whole by each write under ``secure_delete``,
+so the replaced page's text is overwritten rather than left in a freed page of the
+file. No rule here reads the activation a note was written during (ADR-0303 §2:4):
+a split and a move carry exactly the notes they name (§6).
 
 **A decision on a flag is a log line** (ADR-0302 §3). A ``decided`` line carries the
 flag it answers, as canonical JSON text of its identity in ``answers``, and the
@@ -42,7 +44,8 @@ outcome in ``outcome``; it is written in the same transaction as the change it
 records, after that change's lines, so the two stand or fall together. The checks a
 write answering a flag makes — that the flag is one the version log or the change
 log holds, and that no ``decided`` line answers it yet — are made inside that
-transaction, so two writers cannot both answer one flag.
+transaction, so two writers cannot both answer one flag. A tidy-up's flags are the
+only ones (ADR-0303 §8): a flag named by an activation is never held.
 
 The file is created owner-only (ADR-0004 §4). The membership records hold
 identities and instants only (ADR-0289 §2:7); the notes and the current page hold
@@ -91,7 +94,6 @@ from ai_assistant.core.types import (
     StoryOutcome,
     StoryPage,
     StoryPageDraft,
-    StoryPageLine,
     StoryPageOutcome,
     StoryPageRefusal,
     StoryPageRefusalReason,
@@ -110,7 +112,7 @@ from ai_assistant.core.types import (
 from ai_assistant.memory._transactions import transaction
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Sequence
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
@@ -123,9 +125,10 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 
 #: The schema this module writes, held in ``PRAGMA user_version``. A file carrying
 #: another version is refused at open rather than read under the wrong layout, except
-#: version 1, ADR-0289's layout, and version 2, ADR-0300's, which are migrated in
-#: place (see :data:`_MIGRATE_1` and :data:`_MIGRATE_2`).
-_SCHEMA_VERSION: Final = 3
+#: version 1, ADR-0289's layout, version 2, ADR-0300's, and version 3, ADR-0302's,
+#: which are migrated in place (see :data:`_MIGRATE_1`, :data:`_MIGRATE_2` and
+#: :func:`_migrate_3`).
+_SCHEMA_VERSION: Final = 4
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -148,9 +151,8 @@ _SCHEMA: Final = (
     "actor TEXT NOT NULL, trigger_id TEXT, at INTEGER NOT NULL, "
     "answers TEXT, outcome TEXT)",
     "CREATE INDEX IF NOT EXISTS log_story ON log(story_id, sequence)",
-    # What a write answering a flag checks (ADR-0302 §4): understanding's lines for an
-    # activation, and a ``decided`` line answering the flag.
-    "CREATE INDEX IF NOT EXISTS log_member ON log(member_kind, member_id)",
+    # What a write answering a flag checks (ADR-0302 §4): a ``decided`` line answering
+    # the flag.
     "CREATE INDEX IF NOT EXISTS log_answers ON log(answers) WHERE answers IS NOT NULL",
     "CREATE TRIGGER IF NOT EXISTS log_never_rewritten BEFORE UPDATE ON log "
     "BEGIN SELECT RAISE(ABORT, 'the story change log is append-only'); END",
@@ -162,18 +164,17 @@ _SCHEMA: Final = (
     "INSERT OR IGNORE INTO ticks(only, value) VALUES(0, 0)",
     "CREATE TABLE IF NOT EXISTS notes("
     "id INTEGER PRIMARY KEY, story_id TEXT NOT NULL, text TEXT NOT NULL, "
-    "author TEXT NOT NULL, rests_on TEXT, outside INTEGER NOT NULL, "
+    "author TEXT NOT NULL, written_during TEXT, outside INTEGER NOT NULL, "
     "written_at INTEGER NOT NULL, pending_since INTEGER)",
     "CREATE INDEX IF NOT EXISTS notes_story ON notes(story_id, id)",
-    "CREATE INDEX IF NOT EXISTS notes_resting ON notes(story_id, rests_on)",
     "CREATE TRIGGER IF NOT EXISTS notes_never_rewritten "
-    "BEFORE UPDATE OF id, text, author, rests_on, outside, written_at ON notes "
+    "BEFORE UPDATE OF id, text, author, written_during, outside, written_at ON notes "
     "BEGIN SELECT RAISE(ABORT, 'a story note is never rewritten'); END",
     "CREATE TRIGGER IF NOT EXISTS notes_never_removed BEFORE DELETE ON notes "
     "BEGIN SELECT RAISE(ABORT, 'a story note is never removed'); END",
     "CREATE TABLE IF NOT EXISTS pages("
     "story_id TEXT PRIMARY KEY, version INTEGER NOT NULL, written_at INTEGER NOT NULL, "
-    "lines TEXT NOT NULL)",
+    "lines TEXT NOT NULL, outside INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS versions("
     "version INTEGER PRIMARY KEY, story_id TEXT NOT NULL, written_at INTEGER NOT NULL, "
     "record TEXT NOT NULL)",
@@ -202,6 +203,119 @@ _MIGRATE_2: Final = (
     "ALTER TABLE log ADD COLUMN answers TEXT",
     "ALTER TABLE log ADD COLUMN outcome TEXT",
 )
+
+#: ADR-0302's layout, version 3, to this one (ADR-0303 §4:8), and ADR-0300's, version 2,
+#: once :data:`_MIGRATE_2` has run: the statements that need no record read, which
+#: :func:`_migrate_3` runs before it rewrites the records. A
+#: note's resting activation becomes the activation it was written during, under a
+#: column renamed in place (SQLite renames it in the trigger guarding it as well); the
+#: index a move found notes by goes, as does the one understanding's flags were found
+#: by; and the current page gains its mark. The version log's trigger is dropped for
+#: the rewrite alone, and :data:`_SCHEMA` creates it again in the same transaction.
+_MIGRATE_3: Final = (
+    "DROP INDEX IF EXISTS notes_resting",
+    "ALTER TABLE notes RENAME COLUMN rests_on TO written_during",
+    "DROP INDEX IF EXISTS log_member",
+    "ALTER TABLE pages ADD COLUMN outside INTEGER NOT NULL DEFAULT 0",
+    "DROP TRIGGER IF EXISTS versions_never_rewritten",
+)
+
+
+def _migrate(conn: sqlite3.Connection, version: int) -> None:
+    """Bring a file at an earlier layout ``version`` to this one, in the caller's transaction.
+
+    Version 1 holds no page, so its page tables are created by :data:`_SCHEMA` like any
+    other missing table; versions 2 and 3 hold one, which :func:`_migrate_3` rewrites.
+    """
+    if version == 1:
+        for statement in _MIGRATE_1:
+            conn.execute(statement)
+    if version in {1, 2}:
+        for statement in _MIGRATE_2:
+            conn.execute(statement)
+    if version in {2, 3}:
+        _migrate_3(conn)
+
+
+def _migrate_3(conn: sqlite3.Connection) -> None:
+    """Rewrite the page's records to this layout (ADR-0303 §4:8).
+
+    Every note is kept, and every version and the current page's text. What a version
+    recorded of each line's citations, its safety-net notes and its supersession marks
+    is dropped, and a version written before records no other story's page version.
+    The current page is marked where any of its lines was. A version's mark, which no
+    version recorded before, is set where a note it cited or added as a safety net is
+    marked, the rule the tidy-up marked a line by; the version that wrote the current
+    page is marked as that page is, so the two agree.
+
+    Raises:
+        StoryStoreError: If a stored record is not one the earlier layout wrote.
+    """
+    for statement in _MIGRATE_3:
+        conn.execute(statement)
+    marked = {row[0] for row in conn.execute("SELECT id FROM notes WHERE outside = 1")}
+    records: dict[int, dict[str, Any]] = {}
+    for version, record in conn.execute("SELECT version, record FROM versions").fetchall():
+        old = _decoded(_json_from, record)
+        if not isinstance(old, dict):
+            msg = "a stored page version is not a record"
+            raise StoryStoreError(msg)
+        records[version] = old
+    derived = {
+        version: any(note in marked for note in _named_in(old)) for version, old in records.items()
+    }
+    pages: dict[str, tuple[list[dict[str, Any]], bool]] = {}
+    for story_id, version, lines in conn.execute(
+        "SELECT story_id, version, lines FROM pages"
+    ).fetchall():
+        old_lines = _decoded(_json_from, lines)
+        if not isinstance(old_lines, list) or not all(isinstance(x, dict) for x in old_lines):
+            msg = "a stored current page is not a list of lines"
+            raise StoryStoreError(msg)
+        page_mark = derived.get(version, False) or any(
+            line.get("outside") is True for line in old_lines
+        )
+        derived[version] = page_mark
+        pages[story_id] = (old_lines, page_mark)
+    for version, old in records.items():
+        kept = {
+            "took_in_notes": old.get("took_in_notes", []),
+            "took_in_episodes": old.get("took_in_episodes", []),
+            "read_pages": [],
+            "flags": old.get("flags", []),
+            "outside": derived[version],
+        }
+        conn.execute(
+            "UPDATE versions SET record = ? WHERE version = ?", (json.dumps(kept), version)
+        )
+    for story_id, (old_lines, page_mark) in pages.items():
+        conn.execute(
+            "UPDATE pages SET lines = ?, outside = ? WHERE story_id = ?",
+            (
+                json.dumps([{"text": line.get("text")} for line in old_lines]),
+                int(page_mark),
+                story_id,
+            ),
+        )
+
+
+def _named_in(record: dict[str, Any]) -> list[object]:
+    """The notes an earlier layout's version cited, line by line, and added as safety nets.
+
+    Raises:
+        StoryStoreError: If the record's lists are not lists of note ids.
+    """
+    lines = record.get("lines", [])
+    safety_net = record.get("safety_net", [])
+    if (
+        not isinstance(lines, list)
+        or not all(isinstance(line, list) for line in lines)
+        or not isinstance(safety_net, list)
+    ):
+        msg = "a stored page version's citations are not lists of note ids"
+        raise StoryStoreError(msg)
+    return [*(note for line in lines for note in line), *safety_net]
+
 
 _ACTIVATION = StoryMemberKind.ACTIVATION.value
 
@@ -348,11 +462,6 @@ def _checked_write(actor: object, trigger: object) -> tuple[StoryActor, str | No
     return checked_actor, checked_trigger
 
 
-#: How many stories understanding's lines for one activation must stand on to make a
-#: flag (ADR-0302 §2:2).
-_TWO_STORIES: Final = 2
-
-
 def _unique[T](items: Sequence[T]) -> list[T]:
     """The items in the order given, each once."""
     return list(dict.fromkeys(items))
@@ -365,32 +474,31 @@ def _unique[T](items: Sequence[T]) -> list[T]:
 
 
 def _note_args(
-    text: object, *, author: object, rests_on: object, outside: object
+    text: object, *, author: object, written_during: object, outside: object
 ) -> tuple[str, StoryNoteAuthor, str | None, bool]:
     """Check a note an append writes, as :class:`StoryNote` checks one it holds.
 
-    A tidy-up's notes are written with its page and never appended on their own
-    (ADR-0300 §5:4), so ``tidy_up`` is refused here.
+    Nothing writes a note as ``tidy_up`` (ADR-0303 §2:1, §4:6), so it is refused here.
 
     Raises:
         ValueError: If any of them is malformed, the author is ``tidy_up``, or the
-            resting or the mark is one the author does not admit.
+            activation or the mark is one the author does not admit.
     """
     if not isinstance(author, str):
         msg = f"a note's author must be a StoryNoteAuthor, got {type(author).__name__}"
         raise ValueError(msg)
     if StoryNoteAuthor(author) is StoryNoteAuthor.TIDY_UP:
-        msg = "a tidy-up's notes are written with its page, never appended"
+        msg = "the tidy-up writes no note"
         raise ValueError(msg)
     checked = StoryNote(
         note_id=1,
         text=text,  # type: ignore[arg-type]  # validated by the model, which is the point
         author=StoryNoteAuthor(author),
-        rests_on=rests_on,  # type: ignore[arg-type]  # validated by the model
+        written_during=written_during,  # type: ignore[arg-type]  # validated by the model
         outside=outside,  # type: ignore[arg-type]  # validated by the model
         written_at=_EPOCH,
     )
-    return checked.text, checked.author, checked.rests_on, checked.outside
+    return checked.text, checked.author, checked.written_during, checked.outside
 
 
 def _answers(answers: object) -> StoryFlagName | None:
@@ -429,8 +537,8 @@ def _page_draft(story_id: str, draft: object) -> StoryPageDraft:
     """Snapshot a page write's draft by revalidation, as :func:`story_members` does.
 
     Raises:
-        ValueError: If it is not a :class:`StoryPageDraft`, or a flag names the
-            story written.
+        ValueError: If it is not a :class:`StoryPageDraft`, a flag names the story
+            written, or a page version read names it (ADR-0303 §4:2).
     """
     if not isinstance(draft, StoryPageDraft):
         msg = f"a page write takes a StoryPageDraft, got {type(draft).__name__}"
@@ -439,7 +547,26 @@ def _page_draft(story_id: str, draft: object) -> StoryPageDraft:
     if any(flag.story == story_id for flag in snapshot.flags):
         msg = "a flag names another story, never the one whose page it is raised on"
         raise ValueError(msg)
+    if any(read.story == story_id for read in snapshot.read_pages):
+        msg = "a page version read is another story's, never the one whose page is written"
+        raise ValueError(msg)
     return snapshot
+
+
+def _leave_outcome(outcome: object) -> StoryDecision:
+    """The outcome a ``leave_flag`` records: ``left`` or ``not_applied`` (ADR-0303 §8).
+
+    Raises:
+        ValueError: If it is any other outcome, or not a :class:`StoryDecision`.
+    """
+    if not isinstance(outcome, str):
+        msg = f"a decision's outcome must be a StoryDecision, got {type(outcome).__name__}"
+        raise ValueError(msg)
+    checked = StoryDecision(outcome)
+    if checked not in {StoryDecision.LEFT, StoryDecision.NOT_APPLIED}:
+        msg = "leave_flag records left or not_applied, the outcomes that change no story"
+        raise ValueError(msg)
+    return checked
 
 
 def _move_members(source: str, target: str, members: object) -> tuple[StoryMember, ...]:
@@ -459,18 +586,13 @@ def _move_members(source: str, target: str, members: object) -> tuple[StoryMembe
     return named
 
 
-def _page_size(draft: StoryPageDraft, owner_notes: Mapping[int, str]) -> int:
-    """The characters a draft's lines count against ``STORY_PAGE_CAP_CHARS``.
+def _page_size(draft: StoryPageDraft) -> int:
+    """The characters a draft's lines count against ``STORY_PAGE_CAP_CHARS``: all of them.
 
-    Every line counts except the user's own notes: a line citing a note ``owner``
-    wrote, given in ``owner_notes`` by identity with its text, whose text is that
-    note's unchanged (ADR-0300 §3:9, §3:17).
+    ADR-0303 §4:5: every line counts, the lines that came from the user's own notes
+    included (§2:6).
     """
-    return sum(
-        len(line.text)
-        for line in draft.lines
-        if not any(owner_notes.get(note) == line.text for note in line.cites)
-    )
+    return sum(len(line.text) for line in draft.lines)
 
 
 class SqliteStoryStore:
@@ -523,18 +645,13 @@ class SqliteStoryStore:
             self._restrict_permissions()
             with transaction(conn, "prepare the story store", error=StoryStoreError):
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
-                if version not in {0, 1, 2, _SCHEMA_VERSION}:
+                if version not in {0, 1, 2, 3, _SCHEMA_VERSION}:
                     msg = (
                         f"the story store at {self._path!r} carries schema version "
                         f"{version}, and this build writes {_SCHEMA_VERSION}"
                     )
                     raise StoryStoreError(msg)
-                if version == 1:
-                    for statement in _MIGRATE_1:
-                        conn.execute(statement)
-                if version in {1, 2}:
-                    for statement in _MIGRATE_2:
-                        conn.execute(statement)
+                _migrate(conn, version)
                 for statement in _SCHEMA:
                     conn.execute(statement)
                 conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
@@ -733,27 +850,14 @@ class SqliteStoryStore:
             seen.add(onward)
             story_id = onward
 
-    @staticmethod
-    def _raised_on(conn: sqlite3.Connection, activation: str) -> list[str]:
-        """The stories holding understanding's lines for ``activation``, by first line (§2:2)."""
-        rows = conn.execute(
-            "SELECT story_id, MIN(sequence) AS first FROM log "
-            "WHERE member_kind = ? AND member_id = ? AND change = ? AND actor = ? "
-            "AND trigger_id = ? GROUP BY story_id ORDER BY first",
-            (
-                _ACTIVATION,
-                activation,
-                StoryChange.ADDED.value,
-                StoryActor.UNDERSTANDING.value,
-                activation,
-            ),
-        ).fetchall()
-        return [row[0] for row in rows]
-
     def _flag_refusal(self, conn: sqlite3.Connection, flag: StoryFlagName) -> StoryRefusal | None:
-        """``unknown_flag``, then ``already_decided``, read off the store's own records."""
+        """``unknown_flag``, then ``already_decided``, read off the store's own records.
+
+        A flag named by an activation is never held: understanding raises no flag
+        (ADR-0303 §8).
+        """
         if flag.activation is not None:
-            held = len(self._raised_on(conn, flag.activation)) >= _TWO_STORIES
+            held = False
         else:
             row = conn.execute(
                 "SELECT version, written_at, record FROM versions WHERE version = ? "
@@ -772,14 +876,11 @@ class SqliteStoryStore:
         return None
 
     def _concerned(self, conn: sqlite3.Connection, flag: StoryFlagName) -> list[str]:
-        """The stories a flag concerns, followed through merges, each once (§2:3)."""
-        if flag.activation is not None:
-            raised = self._raised_on(conn, flag.activation)
-        elif flag.story is None or flag.flag is None:  # pragma: no cover — the model's rule
-            msg = "a tidy-up's flag names its story and the flag"
+        """The stories a held flag concerns, followed through merges, each once (§2:3)."""
+        if flag.story is None or flag.flag is None:  # pragma: no cover — never held (§8)
+            msg = "a held flag names its story and the flag"
             raise ValueError(msg)
-        else:
-            raised = [flag.story] if flag.flag.story is None else [flag.story, flag.flag.story]
+        raised = [flag.story] if flag.flag.story is None else [flag.story, flag.flag.story]
         return _unique([self._followed(conn, story_id) for story_id in raised])
 
     def _decide(
@@ -834,16 +935,19 @@ class SqliteStoryStore:
             )
 
     @staticmethod
-    def _notes_resting_on(
-        conn: sqlite3.Connection, story_id: str, activations: set[str]
-    ) -> list[int]:
-        """The notes ``story_id`` holds resting on any of ``activations``, in note order."""
-        rows = conn.execute(
-            "SELECT id, rests_on FROM notes WHERE story_id = ? AND rests_on IS NOT NULL "
-            "ORDER BY id",
-            (story_id,),
-        ).fetchall()
-        return [row[0] for row in rows if row[1] in activations]
+    def _named_notes(conn: sqlite3.Connection, story_id: str, named: Sequence[int]) -> list[int]:
+        """The notes named that ``story_id`` holds, in note order (ADR-0303 §6:2).
+
+        Whoever wrote them; a name it does not hold is passed over.
+        """
+        return sorted(
+            note_id
+            for note_id in _unique(named)
+            if conn.execute(
+                "SELECT 1 FROM notes WHERE id = ? AND story_id = ?", (note_id, story_id)
+            ).fetchone()
+            is not None
+        )
 
     def _mint(self, conn: sqlite3.Connection, stamp: _Stamp) -> str:
         """Mint a story id, write its row and log ``created``."""
@@ -1151,7 +1255,7 @@ class SqliteStoryStore:
                     )
             moving = set(members)
             moved = [m for m in self._member_rows(conn, story_id) if m in moving]
-            carried = self._split_notes(conn, story_id, moved, notes)
+            carried = self._named_notes(conn, story_id, notes)
             if flag is not None and (refused := self._flag_refusal(conn, flag)):
                 return StoryOutcome(refusal=refused)
             split_off = self._mint(conn, stamp)
@@ -1164,30 +1268,7 @@ class SqliteStoryStore:
             decided = [] if flag is None else self._decide(conn, flag, StoryDecision.SPLIT, stamp)
         return StoryOutcome(story_id=split_off, logged=3 + 2 * len(moved) + len(decided))
 
-    def _split_notes(
-        self,
-        conn: sqlite3.Connection,
-        story_id: str,
-        moved: Sequence[StoryMember],
-        named: Sequence[int],
-    ) -> list[int]:
-        """The notes a split carries (ADR-0300 §3:13), in note order.
-
-        Every note ``story_id`` holds resting on a moved activation, and each note
-        named that it holds and ``owner`` wrote; any other name is passed over.
-        """
-        activations = {m.id for m in moved if m.kind is StoryMemberKind.ACTIVATION}
-        carried = set(self._notes_resting_on(conn, story_id, activations))
-        for note_id in named:
-            row = conn.execute(
-                "SELECT 1 FROM notes WHERE id = ? AND story_id = ? AND author = ?",
-                (note_id, story_id, StoryNoteAuthor.OWNER.value),
-            ).fetchone()
-            if row is not None:
-                carried.add(note_id)
-        return sorted(carried)
-
-    async def move(  # noqa: PLR0913 — ADR-0302 §4:2 adds ``answers`` as a keyword to this operation
+    async def move(  # noqa: PLR0913 — ADR-0302 §4:2 and ADR-0303 §6:2 add keywords to this operation
         self,
         story_id: Identifier,
         to: Identifier,
@@ -1195,25 +1276,35 @@ class SqliteStoryStore:
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        notes: Sequence[StoryNoteId] = (),
         answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
-        """Move activation members from one story to another (ADR-0300 §3)."""
+        """Move activation members from one story to another (ADR-0300 §3, ADR-0303 §6)."""
         source = _checked_id(story_id)
         target = _checked_id(to)
         named = _move_members(source, target, members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
+        named_notes = story_note_ids(notes)
         flag = _answers(answers)
         return await self._locked(
-            self._move_sync, source, target, named, checked_actor, checked_trigger, flag
+            self._move_sync,
+            source,
+            target,
+            named,
+            checked_actor,
+            checked_trigger,
+            named_notes,
+            flag,
         )
 
-    def _move_sync(  # noqa: PLR0913 — both stories, the members, the stamp's parts, the flag
+    def _move_sync(  # noqa: PLR0913 — both stories, the members, the stamp's parts, notes, flag
         self,
         source: str,
         target: str,
         members: tuple[StoryMember, ...],
         actor: StoryActor,
         trigger: str | None,
+        notes: tuple[int, ...],
         flag: StoryFlagName | None,
     ) -> StoryOutcome:
         if not members:
@@ -1233,7 +1324,7 @@ class SqliteStoryStore:
                     )
             moving = set(members)
             moved = [m for m in self._member_rows(conn, source) if m in moving]
-            carried = self._notes_resting_on(conn, source, {m.id for m in moved})
+            carried = self._named_notes(conn, source, notes)
             if flag is not None and (refused := self._flag_refusal(conn, flag)):
                 return StoryOutcome(refusal=refused)
             logged = 0
@@ -1249,21 +1340,30 @@ class SqliteStoryStore:
                 logged += len(self._decide(conn, flag, StoryDecision.MOVED, stamp))
         return StoryOutcome(story_id=target, logged=logged)
 
-    async def leave_flag(self, flag: StoryFlagName, *, actor: StoryActor) -> StoryOutcome:
-        """Record a decision to leave the stories a flag concerns as they are (ADR-0302 §4:1)."""
+    async def leave_flag(
+        self,
+        flag: StoryFlagName,
+        *,
+        actor: StoryActor,
+        outcome: StoryDecision = StoryDecision.LEFT,
+    ) -> StoryOutcome:
+        """Record a decision on a flag that changed no story (ADR-0302 §4:1, ADR-0303 §8)."""
         checked = _answers(flag)
         if checked is None:
             msg = "leave_flag takes the flag it decides"
             raise ValueError(msg)
         checked_actor, _ = _checked_write(actor, None)
-        return await self._locked(self._leave_flag_sync, checked, checked_actor)
+        recorded = _leave_outcome(outcome)
+        return await self._locked(self._leave_flag_sync, checked, checked_actor, recorded)
 
-    def _leave_flag_sync(self, flag: StoryFlagName, actor: StoryActor) -> StoryOutcome:
+    def _leave_flag_sync(
+        self, flag: StoryFlagName, actor: StoryActor, outcome: StoryDecision
+    ) -> StoryOutcome:
         stamp = self._stamp(actor, None)
         with self._transaction("leave a flag") as conn:
             if refused := self._flag_refusal(conn, flag):
                 return StoryOutcome(refusal=refused)
-            decided = self._decide(conn, flag, StoryDecision.LEFT, stamp)
+            decided = self._decide(conn, flag, outcome, stamp)
         return StoryOutcome(story_id=decided[0], logged=len(decided))
 
     # --- the page: writes (ADR-0300 §3) --------------------------------------
@@ -1274,12 +1374,12 @@ class SqliteStoryStore:
         text: str,
         *,
         author: StoryNoteAuthor,
-        rests_on: Identifier | None = None,
+        written_during: Identifier | None = None,
         outside: bool = False,
     ) -> StoryNoteOutcome:
-        """Write a note to a story's page, pending there (ADR-0300 §3)."""
+        """Write a note to a story's page, pending there (ADR-0303 §2, §4:7)."""
         target = _checked_id(story_id)
-        checked = _note_args(text, author=author, rests_on=rests_on, outside=outside)
+        checked = _note_args(text, author=author, written_during=written_during, outside=outside)
         return await self._locked(self._append_note_sync, target, *checked)
 
     def _append_note_sync(
@@ -1287,7 +1387,7 @@ class SqliteStoryStore:
         story_id: str,
         text: str,
         author: StoryNoteAuthor,
-        rests_on: str | None,
+        written_during: str | None,
         outside: bool,
     ) -> StoryNoteOutcome:
         at = self._now()
@@ -1300,7 +1400,7 @@ class SqliteStoryStore:
                     note_id=note_id,
                     text=text,
                     author=author,
-                    rests_on=rests_on,
+                    written_during=written_during,
                     outside=outside,
                     written_at=_instant_from(_to_micros(at)),
                 )
@@ -1313,14 +1413,14 @@ class SqliteStoryStore:
         conn: sqlite3.Connection, story_id: str, note: StoryNote, *, pending: int | None
     ) -> None:
         conn.execute(
-            "INSERT INTO notes(id, story_id, text, author, rests_on, outside, written_at, "
-            "pending_since) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO notes(id, story_id, text, author, written_during, outside, "
+            "written_at, pending_since) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 note.note_id,
                 story_id,
                 note.text,
                 note.author.value,
-                note.rests_on,
+                note.written_during,
                 int(note.outside),
                 _to_micros(note.written_at),
                 pending,
@@ -1347,7 +1447,7 @@ class SqliteStoryStore:
         *,
         as_of: int,
     ) -> StoryPageOutcome:
-        """Write a new current page with its safety-net notes and its version."""
+        """Write a new current page and its version, and no note (ADR-0303 §4)."""
         target = _checked_id(story_id)
         checked = _page_draft(target, draft)
         basis = check_story_as_of(as_of)
@@ -1371,47 +1471,54 @@ class SqliteStoryStore:
     def _draft_refusal(
         self, conn: sqlite3.Connection, story_id: str, draft: StoryPageDraft, as_of: int
     ) -> StoryPageRefusal | None:
-        """The first of §3's refusals a draft meets after the story's own, if any."""
+        """The first of the page's refusals a draft meets after the story's own, if any.
+
+        ADR-0303 §4:4: ``page_moved_on``, a flag's unknown story, a page version read
+        naming an unknown story (§4:2), ``not_held``, ``over_cap``.
+
+        Raises:
+            ValueError: If a page version read names a version its story's log does not
+                hold: an identity naming nothing is malformed (§4:2).
+        """
         newest = conn.execute(
             "SELECT MAX(version) FROM versions WHERE story_id = ?", (story_id,)
         ).fetchone()[0]
         if newest is not None and newest > as_of:
             return StoryPageRefusal(reason=StoryPageRefusalReason.PAGE_MOVED_ON, story_id=story_id)
-        named = [note for line in draft.lines for note in line.cites]
-        named += [mark.note for mark in draft.supersessions]
-        owners: dict[int, str] = {}
-        for note_id in _unique(named):
-            row = conn.execute("SELECT author, text FROM notes WHERE id = ?", (note_id,)).fetchone()
-            if row is None:
-                return StoryPageRefusal(
-                    reason=StoryPageRefusalReason.UNKNOWN_NOTE, story_id=story_id, note=note_id
-                )
-            if row[0] == StoryNoteAuthor.OWNER.value:
-                owners[note_id] = row[1]
         for flag in draft.flags:
             if flag.story is not None and self._header(conn, flag.story) is None:
                 return StoryPageRefusal(
                     reason=StoryPageRefusalReason.UNKNOWN_STORY, story_id=flag.story
                 )
+        for read in draft.read_pages:
+            if self._header(conn, read.story) is None:
+                return StoryPageRefusal(
+                    reason=StoryPageRefusalReason.UNKNOWN_STORY, story_id=read.story
+                )
+            if (
+                conn.execute(
+                    "SELECT 1 FROM versions WHERE version = ? AND story_id = ?",
+                    (read.version, read.story),
+                ).fetchone()
+                is None
+            ):
+                msg = "a page version read names a version its story's log does not hold"
+                raise ValueError(msg)
         if refused := self._not_held(conn, story_id, draft):
             return refused
-        if _page_size(draft, owners) > STORY_PAGE_CAP_CHARS:
+        if _page_size(draft) > STORY_PAGE_CAP_CHARS:
             return StoryPageRefusal(reason=StoryPageRefusalReason.OVER_CAP, story_id=story_id)
         return None
 
     def _not_held(
         self, conn: sqlite3.Connection, story_id: str, draft: StoryPageDraft
     ) -> StoryPageRefusal | None:
-        """The first thing a draft rests on or takes in that its story does not hold.
+        """The first thing a draft takes in that its story does not hold.
 
-        ADR-0302 §7: the safety-net notes in the draft's order, then the episodes
-        taken in, then the notes taken in, each against what the story holds inside
-        the write's own transaction.
+        ADR-0302 §7: the episodes taken in, then the notes taken in, each against what
+        the story holds inside the write's own transaction.
         """
-        for activation in (
-            *(note.rests_on for note in draft.safety_net),
-            *draft.took_in_episodes,
-        ):
+        for activation in draft.took_in_episodes:
             member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
             if not self._holds(conn, story_id, member):
                 return StoryPageRefusal(
@@ -1437,22 +1544,7 @@ class SqliteStoryStore:
         as_of: int,
         at: datetime,
     ) -> StoryPageVersion:
-        """Write the safety-net notes, take in, replace the page and append the version."""
-        safety_net: list[int] = []
-        for added in draft.safety_net:
-            note = _decoded(
-                lambda added=added: StoryNote(
-                    note_id=self._tick(conn),
-                    text=added.text,
-                    author=StoryNoteAuthor.TIDY_UP,
-                    rests_on=added.rests_on,
-                    outside=added.outside,
-                    written_at=at,
-                )
-            )
-            # Taken in by the version that adds it, so never pending on this story.
-            self._insert_note(conn, story_id, note, pending=None)
-            safety_net.append(note.note_id)
+        """Take in, replace the page and append the version, writing no note (ADR-0303 §4)."""
         took_notes = [
             note_id
             for note_id in _unique(draft.took_in_notes)
@@ -1471,23 +1563,14 @@ class SqliteStoryStore:
                 (story_id, _ACTIVATION, activation, as_of),
             ).rowcount
         ]
-        lines = tuple(
-            StoryPageLine(
-                text=line.text,
-                cites=tuple(_unique([*line.cites, *(safety_net[i] for i in line.cites_new)])),
-                outside=line.outside,
-            )
-            for line in draft.lines
-        )
         version = StoryPageVersion(
             version=self._tick(conn),
             written_at=at,
-            lines=tuple(line.cites for line in lines),
-            safety_net=tuple(safety_net),
             took_in_notes=tuple(took_notes),
             took_in_episodes=tuple(took_episodes),
-            supersessions=draft.supersessions,
+            read_pages=tuple(_unique(draft.read_pages)),
             flags=draft.flags,
+            outside=draft.outside,
         )
         record = version.model_dump(mode="json", exclude={"version", "written_at"})
         conn.execute(
@@ -1495,14 +1578,17 @@ class SqliteStoryStore:
             (version.version, story_id, _to_micros(at), json.dumps(record)),
         )
         conn.execute(
-            "INSERT INTO pages(story_id, version, written_at, lines) VALUES(?, ?, ?, ?) "
+            "INSERT INTO pages(story_id, version, written_at, lines, outside) "
+            "VALUES(?, ?, ?, ?, ?) "
             "ON CONFLICT(story_id) DO UPDATE SET version = excluded.version, "
-            "written_at = excluded.written_at, lines = excluded.lines",
+            "written_at = excluded.written_at, lines = excluded.lines, "
+            "outside = excluded.outside",
             (
                 story_id,
                 version.version,
                 _to_micros(at),
-                json.dumps([line.model_dump(mode="json") for line in lines]),
+                json.dumps([line.model_dump(mode="json") for line in draft.lines]),
+                int(draft.outside),
             ),
         )
         return version
@@ -1647,10 +1733,11 @@ class SqliteStoryStore:
                 return None
             as_of = self._ticks(conn)
             page_row = conn.execute(
-                "SELECT version, written_at, lines FROM pages WHERE story_id = ?", (story_id,)
+                "SELECT version, written_at, lines, outside FROM pages WHERE story_id = ?",
+                (story_id,),
             ).fetchone()
             note_rows = conn.execute(
-                "SELECT id, text, author, rests_on, outside, written_at FROM notes "
+                "SELECT id, text, author, written_during, outside, written_at FROM notes "
                 "WHERE story_id = ? AND pending_since IS NOT NULL ORDER BY id",
                 (story_id,),
             ).fetchall()
@@ -1689,7 +1776,7 @@ class SqliteStoryStore:
             if header is None:
                 return None
             rows = conn.execute(
-                "SELECT id, text, author, rests_on, outside, written_at FROM notes "
+                "SELECT id, text, author, written_during, outside, written_at FROM notes "
                 "WHERE story_id = ? AND id > ? "
                 "ORDER BY id LIMIT ?",
                 (story_id, -1 if cursor is None else cursor, limit + 1),
@@ -1778,12 +1865,12 @@ def _entry_from(row: Sequence[Any]) -> StoryEntry:
 
 
 def _note_from(row: Sequence[Any]) -> StoryNote:
-    """Decode one stored note: id, text, author, resting, mark and instant."""
+    """Decode one stored note: id, text, author, its activation, mark and instant."""
     return StoryNote(
         note_id=row[0],
         text=row[1],
         author=row[2],
-        rests_on=row[3],
+        written_during=row[3],
         outside=_flag_from(row[4]),
         written_at=_instant_from(row[5]),
     )
@@ -1798,9 +1885,14 @@ def _json_from(value: object) -> object:
 
 
 def _page_from(row: Sequence[Any]) -> StoryCurrentPage:
-    """Decode a stored current page: its version, instant and lines."""
+    """Decode a stored current page: its version, instant, lines and mark."""
     return StoryCurrentPage.model_validate(
-        {"version": row[0], "written_at": _instant_from(row[1]), "lines": _json_from(row[2])}
+        {
+            "version": row[0],
+            "written_at": _instant_from(row[1]),
+            "lines": _json_from(row[2]),
+            "outside": _flag_from(row[3]),
+        }
     )
 
 

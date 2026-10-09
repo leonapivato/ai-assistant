@@ -16,10 +16,11 @@ Four things the engine adds to the story store, and nothing else:
 * **The payload fit** (:func:`fitted`). A page too large for the contract's payload
   limit is re-read at a smaller page size, so the caller gets the largest page that
   fits with a cursor resuming after it, rather than a refusal.
-* **The owner's page** (:func:`owner_page`, ADR-0300 §8:3). A story's current page
-  with what is pending on it, under §11's default for the owner as reader: decided by
+* **The owner's page** (:func:`owner_page`, ADR-0303 §10:2). A story's current page
+  and its mark, and its newest notes with whether each is pending, under ADR-0303 §3's
+  default for the owner as reader: decided by
   :class:`~ai_assistant.orchestration.story_privacy.PageVisibility`, the one statement
-  of that rule, from the episodes the notes rest on.
+  of that rule.
 
 Shared by :class:`~ai_assistant.orchestration.engine.Engine` and the canonical fake
 engine, so the two cannot answer one call two ways. No stage, phase, rule or prompt
@@ -30,7 +31,7 @@ and what its stage writes, are :mod:`~ai_assistant.orchestration.story_links`' (
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.episode_encoding import summary_of
 from ai_assistant.core.errors import StoryStoreError
@@ -41,6 +42,7 @@ from ai_assistant.core.types import (
     StoryMemberKind,
     StoryMemberView,
     StoryPageView,
+    StoryPageViewNote,
     StoryRefusal,
     StoryRefusalReason,
     StoryView,
@@ -52,7 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
-    from ai_assistant.core.types import StoryNote, StoryNoteId
+    from ai_assistant.core.types import StoryNote
 
 
 def episode_address(activation_id: str) -> str:
@@ -143,22 +145,30 @@ async def resolved_view(
     )
 
 
-async def owner_page(
-    stories: StoryStore, memory: MemoryStore, story_id: str
-) -> StoryPageView | None:
-    """Read a story's page as the owner is shown it (ADR-0300 §8:3, §11).
+#: How many of a story's notes the owner's page view lists, newest first (ADR-0303
+#: §10:2). ADR-0303 makes it a composition-root constant; until the lane that rebuilds
+#: the view (§12:3) wires it there, both engines read this default. Twenty notes at
+#: their bound of 2,000 characters is about 40,000 characters, beside a page capped at
+#: 8,000, well inside a frame's payload limit.
+STORY_PAGE_VIEW_NOTES: Final = 20
 
-    The current page and what is pending on it are one read of the story store. Then
-    the notes the page's lines cite that are no longer pending are read page by page,
-    and every episode a pending or cited note rests on is fetched with one
-    ``MemoryStore.get_many``. What is shown is decided by §11's default for the owner:
-    a note the owner wrote is shown, as a record placed for the owner alone may be
-    shown to the owner; a note resting on an activation is shown where the memory
-    store holds its episode, open or frozen, the owner's direct inspection reading
-    every record (ADR-0275 §7, §10) as :data:`~ai_assistant.orchestration.
-    story_standing.OWNER_READER` does; and a line is shown where every note it cites
-    is. A note resting on a forgotten episode, and a line citing one or citing a note
-    the story no longer holds, are withheld and counted.
+
+async def owner_page(
+    stories: StoryStore,
+    memory: MemoryStore,  # noqa: ARG001 — the episodes §3:7's walk reads, once it is built
+    story_id: str,
+    *,
+    notes: int = STORY_PAGE_VIEW_NOTES,
+) -> StoryPageView | None:
+    """Read a story's page as the owner is shown it (ADR-0303 §10:2).
+
+    The current page and what is pending on it are one read of the story store; the
+    story's notes are then read page by page, and the newest ``notes`` of them listed,
+    each with whether it is pending. The owner may be shown a record placed for the
+    owner alone, so every note is shown (§3:6), and so is the page under
+    :class:`~ai_assistant.orchestration.story_privacy.PageVisibility`'s interim rule;
+    §3:7's walk, which withholds a page an open or forgotten episode stands behind, is
+    ADR-0303 §12:3's lane's, and reads ``memory``.
 
     Returns:
         The page, or ``None`` where the store holds no such story. A merged story's
@@ -166,7 +176,7 @@ async def owner_page(
 
     Raises:
         StoryStoreError: If the story store cannot be read.
-        MemoryStoreError: If an episode a note rests on cannot be read.
+        MemoryStoreError: If an episode cannot be read.
     """
     state = await stories.current_page(story_id)
     if state is None:
@@ -174,63 +184,36 @@ async def owner_page(
     if state.story.merged_into is not None:
         return StoryPageView(story=state.story)
     page = state.page
-    lines = () if page is None else page.lines
-    pending = {note.note_id: note for note in state.pending_notes}
-    wanted = {note_id for line in lines for note_id in line.cites}
-    cited = {note_id: pending[note_id] for note_id in wanted if note_id in pending}
-    cited |= await _held_notes(stories, story_id, wanted - cited.keys())
-    rested = dict.fromkeys(
-        note.rests_on
-        for note in (*state.pending_notes, *cited.values())
-        if note.rests_on is not None
-    )
-    addresses = [episode_address(activation) for activation in rested]
-    found = await memory.get_many(addresses) if addresses else {}
-    # Held at its address is shown, whatever the record carries: the owner may be
-    # shown every record the store holds, so no field of it is read to decide.
-    visibility = PageVisibility(
-        activations=frozenset(
-            activation
-            for activation in rested
-            if isinstance(found.get(episode_address(activation)), EpisodicMemory)
-        ),
-        owner_notes=True,
-    )
-    shown_lines = tuple(line for line in lines if visibility.line(line, cited))
-    shown_notes = tuple(note for note in state.pending_notes if visibility.note(note))
+    visibility = PageVisibility(activations=frozenset(), owner_notes=True)
+    shown = page is not None and visibility.page()
+    held = await _all_notes(stories, story_id)
+    newest = [note for note in reversed(held) if visibility.note(note)][:notes]
+    pending = {note.note_id for note in state.pending_notes}
     return StoryPageView(
         story=state.story,
         version=None if page is None else page.version,
         tidied_at=None if page is None else page.written_at,
-        lines=shown_lines,
-        pending_notes=shown_notes,
-        pending_episodes=state.pending_episodes,
-        withheld_lines=len(lines) - len(shown_lines),
-        withheld_notes=len(state.pending_notes) - len(shown_notes),
+        lines=page.lines if shown and page is not None else (),
+        outside=page.outside if shown and page is not None else False,
+        withheld=page is not None and not shown,
+        notes=tuple(
+            StoryPageViewNote(note=note, pending=note.note_id in pending) for note in newest
+        ),
+        more_notes=max(0, len(held) - len(newest)),
     )
 
 
-async def _held_notes(
-    stories: StoryStore, story_id: str, wanted: set[StoryNoteId]
-) -> dict[StoryNoteId, StoryNote]:
-    """The notes ``wanted`` names that the story holds, read page by page.
-
-    Notes are read in identity order, so the walk stops once it passes the largest
-    identity wanted. A note the story no longer holds is not found, and a line citing
-    it is then withheld (§11:1).
-    """
-    found: dict[StoryNoteId, StoryNote] = {}
-    if not wanted:
-        return found
-    last = max(wanted)
+async def _all_notes(stories: StoryStore, story_id: str) -> list[StoryNote]:
+    """Every note the story holds, in the order they were written, read page by page."""
+    found: list[StoryNote] = []
     cursor: int | None = None
     while True:
         listed = await stories.notes(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
         if listed is None:
             return found
-        found |= {note.note_id: note for note in listed.notes if note.note_id in wanted}
+        found.extend(listed.notes)
         following = listed.next_cursor
-        if following is None or following == cursor or following >= last or found.keys() == wanted:
+        if following is None or following == cursor:
             return found
         cursor = following
 

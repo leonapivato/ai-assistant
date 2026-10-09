@@ -24,13 +24,13 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryChange,
     StoryDecision,
-    StoryDraftLine,
     StoryFlag,
     StoryFlagKind,
     StoryFlagName,
     StoryLogLine,
     StoryNoteAuthor,
     StoryPageDraft,
+    StoryPageLine,
 )
 from ai_assistant.orchestration.matters_pass import MattersPass
 from ai_assistant.testing import FakeModelProvider, FakeStoryStore
@@ -100,33 +100,15 @@ async def _raise(stories: FakeStoryStore, story_id: str, flag: StoryFlag) -> Sto
     written = await stories.write_page(
         story_id,
         StoryPageDraft(
-            lines=(
-                StoryDraftLine(
-                    text="Camping at Riverside.", cites=(note.note.note_id,), outside=False
-                ),
-            ),
+            lines=(StoryPageLine(text="Camping at Riverside."),),
             took_in_notes=(note.note.note_id,),
             flags=(flag,),
+            outside=False,
         ),
         as_of=state.as_of,
     )
     assert written.version is not None
     return StoryFlagName(story=story_id, version=written.version.version, flag=flag)
-
-
-async def _linked_twice(
-    stories: FakeStoryStore, activation_id: str, *story_ids: str
-) -> StoryFlagName:
-    """Understanding's lines for ``activation_id`` on each story: its flag (§2:2)."""
-    for story_id in story_ids:
-        linked = await stories.link(
-            story_id,
-            [activation(activation_id)],
-            actor=StoryActor.UNDERSTANDING,
-            trigger=activation_id,
-        )
-        assert linked.refusal is None
-    return StoryFlagName(activation=activation_id)
 
 
 async def _log(stories: FakeStoryStore, story_id: str) -> tuple[StoryLogLine, ...]:
@@ -205,70 +187,6 @@ async def test_a_like_another_flag_is_merged_and_recorded_on_the_story_merged_in
     assert _shown(model)["flag"]["kind"] == "like_another"
 
 
-async def test_an_understanding_flag_can_move_its_input_and_is_recorded_on_both_stories() -> None:
-    stories = _stories()
-    memory = await memory_of(episode("a-1"), episode("b-1"), episode("x-1"))
-    trip = await _story(stories, "a-1")
-    other = await _story(stories, "b-1")
-    flag = await _linked_twice(stories, "x-1", trip, other)
-    model = FakeModelProvider(
-        lambda messages: json.dumps(
-            {
-                "decision": "move",
-                "from": "S1",
-                "to": "S2",
-                "episodes": [json.loads(messages[1].content)["flag"]["episode"]],
-            }
-        )
-    )
-
-    report = await _pass(model, stories, memory).run()
-
-    assert report.decided == 1
-    assert await _members(stories, trip) == ["a-1"]
-    assert await _members(stories, other) == ["b-1", "x-1"]
-    for story_id in (trip, other):
-        assert await _decisions(stories, story_id) == [
-            (flag, StoryDecision.MOVED, StoryActor.MATTERS_PASS)
-        ]
-    shown = _shown(model)
-    assert shown["flag"]["kind"] == "one_input_in_several_stories"
-    assert shown["flag"]["episode"] == "E2"
-
-
-async def test_an_input_linked_to_two_stories_is_shown_once_and_moved_out_of_one() -> None:
-    stories = _stories()
-    call = "Call the campground on Thursday."
-    memory = await memory_of(
-        episode("a-1"), episode("b-1", text="Book the dentist."), episode("x-1", text=call)
-    )
-    trip = await _story(stories, "a-1")
-    dentist = await _story(stories, "b-1")
-    flag = await _linked_twice(stories, "x-1", trip, dentist)
-    # #2775's decision: the input belongs to the trip, so it is moved out of the dentist
-    # story into the one already holding it.
-    model = FakeModelProvider(
-        json.dumps({"decision": "move", "from": "S2", "to": "S1", "episodes": ["E2"]})
-    )
-
-    report = await _pass(model, stories, memory).run()
-
-    shown = _shown(model)
-    # One input, one label, held by both stories: never one rendering per story.
-    assert shown["flag"]["episode"] == "E2"
-    assert [story["episodes"] for story in shown["stories"]] == [["E1", "E2"], ["E3", "E2"]]
-    assert [episode["label"] for episode in shown["episodes"]] == ["E1", "E2", "E3"]
-    assert [held["story"] for held in shown["episodes"][1]["held_by"]] == ["S1", "S2"]
-    assert model.calls[0].messages[1].content.count(call) == 1
-    assert report.decided == 1
-    assert await _members(stories, trip) == ["a-1", "x-1"]
-    assert await _members(stories, dentist) == ["b-1"]
-    for story_id in (trip, dentist):
-        assert await _decisions(stories, story_id) == [
-            (flag, StoryDecision.MOVED, StoryActor.MATTERS_PASS)
-        ]
-
-
 async def test_stories_are_grouped_under_a_new_story_holding_them() -> None:
     stories = _stories()
     memory = await memory_of(episode("a-1"), episode("b-1"))
@@ -309,25 +227,6 @@ async def test_a_decision_to_leave_is_recorded_and_the_flag_is_not_decided_again
 # --- §5:2 and §5:3: no model call ------------------------------------------------------
 
 
-async def test_an_understanding_flag_waits_while_its_episode_is_open_or_unrecorded() -> None:
-    stories = _stories()
-    trip = await _story(stories, "a-1")
-    other = await _story(stories, "b-1")
-    flag = await _linked_twice(stories, "x-1", trip, other)
-    model = FakeModelProvider(_LEAVE)
-
-    for memory in (await memory_of(episode("x-1", open_=True)), await memory_of()):
-        report = await _pass(model, stories, memory).run()
-        assert (report.flags, report.waiting, report.exhausted) == (1, 1, True)
-    assert model.calls == []
-    assert await _decisions(stories, trip) == []
-
-    frozen = await _pass(model, stories, await memory_of(episode("x-1"))).run()
-
-    assert frozen.decided == 1
-    assert await _decisions(stories, other) == [(flag, StoryDecision.LEFT, StoryActor.MATTERS_PASS)]
-
-
 async def test_a_like_another_flag_whose_stories_became_one_is_left_by_rule() -> None:
     stories = _stories()
     trip = await _story(stories, "a-1")
@@ -344,22 +243,24 @@ async def test_a_like_another_flag_whose_stories_became_one_is_left_by_rule() ->
     assert await _decisions(stories, other) == [(flag, StoryDecision.LEFT, StoryActor.MATTERS_PASS)]
 
 
-async def test_an_understanding_flag_fewer_than_two_of_whose_stories_hold_it_is_left_by_rule() -> (
-    None
-):
+async def test_an_input_understanding_linked_into_two_stories_raises_no_flag() -> None:
+    """ADR-0303 §8:1-§8:2: that many links, and no flag; the pass reads none and calls none."""
     stories = _stories()
     trip = await _story(stories, "a-1")
     other = await _story(stories, "b-1")
-    flag = await _linked_twice(stories, "x-1", trip, other)
-    unlinked = await stories.unlink(other, [activation("x-1")], actor=StoryActor.OWNER)
-    assert unlinked.refusal is None
+    for story_id in (trip, other):
+        linked = await stories.link(
+            story_id, [activation("x-1")], actor=StoryActor.UNDERSTANDING, trigger="x-1"
+        )
+        assert linked.refusal is None
     model = FakeModelProvider(_LEAVE)
 
     report = await _pass(model, stories, await memory_of(episode("x-1"))).run()
 
-    assert report.left_by_rule == 1
+    assert (report.flags, report.waiting, report.decided, report.left_by_rule) == (0, 0, 0, 0)
     assert model.calls == []
-    assert await _decisions(stories, trip) == [(flag, StoryDecision.LEFT, StoryActor.MATTERS_PASS)]
+    for story_id in (trip, other):
+        assert await _decisions(stories, story_id) == []
 
 
 # --- §5:6: refusals ------------------------------------------------------------------
@@ -736,51 +637,22 @@ def _merging_on(
 
 async def test_a_merge_after_the_runs_reading_is_followed_before_the_rule() -> None:
     stories = _stories()
-    memory = await memory_of(episode("a-1"), episode("b-1"), episode("c-1"), episode("x-1"))
+    memory = await memory_of(episode("a-1"), episode("b-1"), episode("c-1"))
     trip = await _story(stories, "a-1")
     other = await _story(stories, "b-1")
     third = await _story(stories, "c-1")
-    await _linked_twice(stories, "x-1", trip, other)
-    # The first two reads of the stories are the run's discovery; the third is the
-    # flag's own read of where each story went.
-    landed = _merging_on(stories, "stories", 3, trip, third)
+    await _raise(stories, trip, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other))
+    # The first read of the stories is the run's discovery; the second is the flag's
+    # own read of where each story went.
+    landed = _merging_on(stories, "stories", 2, trip, third)
     model = FakeModelProvider(_LEAVE)
 
     report = await _pass(model, stories, memory).run()
 
-    # `other` and `third` both hold x-1 now: the flag's stories did not come together.
+    # The flag now concerns `third` and `other`: its stories did not come together.
     assert landed == [True]
     assert (report.left_by_rule, report.decided) == (0, 1)
     assert [story["label"] for story in _shown(model)["stories"]] == ["S1", "S2"]
-
-
-async def test_a_merge_during_the_rules_membership_read_defers_the_flag() -> None:
-    stories = _stories()
-    memory = await memory_of(episode("a-1"), episode("b-1"), episode("c-1"), episode("x-1"))
-    trip = await _story(stories, "a-1")
-    other = await _story(stories, "b-1")
-    third = await _story(stories, "c-1")
-    flag = await _linked_twice(stories, "x-1", trip, other)
-    # `trip` no longer holds x-1, so the rule would answer on the stories as read; the
-    # merge into `third`, which does, lands as their membership is looked up.
-    assert (await stories.unlink(trip, [activation("x-1")], actor=StoryActor.OWNER)).refusal is None
-    assert (await stories.link(third, [activation("x-1")], actor=StoryActor.OWNER)).refusal is None
-    landed = _merging_on(stories, "stories_of", 1, other, third)
-    model = FakeModelProvider(_LEAVE)
-    matters = _pass(model, stories, memory)
-
-    deferred = await matters.run()
-
-    assert landed == [True]
-    assert (deferred.raced, deferred.left_by_rule) == (1, 0)
-    for story_id in (trip, other, third):
-        assert await _decisions(stories, story_id) == []
-
-    # Read again whole, `trip` and `third` are its stories, and only `third` holds it.
-    settled = await matters.run()
-
-    assert settled.left_by_rule == 1
-    assert await _decisions(stories, third) == [(flag, StoryDecision.LEFT, StoryActor.MATTERS_PASS)]
 
 
 async def test_decisions_are_placed_by_the_stories_as_they_stand_after_a_merge() -> None:
@@ -837,37 +709,6 @@ async def test_a_decision_made_by_rule_this_run_is_shown_after_a_merge_moves_it(
     assert await _decisions(stories, other) == [
         (first, StoryDecision.LEFT, StoryActor.MATTERS_PASS)
     ]
-
-
-async def test_an_understanding_flags_stories_are_read_after_its_episode_froze() -> None:
-    stories = _stories()
-    trip = await _story(stories, "a-1")
-    other = await _story(stories, "b-1")
-    third = await _story(stories, "c-1")
-    await _linked_twice(stories, "x-1", trip, other)
-    memory = await memory_of(episode("a-1"), episode("b-1"), episode("c-1"), episode("x-1"))
-    get_many = memory.get_many
-    linked = False
-
-    async def linking_first(record_ids: Sequence[str]) -> Any:
-        # The story-links stage writes its third line, and the episode freezes, while
-        # the pass checks whether the episode is frozen.
-        nonlocal linked
-        if not linked:
-            linked = True
-            await _linked_twice(stories, "x-1", third)
-        return await get_many(record_ids)
-
-    memory.get_many = linking_first  # type: ignore[method-assign]
-    model = FakeModelProvider(_LEAVE)
-
-    report = await _pass(model, stories, memory).run()
-
-    assert linked
-    assert report.decided == 1
-    assert [story["label"] for story in _shown(model)["stories"]] == ["S1", "S2", "S3"]
-    for story_id in (trip, other, third):
-        assert len(await _decisions(stories, story_id)) == 1
 
 
 @pytest.mark.parametrize(

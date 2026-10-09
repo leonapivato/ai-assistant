@@ -104,7 +104,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from ai_assistant.core.types import DEFAULT_PAGE_SIZE
+from ai_assistant.core.types import DEFAULT_PAGE_SIZE, StoryDecision
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -12558,13 +12558,16 @@ class StoryStore(Protocol):
     naming a merged story as a member, is refused with the story it was merged into.
     Reading a merged story returns its header, so a caller follows it (§3).
 
-    **A story's page** (ADR-0300 §3). Beside each story the store keeps its
-    **notes** (the page's entries) and its **current page**, with a **version log**
-    recording the current page's history by identity. A note carries its text, who
-    wrote it, the activation it rests on (nothing, for a note ``owner`` wrote),
-    whether outside content fed it, and the store's clock reading; none of it
-    changes once written, and no note is removed. Only the current page is kept as
-    text, and the version log is append-only and holds identities and instants only.
+    **A story's page** (ADR-0300 §3, ADR-0303 §§2-4). Beside each story the store
+    keeps its **notes** and its **current page**, with a **version log** recording the
+    current page's history by identity; nothing ties the notes to the page but that a
+    tidy-up reads the one and writes the other. A note carries its text, who wrote it,
+    the activation it was written during (nothing, for a note ``owner`` wrote), its
+    mark, and the store's clock reading; none of it changes once written, no note is
+    removed, and no rule of the store reads the activation it was written during. The
+    current page is zero or more lines, each its text alone, and the page's mark. Only
+    the current page is kept as text, and the version log is append-only and holds
+    identities, instants and enumerations only.
 
     **Pending.** A note or an activation member is pending on a story from when it
     comes to the story — written to it, linked into it, or brought by a merge, a
@@ -12575,26 +12578,24 @@ class StoryStore(Protocol):
     move brought into a story is pending there whatever another story's version
     took in.
 
-    **Membership writes carry notes**, each in the operation's own transaction: a
-    merge moves the absorbed story's notes to the story it is merged into; a split
-    moves every note resting on an activation it moves, and the notes ``owner``
-    wrote that it names; a move of activation members moves every note resting on a
-    moved activation. The store still reads no other store (ADR-0289 §1:3), and
-    refuses a page write only on what ADR-0300 §3 and ADR-0302 §7 state and on an
-    identity naming nothing it holds: the hub's checks on a tidy-up's output (§5)
-    are the hub's.
+    **Membership writes carry notes**, each in the operation's own transaction
+    (ADR-0303 §6): a merge moves every note the absorbed story holds to the story it
+    is merged into; a split and a move each move exactly the notes they name that the
+    story moved from holds, and no note by the activation it was written during; an
+    unlink moves no note. The store still reads no other store (ADR-0289 §1:3), and
+    refuses a page write only on what ADR-0300 §3, ADR-0302 §7 and ADR-0303 §4 state
+    and on an identity naming nothing it holds: the hub's checks on a tidy-up's output
+    are the hub's, and so is the page's mark, which the store records as it is given.
 
     **A decision on a flag is a line in the change log** (ADR-0302 §§2-4). A flag is
     named by identity, as :class:`~ai_assistant.core.types.StoryFlagName` gives it:
-    a tidy-up's by the story whose version recorded it, that version's number and
-    the flag as recorded; understanding's by its activation, a flag where ``added``
-    lines naming that activation, with the actor ``understanding`` and that
-    activation as trigger, stand on two or more stories. The stories a flag
-    **concerns** are, for a tidy-up's, the story that raised it and then, on
-    ``like_another``, the story it names; for understanding's, each story holding
-    one of those lines, in the order of their sequence numbers; each followed
-    through merges to the story it was merged into, and each counted once, at its
-    first place. A write answering a flag — :meth:`leave_flag`, or ``create``,
+    by the story whose version recorded it, that version's number and the flag as
+    recorded. A tidy-up's flags are the only flags (ADR-0303 §8): understanding
+    raises none, so a flag named by an activation is one the store does not hold. The
+    stories a flag **concerns** are the story that raised it and then, on
+    ``like_another``, the story it names, each followed through merges to the story it
+    was merged into, and each counted once, at its first place. A write answering a
+    flag — :meth:`leave_flag`, or ``create``,
     ``link``, ``merge``, ``split`` or ``move`` given ``answers`` — writes one
     ``decided`` line on each story the flag concerns, as they stand once its change
     is applied, after the change's own lines and in the same transaction, carrying
@@ -12775,19 +12776,19 @@ class StoryStore(Protocol):
         ``split_off`` naming the other. The moved members keep A's link order. C is
         not made a member of A.
 
-        In the same transaction it moves to C every note A holds resting on an
-        activation it moves, and each note named in ``notes`` that A holds and
-        ``owner`` wrote; a note named that is not one of those is passed over, as a
-        member not held is by an unlink. Every other note stays on A. What C
-        receives is pending on C (ADR-0300 §3). Given ``answers``, it records the
-        decision ``split`` on the stories the flag concerns (ADR-0302 §4:2).
+        In the same transaction it moves to C exactly the notes named in ``notes``
+        that A holds, whoever wrote them; a note named that A does not hold is passed
+        over, as a member not held is by an unlink, and no note moves by the
+        activation it was written during (ADR-0303 §6). Every other note stays on A.
+        What C receives is pending on C (ADR-0300 §3). Given ``answers``, it records
+        the decision ``split`` on the stories the flag concerns (ADR-0302 §4:2).
 
         Args:
             story_id: The story split, A.
             members: The members to move, every one a current member of A.
             actor: Who is splitting.
             trigger: The activation that triggered it, where there was one.
-            notes: The notes the user wrote directly that go with the split.
+            notes: The notes that go with the split; none by default.
             answers: The flag this split decides, where it decides one.
 
         Returns:
@@ -12801,7 +12802,7 @@ class StoryStore(Protocol):
         """
         ...
 
-    async def move(  # noqa: PLR0913 — ADR-0302 §4:2 adds ``answers`` as a keyword to this operation
+    async def move(  # noqa: PLR0913 — ADR-0302 §4:2 and ADR-0303 §6:2 add keywords to this operation
         self,
         story_id: Identifier,
         to: Identifier,
@@ -12809,6 +12810,7 @@ class StoryStore(Protocol):
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        notes: Sequence[StoryNoteId] = (),
         answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
         """Move activation members from one story to another (ADR-0300 §3).
@@ -12816,10 +12818,12 @@ class StoryStore(Protocol):
         Each member is removed from the first story, logged ``removed`` there, and
         added to the second where the second does not already hold it, logged
         ``added`` there; one the second already holds keeps its entry as it was.
-        Every note the first story holds resting on a moved activation moves to the
-        second. All of it is one transaction, and what the second story receives is
-        pending there. Given ``answers``, it records the decision ``moved`` on the
-        stories the flag concerns (ADR-0302 §4:2).
+        Exactly the notes named in ``notes`` that the first story holds move to the
+        second; a note named that it does not hold is passed over, and no note moves
+        by the activation it was written during (ADR-0303 §6). All of it is one
+        transaction, and what the second story receives is pending there. Given
+        ``answers``, it records the decision ``moved`` on the stories the flag
+        concerns (ADR-0302 §4:2).
 
         Args:
             story_id: The story moved from.
@@ -12828,6 +12832,7 @@ class StoryStore(Protocol):
                 the first story.
             actor: Who is moving.
             trigger: The activation that triggered it, where there was one.
+            notes: The notes that go with the move; none by default.
             answers: The flag this move decides, where it decides one.
 
         Returns:
@@ -12843,15 +12848,24 @@ class StoryStore(Protocol):
         """
         ...
 
-    async def leave_flag(self, flag: StoryFlagName, *, actor: StoryActor) -> StoryOutcome:
-        """Record a decision to leave the stories a flag concerns as they are.
+    async def leave_flag(
+        self,
+        flag: StoryFlagName,
+        *,
+        actor: StoryActor,
+        outcome: StoryDecision = StoryDecision.LEFT,
+    ) -> StoryOutcome:
+        """Record a decision on a flag that changed no story.
 
-        ADR-0302 §4:1. Writes one ``decided`` line with the outcome ``left`` on each
-        story the flag concerns, in one transaction, and changes no story's members.
+        ADR-0302 §4:1, ADR-0303 §8. Writes one ``decided`` line with ``outcome`` on
+        each story the flag concerns, in one transaction, and changes no story's
+        members: ``left`` where the decider chose to leave the stories as they are,
+        and ``not_applied`` where it chose a change the store refused.
 
         Args:
             flag: The flag decided.
             actor: Who decided.
+            outcome: ``left`` by default, or ``not_applied``.
 
         Returns:
             The first story it wrote a line on, in the order the stories a flag
@@ -12860,7 +12874,8 @@ class StoryStore(Protocol):
             ``already_decided`` where a ``decided`` line already answers it.
 
         Raises:
-            ValueError: If an argument is malformed.
+            ValueError: If an argument is malformed, including an ``outcome`` other
+                than ``left`` or ``not_applied``.
             StoryStoreError: If the store cannot be read or written.
         """
         ...
@@ -12965,22 +12980,23 @@ class StoryStore(Protocol):
         text: str,
         *,
         author: StoryNoteAuthor,
-        rests_on: Identifier | None = None,
+        written_during: Identifier | None = None,
         outside: bool = False,
     ) -> StoryNoteOutcome:
-        """Write a note to a story's page, pending there (ADR-0300 §3).
+        """Write a note to a story's page, pending there (ADR-0303 §2, §4:7).
 
         The note is stamped with the store's clock and an identity the store
-        assigns. A tidy-up's notes are written with its page, by :meth:`write_page`,
-        never here.
+        assigns. The tidy-up writes no note (§2:1), so nothing writes one as
+        ``tidy_up``.
 
         Args:
             story_id: The story the note is for.
             text: The note's text, non-blank, within ``STORY_NOTE_MAX_CHARS``.
             author: ``planning`` or ``owner``.
-            rests_on: The activation the note rests on; ``None`` exactly for
-                ``owner``.
-            outside: Whether outside content fed it; never for ``owner``.
+            written_during: The activation the note was written during; ``None``
+                exactly for ``owner``.
+            outside: The note's mark, as the hub's record of what that activation
+                read gives it (§3:1); never for ``owner``.
 
         Returns:
             The note as written, or a refusal: ``unknown_story``, or
@@ -12988,7 +13004,7 @@ class StoryStore(Protocol):
 
         Raises:
             ValueError: If an argument is malformed, including an author of
-                ``tidy_up`` or a resting or a mark the author does not admit.
+                ``tidy_up``, or an activation or a mark the author does not admit.
             StoryStoreError: If the store cannot be read or written.
         """
         ...
@@ -13000,18 +13016,17 @@ class StoryStore(Protocol):
         *,
         as_of: int,
     ) -> StoryPageOutcome:
-        """Write a new current page with its safety-net notes and its version.
+        """Write a new current page and its version, and no note (ADR-0303 §4).
 
-        One transaction (ADR-0300 §3): the safety-net notes are written by
-        ``tidy_up`` with identities the store assigns, each line's ``cites_new``
-        resolved to them; the new current page replaces the old one, whose text is
-        discarded; and the version is appended, recording the notes each line
-        cites, the safety-net notes, what it took in, its supersession marks and
-        its flags. It takes in exactly the notes and episodes the draft names that
-        were pending on the story at ``as_of``; a name the story holds that was not
-        is not recorded as taken in, and stays pending where it is pending. A draft
-        resting on, or taking in, what the story does not hold when the write runs
-        is refused (ADR-0302 §7). A refused write writes nothing.
+        One transaction: the new current page, its lines and its mark, replaces the
+        old one, whose text is discarded; and the version is appended, recording what
+        it took in, the other stories' page versions its run read, its flags and its
+        mark. It takes in exactly the notes and episodes the draft names that were
+        pending on the story at ``as_of``; a name the story holds that was not is not
+        recorded as taken in, and stays pending where it is pending. A draft taking in
+        what the story does not hold when the write runs is refused (ADR-0302 §7). A
+        page version the draft names as read is checked only as an identity the store
+        holds, never as a member (§4:2). A refused write writes nothing.
 
         Args:
             story_id: The story whose page is written.
@@ -13023,18 +13038,19 @@ class StoryStore(Protocol):
             The version appended, or a refusal, checked in this order:
             ``unknown_story``; ``merged_story``; ``page_moved_on`` where a version
             has been written since ``as_of``, so the version the page was built on
-            is no longer the current one; ``unknown_note`` for a note a line cites
-            or a mark names that the store does not hold; ``unknown_story`` for a
-            flag naming a story the store does not hold; ``not_held`` for the first,
-            in this order, of a safety-net note resting on an activation the story
-            does not hold, an episode named as taken in that is not one of its
-            activation members, and a note named as taken in that it does not hold,
-            naming that activation or note; and ``over_cap`` where the lines that
-            are not the user's own notes exceed ``STORY_PAGE_CAP_CHARS``.
+            is no longer the current one; ``unknown_story`` for a flag naming a
+            story the store does not hold, then for a page version read naming one;
+            ``not_held`` for the first, in this order, of an episode named as taken
+            in that is not one of its activation members and a note named as taken
+            in that it does not hold, naming that activation or note; and
+            ``over_cap`` where the lines together exceed ``STORY_PAGE_CAP_CHARS``,
+            every line counted. No write answers ``unknown_note``.
 
         Raises:
             ValueError: If an argument is malformed, including an ``as_of`` the
-                store has not reached or a flag naming the story written.
+                store has not reached, a flag naming the story written, or a page
+                version read naming the story written or a version that story's log
+                does not hold.
             StoryStoreError: If the store cannot be read or written.
         """
         ...
