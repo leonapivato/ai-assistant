@@ -98,7 +98,7 @@ launches).
 
 - **Against the live hub, not a fake.** A lane verifies its own page against a
   `Gateway` bound in-process over a seeded `FakeAssistantEngine`
-  (`.claude/agents/worker.md`). That is the right instrument for a slice and the
+  (`docs/driving-the-page.md`). That is the right instrument for a slice and the
   wrong one here: this pass exists for the composition, so the page is driven
   against the resident hub the rest of the run drives, over the same planted
   store.
@@ -107,7 +107,7 @@ launches).
 - **The refusal arms are browser arms too.** A withheld operation must be absent
   from the page rather than merely unlabelled: probe what the page can be made to
   request, not only what it offers.
-- **Two known console false positives**, both named in `.claude/agents/worker.md`:
+- **Two known console false positives**, both named in `docs/driving-the-page.md`:
   `favicon.ico … 401` before a session exists (admission is decided before
   routing, so every path answers 401 until one does), and — under WebKit, only on
   a `fullPage` screenshot — `Refused to apply a stylesheet … style-src`,
@@ -150,11 +150,23 @@ acceptance; only then close the accepted milestone. GitHub's completion
 percentage is not evidence of acceptance. Retirement is a separate explicit
 disposition, never a passed exit.
 
-**Sweep `docs/roadmap.md` for what the disposition falsified.** Delete or re-point
-affected dependencies, deferrals and scope claims in the same act. Do not keep a
-second completion checklist in the roadmap or a legacy track issue, and do not
-mark unresolved requirements completed to tidy a retired milestone.
+### Recording a milestone disposition obliges a roadmap sweep
 
-`CONTRIBUTING.md` → "Recording a milestone disposition obliges a roadmap sweep"
-states the same rule at the tracker end. Preserve earlier QA, passing tests and
-open findings when retiring a plan.
+**Whoever records acceptance, retirement or a scope change** — at the end of a
+QA run or anywhere else — updates the native milestone and its linked acceptance
+issue, then sweeps `docs/roadmap.md` for what the disposition falsified **in the
+same act**: delete or re-point affected dependencies, deferrals and scope
+claims. Do not keep a second completion checklist in the roadmap or a legacy
+track issue, and do not tick a retired or unresolved requirement as completed to
+tidy a milestone. Results, tested revisions, remaining work and the owner's
+ruling are recorded in GitHub, not in the roadmap.
+
+A retired milestone is explicitly marked retired, not passed: give its
+remaining requirements an explicit disposition, and preserve legacy issues,
+their evidence and historical identifiers, earlier QA, passing tests and open
+findings.
+
+Milestone boundaries are the owner's: keep a design umbrella outside a
+milestone when it spans several undecided deliveries, and create no
+provisional milestone or milestone number before the owner has agreed the
+replacement boundaries.
