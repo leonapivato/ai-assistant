@@ -1,6 +1,6 @@
 # 281. Recall runs before understanding, and understanding reads what it found
 
-- Status: Partially superseded by ADR-0282 (§3:2's `limit`; §3:3's filling rule, in the addition alone; §6:4's last sentence; §7:1's first sentence, in its *receives the records recall kept* part alone) and ADR-0284 (§4:4's and §6:3's informational-event test) and ADR-0286 (§6:4's written-once rule) and ADR-0300 (§1:3's *nothing else* and §6:1's `RecalledItem`, in the additions alone; §7:1's *any other read*, for the candidate stories alone) and ADR-0305 (§7:3's rendering of a semantic record, in the addition alone)
+- Status: Partially superseded by ADR-0282 (§3:2's `limit`; §3:3's filling rule, in the addition alone; §6:4's last sentence; §7:1's first sentence, in its *receives the records recall kept* part alone) and ADR-0284 (§4:4's and §6:3's informational-event test) and ADR-0286 (§6:4's written-once rule) and ADR-0300 (§1:3's *nothing else* and §6:1's `RecalledItem`, in the additions alone; §7:1's *any other read*, for the candidate stories alone) and ADR-0305 (§7:3's rendering of a semantic record, in the addition alone) and ADR-0308 (§1:3's *before it is understood*, §3:1's one cue and §5:4's *understanding is due next*, each for the second run alone; §6:1's `RecallCue`, in the addition alone)
 - Date: 2026-09-27
 - Scope: [M39](https://github.com/leonapivato/ai-assistant/milestone/6).
 - Dependency: ADR-0280 and its milestone M38; ADR-0276 and ADR-0275.
@@ -42,6 +42,17 @@
 - **Partially supersedes** [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) — **four scopes.** **§1:5**, in its *no retrieved memory* and *nothing else* parts alone: the stage also reads what recall found. **§2:5's referent kinds, in the addition alone**: `UnderstandingReferent.kind` gains `memory`. **§3:3's label scheme, in the addition alone**: a third sequence, `M`. **§5:1's *before any relevance read***, for recall's read alone. Every other clause stands.
 - **Partially supersedes** [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) — **four scopes.** **§3:5's working set and §4:1–§4:3's enums and table, in the additions alone**: the recall decision, the stage `recall`, the rule `not_recalled` and its row. **§5:2's fixed default, for a failure-tolerant stage alone** (§5 below). **§7:1's `schema_version` literal alone**: it becomes `Literal[4]`. Every other clause stands.
 - **Partially supersedes** [ADR-0217](0217-a-record-carries-who-may-receive-it-and-a-model-may-only-narrow-it.md) — **one scope.** §2:5's *no new site* half, for one further site: the same record-level predicate applied to recall's records (§4 below). Every other clause stands.
+- Partially superseded: 2026-10-11 by ADR-0308 — four scopes, each but the last for
+  recall's second run alone, which runs once understanding has recorded and before
+  planning's first round (ADR-0308 §2). §1:3's *before it is understood*: the second run
+  runs after. §3:1's one cue: its cues are the latest understanding's meaning and each
+  reference's phrase, each searched on its own. §5:4's *understanding is due next*: a
+  failed or timed-out second run is recorded, and planning goes on without it. §6:1's
+  `RecallCue`, in the addition alone: it gains `understood_meaning` and
+  `understood_phrase`. Every other clause stands, and the first run is unchanged. These
+  scoped replacements take effect on ratification of ADR-0308. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions
+  and the ratified body below are preserved.
 
 ## Context
 
