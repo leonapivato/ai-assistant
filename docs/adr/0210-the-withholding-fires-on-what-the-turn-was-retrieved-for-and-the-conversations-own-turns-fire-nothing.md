@@ -1,6 +1,6 @@
 # 210. On a channel of unbounded audience the withholding fires on what the turn was retrieved for, and the conversation's own recent turns fire nothing
 
-- Status: Partially superseded by ADR-0309 (§1, in the supply it evaluates, for an activation the phases plan); §1 and §8 amended by ADR-0217
+- Status: Partially superseded by ADR-0309 (§1:1–§1:2, in the set they name, for an activation the phases plan); §1 and §8 amended by ADR-0217
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md)
@@ -62,14 +62,16 @@
   name of the recorded value the second term reads, which is why this is an amendment
   under ADR-0070 §1 rather than a supersession. §8's prose-edit obligation is discharged
   again by ADR-0217 §9, which owes the same two edits where the field now lives.
-- Partially superseded: 2026-10-11 by ADR-0309 — one scope. §1, in the supply it
-  evaluates, for an activation the phases plan: ADR-0309 §5:10's set, what the activation
-  obtained through recall and its calls, replaces the turn's relevance reads, and keeps §1's
-  exclusion of the conversation's own turns. Every other clause stands. The old path keeps
-  the replaced clauses until the cutover lane that removes its code merges (ADR-0309 §1:3).
-  This scoped replacement takes effect on ratification of ADR-0309. This reciprocal header
-  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and
-  the ratified body below are preserved.
+- Partially superseded: 2026-10-11 by ADR-0309 — one scope. §1:1–§1:2, in the set they
+  name, for an activation the phases plan: ADR-0309 §5:10's set, what the activation was
+  given or obtained through its windows, recall and its calls, replaces the turn's relevance
+  reads, and on a pass of unbounded audience leaves the windows' records out, as §1:1 leaves
+  out the conversation's own turns. §1:3–§1:5 stand, the bounded pass's whole supply
+  included, and so does every other clause. The old path keeps the replaced clauses until
+  the cutover lane that removes its code merges (ADR-0309 §1:3). This scoped replacement
+  takes effect on ratification of ADR-0309. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
+  below are preserved.
 
 ## Context
 

@@ -36,7 +36,7 @@
 - **Partially supersedes**:
   [ADR-0158](0158-an-episode-may-supplement-the-answering-prompt-and-never-shares-the-belief-budget.md) (every clause but §2:2);
   [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md) (§2:1's site and timing);
-  [ADR-0210](0210-the-withholding-fires-on-what-the-turn-was-retrieved-for-and-the-conversations-own-turns-fire-nothing.md) (§1, in the supply it evaluates);
+  [ADR-0210](0210-the-withholding-fires-on-what-the-turn-was-retrieved-for-and-the-conversations-own-turns-fire-nothing.md) (§1:1–§1:2, in the set they name);
   [ADR-0260](0260-a-forecast-read-is-its-own-seam-at-a-configured-provider-and-what-it-mints-carries-the-extent-that-makes-it-evidence.md) (§7–§10, the forecast read's place in the turn loop);
   [ADR-0273](0273-a-simulated-booking-provider-is-a-reference-integration-declared-as-the-real-one-and-its-act-reaches-nothing-outside-this-deployment.md) (what it declares and reads for the goal model);
   [ADR-0274](0274-channel-input-and-reply-contract.md) (§7's informational processing, in its summary stage);
@@ -264,10 +264,17 @@ The list, by area:
 > authority milestone redoes them.
 
 > **Normative.** For an activation the phases plan, ADR-0204 §2's two terms are evaluated
-> over the memory records and context facets the activation obtained, what either recall
-> run kept and what its calls returned, digested ones included, and over no window, as
-> ADR-0210 §1 keeps the conversation's own turns out. The value is taken once, at
+> over the memory records and context facets the activation was given or obtained: its
+> windows' records, what either recall run kept and what its calls returned, digested
+> ones included. On a pass whose output channel's audience is unbounded the windows'
+> records are left out, as ADR-0210 §1:1 leaves out the conversation's own turns, and on
+> any other pass nothing is left out (ADR-0210 §1:5). The value is taken once, at
 > capture, over every round, and written as ADR-0217 §3:12 writes it.
+
+> **Normative.** Each `AssistantEngine` member that stays and whose signature or result
+> carries a type §5 retires, `converse_spoken`'s `SpokenTurn` and `receive`'s
+> `ChannelResult` among them, changes under its own ADR, merged before the lane that
+> changes it (golden rule 5).
 
 ### 6. One cutover
 
@@ -305,9 +312,11 @@ The list, by area:
 | `receive` | Reworked: an event runs through the phases, and the event-summary stage retires |
 | `PROTOCOL_VERSION` | Advances in each lane that changes a shape the wire carries (ADR-0124 §9) |
 
-> **Normative.** The `core` types and members the table names change as it states, each in
-> the cutover lane of its area, with the conformance suites and canonical fakes that cover
-> them.
+> **Normative.** The additions the table names land with the lane that first runs them:
+> the thin path adds `authorizing`, `acting`, `round_unauthorized`, `round_authorized`,
+> the working set's two decisions and the opt-in. The removals land in the cutover lane
+> of their area. Each lands with the conformance suites and canonical fakes that cover
+> what it changes.
 
 ### 8. Relationship to earlier decisions
 
@@ -316,8 +325,8 @@ The list, by area:
 | ADR-0078, ADR-0197, ADR-0198 | Whole: deferred memory questions with `answer`, and routing with its parks, retire |
 | ADR-0158 | Every clause but §2:2: the answering prompt's episodic supplement goes with the answering prompt; no caller mixes `EPISODIC` with belief kinds in one band read |
 | ADR-0224, ADR-0229 | Whole: the supplement's size and the planner's citation hop go with the turn loop |
-| ADR-0204 §2:1 | Its site and timing, for an activation the phases plan: §5:10 evaluates over what the activation obtained, at capture; the two terms, the field and §§3–5 stand |
-| ADR-0210 §1 | The supply it evaluates, for an activation the phases plan: §5:10's set replaces the turn's relevance reads and keeps its exclusion of the conversation's own turns |
+| ADR-0204 §2:1 | Its site and timing, for an activation the phases plan: §5:10 evaluates over what the activation was given or obtained, at capture; the two terms, the field and §§3–5 stand |
+| ADR-0210 §1:1–§1:2 | The set they name, for an activation the phases plan: §5:10's set replaces the turn's relevance reads, and leaves the windows out on an unbounded pass as §1:1 leaves out the conversation's own turns. §1:3–§1:5 stand, the bounded pass's whole supply included |
 | ADR-0248–ADR-0256, ADR-0258, ADR-0259, ADR-0261, ADR-0262, ADR-0264–ADR-0271 | Whole: the goal and attempt model retires |
 | ADR-0257, ADR-0272 | Nothing: the mark grammar and the trail's configured-provider fact are not the goal and attempt model |
 | ADR-0260 §7–§10 | The forecast read's place in the turn loop: its servicing, its outcome among ADR-0251's, its evidence row and the turn's statement. Its seam, records, egress and settings stand; whether it survives as a capability is [#2593](https://github.com/leonapivato/ai-assistant/issues/2593)'s |
@@ -358,6 +367,8 @@ the clauses they replace bind only the old path's code until the deletion lanes 
 **What stays open.**
 - Timers and watches, events as their own spokes, activations side by side, and
   authority, each its own milestone; learning follows the cutover as its own.
+- The results of the `AssistantEngine` members that stay but carry a retiring type, each
+  under its own ADR (§5:11).
 - The numbers ([#2589](https://github.com/leonapivato/ai-assistant/issues/2589)).
 - Which read capabilities survive
   ([#2593](https://github.com/leonapivato/ai-assistant/issues/2593)).
