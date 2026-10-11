@@ -255,7 +255,9 @@ async def test_a_call_that_changes_nothing_runs_unclaimed_and_goes_to_a_digest()
         "result:1",
     )
     assert call.output is None
-    assert held.get("result:1") == HeldResult(result_id="result:1", round_id="r1", content={"a": 1})
+    assert held.get("result:1") == HeldResult(
+        result_id="result:1", round_id="r1", decision_id="d1", content={"a": 1}
+    )
     assert len(invoker.calls) == 1
     assert (await plans.export()).activation_effects == ()
 
@@ -587,7 +589,9 @@ async def test_a_result_is_held_as_soon_as_its_call_is_recorded() -> None:
     task = asyncio.create_task(
         stage.act(
             held=held,
-            authorized=_round(_authorized("lookup"), _authorized("remember", effect="e1")),
+            authorized=_round(
+                _authorized("lookup"), _authorized("remember", decision="d2", effect="e1")
+            ),
         )
     )
     await own.entered.wait()
@@ -596,7 +600,8 @@ async def test_a_result_is_held_as_soon_as_its_call_is_recorded() -> None:
             break
         await asyncio.sleep(0)
 
-    assert [one.content for one in told] == ["page"]
+    # The held result names its call, so its digest's question is found at once.
+    assert [(one.content, one.decision_id) for one in told] == [("page", "d1")]
     assert not task.done()
     release.set()
     acted = await task
@@ -636,7 +641,9 @@ async def test_a_null_result_is_held_as_it_arrived() -> None:
     acted = await _stage(plans).act(held=held, authorized=_round(_authorized("lookup")))
 
     assert acted.calls[0].route is ResultRoute.DIGEST
-    assert held.get("result:1") == HeldResult(result_id="result:1", round_id="r1", content=None)
+    assert held.get("result:1") == HeldResult(
+        result_id="result:1", round_id="r1", decision_id="d1", content=None
+    )
 
 
 async def test_a_call_not_done_brings_no_result_and_holds_nothing() -> None:
@@ -687,13 +694,34 @@ async def test_an_own_records_result_that_may_carry_outside_text_is_held_whole()
     assert held.get("result:1") is not None
 
 
+def test_two_calls_of_a_round_never_share_a_decision() -> None:
+    """A held result names its call by its decision, so a round's decisions are distinct."""
+    with pytest.raises(ValueError, match="its own decision"):
+        _round(_authorized("lookup"), _authorized("lookup", parameters={"q": "other"}))
+
+
+async def test_a_round_rewritten_to_share_a_decision_runs_nothing() -> None:
+    """The check runs again on the snapshot acting runs, before anything is claimed."""
+    plans = FakePlanStore(now=_now)
+    invoker = _Invoker()
+    authorized = _round(_authorized("lookup"), _authorized("lookup", decision="d2"))
+    object.__setattr__(authorized, "calls", (authorized.calls[0], authorized.calls[0]))
+
+    with pytest.raises(ValueError, match="its own decision"):
+        await _stage(plans, invoker).act(held=HeldResults(), authorized=authorized)
+
+    assert invoker.calls == []
+
+
 def test_a_result_id_is_held_once() -> None:
     """An id names one result for the whole activation."""
     held = HeldResults()
-    held.hold(HeldResult(result_id="result:1", round_id="r1", content="a"))
+    held.hold(HeldResult(result_id="result:1", round_id="r1", decision_id="d1", content="a"))
     with pytest.raises(ValueError, match="one result"):
-        held.hold(HeldResult(result_id="result:1", round_id="r2", content="b"))
-    assert held.get("result:1") == HeldResult(result_id="result:1", round_id="r1", content="a")
+        held.hold(HeldResult(result_id="result:1", round_id="r2", decision_id="d1", content="b"))
+    assert held.get("result:1") == HeldResult(
+        result_id="result:1", round_id="r1", decision_id="d1", content="a"
+    )
     assert held.get("result:2") is None
 
 

@@ -90,7 +90,7 @@ from ai_assistant.orchestration.activation_cleanup import drain_registered
 from ai_assistant.orchestration.held_results import HeldResult
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import PlanStore, ToolInvoker
     from ai_assistant.core.types import (
@@ -278,6 +278,10 @@ class AuthorizedRound:
     calls: tuple[AuthorizedCall, ...]
     story_activations: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        """Each call runs under its own decision, which names it (ADR-0306 §4)."""
+        _distinct_decisions(self.calls)
+
     @property
     def match(self) -> tuple[str, ...]:
         """What a call not safe to repeat is matched against (ADR-0306 §5:9, §6:3).
@@ -399,6 +403,8 @@ class ActingStage:
         Raises:
             ToolBindingError: If a call does not survive revalidation. Raised before
                 anything is claimed or run.
+            ValueError: If two calls run under one decision, so that a held result
+                could not name its call. Raised before anything is claimed or run.
             Exception: Whatever a call's seam raised beyond the refusals handled here,
                 alone where one call raised and as an ``ExceptionGroup`` where several
                 did.
@@ -407,6 +413,7 @@ class ActingStage:
         round_id = str(authorized.round_id)
         match = tuple(str(one) for one in authorized.match)
         snapshots = [_snapshot(one) for one in authorized.calls]
+        _distinct_decisions(snapshots)
         answers = await asyncio.gather(
             *(self._act(activation_id, round_id, match, one, held) for one in snapshots),
             return_exceptions=True,
@@ -539,10 +546,29 @@ class ActingStage:
                 result_id=result_id,
                 effect_id=effect_id,
             )
-        held.hold(HeldResult(result_id=result_id, round_id=round_id, content=result.output))
+        held.hold(
+            HeldResult(
+                result_id=result_id,
+                round_id=round_id,
+                decision_id=one.call.decision.id,
+                content=result.output,
+            )
+        )
         return ActedCall(
             one, outcome, route=ResultRoute.DIGEST, result_id=result_id, effect_id=effect_id
         )
+
+
+def _distinct_decisions(calls: Sequence[AuthorizedCall]) -> None:
+    """Refuse a round in which two calls run under one decision.
+
+    Raises:
+        ValueError: If two calls share a decision id.
+    """
+    ids = [one.call.decision.id for one in calls]
+    if len(set(ids)) != len(ids):
+        msg = "each call of a round runs under its own decision, which names it"
+        raise ValueError(msg)
 
 
 def _snapshot(one: AuthorizedCall) -> AuthorizedCall:

@@ -500,7 +500,7 @@ async def _digesting_stage(now: Clock) -> None:
     await DigestingStage(
         provider=FakeModelProvider(), recorder=_Unreached(), part_chars=50, now=now
     ).digest_result(
-        HeldResult(result_id="result:1", round_id="r-1", content="a page"),
+        HeldResult(result_id="result:1", round_id="r-1", decision_id="d-1", content="a page"),
         question="hours",
         labels=ActivationLabels(),
         deadline=_AWARE,
