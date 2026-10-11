@@ -4323,7 +4323,10 @@ class PlanningLabel(BaseModel):
     """One label planning was shown, and the id it names (ADR-0307 §5:2, §5:7).
 
     ``label`` is its kind's prefix and a decimal number with no padding. ``id`` is
-    the thing's id exactly as held, never normalised.
+    the thing's id exactly as held, never normalised, and an :data:`EncodableText`
+    rather than an :data:`Identifier` for :class:`UnderstandingReferent`'s reason: an
+    episode's id is carried exactly as stored, a blank or whitespace-distinct address
+    included (ADR-0275 §10).
 
     Raises:
         ValueError: If ``label`` is not of that shape, or its prefix is not its
@@ -4333,7 +4336,7 @@ class PlanningLabel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     label: EncodableText
     kind: LabelKind
-    id: NonBlankEncodableText
+    id: EncodableText
 
     @model_validator(mode="after")
     def _the_kinds_label(self) -> Self:

@@ -174,8 +174,10 @@ def test_a_label_carries_its_kinds_prefix() -> None:
         _label("E1", LabelKind.STORY, "story:1")
 
 
-def test_a_labels_id_is_kept_exactly_as_held() -> None:
-    assert _label("M1", LabelKind.MEMORY, " spaced ").id == " spaced "
+@pytest.mark.parametrize("id_", [" spaced ", "", " "])
+def test_a_labels_id_is_kept_exactly_as_held(id_: str) -> None:
+    """An episode's id is carried exactly as stored, a blank address included."""
+    assert _label("E1", LabelKind.EPISODE, id_).id == id_
 
 
 # --- a recorded round ---------------------------------------------------------------
