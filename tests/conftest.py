@@ -29,6 +29,13 @@ instrument needs (issue #789). It lives here because ``pytest_addoption`` is
 honoured only in the rootdir conftest, and it is a *volume* switch rather than a
 selection one: both scales run the same tests, so it is deliberately absent from
 ``_FILTERING_OPTIONS`` below.
+
+And it registers CI's partition of the suite across test jobs, which lives in
+``suite_partition`` (ADR-0310). Its options are registered here for the same
+reason, and the plugin itself only when a run names a partition, so an ordinary
+run is untouched by it. Its one point of contact with the triad record is
+``_is_unfiltered``: the partition's evidence job ran the whole suite as far as the
+triad is concerned, and every other job of it did not.
 """
 
 from __future__ import annotations
@@ -58,13 +65,20 @@ from ai_assistant.core.config import Settings
 # named `conftest`), makes a narrowed run import the same suite the gate does.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "core"))
 
-# Registered by being imported: pluggy reads hook implementations off a plugin
-# module's namespace, and this conftest is the only plugin the corpus has. What
-# the guard refuses, and why it has to be a collection hook rather than a test,
-# is in `collection_guard`'s own docstring -- in short, a `Test...` class left
-# abstract is dropped from collection in silence, taking every test it inherits
-# with it and leaving the run green (issue #1757). Its directory is already on
-# `sys.path`: pytest's prepend import mode put it there to import this file.
+# `collection_guard` is registered by being imported: pluggy reads hook
+# implementations off a plugin module's namespace, and this conftest is the only
+# plugin the corpus has. What the guard refuses, and why it has to be a collection
+# hook rather than a test, is in `collection_guard`'s own docstring -- in short, a
+# `Test...` class left abstract is dropped from collection in silence, taking every
+# test it inherits with it and leaving the run green (issue #1757).
+#
+# `suite_partition` is CI's partition of the suite across test jobs (ADR-0310). It
+# is not registered by being imported: `pytest_configure` below registers its
+# plugin, and only when a run names a partition, so an ordinary run is untouched.
+#
+# Both sit beside this file, whose directory pytest's prepend import mode already
+# put on `sys.path` to import it.
+import suite_partition
 from collection_guard import pytest_pycollect_makeitem  # noqa: F401  # a hook, by name
 
 if TYPE_CHECKING:
@@ -114,6 +128,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "it deselects nothing."
         ),
     )
+    suite_partition.add_options(parser)
 
 
 @pytest.fixture(scope="session")
@@ -329,12 +344,18 @@ def pytest_configure(config: pytest.Config) -> None:
     A serial run is untouched: ``addopts``' mode is inert without workers, and this
     refuses nothing there.
 
+    It also hands the run to ``suite_partition``, which registers CI's partition
+    where the run names one and refuses one that something else narrows too
+    (ADR-0310 §1).
+
     Args:
         config: The session's configuration.
 
     Raises:
-        pytest.UsageError: If the run is distributed under any mode but ``loadgroup``.
+        pytest.UsageError: If the run is distributed under any mode but ``loadgroup``,
+            or names a partition that is malformed or narrowed.
     """
+    suite_partition.configure(config, narrowed=not _collects_the_whole_suite(config))
     mode = str(config.getoption("dist", "no"))
     if not getattr(config.option, "tx", []) or mode == "no":
         return
@@ -523,7 +544,18 @@ def _declares_optional(func: object) -> bool:
 
 
 def _is_unfiltered(config: pytest.Config) -> bool:
-    """Report whether this session is running the entire configured suite."""
+    """Report whether this session is running the entire configured suite.
+
+    A job of CI's partition runs a share of the suite, and is whole for the triad
+    only where its share holds every item of the evidence: the evidence job
+    (ADR-0310 §2:2). Every other job is a narrowed run, so it decides neither check
+    and is not failed for handing none over (§2:3).
+    """
+    return _collects_the_whole_suite(config) and suite_partition.holds_the_triad_evidence(config)
+
+
+def _collects_the_whole_suite(config: pytest.Config) -> bool:
+    """Report whether no option or path argument narrows what this session runs."""
     if any(config.getoption(option, default=None) for option in _FILTERING_OPTIONS):
         return False
     testpaths: Sequence[str] = config.getini("testpaths")
