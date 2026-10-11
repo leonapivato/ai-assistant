@@ -355,7 +355,11 @@ def pytest_configure(config: pytest.Config) -> None:
         pytest.UsageError: If the run is distributed under any mode but ``loadgroup``,
             or names a partition that is malformed or narrowed.
     """
-    suite_partition.configure(config, narrowed=not _collects_the_whole_suite(config))
+    suite_partition.configure(
+        config,
+        narrowed=not _collects_the_whole_suite(config),
+        handed_over_by=_EVIDENCE_FIXTURE,
+    )
     mode = str(config.getoption("dist", "no"))
     if not getattr(config.option, "tx", []) or mode == "no":
         return

@@ -22,6 +22,7 @@ in CI the live partition's own record of it.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -38,7 +39,7 @@ import suite_partition
 from suite_partition import EVIDENCE_INDEX, Partition, PartitionPlugin, Unit, assign
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 #: The repository root, from which a nested run reads this project's own
 #: ``pyproject.toml`` and ``tests/conftest.py``.
@@ -70,11 +71,16 @@ class _Item:
     path: Path = field(default_factory=lambda: _ROOT / "tests" / "test_elsewhere.py")
     cls: type | None = None
     groups: tuple[str, ...] = ()
+    fixturenames: tuple[str, ...] = ()
+    marks: tuple[str, ...] = ()
 
     def iter_markers(self, name: str | None = None) -> Iterator[pytest.Mark]:
-        if name != "xdist_group":
-            return iter(())
-        return iter(pytest.mark.xdist_group(group).mark for group in self.groups)
+        if name == "xdist_group":
+            return iter(pytest.mark.xdist_group(group).mark for group in self.groups)
+        return iter(getattr(pytest.mark, mark).mark for mark in self.marks if mark == name)
+
+    def get_closest_marker(self, name: str) -> pytest.Mark | None:
+        return next(self.iter_markers(name), None)
 
 
 def _items(count: int, *, prefix: str = "tests/test_x.py::test_") -> list[pytest.Item]:
@@ -232,7 +238,11 @@ def _collection() -> list[pytest.Item]:
     triad = [
         cast(
             "pytest.Item",
-            _Item(nodeid=f"tests/core/test_protocol_triad.py::test_{n}", path=_TRIAD_MODULE),
+            _Item(
+                nodeid=f"tests/core/test_protocol_triad.py::test_{n}",
+                path=_TRIAD_MODULE,
+                fixturenames=(conftest._EVIDENCE_FIXTURE,) if n < 2 else (),
+            ),
         )
         for n in range(5)
     ]
@@ -300,6 +310,126 @@ def test_each_job_records_the_same_collection_and_assignment(tmp_path: Path) -> 
     assert all(record["assignment"] == records[0]["assignment"] for record in records)
 
 
+def _kept_by(index: int, handed_over_by: str = "") -> tuple[PartitionPlugin, list[pytest.Item]]:
+    """Run one job's partition; return the plugin and the items it left to run."""
+    plugin = PartitionPlugin(Partition(index=index, count=3, manifest=None), handed_over_by)
+    items = _collection()
+    plugin.pytest_collection_modifyitems(
+        cast("pytest.Config", SimpleNamespace(hook=_Hooks())), items
+    )
+    return plugin, items
+
+
+def _finish(plugin: PartitionPlugin, remaining: list[pytest.Item]) -> None:
+    plugin.pytest_collection_finish(cast("pytest.Session", SimpleNamespace(items=remaining)))
+
+
+@pytest.mark.parametrize("index", [0, 1, 2])
+def test_an_item_removed_after_the_partition_kept_it_is_refused(index: int) -> None:
+    """§1:3, after collection: ``--sw`` with a cached position drops what precedes it.
+
+    No option says in advance that it will narrow the run, so the refusal at
+    configuration cannot see it. What is left to run is compared with the share.
+    """
+    plugin, kept = _kept_by(index, conftest._EVIDENCE_FIXTURE)
+    after_stepwise = kept[len(kept) // 2 :]
+
+    with pytest.raises(pytest.UsageError, match="ADR-0310 §1:3"):
+        _finish(plugin, after_stepwise)
+
+
+def test_the_triad_hand_over_is_the_one_removal_a_job_admits() -> None:
+    """ADR-0179 §3:3's hand-over removes the evidence-dependent checks on a worker."""
+    plugin, kept = _kept_by(EVIDENCE_INDEX, conftest._EVIDENCE_FIXTURE)
+    handed_over = [
+        item for item in kept if conftest._EVIDENCE_FIXTURE in getattr(item, "fixturenames", ())
+    ]
+    assert handed_over, "the synthetic evidence job must hold an item to hand over"
+
+    _finish(plugin, [item for item in kept if item not in handed_over])
+    _finish(plugin, kept)
+
+
+#: The browser layer's own audit, which reads ``request.session.items``.
+_LAYER_AUDIT_FILE = _ROOT / "tests" / "interfaces" / "gateway" / "test_browser_scheduling.py"
+
+
+def _layer_audit() -> Callable[[object], None]:
+    """The layer's marker audit, loaded from its own file so it is not restated here.
+
+    Under its own module name only where a whole run collected it; loaded afresh
+    otherwise, so this works in a run that never collected that module.
+    """
+    spec = importlib.util.spec_from_file_location("browser_layer_audit", _LAYER_AUDIT_FILE)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    audit = module.test_every_case_that_takes_the_browser_carries_both_of_the_layers_markers
+    return cast("Callable[[object], None]", audit)
+
+
+def _audit_over(items: list[pytest.Item]) -> None:
+    _layer_audit()(SimpleNamespace(session=SimpleNamespace(items=items)))
+
+
+def _layer_case(nodeid: str, *, marked: bool) -> pytest.Item:
+    return cast(
+        "pytest.Item",
+        _Item(
+            nodeid=nodeid,
+            fixturenames=("gateway_browser",),
+            groups=("gateway_browser",) if marked else (),
+            marks=("browser",) if marked else (),
+        ),
+    )
+
+
+def test_a_job_s_share_hides_a_stray_browser_case_that_the_whole_collection_shows() -> None:
+    """Why the audit is run over the partition's whole collection, and not only its share.
+
+    The layer's audit reads ``request.session.items``, which in a job of the
+    partition is that job's share. A case that takes the browser without the
+    layer's group lands wherever its node id hashes, and in a job that does not
+    run the audit it would start a second browser on a second worker unseen. Run
+    over the whole collection, the same audit sees it.
+    """
+    audit_item = cast("pytest.Item", _Item(nodeid="tests/test_scheduling.py::test_audit"))
+    layer = [_layer_case(f"tests/test_page.py::test_{n}", marked=True) for n in range(30)]
+    for n in range(100):  # the first unmarked case whose hash lands away from the audit
+        stray = _layer_case(f"tests/test_new_page.py::test_{n}", marked=False)
+        collection = [audit_item, *layer, stray]
+        placed = assign(suite_partition.units_of(collection, lambda _item: False), 3)
+        if placed[stray.nodeid] != placed[audit_item.nodeid]:
+            break
+    else:
+        pytest.fail("no unmarked case landed away from the audit in 100 tries")
+    plugin = PartitionPlugin(Partition(index=placed[audit_item.nodeid], count=3, manifest=None))
+    share = list(collection)
+    plugin.pytest_collection_modifyitems(
+        cast("pytest.Config", SimpleNamespace(hook=_Hooks())), share
+    )
+
+    _audit_over(share)
+    with pytest.raises(AssertionError):
+        _audit_over(plugin.collection)
+
+
+def test_the_layer_audit_holds_over_the_whole_collection_in_every_job(
+    request: pytest.FixtureRequest,
+) -> None:
+    """ADR-0216 §3's one browser per run, audited over the suite in a partitioned run.
+
+    Where the partition is live, the whole collection is the one it recorded before
+    it kept this job's share. In an ordinary run it is this session's own, which
+    the audit's own test also reads, so there this repeats it.
+    """
+    live = request.config.pluginmanager.get_plugin(suite_partition.PLUGIN_NAME)
+    whole = live.collection if isinstance(live, PartitionPlugin) else request.session.items
+
+    _audit_over(whole)
+
+
 # ---------------------------------------------------------------------------
 # What a run names, and what the triad makes of it
 # ---------------------------------------------------------------------------
@@ -343,7 +473,9 @@ def test_an_ordinary_run_names_no_partition_and_registers_nothing() -> None:
     """A local run without the options is untouched: no plugin, whole for the triad."""
     config = _Config()
 
-    suite_partition.configure(cast("pytest.Config", config), narrowed=False)
+    suite_partition.configure(
+        cast("pytest.Config", config), narrowed=False, handed_over_by=conftest._EVIDENCE_FIXTURE
+    )
 
     assert suite_partition.partition_of(cast("pytest.Config", config)) is None
     assert config.registered == []
@@ -353,7 +485,7 @@ def test_an_ordinary_run_names_no_partition_and_registers_nothing() -> None:
 def test_a_partitioned_run_registers_the_plugin() -> None:
     config = _partitioned(1)
 
-    suite_partition.configure(config, narrowed=False)
+    suite_partition.configure(config, narrowed=False, handed_over_by=conftest._EVIDENCE_FIXTURE)
 
     assert cast("_Config", config).registered == [suite_partition.PLUGIN_NAME]
 
@@ -405,7 +537,11 @@ def test_a_partitioned_run_narrowed_any_other_way_is_refused(
     config = cast("pytest.Config", _Config(options, args=args))
 
     with pytest.raises(pytest.UsageError, match="ADR-0310"):
-        suite_partition.configure(config, narrowed=not conftest._collects_the_whole_suite(config))
+        suite_partition.configure(
+            config,
+            narrowed=not conftest._collects_the_whole_suite(config),
+            handed_over_by=conftest._EVIDENCE_FIXTURE,
+        )
 
 
 @pytest.fixture
