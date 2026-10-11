@@ -5,12 +5,15 @@
 - Scope: the phases after understanding ([#2723](https://github.com/leonapivato/ai-assistant/pull/2723)), milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)), the second of their four decisions: what a planning round is, the message and the report, episode notes, labels, what planning is given and may look up, the tidy-up call, when rounds run and end, and that planning always runs after understanding. ADR-0306 decided capabilities, authorizing and acting; the digesting decision and the cutover decision are the other two.
 - Dependency: [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), Accepted and merged at `bff6e259`; the story store, summaries, notes and views ADR-0300, ADR-0303, ADR-0304 and ADR-0305 decide, implemented at `5166d5bc`.
 - Authorization: the owner accepted proposal #2723 on 2026-10-11 and, the same day, ruled this decision's content in a pass over it. The dispatcher assigned 0307. This ADR is the proposal's §2 and §3 converted under `docs/proposals/README.md` → "When it is decided". Those rulings authorize ratifying it once its reviews are green, for as long as it settles only what they leave open.
-- **Changes `core`, so it is a contract-surface decision.** `core/protocols.py` gains a sibling of `ModelProvider` for a native tool-calling response; `EpisodeProcessingRecord` gains the rounds and the labels; ADR-0306's `ActivationEffect` gains the round it claims for; `ControllerStage` and `ControllerRule` gain members; six types are new. `EpisodeProcessingRecord` crosses the wire, so `PROTOCOL_VERSION` advances (§10).
+- **Changes `core`, so it is a contract-surface decision.** `core/protocols.py` gains a sibling of `ModelProvider` for a native tool-calling response, and `StoryStore.move` and `StoryStore.split` refuse a planning call whole where a named note is not held; `EpisodeProcessingRecord` gains the rounds and the labels, appended as the episode is extended; ADR-0306's `ActivationEffect` gains the round it claims for; `ControllerStage`, `ControllerRule` and `StoryRefusalReason` gain members; six types are new. `EpisodeProcessingRecord` crosses the wire, so `PROTOCOL_VERSION` advances (§10).
 - **Partially supersedes**, each for an activation the phases plan (§1:3), except where a scope below says otherwise:
   [ADR-0170](0170-a-reply-is-not-a-tool-the-turn-composes-its-answer-and-the-outcome-carries-it.md) (whole: the reply is planning's own text, and no compose stage runs);
   [ADR-0226](0226-the-planner-names-one-more-read-beside-its-plan-and-the-loop-services-it-into-the-supply.md), [ADR-0228](0228-a-serviced-read-may-revise-the-plan-once-and-the-turn-stops-looking-at-a-bound-or-a-deadline.md) and [ADR-0251](0251-an-attempt-investigates-in-bounded-rounds-over-typed-read-outcomes-and-keeps-a-reserve-to-answer-with.md) (each whole: planning's rounds replace the turn loop's read rounds);
   [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) (§4:1–§4:2's enums, in the additions alone; §4:6's loop guard, for the planning stage alone);
+  [ADR-0286](0286-an-episode-is-open-while-its-activation-runs-and-frozen-when-it-ends.md) (§3:3's admitted differences, in the additions alone; §3:8's *no field is added for a stage's result*, for planning's rounds and labels alone);
   [ADR-0293](0293-the-hubs-chat-is-a-hosted-medium-and-a-conversation-keeps-its-own-transcript.md) (§6:14 and §11:6, each whole; §6:10, §6:11 and §10:4, until the timers and proactivity milestone);
+  [ADR-0303](0303-a-storys-page-is-free-notes-rewritten-whole-and-the-place-window-links-each-item-to-its-activation.md) (§6:2's *passed over*, for a split or move whose actor is planning);
+  [ADR-0304](0304-a-storys-page-is-its-summary-shown-where-owner-records-are-a-lookalike-is-not-read-and-a-story-is-a-referent.md) (§9:3's and §9:5's treatment of a named note the story does not hold, for a move whose actor is planning);
   [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md) (§6:1's `ActivationEffect`, in the addition alone).
 
 ## Context
@@ -67,6 +70,10 @@ once every call of the last one has finished and something calls for it.
 
 > **Normative.** Each round is one controller step. It is recorded in the episode, never
 > edited, and names the round it follows. Claims point at it by id.
+
+> **Normative.** A round is recorded once the episode writer's append of it has returned
+> (ADR-0286 §3:1). An append that fails is a capture failure under ADR-0286 §5, and holds
+> back neither the round's message nor its calls (ADR-0286 §3:7).
 
 > **Normative.** A round's calls run in parallel. A call that needs another call's result
 > or success goes in a later round, and no call refers to another's output.
@@ -144,8 +151,14 @@ once every call of the last one has finished and something calls for it.
 > planning has been shown.
 
 > **Normative.** A call naming a label planning was never shown, or naming a note the
-> story it moves from does not hold, is refused whole, with the reason, before it is
-> authorized, and runs nothing. A refused call brings a round.
+> story it moves from does not hold, is refused whole, with the reason, and runs nothing.
+> A refused call brings a round.
+
+> **Normative.** The hub refuses such a call before it is authorized, against what it
+> was shown and the stories as they stand then; and the story store refuses a split or a
+> move whose actor is planning, inside its transaction, where a note it names is not held
+> by the story moved from when it runs, so a note moved away meanwhile, by another call of
+> the round or by the matters pass, still refuses the whole call.
 
 > **Normative.** This is how planning names the notes a move or a split carries (ADR-0303
 > §9:4).
@@ -246,9 +259,11 @@ once every call of the last one has finished and something calls for it.
 | `PlanningRound` | New frozen record: its `id`; `follows`, the round before it or `None`; `recorded_at`; the four parts of its `RoundResponse`; and `notes_marked: bool` |
 | `PlanningLabel`, `LabelKind` | New frozen record: `label`, `kind: LabelKind` and the `id` it names; and a new closed enumeration: `story`, `episode`, `note`, `memory`, `result` |
 | `EpisodeProcessingRecord` | Gains `rounds: tuple[PlanningRound, ...]` and `labels: tuple[PlanningLabel, ...]`, both empty by default; `schema_version` advances by one |
-| `EpisodicMemory.outcome` | Holds the activation's messages in the order written, joined by a blank line, or `None` where it wrote none (ADR-0284 §4:1) |
+| `core: episode_extends` | Also admits entries appended at the end of `rounds` and of `labels`, every earlier entry unchanged (ADR-0286 §3:2–§3:3) |
+| `EpisodicMemory.outcome` | Set once, in the revision that freezes the episode, to the activation's messages in the order written, joined by a blank line, or left `None` where it wrote none (ADR-0284 §4:1, ADR-0286 §3:3) |
 | `ActivationEffect` (ADR-0306 §6) | Gains `round: DurableIdentifier \| None`, the round whose call or message it claims, `None` only on the *couldn't finish* message |
 | `ControllerStage`, `ControllerRule` | Gain `planning`; and `first_round_due`, `round_due` and `round_limit_reached`, answering as §8 states |
+| `StoryStore.move`, `StoryStore.split`, `StoryRefusalReason` | Where `actor` is `planning`, a named note the story moved from does not hold refuses the whole operation `note_not_held`, writing nothing (§5:4); `StoryRefusalReason` gains `note_not_held`. No signature changes |
 | `core/episode_encoding.py: project_episode` | Renders an episode's round messages and episode notes, under the reader's audience (§6:4) |
 | `ModelProvider`, `Message` | Unchanged |
 | Planning's story view | Assembled in `orchestration` from `StorySummaryState`, `ShortView`, `StoryStanding` and the version log; no `core` type |
@@ -256,7 +271,9 @@ once every call of the last one has finished and something calls for it.
 
 > **Normative.** The Protocol and the new types the table names land as one Protocol triad,
 > with the conformance suite and the canonical fake, in the lane that builds the planning
-> round; `ActivationEffect.round` lands with ADR-0306 §6:1's triad.
+> round; `ActivationEffect.round` lands with ADR-0306 §6:1's triad; and the `StoryStore`
+> refusal lands with its conformance coverage and the canonical fake's in the lane that
+> builds planning's story calls.
 
 > **Normative.** Where the planning rule rows sit in the table the controller is switched
 > to is the cutover decision's; their members and what each answers are §8's.
@@ -274,18 +291,19 @@ once every call of the last one has finished and something calls for it.
 | ADR-0280 §4:1–§4:2 | The enums gain the members §10 names, in the additions alone |
 | ADR-0280 §4:6 | The loop guard, for the planning stage alone: it runs once per round, bounded by the round limit and ended by a round with no calls (§8), as §4:6 foresaw |
 | ADR-0284 §4:1 | Nothing: `outcome` is still the text the activation sent back, its several messages joined |
+| ADR-0286 §3:3, §3:8 | §3:3's admitted differences gain entries appended at the end of `rounds` and `labels`, in the additions alone; §3:8's *no field is added for a stage's result*, for planning's rounds and labels alone. `outcome` takes its value once, as §3:3 already admits |
 | ADR-0292 §12:2 | Nothing: the tidy-up is planning's choice as written (§7) |
 | ADR-0293 §6:10, §6:11, §10:4 | Until the timers and proactivity milestone: a message goes only into the input's place, no activation whose place takes no message writes one, and the assistant starts no conversation |
 | ADR-0293 §6:14 | Whole: questions and answers are ordinary messages (§3:6) |
 | ADR-0293 §9:1 | Nothing: §3:7 writes it also where the round limit or a deadline ends the activation after earlier messages |
 | ADR-0293 §11:6 | Whole: its condition never holds now that question messages are dropped; `answer` retires as the cutover decision decides |
 | ADR-0300 §10; ADR-0303 §5:1, §8:9, §9:4 | Nothing: §4 gives episodes the notes, and §5 the labels, these clauses wait for |
-| ADR-0303 §6:2; ADR-0304 §9:3, §9:5 | Nothing: a planning call naming a note the story does not hold is refused before it reaches the store (§5:3) |
+| ADR-0303 §6:2; ADR-0304 §9:3, §9:5 | For a split or move whose actor is planning, a named note the story does not hold refuses the whole operation instead of being passed over (§5:4); for every other actor they stand |
 | ADR-0306 §6:1 | `ActivationEffect` gains `round`, in the addition alone |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in
-> a dated header note of ADR-0170, ADR-0226, ADR-0228, ADR-0251, ADR-0280, ADR-0293 and
-> ADR-0306, atomically with this ADR under ADR-0070 and ADR-0082, preserving their
+> a dated header note of ADR-0170, ADR-0226, ADR-0228, ADR-0251, ADR-0280, ADR-0286,
+> ADR-0293, ADR-0303, ADR-0304 and ADR-0306, atomically with this ADR under ADR-0070 and ADR-0082, preserving their
 > ratified bodies. The replacements take effect on this ADR's ratification.
 
 ## Consequences

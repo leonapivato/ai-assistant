@@ -1,6 +1,6 @@
 # 286. An episode is open while its activation runs, and frozen when it ends
 
-- Status: Partially superseded by ADR-0287 (§2:2's, §3:5's, §4:4's and §5:3's archive members; §8:1's discard) and ADR-0293 (§4:4's and §7:3's deletion of the episode where `record_turn` returns `None`)
+- Status: Partially superseded by ADR-0287 (§2:2's, §3:5's, §4:4's and §5:3's archive members; §8:1's discard) and ADR-0293 (§4:4's and §7:3's deletion of the episode where `record_turn` returns `None`) and ADR-0307 (§3:3's admitted differences, in the additions alone; §3:8's *no field is added for a stage's result*, for planning's rounds and labels alone)
 - Date: 2026-10-03
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); step 3a of the plan recorded there on 2026-10-03, the open episode, behind the cutover that steps 2 and 3 share.
 - Dependency: ADR-0284 and ADR-0285, implemented at `6b41b305`.
@@ -36,6 +36,14 @@
 - **Partially supersedes** [ADR-0281](0281-recall-runs-before-understanding-and-understanding-reads-what-it-found.md) — **one scope.** **§6:4's *written once, at capture***: the recall result is written when the recall stage ends (§3 below). Every other clause stands.
 - **Partially supersedes** [ADR-0283](0283-a-channels-history-is-its-episodes-and-the-turn-index-is-retired.md) — **three scopes.** **§1:3's *written with the record and never changed***: an episode whose channel is absent gains it by a later write, and its columns are written then; once written they never change (§3, §12 below). **§7:1's sequence**: the episode is inserted at admission, and the archive entry and `record_turn` follow the write that freezes it (§4 below). **§7:3 and §7:4, in what the writer does to the episode**: after a capture failure it deletes the episode whatever the conversation's state (§5 below). Every other clause stands, §7:2's verification included.
 - **Partially supersedes** [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md) — **five scopes.** **§5:5's validator, for an open record**: it carries no end entry (§1 below). **§6:2's last sentence, for an open episode**: the store passes over it on the reads that feed models, before any reader sees it (§6 below). **§7:1's *the writer sets every processing-record episode's `content` from it*, in when**: at freeze, and an open episode's `content` is empty (§1, §4 below). **§7:4's pass, for an open episode**: the pass leaves it. **§9:1's values**: `schema_version` is `Literal[6]` and the format 7 (§13 below). Every other clause stands.
+- Partially superseded: 2026-10-11 by ADR-0307 — two scopes. §3:3's admitted differences,
+  in the additions alone: a revision may also differ by entries appended at the end of
+  `rounds` and of `labels`, every earlier entry unchanged, and `episode_extends` admits
+  them. §3:8's *no field is added for a stage's result*, for planning's rounds and labels
+  alone (ADR-0307 §2:4, §10). Every other clause stands. These scoped replacements take
+  effect on ratification of ADR-0307. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
+  below are preserved.
 
 ## Context
 
