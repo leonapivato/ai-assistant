@@ -137,7 +137,7 @@ optimisation a kind's push filter (ADR-0292 §6) or a cheaper model can make lat
 | **Its text** | The message, written into the place the input came from. Planning writes the words itself; no compose step follows it. Replies arrive whole, with no streaming for now. |
 | **Its tool calls** | What to do: searches, forecasts, bookings, emails, notes on a story, remembering something. Calls in one response run in parallel. |
 | **Episode notes** | Notes on this activation, kept with the round in its episode and read wherever the episode is read. Writing them is optional; most activations leave none. |
-| **Another round needed** | A mark that a later step depends on this round's calls, so planning must run again once they finish. |
+| **Another round needed** | A mark that planning must run again once this round's calls finish: a later step depends on them, or you will want to hear how one went. |
 
 There are no kinds of step. What a call does is declared by its **capability** (section 5),
 and every rule reads that declaration.
@@ -167,10 +167,10 @@ and every rule reads that declaration.
   its outcome is recorded in the story's version log, not the episode, so the activation
   can end while it runs (ADR-0300 §10). That is ADR-0292 §12:2 as written: planning
   chooses it.
-- **Planning names things by label.** Stories are S1, S2 and so on, episodes E1, E2 and
-  notes N1, N2, the letters understanding and the matters pass use. Each thing gets its
-  label the first time planning is shown it, from any source, its own story reads and the
-  notes it writes included, and keeps it for the whole activation. The hub maps labels to
+- **Planning names things by label.** Stories are S1, S2 and so on, episodes E1, E2,
+  notes N1, N2 and memories M1, M2, the letters understanding and the matters pass use.
+  Each thing gets its label the first time planning is shown it, from any source, its own
+  story reads and the notes it writes included, and keeps it for the whole activation. The hub maps labels to
   ids, so planning never handles an id, and "any story by id" (ADR-0300 §10) is any story
   planning has been shown. A call naming a label planning was never shown, or a note the
   story it moves from does not hold, is refused whole, with the reason; a refused call
@@ -204,13 +204,17 @@ context facet becomes a pull, ADR-0292 §13).
 
 **Rounds** run one per stage, with a round limit, an end when no progress is made and the
 deadlines; the numbers are [#2589](https://github.com/leonapivato/ai-assistant/issues/2589)'s.
-**A new round runs when**:
+**Once every call of a round has finished**, digests included, **a new round runs when**:
 
-- a result arrives (after digesting, where it carries outside text);
-- a call fails or comes back unknown, whatever the call;
-- the round marked that it needs another round, once its calls finish. Planning marks it
-  when a later step depends on this round's calls, or to report how a call in the world
-  went; a mark on a round with no calls waits for nothing, and the no-progress rule ends it.
+- a call brought a result (digested, where it carries outside text);
+- a call failed or came back unknown, whatever the call;
+- the round marked that it needs another round. Planning marks it when a later step depends
+  on this round's calls, or to report how a call in the world went; a mark on a round with
+  no calls waits for nothing, and the no-progress rule ends it.
+
+Each digest starts as soon as its result arrives, so the wait is the slowest call and its
+digest. A call's deadline bounds the wait: a call past it comes back not done, or unknown
+where its outcome can be unknown.
 
 Otherwise the activation ends after the round: a note, a memory, a link, or an effect in
 the world that succeeded with nothing to follow brings no round. When a round runs because
@@ -274,10 +278,11 @@ only once declared:
 - **Each message is recorded** with the activation that wrote it and its position in the
   place, in acting's effect record, so the place window links it to that activation
   (ADR-0303 §7).
-- **The duplicate backstop.** A call with the same capability and values as an effect of
-  the episodes in this activation's stories, or of this activation alone when it has none,
-  is refused as *already done* unless planning marks it a deliberate repeat. It is ADR-0259
-  and ADR-0265's effect key, scoped by the stories' episodes instead of the goal.
+- **The duplicate backstop.** A call to a capability not safe to repeat, with the same
+  capability and values as an effect of the episodes in this activation's stories, or of
+  this activation alone when it has none, is refused as *already done* unless planning marks
+  it a deliberate repeat. It is ADR-0259 and ADR-0265's effect key, scoped by the stories'
+  episodes instead of the goal.
 - **Who wrote the text decides digesting, record by record.** For a web search that is all
   of it; for a memory search, only the records whose stored source is outside.
 - **The assistant's own records** are the story calls ADR-0300 §10 and ADR-0303 §9 declare,
@@ -408,6 +413,10 @@ To be confirmed clause by clause when each section becomes its ADR:
   wrote the text: shape mislabels your own free-text notes and an invite's outside title.
 - **Every round after calls bringing another round.** A round that only writes a note would
   bring a second planning call with nothing to plan from, and risk a second message.
+- **A round on each result as it arrives.** Rejected: planning would plan from half the
+  picture and might call again for what is still running, it costs a round per result, and
+  rounds would overlap running calls, which is the concurrency milestone's. A round after a
+  wait limit, with what has arrived, can come later without changing a round's shape.
 - **The hub holding a round's message until its calls in the world finish**, so the text
   could say "booked". Rejected: planning marking another round reports the outcome with no
   new rule.
