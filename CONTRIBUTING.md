@@ -34,7 +34,7 @@ hooks directory pointed at whichever worktree installed last.)
 
 ## The gate (Definition of Done)
 
-A change is done only when all of these pass locally:
+A change is done only when all of these pass:
 
 ```bash
 uv run ruff format .        # format
@@ -47,105 +47,44 @@ uv run pytest               # tests
 `just check` runs the same five, with `ruff format --check` in place of the
 rewrite. `pre-commit` runs the fast subset on every commit; CI runs the full gate
 on every pull request and push to `main` (`.github/workflows/gate.yml`,
-ADR-0010), and it is the backstop rather than the first line of defence.
+ADR-0010), and that run is the full gate a branch owes (ADR-0311).
 
-### When the full gate is owed, and when it is not (ADR-0136, ADR-0166)
+### When the full gate is owed, and when it is not (ADR-0311)
 
-The five steps are not one price. The four static ones cost about two seconds
-between them; `pytest` costs five to eight minutes serially against ~18,100
-tests, or about a minute and a half across cores. ADR-0136 splits the cadence
-accordingly and governs it, and ADR-0166 lets the parallel run stand in for the
-serial one at the anchors — what follows is operational, and where the two read
-differently the ADRs win.
+**No local whole-suite run is owed** — not before review, not before `just
+ready`, not after a rebase. The full gate is CI's `gate` on the pushed head
+(ADR-0311 §1). The whole suite, serial or `just test-fast`, stays available and
+is never wrong.
 
-**The full gate runs and passes at two anchors on a branch, and neither is at
-your discretion:** immediately before the **first review invocation** on that
-branch, and on the **tree of the final push**, passing before `just ready`
-(ADR-0180 §1). The closing anchor binds that tree rather than an ordering against
-the push, so you may push first and run it while CI runs — provided the tree is
-byte for byte the pushed head's, you do not modify it while the run is out, and
-you take the format step in `just check`'s non-rewriting form so the gate cannot
-move the tree off the pushed head itself.
-Each anchor is a run on the tree it names, so a green run on an earlier tree does
-not discharge it, and an anchor admits no docs-only exemption.
+**Before the first review invocation, run the tests for what the change
+touches** on the tree to be reviewed, and have them pass (ADR-0311 §2). Which
+tests is your call; no justification is owed and no reviewer may require a
+particular selection. It is owed once per branch: a later review or a rebase
+does not re-open it. "What it touches" includes tests that read a changed file —
+`tests/scripts/` for `scripts/`, `tests/scripts/test_adr_citations_corpus.py`
+for `docs/adr/`.
 
-**A rebase that moves your base re-opens the obligation, twice over.** Run the
-full gate again, and have it pass, before the **next review invocation** on the
-branch if one follows — and again before the rebased head is **pushed for
-merge**, whether or not `gh pr ready` has already happened, and however many
-times you rebase. They are two obligations rather than one because a rebase can
-be followed by a review, by a merge push, by both, or by neither. What a rebase
-brings into your branch is other lanes' merged code, and its interaction with
-yours is precisely the cross-subsystem regression a selected run misses.
+**Before every commit, the four static steps run and pass** (ADR-0311 §3).
+`pytest` at any other point is yours to choose: the whole suite,
+`just test-fast`, a selection, or none.
 
-**Between the anchors, the four static steps stay mandatory before every
-commit.** They are the cheap half, and `mypy` and `lint-imports` catch exactly
-the class of breakage a *selected* test run would not.
+**The PR leaves draft only on a green `gate` on its head** (ADR-0311 §4), and
+`just ready` refuses otherwise. A red push on a draft is information, not a
+defect. A push after the PR is ready, such as a rebase, owes no local run and no
+wait on `gate`: the merger reads that run.
 
-**Between the anchors, `pytest` is yours to choose** — the whole suite,
-`just test-fast`, a scoped selection, `--lf`, or no run at all. No justification
-is owed for the choice, and no reviewer may require a particular one. A diff
-touching no file under `src/` or `tests/` owes no `pytest` run between the
-anchors at all.
+`just test-fast` is the suite across cores; it deselects nothing (ADR-0179).
+It runs **at most three suites per user at once** (`TEST_FAST_SLOTS` changes the
+number): a fourth waits for a slot rather than contending for memory — a run
+holds 3–5 GB, and four at once has crashed the WSL VM. Prefer the serial run for
+a change that is order-dependent, shares state through a fixture, or is
+timing-sensitive.
 
-`just test-fast` is the recipe for that discretion: the suite distributed across
-cores, about a minute and a half against the serial five to eight. **It also
-satisfies either anchor** (ADR-0166). So an anchor is the four static steps plus
-*either* `uv run pytest` or a bare `just test-fast` — `just check` runs the serial
-form of it — and the choice is yours at each anchor independently, with no
-justification owed and no reviewer entitled to require a particular one. It
-runs **at most three suites per user at once** (`TEST_FAST_SLOTS` changes the
-number; the machine is single-user, ADR-0099 §1): a fourth `just test-fast`
-from another clone waits for a slot (it says so on stderr) rather than
-contending for cores and memory — a run holds 3–5 GB, and four at once has
-crashed the WSL VM.
-
-**What discharges an anchor is a run that collected the whole suite and executed
-it to a passing result** — not a command name. Anything that leaves it short
-leaves you with a scoped selection instead, whatever caused it and wherever it
-came from: a filtering option (`-k`, `-m`, `--lf`, `--ff`, `--deselect`,
-`--ignore`, `--ignore-glob`, a path or nodeid), an early stop (`-x`,
-`--maxfail`), or a collect-only mode — passed as a recipe argument, since
-`test-fast` forwards them, or sitting in `PYTEST_ADDOPTS` in your environment,
-which narrows `just check` exactly as readily (issue #1243). `-n 4` and `-q`
-change nothing that matters. **Read your own summary line** — the counts are the
-check. What ADR-0166 bought is a second *complete* run, not a licence to select.
-
-**What you give up by choosing it, and when not to.** Nothing is deselected. It
-used to leave out `tests/core/test_protocol_triad.py` — 31 tests, and the
-mechanical enforcement of the Protocol triad rule ("Adding a Protocol", below) —
-because that check reads pytest's own record of what the session ran and under
-`-n auto` no worker sees the whole session. Since ADR-0179 the workers' records
-are merged on the controller and the check is decided there, over strictly more
-evidence than any one process holds and reaching the verdict a serial run reaches;
-CI's `pytest` step is distributed on the same ground (ADR-0010, amended
-2026-08-22). **Choose the serial run when the change is order-dependent, shares
-state through a fixture, or is timing-sensitive.** That is guidance, not a rule:
-the discretion in the paragraph above is flat.
-
-**A red push between the anchors is acceptable.** The draft PR is opened early so
-that CI gates every push, and a rule that no push may ever be red is in tension
-with that. A red `gate` on a draft mid-loop is information, not a defect in
-conduct, and is not on its own grounds for a finding, a report or an escalation.
-**A red *final* push is not acceptable** — it is the failure the closing anchor
-exists to prevent, and a branch is not flipped out of draft on a tree whose full
-gate has not been run and passed locally.
-
-This section used to say "run the whole suite, always", on the stated ground that
-the gate was ~33s over 5,777 tests, and it named its own expiry: "revisit if
-`pytest` ever crosses a couple of minutes". It has, by an order of magnitude, and
-ADR-0136 is that revisit. The breadth argument stands as written — a
-cross-subsystem regression is what a selected run misses and `lint-imports`
-cannot see — but it is an argument about *some* tree being fully tested, and the
-anchors put it on the trees anyone acts on. Nobody merges round 7.
-
-**Run it against a current `main`.** A green gate is evidence about the tree you
+**Run it against a current `main`.** A green run is evidence about the tree you
 ran it on, so `git fetch origin && git rebase origin/main` comes first —
-otherwise you have tested a base nobody will merge. This is not the same
-judgment call as the breadth one above, and it survives ADR-0136 whole: what the
-anchors ration is *breadth*, and this is about *freshness*. A branch that
-predates a check added to `main` runs a full suite that cannot fail on it, which
-is how a change has been reported green while CI had it red. The same staleness
+otherwise you have tested a base nobody will merge. This is about *freshness*,
+and ADR-0311 leaves it standing (§7). A branch that predates a check added to
+`main` runs tests that cannot fail on it, which is how a change has been reported green while CI had it red. The same staleness
 misleads Codex, which reads the working tree for context and will report other
 branches' merged work as regressions in yours — so rebase before you *invoke* a
 review as well. The reviewer itself stays read-only (`docs/review/guide.md`);
@@ -158,12 +97,11 @@ merging a slice branch — **after** the gate is green — put the change throug
 adversarial review. Claude writes the code; **Codex reviews it**, so every change
 is judged by a model independent of the one that produced it.
 
-"After the gate is green" is the first anchor above, and after a rebase it is the
-rebase clause; between the anchors a later review invocation does not on its own
-re-open one, so the tree a mid-loop review reads may be one whose tests were not
-run. That is ADR-0136 §1, deliberately: the reviewer runs no tests and may not
-report what `pytest` catches, so what it needs green is `ruff` and `mypy`, which
-stay mandatory before every commit.
+"After the gate is green" means the tests for what the change touches, run once
+before the first review (ADR-0311 §2), so the tree a later review reads may be
+one whose tests were not run. The reviewer runs no tests and may not report what
+`pytest` catches, so what it needs green is `ruff` and `mypy`, which run before
+every commit.
 
 Two reviewers, defined by shared rubrics in `docs/review/`:
 
@@ -317,7 +255,7 @@ the work:
 
 ```bash
 just ship        # posts the recorded review(s) to the PR
-just ready       # flip it out of draft — refuses on an unratified ADR
+just ready       # flip it out of draft — refuses on an unratified ADR or a non-green gate
 ```
 
 **An agent does not ask permission for any of this** — not to run the review,
@@ -377,7 +315,9 @@ refuses to leave draft while an ADR this PR adds or modifies still reads
 ready` directly is not stopped by it — that command is GitHub's, not this
 repository's — which is an accepted limit rather than one engineered around: both
 of #1044's occurrences were lanes following the documented sequence and skipping
-a step of it.
+a step of it. It also refuses unless `gate` is green on the PR head, waiting up
+to nine minutes on a pending run and naming the state it saw (ADR-0311 §4).
+`just ship` is not held for `gate`; `just ready` is.
 
 **Before pushing a rebase, ask `ship` which path applies rather than working it
 out** — `scripts/ship.sh --drill` (`just drill`) runs this same acceptance rule
@@ -837,12 +777,11 @@ content, and a linear history where each commit keeps its `Refs:` trailer.
   fires on the transition itself (ADR-0015); it is the signal to the dispatcher
   that the lane is done and ready to be verified and merged. What `just ready`
   adds runs *before* it: ADR-0165 §5's refusal on an ADR still standing
-  `Proposed`.
+  `Proposed`, and ADR-0311 §4's refusal unless `gate` is green on the head.
 - **CI gates the PR.** The `gate` workflow runs the full Definition-of-Done gate
   on every PR and push; a PR cannot merge while it is red. This is enforced for
-  everyone. Run the full gate locally at ADR-0136's two anchors anyway — CI is
-  the backstop, not the substitute, and a red check on the *final* push is the
-  one the closing anchor exists to prevent.
+  everyone. It is the full gate: no local whole-suite run is owed, and a PR
+  leaves draft only once `gate` is green on its head (ADR-0311).
 - **`gate` is the only required check; no approving review is required.** Branch
   protection asks for zero approvals (ADR-0167 §4), because there is no second
   author to ask — so the Codex review reported by `just ship` (see "Review") is
@@ -1090,10 +1029,10 @@ it is discussed, and the three ways it ends.
   applies unchanged. The proposal file does not survive the conversion.
 - **Declined or parked means closed unmerged**, with the ruling in the closing
   comment and, for a parked one, the issue that holds it.
-- **Neither ADR-0136 anchor arrives while it is a draft proposal.** No review
-  is invoked on it and it is never flipped out of draft as a proposal, so no
-  review round and no full-gate run is owed until conversion — not as an
-  exemption, but because the events that oblige them have not happened.
+- **Nothing the gate owes arrives while it is a draft proposal.** No review is
+  invoked on it and it is never flipped out of draft as a proposal, so no review
+  round and no ADR-0311 §2 run is owed until conversion — not as an exemption,
+  but because the events that oblige them have not happened.
 
 The reasoning is in the README: proposals kept as wiki pages drifted from the
 issues recording the same design, and an issue thread cannot show a rendered,

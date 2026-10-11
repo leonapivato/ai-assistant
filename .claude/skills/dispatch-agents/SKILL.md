@@ -116,10 +116,11 @@ An under-specified brief is the largest source of rework. Each one carries:
   order it sits and why** (§5). A lane told it merges last plans for the rebase
   instead of reporting as though it were finished; a lane told it holds a path the rest of
   the wave binds across knows its own merge is the expensive one.
-- **The finishing loop** — full gate, `just review-codex`, triage, `just ship`,
-  `just ready` — and that the agent owns all of it without asking. Name `just
-  ready` rather than bare `gh pr ready`: it is the recipe carrying ADR-0165 §5's
-  refusal on an ADR the PR still leaves standing `Proposed` (issue #1044).
+- **The finishing loop** — the tests for what it touches, `just review-codex`,
+  triage, `just ship`, `just ready` — and that the agent owns all of it without
+  asking. Name `just ready` rather than bare `gh pr ready`: it is the recipe
+  carrying ADR-0165 §5's refusal on an ADR the PR still leaves standing
+  `Proposed` (issue #1044), and ADR-0311 §4's refusal unless `gate` is green.
 - **The diagnosis checkpoint, and that its adjudication exit comes to you.**
   ADR-0243 §§1–6: at the **fourth** substantively reviewed tree under a holder —
   ordinarily well before ADR-0138 §1's seventh round, though §5 does not guarantee
@@ -200,12 +201,11 @@ the fence you wrote and against `gh pr diff <n> --name-only`. Reading the diff a
 judging whether it "looks in scope" is the version of this check that has been
 wrong; two lists disagreeing is not.
 
-**Spend your attention on the right fields.** The gate's pytest line and the
-worker's own `gh pr checks` paste are provenance — `gh pr checks` above supersedes
-them, and the pytest line matters only as evidence the closing anchor ran
-locally on the tree the PR head carries, which CI cannot show. A lane no longer
-waits on `gate` before flipping ready (ADR-0180 §2), so `pending` in its paste is
-a complete answer and the sequence below is what settles it. The fields that carry weight are the file list,
+**Spend your attention on the right fields.** The worker's `gate` green is
+provenance — `gh pr checks` above supersedes it. A finishing report comes after
+`just ready`, which refuses unless `gate` is green on the head (ADR-0311 §4); a
+push after that, such as a rebase, waits on nothing, and the sequence below
+settles it. The fields that carry weight are the file list,
 the `ship:$sha` tag, the artifact verdict, the issue numbers, and what the worker
 says it did not do.
 
@@ -394,7 +394,7 @@ refusing looks like "run a review," and a lane left to its own judgement will bu
 a round it did not owe.
 
 So say which, and say it from your own reading of the base move rather than
-leaving it open. Where you expect §2 to cover it: rebase, re-gate, re-`ship`, run
+leaving it open. Where you expect §2 to cover it: rebase, push, re-`ship`, run
 **no** review. `worker.md` holds the drill that checks this *before* the push, and
 splits the two outcomes — a refusal the lane's own verification **predicted** is a
 real round, reported with its figures for you to authorise; a refusal that

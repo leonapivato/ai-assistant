@@ -125,35 +125,19 @@ uv run pytest           # tests
 ```
 
 All five pass, or the change is not done — `just check` runs the same five, with
-the formatting checked rather than rewritten. **When you owe all five is ADR-0136:**
-the full gate runs and passes at two anchors on a branch — immediately before the
-**first review invocation**, and on the **tree of the final push**, passing before
-`just ready` (ADR-0180) — each on the tree it names, neither at your discretion
-and neither admitting a docs-only exemption. A rebase that moves your base re-opens
-the obligation.
+the formatting checked rather than rewritten. **The full gate is CI's `gate`**
+(ADR-0311): no local whole-suite run is owed, before review, before ready or
+after a rebase. What you owe instead:
 
-**The anchor's `pytest` step is the serial suite *or* a bare `just test-fast`**
-(the suite across cores, about a minute — ADR-0166), your call at each anchor, no
-justification owed. What discharges an anchor is a run that **collected the whole
-suite and executed it to a passing result**, so anything leaving it short — a
-filtering option, an early stop, a collect-only mode, passed as a recipe argument
-or sitting in `PYTEST_ADDOPTS` — makes it a scoped selection instead; read the
-summary line. `just test-fast` deselects nothing (ADR-0179): the Protocol-triad
-check is answered there too — decided on the controller from every worker's
-record — and CI's `pytest` step is distributed on the same ground.
+- **Before the first review**, the tests for what your change touches — your
+  call which, once per branch (ADR-0311 §2).
+- **Before every commit**, the four static steps (ADR-0311 §3).
+- **Before the PR leaves draft**, a green `gate` on its head; `just ready`
+  refuses otherwise (ADR-0311 §4).
 
-**Between the anchors, the four static steps stay mandatory before every commit**
-— they cost about two seconds, and they catch what a *selected* test run would
-miss. `pytest` between the anchors is yours to choose: the whole suite,
-`just test-fast`, a scoped selection, or no run at all. A diff touching no file
-under `src/` or `tests/` owes no run between the anchors.
-
-**`CONTRIBUTING.md` → "When the full gate is owed, and when it is not" carries the
-rebase clauses and every condition; do not work them out from memory.** CI runs the
-full gate on every PR and push to `main` (ADR-0010) as the backstop, not the first
-line of defence — so a red push between the anchors is acceptable, and a red
-*final* push is not. `pre-commit` runs the fast subset on commit; `just setup`
-enables it once per clone.
+`CONTRIBUTING.md` → "When the full gate is owed, and when it is not" carries the
+rest. `pre-commit` runs the fast subset on commit; `just setup` enables it once
+per clone.
 
 ## Review (local only, ADR-0015)
 

@@ -98,9 +98,8 @@ jobs:
         # locally: the runner is a fresh VM with exactly one run on it.
         #
         # One job, not two. The serial suite is still what `uv run pytest` does
-        # on any machine, and ADR-0136 §1 lets a lane discharge either anchor
-        # with it, so a serial re-run in CI would buy a diagnosis a lane can
-        # already get in one command (ADR-0179 §3).
+        # on any machine, so a serial re-run in CI would buy a diagnosis a lane
+        # can already get in one command (ADR-0179 §3).
         env:
           GH_TOKEN: ${{ github.token }}
         run: uv run pytest -n auto --basetemp=/tmp/pt

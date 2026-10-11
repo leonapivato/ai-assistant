@@ -385,7 +385,7 @@ def classify_launch_refusal(refusal: BrowserError) -> NoReturn:
     that is not a browser launch (issue #1808). Every case of the layer needs the
     launch to have succeeded, so until this was lifted out it was the only line of
     the harness the suite could not execute -- and §6's skip is the clause that
-    decides whether a fresh clone's anchor is discharged or its gate is simply red.
+    decides whether a fresh clone's run passes or is simply red.
 
     It never returns: an absent build skips the layer, and anything else is re-raised.
 
@@ -452,9 +452,7 @@ async def gateway_browser() -> AsyncIterator[Browser]:
 
     **Absent build, skip** (§6): "Where the browser build the installed
     ``playwright`` pins is not present, the layer skips, with a message naming the
-    command that installs it. That skip is a condition the suite declares, in
-    ADR-0166 §1's sense, and an anchor discharged by a run carrying it is
-    discharged." Only that condition skips: a browser that is present and will not
+    command that installs it." Only that condition skips: a browser that is present and will not
     start -- a missing system library, a sandbox refusal -- is a failure and is
     reported as one. Which of the two a refusal is, is
     :func:`classify_launch_refusal`'s to say, and it is a named function rather than
