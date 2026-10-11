@@ -137,15 +137,20 @@ every part passed.**
 > two triad checks to the controller, no job deselects anything or narrows its run
 > by an option or environment variable.
 
+> **Normative.** Every test job's whole collection is the same set of node ids, and
+> the workflow checks it: `gate` fails where two test jobs' collections differ.
+
 > **Normative.** The number of test jobs is fixed in the workflow and chosen against
 > measurement. Changing it owes no ADR while this decision's other clauses hold.
 
 Taking each job's index and the job count from the matrix's own
 `strategy.job-index` and `strategy.job-total` makes the third clause hold by
-construction. An item whose node id differed between two collections of one tree
-could still fall between shares, but not silently: every job is distributed, and
-xdist refuses a session whose workers collected different items, so such an id
-would fail the job that collects it.
+construction. The fourth is the one the partition cannot give itself. An item
+whose node id differs between jobs, say one carrying the runner's hostname, could
+hash to another job in each and run in none. xdist compares collections only
+within one session, so it would not notice. A digest of each job's sorted node
+ids, compared in `gate`, does. It is a list of names and not triad evidence, so
+§2's last clause does not reach it.
 
 ### 2. The triad's evidence stays in one job
 
