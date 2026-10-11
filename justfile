@@ -39,10 +39,8 @@ imports:
 test *args:
     uv run pytest "$@"
 
-# The whole suite, distributed: ADR-0136 §2's fast gate for the rounds *between*
-# §1's two anchors, and — since ADR-0166 §1, where nothing narrowed what it
-# collected — the `pytest` step at either anchor as well. What discharges an
-# anchor is the run and not the command name, so read the summary line.
+# The whole suite, distributed. No local whole-suite run is owed (ADR-0311 §1);
+# this is for whoever wants one.
 #
 # It runs the whole suite. It used to deselect
 # `tests/core/test_protocol_triad.py`, because that check reads the run record
@@ -99,14 +97,11 @@ test *args:
 # It also reports when /tmp is low, so the 1700-failure run is diagnosed before it
 # happens rather than after.
 #
-# Only a run that COLLECTED THE WHOLE SUITE AND EXECUTED IT discharges an anchor:
-# the `*args` below reach pytest, as does a `PYTEST_ADDOPTS` in the environment
-# (issue #1243), and anything through either that narrows, stops early or only
-# collects makes this a scoped selection under ADR-0136 §2 however the recipe is
-# spelled (ADR-0166 §1).
+# The `*args` below reach pytest, so `just test-fast tests/scripts` runs a scoped
+# selection in parallel.
 #
 # Last line, because `just --list` shows only that one: what this recipe runs.
-# The suite in parallel — ADR-0136 §2's fast gate, and, unnarrowed, an anchor
+# The suite in parallel, or a selection of it
 test-fast *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -254,7 +249,7 @@ test-fast *args:
     # `tests/conftest.py`'s `pytest_configure`, which is where the clause is enforced
     # rather than merely arranged for.
     #
-    # It still changes only which worker runs a test, so ADR-0166 §1 is untouched.
+    # It still changes only which worker runs a test, never which tests run.
     if uv run pytest -n auto "$@" --basetemp="$tmp"; then
         rm -rf "$tmp" "$tmp.lease"
     else
@@ -328,14 +323,20 @@ adr-ratify *args:
 # same failure with one more step. `ship` carries that precondition already, and
 # in the documented order it has run by now anyway.
 #
+# It then refuses unless CI's `gate` is green on the PR's head commit (ADR-0311
+# §4), naming the state it saw. A pending or absent check is waited on for up to
+# nine minutes and never flipped on; still pending then, it says so — run it
+# again. The logic is `scripts/gate_check.py`, tested under `tests/scripts/`.
+#
 # Typing `gh pr ready` directly is not stopped by this: that command is GitHub's,
 # not this repository's. ADR-0165 §5 accepts that limit rather than engineering
 # around it, and names a required CI check as its Revisit condition.
 #
 # Last line, because `just --list` shows only that one: what this recipe does.
-# Flip the PR out of draft — refuses on an unratified ADR (ADR-0165 §5)
+# Flip the PR out of draft — refuses on an unratified ADR or a non-green gate
 ready:
     uv run python scripts/adr_ratify.py check-ready
+    uv run python scripts/gate_check.py
     gh pr ready
 
 # Advisory dependency vulnerability audit
