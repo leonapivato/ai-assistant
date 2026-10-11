@@ -217,6 +217,7 @@ if TYPE_CHECKING:
         NotificationDisposition,
         NotificationEnqueue,
         NotificationPreferences,
+        OfferedTool,
         ParkedBinding,
         ParkedRead,
         ParkedReadDisposition,
@@ -233,6 +234,7 @@ if TYPE_CHECKING:
         RecipientGrant,
         RecordChunk,
         RecordedInvocation,
+        RoundResponse,
         RoutedOperationRecord,
         SearchOutcome,
         SearchSupply,
@@ -782,6 +784,84 @@ class StreamingCompleter(Protocol):
                 argument reproduces identically on every attempt from every route
                 (ADR-0066 §3). Also raised, from the iteration, if a delta has no
                 UTF-8 encoding or the exchange with the provider fails, narrowed
+                to the most specific subclass.
+        """
+        ...
+
+
+@runtime_checkable
+class ToolCallingCompleter(Protocol):
+    """One planning round: a model response in the provider's native tool-calling shape.
+
+    A **sibling** of :class:`ModelProvider`, not a widening of it (ADR-0307 §10), on
+    the ground ADR-0143 §1 and ADR-0173 §5 established for :class:`BatchCompleter`
+    and :class:`StreamingCompleter`: a member on ``ModelProvider`` would assert of
+    every route a capability not every model offers, and would silently unsatisfy
+    every existing implementation of a ``@runtime_checkable`` Protocol. Nothing is
+    added to ``ModelProvider`` or ``Message``, this Protocol does not inherit from
+    either, and an object may implement both.
+
+    **One response, four parts** (ADR-0307 §2:1): its text, its calls, its episode
+    notes and a mark asking for another round. How the provider's native shape
+    carries the notes and the mark is the implementation's (§2:7); at this seam they
+    are parts of :class:`~ai_assistant.core.types.RoundResponse` and never calls.
+
+    **Each round is asked afresh** (§2:6). The conversation handed in is rendered
+    text, and no earlier tool exchange is replayed in the provider's native form, so
+    the seam takes ``Message`` values and represents no tool exchange: a
+    ``Role.TOOL`` turn is refused, as :meth:`StreamingCompleter.stream` refuses one.
+
+    **It proposes and runs nothing.** A returned call is what the model proposed, as
+    the provider returned it: nothing here runs it, checks it against its schema, or
+    promises that it names a tool that was offered. Judging the calls is the
+    caller's (ADR-0307 §5:3, §9:1).
+
+    How :meth:`respond` observes the conversation and the tools it is handed is
+    governed by this module's input-observation clause (ADR-0065): both are
+    caller-owned sequences and the call suspends between reading them and answering.
+    """
+
+    async def respond(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[OfferedTool],
+        *,
+        model: str | None = None,
+    ) -> RoundResponse:
+        """Produce one planning round's response to ``messages``, offering ``tools``.
+
+        ``messages`` is subject to :meth:`ModelProvider.complete`'s precondition
+        (ADR-0066 §1), read as that docstring states it: non-empty, not ending on a
+        ``Role.ASSISTANT`` turn, and, at this seam as at the streaming one, with no
+        ``Role.TOOL`` turn. ``tools`` may be empty, and its names are distinct.
+
+        **The response comes back whole or not at all.** Its ``text`` is the
+        concatenation of the text the model wrote, possibly empty; its ``calls`` are
+        every call the model proposed, in the order the provider returned them, each
+        with the provider's id, the name the model gave and its arguments as a JSON
+        object; ``notes`` is ``None`` where the model wrote none; and
+        ``another_round`` is ``False`` unless the model marked it.
+
+        Args:
+            messages: The round's rendered request, oldest first. Non-empty, not
+                ending on a ``Role.ASSISTANT`` turn, and carrying no ``Role.TOOL``
+                turn.
+            tools: The capabilities offered for this round, with distinct names.
+            model: Optional ``"provider:model"`` override; falls back to the
+                configured default when ``None``.
+
+        Returns:
+            The round's response.
+
+        Raises:
+            ModelError: If ``messages`` is empty, ends on a ``Role.ASSISTANT`` turn or
+                carries a ``Role.TOOL`` turn, two of ``tools`` share a name, or one of
+                them takes a name the implementation reserves for carrying the notes
+                and the mark (§2:7) — before any model is contacted, and with
+                ADR-0066 §3's disposition:
+                neither ``retryable`` nor ``routable``. Also raised where the
+                exchange with the provider fails or its response cannot be read as a
+                round, such as a call whose arguments are not a JSON object, narrowed
                 to the most specific subclass.
         """
         ...

@@ -186,6 +186,11 @@ from ai_assistant.testing.streaming import (
     StreamAttempt,
     StreamCall,
 )
+from ai_assistant.testing.tool_calling import (
+    DEFAULT_ROUND_TEXT,
+    FakeToolCallingCompleter,
+    RoundCall,
+)
 from ai_assistant.testing.tools import FakeToolRegistry, with_phase_declaration
 from ai_assistant.testing.traces import (
     DEFAULT_OCCURRED_AT,
@@ -239,6 +244,7 @@ __all__ = [
     "DEFAULT_READER_NAME",
     "DEFAULT_READ_SOURCE",
     "DEFAULT_REPORTED_AT",
+    "DEFAULT_ROUND_TEXT",
     "DEFAULT_SEARCH_CONTENT",
     "DEFAULT_SEARCH_ORIGIN",
     "DEFAULT_SEARCH_SOURCE_NAME",
@@ -321,6 +327,7 @@ __all__ = [
     "FakeSpendLedger",
     "FakeStoryStore",
     "FakeStreamingCompleter",
+    "FakeToolCallingCompleter",
     "FakeToolImplementation",
     "FakeToolInvoker",
     "FakeToolRegistry",
@@ -331,6 +338,7 @@ __all__ = [
     "ModelCall",
     "PolicyCall",
     "ProgrammedOutcome",
+    "RoundCall",
     "ScriptedDay",
     "SecretBacking",
     "SecretMethod",

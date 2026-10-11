@@ -789,6 +789,18 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
     ``story_links`` is empty on every record a deployment without the story-links stage
     captures**, and on one with it each link names a story or an activation and nothing
     of what either holds.
+
+    **``PlanningRound``, ``ProposedCall`` and ``PlanningLabel`` joined it with ADR-0307
+    §10**, because ``EpisodeProcessingRecord`` gained ``rounds`` and ``labels``. The
+    judgement, made rather than assumed: each closes its fields with ``extra="forbid"``.
+    A round holds an id, the round it follows, a clock reading, its text, its notes and
+    two booleans; a proposed call a provider id, a capability name and its arguments as
+    frozen JSON; a label a label, a member of a closed enumeration and the id it names.
+    None admits a ``SecretStr``: the text, the notes and the arguments are what the
+    planning model wrote, the same Tier 1 text the graph already reaches through
+    ``EpisodicMemory.outcome``. **Every ``rounds`` and ``labels`` is empty on every
+    record this tree captures**, their producer being the planning stage the cutover
+    switches on (ADR-0309 §2:6).
     """
     # ADR-0275: processing metadata joins the in-process record graph. Its
     # fields are identifiers, closed values, clocks and caller-supplied Tier 1
@@ -807,6 +819,9 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
         "EpisodeProcessingRecord",
         "NewConversation",
         "ParkedBinding",
+        "PlanningLabel",
+        "PlanningRound",
+        "ProposedCall",
         "RecordedChannelTrigger",
         "RecordedResumeTrigger",
         "RecordedSpeechInput",

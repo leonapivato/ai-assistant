@@ -114,12 +114,12 @@ def test_the_episode_carries_no_disposition() -> None:
     assert "disposition" not in record.model_dump(mode="json")
 
 
-def test_the_record_is_schema_version_six() -> None:
-    """ADR-0286 §13: ``schema_version`` is ``Literal[6]``; an earlier one is refused."""
+def test_the_record_is_schema_version_seven() -> None:
+    """ADR-0307 §10: ``schema_version`` advances to ``Literal[7]``; an earlier one is refused."""
     data = _processing().model_dump(mode="json")
-    assert data["schema_version"] == 6
+    assert data["schema_version"] == 7
     with pytest.raises(ValidationError, match="literal_error"):
-        EpisodeProcessingRecord.model_validate({**data, "schema_version": 5})
+        EpisodeProcessingRecord.model_validate({**data, "schema_version": 6})
 
 
 def test_absent_processing_retains_other_producer_outcomes() -> None:
