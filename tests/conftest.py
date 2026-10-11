@@ -465,6 +465,11 @@ async def gateway_browser() -> AsyncIterator[Browser]:
     can be shared across the layer's modules. Everything else about the layer lives
     beside its cases, in ``tests/interfaces/gateway/browser_drive.py``.
 
+    Where CI splits its test step across jobs, the layer is divided among them and
+    each job's run starts one browser for its share (ADR-0310 §3). That is still
+    one browser per ``pytest`` run, which is §3:4's first sentence and binds this
+    fixture in every run.
+
     **The full ``chromium``, named rather than defaulted.** §5 makes the full build
     what is installed and driven, and Playwright launches the lighter
     ``chromium-headless-shell`` for a headless launch unless the channel says
