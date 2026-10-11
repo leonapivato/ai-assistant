@@ -456,8 +456,10 @@ class ActingStage:
         """
         try:
             result = _detached_result(await self._invoker.invoke(one.call, timeout=self._timeout))
-        except _REFUSED_BEFORE_THE_CALL as error:
-            _log.info("acting_call_not_done", stage="acting", reason=type(error).__name__)
+        except _REFUSED_BEFORE_THE_CALL:
+            # A code-owned reason and never the exception's class name, which a
+            # collaborator can make carry content (ADR-0004 §5, ADR-0192 §3).
+            _log.info("acting_call_not_done", stage="acting", reason="refused_before_the_call")
             if effect_id is not None:
                 await self._plans.finish_activation_effect(
                     effect_id, ToolOutcome.FAILED, reason=_REFUSED
