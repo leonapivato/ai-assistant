@@ -1,6 +1,6 @@
 # 307. A planning round is one model response that writes its own message, keeps episode notes, and names what it was shown by label
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0312 (§6:4's *episode notes are absent*, and §4:4's placement, each for the activation's own episode notes shown to its own planning)
 - Date: 2026-10-11
 - Scope: the phases after understanding ([#2723](https://github.com/leonapivato/ai-assistant/pull/2723)), milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)), the second of their four decisions: what a planning round is, the message and the report, episode notes, labels, what planning is given and may look up, the tidy-up call, when rounds run and end, and that planning always runs after understanding. ADR-0306 decided capabilities, authorizing and acting; the digesting decision and the cutover decision are the other two.
 - Dependency: [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), Accepted and merged at `bff6e259`; the story store, summaries, notes and views ADR-0300, ADR-0303, ADR-0304 and ADR-0305 decide, implemented at `5166d5bc`.
@@ -22,6 +22,15 @@
   ([#2835](https://github.com/leonapivato/ai-assistant/issues/2835)); this note records the
   decision §10 made and alters none, and ADR-0284's status line and a dated note there now
   carry it.
+- Partially superseded: 2026-10-11 by ADR-0312 — two scopes, one rule. §6:4's *episode
+  notes are absent*, and §4:4's placement, each for the activation's own episode notes
+  shown to its own planning: an activation's own rounds, their episode notes and its own
+  digests' evidence are shown to its own planning on every pass. §6:4 governs, as written,
+  what planning is shown of other episodes and stories, and §4:4's placement governs every
+  other reader. Every other clause stands. This scoped
+  replacement takes effect on ratification of ADR-0312. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the
+  ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 308. Recall runs again on what understanding found, and outside content reaches planning only as a digest's evidence
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0312 (§5:6's placement, for the activation's own evidence shown to its own planning)
 - Date: 2026-10-11
 - Scope: the phases after understanding ([#2723](https://github.com/leonapivato/ai-assistant/pull/2723)), milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)), the third of their four decisions: recall's second run and what planning is shown of recall's finds, and digesting, which turns outside content into evidence. ADR-0306 decided capabilities, authorizing and acting, and ADR-0307 planning; the cutover decision is the fourth.
 - Dependency: [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md) and [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md), both Accepted and merged at `1978419a`; recall (ADR-0281, ADR-0282, ADR-0300 §7), implemented at `5166d5bc`.
@@ -13,6 +13,13 @@
   [ADR-0282](0282-phases-read-and-write-the-working-episode-and-recall-searches-past-the-windows.md) (§2:2's *any stage may read it*, for the held results alone; §4:2's *at most `RECALL_ITEM_LIMIT` records in all*, for the second run alone; §4:3's *and nothing else*, in the addition alone);
   [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md) (§8:1's projection, in the addition alone);
   [ADR-0286](0286-an-episode-is-open-while-its-activation-runs-and-frozen-when-it-ends.md) (§3:3's admitted differences, in the additions alone; §3:8's *no field is added for a stage's result*, for the second run and the digests alone).
+- Partially superseded: 2026-10-11 by ADR-0312 — one scope. §5:6's placement, for the
+  activation's own evidence shown to its own planning: its own digests' evidence is shown
+  to its own planning on every pass. The placement governs every other reader,
+  `project_episode`, the windows and recall included. Every other clause stands. This scoped
+  replacement takes effect on ratification of ADR-0312. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the
+  ratified body below are preserved.
 
 ## Context
 

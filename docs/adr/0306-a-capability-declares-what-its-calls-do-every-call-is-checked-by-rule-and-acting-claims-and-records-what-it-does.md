@@ -1,6 +1,6 @@
 # 306. A capability declares what its calls do, every call is checked by rule, and acting claims and records what it does
 
-- Status: Partially superseded by ADR-0307 (§6:1's `ActivationEffect`, in the addition alone: it also names the round whose call or message it claims)
+- Status: Partially superseded by ADR-0307 (§6:1's `ActivationEffect`, in the addition alone: it also names the round whose call or message it claims) and ADR-0312 (§2:5's first limb: a side-effecting declaration with effect none validates where it writes nothing and discloses something)
 - Date: 2026-10-11
 - Scope: the phases after understanding ([#2723](https://github.com/leonapivato/ai-assistant/pull/2723)), milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)), the first of their four decisions: what a capability declares, how the assistant's own records are declared, how authorizing checks a call until the authority milestone, and how acting runs, claims and records calls. The planning decision, the digesting decision and the cutover decision are the other three.
 - Dependency: the story calls ADR-0300 §10, ADR-0303 §9 and ADR-0304 §9 declare, and ADR-0297's stop, all implemented at `5166d5bc`.
@@ -24,6 +24,15 @@
   other clause stands. This scoped replacement takes effect on ratification of ADR-0307.
   This reciprocal header record accompanies the numbered draft under ADR-0070 and
   ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-11 by ADR-0312 — one scope. §2:5's first limb: a
+  declaration whose `side_effecting` is true while its effect is none validates where its
+  `writes` is empty and its `discloses` is not, so that its one side effect is disclosure,
+  as the web search and the forecast are. Its second limb, refusing an effect that is not
+  none on a declaration that is not side-effecting, stands, and every other clause stands.
+  The build lane builds §2:5 as corrected. This scoped replacement takes effect on
+  ratification of ADR-0312. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 
