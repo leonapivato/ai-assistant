@@ -1,6 +1,6 @@
 # 306. A capability declares what its calls do, every call is checked by rule, and acting claims and records what it does
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-10-11
 - Scope: the phases after understanding ([#2723](https://github.com/leonapivato/ai-assistant/pull/2723)), milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)), the first of their four decisions: what a capability declares, how the assistant's own records are declared, how authorizing checks a call until the authority milestone, and how acting runs, claims and records calls. The planning decision, the digesting decision and the cutover decision are the other three.
 - Dependency: the story calls ADR-0300 §10, ADR-0303 §9 and ADR-0304 §9 declare, and ADR-0297's stop, all implemented at `5166d5bc`.
@@ -248,25 +248,32 @@ every answer after a web search would need you.
 > guessing and never reported as done. How it is recovered in detail is #2584's; for a
 > call to the assistant's own records, the recovery reads the store the call wrote.
 
-> **Normative.** A call that leaves the hub and gets an effect record transmits under that
-> claim, which is its attempt: the record names the deciding `PermissionDecision`, which
-> names the record, and the attempt's outcomes are the record's, pending while it carries
-> none.
+> **Normative.** A call that leaves the hub transmits as ADR-0231 §6 decides for a search:
+> its attempt and its outcomes are its `InvocationLedger` claim and completion (ADR-0192
+> §3), taken from the recorded decision, and no plan step is claimed.
 
-> **Normative.** A call that leaves the hub and gets no effect record, such as a read,
-> transmits under no claim, as ADR-0231 decides for a search.
+> **Normative.** Where such a call also gets an effect record, that record is claimed before
+> the invocation, names the deciding `PermissionDecision`, which names the record, and
+> carries the outcome the invocation completed with.
 
 > **Normative.** A call to a capability that is not safe to repeat is refused as *already
 > done* where its capability and values match an effect of this activation or of the
 > activations of the episodes in this activation's stories, unless planning marks it a
-> deliberate repeat. An activation in no story is matched against its own effects alone.
+> deliberate repeat and every matching effect is done. An activation in no story is matched
+> against its own effects alone.
 
 > **Normative.** The stories a round's calls are matched against are this activation's
 > stories as they stand when the round's calls are authorized. A story call in the same
 > round changes them from the next round on.
 
 > **Normative.** For that match an unknown outcome counts as done, and so does an effect
-> claimed whose outcome is not yet written; an effect not done does not count.
+> claimed whose outcome is not yet written; an effect not done does not count. A deliberate
+> repeat never passes a matching effect that is unknown or not yet written.
+
+> **Normative.** For a call that leaves the hub, its values include its binding's
+> `account`, `transport_endpoint` and `canonical_destination_set`, the three facts
+> `EffectKey` takes from it (ADR-0259 §1), so the same arguments sent to another account
+> or destination are another effect.
 
 > **Normative.** An unknown outcome is never retried, done another way, or reported as
 > done.
@@ -304,8 +311,9 @@ A claim names its activation and is decided in the plan store, where ADR-0297 re
 stop, so the stop and the backstop are one decision with the write. A message has no
 position until the medium has recorded it, since the user may write into the place while
 the activation runs (ADR-0293 §6), so the position joins the record with the outcome.
-A call that leaves the hub and gets an effect record is the egress attempt ADR-0148 §9
-asks for, with the record in place of a plan step: the phases run no plan steps.
+The phases run no plan steps, so the egress attempt ADR-0148 §9 asks for is the
+invocation ledger's claim, as ADR-0231 §6 already made it for a search; the effect record
+is acting's own, beside it.
 
 ### 6. The code it binds
 
@@ -326,18 +334,20 @@ asks for, with the record in place of a plan step: the phases run no plan steps.
 > and the canonical fake, in the lane that builds acting.
 
 > **Normative.** `PlanStore.claim_activation_effect(effect: ActivationEffect, /, *,
-> match: tuple[str, ...] | None) -> ActivationEffectClaim` is `async` and writes `effect`,
-> carrying no outcome, in one indivisible step: it raises `ClaimStopped` where the store
-> holds a stop record for the effect's activation, answers `already_done` and writes
-> nothing where `match` is a tuple and a record of an activation it names carries the same
-> capability and values digest and an outcome of done, of unknown, or none yet, and
+> match: tuple[str, ...] | None, deliberate_repeat: bool = False) ->
+> ActivationEffectClaim` is `async` and writes `effect`, carrying no outcome, in one
+> indivisible step: it raises `ClaimStopped` where the store holds a stop record for the
+> effect's activation, answers `already_done` and writes nothing where `match` is a tuple
+> and a record of an activation it names carries the same capability and values digest
+> and an outcome of unknown or none yet, or of done unless `deliberate_repeat` is set, and
 > otherwise writes the record and answers `claimed`. A claim of an id the store already
 > holds is refused with `PlanningError`, writing nothing.
 
 > **Normative.** Orchestration supplies `match`, and the plan store reads no story: for a
-> call to a capability that is not safe to repeat and not marked a deliberate repeat it is
-> this activation's id and the activations of the episodes in its stories, collected from
-> the story store when the round is authorized; for every other claim it is `None`.
+> call to a capability that is not safe to repeat it is this activation's id and the
+> activations of the episodes in its stories, collected from the story store when the
+> round is authorized, with `deliberate_repeat` set where planning marked it; for every
+> other claim it is `None`.
 
 > **Normative.** `PlanStore.finish_activation_effect(effect_id: str, /, outcome:
 > ToolOutcome, *, reason: str | None = None, position: int | None = None) -> None` is
@@ -365,7 +375,7 @@ asks for, with the record in place of a plan step: the phases run no plan steps.
 | ADR-0037 §4 | For the phases' calls a `CONFIRM` parks nothing and goes back to planning (§4:8); §2–§3's decide, record, read back and claim stand |
 | ADR-0052 §§1–4 | For the phases' calls there is no park to resume |
 | ADR-0148 §8:1 | Its *reached by a `CONFIRM` that parks the step … and answered through an interface*, for the phases' calls; the user stays the approver, and §3's routes and §8's other clauses stand |
-| ADR-0148 §9:1–§9:4 | For the phases' calls the attempt is the effect record's claim and not a plan step's, the decision names the record and not a step, the four outcomes are the record's, and a claim left open is #2584's to recover and is never guessed (§5:5–§5:8); a call that leaves the hub with no effect record runs under no claim |
+| ADR-0148 §9:1–§9:4 | For the phases' calls the attempt is the call's `InvocationLedger` claim and not a plan step's, as ADR-0231 §6 decides for a search; a call with an effect record also claims it before the invocation, and the record and the decision name each other (§5:7–§5:8) |
 | ADR-0181 §4, §5:2 | Nothing: §4:6 computes the fact under §4 over the activation's record, and §5:2 is the stand-in |
 | ADR-0208 §1:1, §1:2, §1:3, §1:5 | A memory search is a capability planning may call, so a memory tool is offered, a turn's records are read for relevance at that call as well, and a phase obtains records by a call |
 | ADR-0211 | Nothing: planning is offered capabilities |
