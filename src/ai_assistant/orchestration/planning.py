@@ -270,7 +270,8 @@ class PlanningInputs:
         place: The place the input came from, and its window.
         understanding: Understanding's latest record, where it recorded one.
         trigger_origin: Who the trigger's input came from.
-        episodes: The episode window's frozen episodes, in its order.
+        episodes: The episode window's frozen episodes, in its order, as the pass's
+            audience predicate already admitted them (ADR-0276 §4:9).
         owner_records: Whether a record placed for the owner alone may be shown on this
             pass. It decides the episode window's notes, never this activation's own.
         rounds: This activation's earlier rounds, as the episode records them.
