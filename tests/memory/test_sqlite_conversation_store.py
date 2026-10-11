@@ -1466,11 +1466,24 @@ async def test_an_insert_naming_only_the_pre_decision_columns_still_succeeds(
         store.close()
 
 
+#: Each incompatible shape, as the statement that makes it from a fresh store.
+_INCOMPATIBLE_SHAPES: dict[str, str] = {
+    "unmarked": "DROP TABLE episode_record_format",
+    "m36": "UPDATE episode_record_format SET version = 1",
+    "m37": "UPDATE episode_record_format SET version = 2",
+    "m38": "UPDATE episode_record_format SET version = 3",
+    "m39": "UPDATE episode_record_format SET version = 4",
+    "format5": "UPDATE episode_record_format SET version = 5",
+    "format6": "UPDATE episode_record_format SET version = 6",
+    "format7": "UPDATE episode_record_format SET version = 7",
+    "format8": "UPDATE episode_record_format SET version = 8",
+    "newer": "UPDATE episode_record_format SET version = 10",
+    "malformed": "ALTER TABLE episode_record_format RENAME COLUMN version TO invalid",
+}
+
+
 @pytest.mark.integration
-@pytest.mark.parametrize(
-    "shape",
-    ["unmarked", "m36", "m37", "m38", "m39", "format5", "format6", "format7", "newer", "malformed"],
-)
+@pytest.mark.parametrize("shape", list(_INCOMPATIBLE_SHAPES))
 def test_incompatible_conversation_state_is_refused_without_mutation(
     tmp_path: Path, shape: str
 ) -> None:
@@ -1478,26 +1491,7 @@ def test_incompatible_conversation_state_is_refused_without_mutation(
     path = tmp_path / "conversations.db"
     SqliteConversationStore(path=path, now=_fixed_now).close()
     with sqlite3.connect(path) as raw:
-        if shape == "unmarked":
-            raw.execute("DROP TABLE episode_record_format")
-        elif shape == "m36":
-            raw.execute("UPDATE episode_record_format SET version = 1")
-        elif shape == "m37":
-            raw.execute("UPDATE episode_record_format SET version = 2")
-        elif shape == "m38":
-            raw.execute("UPDATE episode_record_format SET version = 3")
-        elif shape == "m39":
-            raw.execute("UPDATE episode_record_format SET version = 4")
-        elif shape == "format5":
-            raw.execute("UPDATE episode_record_format SET version = 5")
-        elif shape == "format6":
-            raw.execute("UPDATE episode_record_format SET version = 6")
-        elif shape == "format7":
-            raw.execute("UPDATE episode_record_format SET version = 7")
-        elif shape == "newer":
-            raw.execute("UPDATE episode_record_format SET version = 9")
-        else:
-            raw.execute("ALTER TABLE episode_record_format RENAME COLUMN version TO invalid")
+        raw.execute(_INCOMPATIBLE_SHAPES[shape])
     path.chmod(0o644)
     before = path.read_bytes()
 

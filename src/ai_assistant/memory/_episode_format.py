@@ -1,6 +1,6 @@
 """Fresh-state memory format boundary for ADR-0275 §12.
 
-Advanced by ADRs 0276, 0280, 0281, 0283, 0284, 0286 and 0307.
+Advanced by ADRs 0276, 0280, 0281, 0283, 0284, 0286, 0307 and 0308.
 """
 
 from __future__ import annotations
@@ -31,8 +31,10 @@ from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 #: indexed open column, on the same terms. ADR-0307 §10 advances the record to
 #: schema_version 7 for planning's rounds and labels, which a version-6 record does not
 #: validate as, so the marker advances to 8 on the same terms: the phases start on the
-#: cutover's fresh data directory (ADR-0309 §6:1).
-EPISODE_RECORD_FORMAT: Final[int] = 8
+#: cutover's fresh data directory (ADR-0309 §6:1). ADR-0308 §7 advances the record to
+#: schema_version 8 for the digests, which a version-7 record does not validate as, so
+#: the marker advances to 9 on the same terms (ADR-0308 §7:3).
+EPISODE_RECORD_FORMAT: Final[int] = 9
 
 
 def check_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool:

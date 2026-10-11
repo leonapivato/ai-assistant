@@ -4385,6 +4385,83 @@ class PlanningRound(BaseModel):
         return self
 
 
+# --- digesting's evidence (ADR-0308 §4, §5, §7) --------------------------------
+#
+# A digest is one tool-less model call over a result's outside records that answers
+# one question with a list of marked evidence, which is all of that content planning
+# ever sees. Declared here, ahead of :class:`EpisodeProcessingRecord`, which records
+# the digests.
+
+
+class EvidenceItem(BaseModel):
+    """One item of a digest's evidence (ADR-0308 §5:1).
+
+    Its ``text``; ``source``, the planning label of the record it rests on (§4:15),
+    which names a thing only in the activation that recorded it; and ``outside``, the
+    mark that it came from outside content, which is always set. Nothing more.
+
+    Raises:
+        ValueError: If ``source`` is not a planning label's shape.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    text: NonBlankEncodableText
+    source: EncodableText
+    outside: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _a_label(self) -> Self:
+        if _LABEL_SHAPE.fullmatch(self.source) is None:
+            msg = "an evidence item's source is a planning label"
+            raise ValueError(msg)
+        return self
+
+
+class DigestOutcome(StrEnum):
+    """What came of one digest (ADR-0308 §7).
+
+    Closed, **added to and never renamed**. A digest that found nothing answering its
+    question has ``answered``, with no evidence (§4:8).
+    """
+
+    ANSWERED = "answered"
+    FAILED = "failed"
+
+
+class ActivationDigest(BaseModel):
+    """One digest, as the episode records it (ADR-0308 §5:2, §7).
+
+    ``result`` is the R label of the result digested, or ``None`` for recall's digest;
+    ``question`` what the digest answered; ``outcome`` whether it answered; ``evidence``
+    its items, in part order, empty where it failed (§4:12); and ``recorded_at``. A
+    digest is never edited.
+
+    Raises:
+        ValueError: If ``result`` is not a result's label, or a failed digest carries
+            evidence.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    result: EncodableText | None = None
+    question: NonBlankEncodableText
+    outcome: DigestOutcome
+    evidence: tuple[EvidenceItem, ...] = ()
+    recorded_at: UtcInstant
+
+    @model_validator(mode="after")
+    def _well_formed(self) -> Self:
+        if self.result is not None and (
+            _LABEL_SHAPE.fullmatch(self.result) is None
+            or self.result[0] != _LABEL_PREFIXES[LabelKind.RESULT]
+        ):
+            msg = "a digest names the result it read by its R label"
+            raise ValueError(msg)
+        if self.outcome is DigestOutcome.FAILED and self.evidence:
+            msg = "a failed digest records no evidence"
+            raise ValueError(msg)
+        return self
+
+
 class EpisodeProcessingRecord(BaseModel):
     """The facts about one activation's processing, open while it runs (ADR-0286 §1).
 
@@ -4401,12 +4478,13 @@ class EpisodeProcessingRecord(BaseModel):
 
     ``rounds`` are planning's rounds, oldest first, each naming the one before it, and
     ``labels`` the labels planning was shown, each naming one thing and each thing
-    named once, in the order they were assigned (ADR-0307 §2:3, §5:7). Both are
-    appended to as the episode is extended and default to empty.
+    named once, in the order they were assigned (ADR-0307 §2:3, §5:7). ``digests`` are
+    the activation's digests, in the order they were recorded (ADR-0308 §5:2). All
+    three are appended to as the episode is extended and default to empty.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    schema_version: Literal[7] = 7
+    schema_version: Literal[8] = 8
     activation_id: Identifier
     started_at: UtcInstant
     ended_at: UtcInstant | None = None
@@ -4424,6 +4502,7 @@ class EpisodeProcessingRecord(BaseModel):
     recall: ActivationRecall | None = None
     rounds: tuple[PlanningRound, ...] = ()
     labels: tuple[PlanningLabel, ...] = ()
+    digests: tuple[ActivationDigest, ...] = ()
 
     @property
     def is_open(self) -> bool:
@@ -4713,6 +4792,22 @@ class ProjectedRound(BaseModel):
         return self
 
 
+class ProjectedEvidence(BaseModel):
+    """One item of an episode's evidence, as a later reader is shown it (ADR-0308 §5:5).
+
+    The item's text, cut to the projection's excerpt bound, and its mark. Never its
+    source label, which names a thing only in the activation that recorded it.
+
+    Attributes:
+        text: What the item says.
+        outside: The mark that it came from outside content, always set.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    text: ProjectedText
+    outside: Literal[True] = True
+
+
 class EpisodeProjection(BaseModel):
     """What every model-facing rendering of a stored episode reads (ADR-0284 §8).
 
@@ -4728,7 +4823,8 @@ class EpisodeProjection(BaseModel):
     instead of a channel and its ``content`` as its input, and no origin, no
     understanding, no verdict and no status; ``status`` is ``None`` exactly there.
     Both carry ``occurred_at``, ``response`` and ``derived_from_external``. Only an
-    episode with a processing record carries ``rounds`` (ADR-0307 §10).
+    episode with a processing record carries ``rounds`` (ADR-0307 §10) and
+    ``evidence`` (ADR-0308 §5:5).
 
     Attributes:
         occurred_at: When the episode happened.
@@ -4752,6 +4848,9 @@ class EpisodeProjection(BaseModel):
             it of the episode's provenance (ADR-0106 §2). Not ``origin`` (§8:4).
         rounds: The episode's planning rounds that show a message or notes, in
             order, under the reader's audience (ADR-0307 §10).
+        evidence: The items of the episode's digests, in the order they were
+            recorded, where the reader may be shown a record placed for the owner
+            alone (ADR-0308 §5:5 to §5:6).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -4770,6 +4869,7 @@ class EpisodeProjection(BaseModel):
     reason: ProcessingReason | None = None
     derived_from_external: bool = False
     rounds: tuple[ProjectedRound, ...] = ()
+    evidence: tuple[ProjectedEvidence, ...] = ()
 
     @model_validator(mode="after")
     def _one_of_the_two_shapes(self) -> Self:
@@ -4792,6 +4892,7 @@ class EpisodeProjection(BaseModel):
                 or self.step_dispositions
                 or self.route_outcomes
                 or self.rounds
+                or self.evidence
             ):
                 msg = "a projection without a processing record carries its content alone"
                 raise ValueError(msg)

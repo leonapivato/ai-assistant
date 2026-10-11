@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     InputOrigin,
     ProcessingStatus,
+    ProjectedEvidence,
     ProjectedRound,
     ProjectedText,
     RecordedActivationTrigger,
@@ -46,7 +47,7 @@ from ai_assistant.core.types import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from ai_assistant.core.types import ActivationLinks, PlanningRound
+    from ai_assistant.core.types import ActivationDigest, ActivationLinks, PlanningRound
 
 _MAX_PAGE = 100
 _MAX_CHUNK = 65536
@@ -298,6 +299,14 @@ def project_episode(
     the episode's own response and is shown wherever the episode is. Each is cut to
     ``excerpt_chars`` as the input is.
 
+    **An episode's evidence** (ADR-0308 §5:5 to §5:6) renders each digest's items,
+    in the order the digests were recorded, as each item's text and its mark and
+    never its source label, which names a thing only in the activation that recorded
+    it. Evidence is placed for the owner alone, as episode notes are, so it renders
+    only where ``owner_records`` says so; the activation's own planning is shown its
+    own evidence by the planning stage, never through this (ADR-0312 §4:1, §4:3).
+    Each item is cut to ``excerpt_chars``.
+
     The input is shown where the trigger's ``origin`` is ``user``, or where it is
     ``outside`` and ``admit_outside_input`` is set — which the understanding stage's
     episode window and its recalled episodes alone do (§8:5). A resume carries no
@@ -306,11 +315,11 @@ def project_episode(
 
     Args:
         record: The stored episode, exactly as held.
-        excerpt_chars: The bound, in characters, on the input, the response and
-            each round's message and notes.
+        excerpt_chars: The bound, in characters, on the input, the response,
+            each round's message and notes, and each evidence item.
         admit_outside_input: Whether an ``outside`` input's text is shown.
         owner_records: Whether a record placed for the owner alone may be shown to
-            this reader, which decides the episode notes.
+            this reader, which decides the episode notes and the evidence.
 
     Returns:
         The projection.
@@ -364,6 +373,7 @@ def project_episode(
         reason=processing.reason,
         derived_from_external=external,
         rounds=_projected_rounds(processing.rounds, excerpt_chars, owner_records=owner_records),
+        evidence=_projected_evidence(processing.digests, excerpt_chars) if owner_records else (),
     )
 
 
@@ -383,6 +393,17 @@ def _projected_rounds(
             )
         )
     return tuple(projected)
+
+
+def _projected_evidence(
+    digests: tuple[ActivationDigest, ...], bound: int
+) -> tuple[ProjectedEvidence, ...]:
+    """Each digest's items, in order: the text and the mark, never the source label."""
+    return tuple(
+        ProjectedEvidence(text=ProjectedText(text=item.text[:bound], full_chars=len(item.text)))
+        for digest in digests
+        for item in digest.evidence
+    )
 
 
 # --- a revision of an open episode (ADR-0286 §3) -------------------------------
@@ -406,6 +427,8 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
     - entries appended at the end of ``rounds`` and of ``labels``, every earlier entry
       unchanged; neither is bounded (ADR-0307 §10, superseding §3:3 in the additions
       alone);
+    - entries appended at the end of ``digests``, every earlier entry unchanged, and
+      unbounded (ADR-0308 §7, in the addition alone);
     - in the one revision that freezes it, ``status``, ``reason``, ``ended_at`` and
       ``understanding_omitted``, with the end entry the record's own validators then
       require last.
@@ -454,6 +477,7 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
     if (
         after.rounds[: len(before.rounds)] != before.rounds
         or after.labels[: len(before.labels)] != before.labels
+        or after.digests[: len(before.digests)] != before.digests
     ):
         return False
     settled = before.model_copy(
@@ -469,6 +493,7 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
             "stages_elided": after.stages_elided,
             "rounds": after.rounds,
             "labels": after.labels,
+            "digests": after.digests,
             "status": after.status,
             "reason": after.reason,
             "ended_at": after.ended_at,

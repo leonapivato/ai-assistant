@@ -2511,7 +2511,12 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     (``PlanningLabel``, ``LabelKind``), and moves its ``schema_version`` to
 #:     ``Literal[7]``: a peer at 91 refuses the fields as extra and the version as
 #:     unknown, and a version-6 record does not validate here (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 92
+#: 93: ADR-0308 §7:2 gives the wire-carried ``EpisodicMemory.processing_record`` the
+#:     field ``digests`` (``ActivationDigest``, carrying ``DigestOutcome`` and
+#:     ``EvidenceItem``), and moves its ``schema_version`` to ``Literal[8]``: a peer at
+#:     92 refuses the field as extra and the version as unknown, and a version-7 record
+#:     does not validate here (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 93
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client
