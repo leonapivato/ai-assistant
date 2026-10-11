@@ -1,6 +1,6 @@
 # 37. Joining selection, the permission check and execution
 
-- Status: Partially superseded by ADR-0144 (§1's several-candidates refusal)
+- Status: Partially superseded by ADR-0144 (§1's several-candidates refusal) and ADR-0306 (§4's park, for the calls the phases run: a `CONFIRM` parks nothing and goes back to planning)
 - Date: 2026-07-22
 - **Partially superseded: 2026-08-13 by ADR-0144** — §1's several-candidates row
   only, and nothing else. A step is no longer refused whenever
@@ -46,6 +46,14 @@
   with the implementation it authorises.
 - **No ratified text changes here.** Everything below chooses among options the
   contracts left open, or records that an option is *not* being chosen.
+- Partially superseded: 2026-10-11 by ADR-0306 — one scope. §4's park, for the calls the
+  phases run: a `CONFIRM` parks nothing, goes back to planning as needing the user, and
+  nothing resumes it. §2's decide, record, read back and claim, and §3's read-back, stand
+  and are relied on. Every other clause stands. The old turn loop keeps the replaced text
+  until the cutover decision removes it. This scoped replacement takes effect on
+  ratification of ADR-0306. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 259. An effect is claimed once per goal before it is dispatched, and a turn-start pass reconciles what an earlier turn left uncertain or unfinished
 
-- Status: Partially superseded by ADR-0287 (§9:11's `ExchangeDisposition` limb)
+- Status: Partially superseded by ADR-0287 (§9:11's `ExchangeDisposition` limb) and ADR-0306 (§1's effect key and §2's claim, in their goal scope, for the calls the phases run)
 - **Depends on [ADR-0265](0265-an-intended-action-has-a-stable-identity-minted-once-and-linked-to-the-goal-elements-it-serves.md),
   which is cited and superseded in nothing.** §6 of that decision states four obligations over *"a decision that lands
   the claim"* — the row keyed on the goal, the intended action and the effect key; an answer for a completed act of
@@ -60,6 +60,14 @@
   take effect on ratification of ADR-0287. This reciprocal header record accompanies the
   numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
   below are preserved.
+- Partially superseded: 2026-10-11 by ADR-0306 — one scope. §1's effect key and §2's
+  claim, in their goal scope, for the calls the phases run: a call to a capability that is
+  not safe to repeat is matched by capability and values against the effects of the
+  episodes in its activation's stories, recorded against the activation and claimed in the
+  plan store. Every other clause stands. The old turn loop keeps the replaced text until
+  the cutover decision removes it. This scoped replacement takes effect on ratification of
+  ADR-0306. This reciprocal header record accompanies the numbered draft under ADR-0070
+  and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

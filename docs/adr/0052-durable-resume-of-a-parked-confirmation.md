@@ -1,6 +1,6 @@
 # 52. Durable resume of a parked confirmation through the façade
 
-- Status: Partially superseded by ADR-0084 (§3's and the header's placement of the widened `TurnOutcome` outside contract surface) and ADR-0197 (§3's clause that the step "is what a resume is for, and it is always present", only as it reaches a resume whose `TurnOutcome` carries `routed`) and ADR-0244 (§3's `TurnOutcome(turn=None, step=<resolution>)` sentence, as it reaches a resume answering a parked **read** alone: such a resume carries a real `TurnResult` and a composed reply and no `step`, a search having neither a step nor an execution; §3's reason is obeyed rather than overturned, the parked turn's goal and frozen plan being persisted instead of fabricated and its context and memories assembled afresh at the resume, and §1, §2, §4 and the rest of §3 bind entire — `TurnOutcome.turn` and `_Parked.turn` stay optional and a resume continuing a step returns exactly what it returns today)
+- Status: Partially superseded by ADR-0084 (§3's and the header's placement of the widened `TurnOutcome` outside contract surface) and ADR-0197 (§3's clause that the step "is what a resume is for, and it is always present", only as it reaches a resume whose `TurnOutcome` carries `routed`) and ADR-0244 (§3's `TurnOutcome(turn=None, step=<resolution>)` sentence, as it reaches a resume answering a parked **read** alone: such a resume carries a real `TurnResult` and a composed reply and no `step`, a search having neither a step nor an execution; §3's reason is obeyed rather than overturned, the parked turn's goal and frozen plan being persisted instead of fabricated and its context and memories assembled afresh at the resume, and §1, §2, §4 and the rest of §3 bind entire — `TurnOutcome.turn` and `_Parked.turn` stay optional and a resume continuing a step returns exactly what it returns today) and ADR-0306 (§§1–4's resume of a parked confirmation, for the calls the phases run, which park nothing)
 - Date: 2026-07-24
 - Partially superseded: 2026-07-31 by ADR-0084 — **two sentences placing
   `TurnOutcome` outside contract surface are false; every decision this ADR made
@@ -181,6 +181,12 @@
   ADR-0244 §5 restates its no-ceiling-consult reasoning for a park that is already durable.
   §4 is untouched. The rest of §3 binds entire: `TurnOutcome.turn` and `_Parked.turn` stay
   optional, and a resume that continues a **step** returns exactly what it returns today.
+- Partially superseded: 2026-10-11 by ADR-0306 — one scope. §§1–4's resume of a parked
+  confirmation, for the calls the phases run: such a call parks nothing, so nothing is
+  recovered or resumed. The old turn loop keeps the replaced text until the cutover
+  decision removes it. This scoped replacement takes effect on ratification of ADR-0306.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
