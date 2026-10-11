@@ -35,16 +35,22 @@ reported as done** (§5:13); nothing here retries anything. A call cancelled mid
 leaves its record unfinished: acting cannot read what the invocation ledger recorded,
 and an unfinished record is never resolved by guessing (§5:6).
 
-**Where a result goes** (§5:14 to §5:15). A result declared to carry no outside text goes
-to planning whole. A result that may carry outside text and came back through
-``ToolInvoker`` is one record whose writer is not known, so it goes to a digest.
+**Where a result goes** (§5:14 to §5:15). Acting mints an id for every result a done
+call brings, which the result's R label names (ADR-0307 §5:1, ADR-0308 §6:1). A result
+declared to carry no outside text goes to planning whole. A result that may carry
+outside text and came back through ``ToolInvoker`` is one record whose writer is not
+known, so it goes to a digest: acting holds it in its part of the working episode,
+:class:`~ai_assistant.orchestration.held_results.HeldResults`, as it arrived and under
+its id, as soon as it records it, and the :class:`ActedCall` carries the id and never
+the content (ADR-0308 §6:1, §6:3, §6:5).
 
 **What is left to later lanes, as seams.** Writing the round's message, which needs
 ADR-0307's round (the message's record is already an :class:`ActivationEffect` shape);
-holding results for digesting, and a memory search's record-by-record routing by stored
-provenance (ADR-0308 §6, ADR-0306 §5:16): until then a result of the assistant's own
-records that may carry outside text is routed to a digest whole, the conservative
-direction. No controller rule runs this stage yet (ADR-0309 §2:6).
+and a memory search's record-by-record routing by stored provenance, with its outside
+records held by id (ADR-0306 §5:16, ADR-0308 §6:2): until then a result of the
+assistant's own records that may carry outside text is held whole as it arrived and
+routed to a digest, the conservative direction. No controller rule runs this stage yet
+(ADR-0309 §2:6).
 
 **It logs stage and code-owned reason only**, never arguments or results (ADR-0275 §8).
 """
@@ -57,6 +63,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Protocol, cast
+from uuid import uuid4
 
 import structlog
 from pydantic import ValidationError
@@ -80,6 +87,7 @@ from ai_assistant.core.types import (
     canonical_json_bytes,
 )
 from ai_assistant.orchestration.activation_cleanup import drain_registered
+from ai_assistant.orchestration.held_results import HeldResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -90,6 +98,7 @@ if TYPE_CHECKING:
         FrozenJsonValue,
         ToolDefinition,
     )
+    from ai_assistant.orchestration.held_results import HeldResults
 
 __all__ = [
     "ActedCall",
@@ -287,8 +296,12 @@ class ActedCall:
         call: The call.
         outcome: Done, not done or unknown.
         reason: Why it was not done, in code-owned words; ``None`` otherwise.
-        output: What a done call returned, where its declaration has a result.
+        output: What a done call returned, where its result goes to planning whole;
+            ``None`` otherwise. A result going to a digest is held instead, and never
+            carried here (ADR-0308 §6:5).
         route: Where a done call's result goes; ``None`` where there is none.
+        result_id: The id acting minted for a done call's result, which its R label
+            names; ``None`` where there is none.
         effect_id: The effect record the call was claimed under, where it was.
     """
 
@@ -297,6 +310,7 @@ class ActedCall:
     reason: str | None = None
     output: FrozenJsonValue = None
     route: ResultRoute | None = None
+    result_id: str | None = None
     effect_id: str | None = None
 
 
@@ -317,10 +331,14 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _new_result_id() -> str:
+    return f"result:{uuid4().hex}"
+
+
 class ActingStage:
     """Run a round's allowed calls, claiming and recording their effects (ADR-0306 §5)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — the three seams, the deadline, the clock and the id source
         self,
         *,
         plans: PlanStore,
@@ -328,6 +346,7 @@ class ActingStage:
         own_records: OwnRecordsCalls,
         timeout: timedelta,
         now: Callable[[], datetime] = _utcnow,
+        new_result_id: Callable[[], str] = _new_result_id,
     ) -> None:
         """Wire the stage to its seams, and to the deadline the composition root sets.
 
@@ -339,6 +358,7 @@ class ActingStage:
             timeout: Each invoked call's deadline. A call on the assistant's own
                 records has none (§3:3).
             now: The clock a record's ``claimed_at`` is read from.
+            new_result_id: Mints a result's id (ADR-0308 §6:1).
 
         Raises:
             ValueError: If ``timeout`` is not positive.
@@ -351,8 +371,9 @@ class ActingStage:
         self._own_records = own_records
         self._timeout = timeout
         self._now = checked_clock(now, owner="ActingStage")
+        self._new_result_id = new_result_id
 
-    async def act(self, authorized: AuthorizedRound) -> ActedRound:
+    async def act(self, authorized: AuthorizedRound, *, held: HeldResults) -> ActedRound:
         """Run every call of ``authorized`` in parallel and say what came of each.
 
         Every call is let finish before this returns or raises, so a claimed call is
@@ -364,8 +385,13 @@ class ActingStage:
         call claimed as one set of values and invoked as another would let the
         duplicate backstop check values that never ran (§5:9).
 
+        Each result going to a digest is held in ``held`` as soon as its call is
+        recorded, before the round's other calls have finished (ADR-0308 §4:2).
+
         Args:
             authorized: The round's allowed calls.
+            held: The activation's held results, acting's part of its working
+                episode.
 
         Returns:
             Each call's outcome, in the round's order.
@@ -382,7 +408,7 @@ class ActingStage:
         match = tuple(str(one) for one in authorized.match)
         snapshots = [_snapshot(one) for one in authorized.calls]
         answers = await asyncio.gather(
-            *(self._act(activation_id, round_id, match, one) for one in snapshots),
+            *(self._act(activation_id, round_id, match, one, held) for one in snapshots),
             return_exceptions=True,
         )
         acted: list[ActedCall] = []
@@ -402,7 +428,12 @@ class ActingStage:
         return ActedRound(round_id=round_id, calls=tuple(acted))
 
     async def _act(
-        self, activation_id: str, round_id: str, match: tuple[str, ...], one: AuthorizedCall
+        self,
+        activation_id: str,
+        round_id: str,
+        match: tuple[str, ...],
+        one: AuthorizedCall,
+        held: HeldResults,
     ) -> ActedCall:
         """Claim one detached call where it gets a record, run it, and finish the record."""
         call = one.call
@@ -432,18 +463,22 @@ class ActingStage:
                 return ActedCall(one, ActedOutcome.NOT_DONE, reason=_ALREADY_DONE)
         if tool.effect is CapabilityEffect.OWN_RECORDS:
             # §3:3: awaited to its end, finish included, whatever cancels this task.
-            work = asyncio.ensure_future(self._on_own_records(one, effect_id))
+            work = asyncio.ensure_future(self._on_own_records(one, effect_id, round_id, held))
             return await drain_registered(work, cancel_on_interrupt=False)
-        return await self._through_invoker(one, effect_id)
+        return await self._through_invoker(one, effect_id, round_id, held)
 
-    async def _on_own_records(self, one: AuthorizedCall, effect_id: str | None) -> ActedCall:
+    async def _on_own_records(
+        self, one: AuthorizedCall, effect_id: str | None, round_id: str, held: HeldResults
+    ) -> ActedCall:
         """Run a call against the assistant's own records, then finish its record."""
         result = _detached_result(await self._own_records.run(one.call))
         if effect_id is not None:
             await self._finish(effect_id, result)
-        return _acted(one, result, effect_id)
+        return self._acted(one, result, effect_id, round_id, held)
 
-    async def _through_invoker(self, one: AuthorizedCall, effect_id: str | None) -> ActedCall:
+    async def _through_invoker(
+        self, one: AuthorizedCall, effect_id: str | None, round_id: str, held: HeldResults
+    ) -> ActedCall:
         """Send a call through ``ToolInvoker``, under its ledger claim (ADR-0306 §5:7).
 
         **A cancellation leaves the record unfinished.** The invocation seam may have
@@ -467,12 +502,46 @@ class ActingStage:
             return ActedCall(one, ActedOutcome.NOT_DONE, reason=_REFUSED, effect_id=effect_id)
         if effect_id is not None:
             await self._finish(effect_id, result)
-        return _acted(one, result, effect_id)
+        return self._acted(one, result, effect_id, round_id, held)
 
     async def _finish(self, effect_id: str, result: ToolResult) -> None:
         """Write the outcome the call ended with onto its record (ADR-0306 §5:5)."""
         await self._plans.finish_activation_effect(
             effect_id, result.outcome, reason=_reason(result)
+        )
+
+    def _acted(
+        self,
+        one: AuthorizedCall,
+        result: ToolResult,
+        effect_id: str | None,
+        round_id: str,
+        held: HeldResults,
+    ) -> ActedCall:
+        """What came of a call that ran, routed by its declaration (§5:14 to §5:15).
+
+        A done call's result takes a minted id. One going to a digest is held under it
+        as it arrived, and the outcome carries the id alone (ADR-0308 §6:1, §6:5).
+        """
+        outcome = _OUTCOMES[result.outcome]
+        if outcome is not ActedOutcome.DONE:
+            return ActedCall(one, outcome, reason=_reason(result), effect_id=effect_id)
+        declared = one.call.request.tool.result
+        if declared is CapabilityResult.NONE:
+            return ActedCall(one, outcome, effect_id=effect_id)
+        result_id = str(self._new_result_id())
+        if declared is CapabilityResult.NO_OUTSIDE_TEXT:
+            return ActedCall(
+                one,
+                outcome,
+                output=result.output,
+                route=ResultRoute.PLANNING,
+                result_id=result_id,
+                effect_id=effect_id,
+            )
+        held.hold(HeldResult(result_id=result_id, round_id=round_id, content=result.output))
+        return ActedCall(
+            one, outcome, route=ResultRoute.DIGEST, result_id=result_id, effect_id=effect_id
         )
 
 
@@ -509,17 +578,3 @@ def _reason(result: ToolResult) -> str | None:
     if result.failure is None:
         return "the call failed"
     return f"the call failed ({result.failure.kind.value})"
-
-
-def _acted(one: AuthorizedCall, result: ToolResult, effect_id: str | None) -> ActedCall:
-    """What came of a call that ran, routed by its declaration (ADR-0306 §5:14 to §5:15)."""
-    outcome = _OUTCOMES[result.outcome]
-    if outcome is not ActedOutcome.DONE:
-        return ActedCall(one, outcome, reason=_reason(result), effect_id=effect_id)
-    declared = one.call.request.tool.result
-    if declared is CapabilityResult.NONE:
-        return ActedCall(one, outcome, effect_id=effect_id)
-    route = (
-        ResultRoute.PLANNING if declared is CapabilityResult.NO_OUTSIDE_TEXT else ResultRoute.DIGEST
-    )
-    return ActedCall(one, outcome, output=result.output, route=route, effect_id=effect_id)
