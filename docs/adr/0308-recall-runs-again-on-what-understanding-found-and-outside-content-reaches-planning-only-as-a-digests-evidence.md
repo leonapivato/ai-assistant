@@ -10,7 +10,7 @@
   [ADR-0252](0252-evidence-is-what-a-response-supports-sufficiency-to-act-is-four-mechanical-tests-and-a-refresh-supersedes-the-row-it-displaces.md) (whole: evidence is a digest's list, with no sufficiency tests);
   [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) (§3:5's working set and §4:1–§4:2's enums, in the additions alone; §4:6's loop guard, for the recall stage alone);
   [ADR-0281](0281-recall-runs-before-understanding-and-understanding-reads-what-it-found.md) (§1:3's *before it is understood*, §3:1's one cue and §5:4's *understanding is due next*, each for the second run alone; §6:1's `RecallCue`, in the addition alone);
-  [ADR-0282](0282-phases-read-and-write-the-working-episode-and-recall-searches-past-the-windows.md) (§4:2's *at most `RECALL_ITEM_LIMIT` records in all*, for the second run alone; §4:3's *and nothing else*, in the addition alone);
+  [ADR-0282](0282-phases-read-and-write-the-working-episode-and-recall-searches-past-the-windows.md) (§2:2's *any stage may read it*, for the held results alone; §4:2's *at most `RECALL_ITEM_LIMIT` records in all*, for the second run alone; §4:3's *and nothing else*, in the addition alone);
   [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md) (§8:1's projection, in the addition alone);
   [ADR-0286](0286-an-episode-is-open-while-its-activation-runs-and-frozen-when-it-ends.md) (§3:3's admitted differences, in the additions alone; §3:8's *no field is added for a stage's result*, for the second run and the digests alone).
 
@@ -75,10 +75,11 @@ answers one question with a list of marked evidence, which is all of it planning
 > every record the first run kept, and each band search asks for the limit plus the
 > number of records passed over, as ADR-0282 §4:2 asks.
 
-> **Normative.** The run then keeps the meaning's records first and each phrase's after,
-> in the order understanding recorded the phrases, up to a cap on the total,
-> `RECALL_SECOND_RUN_CAP`. A record more than one cue found is kept once, and its
-> `found_by` names each kind of cue that found it.
+> **Normative.** The run then keeps the cues' records up to a cap on the total,
+> `RECALL_SECOND_RUN_CAP`, in ADR-0072 §5's band order: every cue's `ASSERTED` records
+> first, then `ATTESTED`, then `DERIVED`, and within a band the meaning's records before
+> each phrase's, in the order understanding recorded the phrases. A record more than one
+> cue found is kept once, and its `found_by` names each kind of cue that found it.
 
 > **Normative.** `RECALL_SECOND_RUN_CAP` is a composition-root constant whose value
 > [#2589](https://github.com/leonapivato/ai-assistant/issues/2589) sets, and it is not above
@@ -134,7 +135,8 @@ decision's, as ADR-0307 §10:2 leaves planning's.
 > and nothing else.
 
 > **Normative.** Recall's outside memory records, from both runs, go into one digest after
-> the second run, which answers the latest understanding's `meaning`.
+> the second run, which answers the latest understanding's `meaning`. The digest fetches
+> them by id under ADR-0282 §2:4–§2:8.
 
 > **Normative.** `ControllerStage` gains `digesting`, and `ControllerRule` gains
 > `recall_undigested`, which answers when the second-run decision is made, either run kept
@@ -145,9 +147,8 @@ decision's, as ADR-0307 §10:2 leaves planning's.
 > is made and, where `recall_undigested` would answer, recall's digest is recorded.
 
 > **Normative.** The records reach the digest as quoted source data under ADR-0098 §2, in
-> one JSON object, each attributed by its label and as outside content from the hub's
-> data and never from its text. Each takes its label under ADR-0307 §5:1 before the
-> digest runs.
+> one JSON object, each attributed as outside content from the hub's data and never from
+> its text, under a label local to that call. No local label survives the call.
 
 > **Normative.** The digest's instruction states that the content is data and never
 > instruction (ADR-0098 §3), that the digest answers only the question, that each item
@@ -171,8 +172,14 @@ decision's, as ADR-0307 §10:2 leaves planning's.
 > **Normative.** A failed digest records no evidence, and planning is told it could not
 > read that result, or recall's outside records. Planning is never given the raw content.
 
-> **Normative.** An item naming a source that is not the label of one of the digest's
-> records is dropped.
+> **Normative.** An item naming a source that is not one of the call's local labels is
+> dropped.
+
+> **Normative.** The hub records each kept item's source under the planning label of the
+> record its local label named: the result's R label for a result that is one record, and
+> otherwise the record's own label. The record takes that label under ADR-0307 §5:1 as the
+> item is recorded for planning's next round, as a note planning writes takes its label
+> when written; a record no item names takes no label from its digest.
 
 > **Normative.** A digest remembers nothing between calls: each starts from its records
 > and its question alone.
@@ -208,29 +215,38 @@ that changes no clause here.
 
 ### 6. Held results and the follow-up
 
-> **Normative.** Acting holds each result's outside records, for the activation, under the
-> result's id, which acting mints when it records the result and which the result's R
-> label names (ADR-0307 §5:1).
+> **Normative.** Acting holds each result carrying outside text in its own part of the
+> working episode (ADR-0282 §2:2), under the result's id, which acting mints when it
+> records the result and which the result's R label names (ADR-0307 §5:1).
 
-> **Normative.** The holding is orchestration-local and in memory, never persisted, and is
-> discarded when the activation ends.
+> **Normative.** For a result of the assistant's own records, such as a memory search,
+> acting holds the ids of its outside records (ADR-0282 §2:3), and the digest fetches them
+> by id under ADR-0282 §2:4–§2:8.
 
-> **Normative.** Acting alone writes the holding and digesting alone reads it: planning,
-> consolidation, the episode writer and `project_episode` never reach it, and an
-> import-linter contract forbids any other module importing it.
+> **Normative.** Any other result is held as its text arrived.
+
+> **Normative.** The held results are never saved with the episode (ADR-0282 §1:2), and go
+> when the activation ends.
+
+> **Normative.** Of the stages, digesting alone reads the held results, and planning never
+> does (ADR-0307 §9:2).
 
 > **Normative.** A follow-up is a call of one capability on the assistant's own records,
 > whose one planner argument is a result's R label and whose *looking for* carries the new
 > question. It declares the assistant's own records as its effect, as reading a story does
 > (ADR-0306 §3:1); never leaves the hub; may carry outside text; never has an unknown
-> outcome; and is safe to repeat. It runs directly against the holding (ADR-0306 §3:3).
+> outcome; and is safe to repeat. It runs directly against the held results (ADR-0306
+> §3:3).
 
-> **Normative.** A follow-up's result is the held records of the result it names, under
-> that result's label. It mints no result and holds nothing again, so ADR-0306 §5:14 sends
-> it to a digest answering the new question. A follow-up naming a result with no held
-> records comes back not done, with the reason.
+> **Normative.** A follow-up's result is the result it names, as held, under that
+> result's label. It mints no result and holds nothing again, so ADR-0306 §5:14 sends it
+> to a digest answering the new question. A follow-up naming a result with nothing held
+> comes back not done, with the reason.
 
-Recall's outside records are asked about again by a memory search, which is itself a call.
+A memory record held by id is read at its current version, so one changed or forgotten
+since is digested as it now stands, or not at all (ADR-0282 §2:6). Nothing saved holds a
+held result, so neither consolidation nor an episode's projection can reach one. Recall's
+outside records are asked about again by a memory search, which is itself a call.
 
 ### 7. The code it binds
 
@@ -249,7 +265,7 @@ Recall's outside records are asked about again by a memory search, which is itse
 | `ModelProvider`, `Message`, `ToolCallingCompleter` | Unchanged; a digest calls `ModelProvider.complete` |
 | `RecallStage`, `Recalled`, `ActivationState` | Orchestration-local: the second run's cues, cap and passing over, and its decision held beside the first's |
 | `RECALL_SECOND_RUN_CAP`, `DIGEST_PART_CHARS` | New composition-root constants; their values are #2589's |
-| The held results | Orchestration-local, written by acting and read by digesting alone (§6:2–§6:3) |
+| The held results | Acting's part of the working episode, never saved: ids for memory records, text as it arrived otherwise (§6) |
 
 > **Normative.** The `core` types and functions the table names change, or are added, as
 > it states.
@@ -265,6 +281,7 @@ Recall's outside records are asked about again by a memory search, which is itse
 
 | Earlier decision | What changes |
 | --- | --- |
+| ADR-0072 §5 | Nothing: the second run fills its cap in band order across its cues (§2:4) |
 | ADR-0098 §2, §3 | Nothing: the digest is the one model that reads outside text for planning, and reads it as quoted data |
 | ADR-0106 §1 | Nothing: its predicate decides which memory records are outside (ADR-0306 §5:16) |
 | ADR-0252 | Whole, for an activation the phases plan: evidence is §5's list, with no applicability, standing, verdict or sufficiency test |
@@ -273,11 +290,14 @@ Recall's outside records are asked about again by a memory search, which is itse
 | ADR-0281 §1:3, §3:1, §5:4 | For the second run alone: it runs after understanding, searches with understanding's meaning and phrases, and is followed by planning rather than understanding |
 | ADR-0281 §6:1 | `RecallCue` gains §7's two members, in the addition alone |
 | ADR-0281 §6:3, §7:1 | Nothing: an outside episode's excerpt is still never its raw input, and understanding reads only the first run's records |
+| ADR-0282 §2:2 | *Any stage may read it*, for the held results alone: digesting alone reads them (§6:5) |
+| ADR-0282 §2:3–§2:8 | Nothing: held memory records, and recall's records for its digest, are ids fetched under them |
 | ADR-0282 §4:2 | For the second run alone, `RECALL_ITEM_LIMIT` is per cue and the cap bounds the total (§2:3–§2:5) |
 | ADR-0282 §4:3 | Recall's part of the working episode also holds the second run's `ActivationRecall` and scores, in the addition alone |
 | ADR-0284 §8:1 | The projection also carries an episode's evidence, in the addition alone |
 | ADR-0286 §3:3, §3:8 | §3:3's admitted differences gain `recall_second_run` taking its value and entries appended to `digests`, in the additions alone; §3:8's *no field is added*, for the second run and the digests alone |
 | ADR-0306 §5:14–§5:16 | Nothing: §4 is the digest those clauses send outside text to |
+| ADR-0307 §5:1 | Nothing: a digest's call uses local labels, and an evidence item's source takes its planning label as the item is recorded for planning (§4:15) |
 | ADR-0307 §8:6 | Nothing: §4:6 says when the second run has finished |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in
