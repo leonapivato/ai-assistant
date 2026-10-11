@@ -128,14 +128,28 @@ def test_the_assignment_does_not_depend_on_the_order_items_arrive_in() -> None:
     assert assign(units, 3) == assign(reordered, 3)
 
 
-def test_the_shares_are_about_equal_with_the_evidence_job_weighted_down() -> None:
-    """Index 0's share of the rest is cut by the evidence it already holds."""
+def test_the_loads_are_about_equal_with_the_evidence_job_weighted_down() -> None:
+    """Index 0's share of the rest is cut by the evidence it already holds.
+
+    An evidence item weighs ``EVIDENCE_WEIGHT`` ordinary ones, so the jobs' loads
+    are equal rather than their item counts, and index 0 holds fewer items.
+    """
     units = _units(30_000, evidence=3_600)
+    weight = suite_partition.EVIDENCE_WEIGHT
 
     assignment = assign(units, 3)
 
-    sizes = [list(assignment.values()).count(index) for index in range(3)]
-    assert all(abs(size - 10_000) < 400 for size in sizes), sizes
+    loads = [
+        sum(
+            weight if unit.evidence else 1.0
+            for unit in units
+            if assignment[unit.node_ids[0]] == index
+        )
+        for index in range(3)
+    ]
+    expected = (26_400 + weight * 3_600) / 3
+    assert all(abs(load - expected) < 400 for load in loads), loads
+    assert list(assignment.values()).count(EVIDENCE_INDEX) < 10_000
 
 
 def test_a_group_kept_whole_lands_in_one_job_and_a_divided_one_is_spread() -> None:

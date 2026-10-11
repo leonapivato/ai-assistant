@@ -20,7 +20,8 @@ when it is an item of that module. This module calls that function rather than
 restating it, so a change to what counts as a binding moves the partition with it.
 Every other item goes by a hash of its node id, or of its ``xdist_group`` where the
 group is kept whole. Index 0's share of those is weighted down by the evidence it
-already holds, so every job carries about the same number of items.
+already holds, so every job carries about the same load (see
+:data:`EVIDENCE_WEIGHT`).
 
 **Index 0 is whole for the triad, and every other index is narrowed** (§2:2 and §2:3).
 :func:`holds_the_triad_evidence` is what ``tests/conftest.py`` reads when it asks
@@ -65,6 +66,15 @@ EVIDENCE_INDEX: Final = 0
 #: holding a share. Every other group is kept whole, because dividing one repeats
 #: its shared session setup in every job that holds a part of it.
 DIVIDED_GROUPS: Final = frozenset({"gateway_browser"})
+
+#: What one evidence item costs, in ordinary items, when the cut points are set.
+#: Evidence is contract tests, and its job also runs the triad module, whose own
+#: tests parse the whole tree and run last. Weighted 1:1, the evidence job was the
+#: slowest job on both of PR #2828's first two runs, by 14 s and 23 s against the
+#: mean of the others' (209 s against 192 s and 179 s, then 249 s against 238 s and
+#: 213 s, job wall time). Re-weight it when the evidence job is the critical path
+#: again (ADR-0310, Consequences).
+EVIDENCE_WEIGHT: Final = 1.3
 
 #: How many hash points the unit interval is cut into. A key's point is its hash
 #: modulo this, scaled into ``[0, 1)``.
@@ -243,9 +253,10 @@ def assign(units: Sequence[Unit], count: int) -> dict[str, int]:
     """Assign every item to one job index: the partition itself (ADR-0310 §1 and §2).
 
     Evidence goes to :data:`EVIDENCE_INDEX`. Every other unit goes by its hash
-    point against cut points that give each job about ``total / count`` items:
-    index 0 takes what is left of that after the evidence, and the others split the
-    remainder equally.
+    point against cut points that give each job an equal load, where an evidence
+    item weighs :data:`EVIDENCE_WEIGHT` and any other item one: index 0 takes what
+    is left of its load after the evidence, and the others split the remainder
+    equally.
 
     It takes no job index, so it cannot answer differently in different jobs, and
     nothing it reads depends on the order the items arrive in.
@@ -261,7 +272,8 @@ def assign(units: Sequence[Unit], count: int) -> dict[str, int]:
     total = sum(len(unit.node_ids) for unit in units)
     pinned = sum(len(unit.node_ids) for unit in units if unit.evidence)
     rest = total - pinned
-    first = max(0.0, total / count - pinned) / rest if count > 1 and rest else 1.0
+    load = (rest + EVIDENCE_WEIGHT * pinned) / count
+    first = max(0.0, load - EVIDENCE_WEIGHT * pinned) / rest if count > 1 and rest else 1.0
     width = (1.0 - first) / (count - 1) if count > 1 else 0.0
     assignment: dict[str, int] = {}
     for unit in units:
