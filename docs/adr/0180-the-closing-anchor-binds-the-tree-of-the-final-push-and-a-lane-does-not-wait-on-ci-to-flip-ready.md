@@ -1,6 +1,6 @@
 # 180. The closing anchor binds the tree of the final push, and a lane does not wait on CI to flip ready
 
-- Status: Accepted, §4's trigger bullet and a Consequences revisit trigger amended by ADR-0288
+- Status: Partially superseded by ADR-0311 (§1 whole, §2's first two clauses, and §3's first clause)
 - Date: 2026-08-22
 - **What this changes and what it does not.** It changes two things about the
   tail of a branch: ADR-0136 §1's closing anchor stops being an *ordering*
@@ -29,6 +29,22 @@
   reader holding only this ADR acts identically. This change takes effect on
   ratification of ADR-0288. Nothing below is rewritten: the sentences stay legible
   where they were written, beside this note.
+- Partially superseded: 2026-10-11 by
+  [ADR-0311](0311-cis-gate-is-the-full-gate-and-no-local-full-suite-run-is-owed.md)
+  — **no local whole-suite run is owed, and `just ready` refuses unless `gate` is
+  green on the PR head.** Four clauses are replaced. §1, the closing anchor, goes
+  whole: ADR-0311 §1 owes no local whole-suite run on the final push. §2:1 and
+  §2:2, which held neither `just ready` nor the lane's report for CI, are replaced
+  by ADR-0311 §4, under which `just ready` refuses on a pending or red `gate` and
+  the finishing report follows it. §3:1, which restated ADR-0136 §3:2's local
+  proof, goes with the proof. A reader holding only this ADR would run the gate
+  after the push and flip ready on a pending check, which is ADR-0070 §1's test
+  met, so this is a supersession. **Everything else stands**: §2:3, the merger's
+  check, on which ADR-0311 §4 relies; §3:2, which says what this ADR left
+  untouched; and §3:3. The `Status` line now leads with the supersession, so its
+  ADR-0288 qualifier came off it, and the 2026-10-04 note above carries that
+  record whole (ADR-0082 §2). This change takes effect on ratification of
+  ADR-0311. Nothing above is rewritten.
 
 ## Context
 
