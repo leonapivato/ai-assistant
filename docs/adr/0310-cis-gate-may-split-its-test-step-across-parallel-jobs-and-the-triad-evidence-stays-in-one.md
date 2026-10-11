@@ -1,6 +1,6 @@
 # 310. CI's gate may split its test step across parallel jobs, and the triad evidence stays in one
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Authorization: the owner directed on 2026-10-11 that CI's test run be split across
   parallel jobs, because CI's wall time is now the feedback loop every lane waits on.
