@@ -251,7 +251,7 @@ and in a dated header note, with no ratified text rewritten.
   every case in the layer", as it reaches a test step split across jobs. There it is
   started once per job holding a share. Kept: §3:4's first sentence, and the whole
   clause for every single `pytest` run, local runs included. §3:3 is untouched. It
-  is about the local anchors, and no case is left out of every job.
+  is about the local commands, and no case is left out of every job.
 
 ADR-0166 §4:2, the serial-CI clause, was already superseded by ADR-0179 and takes
 nothing. ADR-0136, ADR-0167, ADR-0180 and ADR-0288 are untouched.
