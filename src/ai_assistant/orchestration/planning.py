@@ -163,6 +163,9 @@ _TRANSFORMABLE: Final = frozenset(
     }
 )
 
+#: The keywords that point elsewhere in a schema, which a removed property could dangle.
+_REFERENCE_KEYWORDS: Final = frozenset({"$ref", "$dynamicRef", "$recursiveRef"})
+
 #: How much of a label the model wrote a refusal's reason quotes back.
 _QUOTED_LABEL_CHARS: Final = 32
 
@@ -252,13 +255,17 @@ class CallOutcome:
         kind: What came of it.
         reason: Why it was not done or was refused, in code-owned words.
         result_id: For a done call that brought a result, the id acting minted for it,
-            which its R label names (ADR-0307 §5:1, ADR-0308 §6:1).
+            which its R label names (ADR-0307 §5:1, ADR-0308 §6:1). ``None`` where the
+            call brought none, as for a capability whose result is none.
         result: What a done call returned, where its result goes to planning whole
-            (ADR-0306 §5:14). A result for a digest reaches planning only as the
-            :class:`DigestedEvidence` that names its ``result_id``.
+            (ADR-0306 §5:14), JSON ``null`` included.
+        digested: Whether the result went to a digest instead (ADR-0306 §5:14). It
+            reaches planning only as the :class:`DigestedEvidence` naming its
+            ``result_id``, and ``result`` is then ``None``.
 
     Raises:
-        ValueError: If it carries a result without the result's id.
+        ValueError: If it carries a result, or says one was digested, without the
+            result's id, or carries a result it says was digested.
     """
 
     round_id: str
@@ -267,11 +274,15 @@ class CallOutcome:
     reason: str | None = None
     result_id: str | None = None
     result: FrozenJsonValue = None
+    digested: bool = False
 
     def __post_init__(self) -> None:
         """A result is shown under its label, so it carries the id the label names."""
-        if self.result is not None and self.result_id is None:
+        if (self.result is not None or self.digested) and self.result_id is None:
             msg = "a call's result carries the id acting minted for it (ADR-0308 §6:1)"
+            raise ValueError(msg)
+        if self.digested and self.result is not None:
+            msg = "a digested result reaches planning only as its digest's evidence"
             raise ValueError(msg)
 
 
@@ -485,8 +496,9 @@ def _offered_schema(tool: ToolDefinition) -> dict[str, Any] | None:
     carrying anything else at its top, a combinator, a conditional or a rule on the
     number or names of its properties, may forbid an argument the hub adds or require
     one it removes, so its capability is not offered rather than offered with
-    arguments no call could satisfy. So is one that already declares an added
-    argument, as a property or as one the hub fills.
+    arguments no call could satisfy. So is one carrying a reference anywhere, which a
+    removed property could leave pointing at nothing, and one that already names an
+    added argument, as a property, as required or as one the hub fills.
     """
     schema: dict[str, Any] = dict(tool.model_dump()["parameters_schema"])
     if schema.get("type", "object") != "object":
@@ -497,11 +509,14 @@ def _offered_schema(tool: ToolDefinition) -> dict[str, Any] | None:
     if not tool.safe_to_repeat:
         added[DELIBERATE_REPEAT] = dict(_DELIBERATE_REPEAT_SCHEMA)
     properties: dict[str, Any] = dict(schema.get("properties") or {})
-    if set(added) & (set(properties) | set(tool.system_supplied)):
+    declared_required: list[str] = list(schema.get("required") or [])
+    if set(added) & (set(properties) | set(declared_required) | set(tool.system_supplied)):
         return None
-    if (added or tool.system_supplied) and set(schema) - _TRANSFORMABLE:
+    if (added or tool.system_supplied) and (
+        set(schema) - _TRANSFORMABLE or _references_anything(schema)
+    ):
         return None
-    required = [name for name in schema.get("required") or [] if name not in tool.system_supplied]
+    required = [name for name in declared_required if name not in tool.system_supplied]
     for name in tool.system_supplied:
         properties.pop(name, None)
     properties.update(added)
@@ -513,6 +528,17 @@ def _offered_schema(tool: ToolDefinition) -> dict[str, Any] | None:
     else:
         schema.pop("required", None)
     return schema
+
+
+def _references_anything(value: object) -> bool:
+    """Whether a JSON schema carries a reference keyword at any depth."""
+    if isinstance(value, dict):
+        return any(
+            key in _REFERENCE_KEYWORDS or _references_anything(item) for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_references_anything(item) for item in value)
+    return False
 
 
 # --- labels ------------------------------------------------------------------------------
@@ -852,10 +878,7 @@ class _Request:
         if outcome.kind is not CallOutcomeKind.DONE or outcome.result_id is None:
             return shown
         result: dict[str, object] = {"label": self._book.label(LabelKind.RESULT, outcome.result_id)}
-        if outcome.result is not None:
-            result["value"] = _thawed(outcome.result)
-        else:
-            result["value"] = _DIGESTED_RESULT
+        result["value"] = _DIGESTED_RESULT if outcome.digested else _thawed(outcome.result)
         shown["result"] = result
         return shown
 

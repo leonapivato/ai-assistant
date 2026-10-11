@@ -528,6 +528,25 @@ async def test_a_done_calls_result_takes_a_result_label() -> None:
 def test_a_result_is_shown_only_under_the_id_acting_minted() -> None:
     with pytest.raises(ValueError, match="minted"):
         CallOutcome("r", "c1", CallOutcomeKind.DONE, result={"saved": True})
+    with pytest.raises(ValueError, match="minted"):
+        CallOutcome("r", "c1", CallOutcomeKind.DONE, digested=True)
+    with pytest.raises(ValueError, match="only as its digest's evidence"):
+        CallOutcome("r", "c1", CallOutcomeKind.DONE, result_id="x", result="raw", digested=True)
+
+
+async def test_a_null_result_is_shown_as_null_and_a_digested_one_as_digested() -> None:
+    earlier = _earlier(
+        calls=(_call("c1", "remember", fact="x"), _call("c2", "web_search", query="q"))
+    )
+    outcomes = (
+        CallOutcome(earlier.id, "c1", CallOutcomeKind.DONE, result_id="result:null"),
+        CallOutcome(earlier.id, "c2", CallOutcomeKind.DONE, result_id="result:d", digested=True),
+    )
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(rounds=(earlier,), outcomes=outcomes))
+    null, digested = (call["result"] for call in _sent(completer)["rounds"][0]["calls"])
+    assert null == {"label": "R1", "value": None}
+    assert digested == {"label": "R2", "value": "read for you by a digest, under evidence"}
 
 
 @pytest.mark.parametrize("episode_id", ["", " ", "activation: spaced "])
@@ -593,8 +612,12 @@ def _two_searches() -> tuple[PlanningRound, tuple[CallOutcome, ...]]:
         )
     )
     outcomes = (
-        CallOutcome(earlier.id, "c1", CallOutcomeKind.DONE, result_id="result:london"),
-        CallOutcome(earlier.id, "c2", CallOutcomeKind.DONE, result_id="result:paris"),
+        CallOutcome(
+            earlier.id, "c1", CallOutcomeKind.DONE, result_id="result:london", digested=True
+        ),
+        CallOutcome(
+            earlier.id, "c2", CallOutcomeKind.DONE, result_id="result:paris", digested=True
+        ),
     )
     return earlier, outcomes
 
@@ -910,6 +933,23 @@ def test_a_declaration_the_hub_fills_an_added_argument_of_is_not_offered(added: 
     declared["parameters_schema"]["properties"][added] = {"type": "string"}
     declared["system_supplied"] = (*declared["system_supplied"], added)
     assert offered_tools((ToolDefinition.model_validate(declared),)) == ()
+
+
+def test_a_declaration_requiring_an_added_argument_is_not_offered() -> None:
+    schema = {"type": "object", "required": [LOOKING_FOR]}
+    assert offered_tools((_tool("web_search", parameters_schema=schema),)) == ()
+
+
+def test_a_schema_with_a_reference_is_not_changed() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "slot": {"$ref": "#/properties/client_reference"},
+            "client_reference": {"type": "string"},
+        },
+        "required": ["slot", "client_reference"],
+    }
+    assert offered_tools((_tool("book", parameters_schema=schema),)) == ()
 
 
 async def test_a_channel_items_excerpt_never_reaches_planning() -> None:
