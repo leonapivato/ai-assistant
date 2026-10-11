@@ -61,7 +61,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
 )
 from ai_assistant.interfaces import cli
-from ai_assistant.testing import FakeAssistantEngine
+from ai_assistant.testing import FakeAssistantEngine, with_phase_declaration
 from ai_assistant.wire import TransportError
 
 if TYPE_CHECKING:
@@ -110,7 +110,7 @@ def _tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
         "idempotency": Idempotency.NATURAL,
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 def _span(  # noqa: PLR0913 — an occurrence's own members, and ADR-0186 §11 varies each

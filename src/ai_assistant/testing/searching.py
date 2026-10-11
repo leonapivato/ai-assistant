@@ -73,6 +73,8 @@ from uuid import uuid4
 from ai_assistant.core.types import (
     ActionRequest,
     Attestation,
+    CapabilityEffect,
+    CapabilityResult,
     CostBasis,
     DataTier,
     Idempotency,
@@ -155,6 +157,11 @@ FAKE_WEB_SEARCH: Final = ToolDefinition(
     discloses=(DataTier.PERSONAL,),
     cost=ToolCost(basis=CostBasis.UNKNOWN),
     idempotency=Idempotency.NONE,
+    effect=CapabilityEffect.NONE,
+    leaves_hub=True,
+    result=CapabilityResult.MAY_CARRY_OUTSIDE_TEXT,
+    outcome_can_be_unknown=True,
+    safe_to_repeat=True,
     parameters_schema={
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",

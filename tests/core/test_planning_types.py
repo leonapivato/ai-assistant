@@ -1375,16 +1375,17 @@ def test_the_kind_vocabulary_is_the_six_the_decisions_admit() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 17
+    assert export.schema_version == 18
     assert export.goals == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_seventeen() -> None:
+def test_export_pins_the_schema_version_to_exactly_eighteen() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[17]`` refuses an explicit ``16`` — a document of the shape this export
-    had before it gained ``stopped_activations`` does not validate against this
-    contract at all (ADR-0297 §1), exactly as a ``15`` stopped validating when it
+    ``Literal[18]`` refuses an explicit ``17`` — a document of the shape this export
+    had before it gained ``activation_effects`` does not validate against this
+    contract at all (ADR-0306 §6), exactly as a ``16`` stopped validating when it
+    gained ``stopped_activations`` (ADR-0297 §1), a ``15`` when it
     gained ``effects`` and ``StepExecution`` gained the two satisfaction marks
     (ADR-0259 §9), a ``14`` when ``AttemptOutcome`` gained ``CANCELLED`` (ADR-0261
     §10) — §10's mechanism applied for the first time to a **value** rather than to a
@@ -1406,13 +1407,13 @@ def test_export_pins_the_schema_version_to_exactly_seventeen() -> None:
     value, so the advertised version cannot be mislabelled. The positive default is
     what a producer gets for free; only the rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``16`` is
-    the shape this contract had one decision ago and ``18`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``17`` is
+    the shape this contract had one decision ago and ``19`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=17).schema_version == 17
-    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18):
+    assert PlanExport(exported_at=_WHEN, schema_version=18).schema_version == 18
+    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)  # type: ignore[arg-type]
 
@@ -1478,7 +1479,7 @@ def test_export_carries_a_whole_supersession_chain() -> None:
         exported_at=_WHEN, goals=(_goal(),), plans=(first, revision), evidence=_histories("g1")
     )
 
-    assert export.schema_version == 17
+    assert export.schema_version == 18
     assert [plan.supersedes for plan in export.plans] == [None, "p1"]
 
 
@@ -1571,7 +1572,7 @@ def test_export_round_trips_through_json() -> None:
     )
     restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
     assert restored == export
-    assert restored.schema_version == 17
+    assert restored.schema_version == 18
     request = restored.plans[0].read_request
     assert request is not None
     assert {ask.kind for ask in request.asks} == {ReadKind.SIGHTED_QUERY, ReadKind.CITATION_HOP}

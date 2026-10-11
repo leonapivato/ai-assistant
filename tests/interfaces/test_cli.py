@@ -154,6 +154,7 @@ from ai_assistant.testing import (
     FakeTraceRetention,
     FakeTraceSink,
     StreamAttempt,
+    with_phase_declaration,
 )
 from ai_assistant.wire import GRANTABLE_SCOPES, TransportError
 from ai_assistant.wire.address import sun_path_limit
@@ -329,7 +330,7 @@ def tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
         "idempotency": Idempotency.NATURAL,
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 def confirmable(tool_id: str = "smtp") -> ToolDefinition:

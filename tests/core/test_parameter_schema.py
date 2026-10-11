@@ -46,6 +46,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
     parameter_violations,
 )
+from ai_assistant.testing import with_phase_declaration
 from ai_assistant.tools.builtin import CURRENT_TIME
 from ai_assistant.tools.send_email import SEND_EMAIL
 
@@ -85,7 +86,7 @@ def _definition(**overrides: object) -> ToolDefinition:
         "idempotency": Idempotency.NONE,
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 def _nested_schema(levels: int) -> dict[str, Any]:

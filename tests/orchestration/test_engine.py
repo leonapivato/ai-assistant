@@ -155,6 +155,7 @@ from ai_assistant.testing import (
     FakeTraceRetention,
     FakeTraceSink,
     evaluation_trace,
+    with_phase_declaration,
 )
 
 if TYPE_CHECKING:
@@ -382,7 +383,7 @@ def tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
         "idempotency": Idempotency.NATURAL,
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 def confirmable(tool_id: str = "smtp") -> ToolDefinition:

@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
 )
+from ai_assistant.testing import with_phase_declaration
 
 #: A fixed instant, so every horizon here is arithmetic a reader can check.
 AT: Final = datetime(2026, 9, 13, 9, 0, tzinfo=UTC)
@@ -66,7 +67,7 @@ def a_tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
         "idempotency": Idempotency.NATURAL,
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 def a_binding(**overrides: object) -> EgressBinding:

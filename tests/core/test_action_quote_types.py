@@ -32,6 +32,8 @@ from ai_assistant.core.types import (
     ActionQuoteMinting,
     Authorization,
     AuthorizationProjection,
+    CapabilityEffect,
+    CapabilityResult,
     CostBasis,
     EvidenceHistory,
     Goal,
@@ -117,6 +119,11 @@ def _tool(**overrides: object) -> ToolDefinition:
         risk_level=RiskLevel.MEDIUM,
         reversibility=Reversibility.RECOVERABLE,
         side_effecting=True,
+        effect=CapabilityEffect.WORLD,
+        leaves_hub=True,
+        result=CapabilityResult.NO_OUTSIDE_TEXT,
+        outcome_can_be_unknown=True,
+        safe_to_repeat=False,
         reads=(),
         writes=(),
         discloses=(),
@@ -458,9 +465,9 @@ def test_the_export_carries_the_quotes_inside_its_goals_and_gains_no_member() ->
         goals=(_goal(quotes=(quote,)),),
         evidence=(EvidenceHistory(goal_id="g1"),),
     )
-    assert export.schema_version == 17
+    assert export.schema_version == 18
     assert "quotes" not in PlanExport.model_fields
     assert export.goals[0].quotes == (quote,)
     restored = PlanExport.model_validate_json(export.model_dump_json())
     assert restored.goals[0].quotes == (quote,)
-    assert restored.schema_version == 17
+    assert restored.schema_version == 18

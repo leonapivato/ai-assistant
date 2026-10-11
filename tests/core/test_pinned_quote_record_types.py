@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
 )
+from ai_assistant.testing import with_phase_declaration
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 _DIGEST = "a" * 64
@@ -77,7 +78,7 @@ def _tool(**overrides: Any) -> ToolDefinition:
         "idempotency": Idempotency.NONE,
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 def _route_d(**overrides: Any) -> dict[str, Any]:

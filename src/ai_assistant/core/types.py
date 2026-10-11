@@ -15164,7 +15164,16 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 17 because the document gains ``stopped_activations``**
+    **``schema_version`` is 18 because the document gains ``activation_effects``**
+    (ADR-0306 §6): acting's effect records, each pointing at the activation that made
+    it, in the order they were claimed. One ground, and sufficient on its own: an older
+    reader's ``extra="forbid"`` refuses the new member, which ``model_dump()`` emits on
+    every document. A record names an activation and a decision, neither of which the
+    document carries, so ADR-0014 §5's closure rule is **extended by nothing**; the only
+    constraint stated over the member is that no record id appears twice. A
+    stored-record version and not a wire ground: ``PlanExport`` crosses no frame.
+
+    **It was 17 because the document gained ``stopped_activations``**
     (ADR-0297 §1): the activation ids the store holds a stop record for, carried so
     that ADR-0004 §6's view and export limbs reach the one datum that decision adds
     rather than taking a scope on them. One ground, and sufficient on its own: an older
@@ -15377,12 +15386,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[17] = Field(
-        default=17,
+    schema_version: Literal[18] = Field(
+        default=18,
         description=(
-            "Shape of this export, pinned to exactly 17 (ADR-0039 §10, ADR-0297 §1): an "
+            "Shape of this export, pinned to exactly 18 (ADR-0039 §10, ADR-0306 §6): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[17]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[18]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -15404,6 +15413,29 @@ class PlanExport(BaseModel):
             "no content."
         ),
     )
+    activation_effects: tuple[ActivationEffect, ...] = Field(
+        default=(),
+        description=(
+            "Acting's effect records, finished or not, in the order they were claimed "
+            "(ADR-0306 §6)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _an_activation_effect_appears_once(self) -> PlanExport:
+        """Refuse a document carrying one effect record id twice (ADR-0306 §6:2).
+
+        A store refuses a claim of an id it already holds, so a duplicate states a
+        record the store cannot hold.
+
+        Raises:
+            ValueError: If an effect record id appears more than once.
+        """
+        ids = [record.id for record in self.activation_effects]
+        if len(set(ids)) != len(ids):
+            msg = "export contains duplicate activation effect ids"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _a_stop_record_appears_once(self) -> PlanExport:
@@ -18227,6 +18259,44 @@ class ChargedOutput(BaseModel):
         return self
 
 
+class CapabilityEffect(StrEnum):
+    """What a capability's calls change (ADR-0306 §2).
+
+    **Three members, closed.** Every rule about a phases call reads this: it decides
+    which calls are claimed, which get an effect record, and what is reported as done
+    in the world (ADR-0306 §5).
+    """
+
+    NONE = "none"
+    """The call changes nothing: a read, or a disclosure with nothing written."""
+
+    OWN_RECORDS = "own_records"
+    """The call changes the assistant's own records, such as a story or a memory
+    (ADR-0306 §3). It runs directly against the store it reaches."""
+
+    WORLD = "world"
+    """The call changes something outside the hub, such as a booking or a sent
+    message."""
+
+
+class CapabilityResult(StrEnum):
+    """What a capability's calls return, by who may have written it (ADR-0306 §2).
+
+    **Three members, closed.** It decides the *looking for* argument and where a
+    result goes: a result that may carry outside text is routed record by record by
+    who wrote it, and one declared to carry none goes to planning whole (ADR-0306 §5).
+    """
+
+    NONE = "none"
+    """The call returns nothing planning reads."""
+
+    NO_OUTSIDE_TEXT = "no_outside_text"
+    """The call returns only what the user or the assistant wrote, or no text at all."""
+
+    MAY_CARRY_OUTSIDE_TEXT = "may_carry_outside_text"
+    """The call may return text someone other than the user or the assistant wrote."""
+
+
 class ToolDefinition(BaseModel):
     """A declaration of what a tool is and what invoking it risks (ADR-0016 §1).
 
@@ -18262,6 +18332,34 @@ class ToolDefinition(BaseModel):
     discloses: TierReach = Field(description="Tiers it may transmit off-device; a ceiling.")
     cost: ToolCost
     idempotency: Idempotency
+    effect: CapabilityEffect = Field(
+        description=(
+            "What the tool's calls change: nothing, the assistant's own records, or the "
+            "world (ADR-0306 §2). Required, with no default."
+        )
+    )
+    leaves_hub: bool = Field(
+        description="Whether a call leaves the hub (ADR-0306 §2). Required, with no default."
+    )
+    result: CapabilityResult = Field(
+        description=(
+            "What a call returns, by who may have written it (ADR-0306 §2). Required, "
+            "with no default."
+        )
+    )
+    outcome_can_be_unknown: bool = Field(
+        description=(
+            "Whether a call's outcome can be unknown (ADR-0306 §2). An unknown outcome "
+            "is never retried. Required, with no default."
+        )
+    )
+    safe_to_repeat: bool = Field(
+        description=(
+            "Whether a call may be made again with the same values (ADR-0306 §2). Its "
+            "own property, never read from ``idempotency``, which governs retrying one "
+            "call. Required, with no default."
+        )
+    )
     idempotency_window: timedelta | None = Field(
         default=None,
         description="How long a repeated key is deduplicated; required iff idempotency is KEYED.",
@@ -18446,6 +18544,34 @@ class ToolDefinition(BaseModel):
             raise ValueError(msg)
         if not self.side_effecting and self.reversibility is not Reversibility.REVERSIBLE:
             msg = "a tool with no side effect has nothing to reverse, so it is REVERSIBLE"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _an_unknown_outcome_is_declared(self) -> ToolDefinition:
+        """Refuse a declaration that says its outcome is never unknown when it can be.
+
+        ADR-0306 §2:6. A call the invocation seam cuts short is classified by
+        :attr:`interrupted_outcome`, and a call to the assistant's own records is
+        never such a call: it runs directly against its store and is awaited to its
+        end (§3:3). Every other declaration whose interrupted call is
+        ``INDETERMINATE`` can have an unknown outcome, and saying otherwise would let
+        acting report as not done a call that may have run.
+
+        Raises:
+            ValueError: If the outcome is declared never unknown, the effect is not
+                the assistant's own records, and an interrupted call is
+                ``INDETERMINATE``.
+        """
+        if (
+            not self.outcome_can_be_unknown
+            and self.effect is not CapabilityEffect.OWN_RECORDS
+            and self.interrupted_outcome is ToolOutcome.INDETERMINATE
+        ):
+            msg = (
+                "a tool whose interrupted call is indeterminate can have an unknown "
+                "outcome, unless its effect is the assistant's own records (ADR-0306 §2)"
+            )
             raise ValueError(msg)
         return self
 
@@ -21211,9 +21337,19 @@ class PermissionDecision(BaseModel):
             ),
         )
     )
+    effect: DurableIdentifier | None = Field(
+        default=None,
+        description=(
+            "The id of the :class:`ActivationEffect` a phases call is claimed under "
+            "(ADR-0306 §5:8, §6). Minted before the ruling and supplied by the recorder "
+            "through :meth:`from_request`, like ``id``; set on every decision about a call "
+            "that gets an effect record, and ``None`` on every other decision. "
+            ":meth:`authorises` does not compare it."
+        ),
+    )
 
     @classmethod
-    def from_request(  # noqa: PLR0913 — the ADR-0059 §1 signature: recorder-supplied id, decided_at, resolves, expires_at
+    def from_request(  # noqa: PLR0913 — the ADR-0059 §1 signature: recorder-supplied id, decided_at, resolves, expires_at, and ADR-0306 §6's effect
         cls,
         request: ActionRequest,
         ruling: PermissionRuling,
@@ -21222,6 +21358,7 @@ class PermissionDecision(BaseModel):
         decided_at: datetime,
         resolves: Identifier | None = None,
         expires_at: datetime | None = None,
+        effect: Identifier | None = None,
     ) -> PermissionDecision:
         """Bind a ruling to the request it was made about.
 
@@ -21281,6 +21418,11 @@ class PermissionDecision(BaseModel):
                 — before calling this; no deadline is computed here. ``None`` for
                 a decision with no lifetime. Permitted only on a ``CONFIRM`` and
                 only strictly after ``decided_at`` (both checked at construction).
+            effect: The id of the ``ActivationEffect`` a phases call is claimed
+                under, minted before the ruling (ADR-0306 §5:8, §6). Supplied by
+                the recorder like ``id``, because the record is acting's and not a
+                fact the policy authored. ``None`` for a call that gets no effect
+                record, and for every call of the old path.
 
         Returns:
             The decision, ready to record.
@@ -21298,6 +21440,7 @@ class PermissionDecision(BaseModel):
             resolves=resolves,
             expires_at=expires_at,
             egress_binding=None if binding is None else binding.model_copy(deep=True),
+            effect=effect,
         )
 
     @classmethod
@@ -21515,6 +21658,10 @@ class PermissionDecision(BaseModel):
         reading — a **stored** decision written before this field decodes carrying
         ``None`` and then authorises only a request carrying none, which is the
         fail-closed direction and needs no migration to be true.
+
+        **``effect`` is not compared** (ADR-0306 §6). It names acting's record of the
+        call, which the recorder mints and the request never carries, so it says
+        nothing about which request was ruled on.
         """
         return (
             self.ruling.outcome is PermissionOutcome.ALLOW
@@ -24747,6 +24894,124 @@ class ToolOutcome(StrEnum):
     FAILED = "failed"
     INDETERMINATE = "indeterminate"
     """The call may or may not have taken effect; ADR-0014 §4's durable ignorance."""
+
+
+# --- acting's effect records (ADR-0306 §5, §6) --------------------------------
+# One record per call in the world, per message, and per call to a capability that
+# is not safe to repeat, pointing at the activation that made it. Written by
+# `PlanStore.claim_activation_effect` before the call runs and finished by
+# `finish_activation_effect` once its outcome is known.
+
+
+class ActivationEffectClaim(StrEnum):
+    """What a store answered when asked to claim one activation effect (ADR-0306 §6:2).
+
+    **Two members, closed.** A stopped activation is not an answer: the claim raises
+    ``ClaimStopped`` instead.
+    """
+
+    CLAIMED = "claimed"
+    """The record was written, carrying no outcome; the call or message may run."""
+
+    ALREADY_DONE = "already_done"
+    """A matching effect of a named activation is done, unknown or not yet written,
+    so nothing was written and the call does not run (ADR-0306 §5:9 to §5:11)."""
+
+
+class ActivationEffect(BaseModel):
+    """One effect an activation made or is making, as acting records it (ADR-0306 §6).
+
+    **A call or a message, never both.** A call carries its capability, a digest of
+    its values and the id of the ``PermissionDecision`` that allowed it; a message
+    carries its place and, once the medium has recorded it, its position. The outcome
+    is ``None`` from the claim until the effect happens, and is then written once:
+    ``succeeded`` is done, ``failed`` not done and ``indeterminate`` unknown.
+
+    The record points at the activation and never at a story, so a split, a merge or a
+    move carries it with its episode (ADR-0306 §5). It names the round whose call or
+    message it claims, and only the *couldn't finish* message names none (ADR-0307
+    §10).
+
+    Attributes:
+        id: The record's id, minted before the ruling and named by the deciding
+            decision's ``effect``.
+        activation_id: The activation that made the effect.
+        round: The planning round whose call or message this claims; ``None`` only on
+            the *couldn't finish* message.
+        capability: For a call, the capability called.
+        values_digest: For a call, the digest of the values the duplicate backstop
+            compares (ADR-0306 §2:10, §5:12).
+        decision_id: For a call, the ``PermissionDecision`` that allowed it.
+        place: For a message, the place it goes into.
+        position: For a message done, the position the medium recorded it at.
+        outcome: The outcome, once known.
+        reason: Why the effect was not done, where it was not.
+        claimed_at: When the record was claimed.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: DurableIdentifier
+    activation_id: DurableIdentifier
+    round: DurableIdentifier | None = None
+    capability: VisibleIdentifier | None = None
+    values_digest: Sha256Hex | None = None
+    decision_id: DurableIdentifier | None = None
+    place: DurableIdentifier | None = None
+    position: int | None = Field(default=None, ge=0)
+    outcome: ToolOutcome | None = None
+    reason: NonBlankEncodableText | None = None
+    claimed_at: UtcInstant
+
+    @property
+    def is_call(self) -> bool:
+        """Whether this records a call, rather than a message."""
+        return self.capability is not None
+
+    @model_validator(mode="after")
+    def _a_call_or_a_message(self) -> ActivationEffect:
+        """Refuse a record that is neither a whole call nor a whole message (ADR-0306 §6).
+
+        Raises:
+            ValueError: If a call lacks its values digest or deciding decision, carries a
+                place or a position, or names no round; or a message lacks its place or
+                carries a call's fields.
+        """
+        call_fields = (self.capability, self.values_digest, self.decision_id)
+        if self.capability is not None:
+            if None in call_fields:
+                msg = "a call's effect carries its capability, values digest and decision"
+                raise ValueError(msg)
+            if self.place is not None or self.position is not None:
+                msg = "a call's effect carries no place and no position"
+                raise ValueError(msg)
+            if self.round is None:
+                msg = "a call's effect names the round that proposed it (ADR-0307 §10)"
+                raise ValueError(msg)
+            return self
+        if any(field is not None for field in call_fields):
+            msg = "a message's effect carries no capability, values digest or decision"
+            raise ValueError(msg)
+        if self.place is None:
+            msg = "an effect is a call, with its capability, or a message, with its place"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _outcome_fields_match(self) -> ActivationEffect:
+        """Tie the reason and the position to the outcome they belong to (ADR-0306 §5:5).
+
+        Raises:
+            ValueError: If a reason rides on an outcome other than not done, or a
+                position on anything but a message done.
+        """
+        if self.reason is not None and self.outcome is not ToolOutcome.FAILED:
+            msg = "only an effect not done carries a reason"
+            raise ValueError(msg)
+        if self.position is not None and self.outcome is not ToolOutcome.SUCCEEDED:
+            msg = "only a message done carries a position"
+            raise ValueError(msg)
+        return self
 
 
 class ToolFailure(BaseModel):

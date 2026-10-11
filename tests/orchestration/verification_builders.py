@@ -60,6 +60,7 @@ from ai_assistant.core.types import (
     ValueResolution,
     VerificationKind,
 )
+from ai_assistant.testing import with_phase_declaration
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -159,7 +160,7 @@ def a_tool(
         "postconditions": tuple(postconditions),
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 def a_criterion(span: str | None, *, text: str | None = None) -> GoalElement:

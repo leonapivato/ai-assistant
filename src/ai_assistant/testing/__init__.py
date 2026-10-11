@@ -186,7 +186,7 @@ from ai_assistant.testing.streaming import (
     StreamAttempt,
     StreamCall,
 )
-from ai_assistant.testing.tools import FakeToolRegistry
+from ai_assistant.testing.tools import FakeToolRegistry, with_phase_declaration
 from ai_assistant.testing.traces import (
     DEFAULT_OCCURRED_AT,
     TRACE_NOT_RECORDED,
@@ -359,4 +359,5 @@ __all__ = [
     "source_read_record",
     "succeeds",
     "terms_bound",
+    "with_phase_declaration",
 ]

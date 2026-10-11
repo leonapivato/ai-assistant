@@ -658,6 +658,17 @@ modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "the phase modules are independent of each other"
+type = "independence"
+# ADR-0309 §2:3: phases meet only in the episode's working set, so no phase module
+# imports another. Each lane that adds a phase module adds it here.
+modules = [
+    "ai_assistant.orchestration.recall",
+    "ai_assistant.orchestration.understanding",
+    "ai_assistant.orchestration.acting",
+]
+
+[[tool.importlinter.contracts]]
 name = "subsystems do not import orchestration or interfaces"
 type = "forbidden"
 source_modules = [

@@ -17,12 +17,40 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.errors import ToolRegistrationError
+from ai_assistant.core.types import CapabilityEffect, CapabilityResult
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
     from ai_assistant.core.types import ToolDefinition
     from ai_assistant.testing.invoker import FakeToolImplementation
+
+
+def with_phase_declaration(fields: Mapping[str, object]) -> dict[str, object]:
+    """Fill in the five ADR-0306 §2 fields a test declaration leaves out.
+
+    For the test builders that assemble a ``ToolDefinition`` from a dict of fields.
+    The values follow the declaration's ``side_effecting``, so they validate whatever
+    a test overrides: a side-effecting tool acts in the world, leaves the hub, can
+    have an unknown outcome and is not safe to repeat; one with no side effect
+    changes nothing, stays in the hub, has no unknown outcome and is safe to repeat.
+    Both return no outside text. A field the caller set is kept.
+
+    Args:
+        fields: The declaration's fields, ``side_effecting`` among them.
+
+    Returns:
+        A new mapping with the five fields present.
+    """
+    acts = bool(fields.get("side_effecting", True))
+    defaults: dict[str, object] = {
+        "effect": CapabilityEffect.WORLD if acts else CapabilityEffect.NONE,
+        "leaves_hub": acts,
+        "result": CapabilityResult.NO_OUTSIDE_TEXT,
+        "outcome_can_be_unknown": acts,
+        "safe_to_repeat": not acts,
+    }
+    return {**defaults, **fields}
 
 
 class FakeToolRegistry:

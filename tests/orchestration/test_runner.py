@@ -57,7 +57,13 @@ from ai_assistant.orchestration import (
     StepRunner,
 )
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
-from ai_assistant.testing import FakeActionPolicy, FakeAuditTrail, FakePlanStore, FakeToolInvoker
+from ai_assistant.testing import (
+    FakeActionPolicy,
+    FakeAuditTrail,
+    FakePlanStore,
+    FakeToolInvoker,
+    with_phase_declaration,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -123,7 +129,7 @@ def tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
         "idempotency": Idempotency.NATURAL,
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 def confirmable(tool_id: str = "smtp") -> ToolDefinition:

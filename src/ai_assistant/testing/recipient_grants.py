@@ -54,6 +54,8 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     BoundAccount,
     CanonicalDestination,
+    CapabilityEffect,
+    CapabilityResult,
     CostBasis,
     DataTier,
     DestinationProtocol,
@@ -134,6 +136,11 @@ RECIPIENT_GRANT_TOOL: Final = ToolDefinition(
     discloses=(DataTier.PERSONAL,),
     cost=ToolCost(basis=CostBasis.FREE),
     idempotency=Idempotency.NONE,
+    effect=CapabilityEffect.WORLD,
+    leaves_hub=True,
+    result=CapabilityResult.NO_OUTSIDE_TEXT,
+    outcome_can_be_unknown=True,
+    safe_to_repeat=False,
 )
 
 #: The connected account a scripted grant is established against. Two facts, as

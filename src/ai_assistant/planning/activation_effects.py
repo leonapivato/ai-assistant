@@ -1,0 +1,238 @@
+"""Acting's effect records: the claim's and the finish's rules, stated once (ADR-0306 §6).
+
+ADR-0306 §5:4 has a call or a message that gets an effect record claimed by writing
+that record before it runs, "in one indivisible plan-store step that also decides the
+stop and §5's backstop", and §6:2 and §6:4 state what the claim and the finish refuse.
+The decisions are written here rather than in each store, for the reason
+:mod:`ai_assistant.planning.stops` gives of its own: two statements of one rule are
+two places for it to drift. Each store's job is the indivisible step the decision is
+taken inside, not the decision.
+
+The canonical fake in :mod:`ai_assistant.testing` re-implements this rather than
+importing it, for the reason :mod:`ai_assistant.planning.effects` gives.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from pydantic import TypeAdapter, ValidationError
+
+from ai_assistant.core.errors import ClaimStopped, PlanningError
+from ai_assistant.core.types import (
+    ActivationEffect,
+    ActivationEffectClaim,
+    Identifier,
+    ToolOutcome,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Container, Iterable, Sequence
+
+_EFFECT_ID: TypeAdapter[Identifier] = TypeAdapter(Identifier)
+
+
+def checked_effect_id(effect_id: object) -> str:
+    """Return ``effect_id`` as the identifier a record carries, or refuse it.
+
+    Args:
+        effect_id: What the caller passed.
+
+    Returns:
+        The validated identifier.
+
+    Raises:
+        PlanningError: If the value is not an identifier.
+    """
+    try:
+        return _EFFECT_ID.validate_python(effect_id)
+    except ValidationError as exc:
+        msg = f"an activation effect is named by an identifier, and {effect_id!r} is not one"
+        raise PlanningError(msg) from exc
+
+
+def revalidated_claim(effect: object) -> ActivationEffect:
+    """Return the store's own copy of a record about to be claimed, or refuse it.
+
+    Rebuilt through validation, so a caller that mutates its record after the call
+    cannot change what the store holds, and a record corrupted past its frozen guard
+    is refused here rather than written. A claimed record carries no outcome, no
+    reason and no position (ADR-0306 §5:4).
+
+    Args:
+        effect: What the caller passed.
+
+    Returns:
+        The validated, detached record.
+
+    Raises:
+        PlanningError: If the value is not a valid ``ActivationEffect``, or it
+            carries an outcome, a reason or a position.
+    """
+    if not isinstance(effect, ActivationEffect):
+        msg = f"a claim writes an ActivationEffect, and {type(effect).__name__} is not one"
+        raise PlanningError(msg)
+    try:
+        record = ActivationEffect.model_validate(effect.model_dump())
+    except ValidationError as exc:
+        msg = f"the activation effect to claim does not validate: {exc}"
+        raise PlanningError(msg) from exc
+    if record.outcome is not None or record.reason is not None or record.position is not None:
+        msg = (
+            f"activation effect {record.id} is claimed before it runs, so it carries no "
+            f"outcome, reason or position (ADR-0306 §5:4)"
+        )
+        raise PlanningError(msg)
+    return record
+
+
+def matched_activations(match: object) -> tuple[str, ...] | None:
+    """Return ``match`` as the tuple of activation ids it names, or refuse it.
+
+    Args:
+        match: What the caller passed as ``match``.
+
+    Returns:
+        ``None``, or the ids.
+
+    Raises:
+        PlanningError: If ``match`` is neither ``None`` nor a tuple of strings.
+    """
+    if match is None:
+        return None
+    if not isinstance(match, tuple) or not all(isinstance(one, str) for one in match):
+        msg = "match is None or a tuple of activation ids (ADR-0306 §6:2)"
+        raise PlanningError(msg)
+    return match
+
+
+def requested_activations(activation_ids: Sequence[str]) -> tuple[str, ...]:
+    """Return the activation ids a read names, refusing a bare string.
+
+    A ``str`` is itself a sequence of strings, so a caller passing one activation id
+    unwrapped would otherwise read the records of each of its characters.
+
+    Args:
+        activation_ids: What the caller passed.
+
+    Returns:
+        The ids, each once, in the order given.
+
+    Raises:
+        PlanningError: If ``activation_ids`` is a string, or holds a non-string.
+    """
+    if isinstance(activation_ids, str) or not all(isinstance(one, str) for one in activation_ids):
+        msg = "activation_effects reads a sequence of activation ids, not one string"
+        raise PlanningError(msg)
+    return tuple(dict.fromkeys(activation_ids))
+
+
+def _counts_against(held: ActivationEffect, effect: ActivationEffect, *, deliberate: bool) -> bool:
+    """Whether one held record refuses ``effect`` as already done (ADR-0306 §5:9, §5:11).
+
+    Only a call matches a call, on its capability and its values digest. An unknown
+    outcome counts as done, and so does an outcome not yet written; an effect not done
+    does not count. A deliberate repeat passes a matching effect only where it is done.
+    """
+    if not (held.is_call and effect.is_call):
+        return False
+    if (held.capability, held.values_digest) != (effect.capability, effect.values_digest):
+        return False
+    if held.outcome is ToolOutcome.FAILED:
+        return False
+    if held.outcome is ToolOutcome.SUCCEEDED:
+        return not deliberate
+    return True
+
+
+def decide_activation_claim(  # noqa: PLR0913 — the claim's three inputs and the three facts the store reads inside its step
+    effect: ActivationEffect,
+    *,
+    match: tuple[str, ...] | None,
+    deliberate_repeat: bool,
+    stopped: bool,
+    held_ids: Container[str],
+    matched: Iterable[ActivationEffect],
+) -> ActivationEffectClaim:
+    """Decide one claim, inside the store's indivisible step (ADR-0306 §6:2).
+
+    Args:
+        effect: The revalidated record to claim.
+        match: The activations it is matched against, or ``None``.
+        deliberate_repeat: Whether planning marked the call a deliberate repeat.
+        stopped: Whether the store holds a stop record for the record's activation.
+        held_ids: The record ids the store holds.
+        matched: The held records of the activations ``match`` names; read only where
+            ``match`` is a tuple.
+
+    Returns:
+        ``CLAIMED`` where the store should write the record, ``ALREADY_DONE`` where
+        it should write nothing.
+
+    Raises:
+        ClaimStopped: If the activation was stopped.
+        PlanningError: If the store already holds a record under the id.
+    """
+    if stopped:
+        msg = (
+            f"activation {effect.activation_id} was stopped, so its claim of effect "
+            f"{effect.id} is refused (ADR-0306 §5:2)"
+        )
+        raise ClaimStopped(msg)
+    if effect.id in held_ids:
+        msg = f"the plan store already holds activation effect {effect.id} (ADR-0306 §6:2)"
+        raise PlanningError(msg)
+    if match is not None and any(
+        _counts_against(held, effect, deliberate=deliberate_repeat) for held in matched
+    ):
+        return ActivationEffectClaim.ALREADY_DONE
+    return ActivationEffectClaim.CLAIMED
+
+
+def finished(
+    held: ActivationEffect | None,
+    effect_id: str,
+    outcome: object,
+    *,
+    reason: object,
+    position: object,
+) -> ActivationEffect:
+    """Return the record ``finish_activation_effect`` writes, or refuse (ADR-0306 §6:4).
+
+    Args:
+        held: The record the store holds under ``effect_id``, or ``None``.
+        effect_id: The id the caller named.
+        outcome: The outcome to write.
+        reason: Why the effect was not done, or ``None``.
+        position: Where the medium recorded a message, or ``None``.
+
+    Returns:
+        The finished record.
+
+    Raises:
+        PlanningError: If no record is held, it is already finished, the outcome is
+            not a ``ToolOutcome``, a reason rides on an outcome other than not done,
+            or a position on anything but a message done.
+    """
+    if held is None:
+        msg = f"the plan store holds no activation effect {effect_id!r} to finish"
+        raise PlanningError(msg)
+    if held.outcome is not None:
+        msg = f"activation effect {held.id} is already finished; its outcome is written once"
+        raise PlanningError(msg)
+    if not isinstance(outcome, ToolOutcome):
+        msg = f"an activation effect finishes with a ToolOutcome, not {outcome!r}"
+        raise PlanningError(msg)
+    if reason is not None and outcome is not ToolOutcome.FAILED:
+        msg = f"only an effect not done carries a reason; {held.id} finished {outcome.value}"
+        raise PlanningError(msg)
+    if position is not None and (held.is_call or outcome is not ToolOutcome.SUCCEEDED):
+        msg = f"only a message done carries a position; {held.id} cannot carry one"
+        raise PlanningError(msg)
+    try:
+        return ActivationEffect.model_validate(
+            {**held.model_dump(), "outcome": outcome, "reason": reason, "position": position}
+        )
+    except ValidationError as exc:
+        msg = f"the finished activation effect {held.id} does not validate: {exc}"
+        raise PlanningError(msg) from exc

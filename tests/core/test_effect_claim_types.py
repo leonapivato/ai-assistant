@@ -62,6 +62,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
     TurnOutcome,
 )
+from ai_assistant.testing import with_phase_declaration
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -105,7 +106,7 @@ def _tool(**overrides: Any) -> ToolDefinition:
     fields.update(overrides)
     if fields["idempotency"] is Idempotency.KEYED:
         fields.setdefault("idempotency_window", timedelta(minutes=5))
-    return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 def _binding(**overrides: Any) -> EgressBinding:

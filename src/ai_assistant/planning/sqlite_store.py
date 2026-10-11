@@ -49,6 +49,8 @@ from ai_assistant.core.types import (
     MAX_GOAL_EVIDENCE,
     TERMINAL_ATTEMPT_STATES,
     ActionPlan,
+    ActivationEffect,
+    ActivationEffectClaim,
     AttemptState,
     EffectRecord,
     EvidenceHistory,
@@ -68,6 +70,14 @@ from ai_assistant.core.types import (
     ground_of,
 )
 from ai_assistant.planning._transactions import transaction
+from ai_assistant.planning.activation_effects import (
+    checked_effect_id,
+    decide_activation_claim,
+    finished,
+    matched_activations,
+    requested_activations,
+    revalidated_claim,
+)
 from ai_assistant.planning.effects import (
     BorrowedAct,
     EffectHolder,
@@ -130,6 +140,7 @@ if TYPE_CHECKING:
         IntendedActionMinting,
         StepExecution,
         StepTransition,
+        ToolOutcome,
         UtcInstant,
     )
 
@@ -270,7 +281,14 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: record refuses, and its ``clear`` and ``export`` would leave the records behind and
 #: out of the document, which is ADR-0004 §6's deletion and export limbs failing in
 #: silence rather than §1's loud refusal at the open.
-_SCHEMA_VERSION = 9
+#:
+#: **Version 10 is ADR-0306 §6's, and it creates a table**: ``activation_effects``,
+#: acting's effect records, one row per record. The migration creates it **empty**,
+#: because no earlier store held one, and rewrites no row. **The marker moves for
+#: ADR-0049 §1's downgrade reading**, as at 8 and 9: an older build opening a file this
+#: code has written would ignore the table, so its ``clear`` and ``export`` would leave
+#: the records behind and out of the document.
+_SCHEMA_VERSION = 10
 
 #: The versions a database this code can upgrade carries. Eight members since ADR-0297:
 #: version 1 is ADR-0049 §1's original shape, version 2 is ADR-0249 §12's, version 3 is
@@ -303,7 +321,7 @@ _SCHEMA_VERSION = 9
 #: migration and a version 1 store holds none, so it upgrades, writes no attempt row
 #: and reaches the new marker — and no arm seeds an ``attempts`` table into a version 1
 #: fixture, which would test a schema the application never wrote.
-_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2, 3, 4, 5, 6, 7, 8})
+_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9})
 
 # The ``meta`` table is created first and on its own, so the schema version can be
 # read and a newer store refused *before* any record table is created (ADR-0049
@@ -489,6 +507,14 @@ _RECORD_SCHEMA = (
     # foreign key, because a record names an activation and no goal. On any earlier
     # database this table is **created empty**, because no earlier store held a stop.
     "CREATE TABLE IF NOT EXISTS stopped_activations(activation_id TEXT PRIMARY KEY)",
+    # ADR-0306 §6's effect records. The record is the blob, as for the tables above;
+    # `activation_id` is a column because the backstop and the read select on it, and
+    # `claimed_seq` because they return records in claim order. No foreign key: a
+    # record names an activation and a decision, neither of which this store holds.
+    # On any earlier database this table is **created empty**.
+    "CREATE TABLE IF NOT EXISTS activation_effects("
+    "id TEXT PRIMARY KEY, activation_id TEXT NOT NULL, claimed_seq INTEGER NOT NULL, "
+    "data TEXT NOT NULL)",
 )
 
 #: ``created_seq`` is unique by construction — every allocation takes it from the
@@ -584,6 +610,12 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool, str | None]]] = {
     "stopped_activations": {
         "activation_id": ("TEXT", False, None),
     },
+    "activation_effects": {
+        "id": ("TEXT", False, None),
+        "activation_id": ("TEXT", True, None),
+        "claimed_seq": ("INTEGER", True, None),
+        "data": ("TEXT", True, None),
+    },
 }
 
 #: The single column every record table's ``PRIMARY KEY`` is, checked against
@@ -603,6 +635,7 @@ _RECORD_PRIMARY_KEY: dict[str, tuple[str, ...]] = {
     "goal_evidence": ("id",),
     "goal_effects": ("goal_id", "intended_action_id"),
     "stopped_activations": ("activation_id",),
+    "activation_effects": ("id",),
 }
 
 #: The foreign keys ADR-0049 §1's referential-integrity backstop rests on, absent
@@ -3892,6 +3925,140 @@ class SqlitePlanStore:
                 (activation_id,),
             )
 
+    async def claim_activation_effect(
+        self,
+        effect: ActivationEffect,
+        /,
+        *,
+        match: tuple[str, ...] | None,
+        deliberate_repeat: bool = False,
+    ) -> ActivationEffectClaim:
+        """Claim one effect of an activation by writing its record (ADR-0306 §6:2).
+
+        The stop, the held ids, the matching records and the write are read and
+        decided inside one ``BEGIN IMMEDIATE`` transaction, so a second claim of an
+        equal call waits on the write lock and then finds the first's record.
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the activation.
+            PlanningError: If the id is already held, the record carries an outcome,
+                a reason or a position, or the backend fails.
+        """
+        # Snapshotted before the first await, so a caller mutating its record while
+        # this call is queued cannot change what is written (ADR-0018 §3).
+        record = revalidated_claim(effect)
+        named = matched_activations(match)
+        async with self._lock:
+            return await _run_to_completion(
+                self._claim_activation_effect_sync, record, named, deliberate_repeat
+            )
+
+    def _claim_activation_effect_sync(
+        self,
+        record: ActivationEffect,
+        named: tuple[str, ...] | None,
+        deliberate_repeat: bool,
+    ) -> ActivationEffectClaim:
+        with self._transaction(f"claim activation effect {record.id!r}") as conn:
+            held = conn.execute(
+                "SELECT 1 FROM activation_effects WHERE id = ?", (record.id,)
+            ).fetchone()
+            matched: list[ActivationEffect] = []
+            if named:
+                marks = ", ".join("?" for _ in named)
+                matched = [
+                    _checked_activation_effect(str(self._path), row)
+                    for row in conn.execute(
+                        "SELECT id, activation_id, data FROM activation_effects "  # noqa: S608 — only placeholders are interpolated
+                        f"WHERE activation_id IN ({marks}) ORDER BY claimed_seq ASC",
+                        named,
+                    ).fetchall()
+                ]
+            answer = decide_activation_claim(
+                record,
+                match=named,
+                deliberate_repeat=deliberate_repeat,
+                stopped=_is_stopped(conn, record.activation_id),
+                held_ids=() if held is None else (record.id,),
+                matched=matched,
+            )
+            if answer is ActivationEffectClaim.CLAIMED:
+                conn.execute(
+                    "INSERT INTO activation_effects(id, activation_id, claimed_seq, data) "
+                    "VALUES (?, ?, (SELECT COALESCE(MAX(claimed_seq), 0) + 1 "
+                    "FROM activation_effects), ?)",
+                    (record.id, record.activation_id, record.model_dump_json()),
+                )
+        return answer
+
+    async def finish_activation_effect(
+        self,
+        effect_id: str,
+        /,
+        outcome: ToolOutcome,
+        *,
+        reason: str | None = None,
+        position: int | None = None,
+    ) -> None:
+        """Write a claimed effect's outcome, once (ADR-0306 §6:4).
+
+        The read of the held record and the write are one ``BEGIN IMMEDIATE``
+        transaction, so two finishes of one record cannot both land.
+
+        Raises:
+            PlanningError: If the record is not held or already finished, the reason
+                or position does not belong to the outcome, or the backend fails.
+        """
+        named = checked_effect_id(effect_id)
+        async with self._lock:
+            await _run_to_completion(
+                self._finish_activation_effect_sync, named, outcome, reason, position
+            )
+
+    def _finish_activation_effect_sync(
+        self, effect_id: str, outcome: object, reason: object, position: object
+    ) -> None:
+        with self._transaction(f"finish activation effect {effect_id!r}") as conn:
+            row = conn.execute(
+                "SELECT id, activation_id, data FROM activation_effects WHERE id = ?",
+                (effect_id,),
+            ).fetchone()
+            held = None if row is None else _checked_activation_effect(str(self._path), row)
+            record = finished(held, effect_id, outcome, reason=reason, position=position)
+            conn.execute(
+                "UPDATE activation_effects SET data = ? WHERE id = ?",
+                (record.model_dump_json(), effect_id),
+            )
+
+    async def activation_effects(
+        self, activation_ids: Sequence[str], /
+    ) -> tuple[ActivationEffect, ...]:
+        """Return the named activations' effect records, in claim order (ADR-0306 §6:5).
+
+        Raises:
+            PlanningError: If ``activation_ids`` is a bare string, or the backend fails.
+        """
+        named = requested_activations(activation_ids)
+        if not named:
+            return ()
+        async with self._lock:
+            rows = await _run_to_completion(self._activation_effects_sync, named)
+        return tuple(_checked_activation_effect(str(self._path), row) for row in rows)
+
+    def _activation_effects_sync(self, named: tuple[str, ...]) -> list[tuple[Any, ...]]:
+        marks = ", ".join("?" for _ in named)
+        try:
+            return [
+                tuple(row)
+                for row in self._conn.execute(
+                    "SELECT id, activation_id, data FROM activation_effects "  # noqa: S608 — only placeholders are interpolated
+                    f"WHERE activation_id IN ({marks}) ORDER BY claimed_seq ASC",
+                    named,
+                ).fetchall()
+            ]
+        except sqlite3.Error as exc:
+            raise _wrap("read activation effects", "", exc) from exc
+
     async def get_execution(self, execution_id: str) -> ExecutionState | None:
         """Return the execution with ``execution_id``, or ``None``."""
         async with self._lock:
@@ -3938,7 +4105,9 @@ class SqlitePlanStore:
         exported_at = self._now()
         async with self._lock:
             snapshot = await _run_to_completion(self._export_sync)
-        goals, plans, executions, attempts, questions, evidence, effects, stopped = snapshot
+        (goals, plans, executions, attempts, questions, evidence, effects, stopped, acted) = (
+            snapshot
+        )
         return PlanExport(
             exported_at=exported_at,
             goals=tuple(_decode_goal(data) for data in goals),
@@ -3961,6 +4130,8 @@ class SqlitePlanStore:
             effects=tuple(effects),
             # ADR-0297 §1: every stop record, in a deterministic order.
             stopped_activations=tuple(stopped),
+            # ADR-0306 §6: every effect record, in claim order.
+            activation_effects=tuple(acted),
         )
 
     def _export_sync(
@@ -3974,6 +4145,7 @@ class SqlitePlanStore:
         list[tuple[str, list[GoalEvidence], int]],
         list[EffectRecord],
         list[str],
+        list[ActivationEffect],
     ]:
         # All three reads inside one transaction, so the export is a single
         # database snapshot: a concurrent connection cannot commit a goal+plan
@@ -4052,7 +4224,15 @@ class SqlitePlanStore:
                     "SELECT activation_id FROM stopped_activations ORDER BY activation_id ASC"
                 ).fetchall()
             ]
-        return goals, plans, executions, attempts, questions, evidence, effects, stopped
+            # ADR-0306 §6's records, in the same snapshot and in claim order.
+            acted = [
+                _checked_activation_effect(str(self._path), row)
+                for row in conn.execute(
+                    "SELECT id, activation_id, data FROM activation_effects "
+                    "ORDER BY claimed_seq ASC"
+                ).fetchall()
+            ]
+        return goals, plans, executions, attempts, questions, evidence, effects, stopped, acted
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
         """Delete a goal, its plan history, its attempts and its questions.
@@ -4176,6 +4356,8 @@ class SqlitePlanStore:
             removed += conn.execute("DELETE FROM goal_effects").rowcount
             # ADR-0297 §1: `clear` erases every stop record with the store's other rows.
             removed += conn.execute("DELETE FROM stopped_activations").rowcount
+            # ADR-0306 §6: `clear` erases every effect record with the rest.
+            removed += conn.execute("DELETE FROM activation_effects").rowcount
             removed += conn.execute("DELETE FROM goals").rowcount
         return removed
 
@@ -4507,6 +4689,37 @@ def _checked_effect(path: str, row: Sequence[Any]) -> EffectRecord:
         msg = (
             f"the plan store at {path!r} holds an effect row indexed at {promoted} whose "
             f"record names {held}; the store is corrupt"
+        )
+        raise PlanningError(msg)
+    return record
+
+
+def _checked_activation_effect(path: str, row: Sequence[Any]) -> ActivationEffect:
+    """Decode one effect record and refuse a blob that disagrees with its columns.
+
+    The id and the activation are promoted, and the backstop and the read select on
+    them, so each is reconciled with the record a tampered file could answer with.
+
+    Args:
+        path: The store's path, for the message.
+        row: ``(id, activation_id, data)``.
+
+    Returns:
+        The reconciled record.
+
+    Raises:
+        PlanningError: If the blob does not validate, or disagrees with its columns.
+    """
+    try:
+        record = ActivationEffect.model_validate_json(str(row[2]))
+    except ValidationError as exc:
+        msg = f"the plan store holds an activation effect that no longer validates: {exc}"
+        raise PlanningError(msg) from exc
+    promoted = (str(row[0]), str(row[1]))
+    if promoted != (record.id, record.activation_id):
+        msg = (
+            f"the plan store at {path!r} holds an activation effect indexed at {promoted} "
+            f"whose record names {(record.id, record.activation_id)}; the store is corrupt"
         )
         raise PlanningError(msg)
     return record

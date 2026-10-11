@@ -40,6 +40,7 @@ from ai_assistant.orchestration.selection import (
     select,
     selection_key,
 )
+from ai_assistant.testing import with_phase_declaration
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -81,7 +82,7 @@ def tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
         "idempotency": Idempotency.NATURAL,
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 def preferred(*candidates: ToolDefinition, preference: Sequence[str] | Preference = ()) -> str:
