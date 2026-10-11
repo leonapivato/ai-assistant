@@ -1,6 +1,6 @@
 # 307. A planning round is one model response that writes its own message, keeps episode notes, and names what it was shown by label
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Scope: the phases after understanding ([#2723](https://github.com/leonapivato/ai-assistant/pull/2723)), milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)), the second of their four decisions: what a planning round is, the message and the report, episode notes, labels, what planning is given and may look up, the tidy-up call, when rounds run and end, and that planning always runs after understanding. ADR-0306 decided capabilities, authorizing and acting; the digesting decision and the cutover decision are the other two.
 - Dependency: [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), Accepted and merged at `bff6e259`; the story store, summaries, notes and views ADR-0300, ADR-0303, ADR-0304 and ADR-0305 decide, implemented at `5166d5bc`.
