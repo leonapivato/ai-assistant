@@ -667,7 +667,21 @@ modules = [
     "ai_assistant.orchestration.understanding",
     "ai_assistant.orchestration.acting",
     "ai_assistant.orchestration.planning",
+    "ai_assistant.orchestration.digesting",
 ]
+
+[[tool.importlinter.contracts]]
+name = "only acting and digesting reach the held results"
+type = "forbidden"
+# ADR-0308 §6:5: of the stages, digesting alone reads the held results, and planning
+# never does. `held_results` is the one shape acting writes and digesting reads, so no
+# other phase module may import it. Each lane that adds a phase module adds it here.
+source_modules = [
+    "ai_assistant.orchestration.recall",
+    "ai_assistant.orchestration.understanding",
+    "ai_assistant.orchestration.planning",
+]
+forbidden_modules = ["ai_assistant.orchestration.held_results"]
 
 [[tool.importlinter.contracts]]
 name = "subsystems do not import orchestration or interfaces"

@@ -157,6 +157,8 @@ from ai_assistant.orchestration.acting import ActingStage, AuthorizedCall, Autho
 from ai_assistant.orchestration.activation_coordinator import ActivationCoordinator
 from ai_assistant.orchestration.activation_state import admit_channel
 from ai_assistant.orchestration.activation_writer import ActivationWriter
+from ai_assistant.orchestration.digesting import ActivationLabels, DigestingStage
+from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
 from ai_assistant.orchestration.planning import PlaceWindow, PlanningInputs, PlanningStage
 from ai_assistant.orchestration.reads import _SearchCounts
@@ -475,11 +477,33 @@ async def _acting_stage(now: Clock) -> None:
         timeout=timedelta(seconds=5),
         now=now,
     ).act(
-        AuthorizedRound(
+        held=HeldResults(),
+        authorized=AuthorizedRound(
             activation_id="act-1",
             round_id="r-1",
             calls=(AuthorizedCall(ToolCall(request=request, decision=decision)),),
-        )
+        ),
+    )
+
+
+async def _digesting_stage(now: Clock) -> None:
+    """ADR-0308 §4:11's deadline, read as a digest starts, and §7's ``recorded_at``.
+
+    Driven through ``digest_result``: the deadline is read first, before any part's call
+    is made or anything is recorded.
+    """
+
+    class _Unreached:
+        async def record(self, digest: object, labels: object) -> None:
+            raise AssertionError
+
+    await DigestingStage(
+        provider=FakeModelProvider(), recorder=_Unreached(), part_chars=50, now=now
+    ).digest_result(
+        HeldResult(result_id="result:1", round_id="r-1", content="a page"),
+        question="hours",
+        labels=ActivationLabels(),
+        deadline=_AWARE,
     )
 
 
@@ -1297,6 +1321,8 @@ SEAMS = [
     Seam("ActingStage", _acting_stage, ClockReadingError),
     # ADR-0307 §6's current time, propagating for `ActingStage`'s reason one phase over.
     Seam("PlanningStage", _planning_stage, ClockReadingError),
+    # ADR-0308 §4:11's deadline, propagating for `PlanningStage`'s reason one phase over.
+    Seam("DigestingStage", _digesting_stage, ClockReadingError),
     # ADR-0260 §7's recorder clock, propagating for `SearchServicer`'s own reason one
     # kind over: ADR-0260 adds **no** error class to `core.errors` either.
     Seam("ForecastServicer", _forecast_servicer, ClockReadingError),
@@ -1655,6 +1681,12 @@ PROPAGATED: Final[dict[str, str]] = {
     "PlanningStage": (
         "ADR-0307 adds **no** error class to `core.errors`, and a clock this process "
         "cannot read is not a round: no model was asked and nothing was recorded"
+    ),
+    "DigestingStage": (
+        "ADR-0308 adds **no** error class to `core.errors`, and a clock this process "
+        "cannot read is none of §4:11's three failures — a call that raised, a reply "
+        "that did not parse, a deadline passed — so it is not a failed digest: no "
+        "model was asked and nothing was recorded"
     ),
     "ConsolidationStage": _UNDECLARED,
     "CurrentTime": ("documented at ``tools/builtin.py:148``, and `tools` is not in §4's list"),
