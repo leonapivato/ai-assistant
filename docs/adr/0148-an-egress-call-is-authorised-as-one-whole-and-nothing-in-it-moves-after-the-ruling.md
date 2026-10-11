@@ -245,11 +245,10 @@
   run. §8:1's *reached by a `CONFIRM` that parks the step … and answered through an
   interface*: the user stays the approver, and a `CONFIRM` goes back to planning as needing
   the user until the authority milestone gives it an answer. §9:1–§9:4's claimed plan step
-  as the egress attempt: a call that leaves the hub and gets an effect record transmits
-  under that record's claim, which names its activation; `PermissionDecision` names the
-  record and the record names the decision; the four outcomes are the record's, pending
-  while it carries none; and a claim left with no outcome is never resolved by guessing.
-  A call that leaves the hub and gets no effect record transmits under no claim. §3's
+  as the egress attempt: a call that leaves the hub transmits as ADR-0231 §6 decides for a
+  search, its attempt and outcomes being its `InvocationLedger` claim and completion, and
+  no plan step is claimed; a call that also gets an effect record claims it before the
+  invocation, and `PermissionDecision` and the record name each other. §3's
   routes and every other clause stand. The old turn loop keeps the replaced text until the cutover decision removes it.
   These scoped replacements take effect on ratification of ADR-0306. This reciprocal header
   record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions
