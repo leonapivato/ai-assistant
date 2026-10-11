@@ -801,6 +801,16 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
     ``EpisodicMemory.outcome``. **Every ``rounds`` and ``labels`` is empty on every
     record this tree captures**, their producer being the planning stage the cutover
     switches on (ADR-0309 §2:6).
+
+    **``ActivationDigest`` and ``EvidenceItem`` joined it with ADR-0308 §7**, because
+    ``EpisodeProcessingRecord`` gained ``digests``. The judgement, made rather than
+    assumed: each closes its fields with ``extra="forbid"``. A digest holds a label, the
+    question planning asked, a member of a closed enumeration, its items and a clock
+    reading; an item its text, a label and a mark fixed true. Neither admits a
+    ``SecretStr``: the question is what the planning model wrote, and an item's text is
+    what the digest model wrote of outside content, marked as such. **Every ``digests``
+    is empty on every record this tree captures**, their producer being the digesting
+    stage the cutover switches on (ADR-0309 §2:6).
     """
     # ADR-0275: processing metadata joins the in-process record graph. Its
     # fields are identifiers, closed values, clocks and caller-supplied Tier 1
@@ -809,6 +819,7 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
     reachable = _reachable_from_the_composing_stage()
 
     assert set(reachable) == {
+        "ActivationDigest",
         "ActivationLinks",
         "ActivationRecall",
         "ActivationUnderstanding",
@@ -817,6 +828,7 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
         "ChannelContextItem",
         "ChannelIdentity",
         "EpisodeProcessingRecord",
+        "EvidenceItem",
         "NewConversation",
         "ParkedBinding",
         "PlanningLabel",

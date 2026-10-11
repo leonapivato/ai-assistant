@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
     MAX_TOPICS_PER_RECORD,
+    ActivationDigest,
     ActivationLinks,
     ActivationRecall,
     ActivationUnderstanding,
@@ -57,9 +58,11 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ControllerRule,
     ControllerStage,
+    DigestOutcome,
     Disposition,
     EpisodeProcessingRecord,
     EpisodicMemory,
+    EvidenceItem,
     InputOrigin,
     LabelKind,
     MemoryKind,
@@ -1517,7 +1520,7 @@ class MemoryStoreContract:
         got = await store.get("understood")
         assert isinstance(got, EpisodicMemory)
         assert got.processing_record is not None
-        assert got.processing_record.schema_version == 7
+        assert got.processing_record.schema_version == 8
         assert got.processing_record.understanding == (version,)
         assert got.processing_record.understanding[0].meaning_referents[0].id == " "
         assert got.processing_record.understanding_omitted is None
@@ -6558,6 +6561,40 @@ class MemoryStoreContract:
         edited = first.model_copy(update={"text": "Done."})
         with pytest.raises(MemoryStoreError):
             await _replace(store, _revised(twice, processing={"rounds": (edited, second)}), door)
+        assert _unstamped_or_none(await store.get("episode")) == twice
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    async def test_the_guard_admits_digests_appended(self, store: MemoryStore, door: str) -> None:
+        """ADR-0308 §7: digests append to an open episode and read back whole.
+
+        A recorded digest is never edited: a revision rewriting one is refused, and the
+        stored episode keeps the digest as it was recorded.
+        """
+        opened = _open_episode("episode")
+        await store.add(opened)
+        answered = ActivationDigest(
+            result="R1",
+            question="when does the loop close",
+            outcome=DigestOutcome.ANSWERED,
+            evidence=(EvidenceItem(text="the lower loop closes on the 15th", source="R1"),),
+            recorded_at=_IN_WINDOW,
+        )
+        failed = ActivationDigest(
+            result="R2",
+            question="is it open on weekends",
+            outcome=DigestOutcome.FAILED,
+            recorded_at=_IN_WINDOW,
+        )
+        label = PlanningLabel(label="R1", kind=LabelKind.RESULT, id="result:1")
+        once = _revised(opened, processing={"digests": (answered,), "labels": (label,)})
+        twice = _revised(once, processing={"digests": (answered, failed)})
+        for revision in (once, twice):
+            await _replace(store, revision, door)
+            assert _unstamped_or_none(await store.get("episode")) == revision
+
+        edited = answered.model_copy(update={"evidence": ()})
+        with pytest.raises(MemoryStoreError):
+            await _replace(store, _revised(twice, processing={"digests": (edited, failed)}), door)
         assert _unstamped_or_none(await store.get("episode")) == twice
 
     @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
