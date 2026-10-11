@@ -1,6 +1,6 @@
 # 280. An activation controller runs the stages by rules and records every choice with the episode
 
-- Status: Partially superseded by ADR-0281 (§3:5's working set and §4:1–§4:3's enums and table, in the additions alone; §5:2's fixed default, for a failure-tolerant stage alone; §7:1's `schema_version` literal alone) and ADR-0282 (§3:5's working set and §4:1–§4:3's enums and table, in the additions alone; §3:7's list of wrapped stages, for understanding alone) and ADR-0284 (§1:4's last sentence and §7:1's resume clause; §6:1's additions; §6:3 for the verdict fields) and ADR-0286 (§4:2's member set, in the addition alone; §6:2's appenders; §6:5; §7:1's validator, for an open record) and ADR-0295 (§4:2's member set, in the addition alone; §5:3's and §5:4's `interrupted`, for a pass a stop ends) and ADR-0297 (§3:3's step and §5:2's fixed default, each for a pass whose stop has been taken in) and ADR-0300 (§3:5's working set and §4:1–§4:3's enums and table, in the additions alone) and ADR-0307 (§4:1–§4:2's enums, in the additions alone; §4:6's loop guard, for the planning stage alone)
+- Status: Partially superseded by ADR-0281 (§3:5's working set and §4:1–§4:3's enums and table, in the additions alone; §5:2's fixed default, for a failure-tolerant stage alone; §7:1's `schema_version` literal alone) and ADR-0282 (§3:5's working set and §4:1–§4:3's enums and table, in the additions alone; §3:7's list of wrapped stages, for understanding alone) and ADR-0284 (§1:4's last sentence and §7:1's resume clause; §6:1's additions; §6:3 for the verdict fields) and ADR-0286 (§4:2's member set, in the addition alone; §6:2's appenders; §6:5; §7:1's validator, for an open record) and ADR-0295 (§4:2's member set, in the addition alone; §5:3's and §5:4's `interrupted`, for a pass a stop ends) and ADR-0297 (§3:3's step and §5:2's fixed default, each for a pass whose stop has been taken in) and ADR-0300 (§3:5's working set and §4:1–§4:3's enums and table, in the additions alone) and ADR-0307 (§4:1–§4:2's enums, in the additions alone; §4:6's loop guard, for the planning stage alone) and ADR-0308 (§3:5's working set and §4:1–§4:2's enums, in the additions alone; §4:6's loop guard, for the recall stage alone)
 - Date: 2026-09-27
 - Scope: [M38](https://github.com/leonapivato/ai-assistant/milestone/5), [#2576](https://github.com/leonapivato/ai-assistant/issues/2576).
 - Dependency: ADR-0275, ADR-0276 and their milestones M36 and M37.
@@ -72,6 +72,16 @@
   clause stands. These scoped replacements take effect on ratification of ADR-0307. This
   reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-11 by ADR-0308 — two scopes. §3:5's working set and
+  §4:1–§4:2's enums, in the additions alone: the working set gains recall's second-run
+  decision and recall's digest, `ControllerStage` gains `digesting`, and `ControllerRule`
+  gains `understood_not_recalled` and `recall_undigested`. §4:6's loop guard, for the
+  recall stage alone: it runs at most twice on a pass, the second time only under
+  `understood_not_recalled`, and the guard ends a pass that would run it a third time
+  (ADR-0308 §2:9–§2:10). Every other clause stands. These scoped replacements take effect
+  on ratification of ADR-0308. This reciprocal header record accompanies the numbered
+  draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 

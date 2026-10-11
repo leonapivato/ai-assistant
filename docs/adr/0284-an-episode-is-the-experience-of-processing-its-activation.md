@@ -1,6 +1,6 @@
 # 284. An episode is the experience of processing its activation
 
-- Status: Partially superseded by ADR-0285 (the observer's member of §6:2, §8:3 and §8:7) and ADR-0286 (§5:5's validator, for an open record; §6:2's last sentence, for an open episode; §7:1's timing of the content; §7:4's pass, for an open episode; §9:1's values) and ADR-0287 (§5:3's second sentence)
+- Status: Partially superseded by ADR-0285 (the observer's member of §6:2, §8:3 and §8:7) and ADR-0286 (§5:5's validator, for an open record; §6:2's last sentence, for an open episode; §7:1's timing of the content; §7:4's pass, for an open episode; §9:1's values) and ADR-0287 (§5:3's second sentence) and ADR-0308 (§8:1's projection, in the addition alone)
 - Date: 2026-10-02
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); the second of three steps, the episode's end entry.
 - Dependency: ADR-0283, implemented at `f5993b40`.
@@ -35,6 +35,13 @@
 - **Partially supersedes** [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) — **four scopes.** **§1:4's last sentence** and **§7:1's resume clause**: a resume records the stages it runs (§5 below). **§6:1's field set and `ControllerRule`, in the additions alone**: `StageEntry` gains two verdict fields and `ControllerRule` gains `park_answered`. **§6:3, for those two fields alone**: a `drive` or `routing` entry carries the verdict it reached. Every other clause stands.
 - **Partially supersedes** [ADR-0281](0281-recall-runs-before-understanding-and-understanding-reads-what-it-found.md) — **two scopes.** **§4:4's and §6:3's test**, *"an episode whose trigger arrived on the informational event channel"*: an episode whose trigger's `origin` is `outside`. Every other clause stands.
 - **Partially supersedes** [ADR-0283](0283-a-channels-history-is-its-episodes-and-the-turn-index-is-retired.md) — **four scopes.** **§3:1's and §3:2's eligibility axis**: `channel_episodes` takes none, and `total` counts every live episode on the channel. **§4:1's `episode_model_eligible=True`**: history reads every episode. **§7:5's `model_eligible=False`**: the flag does not exist. **§11:1's *"skips ineligible episodes"***: the observer reads every episode of its page. Every other clause stands.
+- Partially superseded: 2026-10-11 by ADR-0308 — one scope. §8:1's projection, in the
+  addition alone: it also carries an episode's evidence, each item's text and its mark and
+  not its source label, placed for the owner alone (ADR-0308 §5:5–§5:6). Every other
+  clause stands, §8:5's `admit_outside_input` included. This scoped replacement takes
+  effect on ratification of ADR-0308. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
+  below are preserved.
 
 ## Context
 
