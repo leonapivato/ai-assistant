@@ -87,19 +87,15 @@ and the owner's reset record #2518.
   files your change touches, so a stray sweep can't pick up unrelated work.
 - **One subsystem per change.** Scope a change to a single package plus its
   tests. Small diffs review faster and fail more clearly. The one exception is a
-  Protocol triad (below): contract, conformance suite, and canonical fake are
-  one unit of work, not three changes. Where a slice was cut at that contract
-  seam — because its implementation would otherwise put new machinery into two
-  subsystems — the triad rides inside that same exception **together with its
-  primary production implementation**, the consumer whose demands shape the
-  contract (ADR-0137 §2). That widening is the whole of it: every other
-  cross-subsystem pairing is still more than one change.
-- **Contract first, and land the triad.** If a subsystem needs a new capability
-  from another, the Protocol goes in `core/protocols.py` first — its ADR merged
-  ahead of the implementation (golden rule 5). Then the *new* Protocol ships as
-  a triad — Protocol + shared conformance suite + canonical fake in
-  `ai_assistant.testing` — in one change, never deferred (`CONTRIBUTING.md` →
-  "Adding a Protocol").
+  Protocol triad (below) — contract, conformance suite, and canonical fake are
+  one unit of work — which, where a slice was cut at that contract seam, also
+  carries its **primary production implementation** (ADR-0137 §2). That
+  widening is the whole of it: every other cross-subsystem pairing is still more
+  than one change.
+- **Contract first, and land the triad.** A new capability one subsystem needs
+  from another is a Protocol in `core/protocols.py`, its ADR merged first (golden
+  rule 5); the *new* Protocol then ships as a triad in one change, never deferred
+  (`CONTRIBUTING.md` → "Adding a Protocol").
 - **Park what isn't this change.** Anything you notice but shouldn't fix here —
   a deferred review finding, a debt, a follow-up — becomes a **GitHub issue**.
   There is no tracked TODO file; a file would just conflict (ADR-0015).
@@ -142,52 +138,33 @@ per clone.
 ## Review (local only, ADR-0015)
 
 **This loop is yours to run and yours to finish. Don't ask permission for any
-of it** — not to run the review, not to spend on it, not to flip the PR ready.
-Judge that the change is done, then:
+of it** — not to run the review, not to spend on it (it sends the diff to
+OpenAI, which is already authorized), not to flip the PR ready. Judge that the
+change is done, then:
 
 ```bash
 just review-codex adversarial   # architecture too, for a contract change
 # ...triage, fix, commit, re-run until clean...
 just adr-ratify                 # ADR lanes only: the one-line Proposed → Accepted flip
 just ship                       # posts the review to the PR
-just ready                      # you decide when; don't wait to be told
+just ready                      # not bare `gh pr ready`; you decide when
 ```
 
-Codex reviews every change — a model independent of the one that wrote it. It
-reviews `HEAD` vs the base, i.e. the **committed** diff, so commit a fix before
-re-running or it is invisible. Each run records an artifact under `.review/`, and
-`just ship` refuses to post unless one covers the **content** the PR head
-carries. So amending, squashing, or reverting to a reviewed tree costs no round;
-changing a reviewed byte does. A base move may or may not — it depends on what
-the move touched. **`CONTRIBUTING.md` → "Report the review, then mark it ready"
-carries every condition, including which paths cost a round; do not work them out
-from memory.**
-
-**One commit shape is exempt** (ADR-0165): a `HEAD` that flips exactly one ADR's
-`- Status: Proposed` to `- Status: Accepted` and changes no other byte — not the
-`- Date:` line, not a ratification note, not a second file. `just adr-ratify`
-makes that commit; `ship` recognises it by rebuilding the file from its parent's
-and judges the review against that parent, disclosing it in the comment. A flip
-carrying anything more costs its round, exactly as before. `just ready`, not bare
-`gh pr ready`, is the way out of draft: it refuses while an ADR this PR touches
-still reads `Proposed`. `CONTRIBUTING.md` → "Finishing an ADR PR" is the sequence.
-
-Running the review sends the diff to OpenAI. That is a normal, expected step of
-finishing a change, already authorized — not a decision to escalate.
+Codex — a model independent of the one that wrote the change — reviews `HEAD`
+vs the base, i.e. the **committed** diff, so commit a fix before re-running or it
+is invisible. What a recorded review covers, and when a rebase costs a round, is
+`CONTRIBUTING.md` → "Report the review, then mark it ready"; the ADR sequence is
+"Finishing an ADR PR". Do not work either out from memory.
 
 **Stop when the required reviews are green.** Every review the change requires
 coming back green is a **terminal state, not a checkpoint** — adversarial alone
 for most changes, adversarial *and* architecture for a contract-surface one. Ship
 then; committing again to improve wording destroys the records and starts a fresh
-round. Each run also prints an aggregate (round number, net diff size, churn
-ratio); nothing in it blocks, but a churn ratio far above 1 means the loop is
-reworking itself rather than converging.
+round.
 
-**Findings are hypotheses to verify, not facts to comply with.** Check each one
-against the actual text before acting; a confidently worded finding carrying
-specific-looking grounding can still be factually false (`docs/review/guide.md`).
-
-**Triage each finding — do not let the PR grow to absorb them.**
+**Findings are hypotheses to verify, not facts to comply with**
+(`docs/review/guide.md`). Then triage each one — do not let the PR grow to
+absorb them:
 
 - `blocker`/`major` **and** about code in your diff → fix it now.
 - Anything else → **open a GitHub issue** and leave the PR alone.
