@@ -666,6 +666,7 @@ modules = [
     "ai_assistant.orchestration.recall",
     "ai_assistant.orchestration.understanding",
     "ai_assistant.orchestration.acting",
+    "ai_assistant.orchestration.planning",
 ]
 
 [[tool.importlinter.contracts]]

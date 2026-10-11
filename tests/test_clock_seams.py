@@ -158,6 +158,7 @@ from ai_assistant.orchestration.activation_coordinator import ActivationCoordina
 from ai_assistant.orchestration.activation_state import admit_channel
 from ai_assistant.orchestration.activation_writer import ActivationWriter
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
+from ai_assistant.orchestration.planning import PlaceWindow, PlanningInputs, PlanningStage
 from ai_assistant.orchestration.reads import _SearchCounts
 from ai_assistant.orchestration.traces import OperationTraces
 from ai_assistant.permissions import (
@@ -213,6 +214,7 @@ from ai_assistant.testing import (
     FakeSourceReadTrail,
     FakeStoryStore,
     FakeStreamingCompleter,
+    FakeToolCallingCompleter,
     FakeToolInvoker,
     FakeToolRegistry,
     FakeTraceRetention,
@@ -479,6 +481,22 @@ async def _acting_stage(now: Clock) -> None:
             calls=(AuthorizedCall(ToolCall(request=request, decision=decision)),),
         )
     )
+
+
+async def _planning_stage(now: Clock) -> None:
+    """ADR-0307 §6's current time, read as planning renders its round's request.
+
+    Driven through ``plan``: the reading is the first thing the round takes, before the
+    model is asked or anything is recorded.
+    """
+
+    class _Unreached:
+        async def record(self, planning_round: object, labels: object) -> None:
+            raise AssertionError
+
+    await PlanningStage(
+        completer=FakeToolCallingCompleter(), recorder=_Unreached(), excerpt_chars=50, now=now
+    ).plan(PlanningInputs(activation_id="act-1", place=PlaceWindow(takes_message=True)))
 
 
 async def _search_servicer(now: Clock) -> None:
@@ -1277,6 +1295,8 @@ SEAMS = [
     Seam("SearchServicer", _search_servicer, ClockReadingError),
     # ADR-0306 §6's record clock, propagating for the reason `PROPAGATED` records.
     Seam("ActingStage", _acting_stage, ClockReadingError),
+    # ADR-0307 §6's current time, propagating for `ActingStage`'s reason one phase over.
+    Seam("PlanningStage", _planning_stage, ClockReadingError),
     # ADR-0260 §7's recorder clock, propagating for `SearchServicer`'s own reason one
     # kind over: ADR-0260 adds **no** error class to `core.errors` either.
     Seam("ForecastServicer", _forecast_servicer, ClockReadingError),
@@ -1631,6 +1651,10 @@ PROPAGATED: Final[dict[str, str]] = {
     "ActingStage": (
         "ADR-0306 adds **no** error class to `core.errors`, and a clock this process "
         "cannot read is not a refusal of the call: no record was claimed and nothing ran"
+    ),
+    "PlanningStage": (
+        "ADR-0307 adds **no** error class to `core.errors`, and a clock this process "
+        "cannot read is not a round: no model was asked and nothing was recorded"
     ),
     "ConsolidationStage": _UNDECLARED,
     "CurrentTime": ("documented at ``tools/builtin.py:148``, and `tools` is not in §4's list"),
