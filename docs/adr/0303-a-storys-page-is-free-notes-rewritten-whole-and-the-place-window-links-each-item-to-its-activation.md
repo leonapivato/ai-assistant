@@ -1,6 +1,6 @@
 # 303. A story's page is free notes rewritten whole, and the place window links each item to its activation
 
-- Status: Partially superseded by ADR-0304 (§3:3's pages a run reads; §3:10–§3:12's walk and withholding; §5:7's last sentence; §6:2's, §9:2's table's, §10:1's and §10:4's move, in the additions alone; the page's names, in the renaming alone)
+- Status: Partially superseded by ADR-0304 (§3:3's pages a run reads; §3:10–§3:12's walk and withholding; §5:7's last sentence; §6:2's, §9:2's table's, §10:1's and §10:4's move, in the additions alone; the page's names, in the renaming alone) and ADR-0307 (§6:2's *passed over*, for a split or move whose actor is planning)
 - Date: 2026-10-08
 - Scope: [M42](https://github.com/leonapivato/ai-assistant/milestone/9), after its acceptance run [#2772](https://github.com/leonapivato/ai-assistant/issues/2772): what a story's page is, how its marks and privacy are decided, how notes move, which place-window items understanding may link, what a flag is, and what planning's story calls are. It closes [#2773](https://github.com/leonapivato/ai-assistant/issues/2773), [#2774](https://github.com/leonapivato/ai-assistant/issues/2774), [#2777](https://github.com/leonapivato/ai-assistant/issues/2777) and [#2771](https://github.com/leonapivato/ai-assistant/issues/2771).
 - Dependency: ADR-0300, ADR-0301 and ADR-0302, implemented at `f1dace5a`.
@@ -22,6 +22,12 @@
   stories. Every other clause stands. These scoped replacements take effect on ratification of
   ADR-0304. This reciprocal header record accompanies the numbered draft under ADR-0070
   and ADR-0082; the ratified body below is preserved.
+- Partially superseded: 2026-10-11 by ADR-0307 — one scope. §6:2's *a named note it does
+  not hold is passed over*, for a split or a move whose actor is planning: such a note
+  refuses the whole operation `note_not_held`, writing nothing (ADR-0307 §5:4). Every
+  other clause stands. This scoped replacement takes effect on ratification of ADR-0307.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

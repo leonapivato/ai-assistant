@@ -1,6 +1,6 @@
 # 304. A story's page is its summary, shown where owner records are; a lookalike is not read, and a story is a referent
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0307 (§9:3's and §9:5's treatment of a named note the story does not hold, for a move whose actor is planning)
 - Date: 2026-10-09
 - Scope: [M42](https://github.com/leonapivato/ai-assistant/milestone/9), after its second acceptance run [#2792](https://github.com/leonapivato/ai-assistant/issues/2792) and the owner's review of the milestone: what a story's page is called, what a tidy-up's run reads, who may be shown a summary, what forgetting reaches, what the *looks like another story* flag is shown and told, what an `S` label resolves to outside `story_labels`, and whether a note may move on its own. It decides [#2794](https://github.com/leonapivato/ai-assistant/issues/2794), [#2793](https://github.com/leonapivato/ai-assistant/issues/2793), [#2796](https://github.com/leonapivato/ai-assistant/issues/2796) and [#2795](https://github.com/leonapivato/ai-assistant/issues/2795).
 - Dependency: ADR-0303, implemented at `5b0b094b`.
@@ -11,6 +11,12 @@
 - **Partially supersedes** [ADR-0300](0300-a-story-keeps-a-page-of-notes-and-where-its-matter-stands-is-worked-out-from-records.md) — **two scopes.** **The names its clauses give the page and what carries it, in the renaming alone** (§2 below). **§3:14 and §9:3's *move members*, in the additions alone**: a move may carry notes and no member, and a note it carries is logged on each story (§9 below). Every other clause stands.
 - **Partially supersedes** [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) — **one scope.** **§2:5's referent kinds, in the addition alone**: a fourth kind, `story` (§8 below). Every other clause stands, §3:4, §6:2 and §6:4 included.
 - **Extends, and replaces no sentence of,** [ADR-0289](0289-a-story-store-holds-which-experiences-belong-to-the-same-matter.md). §2:5's enumeration of what happened gains two members under its own *"added to and never renamed"*, and a line recording a carried note carries one field beside those §2:4 lists, as ADR-0302's `decided` line does. §2:7 stands: the new field is an identity, never free text.
+- Partially superseded: 2026-10-11 by ADR-0307 — one scope. §9:3's and §9:5's treatment of
+  a named note the story moved from does not hold, for a move whose actor is planning: any
+  such note refuses the whole move `note_not_held`, writing nothing (ADR-0307 §5:4). Every
+  other clause stands. This scoped replacement takes effect on ratification of ADR-0307.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
