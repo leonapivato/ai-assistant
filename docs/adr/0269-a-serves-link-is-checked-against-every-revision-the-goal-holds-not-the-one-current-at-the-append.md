@@ -1,6 +1,6 @@
 # 269. A `serves` link is checked against every revision the goal holds, not the one current at the append
 
-- Status: Accepted
+- Status: Superseded by ADR-0309
 - Date: 2026-09-15
 - **Partially supersedes** [ADR-0265](0265-an-intended-action-has-a-stable-identity-minted-once-and-linked-to-the-goal-elements-it-serves.md)
   — **one scope, and it is one refusal conjunct of §5, stated there and once more as an arm.
@@ -23,6 +23,12 @@
   entire and are **relied on**; **§3 binds entire** and is the ground this narrowing is taken on;
   §4's label space and its step-label refusal are untouched, and the asymmetry §3 draws between
   them is preserved; and §§6-11 stand entire.
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. The goal and attempt model it
+  belongs to retires at the cutover, and the phases ADR-0306, ADR-0307 and ADR-0308 decide
+  replace it. The old path keeps this decision until the cutover lane that removes its code
+  merges (ADR-0309 §1:3). This replacement takes effect on ratification of ADR-0309. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,7 +1,7 @@
 # 267. A quote is a record the goal holds in order, read from the output its declaration names,
 and no local check proves it still true
 
-- Status: Partially superseded by ADR-0262 (one scope, in §10's first entry: the clause naming *"A10's verification of the charge afterwards, which is a finding rather than a prevention"*, in the application to which decision performs that verification alone — it is the decision that pins a dispatch's quote to that dispatch, issue #2409, and not A10, which has no operand for the comparison; the first dated note below states it in full) and ADR-0270 (one scope, in §7's selection clause and in one limb of it: the limb naming the component that writes the row as the selector and that write's own read as the source — the governing quote is selected by `permissions` inside condition 6's answer, over the read that answer was proved on, and the writer records what the answer carries; §2's order, the no-comparison rule, the write-once and never-edited rules, the absence rule over the three write paths and the provenance clause all bind entire; the second dated note below states it in full)
+- Status: Superseded by ADR-0309; partially superseded before it by ADR-0262 (one scope, in §10's first entry: the clause naming *"A10's verification of the charge afterwards, which is a finding rather than a prevention"*, in the application to which decision performs that verification alone — it is the decision that pins a dispatch's quote to that dispatch, issue #2409, and not A10, which has no operand for the comparison; the first dated note below states it in full) and ADR-0270 (one scope, in §7's selection clause and in one limb of it: the limb naming the component that writes the row as the selector and that write's own read as the source — the governing quote is selected by `permissions` inside condition 6's answer, over the read that answer was proved on, and the writer records what the answer carries; §2's order, the no-comparison rule, the write-once and never-edited rules, the absence rule over the three write paths and the provenance clause all bind entire; the second dated note below states it in full)
 - **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
   — **three narrowly stated scopes, and §9 shows the working for each. §1's `Authorization` field
   list**: the row gains `quoted`, an `ActionQuote | None` defaulting to `None`, carrying the
@@ -118,6 +118,12 @@ and no local check proves it still true
   of this ADR binds entire** — §5's seam, §6's freshness rule, §7's `QuoteView` and its
   `AuthorizationProjection` transcription, and §11's assignment of `quoted`'s population to ADR-0254
   §20's Lane 2, which now writes it from that answer.
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. The goal and attempt model it
+  belongs to retires at the cutover, and the phases ADR-0306, ADR-0307 and ADR-0308 decide
+  replace it. The old path keeps this decision until the cutover lane that removes its code
+  merges (ADR-0309 §1:3). This replacement takes effect on ratification of ADR-0309. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

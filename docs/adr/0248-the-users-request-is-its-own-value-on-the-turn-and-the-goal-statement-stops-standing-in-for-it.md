@@ -1,6 +1,6 @@
 # 248. The user's request is its own value on the turn, and the goal statement stops standing in for it
 
-- Status: Partially superseded by ADR-0249 (§3's fallback clause in its accessor alone: where a park carries no `utterance`, `Engine._resume_read` takes `park.goal.outcome` rather than the parked `Goal.statement`, because that decision's §12 converts a pre-decision park's `goal` column to a `GoalBrief` that has no `statement`. The bytes are identical, the conversion setting `outcome` from the stored `statement`, so §3's "That reading is exact for the whole life of the fallback, and A1 does not change that" binds entire and is vindicated rather than weakened. That one accessor, and nothing else in this ADR: the fallback is still the only site that may take it, is still not widened to a park carrying an `utterance`, to a blank one, to any other reader of §5's table or to any other site, is still not removed, and a later change may still delete it once every park predating this decision has expired; §§1, 2, 4-13 stand entire and §8's list of what this ADR left to A1 is what that decision decides)
+- Status: Superseded by ADR-0309; partially superseded before it by ADR-0249 (§3's fallback clause in its accessor alone: where a park carries no `utterance`, `Engine._resume_read` takes `park.goal.outcome` rather than the parked `Goal.statement`, because that decision's §12 converts a pre-decision park's `goal` column to a `GoalBrief` that has no `statement`. The bytes are identical, the conversion setting `outcome` from the stored `statement`, so §3's "That reading is exact for the whole life of the fallback, and A1 does not change that" binds entire and is vindicated rather than weakened. That one accessor, and nothing else in this ADR: the fallback is still the only site that may take it, is still not widened to a park carrying an `utterance`, to a blank one, to any other reader of §5's table or to any other site, is still not removed, and a later change may still delete it once every park predating this decision has expired; §§1, 2, 4-13 stand entire and §8's list of what this ADR left to A1 is what that decision decides)
 - Date: 2026-09-12
 - **Partially superseded: 2026-09-12 by ADR-0249 — §3's fallback clause in its accessor
   alone. Nothing else in this ADR.** ADR-0249 is A1: the decision this one was written to
@@ -62,6 +62,12 @@
   reading its own §4 does not support is corrected rather than grandfathered. Appended
   dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
   other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. The goal and attempt model it
+  belongs to retires at the cutover, and the phases ADR-0306, ADR-0307 and ADR-0308 decide
+  replace it. The old path keeps this decision until the cutover lane that removes its code
+  merges (ADR-0309 §1:3). This replacement takes effect on ratification of ADR-0309. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

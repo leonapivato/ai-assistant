@@ -1,7 +1,7 @@
 # 268. An authorization ends when its goal closes, the retention window is only the
 backstop, and an offered change carries the price its acceptance authorises
 
-- Status: Accepted
+- Status: Superseded by ADR-0309
 - **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
   — **five scopes.** **§1's `AuthorizationDisposition` clause**, in its closure and its retired
   enumeration: *"closed at exactly **six** members"* becomes **seven**, gaining **`GOAL_CLOSED`** —
@@ -146,6 +146,12 @@ backstop, and an offered change carries the price its acceptance authorises
   **§13's lane cut is that decision's own, already taken**, its L2 line describing the act as it
   then stood and re-cut by §9 here; and **§14 stands but for arm 6's framing**
 - Date: 2026-09-15
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. The goal and attempt model it
+  belongs to retires at the cutover, and the phases ADR-0306, ADR-0307 and ADR-0308 decide
+  replace it. The old path keeps this decision until the cutover lane that removes its code
+  merges (ADR-0309 §1:3). This replacement takes effect on ratification of ADR-0309. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

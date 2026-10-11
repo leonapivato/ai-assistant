@@ -1,7 +1,7 @@
 # 270. The policy answers whether a proposed row's coverage is met, and that answer is the whole
 of what crosses the seam
 
-- Status: Accepted
+- Status: Superseded by ADR-0309
 - Date: 2026-09-15
 - **Partially supersedes** [ADR-0266](0266-a-coverage-member-records-the-constraint-the-user-stated-and-the-bound-is-proved-against-the-quote-for-the-intended-action.md)
   — **two scopes. §7's last normative clause, in the limb naming `ActionPolicy.decide` as the only
@@ -18,6 +18,12 @@ of what crosses the seam
   no-comparison rule, the write-once and never-edited rules, the absence rule over the three write
   paths and the whole provenance clause bind entire; §5 sweeps the five places the replaced reading
   is available and shows the working at each.
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. The goal and attempt model it
+  belongs to retires at the cutover, and the phases ADR-0306, ADR-0307 and ADR-0308 decide
+  replace it. The old path keeps this decision until the cutover lane that removes its code
+  merges (ADR-0309 §1:3). This replacement takes effect on ratification of ADR-0309. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

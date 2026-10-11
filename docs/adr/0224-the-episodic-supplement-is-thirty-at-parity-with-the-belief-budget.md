@@ -1,6 +1,6 @@
 # 224. The episodic supplement is thirty, at parity with the belief budget
 
-- Status: Accepted
+- Status: Superseded by ADR-0309
 - Date: 2026-09-02
 - **Partially supersedes:**
   [ADR-0162](0162-what-the-user-tells-the-assistant-is-recorded-and-selectivity-moves-to-retrieval-and-forgetting.md)
@@ -36,6 +36,12 @@
   set returns clean on one tree. The ratifying commit changes the `Status` line and
   nothing else.
 - Refs #1844, #1294, #1029.
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. The answering prompt's episodic
+  supplement retires with the turn loop at the cutover; planning is given what recall finds
+  (ADR-0307 §6). The old path keeps this decision until the cutover lane that removes its
+  code merges (ADR-0309 §1:3). This replacement takes effect on ratification of ADR-0309.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  prior supersessions and the ratified body below are preserved.
 
 ## Context
 

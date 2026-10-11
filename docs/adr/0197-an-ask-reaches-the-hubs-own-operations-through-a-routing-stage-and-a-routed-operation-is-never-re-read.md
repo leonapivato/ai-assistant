@@ -1,6 +1,6 @@
 # 197. An ask reaches the hub's own operations through a routing stage, and a routed operation is never re-read
 
-- Status: Partially superseded by ADR-0201 (§5's first clause, that a routed operation's argument is resolved from that query by deterministic local code reading the store the operation itself reads — scoped to exactly one case: the kinds a routed `forget`'s lookup enumerates)
+- Status: Superseded by ADR-0309; partially superseded before it by ADR-0201 (§5's first clause, that a routed operation's argument is resolved from that query by deterministic local code reading the store the operation itself reads — scoped to exactly one case: the kinds a routed `forget`'s lookup enumerates)
 - Date: 2026-08-27
 - Amended: 2026-08-27 (§7 — the ordinary parked step's refusal is described as
   raising, and the tree returns a ruling). §7's clause bounding the routed resume
@@ -233,6 +233,12 @@
   a claim about it.
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-27**, the
   durability form ADR-0100 established.
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. Routing, its stage and its
+  rules retire at the cutover (ADR-0309 §3:6, §5). The old path keeps this decision until
+  the cutover lane that removes its code merges (ADR-0309 §1:3). This replacement takes
+  effect on ratification of ADR-0309. This reciprocal header record accompanies the numbered
+  draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 158. An episode may supplement the answering prompt, and never shares the belief budget
 
-- Status: Partially superseded by ADR-0160 (§3's value clause, §6's arm mandate and retraction predicate, and §8's first bullet) and ADR-0226 (§5's sameness clause alone, that `TurnResult.memories` carries the same three groups in the same order as `Planner.plan`'s `memories` — on a turn whose planner emitted a read request the `TurnResult` carries those three groups, in that order, and a fourth appended after them; §5's three-group clause on `Planner.plan`, its grouping-not-ranking caution, its degraded-read clause, its episodic-bound clauses and its `Settings` prohibition all stand, and §4 is untouched) and ADR-0228 (§5's three-group clause alone, as it governs `Planner.plan`'s `memories` — a turn's **second** planner call, made over the supply the first plan's serviced read produced, is handed four groups, because the fourth exists by the time it is made; §5's sameness clause as already narrowed, its grouping-not-ranking caution, its degraded-read clause, its episodic-bound clauses and its `Settings` prohibition all stand, and §4's append-never-interleave rule is extended in application and unchanged in text)
+- Status: Partially superseded by ADR-0160 (§3's value clause, §6's arm mandate and retraction predicate, and §8's first bullet) and ADR-0226 (§5's sameness clause alone, that `TurnResult.memories` carries the same three groups in the same order as `Planner.plan`'s `memories` — on a turn whose planner emitted a read request the `TurnResult` carries those three groups, in that order, and a fourth appended after them; §5's three-group clause on `Planner.plan`, its grouping-not-ranking caution, its degraded-read clause, its episodic-bound clauses and its `Settings` prohibition all stand, and §4 is untouched) and ADR-0228 (§5's three-group clause alone, as it governs `Planner.plan`'s `memories` — a turn's **second** planner call, made over the supply the first plan's serviced read produced, is handed four groups, because the fourth exists by the time it is made; §5's sameness clause as already narrowed, its grouping-not-ranking caution, its degraded-read clause, its episodic-bound clauses and its `Settings` prohibition all stand, and §4's append-never-interleave rule is extended in application and unchanged in text) and ADR-0309 (every clause but §2:2)
 - Date: 2026-08-15
 - Partially superseded: 2026-08-16 by ADR-0160 — **the bound's *value* moves from
   5 to 15, the separately registered ablation arm is retired in favour of post-hoc
@@ -293,6 +293,14 @@
   and ADR-0226's rather than replacing either. Appended note per ADR-0070 §1; no text
   below is rewritten. This note lands in the same change as ADR-0228 itself, which is
   the existence condition ADR-0082 §7 states. Refs #1908, #1952.
+- Partially superseded: 2026-10-11 by ADR-0309 — one scope. Every clause but §2:2: the
+  answering prompt's episodic supplement retires with the answering prompt at the cutover,
+  and planning is given what recall finds (ADR-0307 §6). §2:2 stands: no caller passes a
+  kind set mixing `EPISODIC` with a belief kind to `assemble_by_band`. The old path keeps
+  the replaced clauses until the cutover lane that removes its code merges (ADR-0309 §1:3).
+  This scoped replacement takes effect on ratification of ADR-0309. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and
+  the ratified body below are preserved.
 
 ## Context
 
