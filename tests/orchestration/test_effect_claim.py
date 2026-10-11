@@ -74,7 +74,13 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration import StepExecutor, StepRunner
 from ai_assistant.orchestration.effects import told_once
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
-from ai_assistant.testing import FakeActionPolicy, FakeAuditTrail, FakePlanStore, FakeToolInvoker
+from ai_assistant.testing import (
+    FakeActionPolicy,
+    FakeAuditTrail,
+    FakePlanStore,
+    FakeToolInvoker,
+    with_phase_declaration,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -137,7 +143,7 @@ def declaration(tool_id: str = "rooms", **overrides: object) -> ToolDefinition:
         "idempotency": Idempotency.NATURAL,
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 def a_step(  # noqa: PLR0913 — one keyword per field an arm varies; each is a distinct declaration

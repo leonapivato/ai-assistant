@@ -47,6 +47,7 @@ from ai_assistant.core.types import (
     TurnResult,
     VerificationKind,
 )
+from ai_assistant.testing import with_phase_declaration
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -92,7 +93,7 @@ def _tool(**overrides: object) -> ToolDefinition:
         "cost": ToolCost(basis=CostBasis.FREE),
         "idempotency": Idempotency.NATURAL,
     }
-    return ToolDefinition(**{**fields, **overrides})  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration({**fields, **overrides}))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 # --- ADR-0262 §2: ``ToolDefinition.postconditions`` --------------------------

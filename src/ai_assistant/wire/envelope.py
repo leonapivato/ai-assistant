@@ -2500,7 +2500,13 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     which the engine's story log carries; and ``move_story_members`` takes its
 #:     members defaulting to none. A peer at 89 would refuse each new member and the
 #:     field (§9:10, ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 90
+#: 91: ADR-0306 §6:6 gives ``ToolDefinition`` five required fields — ``effect``,
+#:     ``leaves_hub``, ``result``, ``outcome_can_be_unknown`` and ``safe_to_repeat`` —
+#:     and ``PermissionDecision`` the field ``effect``, both carried inside every
+#:     ``PermissionDecision`` the engine's decision reads return. A peer at 90 refuses
+#:     the new fields as extra, and a declaration without them does not validate here
+#:     (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 91
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

@@ -45,7 +45,7 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
 )
-from ai_assistant.testing import FakeToolImplementation, succeeds
+from ai_assistant.testing import FakeToolImplementation, succeeds, with_phase_declaration
 
 
 class PopulatableToolRegistry(ToolRegistry, Protocol):
@@ -94,7 +94,7 @@ def tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
         "idempotency": Idempotency.NONE,
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 class ToolRegistryContract:

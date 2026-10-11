@@ -64,6 +64,7 @@ from ai_assistant.testing import (
     FakeIdentifiers,
     FakeIdentifierSpace,
     FakePlanStore,
+    with_phase_declaration,
 )
 
 if TYPE_CHECKING:
@@ -124,7 +125,7 @@ def tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
         "idempotency": Idempotency.NONE,
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 def read_only(tool_id: str = "inbox") -> ToolDefinition:

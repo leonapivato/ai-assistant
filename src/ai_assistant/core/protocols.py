@@ -115,6 +115,8 @@ if TYPE_CHECKING:
         ActionQuote,
         ActionQuoteMinting,
         ActionRequest,
+        ActivationEffect,
+        ActivationEffectClaim,
         ActivationStop,
         AnswerOutcome,
         AttemptTransition,
@@ -6104,6 +6106,107 @@ class PlanStore(Protocol):
         """
         ...
 
+    async def claim_activation_effect(
+        self,
+        effect: ActivationEffect,
+        /,
+        *,
+        match: tuple[str, ...] | None,
+        deliberate_repeat: bool = False,
+    ) -> ActivationEffectClaim:
+        """Claim one effect of an activation by writing its record (ADR-0306 §5:4, §6:2).
+
+        **One indivisible step**, which decides the stop, the duplicate backstop and
+        the write together. A call or a message that gets an effect record is claimed
+        here before it runs, with no outcome and, for a message, no position.
+
+        In this order:
+
+        1. **The stop.** Where the store holds a stop record for
+           ``effect.activation_id`` (ADR-0297 §1), it raises ``ClaimStopped`` and
+           writes nothing.
+        2. **The id.** Where the store already holds a record under ``effect.id``, it
+           raises ``PlanningError`` and writes nothing.
+        3. **The backstop.** Where ``match`` is a tuple, and a record of an
+           activation it names carries the same capability and values digest with an
+           outcome that is unknown, not yet written, or done (done only when
+           ``deliberate_repeat`` is false), it answers ``ALREADY_DONE`` and writes
+           nothing. A record not done never matches, and a message never matches.
+        4. Otherwise it writes ``effect`` and answers ``CLAIMED``.
+
+        **The store reads no story** (§6:3). ``orchestration`` supplies ``match``: for a
+        call to a capability that is not safe to repeat, this activation's id and the
+        activations of the episodes in its stories, taken when the round was
+        authorized; for every other claim, ``None``, which matches nothing.
+
+        Args:
+            effect: The record to write. It carries no outcome, no reason and no
+                position.
+            match: The activations whose effects this claim is matched against, or
+                ``None``.
+            deliberate_repeat: Whether planning marked the call a deliberate repeat,
+                which passes a matching effect only where every one is done.
+
+        Returns:
+            ``CLAIMED`` where the record was written; ``ALREADY_DONE`` where a
+            matching effect refused it.
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the activation.
+            PlanningError: If the store already holds a record under the id, the
+                record carries an outcome, a reason or a position, or the backend
+                fails. Nothing is written.
+        """
+        ...
+
+    async def finish_activation_effect(
+        self,
+        effect_id: str,
+        /,
+        outcome: ToolOutcome,
+        *,
+        reason: str | None = None,
+        position: int | None = None,
+    ) -> None:
+        """Write a claimed effect's outcome, once (ADR-0306 §5:5, §6:4).
+
+        Writes the outcome, the reason where it is not done, and, for a message done,
+        the position the medium returned for it, in one step.
+
+        Args:
+            effect_id: The record to finish.
+            outcome: ``SUCCEEDED`` for done, ``FAILED`` for not done,
+                ``INDETERMINATE`` for unknown.
+            reason: Why the effect was not done; only with ``FAILED``.
+            position: Where the medium recorded a message; only on a message done.
+
+        Raises:
+            PlanningError: If the store holds no record under ``effect_id``, the
+                record is already finished, a reason rides on an outcome other than
+                ``FAILED``, or a position on anything but a message done. Nothing is
+                written.
+        """
+        ...
+
+    async def activation_effects(
+        self, activation_ids: Sequence[str], /
+    ) -> tuple[ActivationEffect, ...]:
+        """Return the effect records of the named activations (ADR-0306 §6:5).
+
+        Finished or not, in the order they were claimed. An activation the store
+        holds no record of contributes nothing.
+
+        Args:
+            activation_ids: The activations whose records to return.
+
+        Returns:
+            The records, in claim order.
+
+        Raises:
+            PlanningError: If the backend fails.
+        """
+        ...
+
     async def get_execution(self, execution_id: str) -> ExecutionState | None:
         """Return the execution with ``execution_id``, or ``None`` if absent."""
         ...
@@ -6137,6 +6240,10 @@ class PlanStore(Protocol):
 
         **And it carries the store's stop records** (ADR-0297 §1), as the tuple of
         activation ids :meth:`record_stop` recorded, each once.
+
+        **And its activation effect records** (ADR-0306 §6), finished or not, in the
+        order they were claimed. :meth:`clear` erases them with the rest, and
+        :meth:`delete_goal` reaches none, since a record names no goal.
         """
         ...
 

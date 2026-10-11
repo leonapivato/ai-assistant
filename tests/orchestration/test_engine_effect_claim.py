@@ -21,6 +21,8 @@ from test_engine import PATIENT, Harness, NoStepPlanner
 
 from ai_assistant.core.types import (
     AssociationVerdict,
+    CapabilityEffect,
+    CapabilityResult,
     CostBasis,
     Disposition,
     GoalAssociation,
@@ -57,6 +59,11 @@ def _tool() -> ToolDefinition:
         risk_level=RiskLevel.LOW,
         reversibility=Reversibility.REVERSIBLE,
         side_effecting=True,
+        effect=CapabilityEffect.WORLD,
+        leaves_hub=True,
+        result=CapabilityResult.NO_OUTSIDE_TEXT,
+        outcome_can_be_unknown=True,
+        safe_to_repeat=False,
         reads=(),
         writes=(),
         discloses=(),

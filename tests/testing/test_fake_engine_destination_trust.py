@@ -26,6 +26,8 @@ import pytest
 from ai_assistant.core.errors import DuplicateDestinationTrustError
 from ai_assistant.core.types import (
     BoundAccount,
+    CapabilityEffect,
+    CapabilityResult,
     CostBasis,
     DestinationProtocol,
     DestinationTrust,
@@ -61,6 +63,11 @@ def _decision(decision_id: str, *, canonical: str = "a@example.com") -> Permissi
             risk_level=RiskLevel.LOW,
             reversibility=Reversibility.REVERSIBLE,
             side_effecting=True,
+            effect=CapabilityEffect.WORLD,
+            leaves_hub=True,
+            result=CapabilityResult.NO_OUTSIDE_TEXT,
+            outcome_can_be_unknown=True,
+            safe_to_repeat=False,
             reads=(),
             writes=(),
             discloses=(),

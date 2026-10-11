@@ -32,6 +32,7 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
 )
+from ai_assistant.testing import with_phase_declaration
 
 AT = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 
@@ -52,7 +53,7 @@ def tool(tool_id: str = "smtp", **overrides: Any) -> ToolDefinition:
         "idempotency": Idempotency.NONE,
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 # --- PermissionOutcome ------------------------------------------------------

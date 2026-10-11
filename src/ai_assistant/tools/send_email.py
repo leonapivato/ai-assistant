@@ -81,6 +81,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final, Protocol
 
 from ai_assistant.core.types import (
+    CapabilityEffect,
+    CapabilityResult,
     CostBasis,
     DataTier,
     DestinationProtocol,
@@ -168,6 +170,11 @@ SEND_EMAIL: Final = ToolDefinition(
     discloses=(DataTier.PERSONAL,),
     cost=ToolCost(basis=CostBasis.UNKNOWN),
     idempotency=Idempotency.NONE,
+    effect=CapabilityEffect.WORLD,
+    leaves_hub=True,
+    result=CapabilityResult.NO_OUTSIDE_TEXT,
+    outcome_can_be_unknown=True,
+    safe_to_repeat=False,
     parameters_schema={
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",

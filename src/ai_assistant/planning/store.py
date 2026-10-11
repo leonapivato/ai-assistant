@@ -27,6 +27,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     MAX_GOAL_EVIDENCE,
     TERMINAL_ATTEMPT_STATES,
+    ActivationEffectClaim,
     AttemptState,
     EffectRecord,
     EvidenceHistory,
@@ -37,6 +38,14 @@ from ai_assistant.core.types import (
     PlanExport,
     StepStatus,
     evidence_order,
+)
+from ai_assistant.planning.activation_effects import (
+    checked_effect_id,
+    decide_activation_claim,
+    finished,
+    matched_activations,
+    requested_activations,
+    revalidated_claim,
 )
 from ai_assistant.planning.effects import (
     BorrowedAct,
@@ -94,6 +103,7 @@ if TYPE_CHECKING:
         ActionPlan,
         ActionQuote,
         ActionQuoteMinting,
+        ActivationEffect,
         AttemptTransition,
         EffectKey,
         EffectOutcome,
@@ -107,6 +117,7 @@ if TYPE_CHECKING:
         IntendedActionMinting,
         StepExecution,
         StepTransition,
+        ToolOutcome,
         UtcInstant,
     )
 
@@ -166,6 +177,9 @@ class InMemoryPlanStore:
         # because a record has nothing but its identity and `record_stop` is
         # idempotent; ordered on export, so two exports of one store are one document.
         self._stopped: set[str] = set()
+        # ADR-0306 §6: acting's effect records by id. A dict keeps insertion order,
+        # which is claim order, and nothing removes one but `clear`.
+        self._activation_effects: dict[str, ActivationEffect] = {}
         self._clock = checked_clock(now, owner="InMemoryPlanStore")
         self._tracker = tracker or PlanExecution(now=now)
         self._sequence = 0
@@ -1539,6 +1553,78 @@ class InMemoryPlanStore:
         """
         self._stopped.add(revalidated_activation_id(activation_id))
 
+    async def claim_activation_effect(
+        self,
+        effect: ActivationEffect,
+        /,
+        *,
+        match: tuple[str, ...] | None,
+        deliberate_repeat: bool = False,
+    ) -> ActivationEffectClaim:
+        """Claim one effect of an activation by writing its record (ADR-0306 §6:2).
+
+        Decided and written with no ``await`` between, which is this store's
+        indivisible step.
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the activation.
+            PlanningError: If the id is already held, or the record carries an
+                outcome, a reason or a position.
+        """
+        record = revalidated_claim(effect)
+        named = matched_activations(match)
+        answer = decide_activation_claim(
+            record,
+            match=named,
+            deliberate_repeat=deliberate_repeat,
+            stopped=record.activation_id in self._stopped,
+            held_ids=self._activation_effects,
+            matched=(
+                ()
+                if named is None
+                else [
+                    held
+                    for held in self._activation_effects.values()
+                    if held.activation_id in named
+                ]
+            ),
+        )
+        if answer is ActivationEffectClaim.CLAIMED:
+            self._activation_effects[record.id] = record
+        return answer
+
+    async def finish_activation_effect(
+        self,
+        effect_id: str,
+        /,
+        outcome: ToolOutcome,
+        *,
+        reason: str | None = None,
+        position: int | None = None,
+    ) -> None:
+        """Write a claimed effect's outcome, once (ADR-0306 §6:4).
+
+        Raises:
+            PlanningError: If the record is not held or already finished, or the
+                reason or position does not belong to the outcome.
+        """
+        named = checked_effect_id(effect_id)
+        held = self._activation_effects.get(named)
+        self._activation_effects[named] = finished(
+            held, named, outcome, reason=reason, position=position
+        )
+
+    async def activation_effects(
+        self, activation_ids: Sequence[str], /
+    ) -> tuple[ActivationEffect, ...]:
+        """Return the named activations' effect records, in claim order (ADR-0306 §6:5)."""
+        named = set(requested_activations(activation_ids))
+        return tuple(
+            held.model_copy(deep=True)
+            for held in self._activation_effects.values()
+            if held.activation_id in named
+        )
+
     async def get_execution(self, execution_id: str) -> ExecutionState | None:
         """Return the execution with ``execution_id``, or ``None``."""
         stored = self._executions.get(execution_id)
@@ -1585,6 +1671,10 @@ class InMemoryPlanStore:
             # ADR-0297 §1: every stop record. A record names no goal, so `delete_goal`
             # never reaches one and only `clear` takes one out.
             stopped_activations=tuple(sorted(self._stopped)),
+            # ADR-0306 §6: every effect record, in claim order.
+            activation_effects=tuple(
+                held.model_copy(deep=True) for held in self._activation_effects.values()
+            ),
         )
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
@@ -1672,6 +1762,7 @@ class InMemoryPlanStore:
             + len(self._executions)
             + len(self._effects)
             + len(self._stopped)
+            + len(self._activation_effects)
         )
         self._goals.clear()
         self._attempts.clear()
@@ -1682,4 +1773,5 @@ class InMemoryPlanStore:
         self._executions.clear()
         self._effects.clear()
         self._stopped.clear()
+        self._activation_effects.clear()
         return removed

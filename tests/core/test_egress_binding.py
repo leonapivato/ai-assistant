@@ -52,6 +52,7 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
 )
+from ai_assistant.testing import with_phase_declaration
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -98,7 +99,7 @@ def _definition(**overrides: object) -> ToolDefinition:
         "idempotency": Idempotency.NONE,
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 def _destination(supplied: str, canonical: str | None = None) -> EgressDestination:

@@ -51,6 +51,8 @@ from typing import TYPE_CHECKING
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.types import (
+    CapabilityEffect,
+    CapabilityResult,
     CostBasis,
     Idempotency,
     Reversibility,
@@ -146,6 +148,11 @@ CURRENT_TIME = ToolDefinition(
     discloses=(),
     cost=ToolCost(basis=CostBasis.FREE),
     idempotency=Idempotency.NATURAL,
+    effect=CapabilityEffect.NONE,
+    leaves_hub=False,
+    result=CapabilityResult.NO_OUTSIDE_TEXT,
+    outcome_can_be_unknown=False,
+    safe_to_repeat=True,
     parameters_schema={"type": "object", "properties": {}, "additionalProperties": False},
 )
 """Declaration for :class:`CurrentTime` (ADR-0048 §2).

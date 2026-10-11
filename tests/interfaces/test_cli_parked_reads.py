@@ -36,6 +36,8 @@ from typer.testing import CliRunner
 from ai_assistant.core.config import Settings
 from ai_assistant.core.types import (
     BoundAccount,
+    CapabilityEffect,
+    CapabilityResult,
     Confirmation,
     ConfirmationEgress,
     ContinuationToken,
@@ -132,6 +134,11 @@ def _confirm(*, planned: bool = False) -> PermissionDecision:
             risk_level=RiskLevel.LOW,
             reversibility=Reversibility.REVERSIBLE,
             side_effecting=True,
+            effect=CapabilityEffect.WORLD,
+            leaves_hub=True,
+            result=CapabilityResult.NO_OUTSIDE_TEXT,
+            outcome_can_be_unknown=True,
+            safe_to_repeat=False,
             reads=(),
             writes=(),
             discloses=(DataTier.PERSONAL,),

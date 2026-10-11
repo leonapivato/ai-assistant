@@ -79,6 +79,8 @@ from typing import TYPE_CHECKING, Any, Final, final
 
 from ai_assistant.core.errors import AssistantError, ClassifiedToolError, ConnectionStoreError
 from ai_assistant.core.types import (
+    CapabilityEffect,
+    CapabilityResult,
     ChargedOutput,
     CostBasis,
     DataTier,
@@ -271,6 +273,11 @@ BOOKING_AVAILABILITY: Final = ToolDefinition(
     discloses=(),
     cost=ToolCost(basis=CostBasis.FREE),
     idempotency=Idempotency.NATURAL,
+    effect=CapabilityEffect.NONE,
+    leaves_hub=True,
+    result=CapabilityResult.NO_OUTSIDE_TEXT,
+    outcome_can_be_unknown=False,
+    safe_to_repeat=True,
     quoted_output=QuotedOutput(amount=PRICE_AMOUNT_KEY, currency=PRICE_CURRENCY_KEY),
     charged_output=None,
     parameters_schema=_parameters_schema(),
@@ -326,6 +333,11 @@ BOOKING_ACT: Final = ToolDefinition(
     discloses=(),
     cost=ToolCost(basis=CostBasis.FREE),
     idempotency=Idempotency.NONE,
+    effect=CapabilityEffect.WORLD,
+    leaves_hub=True,
+    result=CapabilityResult.NO_OUTSIDE_TEXT,
+    outcome_can_be_unknown=True,
+    safe_to_repeat=False,
     quoted_output=None,
     charged_output=ChargedOutput(amount=CHARGED_AMOUNT_KEY, currency=CHARGED_CURRENCY_KEY),
     postconditions=(

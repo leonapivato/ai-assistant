@@ -62,7 +62,12 @@ from ai_assistant.core.types import (
     ToolResult,
 )
 from ai_assistant.orchestration import StepExecutor
-from ai_assistant.testing import FakeAuditTrail, FakePlanStore, FakeToolInvoker
+from ai_assistant.testing import (
+    FakeAuditTrail,
+    FakePlanStore,
+    FakeToolInvoker,
+    with_phase_declaration,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
@@ -176,7 +181,7 @@ def tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
         "idempotency": Idempotency.NONE,
     }
     fields.update(overrides)
-    return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 def read_only(tool_id: str = "inbox") -> ToolDefinition:
