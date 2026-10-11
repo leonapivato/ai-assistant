@@ -63,8 +63,10 @@ another.
 | **Timers, watches, events and concurrency** (later) | Things that fire later, events as their own spokes, activations side by side, writing into other places |
 
 **One cutover.** M42, the phases and the authority milestone go live together, in one
-deploy on a fresh data directory. Until then the live hub keeps today's behaviour, and the
-new work runs on a test hub.
+deploy on a fresh data directory; nothing on the live hub carries over. Until then the live
+hub keeps today's behaviour and is not redeployed, and the new work runs on a test hub. The
+deploy waits for the phases' acceptance run on the test hub and for authority's. Learning
+follows the cutover as its own milestone.
 
 **How it is built.**
 
@@ -95,20 +97,24 @@ new work runs on a test hub.
 ## 1. Recall
 
 - **Two runs, one after the other.** The first, before understanding, searches with your
-  words, as built. The second, once understanding has recorded what the input means,
-  searches with its meaning and with each phrase it placed or could not place, each as its
-  own cue, so a name finds its memory. Same closeness threshold and per-cue limit, a cap on
-  the total, and nothing the first run already found.
+  words, as built. The second, once understanding has recorded what the input means and
+  before planning's first round, searches with its meaning and with each phrase it placed
+  or could not place, each as its own cue, so a name finds its memory. Same closeness
+  threshold and per-cue limit, a cap on the total, and nothing the first run already found.
 - **Stories come with the finds**, as M42 built: for each episode recall finds, the story
   store says which stories it belongs to, by lookup, never by search. Understanding's
   candidates are the place window's stories, then the episode window's, then recall's
   (ADR-0303 §7).
-- **An episode comes with its notes** (section 3), wherever recall finds it.
 - **What the second run finds** joins the working set for planning. Understanding does not
-  see it, so understanding never runs twice because of recall.
-- **Outside content still passes through a reader.** A fact stored word for word from
-  outside content reaches planning only through a digest (section 6).
-- **Failure-tolerant**, as built.
+  see it, so understanding never runs twice because of recall. The audience rule applies
+  as in the first run: a withheld record is simply absent.
+- **An episode recall finds is shown by its records**: understanding's meaning, the rounds'
+  messages and notes (section 3), and the evidence, never its raw outside input, as
+  recall's record already does (ADR-0281 §6). So an episode needs no digest. It shows the
+  labels of the stories it is in, and planning reads one only if it needs it.
+- **Outside content still passes through a reader.** A memory record whose stored source is
+  outside reaches planning only through a digest (section 6).
+- **Failure-tolerant**, as built: a failed run is recorded, and planning goes on without it.
 
 Deferred: recall running again on everything new, contesting a reference, a hook running
 alongside the phases ([#2591](https://github.com/leonapivato/ai-assistant/issues/2591)),
@@ -134,13 +140,14 @@ optimisation a kind's push filter (ADR-0292 §6) or a cheaper model can make lat
 
 | Part | What it is |
 | --- | --- |
-| **Its text** | The message, written into the place the input came from. Planning writes the words itself; no compose step follows it. Replies arrive whole, with no streaming for now. |
+| **Its text** | The message, written into the place the input came from as soon as the round is recorded, without waiting for the round's calls. Planning writes the words itself; no compose step follows it. Replies arrive whole, with no streaming for now. |
 | **Its tool calls** | What to do: searches, forecasts, bookings, emails, notes on a story, remembering something. Calls in one response run in parallel. |
 | **Episode notes** | Notes on this activation, kept with the round in its episode and read wherever the episode is read. Writing them is optional; most activations leave none. |
 | **Another round needed** | A mark that planning must run again once this round's calls finish: a later step depends on them, or you will want to hear how one went. |
 
-There are no kinds of step. What a call does is declared by its **capability** (section 5),
-and every rule reads that declaration.
+The notes and the mark are part of the response, not calls: they pass no authorizing and
+bring no round. There are no kinds of step. What a call does is declared by its
+**capability** (section 5), and every rule reads that declaration.
 
 - **Calls that depend on each other go in different rounds.** A call needing another's
   result, or its success, waits for the next round, which sees the result; no call ever
@@ -150,17 +157,18 @@ and every rule reads that declaration.
   done. When you will want to hear how it went, planning marks another round, and that
   round reports it from acting's record. A call that fails or comes back unknown brings
   that round anyway.
-- **The round is recorded in the episode**, naming the round it follows. Claims point at
-  it by id.
+- **Where the input's place takes no message**, as for an event, the round's text is kept
+  in the episode and written nowhere, and planning is told so.
+- **The round is recorded in the episode**, never edited, naming the round it follows.
+  Claims point at it by id.
 - **Episode notes** are read wherever the episode is read: by the activation's later
   rounds, by a later activation that sees the episode in its episode window or through
   recall, by the tidy-up and by the matters pass (ADR-0303 §5, §8), whether or not the
   episode is in a story. They are free text with no citations, written only by planning as
-  part of its response and never as a call, so writing one costs no round and passes no
-  authorizing. They are marked, and placed for you alone, as a story's notes are (ADR-0303
-  §3, ADR-0304 §4). They move with their episode when it moves between stories, and are
-  never copied onto a story (ADR-0300 §10): the tidy-up reads them and may take what they
-  say into the summary. They have no size cap for now.
+  part of its response. They are marked, and placed for you alone, as a story's notes are
+  (ADR-0303 §3, ADR-0304 §4). They move with their episode when it moves between stories,
+  and are never copied onto a story (ADR-0300 §10): the tidy-up reads them and may take
+  what they say into the summary. They have no size cap for now.
 - **The tidy-up is planning's call.** For each story it is handed, planning is told when
   the summary was last tidied and how many changes have come since, and calls the tidy-up
   when it judges the summary behind. The tidy-up never brings a round, even when it fails;
@@ -168,14 +176,14 @@ and every rule reads that declaration.
   can end while it runs (ADR-0300 §10). That is ADR-0292 §12:2 as written: planning
   chooses it.
 - **Planning names things by label.** Stories are S1, S2 and so on, episodes E1, E2,
-  notes N1, N2 and memories M1, M2, the letters understanding and the matters pass use.
-  Each thing gets its label the first time planning is shown it, from any source, its own
-  story reads and the notes it writes included, and keeps it for the whole activation. The hub maps labels to
-  ids, so planning never handles an id, and "any story by id" (ADR-0300 §10) is any story
-  planning has been shown. A call naming a label planning was never shown, or a note the
-  story it moves from does not hold, is refused whole, with the reason; a refused call
-  brings a round. This is how planning names the notes a move or a split carries
-  (ADR-0303 §9).
+  notes N1, N2 and memories M1, M2, the letters understanding and the matters pass use, and
+  results R1, R2. Each thing gets its label the first time planning is shown it, from any
+  source, its own story reads and the notes it writes included, and keeps it for the whole
+  activation. The hub maps labels to ids, so planning never handles an id, and "any story
+  by id" (ADR-0300 §10) is any story planning has been shown. A call naming a label
+  planning was never shown, or a note the story it moves from does not hold, is refused
+  whole, with the reason; a refused call brings a round. This is how planning names the
+  notes a move or a split carries (ADR-0303 §9).
 - **Messages go only into the place the input came from** in this milestone; the hub
   refuses any other. Writing into other places and starting conversations come with the
   timers and proactivity milestone, with the audience rules they need
@@ -189,6 +197,7 @@ inherited), where the matter stands and the latest episodes (ADR-0300 §8); the 
 a story understanding cited as a referent that the activation is not in; the place window
 and the episode window; the capability names; the channel kind's description (ADR-0292 §8);
 digested evidence; acting's outcomes; earlier rounds and their notes; the current time.
+Marked records are shown as outside content (ADR-0303 §3).
 
 **Where a record placed for you alone may not be shown**, as on a spoken pass, planning's
 views follow understanding's (ADR-0304 §4, ADR-0305 §4). The summary is withheld, and the
@@ -209,38 +218,47 @@ deadlines; the numbers are [#2589](https://github.com/leonapivato/ai-assistant/i
 - a call brought a result (digested, where it carries outside text);
 - a call failed or came back unknown, whatever the call;
 - the round marked that it needs another round. Planning marks it when a later step depends
-  on this round's calls, or to report how a call in the world went; a mark on a round with
-  no calls waits for nothing, and the no-progress rule ends it.
+  on this round's calls, or to report how a call in the world went.
 
 Each digest starts as soon as its result arrives, so the wait is the slowest call and its
 digest. A call's deadline bounds the wait: a call past it comes back not done, or unknown
 where its outcome can be unknown.
 
+**No progress** is a round with no calls: the activation ends after its message, whatever
+its mark. A round whose calls are all refused gets the round that explains it, and a loop
+of refused calls is ended by the round limit.
+
 Otherwise the activation ends after the round: a note, a memory, a link, or an effect in
 the world that succeeded with nothing to follow brings no round. When a round runs because
 the calls are done, its text is the **report**, written from acting's outcomes and claiming
-no more than they show. When processing cannot finish, the fixed *couldn't finish* message
-is written (ADR-0293 §9).
+no more than they show; a failure or an unknown outcome is always reported. When processing
+cannot finish, the fixed *couldn't finish* message is written (ADR-0293 §9).
 
-**Rules**: it proposes and never permits; it never reads raw outside content; it cites what
-it relies on; it never substitutes for what you asked; a call that comes back *needs you*
-is answered, in this milestone, by telling you plainly that it cannot be done yet.
+**Rules**: it proposes and never permits; it never reads raw outside content; it never
+substitutes for what you asked; a call that comes back *needs you* is answered, in this
+milestone, by telling you plainly that it cannot be done yet. Questions and answers are
+ordinary messages.
 
 ## 4. Authorizing
 
-For each call, by rule, with no model:
+For each call, the assistant's own records included, by rule, with no model:
 
 1. **Policy.** The permission policy rules allow, confirm or deny; a standing grant you gave
-   counts. Deny runs nothing and asks nothing.
+   counts. Deny runs nothing and asks nothing. Remembering also passes the memory policy,
+   and memory it says to ask about is not written, by planning or by consolidation, until
+   the authority milestone.
 2. **Outside content.** The built lineage rule stands in until the authority milestone
    decides how a value's source is traced: a call that leaves the hub, planned in an
    activation that has read outside content, gets no standing permission and needs you,
    with its values shown (ADR-0181 §5, with ADR-0247's exception for a search at the
-   configured provider). Digested evidence and a marked summary or note count as outside
-   content read (ADR-0303 §3). A story keeps its mark, so until then every such call in a
-   matter outside content once touched needs you; that is expected
+   configured provider). An activation has read outside content when its record says so:
+   an outside trigger, digested evidence, or a marked summary or note (ADR-0303 §3). A story
+   keeps its mark, so until then every such call in a matter outside content once touched
+   needs you; that is expected
    ([#2798](https://github.com/leonapivato/ai-assistant/issues/2798)).
-3. **The message place.** Only the place the input came from.
+3. **The message place.** Only the place the input came from. The round's own message is
+   checked by its place alone, never by the outside-content rule, or every answer after a
+   web search would need you.
 4. **Confirm means *needs you*.** In this milestone that goes back to planning, which tells
    you it cannot be done yet; the authority milestone gives it an answer.
 
@@ -250,8 +268,7 @@ decision is recorded and read back before anything runs.
 The permission policy loses its goal authorizations and goal quotes (ADR-0254) as inputs.
 Quotes, stated bounds and charges retire, and are redone as limits on approvals in the
 authority milestone; so is the recipient grant's establishing act, which rides recorded
-confirmations. **Memory the memory policy says to ask about is not written**, by planning
-or by consolidation, until the authority milestone.
+confirmations.
 
 ## 5. Acting
 
@@ -259,9 +276,11 @@ Acting runs the round's allowed calls in parallel, with no model, and records ea
 outcome: **done**, **not done** with its reason, or **unknown**.
 
 **What each capability declares**, set by the hub and never taken from a tool on trust (an
-MCP server's annotations are hints only). Every capability declares every property; the
-hub does not offer planning a capability until it has, so a newly connected tool is usable
-only once declared:
+MCP server's annotations are hints to whoever writes the declaration, and no rule reads
+them). Each tool's declaration gains five required properties, beside what it declares
+today (risk, reversibility, data tiers, cost and its retry guarantee), which the permission
+policy keeps reading. A declaration missing one does not validate, so an undeclared tool is
+never offered to planning:
 
 | Property | Values | What reads it |
 | --- | --- | --- |
@@ -269,47 +288,59 @@ only once declared:
 | **Leaves the hub** | yes / no | Whether it goes out through a channel's actuator (ADR-0292 §7) or runs directly (§12) |
 | **Result** | none / no outside text / may carry outside text | A result that may carry outside text takes a *looking for* argument; when it arrives, the text someone other than you or the assistant wrote goes to a digest, record by record, and the rest goes to planning |
 | **Outcome can be unknown** | yes / no | An unknown outcome is never retried or done another way, and never reported as done |
-| **Safe to repeat** | yes / no | The duplicate backstop |
+| **Safe to repeat** | yes / no | The duplicate backstop. Not the retry guarantee: repeating a call with the same values is a different question from retrying one call |
 
-- **Effects in the world** are claimed before they run, so a stop refuses them (ADR-0297),
-  and written durably the moment they happen, **pointing at the activation that made
-  them** (ADR-0300 §8). A story finds its effects through its current episodes, so a split,
-  a merge or a corrected link moves them with their episode.
-- **Each message is recorded** with the activation that wrote it and its position in the
-  place, in acting's effect record, so the place window links it to that activation
-  (ADR-0303 §7).
+Planning is offered capabilities (ADR-0211); tool selection picks the tool, and every rule
+reads that tool's declaration. The hub adds the arguments the rules need: a required
+*looking for* on every capability whose result may carry outside text, and a *deliberate
+repeat* mark on every one not safe to repeat.
+
+- **Effects in the world, and messages,** are claimed before they run, so a stop refuses
+  them (ADR-0297), and written durably the moment they happen, **pointing at the activation
+  that made them** (ADR-0300 §8). A story finds its effects through its current episodes, so
+  a split, a merge or a corrected link moves them with their episode.
+- **Effect records** are written for every call in the world, for every message, with its
+  position in the place, so the place window links it to its activation (ADR-0303 §7), and
+  for every call to a capability not safe to repeat.
 - **The duplicate backstop.** A call to a capability not safe to repeat, with the same
   capability and values as an effect of the episodes in this activation's stories, or of
   this activation alone when it has none, is refused as *already done* unless planning marks
-  it a deliberate repeat. It is ADR-0259 and ADR-0265's effect key, scoped by the stories'
-  episodes instead of the goal.
+  it a deliberate repeat. An unknown outcome counts as done here, so a retry after "unknown"
+  is refused too. It is ADR-0259 and ADR-0265's effect key, scoped by the stories' episodes
+  instead of the goal.
 - **Who wrote the text decides digesting, record by record.** For a web search that is all
-  of it; for a memory search, only the records whose stored source is outside.
+  of it; for a memory search, only the records whose stored source is outside. A record
+  whose writer is not known counts as outside.
 - **The assistant's own records** are the story calls ADR-0300 §10 and ADR-0303 §9 declare,
-  and remembering, all with the assistant's own records as their effect (ADR-0292 §12). The
-  story calls are: starting a story with its first notes and, optionally, the story it sits
-  inside; a note, naming a story that exists; linking and unlinking; moving members, notes
-  or both from one story to another (ADR-0304 §9); merging; splitting off members and the
-  notes that go; grouping stories under a larger one; the tidy-up; and reading a story.
-  Starting and grouping are not safe to repeat. Several new stories in one round are
-  several start calls.
+  and remembering, all with the assistant's own records as their effect (ADR-0292 §12),
+  never leaving the hub and never unknown. The story calls are: starting a story with its
+  first notes and, optionally, the story it sits inside; a note, naming a story that exists;
+  linking and unlinking; moving members, notes or both from one story to another (ADR-0304
+  §9); merging; splitting off members and the notes that go; grouping stories under a
+  larger one; the tidy-up; and reading a story, which returns no outside text and shows its
+  marks. Starting, grouping and remembering are not safe to repeat, so the backstop stops
+  the same memory being written twice in a matter. Several new stories in one round are
+  several start calls. Memory search and pulls may carry outside text.
 - **What runs finishes** when a stop arrives; nothing new starts. No locks in this
   milestone; they come with the concurrency milestone.
 
 ## 6. Digesting
 
-- **One model call per result carrying outside text**, in parallel, with no tools.
-- **Each digest answers a question.** The hub adds a required *looking for* argument to
-  every capability whose result may carry outside text, so the call carries the question
-  and the digest answers it. An outside fact that **recall** finds has no call behind it;
-  its digest answers what understanding said the input means.
+- **One model call per result carrying outside text**, covering that result's outside
+  records together, in parallel, with no tools; each starts as soon as its result arrives.
+- **Each digest answers a question.** The call carries it in its *looking for* argument,
+  and the digest answers only that. Recall's outside memory records, from both runs, have
+  no call behind them: they go into one digest after the second run, which answers what
+  understanding said the input means.
+- **The content reaches the digest as quoted source data** (ADR-0098 §2), attributed by its
+  record. "Nothing here answers it" is a valid answer: an empty list of evidence.
 - **A follow-up** is a call on the assistant's own records: ask again about a stored result,
-  with a new question. Nothing is remembered between calls.
-- **Long content** is split into parts digested in parallel, and their evidence merged; the
+  named by its label, with a new question. Nothing is remembered between calls.
+- **Long content** is split into parts digested in parallel, and their evidence joined; the
   part size is a number for #2589.
-- **Evidence** is a list, each item its text, its source and a mark that it came from outside
-  content, and nothing more. It lives in the episode, and reaches a story only through the
-  notes planning writes, keeping its mark.
+- **Evidence** is a list, each item its text, its source by label and a mark that it came
+  from outside content, and nothing more. It lives in the episode, and reaches a story only
+  through the notes planning writes, keeping its mark.
 - **A digest that fails** tells planning it could not read that result; planning never gets
   the raw content.
 
@@ -318,7 +349,8 @@ goal model.
 
 ## 7. What retires, and the cutover
 
-From a read-only survey of `8fe54b36`, each confirmed by the lane that removes it.
+From a read-only survey of `8fe54b36`, checked again against `main` when the cutover lanes
+start, and each item confirmed by the lane that removes it.
 
 **Engine surface.** Retire: `converse`; `resume`, `pending_confirmations`, `cancel_read`;
 `goals`, `withdraw_clarification`, `abandon_goal`; `standing_authorizations`,
@@ -330,9 +362,9 @@ From a read-only survey of `8fe54b36`, each confirmed by the lane that removes i
 **`receive` stays.** ADR-0292 §13 retires a mechanism only when its replacement is built,
 and events' replacement, a spoke per source, is the events milestone's. Events run through
 the new phases like any activation; the event-summary stage retires because planning does
-that work; an event cannot message you in this milestone, but planning can write notes and
-memories from it. The notification route, the upcoming-events producer and the delivery
-outbox survive the cutover for the same reason.
+that work; an event cannot message you in this milestone (section 3), but planning can
+write notes and memories from it. The notification route, the upcoming-events producer and
+the delivery outbox survive the cutover for the same reason.
 
 **Orchestration.** Retire: `loop`, `composing`, `goals`, `interpretation`, `questions`,
 `parked_reads`, `routing` (with `permissions/routing`), `reconciling`, `verification`,
@@ -345,11 +377,11 @@ outbox survive the cutover for the same reason.
 **Stories.** The interim rule that runs the tidy-up until the phases are built
 (`story_tidy_up_interim.py`) is deleted; planning's tidy-up call replaces it.
 
-**Memory.** Planning's remember call is the one writer of beliefs in this milestone.
-Consolidation stays off by default, as today; its rework reads the new episode's text (your
-input, understanding's record, the rounds' messages and notes, the evidence) and never the
-raw results stored for follow-ups. Who else writes beliefs, and how remembering relates to
-it, are the learning design's.
+**Memory.** Planning's remember call is the one writer of beliefs until the learning
+milestone, as nothing learns in the background today. Consolidation stays off by default;
+its rework reads the new episode's text (your input, understanding's record, the rounds'
+messages and notes, the evidence) and never the raw results stored for follow-ups. Who else
+writes beliefs, and how remembering relates to it, are the learning design's.
 
 **Stores.** Retire: the deferral store; parked reads; goal authorizations, quotes and
 coverage; the routing trail; `PlanStore`'s goal, attempt, interpretation, intended-action,
@@ -361,34 +393,60 @@ turn-outcome, routing, deferral-question and verification families, with their c
 fakes. CLI: `ask`, `resume`, `cancel-read`, `goals`, `withdraw-clarification`,
 `abandon-goal`, `questions`, `answer`, `forget-question`, `authorizations`,
 `revoke-authorization`. Gateway: the Ask, What happened, confirmations, questions, goals and
-authorizations panels and their routes.
+authorizations panels and their routes. `assistant chat` and the gateway's chat, both built
+(ADR-0293), are the way to talk to the assistant.
 
 **The controller's dead members.** `ControllerStage` and `ControllerRule` are "added to and
 never renamed", but routing, event summary, goal association, disambiguation, reconcile,
 turn loop, drive and compose, with their rules, are **removed**, as a recorded exception:
 the data directory is fresh, so nothing stored names them.
 
+## How it becomes ADRs
+
+Four ADRs, numbered from ADR-0306 in this order, each its own lane and ratified before
+anything builds on it:
+
+| ADR | What it decides | Sections |
+| --- | --- | --- |
+| **ADR-0306: capabilities, authorizing and acting** | What a capability declares, the declarations of the assistant's own records, authorizing's stand-in rules, and how calls run and are recorded. The authority milestone supersedes its authorizing section. | 4, 5 |
+| **ADR-0307: planning** | The round, the message and the report, episode notes, labels, the tidy-up call, what planning is given and may look up, and when rounds run and end; that planning always runs after understanding | 2, 3 |
+| **ADR-0308: recall's second run and digesting** | The second run and what it shows, and how outside content becomes evidence | 1, 6 |
+| **ADR-0309: the cutover** | How the phases are built, the one cutover, and what retires | 0, 7 |
+
+The Done list above becomes the milestone's acceptance issue, opened with ADR-0306's lane;
+the numbers stay with #2589.
+
+**Delivery**, as guidance for the lanes rather than a ruling:
+
+- The ADR lanes run one at a time, ADR-0306 to ADR-0309.
+- **The first build lane is a thin path** on the test hub: one planning round,
+  authorizing, acting and digesting, with one capability of each kind, checked before the
+  other phase lanes are built.
+- **The cutover is several lanes.** One switches the controller's rules over, so the new
+  path runs on the test hub; deletion lanes then remove the old path by area (the engine
+  surface, CLI and gateway; the orchestration modules; the stores and types). Nothing
+  deploys until all of them have merged.
+
 ## What it would supersede
 
-To be confirmed clause by clause when each section becomes its ADR:
+To be confirmed clause by clause in each ADR:
 
-- ADR-0170, "a reply is not a tool": the reply is planning's own text.
-- ADR-0052, ADR-0244 and ADR-0148's parked call resumed on the answer; ADR-0078's deferred
-  questions and `answer`, with ADR-0293 §11's clause retiring `answer` "once question
-  messages and their answers (§6) are built", which never fires now that question messages
-  are dropped.
-- ADR-0293 §6, its options on a question and an answer naming its question: questions and
-  answers are ordinary messages.
-- ADR-0248–ADR-0273, the goal and attempt model; ADR-0226, ADR-0228 and ADR-0251's turn
-  loop; ADR-0252's evidence record; ADR-0254's goal authorizations; ADR-0259 and
-  ADR-0265's effect key in its goal scope.
-- ADR-0197 and ADR-0198, routing; ADR-0274 §7's informational processing, in its summary
-  stage.
-- ADR-0280 §1:4, `resume` outside the controller, and the closed `ControllerStage` and
-  `ControllerRule` in the removal above.
-- ADR-0208 §1:2 and §1:5: planning's memory search is a tool that reads memory. To be
-  checked against the old answering prompt's supply: ADR-0158, ADR-0224, ADR-0229, ADR-0204
-  §2:1 and ADR-0210 §1.
+- **ADR-0306:** ADR-0052, ADR-0244 and ADR-0148's parked call resumed on the answer;
+  ADR-0254's goal authorizations as policy inputs; ADR-0259 and ADR-0265's effect key in its
+  goal scope; ADR-0208 §1:2, §1:3 and §1:5, on memory-reading tools and the one place memory
+  is read for relevance.
+- **ADR-0307:** ADR-0170, "a reply is not a tool": the reply is planning's own text;
+  ADR-0226, ADR-0228 and ADR-0251's turn loop; ADR-0293 §6, its options on a question and an
+  answer naming its question, since questions and answers are ordinary messages; and
+  ADR-0293 §11's clause retiring `answer` "once question messages and their answers (§6) are
+  built", which never fires now that question messages are dropped.
+- **ADR-0308:** ADR-0252's evidence record; and, to confirm, how ADR-0281's recall record
+  holds a second run.
+- **ADR-0309:** ADR-0248–ADR-0273, the goal and attempt model; ADR-0197 and ADR-0198,
+  routing; ADR-0274 §7's informational processing, in its summary stage; ADR-0280 §1:4,
+  `resume` outside the controller, and the closed `ControllerStage` and `ControllerRule` in
+  the removal above; ADR-0078's deferred questions and `answer`. To be checked against the
+  old answering prompt's supply: ADR-0158, ADR-0224, ADR-0229, ADR-0204 §2:1 and ADR-0210 §1.
 
 ## Options considered
 
@@ -429,28 +487,40 @@ To be confirmed clause by clause when each section becomes its ADR:
 - **Hiding the tidy-up's facts where owner-only records may not be shown.** Rejected: a
   matter handled only by voice would never be tidied, and a count says nothing to a listener.
 - **Tracing each value's source in this milestone.** Moved to the authority milestone, where
-  asking you is designed; the coarse rule stands in.
+  asking you is designed; the built lineage rule stands in.
+- **Planning citing what it relies on, now.** Dropped from this milestone: nothing reads
+  citations until authority traces where values came from or learning tracks which memories
+  were used, and the milestone that needs them adds them.
+- **The outside-content rule on the round's own message.** Rejected: every answer after a
+  web search would need you.
+- **Carrying the live hub's data over.** Not done: the cutover starts fresh, as earlier
+  cutovers did.
+- **Learning in the cutover.** Not done: it would delay the cutover further, and
+  remember-only is what the hub does today.
+- **One cutover lane.** Rejected: deleting the old path is too large for one change.
 
 ## What it leaves open
 
 - Timers and watches pointing at what set them and found through the story, as effects
   now are (the timers milestone).
 - Approvals found through a story that later merges or splits (the authority milestone).
-- How a call's values are traced to their source, replacing the coarse rule, and whether
-  the lineage rule (ADR-0181 §5, and the direction "never what, where or to whom") should
-  relax toward the owner's principle for outside content recorded on #2747 (the authority
-  milestone, where asking the user is designed).
+- How a call's values are traced to their source, replacing the built rule's stand-in, and
+  whether the lineage rule (ADR-0181 §5, and the direction "never what, where or to whom")
+  should relax toward the owner's principle for outside content recorded on #2747 (the
+  authority milestone, where asking the user is designed).
+- Citations, for the milestone that first reads them (authority or learning).
 - A note left on the wrong story
   ([#2809](https://github.com/leonapivato/ai-assistant/issues/2809)): no flag fires;
   planning and you move notes, and the matters pass's note-only move stays incidental.
-- Who else writes beliefs, and how remembering relates to it (the learning design).
+- Who else writes beliefs, and how remembering relates to it (the learning milestone).
 - Privacy beyond the owner-only minimum (ADR-0304).
-- The numbers: rounds, no progress, deadlines, digest part size, the second recall run's
-  total cap ([#2589](https://github.com/leonapivato/ai-assistant/issues/2589)); episode notes
-  have no cap, and the test hub shows whether they need one.
+- The numbers: rounds, deadlines, digest part size, the second recall run's total cap
+  ([#2589](https://github.com/leonapivato/ai-assistant/issues/2589)); episode notes have no
+  cap, and the test hub shows whether they need one.
 - Which read capabilities survive, and the unbounded-audience gate on reads
   ([#2593](https://github.com/leonapivato/ai-assistant/issues/2593)).
 - Durability of effects and unknown outcomes in detail
   ([#2584](https://github.com/leonapivato/ai-assistant/issues/2584)).
 - Phase-level carry-overs: quoted text, forget over recalled copies, audience at delivery
   ([#2590](https://github.com/leonapivato/ai-assistant/issues/2590)).
+- Finer declarations, such as an invite's title shown marked instead of digested.
