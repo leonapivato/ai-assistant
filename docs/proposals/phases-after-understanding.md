@@ -228,12 +228,14 @@ For each call, by rule, with no model:
 
 1. **Policy.** The permission policy rules allow, confirm or deny; a standing grant you gave
    counts. Deny runs nothing and asks nothing.
-2. **Outside content.** If the round read anything marked as outside content, such as
-   digested evidence or a marked summary or note (ADR-0303 §3), every call with an effect in
-   the world needs you, with its values shown. This coarse rule stands in until the
-   authority milestone decides how a value's source is traced. A story keeps its mark, so
-   until then every such call in a matter outside content once touched needs you; that is
-   expected ([#2798](https://github.com/leonapivato/ai-assistant/issues/2798)).
+2. **Outside content.** The built lineage rule stands in until the authority milestone
+   decides how a value's source is traced: a call that leaves the hub, planned in an
+   activation that has read outside content, gets no standing permission and needs you,
+   with its values shown (ADR-0181 §5, with ADR-0247's exception for a search at the
+   configured provider). Digested evidence and a marked summary or note count as outside
+   content read (ADR-0303 §3). A story keeps its mark, so until then every such call in a
+   matter outside content once touched needs you; that is expected
+   ([#2798](https://github.com/leonapivato/ai-assistant/issues/2798)).
 3. **The message place.** Only the place the input came from.
 4. **Confirm means *needs you*.** In this milestone that goes back to planning, which tells
    you it cannot be done yet; the authority milestone gives it an answer.
