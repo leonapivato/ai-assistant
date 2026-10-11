@@ -2506,7 +2506,12 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``PermissionDecision`` the engine's decision reads return. A peer at 90 refuses
 #:     the new fields as extra, and a declaration without them does not validate here
 #:     (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 91
+#: 92: ADR-0307 §10:3 gives the wire-carried ``EpisodicMemory.processing_record`` the
+#:     fields ``rounds`` (``PlanningRound``, carrying ``ProposedCall``) and ``labels``
+#:     (``PlanningLabel``, ``LabelKind``), and moves its ``schema_version`` to
+#:     ``Literal[7]``: a peer at 91 refuses the fields as extra and the version as
+#:     unknown, and a version-6 record does not validate here (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 92
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

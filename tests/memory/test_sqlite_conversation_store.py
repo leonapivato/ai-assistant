@@ -1468,7 +1468,8 @@ async def test_an_insert_naming_only_the_pre_decision_columns_still_succeeds(
 
 @pytest.mark.integration
 @pytest.mark.parametrize(
-    "shape", ["unmarked", "m36", "m37", "m38", "m39", "format5", "format6", "newer", "malformed"]
+    "shape",
+    ["unmarked", "m36", "m37", "m38", "m39", "format5", "format6", "format7", "newer", "malformed"],
 )
 def test_incompatible_conversation_state_is_refused_without_mutation(
     tmp_path: Path, shape: str
@@ -1491,8 +1492,10 @@ def test_incompatible_conversation_state_is_refused_without_mutation(
             raw.execute("UPDATE episode_record_format SET version = 5")
         elif shape == "format6":
             raw.execute("UPDATE episode_record_format SET version = 6")
+        elif shape == "format7":
+            raw.execute("UPDATE episode_record_format SET version = 7")
         elif shape == "newer":
-            raw.execute("UPDATE episode_record_format SET version = 8")
+            raw.execute("UPDATE episode_record_format SET version = 9")
         else:
             raw.execute("ALTER TABLE episode_record_format RENAME COLUMN version TO invalid")
     path.chmod(0o644)

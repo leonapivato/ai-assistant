@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     InputOrigin,
     ProcessingStatus,
+    ProjectedRound,
     ProjectedText,
     RecordedActivationTrigger,
     RecordedChannelTrigger,
@@ -45,7 +46,7 @@ from ai_assistant.core.types import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from ai_assistant.core.types import ActivationLinks
+    from ai_assistant.core.types import ActivationLinks, PlanningRound
 
 _MAX_PAGE = 100
 _MAX_CHUNK = 65536
@@ -276,7 +277,11 @@ ROUTE_OUTCOME_PHRASES: Final[Mapping[RouteOutcome, str]] = MappingProxyType(
 
 
 def project_episode(
-    record: EpisodicMemory, *, excerpt_chars: int, admit_outside_input: bool = False
+    record: EpisodicMemory,
+    *,
+    excerpt_chars: int,
+    admit_outside_input: bool = False,
+    owner_records: bool = False,
 ) -> EpisodeProjection:
     """Project an episode onto what a model is shown of it (ADR-0284 §8:1-§8:2).
 
@@ -284,6 +289,14 @@ def project_episode(
     and renders no other field of it (§8:3). The input and the response are cut to
     ``excerpt_chars`` characters and the cut is carried; a site with a tighter
     ceiling of its own applies it to what this returns (§8:7).
+
+    **Planning's rounds** (ADR-0307 §10) render under the reader's audience: each
+    round's message, and its episode notes with their mark only where
+    ``owner_records`` says a record placed for the owner alone may be shown to this
+    reader (ADR-0307 §4:4, §6:4). That placement holds for every reader of a stored
+    episode (ADR-0312 §4:3), so the default withholds them; the round's message is
+    the episode's own response and is shown wherever the episode is. Each is cut to
+    ``excerpt_chars`` as the input is.
 
     The input is shown where the trigger's ``origin`` is ``user``, or where it is
     ``outside`` and ``admit_outside_input`` is set — which the understanding stage's
@@ -293,8 +306,11 @@ def project_episode(
 
     Args:
         record: The stored episode, exactly as held.
-        excerpt_chars: The bound, in characters, on the input and the response.
+        excerpt_chars: The bound, in characters, on the input, the response and
+            each round's message and notes.
         admit_outside_input: Whether an ``outside`` input's text is shown.
+        owner_records: Whether a record placed for the owner alone may be shown to
+            this reader, which decides the episode notes.
 
     Returns:
         The projection.
@@ -347,7 +363,26 @@ def project_episode(
         status=processing.status,
         reason=processing.reason,
         derived_from_external=external,
+        rounds=_projected_rounds(processing.rounds, excerpt_chars, owner_records=owner_records),
     )
+
+
+def _projected_rounds(
+    rounds: tuple[PlanningRound, ...], bound: int, *, owner_records: bool
+) -> tuple[ProjectedRound, ...]:
+    """Each round's message and, where the reader may be shown them, its notes."""
+    projected: list[ProjectedRound] = []
+    for one in rounds:
+        message = _projected(one.text, bound) if one.text.strip() else None
+        notes = _projected(one.notes, bound) if owner_records else None
+        if message is None and notes is None:
+            continue
+        projected.append(
+            ProjectedRound(
+                message=message, notes=notes, notes_marked=notes is not None and one.notes_marked
+            )
+        )
+    return tuple(projected)
 
 
 # --- a revision of an open episode (ADR-0286 §3) -------------------------------
@@ -368,6 +403,9 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
       ``False``);
     - entries appended at the end of ``understanding`` and of ``stages``, each under
       its bound, with its elided count grown by exactly what the bound dropped;
+    - entries appended at the end of ``rounds`` and of ``labels``, every earlier entry
+      unchanged; neither is bounded (ADR-0307 §10, superseding §3:3 in the additions
+      alone);
     - in the one revision that freezes it, ``status``, ``reason``, ``ended_at`` and
       ``understanding_omitted``, with the end entry the record's own validators then
       require last.
@@ -413,6 +451,11 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
         before.stages, before.stages_elided, after.stages, after.stages_elided, head=_stage_head
     ):
         return False
+    if (
+        after.rounds[: len(before.rounds)] != before.rounds
+        or after.labels[: len(before.labels)] != before.labels
+    ):
+        return False
     settled = before.model_copy(
         update={
             "trigger": _settled_trigger(before.trigger, after.trigger),
@@ -424,6 +467,8 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
             "understanding_elided": after.understanding_elided,
             "stages": after.stages,
             "stages_elided": after.stages_elided,
+            "rounds": after.rounds,
+            "labels": after.labels,
             "status": after.status,
             "reason": after.reason,
             "ended_at": after.ended_at,

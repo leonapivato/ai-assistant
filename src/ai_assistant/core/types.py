@@ -4206,6 +4206,182 @@ class ActivationRecall(BaseModel):
         return self
 
 
+# --- planning's round (ADR-0307 §2, §5, §10) -----------------------------------
+#
+# What a planning round asks a model for and what it gets back, in the provider's
+# native tool-calling shape, and what the episode keeps of it. Declared here, ahead
+# of :class:`EpisodeProcessingRecord`, which records the rounds and the labels.
+
+
+class OfferedTool(BaseModel):
+    """One capability as a planning round offers it to the model (ADR-0307 §10).
+
+    The capability's ``name`` and ``description``, and ``parameters``, its JSON
+    schema with ADR-0306 §2:9's added arguments. It is what
+    :meth:`~ai_assistant.core.protocols.ToolCallingCompleter.respond` hands the
+    provider as a native tool, and nothing about who may run it.
+
+    Raises:
+        ValueError: If ``parameters`` is not a JSON schema of an object, the one shape
+            a native tool's arguments take.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    name: Identifier
+    description: NonBlankEncodableText
+    parameters: FrozenJsonMapping
+
+    @model_validator(mode="after")
+    def _an_object_schema(self) -> Self:
+        if self.parameters.get("type") != "object":
+            msg = "an offered tool's parameters are the JSON schema of an object"
+            raise ValueError(msg)
+        return self
+
+
+class ProposedCall(BaseModel):
+    """One call a planning round proposed, as the provider returned it (ADR-0307 §10).
+
+    ``call_id`` is the provider's id for the call, ``name`` the capability it names,
+    and ``arguments`` the JSON object it carries. Nothing here says the name was
+    offered or the arguments fit its schema: planning and authorizing judge that.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    call_id: Identifier
+    name: NonBlankEncodableText
+    arguments: FrozenJsonMapping = Field(default_factory=FrozenDict, validate_default=True)
+
+
+def _distinct_call_ids(calls: tuple[ProposedCall, ...]) -> None:
+    """Refuse two calls of one response under one provider id."""
+    ids = [call.call_id for call in calls]
+    if len(set(ids)) != len(ids):
+        msg = "a round's calls carry distinct call ids"
+        raise ValueError(msg)
+
+
+class RoundResponse(BaseModel):
+    """One model response of a planning round, in its four parts (ADR-0307 §2:1).
+
+    ``text`` is the round's message, possibly empty; ``calls`` the calls it proposes;
+    ``notes`` its episode notes, or ``None`` where it wrote none; and
+    ``another_round`` the mark asking for another round. The notes and the mark are
+    parts of the response and never calls (§2:2, §2:7).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    text: EncodableText = Field(default="", validate_default=True)
+    calls: tuple[ProposedCall, ...] = ()
+    notes: NonBlankEncodableText | None = None
+    another_round: bool = False
+
+    @model_validator(mode="after")
+    def _calls_distinct(self) -> Self:
+        _distinct_call_ids(self.calls)
+        return self
+
+
+class LabelKind(StrEnum):
+    """What a planning label names (ADR-0307 §5:1).
+
+    Closed, **added to and never renamed**. Episode notes take no label.
+    """
+
+    STORY = "story"
+    EPISODE = "episode"
+    NOTE = "note"
+    MEMORY = "memory"
+    RESULT = "result"
+
+
+#: Each kind's label prefix (ADR-0307 §5:1): S1…, E1…, N1…, M1… and R1….
+_LABEL_PREFIXES: Final[dict[LabelKind, str]] = {
+    LabelKind.STORY: "S",
+    LabelKind.EPISODE: "E",
+    LabelKind.NOTE: "N",
+    LabelKind.MEMORY: "M",
+    LabelKind.RESULT: "R",
+}
+
+_LABEL_SHAPE: Final = re.compile(r"[SENMR][1-9][0-9]{0,8}")
+
+
+def label_prefix(kind: LabelKind) -> str:
+    """The prefix a label of ``kind`` carries (ADR-0307 §5:1).
+
+    Args:
+        kind: What the label names.
+
+    Returns:
+        ``S``, ``E``, ``N``, ``M`` or ``R``.
+    """
+    return _LABEL_PREFIXES[kind]
+
+
+class PlanningLabel(BaseModel):
+    """One label planning was shown, and the id it names (ADR-0307 §5:2, §5:7).
+
+    ``label`` is its kind's prefix and a decimal number with no padding. ``id`` is
+    the thing's id exactly as held, never normalised.
+
+    Raises:
+        ValueError: If ``label`` is not of that shape, or its prefix is not its
+            kind's.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    label: EncodableText
+    kind: LabelKind
+    id: NonBlankEncodableText
+
+    @model_validator(mode="after")
+    def _the_kinds_label(self) -> Self:
+        if _LABEL_SHAPE.fullmatch(self.label) is None:
+            msg = "a planning label is a kind's prefix and a number with no padding"
+            raise ValueError(msg)
+        if self.label[0] != _LABEL_PREFIXES[self.kind]:
+            msg = "a planning label carries its kind's prefix"
+            raise ValueError(msg)
+        return self
+
+
+class PlanningRound(BaseModel):
+    """One planning round as the episode records it (ADR-0307 §2:3, §10).
+
+    Its ``id``; ``follows``, the round before it, or ``None`` for the first;
+    ``recorded_at``; the four parts of its :class:`RoundResponse`, the calls as
+    proposed, labels and all; and ``notes_marked``, which the hub sets where the
+    activation had read outside content when the notes were written (ADR-0307 §4:3,
+    ADR-0303 §3:1), never from the model's output. A round is never edited.
+
+    Raises:
+        ValueError: If it follows itself, marks notes it does not carry, or carries
+            two calls under one id.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: Identifier
+    follows: Identifier | None = None
+    recorded_at: UtcInstant
+    text: EncodableText = Field(default="", validate_default=True)
+    calls: tuple[ProposedCall, ...] = ()
+    notes: NonBlankEncodableText | None = None
+    another_round: bool = False
+    notes_marked: bool = False
+
+    @model_validator(mode="after")
+    def _well_formed(self) -> Self:
+        if self.follows == self.id:
+            msg = "a round follows the round before it, never itself"
+            raise ValueError(msg)
+        if self.notes_marked and self.notes is None:
+            msg = "only a round carrying notes marks them"
+            raise ValueError(msg)
+        _distinct_call_ids(self.calls)
+        return self
+
+
 class EpisodeProcessingRecord(BaseModel):
     """The facts about one activation's processing, open while it runs (ADR-0286 §1).
 
@@ -4219,10 +4395,15 @@ class EpisodeProcessingRecord(BaseModel):
     A frozen record is immutable. An open one is replaced only by a record that
     extends it, which :func:`~ai_assistant.core.episode_encoding.episode_extends`
     decides (ADR-0286 §3).
+
+    ``rounds`` are planning's rounds, oldest first, each naming the one before it, and
+    ``labels`` the labels planning was shown, each naming one thing and each thing
+    named once, in the order they were assigned (ADR-0307 §2:3, §5:7). Both are
+    appended to as the episode is extended and default to empty.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    schema_version: Literal[6] = 6
+    schema_version: Literal[7] = 7
     activation_id: Identifier
     started_at: UtcInstant
     ended_at: UtcInstant | None = None
@@ -4238,11 +4419,38 @@ class EpisodeProcessingRecord(BaseModel):
     stages: tuple[StageEntry, ...] = ()
     stages_elided: int = Field(default=0, strict=True, ge=0, lt=2**31)
     recall: ActivationRecall | None = None
+    rounds: tuple[PlanningRound, ...] = ()
+    labels: tuple[PlanningLabel, ...] = ()
 
     @property
     def is_open(self) -> bool:
         """Whether the record is open: its pass has not ended (ADR-0286 §1)."""
         return self.status is None
+
+    @model_validator(mode="after")
+    def _rounds_follow_each_other(self) -> Self:
+        # ADR-0307 §2:3: each round names the round it follows; the first follows none.
+        previous: str | None = None
+        for one in self.rounds:
+            if one.follows != previous:
+                msg = "each round follows the round recorded before it, and the first none"
+                raise ValueError(msg)
+            previous = one.id
+        if len({one.id for one in self.rounds}) != len(self.rounds):
+            msg = "a processing record's rounds carry distinct ids"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _one_label_one_thing(self) -> Self:
+        # ADR-0307 §5:1: each thing gets one label, which holds for the whole activation.
+        if len({one.label for one in self.labels}) != len(self.labels):
+            msg = "a label names one thing"
+            raise ValueError(msg)
+        if len({(one.kind, one.id) for one in self.labels}) != len(self.labels):
+            msg = "a thing takes one label"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _open_or_frozen(self) -> Self:
@@ -4469,6 +4677,39 @@ class ProjectedText(BaseModel):
         return len(self.text) < self.full_chars
 
 
+class ProjectedRound(BaseModel):
+    """One planning round of an episode, as a model is shown it (ADR-0307 §10).
+
+    The round's message and its episode notes, each cut to the projection's excerpt
+    bound. ``notes`` is ``None`` where the round wrote none or the reader may not be
+    shown them: episode notes are placed for the owner alone (ADR-0307 §4:4), and a
+    later reader keeps that placement (ADR-0312 §4:3).
+
+    Attributes:
+        message: The round's text, where it wrote any: the message it wrote into its
+            place, or the text kept in the episode where the place took none
+            (ADR-0307 §3:8).
+        notes: Its episode notes, where it wrote any and the reader may be shown them.
+        notes_marked: Whether those notes rest on outside content (ADR-0307 §4:3).
+            Never set without ``notes``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    message: ProjectedText | None = None
+    notes: ProjectedText | None = None
+    notes_marked: bool = False
+
+    @model_validator(mode="after")
+    def _marked_with_notes(self) -> Self:
+        if self.notes_marked and self.notes is None:
+            msg = "a projected round marks only notes it carries"
+            raise ValueError(msg)
+        if self.message is None and self.notes is None:
+            msg = "a projected round shows its message, its notes or both"
+            raise ValueError(msg)
+        return self
+
+
 class EpisodeProjection(BaseModel):
     """What every model-facing rendering of a stored episode reads (ADR-0284 §8).
 
@@ -4483,7 +4724,8 @@ class EpisodeProjection(BaseModel):
     ``reason``. **An episode without one** (§8:2) carries its ``capture_modality``
     instead of a channel and its ``content`` as its input, and no origin, no
     understanding, no verdict and no status; ``status`` is ``None`` exactly there.
-    Both carry ``occurred_at``, ``response`` and ``derived_from_external``.
+    Both carry ``occurred_at``, ``response`` and ``derived_from_external``. Only an
+    episode with a processing record carries ``rounds`` (ADR-0307 §10).
 
     Attributes:
         occurred_at: When the episode happened.
@@ -4505,6 +4747,8 @@ class EpisodeProjection(BaseModel):
         derived_from_external: Whether processing read material resting on recorded
             external content, as :func:`rests_on_recorded_external_content` answers
             it of the episode's provenance (ADR-0106 §2). Not ``origin`` (§8:4).
+        rounds: The episode's planning rounds that show a message or notes, in
+            order, under the reader's audience (ADR-0307 §10).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -4522,6 +4766,7 @@ class EpisodeProjection(BaseModel):
     status: ProcessingStatus | None = None
     reason: ProcessingReason | None = None
     derived_from_external: bool = False
+    rounds: tuple[ProjectedRound, ...] = ()
 
     @model_validator(mode="after")
     def _one_of_the_two_shapes(self) -> Self:
@@ -4543,6 +4788,7 @@ class EpisodeProjection(BaseModel):
                 or self.meaning is not None
                 or self.step_dispositions
                 or self.route_outcomes
+                or self.rounds
             ):
                 msg = "a projection without a processing record carries its content alone"
                 raise ValueError(msg)

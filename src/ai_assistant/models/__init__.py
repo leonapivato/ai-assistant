@@ -5,7 +5,8 @@ Nothing outside this package imports a provider SDK (anthropic, openai, ...) —
 that is the entire point of this seam. Swapping or adding a model provider is a
 change confined to this package.
 
-Implements: ``ModelProvider``, ``StreamingCompleter`` and ``Embedder``.
+Implements: ``ModelProvider``, ``StreamingCompleter``, ``ToolCallingCompleter`` and
+``Embedder``.
 
 ``FastEmbedEmbedder`` lives in ``ai_assistant.models.fastembed_embedder`` and is
 deliberately not re-exported here, so importing this package does not pull in the
@@ -39,6 +40,7 @@ from ai_assistant.models.provider import (
 from ai_assistant.models.retry import RetryingProvider
 from ai_assistant.models.routing import Route, RoutingProvider
 from ai_assistant.models.streaming import PydanticAIStreamingCompleter
+from ai_assistant.models.tool_calling import PydanticAIToolCallingCompleter
 
 __all__ = [
     "BoundedEmbedder",
@@ -47,6 +49,7 @@ __all__ = [
     "HashingEmbedder",
     "PydanticAIProvider",
     "PydanticAIStreamingCompleter",
+    "PydanticAIToolCallingCompleter",
     "RetryingProvider",
     "Route",
     "RoutingProvider",
