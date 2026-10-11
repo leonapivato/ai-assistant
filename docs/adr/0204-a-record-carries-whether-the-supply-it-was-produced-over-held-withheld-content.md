@@ -263,13 +263,14 @@
   preserved.
 - Partially superseded: 2026-10-11 by ADR-0309 — one scope. §2:1's site and timing, for an
   activation the phases plan: §2's two terms are evaluated over the memory records and
-  context facets the activation obtained, what either recall run kept and what its calls
-  returned, and over no window, once, at capture, over every round (ADR-0309 §5:10). The two
-  terms, the field they write and §§3–5 stand. The old path keeps the replaced clauses until
-  the cutover lane that removes its code merges (ADR-0309 §1:3). This scoped replacement
-  takes effect on ratification of ADR-0309. This reciprocal header record accompanies the
-  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
-  below are preserved.
+  context facets the activation was given or obtained, its windows' records, what either
+  recall run kept and what its calls returned, the windows left out on a pass of unbounded
+  audience, once, at capture, over every round (ADR-0309 §5:10). The two terms, the field
+  they write and §§3–5 stand. The old path keeps the replaced clauses until the cutover lane
+  that removes its code merges (ADR-0309 §1:3). This scoped replacement takes effect on
+  ratification of ADR-0309. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 
