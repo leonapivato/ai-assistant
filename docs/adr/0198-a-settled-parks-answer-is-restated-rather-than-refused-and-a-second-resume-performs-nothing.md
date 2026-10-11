@@ -1,6 +1,6 @@
 # 198. A settled park's answer is restated rather than refused, and a second resume performs nothing
 
-- Status: Accepted
+- Status: Superseded by ADR-0309
 - Date: 2026-08-27
 - **Partially supersedes:**
   [ADR-0042](0042-the-interface-adapter-contract.md) — §4's rule that
@@ -23,6 +23,12 @@
   surface whether or not the surface gains a method — ADR-0197 §7's own words for
   its own two sentences — so this is decided first and implemented second, and it
   owes both the adversarial and the architecture lens.
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. Parks and `resume` retire at
+  the cutover, since the phases park nothing (ADR-0306 §4:8). The old path keeps this
+  decision until the cutover lane that removes its code merges (ADR-0309 §1:3). This
+  replacement takes effect on ratification of ADR-0309. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the
+  ratified body below are preserved.
 
 ## Context
 

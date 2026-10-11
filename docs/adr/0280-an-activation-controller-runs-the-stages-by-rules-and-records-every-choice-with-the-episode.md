@@ -1,6 +1,6 @@
 # 280. An activation controller runs the stages by rules and records every choice with the episode
 
-- Status: Partially superseded by ADR-0281 (§3:5's working set and §4:1–§4:3's enums and table, in the additions alone; §5:2's fixed default, for a failure-tolerant stage alone; §7:1's `schema_version` literal alone) and ADR-0282 (§3:5's working set and §4:1–§4:3's enums and table, in the additions alone; §3:7's list of wrapped stages, for understanding alone) and ADR-0284 (§1:4's last sentence and §7:1's resume clause; §6:1's additions; §6:3 for the verdict fields) and ADR-0286 (§4:2's member set, in the addition alone; §6:2's appenders; §6:5; §7:1's validator, for an open record) and ADR-0295 (§4:2's member set, in the addition alone; §5:3's and §5:4's `interrupted`, for a pass a stop ends) and ADR-0297 (§3:3's step and §5:2's fixed default, each for a pass whose stop has been taken in) and ADR-0300 (§3:5's working set and §4:1–§4:3's enums and table, in the additions alone) and ADR-0307 (§4:1–§4:2's enums, in the additions alone; §4:6's loop guard, for the planning stage alone) and ADR-0308 (§3:5's working set and §4:1–§4:2's enums, in the additions alone; §4:6's loop guard, for the recall stage alone)
+- Status: Partially superseded by ADR-0281 (§3:5's working set and §4:1–§4:3's enums and table, in the additions alone; §5:2's fixed default, for a failure-tolerant stage alone; §7:1's `schema_version` literal alone) and ADR-0282 (§3:5's working set and §4:1–§4:3's enums and table, in the additions alone; §3:7's list of wrapped stages, for understanding alone) and ADR-0284 (§1:4's last sentence and §7:1's resume clause; §6:1's additions; §6:3 for the verdict fields) and ADR-0286 (§4:2's member set, in the addition alone; §6:2's appenders; §6:5; §7:1's validator, for an open record) and ADR-0295 (§4:2's member set, in the addition alone; §5:3's and §5:4's `interrupted`, for a pass a stop ends) and ADR-0297 (§3:3's step and §5:2's fixed default, each for a pass whose stop has been taken in) and ADR-0300 (§3:5's working set and §4:1–§4:3's enums and table, in the additions alone) and ADR-0307 (§4:1–§4:2's enums, in the additions alone; §4:6's loop guard, for the planning stage alone) and ADR-0308 (§3:5's working set and §4:1–§4:2's enums, in the additions alone; §4:6's loop guard, for the recall stage alone) and ADR-0309 (§1:4's resume clause; §2:1; §2:3's association limb; §3:3, for the round's step; §3:5 and §3:7, in the removed members and the additions; §4:1–§4:2, in the removal and the additions; §4:3's table; §4:5's composition sentence; §4:6's loop guard, for authorizing, acting and digesting; §4:7; §4:8's last sentence)
 - Date: 2026-09-27
 - Scope: [M38](https://github.com/leonapivato/ai-assistant/milestone/5), [#2576](https://github.com/leonapivato/ai-assistant/issues/2576).
 - Dependency: ADR-0275, ADR-0276 and their milestones M36 and M37.
@@ -82,6 +82,22 @@
   on ratification of ADR-0308. This reciprocal header record accompanies the numbered
   draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
   preserved.
+- Partially superseded: 2026-10-11 by ADR-0309 — eleven scopes. §1:4's resume clause:
+  `resume` retires, and every channel activation runs through the controller. §2:1 whole,
+  and §2:3's association limb: routing and goal association retire. §3:3, for the round's
+  step: `acting` and `digesting` run side by side in one step (ADR-0309 §3:3–§3:4). §3:5's
+  working set and §3:7's stages lose the removed members' decisions and stages and gain each
+  round's authorizing and acting decisions. §4:1–§4:2: the members ADR-0309 §3:6 names are
+  removed, as a recorded exception to *added to and never renamed*, and `authorizing`,
+  `acting`, `round_unauthorized` and `round_authorized` are added. §4:3's table is replaced
+  by ADR-0309 §3's. §4:5's sentence on a degraded composition goes with `compose`. §4:6's
+  loop guard, for authorizing, acting and digesting: each runs at most once per round, and
+  digesting once more for recall's digest. §4:7 goes with the attempt. §4:8's *their enum
+  members remain, unused* gives way to the removal. Every other clause stands. The old path
+  keeps the replaced clauses until the cutover lane that removes its code merges (ADR-0309
+  §1:3). This scoped replacement takes effect on ratification of ADR-0309. This reciprocal
+  header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

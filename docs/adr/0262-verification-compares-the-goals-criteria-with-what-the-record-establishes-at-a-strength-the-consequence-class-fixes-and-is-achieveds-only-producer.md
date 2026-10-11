@@ -1,6 +1,6 @@
 # 262. Verification compares the goal's criteria with what the goal's own records establish, at a strength the consequence class fixes, and it is the only producer of `GoalStatus.ACHIEVED`
 
-- Status: Partially superseded by ADR-0271 (two scopes. §2's `MONEY` clause, which rules that a criterion whose confirmed member is a `MONEY` one is `unestablished` outright — such a criterion now takes §2's own three results, over §2's own calls and decisive steps, with §2's classification of a bound step restated as three ordered limbs: an agreeing charge is added conjunctively to satisfaction, a disagreeing one disjunctively to contradiction, and a contradiction §2 already reached stands whether or not a charge can be read — the charge being measured against the quote that decision pins to the dispatch, which is the operand §9 reassigns to it by name. And §7's gate statement, in two limbs and no more — the limb *"the guarantee does not cover a capability whose acts make a charge"*, which is reversed, it covers one; and its *"A deployment wiring a covered capability does two things as part of wiring it"* in the application to a capability whose acts charge alone, where the deployment does a third thing beside those two, declaring where those acts report a charge. The two obligations that clause names are themselves unchanged, and it stands at two for every covered capability whose acts make no charge. Every other clause of both sections binds entire; the first dated note below states both scopes in full)
+- Status: Superseded by ADR-0309; partially superseded before it by ADR-0271 (two scopes. §2's `MONEY` clause, which rules that a criterion whose confirmed member is a `MONEY` one is `unestablished` outright — such a criterion now takes §2's own three results, over §2's own calls and decisive steps, with §2's classification of a bound step restated as three ordered limbs: an agreeing charge is added conjunctively to satisfaction, a disagreeing one disjunctively to contradiction, and a contradiction §2 already reached stands whether or not a charge can be read — the charge being measured against the quote that decision pins to the dispatch, which is the operand §9 reassigns to it by name. And §7's gate statement, in two limbs and no more — the limb *"the guarantee does not cover a capability whose acts make a charge"*, which is reversed, it covers one; and its *"A deployment wiring a covered capability does two things as part of wiring it"* in the application to a capability whose acts charge alone, where the deployment does a third thing beside those two, declaring where those acts report a charge. The two obligations that clause names are themselves unchanged, and it stands at two for every covered capability whose acts make no charge. Every other clause of both sections binds entire; the first dated note below states both scopes in full)
 - Date: 2026-09-15
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
   — **one scope, in §1, and it is the scope three records already take there reaching one further
@@ -131,6 +131,12 @@
   its `ACHIEVED` assertions unmoved. **Every other clause of this ADR binds entire**, §§1, 2a, 3-6,
   8, 10, 11 and 13 included: the report's two fields and its fixed statements, which the superseding decision reports
   the finding through and neither widens nor renames.
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. The goal and attempt model it
+  belongs to retires at the cutover, and the phases ADR-0306, ADR-0307 and ADR-0308 decide
+  replace it. The old path keeps this decision until the cutover lane that removes its code
+  merges (ADR-0309 §1:3). This replacement takes effect on ratification of ADR-0309. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

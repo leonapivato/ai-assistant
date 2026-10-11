@@ -1,6 +1,6 @@
 # 229. A citation hop reaches the record its label names, as well as that record's evidence
 
-- Status: Accepted
+- Status: Superseded by ADR-0309
 - Date: 2026-09-03
 - **Amends** [ADR-0226](0226-the-planner-names-one-more-read-beside-its-plan-and-the-loop-services-it-into-the-supply.md)
   — **§2's servicing clause for the `CITATION_HOP` kind, and §3's "follows only"
@@ -48,6 +48,12 @@
   the implementing lane owes; nothing implements against it until it has merged
   ([ADR-0015](0015-simplify-the-agent-workflow.md) §5, golden rule 5). Refs #1960,
   #1945, #1908.
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. The planner's citation hop
+  retires with the turn loop at the cutover; no citation rule applies in this milestone
+  (ADR-0307 §9:5). The old path keeps this decision until the cutover lane that removes its
+  code merges (ADR-0309 §1:3). This replacement takes effect on ratification of ADR-0309.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  prior supersessions and the ratified body below are preserved.
 
 ## Context
 

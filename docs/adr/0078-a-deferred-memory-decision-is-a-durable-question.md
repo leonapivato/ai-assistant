@@ -1,6 +1,6 @@
 # 78. A deferred memory decision is a durable question the user answers
 
-- Status: Partially superseded by ADR-0084 (§8's placement of the question surface and its DTOs outside contract surface, and its licence to widen the learn DTO without a contract change) and ADR-0293 (§8's answering call, as the route by which the user answers a question, once question messages and their answers are built)
+- Status: Superseded by ADR-0309; partially superseded before it by ADR-0084 (§8's placement of the question surface and its DTOs outside contract surface, and its licence to widen the learn DTO without a contract change) and ADR-0293 (§8's answering call, as the route by which the user answers a question, once question messages and their answers are built)
 - Date: 2026-07-28
 - Partially superseded: 2026-07-31 by ADR-0084 — **§8's three statements that the
   façade is not contract surface are false; every decision §8 made about *what the
@@ -140,6 +140,13 @@
   the observe outcome and the process then exits, so that particular deferral is
   gone" — which is the same drop §Context traces, reached from the observer's side
   rather than `learn`'s.
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. Deferred memory questions and
+  `answer` retire at the cutover: memory the policy asks about is not written until the
+  authority milestone (ADR-0306 §4:3), and questions and answers are ordinary messages
+  (ADR-0307 §3:6). The old path keeps this decision until the cutover lane that removes its
+  code merges (ADR-0309 §1:3). This replacement takes effect on ratification of ADR-0309.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  prior supersessions and the ratified body below are preserved.
 
 ## Context
 

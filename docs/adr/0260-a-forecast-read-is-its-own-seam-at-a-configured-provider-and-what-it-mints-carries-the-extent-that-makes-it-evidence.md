@@ -1,6 +1,6 @@
 # 260. A forecast read is its own seam, at a provider the deployment configured, and what it mints carries the extent that makes it evidence
 
-- Status: Partially superseded by ADR-0272 (one scope. **The header's *Everything else of ADR-0247 binds entire* sentence, in the words *"and its trail check"* alone.** ADR-0247 §2's trail check admits a digest-free standing row only on a binding whose `closed_loop` is `True`, and §11 below keeps `closed_loop` the search kind's alone — so that sentence makes §6's own forecast `ALLOW` unrecordable, and `AuditTrail.record` refuses it. ADR-0272 §1 widens that one conjunct to *the binding carries its kind's own configured-provider fact*, exactly one of `closed_loop` and `forecast_reach` carried. **Everything else of that sentence binds entire** — §1's remaining clauses, §2's route (c) itself, §3's retirements as §6 restates their reach, §4's `closed_loop`, §5, §7, §8's (a′) to (d′), §9's unchanged list and §10's surface — and so does every other clause of this ADR: §6's widened route (c) and its three conjuncts, §7's bind-then-rule-then-record-then-send order, §11's `forecast_reach` with its restrictive default and its `closed_loop` is untouched clause, §12's three lanes and their order, and §13's arms)
+- Status: Partially superseded by ADR-0272 (one scope. **The header's *Everything else of ADR-0247 binds entire* sentence, in the words *"and its trail check"* alone.** ADR-0247 §2's trail check admits a digest-free standing row only on a binding whose `closed_loop` is `True`, and §11 below keeps `closed_loop` the search kind's alone — so that sentence makes §6's own forecast `ALLOW` unrecordable, and `AuditTrail.record` refuses it. ADR-0272 §1 widens that one conjunct to *the binding carries its kind's own configured-provider fact*, exactly one of `closed_loop` and `forecast_reach` carried. **Everything else of that sentence binds entire** — §1's remaining clauses, §2's route (c) itself, §3's retirements as §6 restates their reach, §4's `closed_loop`, §5, §7, §8's (a′) to (d′), §9's unchanged list and §10's surface — and so does every other clause of this ADR: §6's widened route (c) and its three conjuncts, §7's bind-then-rule-then-record-then-send order, §11's `forecast_reach` with its restrictive default and its `closed_loop` is untouched clause, §12's three lanes and their order, and §13's arms) and ADR-0309 (§7–§10, the forecast read's place in the turn loop)
 - Date: 2026-09-15
 - **Partially supersedes**
   [ADR-0247](0247-the-configured-web-search-provider-is-the-destination-the-owner-chose-and-the-recipient-they-granted-and-the-call-budget-is-removed.md)
@@ -110,6 +110,15 @@
   Appended dated note per ADR-0070 §1; no ratified text is rewritten and no mark is added
   (ADR-0089 §5). Refs #2459.
 - Refs [#2255](https://github.com/leonapivato/ai-assistant/issues/2255).
+- Partially superseded: 2026-10-11 by ADR-0309 — one scope. §7–§10, in the forecast read's
+  place in the turn loop: its servicing in the read rounds, its outcome among ADR-0251's,
+  its evidence row and the turn's statement of the contact retire with the turn loop. The
+  seam, the records it mints, its egress and its settings stand; whether it survives as a
+  capability is #2593's. The old path keeps the replaced clauses until the cutover lane that
+  removes its code merges (ADR-0309 §1:3). This scoped replacement takes effect on
+  ratification of ADR-0309. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 

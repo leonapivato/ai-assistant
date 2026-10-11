@@ -1,7 +1,7 @@
 # 266. A coverage member records the constraint the user stated, and the bound is proved against
 the quote for the intended action
 
-- Status: Partially superseded by ADR-0262 (§10's *"What the verification phase does with a quote, and coverage's other conditions"* entry, in its *"Fired by A10"* clause and in the application of that clause to the charge confirmation and the quote/charge mismatch finding alone — the first dated note below states it in full) and ADR-0270 (two limbs: §7's last normative clause in the limb naming `ActionPolicy.decide` as the only site where condition 6 is taken, and §11's lane-ordering clause in its Lane-2 limb — the second dated note below states both in full)
+- Status: Superseded by ADR-0309; partially superseded before it by ADR-0262 (§10's *"What the verification phase does with a quote, and coverage's other conditions"* entry, in its *"Fired by A10"* clause and in the application of that clause to the charge confirmation and the quote/charge mismatch finding alone — the first dated note below states it in full) and ADR-0270 (two limbs: §7's last normative clause in the limb naming `ActionPolicy.decide` as the only site where condition 6 is taken, and §11's lane-ordering clause in its Lane-2 limb — the second dated note below states both in full)
 - **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
   — **twelve narrowly stated scopes, found by a sweep of that document rather than one at a time; §9
   shows the working for each and ADR-0254's own `Status` line carries them in full. §1, in four
@@ -125,6 +125,12 @@ the quote for the intended action
   and the no-migration clause — and so does every other clause of this ADR, §7's two routes, its
   condition 6, its fault clause and its lineage narrowing conspicuously so: they are what the new
   member answers with.
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. The goal and attempt model it
+  belongs to retires at the cutover, and the phases ADR-0306, ADR-0307 and ADR-0308 decide
+  replace it. The old path keeps this decision until the cutover lane that removes its code
+  merges (ADR-0309 §1:3). This replacement takes effect on ratification of ADR-0309. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

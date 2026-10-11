@@ -1,6 +1,6 @@
 # 284. An episode is the experience of processing its activation
 
-- Status: Partially superseded by ADR-0285 (the observer's member of §6:2, §8:3 and §8:7) and ADR-0286 (§5:5's validator, for an open record; §6:2's last sentence, for an open episode; §7:1's timing of the content; §7:4's pass, for an open episode; §9:1's values) and ADR-0287 (§5:3's second sentence) and ADR-0307 (§8:1's projection, in the addition alone) and ADR-0308 (§8:1's projection, in the addition alone)
+- Status: Partially superseded by ADR-0285 (the observer's member of §6:2, §8:3 and §8:7) and ADR-0286 (§5:5's validator, for an open record; §6:2's last sentence, for an open episode; §7:1's timing of the content; §7:4's pass, for an open episode; §9:1's values) and ADR-0287 (§5:3's second sentence) and ADR-0307 (§8:1's projection, in the addition alone) and ADR-0308 (§8:1's projection, in the addition alone) and ADR-0309 (§5:1–§5:2's verdict fields; §5:4–§5:5's resume record)
 - Date: 2026-10-02
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); the second of three steps, the episode's end entry.
 - Dependency: ADR-0283, implemented at `f5993b40`.
@@ -49,6 +49,14 @@
   status line when ADR-0307 merged; it records the decision ADR-0307 §10 made and alters
   none. Every other clause stands. This reciprocal header record accompanies ADR-0307 under
   ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-11 by ADR-0309 — two scopes. §5:1–§5:2: `StageEntry`'s
+  `step_disposition` and `route_outcome` leave with the `drive` and `routing` stages they
+  are admitted on (ADR-0309 §3:7). §5:4–§5:5: the resume record, and `park_answered`, leave
+  with `resume`. Every other clause stands, §8 included. The old path keeps the replaced
+  clauses until the cutover lane that removes its code merges (ADR-0309 §1:3). This scoped
+  replacement takes effect on ratification of ADR-0309. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the
+  ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 258. The investigation's per-ask outcome is named ReadAskOutcome, and the permission trail keeps ReadOutcome
 
-- Status: Accepted
+- Status: Superseded by ADR-0309
 - **Partially supersedes**
   [ADR-0251](0251-an-attempt-investigates-in-bounded-rounds-over-typed-read-outcomes-and-keeps-a-reserve-to-answer-with.md)
   — **one scope, and it is a name: `ReadOutcome` → `ReadAskOutcome`, wherever ADR-0251 writes it
@@ -40,6 +40,12 @@
   **No implementation has to move for the break**, because the tree already carries the name
   this ADR rules — which is itself irregular, and §4 owns it.
 - Date: 2026-09-13
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. The goal and attempt model it
+  belongs to retires at the cutover, and the phases ADR-0306, ADR-0307 and ADR-0308 decide
+  replace it. The old path keeps this decision until the cutover lane that removes its code
+  merges (ADR-0309 §1:3). This replacement takes effect on ratification of ADR-0309. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

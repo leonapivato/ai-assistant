@@ -1,6 +1,6 @@
 # 274. Channel inputs share an assistant receiver, and reply delivery is optional
 
-- Status: Partially superseded by ADR-0275 (§1, §3 and §5–§8's event/context and speech-ending persistence, capture reporting and post-processing cleanup) and ADR-0276 (§5's third clause, in its prompt and reference-resolution halves alone: the understanding stage renders supplied context into its own prompt as quoted data and resolves the input's references against it) and ADR-0293 (§2–§6, in so far as they govern a typed text input to the conversation and its reply)
+- Status: Partially superseded by ADR-0275 (§1, §3 and §5–§8's event/context and speech-ending persistence, capture reporting and post-processing cleanup) and ADR-0276 (§5's third clause, in its prompt and reference-resolution halves alone: the understanding stage renders supplied context into its own prompt as quoted data and resolves the input's references against it) and ADR-0293 (§2–§6, in so far as they govern a typed text input to the conversation and its reply) and ADR-0309 (§7's informational processing, in its summary stage)
 - Date: 2026-09-17
 - Scope: [Milestone 1](https://github.com/leonapivato/ai-assistant/milestone/1), [#2521](https://github.com/leonapivato/ai-assistant/issues/2521).
 - Owner authorization: Reviewed and authorized for ratification on 2026-09-18; the owner assigned ADR-0274.
@@ -41,6 +41,13 @@
   other clause stand. This replacement takes effect on ratification of ADR-0293. This
   reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-11 by ADR-0309 — one scope. §7's informational processing,
+  in its summary stage: an event runs through the phases like any activation, and
+  `InformationalEventStage` retires (ADR-0309 §5:5). `receive` stays, and every other clause
+  stands. The old path keeps the replaced clauses until the cutover lane that removes its
+  code merges (ADR-0309 §1:3). This scoped replacement takes effect on ratification of
+  ADR-0309. This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

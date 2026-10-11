@@ -1,6 +1,6 @@
 # 264. A turn that reached outside this system says so, and a reply cannot deny it on a surface that renders the statement
 
-- Status: Accepted, §§3 and 5 amended by ADR-0260
+- Status: Superseded by ADR-0309; §§3 and 5 amended before it by ADR-0260
 - Date: 2026-09-13
 - **Partially supersedes** [ADR-0242](0242-the-act-that-trusts-a-destination-has-its-own-surface-and-a-search-that-did-not-happen-is-explained-in-the-reply.md)
   — **§6's first clause, in its second sentence alone.** That sentence reads *"On every
@@ -50,6 +50,12 @@
 
   Appended dated note per ADR-0070 §1; no ratified text is rewritten and no mark is added
   (ADR-0089 §5). Refs #2255.
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. The goal and attempt model it
+  belongs to retires at the cutover, and the phases ADR-0306, ADR-0307 and ADR-0308 decide
+  replace it. The old path keeps this decision until the cutover lane that removes its code
+  merges (ADR-0309 §1:3). This replacement takes effect on ratification of ADR-0309. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

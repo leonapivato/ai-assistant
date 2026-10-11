@@ -1,7 +1,7 @@
 # 271. The quote a dispatch was proved against is pinned to that dispatch, and a charge that
 disagrees with it is a reported finding
 
-- Status: Accepted
+- Status: Superseded by ADR-0309
 - Date: 2026-09-15
 - **Partially supersedes** [ADR-0262](0262-verification-compares-the-goals-criteria-with-what-the-record-establishes-at-a-strength-the-consequence-class-fixes-and-is-achieveds-only-producer.md)
   — **two scopes, and §7 shows the working for each. §2's `MONEY` clause, which rules that *"a
@@ -54,6 +54,12 @@ disagrees with it is a reported finding
   ADR-0270 and ADR-0249 are each reached and none is moved** — and of ADR-0016, only the one scope
   above is, every other clause of that ADR binding entire. §7 states the test for every ADR this
   decision reaches and shows the working at each.
+- Superseded: 2026-10-11 by ADR-0309 — the whole decision. The goal and attempt model it
+  belongs to retires at the cutover, and the phases ADR-0306, ADR-0307 and ADR-0308 decide
+  replace it. The old path keeps this decision until the cutover lane that removes its code
+  merges (ADR-0309 §1:3). This replacement takes effect on ratification of ADR-0309. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 
