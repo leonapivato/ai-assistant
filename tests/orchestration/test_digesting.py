@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 from structlog.testing import capture_logs
 
+from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
     ActivationDigest,
@@ -415,6 +416,49 @@ async def test_no_call_is_made_once_the_deadline_has_passed() -> None:
     assert digested.digest.outcome is DigestOutcome.FAILED
     assert provider.calls == []
     assert [one["reason"] for one in logs if one["event"] == "digest_failed"] == ["deadline"]
+
+
+class _ClockDown(Exception):  # noqa: N818 — the clock's own failure, as a test raises it
+    """The injected clock's own failure."""
+
+
+def _later_reading_fails(fault: str) -> Callable[[], datetime]:
+    """A clock whose first reading is good and whose next, a part's, is not."""
+    readings = iter([_AT])
+
+    def now() -> datetime:
+        reading = next(readings, None)
+        if reading is not None:
+            return reading
+        if fault == "naive":
+            return datetime(2026, 10, 11, 12, 0)  # noqa: DTZ001 — the bad reading under test
+        raise _ClockDown
+
+    return now
+
+
+@pytest.mark.parametrize(
+    ("fault", "escapes"), [("naive", ClockReadingError), ("raises", _ClockDown)]
+)
+async def test_a_clock_failing_inside_a_part_escapes_and_is_no_failed_digest(
+    fault: str, escapes: type[Exception]
+) -> None:
+    """ADR-0026: a clock the stage cannot read is none of §4:11's three failures.
+
+    A bad reading is ``ClockReadingError`` and the clock's own failure is itself; either
+    escapes the stage, no call is made, and no digest is recorded.
+    """
+    provider = _Provider(lambda _: _reply(("x", "D1")))
+    recorder = _Recorder()
+    stage = DigestingStage(
+        provider=provider, recorder=recorder, part_chars=100, now=_later_reading_fails(fault)
+    )
+
+    with pytest.raises(escapes):
+        await _digest(stage)
+
+    assert provider.calls == []
+    assert recorder.recorded == []
 
 
 async def test_a_call_that_raises_cancelled_error_fails_the_digest() -> None:
