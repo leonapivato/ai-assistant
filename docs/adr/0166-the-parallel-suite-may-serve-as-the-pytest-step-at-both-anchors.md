@@ -1,6 +1,6 @@
 # 166. The parallel suite may serve as the `pytest` step at both anchors
 
-- Status: Partially superseded by ADR-0179 (§1's carve-out for the file `just test-fast` deselects and its per-test execution clause, §3's accepted risk, and §4's serial-CI clause)
+- Status: Partially superseded by ADR-0179 (§1's carve-out for the file `just test-fast` deselects and its per-test execution clause, §3's accepted risk, and §4's serial-CI clause) and ADR-0311 (§1 whole)
 - Date: 2026-08-20
 - Partially superseded: 2026-08-22 by
   [ADR-0179](0179-the-triad-check-reads-a-distributed-runs-merged-record-so-both-gates-run-across-cores.md)
@@ -27,6 +27,17 @@
   withdrawing that is a change to what was decided (ADR-0070 §1). This ADR's own
   **Revisit if** named the trigger: "the triad check is made to run under
   `-n auto`".
+- Partially superseded: 2026-10-11 by
+  [ADR-0311](0311-cis-gate-is-the-full-gate-and-no-local-full-suite-run-is-owed.md)
+  — **no local whole-suite run is owed on a branch, so no anchor is left for
+  §1 to say what discharges it.** §1 is replaced whole. Its three clauses say
+  which run discharges an anchor that requires the whole suite, and ADR-0311 §1
+  and §2 leave no such anchor. §1:2 also refuses a narrowed run at an anchor,
+  which ADR-0311 §2 permits before the first review. A reader holding only this
+  ADR would run the whole suite there, which is ADR-0070 §1's test met, so this is
+  a supersession. **Everything else stands**: §2:1, that the serial suite is never
+  wrong, and §4, which says what this ADR left untouched. This change takes effect
+  on ratification of ADR-0311. Nothing in §1 is rewritten.
 - **What this changes and what it does not.** It relaxes one step of one gate at
   two named moments — which `pytest` invocation discharges ADR-0136 §1's anchors.
   The two anchors themselves, the four static steps before every commit, the

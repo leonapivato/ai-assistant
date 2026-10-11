@@ -1,6 +1,6 @@
 # 136. The full gate is owed at two anchors on a branch, and between them the fast gate suffices
 
-- Status: Partially superseded by ADR-0166 (§1's requirement of the whole `pytest` suite at the anchors, and §6's parallel-recipe clause) and ADR-0180 (§1's closing anchor, in its ordering half)
+- Status: Partially superseded by ADR-0166 (§1's requirement of the whole `pytest` suite at the anchors, and §6's parallel-recipe clause) and ADR-0180 (§1's closing anchor, in its ordering half) and ADR-0311 (§1's closing anchor, its whole-suite requirement at the first anchor and its two rebase clauses, and §3's second clause)
 - Date: 2026-08-11
 - Partially superseded: 2026-08-20 by
   [ADR-0166](0166-the-parallel-suite-may-serve-as-the-pytest-step-at-both-anchors.md)
@@ -106,6 +106,25 @@
   record is this note alone and the line is not edited (ADR-0082 §2). ADR-0015's
   header note, which restates §4's four types, points here. This change takes
   effect on ratification of ADR-0288. Nothing in §4 or §6 is rewritten.
+- Partially superseded: 2026-10-11 by
+  [ADR-0311](0311-cis-gate-is-the-full-gate-and-no-local-full-suite-run-is-owed.md)
+  — **no local whole-suite run is owed on a branch: CI's required `gate` is the
+  full gate, and `just ready` refuses unless it is green on the PR head.** Four
+  clauses are replaced. §1:1 is replaced in two scopes: its closing anchor, and its
+  requirement of the whole suite at the first anchor, which ADR-0311 §2 replaces
+  with the tests the author selects for what the change touches. §1:3 and §1:4,
+  the two rebase clauses, are replaced by ADR-0311 §1. §3:2, which refused the
+  flip out of draft on a tree whose full gate had not run locally, is replaced by
+  ADR-0311 §4's green `gate` on the PR head. A reader holding only this ADR would
+  run the whole suite at both anchors and after every base-moving rebase, which is
+  ADR-0070 §1's test met. Each requirement is replaced by a different one rather
+  than reconciled with this text, so this is a supersession, and the `Status` line
+  takes a third pair. Where it overlaps ADR-0180's pair on the closing anchor,
+  ADR-0311 governs (ADR-0070 §4). **Everything else stands**: §1:2, which now
+  governs the first anchor's selected run; §1:5, whose proviso naming the rebase
+  clauses has nothing left to bind; §2, whose four static steps and `pytest`
+  discretion now run to the merge; §3:1; and §5:1. This change takes effect on
+  ratification of ADR-0311. Nothing above is rewritten.
 - **What this changes and what it does not.** It moves one sentence of ADR-0015's
   `Consequences` — the every-commit full gate — and nothing else. CI's gate is
   untouched (§6), the Definition of Done is untouched, and no Protocol, no
