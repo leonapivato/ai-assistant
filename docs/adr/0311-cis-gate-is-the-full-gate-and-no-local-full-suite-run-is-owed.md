@@ -1,6 +1,6 @@
 # 311. CI's `gate` is the full gate, and no local full-suite run is owed
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Authorization: the owner decided this on 2026-10-11, in conversation with the
   dispatcher, as owner-directed maintenance under no milestone. The dispatcher
