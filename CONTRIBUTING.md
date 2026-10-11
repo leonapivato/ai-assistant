@@ -27,11 +27,6 @@ uv run pre-commit install --install-hooks   # pre-commit + commit-msg hooks
 git config commit.template .gitmessage      # scaffold commit messages
 ```
 
-Each clone owns its own `.git/hooks` and its own `.venv`, so the hook path
-`pre-commit install` bakes in stays valid for the life of the clone. (This was
-not true under the linked-worktree model ADR-0015 removed, where one shared
-hooks directory pointed at whichever worktree installed last.)
-
 ## The gate (Definition of Done)
 
 A change is done only when all of these pass:
@@ -84,24 +79,19 @@ timing-sensitive.
 ran it on, so `git fetch origin && git rebase origin/main` comes first —
 otherwise you have tested a base nobody will merge. This is about *freshness*,
 and ADR-0311 leaves it standing (§7). A branch that predates a check added to
-`main` runs tests that cannot fail on it, which is how a change has been reported green while CI had it red. The same staleness
-misleads Codex, which reads the working tree for context and will report other
-branches' merged work as regressions in yours — so rebase before you *invoke* a
-review as well. The reviewer itself stays read-only (`docs/review/guide.md`);
-freshening the tree is the branch owner's job, not the reviewer's.
+`main` runs tests that cannot fail on it. The same staleness misleads Codex, which
+reads the working tree for context and will report other branches' merged work
+as regressions in yours — so rebase before you *invoke* a review as well. The
+reviewer itself stays read-only (`docs/review/guide.md`); freshening the tree is
+the branch owner's job, not the reviewer's.
 
 ## Review (pre-merge)
 
 The gate is mechanical; it cannot judge design or the adequacy of tests. Before
 merging a slice branch — **after** the gate is green — put the change through
 adversarial review. Claude writes the code; **Codex reviews it**, so every change
-is judged by a model independent of the one that produced it.
-
-"After the gate is green" means the tests for what the change touches, run once
-before the first review (ADR-0311 §2), so the tree a later review reads may be
-one whose tests were not run. The reviewer runs no tests and may not report what
-`pytest` catches, so what it needs green is `ruff` and `mypy`, which run before
-every commit.
+is judged by a model independent of the one that produced it. Review runs
+**locally only** (ADR-0015).
 
 Two reviewers, defined by shared rubrics in `docs/review/`:
 
@@ -119,8 +109,8 @@ just review-codex adversarial       # base-ref defaults to origin/main (fetch fi
 ```
 
 **A round runs for minutes, so it can also be started and polled** — the same
-round, same locks, same artifact, started detached rather than reimplemented
-(#1594). Use this form when the caller cannot hold one process open that long:
+round, same locks, same artifact, started detached rather than reimplemented.
+Use this form when the caller cannot hold one process open that long:
 
 ```bash
 just review-codex-start adversarial  # returns once the round is running
@@ -132,31 +122,20 @@ the verdict, **3** for `still running` — the round is alive and nothing is los
 so call it again — or **4** for no round in flight for `HEAD`'s tree, which is a
 condition to read and act on rather than to retry. Never relaunch on a 3: a
 second round is refused, and relaunching is how a paid round is thrown away.
+Where `--start` cannot confirm its round, the message it prints says what to do.
 
-**A change that owes both lenses runs both in the same round, from round 1** —
-`just review-codex-both`, or `just review-codex-both-start` and
-`just review-codex-both-wait`, which hold one deadline across the pair and
-succeed only when both artifacts cover `HEAD`'s tree. `docs/review/guide.md` →
-"When a change owes both lenses" says why sequencing them costs more than it
-saves.
+A change that owes both lenses runs both in the same round —
+`docs/review/guide.md` → "When a change owes both lenses".
 
-Review runs **locally only** (ADR-0015). It used to also run in CI and post its
-findings as a PR comment; that produced far more rounds than it produced value —
-PR #17 drew 20 hosted reviews across 23 commits — so the hosted path is gone.
-The reviewer is unchanged: Codex still judges every change, independently of the
-model that wrote it.
-
-Each run records itself to
-`.review/<loop_id-or-noloop>-<persona>-<base_sha>-<tree>.md`, named by the
-anchor `ship` selects it by rather than by the commit it was filed under
-(ADR-0027 §6). The first field is the ADR-0025 loop identity where the run has
-one. The bypass path — `CODEX_REVIEW_NO_SANDBOX=1`, or `GITHUB_ACTIONS` exactly
-`true` — keeps no session and so has no loop identity; there the sentinel
-`noloop` stands in, so the field is never empty and the segments never collapse.
+`CODEX_REVIEW_NO_SANDBOX=1` (and `GITHUB_ACTIONS` exactly `true`) runs Codex with
+no sandbox at all and no session, skipping ADR-0025 §4's read-only proof. It is
+for CI-like environments where bubblewrap cannot set up its network namespace; do
+not set it for an ordinary local review.
 
 Loop: **fix, commit, re-run**. It reviews `HEAD` vs the base — the *committed*
 diff, not your working tree — so an uncommitted fix is invisible to a re-run.
-Stop when it comes back clean or only deliberately-waived findings remain.
+Each run records an artifact under `.review/`. Stop when it comes back clean or
+only deliberately-waived findings remain.
 
 ### Triage every finding — do not let the PR grow to absorb them
 
@@ -172,52 +151,35 @@ A review finding is not automatically this PR's problem. For each one:
   verdict and that one-line consequence in the PR, and the finding leaves the
   loop without a tracker row.
 
-The trigger is the finding, not a size threshold. The PRs that got out of hand
-did not start large; they grew under review, one finding-fix commit at a time.
-Deciding at the finding is what stops that, and it is why there is no "PR is too
-big" rule to game.
+The trigger is the finding, not a size threshold; there is no "PR is too big"
+rule to game.
 
 Waiving a `blocker`/`major` is allowed — write the rationale in the PR or the
 commit. A reviewer that disagrees with a ratified decision files an ADR
 proposal; it does not block on it (authority hierarchy: `docs/review/guide.md`).
 Review is advisory tooling, not a hard gate; the only required check is `gate`.
 
-**Five verdicts, and the third bullet is the newest of them.** *Fix now*;
-*deferred to an issue*; *rejected as false*, which asserts the finding is wrong;
-*waived with a rationale*, for a `blocker`/`major` you will not fix; and
-*acknowledged, no action warranted*, which asserts the finding is **right** and
-that nobody should ever act on it. The stated consequence is the whole of what
-separates the last from "I could not be bothered to file an issue" — a finding
-whose consequence you cannot write down is one you have not verified, and the
-verdict is then unavailable.
-
-**It is never available at `blocker` or `major`** (ADR-0243 §7), whatever else is
-true of the finding. At those severities the dispositions stay exactly the ones
-above — fix it now where it concerns code in the current diff, open an issue where
-it does not, or waive it with the rationale on the record — so no-action can never
-quietly hide one, and nothing here withdraws the issue branch for a verified
-`major` about code the PR merely sits next to. It is also **prospective**: it
-disposes of a finding a review round raised, and authorises no closure or
-relabelling sweep of issues already filed.
+So there are five verdicts: *fix now*; *deferred to an issue*; *rejected as
+false*, which asserts the finding is wrong; *waived with a rationale*, for a
+`blocker`/`major` you will not fix; and *acknowledged, no action warranted*,
+which asserts the finding is **right** and that nobody should ever act on it. A
+finding whose consequence you cannot write down is one you have not verified,
+and the last verdict is then unavailable. **It is never available at `blocker`
+or `major`** (ADR-0243 §7): there the dispositions stay exactly the first, second
+and fourth. It is also **prospective** — it disposes of a finding a review round
+raised, and authorises no closure or relabelling sweep of issues already filed.
 
 ### Diagnose the loop at the fourth reviewed tree
 
-A long review loop can pass through several holders still doing the one thing
-that is not working. **PR #2136 did**: four ADR-0138 §1 handoffs, five holders,
-and it shipped at "round 26 · 2256 lines net across 27 commit(s) · churn ≥2.4×".
-Every handoff carried what ADR-0138 §4 asks for. None of them was ever obliged to
-say *why* the loop was expensive.
-
-So, as a **dispatched lane** (ADR-0243 §§1–6, §10 — an agent under a coordinator
+As a **dispatched lane** (ADR-0243 §§1–6, §10 — an agent under a coordinator
 who can brief a successor into its clone): once **four substantively reviewed
 trees** have been recorded under you, and before you invoke a further round,
 write a **diagnosis** as a comment on the PR. The count is **persona-agnostic** —
 any lens's recorded artifact counts its tree, which is exactly what
 `scripts/codex-review.sh` counts — less the figure recorded in the handoff comment
 you took the lane under. A byte-identical rebase, a squash, a second lens on one
-tree and an ADR-0165 ratification flip each count no tree, and so does a round
-that recorded no artifact, whatever number its launch printed. So it is the round
-number a *successful* round prints, and no new arithmetic.
+tree, an ADR-0165 ratification flip and a round that recorded no artifact each
+count no tree. So it is the round number a *successful* round prints.
 
 The diagnosis does two things:
 
@@ -233,20 +195,16 @@ The diagnosis does two things:
 
 **A specification dispute does not get another round.** Where the diagnosis
 classifies any finding as one, the chosen activity is the adjudication request —
-quote the clause, state both readings — or the grounded waiver. Issue #1684 is
-why: three rounds produced three correct findings, each forbidden by the
-previous round's fix, because the question was never about the code.
+quote the clause, state both readings — or the grounded waiver (issue #1684).
 
 **Nothing turns on it mechanically.** The checkpoint authorises no merge, forbids
 no round, caps nothing, makes no lens terminal, and is **not** a second handoff
 trigger — ADR-0138 §1's seven-rounds and churn-1.5 arms are untouched, and a
-handoff is never delayed or excused by a missing diagnosis. It costs a comment,
-and on any loop spending its rounds on new trees it comes before the handoff,
-which costs a successor's spin-up. Where your count never reaches four, no
-diagnosis is owed — say that in the handoff comment.
-Carry your most recent diagnosis, and the count of trees, into the handoff
-comment when one is owed (ADR-0243 §6) — and record the count of trees actually
-recorded, never the figure a failed launch printed.
+handoff is never delayed or excused by a missing diagnosis. Where your count
+never reaches four, no diagnosis is owed — say that in the handoff comment.
+Carry your most recent diagnosis, and the count of trees actually recorded (never
+the figure a failed launch printed), into the handoff comment when one is owed
+(ADR-0243 §6).
 
 ### Report the review, then mark it ready — on your own judgement
 
@@ -261,133 +219,51 @@ just ready       # flip it out of draft — refuses on an unratified ADR or a no
 **An agent does not ask permission for any of this** — not to run the review,
 not for the OpenAI spend it incurs, not to flip the PR ready. Deciding a change
 is done is the job; stopping to ask just adds a round-trip to something already
-authorized. Say what you concluded and why in the PR, and let the review and the
-gate speak for the rest.
+authorized. What still warrants stopping is narrow: an irreversible or
+destructive action, or discovering the task itself was wrong.
 
-**"Say what you concluded and why in the PR" is where the author's record of the
-loop lives**, and it is not the same record as the one `ship` publishes. The
-disposition list in the ship comment is the **reviewer's** ledger: its `open` and
-`retired` statuses are written from whether Codex re-raised a finding, never from
-what you decided about it. So your triage verdicts go in the PR text — every
-waived `blocker`/`major` with its rationale, every *acknowledged, no action
-warranted* with its one-line consequence (ADR-0243 §8), links to the issues you
-filed, and any diagnosis the checkpoint above owed. That is what the coordinator
-and the reviewer at merge read.
-
-What still warrants stopping is unchanged and narrow: an irreversible or
-destructive action, or discovering the task itself was wrong. "Is this ready?"
-is not on that list.
+**Your triage verdicts go in the PR text** — every waived `blocker`/`major` with
+its rationale, every *acknowledged, no action warranted* with its one-line
+consequence (ADR-0243 §8), links to the issues you filed, and any diagnosis the
+checkpoint above owed. The disposition list in the ship comment is the
+**reviewer's** ledger, written from whether Codex re-raised a finding, never from
+what you decided about it.
 
 `ship` refuses unless an adversarial review exists for **the content the PR head
-carries**, so the record cannot be a review of different code. Two paths are
-accepted (ADR-0027 §2):
+carries**. Two paths are accepted (ADR-0027 §2):
 
 - **The base has not moved** — the review's recorded base equals the PR's merge
-  base *and* its recorded tree equals `HEAD`'s tree. This is ADR-0020 §3 exactly
-  as written, and it is unchanged.
+  base *and* its recorded tree equals `HEAD`'s tree (ADR-0020 §3).
 - **The base has moved** — the recorded base is a *proper* ancestor of the merge
   base, the reviewed patch identity is unchanged, and the base move clears the
-  floor below. `ship` then publishes the drift — both bases and the whole file
-  set the move touched, with the test that decided each floor path — in the
-  comment it posts.
-
-It also refuses on a dirty tree, on `main`, and when the PR head is behind local
-`HEAD`.
-
-**One commit shape is exempt, and it is one line** (ADR-0165 §2): a `HEAD` that
-modifies exactly one `docs/adr/NNNN-*.md`, turning the header's single
-`- Status: Proposed` into `- Status: Accepted` and changing no other byte — the
-`- Date:` line included. There, and only there, the two content inputs above are
-read from `HEAD`'s **parent**, because the decision text such a commit ratifies
-is byte for byte the text the reviewer already returned green on. `just
-adr-ratify` makes that commit and `ship` recognises it by rebuilding the file
-from its parent's with the same transform, so producer and recogniser cannot
-drift apart; `ship` then discloses the exemption in the comment it posts (§4).
-The re-anchoring is not recursive, and it changes nothing about the floor or the
-drift record below — those govern a *base move*, not a commit the PR carries.
-Everything larger — a ratification note, an amendment record, a restamped date, a
-second ADR — falls outside the shape and costs its round. "Finishing an ADR PR"
-carries the sequence.
-
-**`just ready`, not bare `gh pr ready`.** It is the documented recipe, and it
-refuses to leave draft while an ADR this PR adds or modifies still reads
-`- Status: Proposed`, naming the file (ADR-0165 §5, issue #1044). Typing `gh pr
-ready` directly is not stopped by it — that command is GitHub's, not this
-repository's — which is an accepted limit rather than one engineered around: both
-of #1044's occurrences were lanes following the documented sequence and skipping
-a step of it. It also refuses unless `gate` is green on the PR head, waiting up
-to nine minutes on a pending run and naming the state it saw (ADR-0311 §4).
-`just ship` is not held for `gate`; `just ready` is.
-
-**Before pushing a rebase, ask `ship` which path applies rather than working it
-out** — `scripts/ship.sh --drill` (`just drill`) runs this same acceptance rule
-and posts nothing, so a round that is owed is discovered while it is still cheap.
-(It fetches the PR's base, as `ship` does; what it does not do is write to
-GitHub.) It reports the inputs it judged, not just a verdict: the base move's
-file set with floor paths marked and the test that bound or cleared each of them,
-and where it made no floor claim, which of its four reasons applies — none of
-which is a clear. **Rebase first**: on a `HEAD` that does not contain the fetched
-tip it refuses, rather than testing the floor over the range to the *old* merge
-base — a different base move from the one being asked about, and where nothing
-else has moved, an empty one (issue #751).
-
-**ADR-0027 §3's floor is the set of base moves the gate cannot see and a reviewer
-would have judged differently, and since ADR-0209 it has two halves.**
-
-- **The standing review contracts bind outright** — `docs/review/**`,
-  `CLAUDE.md`, `CONTRIBUTING.md` and `scripts/codex-review.sh`. No test is
-  consulted and no PR can clear them: they are the instructions the reviewer is
-  conducted under, so a base move touching one conducts every later review under
-  different instructions while touching no document (ADR-0209 §1).
-- **The ADRs and the contract surface bind only where the moved text and the PR
-  name each other** — `docs/adr/**`, `src/ai_assistant/core/protocols.py` and
-  `src/ai_assistant/core/types.py` (ADR-0209 §§2–4). Four tests, any one of
-  which costs the round:
-  - the PR's text — its diff's added and removed lines **and its description** —
-    writes `ADR-NNNN` for the moved ADR;
-  - the moved ADR's own text names a path the PR's diff touches, or a symbol an
-    added or removed line of it carries;
-  - the move adds a `Protocol` to `src/ai_assistant/core/protocols.py`, or widens
-    any `Protocol`'s effective member surface — inherited members included. This
-    limb is unconditional, because "a diff that *now should* consume it" is a
-    relation the PR's own text cannot witness;
-  - for any other move to `protocols.py` or `core/types.py`: the PR's diff
-    touches `src/ai_assistant/core/`, or a name whose *definition* the move
-    changed occurs in the PR's text.
-- **Anything undecidable binds** (ADR-0209 §6) — a `core/protocols.py` endpoint
-  that will not parse, a base whose binding cannot be resolved, an unreadable
-  file, a PR description GitHub will not return, and any failure nobody
-  foresaw. The rule is fail-closed as a *rule*, not as a list.
-
-The floor is read rename-aware on **both** endpoints: a floor path counts when
-it appears as the source or the destination of a rename, and when it is deleted,
-and a moved ADR is read at each of its names. Every test is persona-agnostic — a
-test that binds costs the round for every persona the change requires. Clearing
-the floor is necessary but not sufficient — the moved-base path above carries the
-rest of the conditions, and a base move that edits the reviewed hunks costs its
-round whatever the floor says. Merging to `main`, meanwhile, does not move a PR's
-merge base at all; rebasing onto it does.
-
-**Do not work out which test binds from memory — `just drill` prints it,** per
-path, beside the file set it was decided over, and the ship comment carries the
-same reason for the merge reviewer.
-
-**Your PR description can add a binding and must never lose one.** It is read as
-part of the PR's text, so a citation there costs the round exactly as one in the
-diff does. Once a review has been recorded, do not delete from the description a
-citation that would bind a base move being published: the round is owed
-regardless, and `ship` computes it — each round records the description it was
-taken beside, and reads the union of that and the live body (ADR-0209 §5, issue
-#1750). Adding to the description is free of this and always was.
+  floor. `ship` then publishes the drift in the comment it posts.
 
 Anchoring on content rather than the commit SHA is what makes squashing,
-amending, and reverting free: a commit that changes no reviewed byte does not
-cost a review round. Content the review did not read still fails mechanically —
-a scope cut is a real content change, so it genuinely re-reviews. On the
-moved-base path, so does a diverged history, a patch identity with nothing to
-hash (a rename-only or mode-only entry), or a drift record too large to publish
-whole: each makes that path unavailable, leaving the unmoved-base test to judge
-the artifact, which a moved base fails.
+amending, and reverting to a reviewed tree free; changing a reviewed byte costs a
+round. `ship` also refuses on a dirty tree, on `main`, and when the PR head is
+behind local `HEAD`. The one exempt commit shape, the ratification flip, is
+"Finishing an ADR PR"'s step 3.
+
+**The floor** is ADR-0027 §3's, as ADR-0209 narrows it. The standing review
+contracts — `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md`,
+`scripts/codex-review.sh` — bind outright (§1). `docs/adr/**`,
+`src/ai_assistant/core/protocols.py` and `src/ai_assistant/core/types.py` bind
+only where the moved text and the PR name each other (§§2–4), and anything
+undecidable binds (§6). The PR description is part of the PR's text, so a
+citation there binds like one in the diff, and `ship` reads every recorded
+description with the live one (§5).
+
+**Before pushing a rebase, ask `ship` which path applies rather than working it
+out** — `just drill` (`scripts/ship.sh --drill`) runs the same acceptance rule
+and posts nothing. **Rebase onto the fetched base first**; the drill refuses a
+`HEAD` that does not contain it. Its report prints the base move's file set with
+the test that bound or cleared each floor path, and says when it makes no floor
+claim and why; report its figures, not your reconstruction of them.
+
+**`just ready`, not bare `gh pr ready`.** It refuses to leave draft while an ADR
+this PR adds or modifies still reads `- Status: Proposed`, naming the file
+(ADR-0165 §5), and unless `gate` is green on the PR head, waiting up to nine
+minutes on a pending run (ADR-0311 §4). `just ship` is not held for `gate`.
 
 ### Stop when the required reviews are green
 
@@ -399,9 +275,8 @@ contract-surface when it touches `core/protocols.py` or `core/types.py` — **or
 when it is the ADR deciding that surface**, even though such a PR is prose only
 (see "Contract ADRs land before their implementation"). Adversarial is in every
 required set, which is why `ship` can demand it unconditionally. When the
-required set is green, ship —
-do not commit again to improve wording, because that destroys the records and
-starts a fresh round.
+required set is green, ship — do not commit again to improve wording, because
+that destroys the records and starts a fresh round.
 
 **"Green" is about the findings, not the verdict word** (ADR-0138 §3): a lens is
 terminal when its latest run leaves no finding the triage rule above requires
@@ -412,72 +287,41 @@ about code in your diff is not, whatever line it printed.
 
 Each review run prints an aggregate, unasked: the round number on this branch,
 the net diff size, and the **churn ratio** (cumulative lines touched ÷ net lines
-in the final diff). A ratio far above 1 means most of the work has been rework.
-Nothing in it blocks — a cap would forbid rounds that produce findings worth
-having — but it is on the record, and `just ship` carries it to the PR so the
-reviewer at merge sees the same numbers you did.
-
-A long review loop is locally defensible at every step: a late round looks like
-an early one from inside, and the author cannot read the signal they are
-emitting.
-That is why the aggregate is printed rather than left to judgement — the view
-that ends such a loop has historically been held from outside it. Several rounds
-in with a high churn ratio is the signal that the loop is reworking itself rather
-than converging. ADR-0020 records the cases this rule comes from.
-
-This is deliberately not a pre-push hook: review is a pre-merge step, and gating
-every push would force a full Codex run per WIP commit — the per-push cost
-pattern ADR-0015 exists to remove.
-
-A pasted review is self-attested where the CI-posted one was not. The content
-anchor covers the failure that actually happens (reviewing stale content); it is
-not tamper-proof and does not try to be.
+in the final diff). Nothing in it blocks, and `just ship` carries it to the PR.
+Several rounds in with a ratio far above 1 is the signal that the loop is
+reworking itself rather than converging (ADR-0020).
 
 ### Contract ADRs land before their implementation
 
-The architecture reviewer's natural subject is a *decision*, not just a diff. A
-**substantive contract ADR** — one that adds or changes a Protocol or a `core`
+A **substantive contract ADR** — one that adds or changes a Protocol or a `core`
 type that crosses subsystem boundaries — ships as **its own PR, ratified before
 the implementation PR that depends on it** (ADR-0015 §5). Review it while it is
-still `Proposed`, so a finding can still change the decision:
-
-```bash
-just review-codex architecture      # on the branch holding the drafted ADR
-just review-codex adversarial       # both — see below
-```
-
-**Run both on an ADR PR.** Architecture is the review that earns its keep on a
-decision; adversarial is required as well, and not only because `ship` enforces
-it (above). A contract ADR is where the edge cases get decided — what happens on
-conflict, on cancellation, on an empty or oversized input — and those are
-answerable from the prose, before an implementation has committed to an answer.
-A finding there costs a paragraph; the same finding after the triad lands costs a
+still `Proposed`, so a finding can still change the decision, and **run both
+lenses on it**: a contract ADR is where the edge cases get decided, and a finding
+there costs a paragraph where the same finding after the triad lands costs a
 supersession.
 
 Triage the findings, fold real ones into the draft, flip the ADR to `Accepted`,
 merge that PR, then build against it. This is advisory like all review: the
-author still owns ratification; the reviewer only surfaces blind spots (a missed
-alternative, inconsistency with a prior ADR, a seam that will not extend).
+author still owns ratification; the reviewer only surfaces blind spots.
 
 **Trivial ADR edits** — an in-place amendment, the `Proposed` → `Accepted`
 ratification flip, or recording on an ADR's status that a superseding ADR has
-landed — are cheap and skip a separate review *of the edit itself*, not worth the
-round-trip. This is about *review cost*, and nothing else: it is not licence to
-rewrite a ratified decision in place, and it does not lift any review the ADR's
-substance requires. A substantive contract ADR is still reviewed while `Proposed`
-and ratified only after (see "Contract ADRs land before their implementation",
-ADR-0015 §5); the trivial edit is recording that ratification, not the decision
-to grant it. Recording a supersession likewise presupposes the superseding ADR
-exists; flipping a live decision to `Superseded` without one is not a status
-change but an unrecorded decision change, and is not permitted.
-ADR-0070 fixes the line: **amend in place only when the change alters no
-decision** — reconciling an ADR with its own text or with a fact that postdates
-it — always as an appended dated note that never overwrites ratified text.
-**Any change to what was decided needs a new ADR that supersedes the old one:**
-wholly, or **partially** with a scoped, supersession-leading status
-(`docs/adr/template.md`). ADR-0001 holds the append-only rule; ADR-0070 holds
-the amend-vs-supersede test and the partial-supersession form. Being small, or
-cheap to review, does not bear on which side of that line a change is.
+landed — are cheap and skip a separate review *of the edit itself*. This is about
+*review cost*, and nothing else: it is not licence to rewrite a ratified decision
+in place, and it does not lift any review the ADR's substance requires. A
+substantive contract ADR is still reviewed while `Proposed` and ratified only
+after; the trivial edit records that ratification, not the decision to grant it.
+Recording a supersession presupposes the superseding ADR exists; flipping a live
+decision to `Superseded` without one is an unrecorded decision change, and is not
+permitted. **Amend in place only when the change alters no decision** —
+reconciling an ADR with its own text or with a fact that postdates it — always as
+an appended dated note that never overwrites ratified text. **Any change to what
+was decided needs a new ADR that supersedes the old one:** wholly, or
+**partially** with a scoped, supersession-leading status (`docs/adr/template.md`).
+ADR-0001 holds the append-only rule and ADR-0070 the amend-vs-supersede test.
+Being small, or cheap to review, does not bear on which side of that line a
+change is.
 
 **Spike first if you need to.** A contract ratified with no implementation
 contact is how a seam that does not survive first use gets blessed. Run a
@@ -486,251 +330,100 @@ what must not happen is the implementation landing *with* the ADR that justifies
 it.
 
 **ADR numbers are assigned at dispatch,** by whoever hands out the work, not
-computed by the agent doing it. That removes the shared-counter race the old
-in-flight ledger tried and failed to arbitrate. If two branches still collide on
-a number, the second to merge renumbers — a file rename plus its internal
-`ADR-NNNN` references and `Refs:` trailers, no code change.
+computed by the agent doing it. If two branches still collide on a number, the
+second to merge renumbers — a file rename plus its internal `ADR-NNNN`
+references and `Refs:` trailers, no code change.
 
 ### Finishing an ADR PR: `Proposed` through the reviews, `Accepted` on the way out
 
-An ADR PR ends in a fixed order, and each step is what makes the next one mean
-something. It is written down once here so a lane does not re-derive it:
+An ADR PR ends in this order:
 
-1. **Draft, review and revise it while it stands `Proposed`.** That is the state
-   in which a finding can still change the decision, and in which the ADR's own
-   text is *corrected* rather than annotated — ADR-0070 §1's append-only
-   protection is scoped by its own words to **ratified** decision text, and
-   ADR-0095 §7 works that adjudication through ("A `Proposed` ADR is by
-   definition still in the state where review changes its text"). Run the whole
-   required set here: adversarial for most ADRs, adversarial *and* architecture
-   for one deciding a contract surface ("Stop when the required reviews are
-   green").
+1. **Draft, review and revise it while it stands `Proposed`** — the state in
+   which a finding can still change the decision and the ADR's text is
+   *corrected* rather than annotated (ADR-0070 §1 protects only **ratified**
+   text; ADR-0095 §7). Run the whole required set here ("Stop when the required
+   reviews are green").
 2. **Flip `Proposed` → `Accepted` only once that whole set is green on one
-   tree**, and make the flip with **`just adr-ratify`**. Two lenses that came
-   back clean on trees the ADR has since moved off have not agreed with each
-   other about the thing being ratified. Ratifying ahead of them ratifies a
-   decision the reviewer was still entitled to change. The flip itself is a
-   permitted in-place header edit (ADR-0070 §1).
+   tree**, and make the flip with **`just adr-ratify`** — a permitted in-place
+   header edit (ADR-0070 §1).
 3. **Then re-run the required reviews on the flipped tree — unless the flip
-   commit is the one exempt shape, in which case there is nothing to re-run.**
-   ADR-0165 §2 defines that shape and it is one line: **one ADR file, the
-   header's single `- Status: Proposed` becoming `- Status: Accepted`, and no
-   other byte — the `- Date:` line included.** `just adr-ratify` makes exactly
-   that commit, and `ship` recognises it by rebuilding the file from its parent's
-   with the same transform, so the two cannot disagree. Where `HEAD` is that
-   shape, ADR-0027 §2's acceptance loop reads `HEAD`'s **parent** for the tree
-   and the patch identity it compares — the decision text the flip ratifies is
-   byte for byte the text the reviewer already returned green on — and `ship`
-   says so in the comment it posts (ADR-0165 §4). The re-anchoring stops there:
-   it is not recursive, and it touches neither ADR-0027 §3's floor nor §4's
-   drift record, which govern a base move rather than a commit the PR carries.
-
-   **Anything larger costs the round, exactly as before**, and that is the
-   fail-closed direction rather than an oversight: a flip commit that also
-   appends a ratification note, or applies the amendment records the ADR
-   schedules for its own ratification, or restamps the `- Date:` line, or fixes a
-   typo, or flips two ADRs at once, carries text no reviewer has read. So it
-   falls outside the shape, and the round it costs is a real one. You choose:
-   write the note and pay, or keep the flip bare and don't. Both are correct.
-
-   When the round *is* owed, it is not a judgement call and not a symptom of
-   anything: the flip edits a reviewed byte, so the recorded tree no longer
-   equals `HEAD`'s and the unmoved-base path refuses — "(a) — ADR-0020 §3 exactly
-   as written. The tree is the whole test here.", in `scripts/ship.sh`'s
-   artifact-selection loop. The moved-base path does not rescue it either, since
-   the flip changes the reviewed patch identity as well. "Trivial ADR edits"
-   above says the flip earns no review *of the edit itself*, and it does not —
-   nothing in the re-run triages a status line. What the re-run buys is
-   **coverage**, which is mechanical. **ADR-0020 is not in tension with this
-   step; it is what obliges it.** Its §3 keeps the tree comparison mechanical — a
-   review "taken against different content or a different base" will "still fail,
-   mechanically, as before" — so ADR-0020 is itself the rule under which the
-   flipped tree is refused, and it cannot both mandate that refusal and forbid
-   the round that clears it. The round is cheap by construction: the flipped tree
-   differs from the one already judged by a status line.
-
-   **This does not turn a green set into a checkpoint.** What "Stop when the
-   required reviews are green" forbids is committing *again to improve* content a
-   reviewer has already judged. The flip improves nothing and reworks nothing —
-   it is the ratifying act the PR exists to perform, and without it nothing may
-   implement against the ADR at all (ADR-0015 §5). And a finding that does arrive
-   on that round is not stranded by the flip having happened: **return the ADR to
-   `Proposed` and re-enter at step 1.** This is a **pre-merge** move and only
-   that. Every step here runs on the open PR, so an `Accepted` flip sitting on the
-   branch has landed nowhere and binds no reader; restoring `Proposed` is then
-   ADR-0070 §1's *third* permitted in-place header edit — "correcting a `Status`
-   line to match what actually landed" — which is the clause ADR-0127 §3 invokes
-   for exactly this restoration, and the route ADR-0127 and ADR-0133 each took on
-   their own PRs. After the merge the route is gone and a change to the decision
-   is a new ADR that supersedes it (ADR-0070 §1), which is the whole reason the
-   flip waits for step 2's green set. ADR-0070 §1's no-rewrite rule protects
-   *ratified* decision text, and an ADR returned to `Proposed` before merge is not
-   that — so the correction stays an in-place edit rather than becoming a dated
-   note appended to a document one commit old. What the return does **not** buy is a
-   shortcut back to step 3: §1 is explicit that its permitted edit forms "bound
-   the append-only *form* of an edit, not the review a decision needs. A
-   substantive contract ADR is still reviewed while `Proposed` and ratified only
-   after". So the corrected decision earns the whole required set green on the
-   corrected `Proposed` tree before it is flipped a second time — which is why an
-   ADR taking this route records itself as ratified *on its second flip*.
-4. **`just ship`, then `just ready`, then merge** — on your own judgement, like
-   any other change ("Report the review, then mark it ready"). `just ready` is
-   the documented way out of draft and the only one carrying ADR-0165 §5's
-   guard: it refuses while any ADR this PR adds or modifies still reads
-   `- Status: Proposed`, and names the file. That is issue #1044 — two lanes in
-   two days shipped ready with the flip never made, and nothing mechanical caught
-   either. The refusal sits at the ready boundary and nowhere else, because an
-   ADR is `Proposed` for its whole reviewed life and `just ship` must keep
-   posting intermediate rounds on one.
+   commit is the one exempt shape** (ADR-0165 §2): **one ADR file, the header's
+   single `- Status: Proposed` becoming `- Status: Accepted`, and no other byte —
+   the `- Date:` line included.** `just adr-ratify` makes exactly that commit;
+   `ship` recognises it, judges coverage against `HEAD`'s parent, and says so in
+   its comment (ADR-0165 §§3–4). Anything larger — a ratification note, an
+   amendment record, a restamped date, a typo fix, a second ADR — costs the
+   round; write the note and pay, or keep the flip bare. The flip is the
+   ratifying act, not a commit "to improve", so "Stop when the required reviews
+   are green" does not forbid it. **A finding on that round returns the ADR to
+   `Proposed` and re-enters step 1** — before merge only, as ADR-0070 §1's
+   correction of a `Status` line (ADR-0127 §3) — and the corrected decision
+   earns the whole set green before it is flipped a second time, so such an ADR
+  records itself as ratified *on its second flip*.
+4. **`just ship`, then `just ready`, then merge** ("Report the review, then mark
+   it ready"). `just ready` refuses while any ADR this PR adds or modifies still
+   reads `- Status: Proposed` (ADR-0165 §5).
 5. **Nothing implements against the ADR until that merge** (ADR-0015 §5, golden
    rule 5).
 
-**Point at this block rather than re-arguing it.** ADR-0130 §12's status bullet
-is the worked precedent: drafted, reviewed and revised as `Proposed`, "its status
-flipped only once both required reviews returned clean on one tree", "Findings
-raised after the flip were folded the same way and both reviews re-run", and
-"nothing implements against §9 until this has merged". ADR-0136 §7 is the same
-bullet for a single-lens ADR: drafted, reviewed and revised as `Proposed`, with
-"the status flipped only once the required review returned clean on one tree,
-with the required review re-run on the flipped tree". Two ratified ADRs recording
-step 3 as the route they took is why this is a settled sequence to point at
-rather than one to re-argue. An ADR recording its own ratification owes a line
-naming the set it ran and the outcome it got, plus a pointer here — not a
-paragraph reasoning the sequencing out from first principles.
+An ADR recording its own ratification owes a line naming the set it ran and the
+outcome it got, plus a pointer here — not a paragraph reasoning the sequencing
+out from first principles.
 
 ## The dispatcher
 
-ADR-0015 replaced the shared coordination files with a person: the **dispatcher**
-is whoever hands work to agents. ADR-0015 §§2 and 5 give the role its powers, and
-the rest of this document assumes it exists without naming it.
-
-The dispatcher:
-
-- **assigns ADR numbers** at dispatch (above);
-- **prevents lane collisions**, since nothing mechanical detects two agents
-  working the same subsystem — ADR-0015 traded that check away deliberately;
-- **places each agent in its own clone** (ADR-0015 §2), never two in one, and
-  never in a linked worktree;
-- **decides merge order** where a contract ADR must land before the
-  implementation depending on it (golden rule 5).
+The **dispatcher** is whoever hands work to agents (ADR-0015 §§2 and 5): it
+assigns ADR numbers, prevents lane collisions, places each agent in its own
+clone, and decides merge order. The `dispatch-agents` skill carries the role.
 
 Two things follow for **you, the agent**. Your lane's boundaries and your ADR
 number come from your brief, not from your own reading of the repo — where the
 brief conflicts with an issue the brief is newer, and where it conflicts with a
 ratified ADR, stop and say so rather than choosing. And the report you send back
-is evidence: say what you actually verified and at which commit, because a gate
-run before a rebase is not a gate run against `main`.
-
-The mechanics of the role — clone inventory, brief contents, what to re-check
-before believing a report, merge sequencing — live in the `dispatch-agents`
-skill, alongside `pre-dispatch-survey`, which establishes the state its briefs
-are written against. Neither decides *what* the work is: native GitHub
-milestones and their linked issues hold agreed delivery scope and dependencies;
-`docs/roadmap.md` explains direction and points to them.
+is evidence: say what you actually verified and at which commit.
 
 ## The tracker
 
 GitHub issues and native GitHub milestones are the delivery tracker. Keep no
-in-repo coordination ledger (ADR-0015). The owner-directed transition and
-retirement of legacy milestone plans are recorded in #2518; the old track
-checklists are historical evidence, not dispatch authority. Labels remain a
-small classification set (#1226 §6).
+in-repo coordination ledger (ADR-0015). Milestones and their linked acceptance
+issues hold delivery scope (`CLAUDE.md` → "Delivery planning", #2518); how scope
+is taken, accepted, retired and swept out of `docs/roadmap.md` is the dispatcher
+skills' (`pre-dispatch-survey`, `qa-milestone`, `status-report`).
 
 **Track labels — at most one per issue.** A track identifies an area of work,
-not a separate milestone board or an implicit implementation schedule. **The live
-set is the tracker's own**, and it is not enumerated here: this file went two tracks stale
-the last time it was, and a list that decays is worse than a pointer. Read it
+not a milestone board or a schedule. The live set is the tracker's own; read it
 whole with
 
 ```bash
 gh api --paginate repos/{owner}/{repo}/labels --jq '.[].name'
 ```
 
-rather than with `gh label list`, whose `--limit` is a maximum and defaults to
-30 — a listing silently cut at its limit is the failure this pointer exists to
-avoid.
+rather than with `gh label list`, whose `--limit` defaults to 30. An issue that
+would carry two tracks is a finding in a subsystem another track has a lane open
+in: file it to the track that holds that subsystem, not to both
+(`docs/roadmap.md` → "Concurrency").
 
-**Native milestones own delivery scope and acceptance status.** Each milestone
-states a user-visible outcome, exclusions and dependencies, and links an
-acceptance issue with scenarios agreed before implementation. Issues carry its
-delivery slices and evidence; associate those issues with the native milestone
-rather than maintaining another checklist on a track issue. Keep design
-umbrellas outside a milestone when they span several undecided deliveries.
-
-The milestone's completion percentage is not acceptance. Record the owner's
-exit ruling with the evidence before closing an accepted milestone. A retired
-milestone is explicitly marked retired, not passed; preserve its evidence and
-give remaining requirements an explicit disposition. Closing a QA record or
-merging the components does not itself accept the milestone.
-
-`docs/roadmap.md` carries direction and navigation, not duplicate status.
-Track issues retain historical discussion; native milestones and their linked
-issues hold the live delivery plan. An empty milestone list is not an
-invitation to dispatch from an archived track. Do not create provisional
-milestones or assign numbers before the owner has agreed the replacement
-boundaries. Explicit owner-directed maintenance need not invent a milestone,
-but record that instruction on its work item.
-
-*At most one* `track:*` is the rule with teeth. An issue that would carry two is
-a finding that belongs to a subsystem another track has a lane open in: file it
-to the track that holds that subsystem, not to both (`docs/roadmap.md` →
-"Concurrency").
-
-**The backlog is a severity family, not a track and not a bare label.** An issue
-that has been triaged onto *no* program of work — opportunistic hardening and
-debt, which is what distinguishes it from one nobody has looked at yet — carries
-exactly one of `backlog:blocker`, `backlog:major`,
+**The backlog is a severity family, not a track.** An issue triaged onto *no*
+program of work carries exactly one of `backlog:blocker`, `backlog:major`,
 `backlog:minor` or `backlog:unknown`, *instead of* a `track:*` label and never
-alongside one. **#1232 is the census and the conventions record**, and it is
-where the ruling behind this rule is written down — so a later ruling moves it
-there and this section stays a rule rather than a snapshot of one.
+alongside one (#1232 is the conventions record).
 
 - The three named severities are **`docs/review/guide.md`'s words** — `blocker`
   (must fix before merge), `major` (should fix), `minor` (worth noting) — read
   against the issue rather than against a review finding.
 - **`unknown` is "not yet sized"**, the honest default for an issue filed in
-  passing, and it is re-sized **lazily, when the issue is next touched**. There
-  is no sizing sweep owed, for the same reason there is no labelling sweep.
-- **`backlog:blocker` makes selection urgent, not implicit.** Surface it for
-  the next work-selection decision. A severity label does not create a batch,
-  revive a retired plan or bypass the owner's milestone/scope decision.
+  passing, re-sized lazily when the issue is next touched.
+- **`backlog:blocker` makes selection urgent, not implicit.** Surface it for the
+  next work-selection decision; it does not create a batch, revive a retired plan
+  or bypass the owner's milestone/scope decision.
 
-**Kind labels**, orthogonal to the track:
+**Kind labels**, orthogonal to the track: `ruling` — needs the owner, and the
+return brief is `gh issue list -l ruling`, whole; `batch` — a dispatch record;
+`qa` — a QA-run record (`.claude/skills/qa-milestone`). Add another label on
+evidence, not in advance.
 
-- `ruling` — needs the owner. **The return brief is the `ruling` query** —
-  `gh issue list -l ruling`, whole, so raise `--limit` past its default of 30 if
-  the queue ever runs long enough to page. It is what the owner reads when they
-  come back, so it is the one label applied the moment the issue is filed rather
-  than lazily.
-- `batch` — a dispatch record: the lanes, the ADRs they carry, the run, the
-  outcome.
-- `qa` — a QA-run record (`.claude/skills/qa-milestone`), the evidence a milestone's
-  exit is ruled on.
-
-Add another label on evidence, not in advance.
-
-**Label existing issues lazily, as you touch them.** There is no sweep owed and
-no obligation to label an issue you merely read; the labels become true as work
-passes through them. `ruling` is the exception above — an issue the owner owes a
-decision on is unreachable in the return brief until it carries one, so label it
-immediately.
-
-### Recording a milestone disposition obliges a roadmap sweep
-
-Whoever records acceptance, retirement or a scope change updates the native
-milestone and its linked acceptance issue, then reads the affected roadmap
-narrative in the same act. Delete or re-point any dependency, deferral or scope
-claim the ruling falsified. Do not tick a retired requirement as completed.
-
-The sweep removes obsolete claims; it does not duplicate milestone status in
-`docs/roadmap.md`. Record results, tested revisions, remaining work and the
-owner's ruling in GitHub. Preserve legacy issues, their original evidence and
-historical identifiers when a plan is retired.
-
-`.claude/skills/qa-milestone` → "Close out" states the same obligation at the
-QA-run end. Tests and composition evidence accumulate during slice delivery;
-the acceptance record gathers that evidence rather than postponing integration
-until every component has merged.
+**Label lazily, as you touch an issue** — no sweep is owed — except `ruling`,
+which is applied the moment the issue is filed.
 
 ## Git & commits
 
@@ -763,98 +456,50 @@ until every component has merged.
 ### Working on GitHub (pull requests)
 
 `main` is protected and integration happens through pull requests — not local
-merges (ADR-0010). The protection is not about arbitrating between contributors;
-it is what makes every merge carry evidence: a green `gate` on the merged
-content, and a linear history where each commit keeps its `Refs:` trailer.
+merges (ADR-0010) — so every merge carries a green `gate` on the merged content
+and a linear history where each commit keeps its `Refs:` trailer.
 
 - **Never push to `main`.** Push your `<area>/<slug>` branch and open a PR.
 - **Open a draft PR early — always.** As soon as you have a branch and a first
-  commit, open it as a **draft**, before the work is done. CI runs on every push
-  so you get the gate continuously, and the dispatcher can see your direction
-  (and any contract change) while redirecting is still cheap. Mark it **ready for
-  review** with `just ready` when the change is complete — your call, made
-  without asking (see "Report the review, then mark it ready"). Nothing automated
-  fires on the transition itself (ADR-0015); it is the signal to the dispatcher
-  that the lane is done and ready to be verified and merged. What `just ready`
-  adds runs *before* it: ADR-0165 §5's refusal on an ADR still standing
-  `Proposed`, and ADR-0311 §4's refusal unless `gate` is green on the head.
-- **CI gates the PR.** The `gate` workflow runs the full Definition-of-Done gate
-  on every PR and push; a PR cannot merge while it is red. This is enforced for
-  everyone. It is the full gate: no local whole-suite run is owed, and a PR
-  leaves draft only once `gate` is green on its head (ADR-0311).
-- **`gate` is the only required check; no approving review is required.** Branch
-  protection asks for zero approvals (ADR-0167 §4), because there is no second
-  author to ask — so the Codex review reported by `just ship` (see "Review") is
-  the entire independent judgement on the change, and the dispatcher's
-  verification is the entire human one. Note in the PR description any
-  `blocker`/`major` finding you waived, with its rationale, and link the issues
-  you filed for findings you deferred. **A merge therefore needs no `--admin`:**
-  reach for the bypass only for a *stale* gate — a branch `strict` is holding
-  because it is behind `main` — and say why in the PR. A **red** gate is never a
-  case for it: ADR-0167 §2 rules that nothing crosses the gate red, whatever the
-  flag mechanically reaches (see the bypass note below).
+  commit, open it as a **draft**, so CI gates every push and the dispatcher can
+  see your direction (and any contract change) while redirecting is still cheap.
+  Mark it ready with `just ready` when the change is complete — your call, made
+  without asking ("Report the review, then mark it ready"). The transition is the
+  signal to the dispatcher that the lane is done and ready to be verified and
+  merged.
+- **CI gates the PR.** The `gate` workflow runs the full gate on every PR and
+  push; a PR cannot merge while it is red.
+- **`gate` is the only required check; no approving review is required**
+  (ADR-0167 §4). The Codex review `just ship` reports is the entire independent
+  judgement on the change, and the dispatcher's verification the entire human
+  one. When the administrator bypass may be used is ADR-0167 §§2–3's.
 - **Rebase and merge.** Rebase your branch onto `main` and merge via GitHub's
   *Rebase and merge* so linear history holds and each commit keeps its
   `Refs: ADR-NNNN` trailer. Delete the branch after merge.
 - **Low-collision by design.** Work is split across low-overlap sections, so
   rebase conflicts should be rare; whoever merges second resolves them.
-- Administrators retain a bypass, and what it now bypasses is **evidence**, not
-  an approval queue: `--admin` merges past a red `gate` and past the
-  `strict`-protection check that a branch is current. Both of those are the
-  reason to trust the merge, so the bypass is for a genuine emergency and the
-  reason goes in the PR.
-
-  **That bypass is deliberate, and ADR-0167 is where it is decided.**
-  `enforce_admins` is off, which exempts administrators from every protection on
-  `main` — the required `gate` included — because the only person the lock would
-  restrain is the sole administrator and merger. ADR-0010 asked instead for a
-  split (gate binding everyone, administrators exempt from the review and
-  up-to-date restrictions only) that classic branch protection cannot express,
-  the switch being one all-or-nothing toggle; ADR-0167 partially supersedes that
-  clause and ratifies the configuration, closing issue #1246. **The rule binds
-  conduct where the toggle does not enforce it** (ADR-0167 §2): nothing crosses
-  the gate red, and a bypass that mechanically *can* reach the gate is not
-  licence to use it for that. The two sentences above describe the blast radius
-  of the flag, so that whoever reaches for it knows what they are actually
-  overriding; they authorise nothing.
 
 ### Coordinating parallel work
 
 **One clone per agent** (ADR-0015). An agent is dispatched by hand into a
-pre-existing local clone and may assume it is the only worker there. Isolation
-comes from the clone; there is no claiming protocol, no lock, and no code to
-maintain. Nothing in the repo tracks who is working where — that is the
-dispatcher's job, deliberately.
+pre-existing local clone and may assume it is the only worker there; nothing in
+the repo tracks who is working where. Each unit of work starts on a fresh branch
+from `origin/main` (`CLAUDE.md` → "How to work"), or from `origin/<other-branch>`
+to stack a dependent PR — fetch first. The `no-commit-to-branch` pre-commit hook
+refuses commits to `main`.
 
-In your clone, each unit of work still starts the same way:
+`core/` is a shared surface the gate cannot referee — a collision there is a
+valid diff that passes every check and only surfaces as a conflict on the second
+rebase:
 
-```bash
-git fetch origin
-git switch -c <area>/<slug> origin/main
-```
-
-Branch from `origin/main`, not from whatever the clone happens to have checked
-out, so your work starts from the latest merged state. To stack a dependent PR,
-branch from `origin/<other-branch>` — fetch first; the base must be a ref you
-actually have.
-
-Never work directly on `main` in a clone: it is the integration ref, and the
-`no-commit-to-branch` pre-commit hook refuses commits to it.
-
-The subsystem split keeps most work in non-overlapping folders, but `core/` is a
-shared surface the gate cannot referee — a collision there is a valid diff that
-passes every check and only surfaces as a conflict on the second rebase:
-
-- **Changing `core/` is the one high-collision edit — flag it loudly.**
-  `core/protocols.py` and `core/types.py` are touched by every subsystem, and a
-  Protocol change is breaking (golden rule 5). The contract lands as its own
+- **Changing `core/` is the one high-collision edit — flag it loudly.** A
+  Protocol change is breaking (golden rule 5), and the contract lands as its own
   ratified ADR *and its own PR*, ahead of anything built on it (see "Contract
-  ADRs land before their implementation"), so the new shape is visible before
-  another stream builds against the old one.
-- **Two agents needing `core/` at once are not independent.** Sequence them:
-  the second stacks on the first once the first's contract PR has merged.
-  Whoever dispatches decides this; an agent that discovers it mid-task should
-  say so rather than racing.
+  ADRs land before their implementation").
+- **Two agents needing `core/` at once are not independent.** The second stacks
+  on the first once the first's contract PR has merged. Whoever dispatches
+  decides this; an agent that discovers it mid-task should say so rather than
+  racing.
 
 ## Typing & code style
 
@@ -892,13 +537,10 @@ passes every check and only surfaces as a conflict on the second rebase:
 4. Provider SDKs (`pydantic_ai`, `anthropic`, `openai`, ...) are imported only
    inside `models/`.
 
-**These four are the headline, not the register.** They restate `CLAUDE.md`'s
-golden rules 1, 2 and 4. The register is `pyproject.toml`'s
-`[[tool.importlinter.contracts]]`, where each contract carries its reasoning in
-place — **check a change against `uv run lint-imports`, never against this
-list.** Restating the enforced set here would be a state claim in a living
-document, and the check owns that fact (ADR-0019, "No state claims in living
-documents" below).
+**These four are the headline, not the register.** The register is
+`pyproject.toml`'s `[[tool.importlinter.contracts]]`, where each contract carries
+its reasoning in place — **check a change against `uv run lint-imports`, never
+against this list** (ADR-0019).
 
 Subsystems communicate only through the Protocols in `core/protocols.py`. A
 Protocol change is a breaking change: call it out and add an ADR first.
@@ -920,10 +562,9 @@ A Protocol on its own is an unenforced promise. The required unit of work for a
 A triad spans `core/`, `ai_assistant/testing/`, and `tests/`, and that is
 deliberate: it is **one** unit of work, the standing exception to "one subsystem
 per change" (`CLAUDE.md`). Splitting it across PRs is the failure mode this rule
-exists to prevent, not a way to satisfy the scoping rule. On its own it stays a
-small diff, because it is then a contract and its guardrails with no
-*production* implementation attached (the canonical fake is an implementation,
-but a test-only one).
+exists to prevent. On its own it stays a small diff, because it is then a
+contract and its guardrails with no *production* implementation attached (the
+canonical fake is an implementation, but a test-only one).
 
 **It does not always travel alone.** Where a slice was cut at this contract seam
 — because its implementation would otherwise put new machinery into two
@@ -934,11 +575,9 @@ cross-subsystem pairing stays outside it, the triad itself is still never split
 (ADR-0137 §3), the sequence below is unchanged, and every further consumer group
 is a follow-on lane briefed against the merged contract (ADR-0137 §4).
 
-Not "Protocol now, tests when someone implements it." Deferring 2 and 3 is how
-the original backfill debt came to exist: contracts landed, the machinery that
-keeps implementations honest did not, and the backfill fell to whoever came
-later. A fake with no suite drifts from the contract silently; a suite with no
-fake leaves every consumer hand-rolling a private mock.
+Not "Protocol now, tests when someone implements it": a fake with no suite drifts
+from the contract silently; a suite with no fake leaves every consumer
+hand-rolling a private mock.
 
 The triad is what a Protocol *change* is measured against too — extend the suite
 in the same change, so the new obligation is enforced rather than assumed.
@@ -946,37 +585,18 @@ in the same change, so the new obligation is enforced rather than assumed.
 **The triad itself is mechanically enforced.**
 `tests/core/test_protocol_triad.py` maps every Protocol in `core/protocols.py`
 to its suite, its canonical fake, and a `Test…Contract` subclass whose contract
-tests pytest actually *ran and passed*. The last part is the one that matters:
-an abstract suite is only worth anything once something runs it against a real
-subject, so the check demands evidence of execution rather than the existence
-of files. It lives in pytest rather than in a script because only pytest can
-answer "did these assertions run?", and `uv run pytest` is already in the gate
-and in CI. Add a Protocol without its triad and the gate goes red, naming what
-is missing.
+tests pytest actually *ran and passed*. Add a Protocol without its triad and the
+gate goes red, naming what is missing.
 
 Because the check wants evidence that the contract *ran*, a contract test that
-skips itself does not count — a `pytest.skip("not implemented")` in a suite is
-an obligation nobody met. Where an obligation genuinely does not apply to every
+skips itself does not count. Where an obligation genuinely does not apply to every
 implementation, the **suite** says so by marking that test
 `@pytest.mark.optional_obligation`; only then may an implementation's run skip
-it. See `ContextProviderContract.test_each_assembly_recomputes_from_the_clock`,
-which a provider deliberately serving a fixed instant opts out of.
+it. See `ContextProviderContract.test_each_assembly_recomputes_from_the_clock`.
 
 What the check enforces is that the three artifacts exist and run — **not that
-a suite covers every method of its Protocol.** Add a method to an existing
-Protocol and leave its suite alone and the gate stays green. Keeping the suite
-abreast of the contract is a review concern, like the adequacy of any other
-test (ADR-0003).
-
-The check carries an `EXEMPTIONS` list for Protocols whose backfill was still
-outstanding when it landed. That list is a backlog, not an escape hatch: each
-entry names the missing parts and the issue tracking them, an entry that
-outlives its gap fails the check, and only the Protocols that predate the check
-may be named at all — so a new Protocol cannot buy itself an exemption, and the
-list can only shrink. **The hatch is closed rather than merely unused:** the
-list is empty and no Protocol remains that an exemption could name, both of
-which `tests/core/test_protocol_triad.py` enforces on every run. Read it for
-what the list holds.
+a suite covers every method of its Protocol.** Keeping the suite abreast of the
+contract is a review concern, like the adequacy of any other test (ADR-0003).
 
 This does not loosen contract-first. The sequence is two stages, not one:
 
@@ -989,8 +609,7 @@ This does not loosen contract-first. The sequence is two stages, not one:
   artifacts ship together in the implementation PR.
 
 So "contract-first" governs the ADR *preceding* the triad, not the ordering of
-files inside it. The triad is about what ships together, not about writing tests
-before you know the contract.
+files inside it.
 
 ## Documentation
 
@@ -1009,17 +628,16 @@ A **proposal** is a design under discussion before the owner has decided it. It
 is one Markdown file under `docs/proposals/` on a `proposal/<slug>` branch,
 opened as a **draft pull request**, and it never merges as a proposal.
 `docs/proposals/README.md` is the working guide — what the file carries, how
-it is discussed, and the three ways it ends.
+it is discussed, why it is a PR, and the three ways it ends.
 
 - **The wiki is the baseline, not the venue.** The wiki describes the system's
-  design at a high level — the ratified decisions, and the owner's direction
-  where it goes further — and is not wired into dispatch; ADRs bind the code,
-  and a page never amends one. A proposal is a change against that baseline:
-  it cites the wiki pages and ADR clauses it would alter and does not live
-  among them. Nothing under `docs/proposals/` on `main` is a proposal.
+  design at a high level and is not wired into dispatch; ADRs bind the code, and
+  a page never amends one. A proposal cites the wiki pages and ADR clauses it
+  would alter and does not live among them. Nothing under `docs/proposals/` on
+  `main` is a proposal.
 - **The pull request is the medium.** The file is rewritten in place and
-  pushed; the PR's history is the record, and review threads on the diff are
-  the discussion. An issue, where one exists, holds the ruling and the link.
+  pushed; review threads on the diff are the discussion. An issue, where one
+  exists, holds the ruling and the link.
 - **An open proposal authorizes nothing.** It claims no scope, blocks no lane,
   amends no ADR, and no implementation cites it.
 - **Accepted means converted, on the same branch.** The file moves to
@@ -1031,127 +649,49 @@ it is discussed, and the three ways it ends.
   comment and, for a parked one, the issue that holds it.
 - **Nothing the gate owes arrives while it is a draft proposal.** No review is
   invoked on it and it is never flipped out of draft as a proposal, so no review
-  round and no ADR-0311 §2 run is owed until conversion — not as an exemption,
-  but because the events that oblige them have not happened.
-
-The reasoning is in the README: proposals kept as wiki pages drifted from the
-issues recording the same design, and an issue thread cannot show a rendered,
-versioned text with a diff. The ADR template already carries the second half of
-the lifecycle — `Proposed`, then `Accepted` or `Withdrawn` — so this rule only
-adds the stage before an ADR exists and the act that turns one into the other.
+  round and no ADR-0311 §2 run is owed until conversion.
 
 ### Cite in form, and mark what binds
 
-Two decisions govern ADR *text* — ADR-0088 and ADR-0089, which hold the
-evidence and the rejected alternatives. Both are **forward-only**: nothing
-ratified is rewritten to satisfy either, so an older ADR that does not follow
-them is a record, not a defect to fix.
+ADR-0088 and ADR-0089 govern ADR *text*, and both are **forward-only**: an
+older ADR that does not follow them is a record, not a defect to fix.
+`docs/adr/template.md` carries the authoring forms.
 
-**Cite in one of ADR-0088 §1's three forms** — a decision, a code, or a tracker
-citation. §1 defines each and §2 says what each must resolve to; read them there
-rather than from memory, because a reference not written in one of those forms
-is prose, and nothing resolves it. **A code citation carries no line number**
-(§5): name the enclosing symbol, and quote the line where the position matters.
-That one is worth remembering for its reason — a line number stays well-formed
-after the edit that invalidates it, so it fails *silently*, where a symbol name
-either resolves or does not.
+- **Cite in one of ADR-0088 §1's three forms** — a decision, a code, or a tracker
+  citation; §2 says what each must resolve to. **A code citation carries no line
+  number** (§5): name the enclosing symbol, and quote the line where the position
+  matters — a line number stays well-formed after the edit that invalidates it.
+- **Mark every normative clause** (ADR-0089 §2). A clause is normative when **a
+  reader could disobey it**; a measurement, an argument, a worked example or a
+  classification is not, however load-bearing (§1). **In a marked ADR the marked
+  clauses are the whole of what it obligates** (§3): prose beside a mark binds
+  nothing, so a clause carries its own scope, conditions and exceptions. An ADR
+  with no well-formed mark is unmarked and binds as prose (§4). **Reviewing a
+  marked ADR, check that every obligation it intends sits inside a mark** —
+  nothing mechanical finds an under-marked ADR.
+- **Name one ruling by its clause identifier**, `ADR-NNNN §S:k` — the *k*-th
+  marked clause within section *S* (ADR-0277 §1); the template defines *S*,
+  ranges and shared prefixes. It is an additional form of the decision citation
+  and replaces none, and no lane rewrites an existing citation into it. **Do not
+  count by hand** — `just adr-rules NNNN` prints an ADR's `Status` line and every
+  marked clause under its identifier, and says nothing about whether a clause is
+  still in force; that reading stays with the `Status` line (ADR-0277 §4). An
+  identifier is stable once its ADR is `Accepted`.
+- **Two authoring rules keep the record from drifting** (ADR-0277 §3). A header
+  note written onto an earlier ADR does not state the writing ADR's status — it
+  may say the change takes effect on that ADR's ratification, and nothing
+  further. A quotation of another ADR's marked clause carries no `**Normative.**`
+  token: fence it, or block-quote it without the token.
 
-What the corpus actually cites is owned by a check, not by this document:
-`tests/scripts/test_adr_citations_corpus.py` runs ADR-0088 §6's Tier 1 inside
-`pytest`, so a citation naming an ADR file that does not exist fails the gate
-like any other test. One case is exempt: a number in a **gap** the issued set
-encloses was assigned and never written, so an ADR cites it correctly and it is
-neither failed nor reported. **ADR-0090 §1 defines which numbers those are —
-read it there rather than inferring the boundary**, because the enclosure is
-bounded on both sides and a number outside it is one nobody has issued. That
-residual is where the check keeps its value: a typo and a stale forward
-reference both land outside far more often than inside a gap, and both still
-fail. Tier 1's tracker half needs `gh` to answer GitHub; where it cannot, the
-citation is unevaluable and passes silently rather than failing, which is §6's
-rule that a miss is benign and a false report is not.
-`just citations` prints the whole report; its Tier 2 half is advisory and never
-fails, because an append-only corpus correctly cites what the tree no longer
-contains (ADR-0088 §3).
-
-**Mark every normative clause**, in the form `docs/adr/template.md` carries
-(ADR-0089 §2). A clause is normative when **a reader could disobey it** — it
-constrains what an implementation, a lane, or a later ADR may do. A measurement,
-an argument, a worked example, or a classification of the change being made is
-not, however load-bearing it is: the test is conduct, not weight, and a refusal
-to allow something is a rule like any other (ADR-0089 §1).
-
-**In a marked ADR the marked clauses are the whole of what it obligates** (§3).
-Unmarked text is read to determine what a marked clause *means*; it never
-supplies an obligation. So a rule stated only in the prose beside a mark binds
-nothing, and a clause has to carry its own scope, conditions and exceptions —
-where the surrounding argument is what establishes that an obligation exists, or
-how far it reaches, the marking is not finished.
-
-Which regime an ADR is in is mechanical, not a judgement: it is marked when it
-carries at least one well-formed clause and unmarked otherwise, and an unmarked
-ADR binds as prose exactly as the corpus always has (§4). Mechanical is not a
-bare search for the token — one that is indented, not preceded by a blank line,
-or sitting inside a fence is not a mark and does not switch the regime (§2).
-That default is deliberate: a near-mark and a marked-nothing ADR both degrade to
-the status quo rather than to a defect, which moves the risk onto review.
-**Reviewing a marked ADR, check that every obligation the document intends sits
-inside a mark.** Nothing mechanical finds an under-marked ADR, and under §3
-whatever was left outside the marks is simply discarded.
-
-**Name one ruling by its clause identifier**, `ADR-NNNN §S:k` — the *k*-th
-marked clause of ADR-NNNN within section *S*, counted from 1 in file order
-(ADR-0277 §1). *S* is the label of the nearest numbered heading above the clause
-(`5`, `10a`), or, where no numbered heading precedes it within its level-2
-section, that level-2 heading's first word (`Context`, `Consequences`); an
-unnumbered heading below level 2 starts no section. `§S:j-k` names clauses *j*
-to *k* inclusive, and several identifiers may share one prefix after commas
-(`ADR-NNNN §5:2, §6:1-3`). It is an additional form of the decision citation and
-replaces none: `ADR-NNNN`, `ADR-NNNN §K` and a scope in words stay valid, and no
-lane rewrites an existing citation into it. **Do not count by hand** —
-`just adr-rules NNNN` prints an ADR's title, its whole `Status` line and every
-marked clause under its identifier, and nothing else of the body. It says
-nothing about whether a clause is still in force; that reading stays with the
-`Status` line and the ADRs it names (§4). An identifier is stable once its ADR
-is `Accepted`, because the marks and their order are then fixed; one into a
-`Proposed` ADR can still move, and is checked for existence only.
-
-The same corpus check reads the record (ADR-0277 §2). **Tier 1**, failing the
-gate: a clause identifier naming a clause that does not exist — for a range, any
-member of it, and a range whose first member is 0 or exceeds its last fails
-outright; an ADR numbered above 0277, not `Withdrawn`, that marks no clause; and
-a marked clause, in an ADR numbered above 0277, whose text equals another ADR's
-once whitespace and block-quote markers are normalised **and which stands
-outside its own ADR's `## Decision` section**, where a repeated ruling reads as
-a quotation (ADR-0278 §1). **Tier 2**, reported: the same repeated clause in an
-older ADR, and a header note saying an ADR "remains Proposed" when that ADR's
-own `Status` no longer is. `scripts/brief_check.py` resolves a clause identifier
-in a dispatch brief the same way, and reports one that does not resolve as
-absent.
-
-Two narrowings keep that report readable (ADR-0278). **An equal clause inside a
-`## Decision` section is no finding at any tier**, so a sentence the corpus
-states on purpose in ADR after ADR — "`PROTOCOL_VERSION` does not move for this
-change." — can be ruled again word for word; the report counts those clauses and
-lists none. **A stale note is corrected, and not reported, by a later list item
-of the same header** that carries a `YYYY-MM-DD` date on its first line and
-writes `ADR-NNNN was ratified` for the number the stale note names, the words
-directly after the number. That dated note is how a stale header sentence is
-recorded, since a ratified one is never rewritten (ADR-0001, ADR-0070 §1); the
-report counts the notes it passed this way. The check is narrower than the rule
-by design: a marked quotation inside a Decision section passes it, and the
-second authoring rule below still forbids it (ADR-0278 §3).
-
-**Two authoring rules keep the record from drifting** (ADR-0277 §3):
-
-- **A header note written onto an earlier ADR does not state the writing ADR's
-  status.** It may say the change takes effect on that ADR's ratification, and
-  says nothing further about whether that has happened. A note saying the
-  writing ADR "remains Proposed" goes stale on the day it is ratified, and
-  ADR-0165's one-line flip cannot reach it.
-- **A quotation of another ADR's marked clause carries no `**Normative.**`
-  token.** Show it in a fenced block (ADR-0089 §2) or as a block quote without
-  the token. A quoted mark is a second marked clause — a ruling the quoting ADR
-  never made.
+`tests/scripts/test_adr_citations_corpus.py` runs ADR-0088 §6's Tier 1 in the
+gate and `just citations` prints the whole report; which numbers are exempt gaps
+is ADR-0090 §1's. Two checks are ADR-0278's: a marked clause equal to another
+ADR's fails where it stands outside its own ADR's `## Decision` section and is no
+finding inside it (§1), and a header note saying an ADR "remains Proposed" after
+it was ratified is reported until a later dated item of the same header writes
+`ADR-NNNN was ratified` (§2). The check is narrower than the rule: a marked
+quotation inside a Decision section passes it, and the second authoring rule
+above still forbids it (§3).
 
 ### No state claims in living documents
 
@@ -1168,17 +708,14 @@ check asserts it or a dated ADR records it.
   piece of work is finished. The test is where the sentence came from: an
   argument, or a measurement. Prefer the durable form — name the rule, and point
   at whatever actually holds the state.
-- **A fact a check owns is not a snapshot.** Say which check owns it, so a
-  reader can tell the two apart.
+- **A fact a check owns is not a snapshot.** Say which check owns it.
 - **A decision does not become a snapshot by describing a situation.** "You are
-  the only agent in this clone" is a premise these documents *set* (ADR-0015),
-  not a count someone took.
-- **ADRs are exempt**, and that is why the rule works: an ADR is dated, so "at
-  the time of writing, X" belongs there and stays correct as history. Do not
-  scrub snapshots out of `docs/adr/`.
+  the only agent in this clone" is a premise these documents *set* (ADR-0015).
+- **ADRs are exempt**: an ADR is dated, so "at the time of writing, X" belongs
+  there. Do not scrub snapshots out of `docs/adr/`.
 
-Enforced the way style is — by reviewers, reading the diff. There is
-deliberately no linter for it (ADR-0019 §5).
+Enforced by reviewers reading the diff; there is deliberately no linter for it
+(ADR-0019 §5).
 
 ## Testing
 
