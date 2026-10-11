@@ -40,11 +40,16 @@ class HeldResult:
     Attributes:
         result_id: The id acting minted for it, which its R label names.
         round_id: The planning round whose call brought it.
+        decision_id: The id of the decision that allowed the call, which names that
+            call alone within its round, so the step running digests beside acting can
+            find the call's *looking for* as soon as the result is held (ADR-0308
+            §4:2 to §4:3).
         content: The result as it arrived from the call, JSON ``null`` included.
     """
 
     result_id: str
     round_id: str
+    decision_id: str
     content: FrozenJsonValue
 
 

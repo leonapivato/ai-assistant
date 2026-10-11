@@ -87,7 +87,7 @@ def _document(messages: Sequence[Message]) -> dict[str, Any]:
 
 
 def _held(content: object = _PAGE, result_id: str = "result:1") -> HeldResult:
-    return HeldResult(result_id=result_id, round_id="r1", content=content)  # type: ignore[arg-type]
+    return HeldResult(result_id=result_id, round_id="r1", decision_id="d1", content=content)  # type: ignore[arg-type]
 
 
 def _stage(
@@ -395,6 +395,64 @@ async def test_a_deadline_passing_mid_call_fails_the_digest() -> None:
 
     assert (digested.digest.outcome, digested.digest.evidence) == (DigestOutcome.FAILED, ())
     assert [one["reason"] for one in logs if one["event"] == "digest_failed"] == ["deadline"]
+
+
+async def test_no_call_is_made_once_the_deadline_has_passed() -> None:
+    """§4:11: a part whose turn comes after the deadline is never sent.
+
+    The clock reads inside the budget once, and past the deadline at every read after,
+    as though cutting the parts had spent it: no part's call is made.
+    """
+    readings = iter([_AT, *([_DEADLINE + timedelta(seconds=1)] * 100)])
+    provider = _Provider(lambda _: _reply(("x", "D1")))
+    stage = DigestingStage(
+        provider=provider, recorder=_Recorder(), part_chars=1, now=lambda: next(readings)
+    )
+
+    with capture_logs() as logs:
+        digested = await _digest(stage, _held("abcdef"))
+
+    assert digested.digest.outcome is DigestOutcome.FAILED
+    assert provider.calls == []
+    assert [one["reason"] for one in logs if one["event"] == "digest_failed"] == ["deadline"]
+
+
+async def test_a_call_that_raises_cancelled_error_fails_the_digest() -> None:
+    """§4:11: a call that raises ``CancelledError`` while nothing cancelled it raised."""
+
+    def answer(_: Sequence[Message]) -> str:
+        raise asyncio.CancelledError
+
+    stage, recorder = _stage(_Provider(answer))
+
+    with capture_logs() as logs:
+        digested = await _digest(stage)
+
+    assert (digested.digest.outcome, digested.digest.evidence) == (DigestOutcome.FAILED, ())
+    assert recorder.recorded == [(digested.digest, digested.labels)]
+    assert [one["reason"] for one in logs if one["event"] == "digest_failed"] == ["raised"]
+
+
+async def test_a_digest_cancelled_from_outside_is_cancelled() -> None:
+    """A cancellation of the digest itself unwinds: nothing is recorded or swallowed."""
+    entered = asyncio.Event()
+
+    class _Waiting:
+        async def complete(
+            self, messages: Sequence[Message], *, model: str | None = None
+        ) -> Message:
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError
+
+    stage, recorder = _stage(_Waiting())
+    task = asyncio.create_task(_digest(stage))
+    await entered.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert recorder.recorded == []
 
 
 # --- recording ---------------------------------------------------------------------------

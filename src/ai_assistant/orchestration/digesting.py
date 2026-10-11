@@ -333,6 +333,27 @@ class _Unparsable(Exception):  # noqa: N818 — a control-flow signal inside one
     """A part's reply did not parse as the one object asked for."""
 
 
+class _PartFailed(Exception):  # noqa: N818 — a control-flow signal inside one digest, never raised out
+    """A part failed for a reason §4:11 names, carried as a code-owned word."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _failure_reason(failed: ExceptionGroup[Exception]) -> str:
+    """The code-owned reason a failed digest is logged under.
+
+    ``deadline`` where a part found the deadline passed, ``unparsable`` where every
+    failure was a reply that did not parse, and ``raised`` otherwise.
+    """
+    parts = [one for one in failed.exceptions if isinstance(one, _PartFailed)]
+    if any(one.reason == "deadline" for one in parts):
+        return "deadline"
+    _, other = failed.split(_Unparsable)
+    return "unparsable" if other is None else "raised"
+
+
 def _parsed(content: str) -> _Proposed | None:
     """The reply as one object, or ``None``: never a partial one.
 
@@ -469,31 +490,40 @@ class DigestingStage:
         ``None`` is a failed digest (§4:11): a part's call raised, its reply did not
         parse, or the deadline passed before every part answered.
         """
+        parts = _parts(records, self._part_chars)
+        # The budget is read after the parts are cut, so their cutting is inside it,
+        # and each call reads the clock again before it is made (``_part``).
         remaining = (deadline - self._now()).total_seconds()
         if remaining <= 0:
             _log.info("digest_failed", stage="digesting", reason="deadline")
             return None
-        parts = _parts(records, self._part_chars)
         try:
             async with asyncio.timeout(remaining):
-                return await self._every_part(question, parts)
+                return await self._every_part(question, parts, deadline)
         except TimeoutError:
             _log.info("digest_failed", stage="digesting", reason="deadline")
             return None
         except ExceptionGroup as failed:  # §4:11: a call that raises fails the digest
-            _, other = failed.split(_Unparsable)
-            reason = "unparsable" if other is None else "raised"
-            _log.info("digest_failed", stage="digesting", reason=reason)
+            _log.info("digest_failed", stage="digesting", reason=_failure_reason(failed))
             return None
 
-    async def _every_part(self, question: str, parts: Sequence[Sequence[_Piece]]) -> list[_Kept]:
+    async def _every_part(
+        self, question: str, parts: Sequence[Sequence[_Piece]], deadline: datetime
+    ) -> list[_Kept]:
         """Every part's call, in parallel; the first to fail cancels the rest (§4:9)."""
         async with asyncio.TaskGroup() as group:
-            tasks = [group.create_task(self._part(question, part)) for part in parts]
+            tasks = [group.create_task(self._part(question, part, deadline)) for part in parts]
         return [one for task in tasks for one in task.result()]
 
-    async def _part(self, question: str, part: Sequence[_Piece]) -> list[_Kept]:
-        """One part's call: its records under local labels, and the items it kept."""
+    async def _part(self, question: str, part: Sequence[_Piece], deadline: datetime) -> list[_Kept]:
+        """One part's call: its records under local labels, and the items it kept.
+
+        Raises:
+            _PartFailed: If the deadline has passed before the call is made, or the
+                call raised ``CancelledError`` while nothing cancelled this part, which
+                is a call that raised and not a cancellation of the digest.
+            _Unparsable: If the reply does not parse.
+        """
         names: dict[_Record, str] = {}
         shown: list[dict[str, object]] = []
         for piece in part:
@@ -507,7 +537,15 @@ class DigestingStage:
             Message(role=Role.SYSTEM, content=_INSTRUCTION),
             Message(role=Role.USER, content=json.dumps(document, ensure_ascii=True)),
         )
-        reply = await self._provider.complete(messages)
+        if self._now() >= deadline:
+            raise _PartFailed("deadline")
+        try:
+            reply = await self._provider.complete(messages)
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise  # the digest, or its group, was cancelled: let it unwind
+            raise _PartFailed("raised") from None
         proposed = _parsed(reply.content)
         if proposed is None:
             raise _Unparsable
