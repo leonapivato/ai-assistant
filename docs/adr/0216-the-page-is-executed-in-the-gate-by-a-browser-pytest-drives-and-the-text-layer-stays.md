@@ -1,6 +1,6 @@
 # 216. The page is executed in the gate by a browser `pytest` drives, and the text layer stays
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0310 (§3:4's one browser for the whole layer, as it reaches a test step split across jobs)
 - Date: 2026-08-29
 - **Note (2026-09-03): §4's rationale names a `usefixtures` mark
   `tests/interfaces/gateway/test_gateway.py` no longer carries; read that clause as
@@ -34,6 +34,16 @@
   postdates it — ADR-0070 §1's second term — with no other ADR as its cause, so it is
   recorded as this appended dated note, the ratified text below is **not** rewritten,
   and no `Status` edit is owed (ADR-0082 §1). Refs #1988, #1058, #1395, PR #1987.
+- Partially superseded: 2026-10-11 by
+  [ADR-0310](0310-cis-gate-may-split-its-test-step-across-parallel-jobs-and-the-triad-evidence-stays-in-one.md)
+  — **where CI splits its test step across jobs, the browser layer may be divided
+  among them, one browser per job.** Replaced: §3:4's second sentence, "The
+  browser is started once and shared by every case in the layer", as it reaches
+  such a split. There the browser is started once per job holding a share and
+  shared across that share. Kept: §3:4's first sentence for every `pytest` run,
+  and the whole clause for any single run, local runs included. Everything else
+  stands. ADR-0310 §3 has every test job install the browser, so §6:2 holds job
+  by job.
 
 ## Context
 

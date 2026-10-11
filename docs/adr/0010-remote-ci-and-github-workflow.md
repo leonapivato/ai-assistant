@@ -1,6 +1,6 @@
 # 10. Remote CI and the GitHub collaboration workflow
 
-- Status: Partially superseded by ADR-0167 (the "Branch protection (pragmatic)" clause's administrator-bypass and approving-review bullets, and the settings-change route to tightening)
+- Status: Partially superseded by ADR-0167 (the "Branch protection (pragmatic)" clause's administrator-bypass and approving-review bullets, and the settings-change route to tightening) and ADR-0310 (the "Remote gate" clause's one job `gate` running the five steps in order)
 - Date: 2026-07-18
 - Amended: 2026-08-22 (the gate's `pytest` step is distributed — see the
   dated section at the end). It is still the same five steps over the whole
@@ -43,6 +43,16 @@
   text is rewritten (ADR-0070 §1), and the record sits in this note rather than
   as a `Status` qualifier because the line now leads with the supersession token
   (ADR-0082 §2).
+- Partially superseded: 2026-10-11 by
+  [ADR-0310](0310-cis-gate-may-split-its-test-step-across-parallel-jobs-and-the-triad-evidence-stays-in-one.md)
+  — **the five steps may run as several parallel jobs, with `gate` as the one job
+  that passes only when every part passed.** Replaced in the "Remote gate" clause:
+  that job `gate` runs the five steps, and that their order mirrors the local gate
+  across the workflow. Kept: the five Definition-of-Done steps, on every pull
+  request and every push to `main`, against the locked environment, as the same
+  gate on neutral ground. The 2026-08-22 amendment's "nothing is deselected,
+  skipped or split across jobs" describes ADR-0179 as it stood that day; ADR-0179's
+  own header now records the change.
 
 ## Context
 
