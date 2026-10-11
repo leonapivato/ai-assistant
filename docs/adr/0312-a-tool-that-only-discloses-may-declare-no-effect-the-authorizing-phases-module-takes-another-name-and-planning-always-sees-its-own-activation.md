@@ -1,6 +1,6 @@
 # 312. A tool that only discloses may declare no effect, the authorizing phase's module takes another name, and planning always sees its own activation
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Scope: the phases after understanding, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): three corrections to [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md)–[ADR-0309](0309-the-phases-are-built-beside-the-old-path-and-one-cutover-switches-the-controller-over-deletes-the-old-path-and-goes-live-in-one-deploy.md), found while starting to build them. The first two settle contradictions between ratified texts; the third ([#2838](https://github.com/leonapivato/ai-assistant/issues/2838)) settles a literal reading against the owner's ruling it came from.
 - Authorization: the dispatcher assigned 0312 and authorized ratifying it once its reviews are green. The owner approved adding the third correction on 2026-10-11. It changes no owner ruling: the web search has no effect in the world (ADR-0309 §4:2), and the owner-only rule governs planning's views of other episodes and stories (ADR-0307 §6:4); §2 makes the first buildable, and §4 confines the second to what it was about.
