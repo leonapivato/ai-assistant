@@ -5,7 +5,7 @@
 - Scope: the phases after understanding ([#2723](https://github.com/leonapivato/ai-assistant/pull/2723)), milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)), the first of their four decisions: what a capability declares, how the assistant's own records are declared, how authorizing checks a call until the authority milestone, and how acting runs, claims and records calls. The planning decision, the digesting decision and the cutover decision are the other three.
 - Dependency: the story calls ADR-0300 §10, ADR-0303 §9 and ADR-0304 §9 declare, and ADR-0297's stop, all implemented at `5166d5bc`.
 - Authorization: the owner accepted proposal #2723 on 2026-10-11 and, the same day, ruled this decision's content in a pass over it. The dispatcher assigned 0306. This ADR is the proposal's §4 and §5 converted under `docs/proposals/README.md` → "When it is decided". Those rulings authorize ratifying it once its reviews are green, for as long as it settles only what they leave open.
-- **Changes `core`, so it is a contract-surface decision.** `ToolDefinition` gains five required fields, and `ToolResult` and `PermissionDecision` one each; `PlanStore` gains three members and `PlanExport` one field; six types are new. `ToolDefinition` crosses the wire, so `PROTOCOL_VERSION` advances (§6).
+- **Changes `core`, so it is a contract-surface decision.** `ToolDefinition` gains five required fields and `PermissionDecision` one; `PlanStore` gains three members and `PlanExport` one field; four types are new. `ToolDefinition` crosses the wire, so `PROTOCOL_VERSION` advances (§6).
 - **Partially supersedes**, each for the calls the phases run alone (§1:3), except the first, which reaches every declaration:
   [ADR-0016](0016-tool-definition-and-registry.md) (§1's `ToolDefinition` field list, in the addition alone);
   [ADR-0037](0037-joining-selection-permission-and-execution.md) (§4: a `CONFIRM` parks the step);
@@ -111,6 +111,10 @@ and refusing a repeat its capability says is unsafe.
 > **Normative.** A declaration whose `side_effecting` is true while its effect is none,
 > or false while its effect is not none, does not validate.
 
+> **Normative.** A declaration whose outcome cannot be unknown, whose effect is not the
+> assistant's own records, and whose `interrupted_outcome` is `indeterminate` does not
+> validate.
+
 > **Normative.** Every tool satisfying one capability declares the same five properties,
 > and the hub offers planning no capability whose tools disagree.
 
@@ -145,9 +149,19 @@ keep a value no planner wrote from making two equal calls look different.
 > safe to repeat, so §5's backstop stops the same memory being written twice in a matter.
 > It never leaves the hub, its outcome is never unknown, and it returns none.
 
+> **Normative.** A call whose effect is the assistant's own records, and a read of them,
+> runs directly against the store it reaches (ADR-0292 §12:1, §12:3), not through
+> `ToolInvoker`. No deadline or cancellation cuts it short: it is awaited to its end, and
+> its outcome is what that store answered.
+
 > **Normative.** A memory search, and a pull such as the calendar, each declare a result
 > that may carry outside text. This is the decision ADR-0208 §1:2 asks for: planning may
 > call a memory search.
+
+`interrupted_outcome` classifies a call the invocation seam cut short (ADR-0029 §4,
+ADR-0031 §1). A call to the assistant's own records is never such a call, which is how
+*never unknown* holds for a story start or a remembered fact that is not safe to repeat.
+§2's validator keeps every other declaration honest against that classification.
 
 Reading a story is declared with the class's effect, as ADR-0300 §10:5 already declares
 it. The read writes no effect record, being safe to repeat and not in the world, so the
@@ -231,7 +245,8 @@ every answer after a web search would need you.
 > not done, or whose outcome is unknown, carries no position.
 
 > **Normative.** A claimed record given no outcome, as after a crash, is never resolved by
-> guessing and never reported as done. How it is recovered in detail is #2584's.
+> guessing and never reported as done. How it is recovered in detail is #2584's; for a
+> call to the assistant's own records, the recovery reads the store the call wrote.
 
 > **Normative.** A call that leaves the hub and gets an effect record transmits under that
 > claim, which is its attempt: the record names the deciding `PermissionDecision`, which
@@ -256,16 +271,19 @@ every answer after a web search would need you.
 > **Normative.** An unknown outcome is never retried, done another way, or reported as
 > done.
 
-> **Normative.** A result is routed record by record, by who wrote the text: text someone
-> other than the user or the assistant wrote goes to a digest (the digesting decision),
-> and the rest goes to planning. For a web search that is all of it; for a memory search
-> it is the records whose stored source is outside.
+> **Normative.** A result that may carry outside text is routed record by record, by who
+> wrote the text: text someone other than the user or the assistant wrote goes to a
+> digest (the digesting decision), and the rest goes to planning. For a web search that is
+> all of it; for a memory search it is the records whose stored source is outside. A
+> result declared to carry no outside text goes to planning whole.
 
-> **Normative.** A record whose writer is not known counts as outside, and a result that
-> names no writers is one record whose writer is not known.
+> **Normative.** A record whose writer is not known counts as outside. A result returned
+> through `ToolInvoker` is one record whose writer is not known.
 
-> **Normative.** A memory record's stored source is outside where ADR-0106 §1's
-> `rests_on_recorded_external_content` holds for it.
+> **Normative.** A direct read of the assistant's own records is routed by each record's
+> stored provenance: a memory record's source is outside where ADR-0106 §1's
+> `rests_on_recorded_external_content` holds for it, and a record that carries no
+> provenance is outside.
 
 > **Normative.** No lane adds a lock under this decision; locks come with the concurrency
 > milestone.
@@ -293,12 +311,10 @@ asks for, with the record in place of a plan step: the phases run no plan steps.
 
 | Code | Change |
 | --- | --- |
-| `ToolDefinition` | Gains `effect: CapabilityEffect`, `leaves_hub: bool`, `result: CapabilityResult`, `outcome_can_be_unknown: bool` and `safe_to_repeat: bool`, all required (§2:1–§2:2), and the validator §2:5 states |
+| `ToolDefinition` | Gains `effect: CapabilityEffect`, `leaves_hub: bool`, `result: CapabilityResult`, `outcome_can_be_unknown: bool` and `safe_to_repeat: bool`, all required (§2:1–§2:2), and the validators §2:5–§2:6 state |
 | `CapabilityEffect`, `CapabilityResult` | New closed enumerations: `none`, `own_records`, `world`; and `none`, `no_outside_text`, `may_carry_outside_text` |
-| `ToolResult` | Gains `records: tuple[ResultRecord, ...]`, defaulting to empty, which §5:14 reads as one record whose writer is not known |
-| `ResultRecord`, `ResultWriter` | New: a record's `output` and its `writer: ResultWriter \| None`; the writers are `user`, `assistant` and `outside` |
 | `ActivationEffect` | New frozen record: its id; its activation; for a call, the capability, a digest of its values and the deciding decision's id; for a message, its place and, once the medium has recorded it, its position; its `ToolOutcome` once known (`succeeded` is done, `failed` not done, `indeterminate` unknown); the reason where not done; and when it was claimed |
-| `PlanStore` | Gains `claim_activation_effect`, which writes an `ActivationEffect` under §5:4 and answers an `ActivationEffectClaim` (`claimed` or `already_done`) or raises `ClaimStopped`; `finish_activation_effect`, which writes the outcome and, for a message the medium recorded, its position (§5:5); and `activation_effects`, which reads the records of the activations it is given |
+| `PlanStore` | Gains `claim_activation_effect`, `finish_activation_effect` and `activation_effects`, as §6:2–§6:5 state |
 | `PlanExport` | Gains `activation_effects`; `schema_version` advances by one |
 | `PlanStore.claim_effect`, `EffectKey`, `EffectClaim`, `EffectRecord` | Unchanged; the old path keeps them until the cutover decision retires them, and the phases do not call them |
 | `PermissionDecision` | Gains `effect: DurableIdentifier \| None`, the id of the `ActivationEffect` a phases call is claimed under, minted before the ruling and set on every decision about a call that gets one (§5:7); `authorises` does not compare it |
@@ -308,6 +324,31 @@ asks for, with the record in place of a plan step: the phases run no plan steps.
 > **Normative.** The `core` types and `PlanStore` members the table names change, or are
 > added, as the table states, and land as one Protocol triad with the conformance suite
 > and the canonical fake, in the lane that builds acting.
+
+> **Normative.** `PlanStore.claim_activation_effect(effect: ActivationEffect, /, *,
+> match: tuple[str, ...] | None) -> ActivationEffectClaim` is `async` and writes `effect`,
+> carrying no outcome, in one indivisible step: it raises `ClaimStopped` where the store
+> holds a stop record for the effect's activation, answers `already_done` and writes
+> nothing where `match` is a tuple and a record of an activation it names carries the same
+> capability and values digest and an outcome of done, of unknown, or none yet, and
+> otherwise writes the record and answers `claimed`. A claim of an id the store already
+> holds is refused with `PlanningError`, writing nothing.
+
+> **Normative.** Orchestration supplies `match`, and the plan store reads no story: for a
+> call to a capability that is not safe to repeat and not marked a deliberate repeat it is
+> this activation's id and the activations of the episodes in its stories, collected from
+> the story store when the round is authorized; for every other claim it is `None`.
+
+> **Normative.** `PlanStore.finish_activation_effect(effect_id: str, /, outcome:
+> ToolOutcome, *, reason: str | None = None, position: int | None = None) -> None` is
+> `async` and writes the outcome, the reason where not done, and a message's position, once.
+> A record it does not hold, a record already finished, a reason on an outcome other than
+> not done, and a position on anything but a message done are refused with
+> `PlanningError`, writing nothing.
+
+> **Normative.** `PlanStore.activation_effects(activation_ids: Sequence[str], /) ->
+> tuple[ActivationEffect, ...]` is `async` and returns the records of the named
+> activations, finished or not, in the order they were claimed.
 
 > **Normative.** The change that adds the five fields to `ToolDefinition` advances
 > `PROTOCOL_VERSION`, on ADR-0124 §9's rule, as does any change here to another shape the
