@@ -1,6 +1,6 @@
 # 208. `recall_memory` leaves the default tool set, and the turn's supply is retrieved at one site
 
-- Status: Partially superseded by ADR-0226 (§1's one-site clause alone — the turn path gains a second relevance-selection site, a planner-named sighted query the loop services after planning; §1's four other clauses, its keyed-load clause and both tool clauses among them, and every other section stand)
+- Status: Partially superseded by ADR-0226 (§1's one-site clause alone — the turn path gains a second relevance-selection site, a planner-named sighted query the loop services after planning; §1's four other clauses, its keyed-load clause and both tool clauses among them, and every other section stand) and ADR-0306 (§1:1's *no memory tool is among them*, §1:2, §1:3 and §1:5, for the phases: planning may call a memory search)
 - Date: 2026-08-28
 - **Partially superseded: 2026-09-02 by ADR-0226 — §1's one-site clause, and no
   other clause of §1.** The offline replay recorded on **#1844** on 2026-09-01
@@ -58,6 +58,14 @@
   qualifier, per ADR-0082 §2, and none is owed. Appended note per ADR-0070 §1; no
   text below is rewritten. This note lands in the same change as ADR-0226 itself,
   which is the existence condition ADR-0082 §7 states. Refs #1844, #1732, #1908.
+- Partially superseded: 2026-10-11 by ADR-0306 — four clauses, for the phases:
+  §1:1's *no memory tool is among them*, §1:2, §1:3 as ADR-0226 left it, and §1:5. A
+  memory search is a capability planning may call, which is the decision §1:2 asks for; a
+  turn's records are read for relevance at that call as well; and a phase obtains records
+  by a call. Every other clause stands. The old turn loop keeps the replaced text until
+  the cutover decision removes it. This scoped replacement takes effect on ratification of
+  ADR-0306. This reciprocal header record accompanies the numbered draft under ADR-0070
+  and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 297. A stop is marked on the activation and recorded where claims are decided
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0306 (§2:11's *and at no other write*, in the addition alone: the phases' effect claim is also refused on a stop record)
 - Date: 2026-10-05
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: how a stop bites, which ships with the conversation channel (ADR-0293 §11:8, ADR-0295 §6).
 - Dependency: ADR-0295, ratified.
@@ -9,6 +9,13 @@
 - **Partially supersedes** [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) — **two scopes, each for a pass whose stop has been taken in.** **§3:3's step**: the controller reads the stop before it evaluates the rules and once a stage's result is in hand, and leaves the loop on it (§4 below). **§5:2's fixed default**: a stage that failed or timed out after the stop was taken in ends the pass with the stop's end entry, and its error is not re-raised (§4 below). Every other clause stands, and both clauses stand entire for every pass no stop reaches.
 - **Partially supersedes** [ADR-0170](0170-a-reply-is-not-a-tool-the-turn-composes-its-answer-and-the-outcome-carries-it.md) — **one scope.** **§4:1's shapes on which `reply` is `None`, in the addition alone**: a fourth, the outcome of a resume a stop ended, marked by `TurnOutcome.stopped` and never `reply_degraded`, stated in both directions by §4:3's validator (§4 below). §4:2's flag rule stands entire: `reply_degraded` is not set on the new shape. Every other clause stands.
 - **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **three scopes.** **§4:1's `ProcessingReason` values, in the addition alone**: `stopped`. **§5:3's table, in the addition alone**: a first row, *a stop ended the pass*, classified `interrupted / stopped`. **§5:6's *"original outward exception … remain[s] intact"*, for a stopped pass alone**: a turn call awaiting it raises `ActivationStoppedError`, and a stopped resume returns its outcome with no reply (§4 below). Every other clause stands.
+- Partially superseded: 2026-10-11 by ADR-0306 — one scope. §2:11's *and at no other
+  write*, in the addition alone: the phases' claim of a call or a message,
+  `PlanStore.claim_activation_effect`, is also refused on a stop record, in the same
+  indivisible step. Every other clause stands, `claim_effect` included. This scoped
+  replacement takes effect on ratification of ADR-0306. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the
+  ratified body below are preserved.
 
 ## Context
 
