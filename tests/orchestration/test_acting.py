@@ -16,6 +16,8 @@ import pytest
 from ai_assistant.core.errors import AuthorisationSpentError
 from ai_assistant.core.types import (
     ActionRequest,
+    ActivationEffect,
+    ActivationEffectClaim,
     CapabilityEffect,
     CapabilityResult,
     CostBasis,
@@ -415,8 +417,13 @@ async def test_a_call_on_the_assistants_own_records_is_awaited_to_its_end() -> N
     assert record.outcome is ToolOutcome.SUCCEEDED
 
 
-async def test_a_cancelled_invocation_is_finished_as_its_declaration_says() -> None:
-    """A call cut short is recorded by its ``interrupted_outcome``, never as done."""
+async def test_a_cancelled_invocation_leaves_its_record_unfinished() -> None:
+    """§5:6: acting cannot read what the ledger recorded, so it guesses nothing.
+
+    The seam may have completed the call ``succeeded`` before the cancellation reached
+    acting; writing an interrupted outcome would contradict it, and the finish is
+    written once. The unfinished record counts as done for the backstop (§5:11).
+    """
     plans = FakePlanStore(now=_now)
     invoker = _Invoker()
     invoker.release = asyncio.Event()
@@ -430,7 +437,51 @@ async def test_a_cancelled_invocation_is_finished_as_its_declaration_says() -> N
         await task
 
     (record,) = await plans.activation_effects(["act-1"])
-    assert record.outcome is ToolOutcome.INDETERMINATE
+    assert record.outcome is None
+    repeat = await _stage(plans).act(
+        _round(_authorized("book", decision="d2", effect="e2", deliberate_repeat=True))
+    )
+    assert repeat.calls[0].outcome is ActedOutcome.NOT_DONE
+
+
+class _RewritingPlanStore(FakePlanStore):
+    """A plan store that runs ``during_claim`` while a claim is in flight."""
+
+    def __init__(self, during_claim: Callable[[], None]) -> None:
+        super().__init__(now=_now)
+        self._during_claim = during_claim
+
+    async def claim_activation_effect(
+        self, effect: ActivationEffect, /, *, match: tuple[str, ...] | None, **rest: Any
+    ) -> ActivationEffectClaim:
+        self._during_claim()
+        return await super().claim_activation_effect(effect, match=match, **rest)
+
+
+async def test_the_call_claimed_is_the_call_invoked_whatever_the_caller_rewrites() -> None:
+    """§5:8, §5:9: one detached snapshot is claimed, invoked and recorded.
+
+    The caller's object is rewritten past ``frozen=True`` while the claim is in
+    flight, as ADR-0018 §3 puts in the threat model; the invoker still receives the
+    values the record's digest was taken over.
+    """
+    original = _authorized("book", effect="e1", parameters={"date": "2026-11-01"})
+    other = _authorized("book", effect="e1", parameters={"date": "2026-11-02"})
+
+    def rewrite() -> None:
+        original.call.__dict__["request"] = other.call.request
+        original.call.__dict__["decision"] = other.call.decision
+
+    plans = _RewritingPlanStore(rewrite)
+    invoker = _Invoker()
+    expected = values_digest(original.call)
+
+    await _stage(plans, invoker).act(_round(original))
+
+    (invoked,) = invoker.calls
+    assert invoked.request.parameters["date"] == "2026-11-01"
+    (record,) = await plans.activation_effects(["act-1"])
+    assert record.values_digest == expected == values_digest(invoked)
 
 
 async def test_a_sibling_that_raises_does_not_abandon_a_claimed_call() -> None:

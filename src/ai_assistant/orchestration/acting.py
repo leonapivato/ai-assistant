@@ -32,8 +32,8 @@ the invocation and names the deciding decision, which names it.
 record: ``succeeded`` is done, ``failed`` not done with a code-owned reason, and
 ``indeterminate`` unknown. **An unknown outcome is never retried, done another way, or
 reported as done** (§5:13); nothing here retries anything. A call cancelled mid-flight
-is finished with its declaration's ``interrupted_outcome``, the rule the invocation
-seam applies to a deadline, before the cancellation leaves.
+leaves its record unfinished: acting cannot read what the invocation ledger recorded,
+and an unfinished record is never resolved by guessing (§5:6).
 
 **Where a result goes** (§5:14 to §5:15). A result declared to carry no outside text goes
 to planning whole. A result that may carry outside text and came back through
@@ -59,12 +59,12 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import structlog
+from pydantic import ValidationError
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import (
     AuditError,
     ClaimStopped,
-    PlanningError,
     SpendError,
     ToolBindingError,
 )
@@ -74,7 +74,9 @@ from ai_assistant.core.types import (
     CapabilityEffect,
     CapabilityResult,
     EgressBinding,
+    ToolCall,
     ToolOutcome,
+    ToolResult,
     canonical_json_bytes,
 )
 from ai_assistant.orchestration.activation_cleanup import drain_registered
@@ -86,9 +88,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         FrozenJson,
         FrozenJsonValue,
-        ToolCall,
         ToolDefinition,
-        ToolResult,
     )
 
 __all__ = [
@@ -139,7 +139,6 @@ _OUTCOMES: Final = {
 _STOPPED: Final = "the activation was stopped before this call was claimed"
 _ALREADY_DONE: Final = "already done: an equal call was made in this matter"
 _REFUSED: Final = "refused before the call was made"
-_INTERRUPTED: Final = "interrupted before the call finished"
 
 
 def gets_effect_record(tool: ToolDefinition) -> bool:
@@ -359,6 +358,12 @@ class ActingStage:
         Every call is let finish before this returns or raises, so a claimed call is
         never abandoned because a sibling failed.
 
+        **Each call is revalidated and detached before the first ``await``**, and the
+        claim, the invocation and the record all read that one snapshot. A caller's
+        object can be rewritten past ``frozen=True`` while a claim is in flight, and a
+        call claimed as one set of values and invoked as another would let the
+        duplicate backstop check values that never ran (§5:9).
+
         Args:
             authorized: The round's allowed calls.
 
@@ -366,12 +371,18 @@ class ActingStage:
             Each call's outcome, in the round's order.
 
         Raises:
+            ToolBindingError: If a call does not survive revalidation. Raised before
+                anything is claimed or run.
             Exception: Whatever a call's seam raised beyond the refusals handled here,
                 alone where one call raised and as an ``ExceptionGroup`` where several
                 did.
         """
+        activation_id = str(authorized.activation_id)
+        round_id = str(authorized.round_id)
+        match = tuple(str(one) for one in authorized.match)
+        snapshots = [_snapshot(one) for one in authorized.calls]
         answers = await asyncio.gather(
-            *(self._act(authorized, one) for one in authorized.calls),
+            *(self._act(activation_id, round_id, match, one) for one in snapshots),
             return_exceptions=True,
         )
         acted: list[ActedCall] = []
@@ -388,18 +399,20 @@ class ActingStage:
         if errors:
             msg = "acting: several calls raised"
             raise ExceptionGroup(msg, errors)
-        return ActedRound(round_id=authorized.round_id, calls=tuple(acted))
+        return ActedRound(round_id=round_id, calls=tuple(acted))
 
-    async def _act(self, authorized: AuthorizedRound, one: AuthorizedCall) -> ActedCall:
-        """Claim one call where it gets a record, run it, and finish the record."""
+    async def _act(
+        self, activation_id: str, round_id: str, match: tuple[str, ...], one: AuthorizedCall
+    ) -> ActedCall:
+        """Claim one detached call where it gets a record, run it, and finish the record."""
         call = one.call
         tool = call.request.tool
         effect_id = call.decision.effect
         if effect_id is not None:
             record = ActivationEffect(
                 id=effect_id,
-                activation_id=authorized.activation_id,
-                round=authorized.round_id,
+                activation_id=activation_id,
+                round=round_id,
                 capability=tool.capability,
                 values_digest=values_digest(call),
                 decision_id=call.decision.id,
@@ -408,7 +421,7 @@ class ActingStage:
             try:
                 answer = await self._plans.claim_activation_effect(
                     record,
-                    match=None if tool.safe_to_repeat else authorized.match,
+                    match=None if tool.safe_to_repeat else match,
                     deliberate_repeat=one.deliberate_repeat,
                 )
             except ClaimStopped:
@@ -425,16 +438,24 @@ class ActingStage:
 
     async def _on_own_records(self, one: AuthorizedCall, effect_id: str | None) -> ActedCall:
         """Run a call against the assistant's own records, then finish its record."""
-        result = await self._own_records.run(one.call)
+        result = _detached_result(await self._own_records.run(one.call))
         if effect_id is not None:
             await self._finish(effect_id, result)
         return _acted(one, result, effect_id)
 
     async def _through_invoker(self, one: AuthorizedCall, effect_id: str | None) -> ActedCall:
-        """Send a call through ``ToolInvoker``, under its ledger claim (ADR-0306 §5:7)."""
-        tool = one.call.request.tool
+        """Send a call through ``ToolInvoker``, under its ledger claim (ADR-0306 §5:7).
+
+        **A cancellation leaves the record unfinished.** The invocation seam may have
+        completed its ledger row with any outcome before the cancellation reached
+        this frame, and acting holds no read of that row, so it cannot know what the
+        call did. Writing the declaration's ``interrupted_outcome`` would contradict
+        a ``succeeded`` the ledger holds, and the finish is written once. An
+        unfinished record is never resolved by guessing and counts as done for the
+        backstop (§5:6, §5:11); its recovery is #2584's.
+        """
         try:
-            result = await self._invoker.invoke(one.call, timeout=self._timeout)
+            result = _detached_result(await self._invoker.invoke(one.call, timeout=self._timeout))
         except _REFUSED_BEFORE_THE_CALL as error:
             _log.info("acting_call_not_done", stage="acting", reason=type(error).__name__)
             if effect_id is not None:
@@ -442,10 +463,6 @@ class ActingStage:
                     effect_id, ToolOutcome.FAILED, reason=_REFUSED
                 )
             return ActedCall(one, ActedOutcome.NOT_DONE, reason=_REFUSED, effect_id=effect_id)
-        except asyncio.CancelledError:
-            if effect_id is not None:
-                await self._finish_interrupted(effect_id, tool.interrupted_outcome)
-            raise
         if effect_id is not None:
             await self._finish(effect_id, result)
         return _acted(one, result, effect_id)
@@ -456,21 +473,27 @@ class ActingStage:
             effect_id, result.outcome, reason=_reason(result)
         )
 
-    async def _finish_interrupted(self, effect_id: str, outcome: ToolOutcome) -> None:
-        """Finish a cancelled call's record before the cancellation leaves.
 
-        Run as its own task and drained, so a further cancellation cannot cut the
-        write short; a failure to write leaves the record unfinished, which recovery
-        reads and never resolves by guessing (§5:6).
-        """
-        reason = _INTERRUPTED if outcome is ToolOutcome.FAILED else None
-        write = asyncio.ensure_future(
-            self._plans.finish_activation_effect(effect_id, outcome, reason=reason)
-        )
-        try:
-            await drain_registered(write, cancel_on_interrupt=False)
-        except PlanningError, asyncio.CancelledError:
-            _log.warning("acting_finish_not_written", stage="acting", reason="cancelled")
+def _snapshot(one: AuthorizedCall) -> AuthorizedCall:
+    """Revalidate and detach one call, as the executor does before its claim.
+
+    Rebuilt through validation, so nothing the caller still holds reaches what is
+    claimed or invoked, and the call's own checks run again on the copy.
+
+    Raises:
+        ToolBindingError: If the call does not survive revalidation.
+    """
+    try:
+        call = ToolCall.model_validate(one.call.model_dump())
+        return AuthorizedCall(call, deliberate_repeat=bool(one.deliberate_repeat))
+    except (ValidationError, ValueError) as exc:
+        msg = "the call did not survive revalidation, so it is not the call that was authorised"
+        raise ToolBindingError(msg) from exc
+
+
+def _detached_result(result: ToolResult) -> ToolResult:
+    """The seam's result, revalidated and detached before it is recorded or routed."""
+    return ToolResult.model_validate(result.model_dump())
 
 
 def _reason(result: ToolResult) -> str | None:
