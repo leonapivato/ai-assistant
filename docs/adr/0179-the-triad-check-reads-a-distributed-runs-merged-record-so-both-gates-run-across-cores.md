@@ -1,7 +1,19 @@
 # 179. The Protocol-triad check reads a distributed run's merged record, so both gates run across cores
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0310 (§3:1's refusal to split the test step across jobs, and its order across them)
 - Date: 2026-08-22
+- Partially superseded: 2026-10-11 by
+  [ADR-0310](0310-cis-gate-may-split-its-test-step-across-parallel-jobs-and-the-triad-evidence-stays-in-one.md)
+  — **CI's `gate` may run its test step as several parallel jobs over one
+  partition of the suite. Everything else this ADR decided stands.** Replaced in
+  §3:1: "or split across jobs", "nothing is deselected" as it reaches the
+  partition's assignment of an item to another job, and "order" across jobs. Kept
+  in §3:1: each job distributes across its runner's cores, the jobs together run
+  the whole suite, ADR-0010's five steps keep their number and kind, and nothing
+  else is deselected or skipped. §§1–2 stand unchanged: ADR-0310 §2 keeps every
+  item that can be triad evidence in one job, so the record never leaves one
+  session. This is a supersession rather than an amendment because §3:1 refused
+  the split in its own words (ADR-0070 §1).
 
 ## Context
 
