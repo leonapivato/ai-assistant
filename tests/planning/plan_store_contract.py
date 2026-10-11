@@ -44,6 +44,8 @@ from ai_assistant.core.types import (
     ActionPlan,
     ActionQuote,
     ActionQuoteMinting,
+    ActivationEffect,
+    ActivationEffectClaim,
     AttemptEffort,
     AttemptKind,
     AttemptOutcome,
@@ -87,6 +89,7 @@ from ai_assistant.core.types import (
     StepTransition,
     StepVerification,
     ToolFailureKind,
+    ToolOutcome,
     VerificationKind,
 )
 from ai_assistant.testing.cancellation import settle
@@ -124,6 +127,32 @@ _RELEASED_EARLY = (
     "the cancelled call released its resource while its own work was still "
     "running, so a second caller reached it concurrently"
 )
+
+
+def _effect(
+    effect_id: str,
+    *,
+    activation: str = "act-1",
+    capability: str = "book_stay",
+    values: str = "a" * 64,
+) -> ActivationEffect:
+    """A call's effect record as acting claims it (ADR-0306 §6), with no outcome."""
+    return ActivationEffect(
+        id=effect_id,
+        activation_id=activation,
+        round="r1",
+        capability=capability,
+        values_digest=values,
+        decision_id=f"d-{effect_id}",
+        claimed_at=_WHEN,
+    )
+
+
+def _message(effect_id: str, *, activation: str = "act-1") -> ActivationEffect:
+    """A message's effect record as claimed, with no outcome and no position."""
+    return ActivationEffect(
+        id=effect_id, activation_id=activation, round="r1", place="c-1", claimed_at=_WHEN
+    )
 
 
 class InjectedFaultError(Exception):
@@ -1093,6 +1122,69 @@ class _EvidenceOfOp(_EvidenceReadOp):
         return store.evidence_of("gB")
 
 
+class _ClaimActivationEffectOp:
+    """The ``claim_activation_effect`` write (ADR-0306 §6:2), on two activations.
+
+    Its stop, backstop and write are one indivisible step, so a release before its own
+    work finished would let a second claim decide against a record not yet written.
+    """
+
+    name = "claim_activation_effect"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Nothing: a claim names no row the store must already hold."""
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Claim activation A's effect — the call that is cancelled."""
+        return store.claim_activation_effect(_effect("eA", activation="act-A"), match=None)
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Claim activation B's effect concurrently."""
+        return store.claim_activation_effect(_effect("eB", activation="act-B"), match=None)
+
+    async def verify(self, store: PlanStore) -> None:
+        """Activation B's record landed whole; the store still serves reads."""
+        assert [one.id for one in await store.activation_effects(["act-B"])] == ["eB"]
+
+
+class _FinishActivationEffectOp:
+    """The ``finish_activation_effect`` write (ADR-0306 §6:4), on two records."""
+
+    name = "finish_activation_effect"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Two claimed records to finish."""
+        await store.claim_activation_effect(_effect("eA", activation="act-A"), match=None)
+        await store.claim_activation_effect(_effect("eB", activation="act-B"), match=None)
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Finish record A — the call that is cancelled."""
+        return store.finish_activation_effect("eA", ToolOutcome.SUCCEEDED)
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Finish record B concurrently."""
+        return store.finish_activation_effect("eB", ToolOutcome.FAILED)
+
+    async def verify(self, store: PlanStore) -> None:
+        """Record B carries its outcome; the store still serves reads."""
+        (held,) = await store.activation_effects(["act-B"])
+        assert held.outcome is ToolOutcome.FAILED
+
+
+class _ActivationEffectsOp(_ReadOp):
+    """``activation_effects`` — a read of acting's records, its own lock site."""
+
+    name = "activation_effects"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read the records — the call that is cancelled."""
+        return store.activation_effects(["act-1"])
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read them again concurrently."""
+        return store.activation_effects(["act-1"])
+
+
 class _ClaimEffectOp:
     """The ``claim_effect`` compare-and-swap (ADR-0259 §2).
 
@@ -1182,6 +1274,11 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _ClaimEffectOp,
     # ADR-0297 §1's member is one more lock site: the write a claim is decided against.
     _RecordStopOp,
+    # ADR-0306 §6's three members: two writes, one of them the indivisible claim, and a
+    # read that acquires the resource like every other.
+    _ClaimActivationEffectOp,
+    _FinishActivationEffectOp,
+    _ActivationEffectsOp,
 )
 
 
@@ -8827,3 +8924,260 @@ class PlanStoreContract:
             await store.record_stop("   ")
 
         assert (await store.export()).stopped_activations == ()
+
+    # --- ADR-0306 §6: acting's effect records ---------------------------------
+
+    async def test_a_claim_writes_the_record_with_no_outcome(self, store: PlanStore) -> None:
+        """§6:2: an unmatched claim writes the record and answers ``claimed``."""
+        record = _effect("e1")
+
+        assert await store.claim_activation_effect(record, match=None) is (
+            ActivationEffectClaim.CLAIMED
+        )
+
+        assert await store.activation_effects(["act-1"]) == (record,)
+        assert (await store.export()).activation_effects == (record,)
+
+    async def test_a_claim_carrying_an_outcome_is_refused(self, store: PlanStore) -> None:
+        """§5:4: a record is claimed before it runs, so it carries no outcome yet."""
+        finished = _effect("e1").model_copy(update={"outcome": ToolOutcome.SUCCEEDED})
+
+        with pytest.raises(PlanningError):
+            await store.claim_activation_effect(finished, match=None)
+
+        assert await store.activation_effects(["act-1"]) == ()
+
+    async def test_a_stopped_activation_claims_nothing(self, store: PlanStore) -> None:
+        """§6:2: a stop record refuses the claim with ``ClaimStopped``, writing nothing."""
+        await store.record_stop("act-1")
+
+        with pytest.raises(ClaimStopped):
+            await store.claim_activation_effect(_effect("e1"), match=("act-1",))
+
+        assert await store.activation_effects(["act-1"]) == ()
+
+    async def test_a_stop_of_another_activation_refuses_nothing(self, store: PlanStore) -> None:
+        """The stop is decided for the record's own activation alone."""
+        await store.record_stop("act-2")
+
+        assert await store.claim_activation_effect(_effect("e1"), match=None) is (
+            ActivationEffectClaim.CLAIMED
+        )
+
+    async def test_a_claim_of_a_held_id_is_refused(self, store: PlanStore) -> None:
+        """§6:2: an id the store already holds is refused with ``PlanningError``."""
+        await store.claim_activation_effect(_effect("e1"), match=None)
+
+        with pytest.raises(PlanningError):
+            await store.claim_activation_effect(_effect("e1", values="b" * 64), match=None)
+
+        assert [one.values_digest for one in await store.activation_effects(["act-1"])] == [
+            "a" * 64
+        ]
+
+    async def test_no_match_claims_an_equal_call_again(self, store: PlanStore) -> None:
+        """§6:3: a claim with ``match`` of ``None`` is never refused as already done."""
+        await store.claim_activation_effect(_effect("e1"), match=None)
+
+        assert await store.claim_activation_effect(_effect("e2"), match=None) is (
+            ActivationEffectClaim.CLAIMED
+        )
+
+    @pytest.mark.parametrize(
+        ("outcome", "deliberate", "expected"),
+        [
+            (None, False, ActivationEffectClaim.ALREADY_DONE),
+            (None, True, ActivationEffectClaim.ALREADY_DONE),
+            (ToolOutcome.INDETERMINATE, False, ActivationEffectClaim.ALREADY_DONE),
+            (ToolOutcome.INDETERMINATE, True, ActivationEffectClaim.ALREADY_DONE),
+            (ToolOutcome.SUCCEEDED, False, ActivationEffectClaim.ALREADY_DONE),
+            (ToolOutcome.SUCCEEDED, True, ActivationEffectClaim.CLAIMED),
+            (ToolOutcome.FAILED, False, ActivationEffectClaim.CLAIMED),
+            (ToolOutcome.FAILED, True, ActivationEffectClaim.CLAIMED),
+        ],
+        ids=[
+            "unwritten",
+            "unwritten-deliberate",
+            "unknown",
+            "unknown-deliberate",
+            "done",
+            "done-deliberate",
+            "not-done",
+            "not-done-deliberate",
+        ],
+    )
+    async def test_the_backstop_reads_the_matching_effects_outcome(
+        self,
+        store: PlanStore,
+        outcome: ToolOutcome | None,
+        deliberate: bool,
+        expected: ActivationEffectClaim,
+    ) -> None:
+        """§5:9, §5:11, §6:2: unknown and unwritten count as done; not done does not.
+
+        A deliberate repeat passes a matching effect only where it is done.
+        """
+        await store.claim_activation_effect(_effect("e1"), match=None)
+        if outcome is not None:
+            await store.finish_activation_effect("e1", outcome)
+
+        answer = await store.claim_activation_effect(
+            _effect("e2", activation="act-2"),
+            match=("act-2", "act-1"),
+            deliberate_repeat=deliberate,
+        )
+
+        assert answer is expected
+        written = [one.id for one in await store.activation_effects(["act-2"])]
+        assert written == (["e2"] if expected is ActivationEffectClaim.CLAIMED else [])
+
+    async def test_already_done_writes_nothing(self, store: PlanStore) -> None:
+        """§6:2: ``already_done`` writes nothing, so the export holds the first alone."""
+        await store.claim_activation_effect(_effect("e1"), match=None)
+
+        await store.claim_activation_effect(_effect("e2"), match=("act-1",))
+
+        assert [one.id for one in (await store.export()).activation_effects] == ["e1"]
+
+    async def test_the_backstop_matches_only_the_named_activations(self, store: PlanStore) -> None:
+        """§5:9: an activation outside ``match`` is not matched against."""
+        await store.claim_activation_effect(_effect("e1", activation="act-9"), match=None)
+
+        assert await store.claim_activation_effect(_effect("e2"), match=("act-1",)) is (
+            ActivationEffectClaim.CLAIMED
+        )
+
+    @pytest.mark.parametrize(
+        "other",
+        [
+            {"capability": "send_email"},
+            {"values": "c" * 64},
+        ],
+        ids=["another-capability", "other-values"],
+    )
+    async def test_the_backstop_matches_capability_and_values_together(
+        self, store: PlanStore, other: dict[str, str]
+    ) -> None:
+        """§6:2: a match carries the same capability *and* the same values digest."""
+        await store.claim_activation_effect(_effect("e1"), match=None)
+
+        answer = await store.claim_activation_effect(_effect("e2", **other), match=("act-1",))
+
+        assert answer is ActivationEffectClaim.CLAIMED
+
+    async def test_a_message_is_never_matched(self, store: PlanStore) -> None:
+        """Only a call matches a call: a message carries no capability or values."""
+        await store.claim_activation_effect(_message("m1"), match=None)
+
+        assert await store.claim_activation_effect(_message("m2"), match=("act-1",)) is (
+            ActivationEffectClaim.CLAIMED
+        )
+
+    async def test_two_equal_claims_at_once_admit_one(self, store: PlanStore) -> None:
+        """§5 and §6:2: the claim is one indivisible step, so concurrent equal calls
+        in one round are one claimed and one already done."""
+        answers = await asyncio.gather(
+            store.claim_activation_effect(_effect("e1"), match=("act-1",)),
+            store.claim_activation_effect(_effect("e2"), match=("act-1",)),
+        )
+
+        assert sorted(answers) == sorted(
+            [ActivationEffectClaim.CLAIMED, ActivationEffectClaim.ALREADY_DONE]
+        )
+        assert len(await store.activation_effects(["act-1"])) == 1
+
+    async def test_a_finish_writes_the_outcome_once(self, store: PlanStore) -> None:
+        """§6:4: the outcome and the reason where not done are written once."""
+        await store.claim_activation_effect(_effect("e1"), match=None)
+
+        await store.finish_activation_effect("e1", ToolOutcome.FAILED, reason="refused")
+
+        (held,) = await store.activation_effects(["act-1"])
+        assert (held.outcome, held.reason) == (ToolOutcome.FAILED, "refused")
+        with pytest.raises(PlanningError):
+            await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
+        assert (await store.activation_effects(["act-1"])) == (held,)
+
+    async def test_a_finish_of_an_unheld_record_is_refused(self, store: PlanStore) -> None:
+        """§6:4: a record the store does not hold is refused, writing nothing."""
+        with pytest.raises(PlanningError):
+            await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
+
+        assert (await store.export()).activation_effects == ()
+
+    @pytest.mark.parametrize(
+        "outcome", [ToolOutcome.SUCCEEDED, ToolOutcome.INDETERMINATE], ids=["done", "unknown"]
+    )
+    async def test_a_reason_rides_only_on_not_done(
+        self, store: PlanStore, outcome: ToolOutcome
+    ) -> None:
+        """§6:4: a reason on an outcome other than not done is refused, writing nothing."""
+        await store.claim_activation_effect(_effect("e1"), match=None)
+
+        with pytest.raises(PlanningError):
+            await store.finish_activation_effect("e1", outcome, reason="because")
+
+        (held,) = await store.activation_effects(["act-1"])
+        assert held.outcome is None
+
+    async def test_a_position_rides_only_on_a_message_done(self, store: PlanStore) -> None:
+        """§6:4: a position on a call, or on a message not done, is refused."""
+        await store.claim_activation_effect(_effect("e1"), match=None)
+        await store.claim_activation_effect(_message("m1"), match=None)
+
+        with pytest.raises(PlanningError):
+            await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED, position=3)
+        with pytest.raises(PlanningError):
+            await store.finish_activation_effect("m1", ToolOutcome.FAILED, position=3)
+        assert all(one.outcome is None for one in await store.activation_effects(["act-1"]))
+
+        await store.finish_activation_effect("m1", ToolOutcome.SUCCEEDED, position=3)
+
+        message = (await store.activation_effects(["act-1"]))[1]
+        assert (message.outcome, message.position) == (ToolOutcome.SUCCEEDED, 3)
+
+    async def test_the_records_are_read_by_activation_in_claim_order(
+        self, store: PlanStore
+    ) -> None:
+        """§6:5: the named activations' records, finished or not, in claim order."""
+        await store.claim_activation_effect(_effect("e3", activation="act-2"), match=None)
+        await store.claim_activation_effect(_effect("e1"), match=None)
+        await store.claim_activation_effect(_effect("e2", activation="act-3"), match=None)
+        await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
+
+        read = await store.activation_effects(["act-1", "act-2"])
+
+        assert [one.id for one in read] == ["e3", "e1"]
+        assert read[1].outcome is ToolOutcome.SUCCEEDED
+        assert await store.activation_effects([]) == ()
+        assert await store.activation_effects(["act-unknown"]) == ()
+
+    async def test_a_bare_string_is_not_a_sequence_of_activations(self, store: PlanStore) -> None:
+        """A single id passed unwrapped would read each of its characters; refused."""
+        with pytest.raises(PlanningError):
+            await store.activation_effects("act-1")
+
+    async def test_the_export_carries_the_records_and_clear_erases_them(
+        self, store: PlanStore
+    ) -> None:
+        """§6's ``PlanExport.activation_effects``; ``clear`` erases them with the rest."""
+        await store.claim_activation_effect(_effect("e1"), match=None)
+        await store.claim_activation_effect(_message("m1"), match=None)
+        await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
+
+        export = await store.export()
+        assert export.schema_version == 18
+        assert [one.id for one in export.activation_effects] == ["e1", "m1"]
+        assert type(export).model_validate_json(export.model_dump_json()) == export
+
+        assert await store.clear() == 2
+        assert (await store.export()).activation_effects == ()
+
+    async def test_delete_goal_reaches_no_activation_effect(self, store: PlanStore) -> None:
+        """A record names an activation and no goal, so ``delete_goal`` leaves it."""
+        await store.save_goal(_goal())
+        await store.claim_activation_effect(_effect("e1"), match=None)
+
+        assert (await store.delete_goal("g1")).deleted
+
+        assert [one.id for one in await store.activation_effects(["act-1"])] == ["e1"]

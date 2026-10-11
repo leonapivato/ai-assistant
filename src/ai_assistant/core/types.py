@@ -18548,6 +18548,36 @@ class ToolDefinition(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _the_effect_agrees_with_side_effecting(self) -> ToolDefinition:
+        """Refuse an effect that ``side_effecting`` contradicts (ADR-0306 §2:5, ADR-0312 §2).
+
+        A call that changes the assistant's own records or the world is
+        side-effecting. A side-effecting call may declare no effect only where its one
+        side effect is disclosure: it writes nothing and discloses something, as the
+        web search and the forecast do. ADR-0016's consistency rules in
+        :meth:`_effects_are_consistent` run beside this one.
+
+        Raises:
+            ValueError: If the effect is not none while ``side_effecting`` is false, or
+                none while ``side_effecting`` is true and the declaration writes, or
+                discloses nothing.
+        """
+        if self.effect is not CapabilityEffect.NONE and not self.side_effecting:
+            msg = "a tool whose calls change records or the world is side-effecting"
+            raise ValueError(msg)
+        if (
+            self.effect is CapabilityEffect.NONE
+            and self.side_effecting
+            and (self.writes or not self.discloses)
+        ):
+            msg = (
+                "a side-effecting tool declares no effect only where its one side effect "
+                "is disclosure: it writes nothing and discloses something (ADR-0312 §2)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _an_unknown_outcome_is_declared(self) -> ToolDefinition:
         """Refuse a declaration that says its outcome is never unknown when it can be.
 
