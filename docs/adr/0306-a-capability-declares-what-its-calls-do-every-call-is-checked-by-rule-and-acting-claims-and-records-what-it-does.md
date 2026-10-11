@@ -1,6 +1,6 @@
 # 306. A capability declares what its calls do, every call is checked by rule, and acting claims and records what it does
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0307 (§6:1's `ActivationEffect`, in the addition alone: it also names the round whose call or message it claims)
 - Date: 2026-10-11
 - Scope: the phases after understanding ([#2723](https://github.com/leonapivato/ai-assistant/pull/2723)), milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)), the first of their four decisions: what a capability declares, how the assistant's own records are declared, how authorizing checks a call until the authority milestone, and how acting runs, claims and records calls. The planning decision, the digesting decision and the cutover decision are the other three.
 - Dependency: the story calls ADR-0300 §10, ADR-0303 §9 and ADR-0304 §9 declare, and ADR-0297's stop, all implemented at `5166d5bc`.
@@ -18,6 +18,12 @@
   [ADR-0265](0265-an-intended-action-has-a-stable-identity-minted-once-and-linked-to-the-goal-elements-it-serves.md) (§6: an effect claim keyed on the intended action);
   [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md) (§7:2's choice of place, until the timers and proactivity milestone);
   [ADR-0297](0297-a-stop-is-marked-on-the-activation-and-recorded-where-claims-are-decided.md) (§2:11's *and at no other write*, in the addition alone).
+- Partially superseded: 2026-10-11 by ADR-0307 — one scope. §6:1's `ActivationEffect`, in
+  the addition alone: it gains `round`, the round whose call or message it claims, `None`
+  only on the *couldn't finish* message, and lands with §6:1's triad (ADR-0307 §10). Every
+  other clause stands. This scoped replacement takes effect on ratification of ADR-0307.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 226. The planner names one more read beside its plan, and the loop services it into the supply
 
-- Status: Partially superseded by ADR-0228 (§2's second-emission clause, §3's second-level clause, §6's one-emission-per-turn clause, §7's re-planning prohibition together with its evaluation-timing phrase and its restatement that `Planner.plan`'s `memories` carries exactly three groups, and §8's trigger clause read as a test on the one plan a turn produced — a turn may make a second planner call over the supply the first plan's serviced read produced, and may service that plan's own request once; §2's at-most-one-ask-of-each-kind rule read per emission, §3's namer rule, no-identifier rule and ordinal scheme, §5's channel scoping and degradation posture, §6's budget of ten, cross-kind precedence and two-label cap, §7's fourth group, whole-union deduplication, discards-nothing-by-class clause and constructed-once rule, §9 entire, and §§1, 2, 4, 10, 11, 12 and 13 all stand)
+- Status: Partially superseded by ADR-0228 (§2's second-emission clause, §3's second-level clause, §6's one-emission-per-turn clause, §7's re-planning prohibition together with its evaluation-timing phrase and its restatement that `Planner.plan`'s `memories` carries exactly three groups, and §8's trigger clause read as a test on the one plan a turn produced — a turn may make a second planner call over the supply the first plan's serviced read produced, and may service that plan's own request once; §2's at-most-one-ask-of-each-kind rule read per emission, §3's namer rule, no-identifier rule and ordinal scheme, §5's channel scoping and degradation posture, §6's budget of ten, cross-kind precedence and two-label cap, §7's fourth group, whole-union deduplication, discards-nothing-by-class clause and constructed-once rule, §9 entire, and §§1, 2, 4, 10, 11, 12 and 13 all stand) and ADR-0307 (whole, for an activation the phases plan: planning's rounds replace the turn loop's read rounds)
 - Date: 2026-09-02
 - Amended: 2026-09-03 by ADR-0227 — §11 item 1's assertion *"the answer carries it"*
   stands and is not replaced; what it gains is the **fidelity requirement** under which
@@ -416,6 +416,13 @@
   This ADR's `Status` line carries the leading `Partially superseded by` token, so under
   ADR-0082 §2 no amendment qualifier is written on it and this note is the whole record.
   Appended note per ADR-0070 §1; no text below is rewritten. Refs #2255.
+- Partially superseded: 2026-10-11 by ADR-0307 — one scope. The whole decision, for an
+  activation the phases plan: planning's rounds replace the turn loop's read rounds
+  (ADR-0307 §2, §8). The old turn loop keeps this decision until the cutover decision
+  removes it. For every other activation, every clause stands. This scoped replacement
+  takes effect on ratification of ADR-0307. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
+  below are preserved.
 
 ## Context
 
