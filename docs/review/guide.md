@@ -42,15 +42,6 @@ inventing the fact. An invented count is not a lesser error than an invented lin
 of code; it reads exactly like grounding, and it costs the author a round to
 disprove (issue #1254).
 
-*Operator note, not a rule for the reviewer: the read-only sandbox has one
-switch. `CODEX_REVIEW_NO_SANDBOX=1` — and `GITHUB_ACTIONS` exactly `true`, which
-`scripts/codex-review.sh` treats the same way — runs Codex under
-`--dangerously-bypass-approvals-and-sandbox`: no sandbox at all, so the whole
-filesystem and the network are reachable, no session is kept, and the read-only
-proof of ADR-0025 §4 is skipped. It is there for CI-like environments where
-bubblewrap cannot set up its network namespace; do not set it for an ordinary
-local review.*
-
 ## Output contract
 
 Produce a **ranked list, most severe first**. For each finding:
@@ -81,116 +72,13 @@ End with a one-line **verdict**: `BLOCK` (has blockers), `APPROVE WITH NITS`, or
 **Findings are hypotheses to verify, not facts to comply with.** A finding is a
 reviewer's claim about the code, produced without the ability to run it. Check it
 against the actual text before acting — and when it is wrong, say so with
-grounding rather than changing the code to satisfy it.
+grounding rather than changing the code to satisfy it. A finding worded with full
+confidence, and carrying specific-looking grounding, can still be factually
+false; ADR-0020 §1 records the cases this rule comes from.
 
-A finding worded with full confidence, and carrying specific-looking grounding,
-can still be factually false — complying with one makes the code worse on the
-strength of a confident sentence. ADR-0020 §1 records the cases this rule comes
-from.
-
-**Every review the change requires coming back green is a terminal state, not a
-checkpoint.** That is adversarial alone for most changes, and adversarial *and*
-architecture for a contract-surface one (ADR-0015 §1). When the required set is
-green, ship. Do not treat it as a base to improve on: a further commit destroys
-those records and starts a fresh round, and a *good* commit does this exactly as
-thoroughly as a bad one. ADR-0020 §2 records the evidence.
-
-Waiving a `blocker` or `major` is allowed; write the one-line rationale in the PR
-or the commit. `CONTRIBUTING.md` covers triaging a finding that is real but
-belongs in its own issue.
-
-**A finding can also be true and not worth acting on.** Where you have verified
-it, can state its concrete consequence, and judge that consequence too small to
-justify any future work, dispose of it as **acknowledged, no action warranted**
-(ADR-0243 §7) — the verdict plus that one-line consequence, written in the PR,
-and no issue is filed. It asserts the opposite of *rejected as false* (the
-finding is right) and the opposite of *deferred to an issue* (nobody should ever
-act on it), and the stated consequence is what keeps the three apart. It is
-**never** available at `blocker` or `major`, and never for a finding you have not
-checked against the text it describes. At those severities the dispositions stay
-the ones `CONTRIBUTING.md` already gives — fix it now where it concerns code in
-the current diff, open an issue where it does not, or waive it with the rationale
-on the record.
-
-**And a loop that is not converging owes a diagnosis before it owes a handoff.**
-As a dispatched lane, once four substantively reviewed trees are recorded under
-you — any lens's recorded artifact counts its tree, so it is the round number a
-*successful* run prints, less what the handoff comment you took the lane under
-recorded — write a comment on the PR classifying each open and
-recently-fixed finding as a new independent defect, a regression from an earlier
-fix in this loop, a specification dispute, or scope expansion, and name one next
-activity: a probe, a smaller decision, an adjudication request to the
-coordinator, a grounded waiver, or continued review with a reason. Where anything
-is a specification dispute, another round is not on the list — quote the clause,
-give both readings, and ask for the ruling. `CONTRIBUTING.md` → "Diagnose the
-loop at the fourth reviewed tree" carries it, ADR-0243 §§1–6 decides it, and it
-authorises no merge and forbids no round.
-
-**A green review survives a rebase unless the base move bears on this PR.** The
-artifact answers *coverage* — did a reviewer read this content — and the gate
-answers *currency*, so a base move outside the reviewed hunks does not spend a
-round (ADR-0027 §§1–2). What still does is ADR-0027 §3's floor, and since
-ADR-0209 it has two halves. **The standing review contracts bind outright** —
-`docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md`, `scripts/codex-review.sh` —
-with no test consulted: this document and its rubrics are what a reviewer is
-conducted under, and `scripts/codex-review.sh` assembles the prompt, so a review
-taken before any of them moved ran under different instructions and its verdict
-says nothing about the rubric now in force. **The ADRs and the contract surface
-bind only where the two texts name each other**: the PR's diff or description
-writes the moved ADR's `ADR-NNNN`, or the moved ADR names a path the diff touches
-or a symbol it carries, or the move landed new `Protocol` surface, or the PR
-reaches `src/ai_assistant/core/`. **Any test that cannot be evaluated binds**
-(ADR-0209 §6).
-
-That narrowing is grounded in what a reviewer's authority actually runs
-through — §1 makes the ADRs binding, and a reviewer applies a ratified decision
-to a diff by reading what it says about the diff's paths and symbols. A floor
-file that neither names nor is named by the PR could change what a reviewer says
-only if the reviewer supplied the connection itself, and a reviewer reads the
-diff against its own base, never two changes side by side. `just drill` prints
-which test bound or cleared each floor path; `CONTRIBUTING.md` → "Report the
-review, then mark it ready" carries the conditions in full. Do not reconstruct
-them from memory, and do not buy a round to find out.
-
-*Operator note, not a rule for the reviewer: a round runs for minutes, and a
-caller that cannot hold one process open that long starts it and polls it instead
-— `just review-codex-start <persona>`, then `just review-codex-wait <persona>`
-until it exits 0 with the artifact path and verdict. Exit 3 is `still running`
-(ask again, nothing is lost); exit 4 is no round in flight for HEAD's tree. It is
-the same round as the foreground form — same locks, same artifact, same
-acceptance — started detached rather than reimplemented (issue #1594).*
-
-*Two further operator notes, both bought by lanes that lost time to them. A
-`--start` that returns non-zero without confirming is **not** a statement that
-the round is dead — it cannot see that; it is saying only that no claim arrived
-in the grace, and a round renders the whole diff and computes the patch identity
-before it claims. Never relaunch (issues #1670, #1674). Ask `--wait` — but note
-that it is not conclusive in that same window: it reads the round marker and the
-persona lock, both of which an unclaimed child has yet to publish, so it can
-answer exit 4 about a round that is alive. There and only there, an exit 4 is not
-the "stop polling" it is everywhere else — ask again. Nothing in that window is
-conclusive: a log that is still growing says the round is alive, a static one says
-nothing either way, and what ends the window is the claim itself, after which
-`--wait` is conclusive as usual. If the child has *gone*, no claim will ever
-arrive and asking again cannot help — confirm it with the process listing the
-message prints, which matches this clone's script path and persona (a sibling
-clone's round of the same persona runs a different path and must not count), and
-then relaunch, which is the one case in this mode where a second start is right
-rather than forbidden. That check is a **fixed-string** `grep -F` over `ps`, and
-deliberately not the `pgrep -f` it used to be: `pgrep -f` reads its argument as
-an ERE, so a clone path holding `[`, `(`, `+` or `?` stops matching the live
-child and the check would say "gone" about a round that is still running. Issue
-#1730 is the gap: the script cannot yet tell those two apart for you. And when
-`--wait` answers exit 4 about a round that failed, read the log it prints:
-`codex exec --json` puts its failures on **stdout**, so until issue #1674 that
-log ended at "Running Codex …" with nothing after it and the reason was
-discarded unread.*
-
-*One more, for an ADR lane. Where `HEAD` is the one-line ratification flip, a
-round reviews and records `HEAD`'s **parent** — the content `ship` judges
-coverage over under ADR-0165 §3 — and says so on stderr as it starts. A round
-recorded against the flip's own tree could not satisfy `ship` at all, which is
-issue #1672.*
+What to do with a finding that holds — fix it, file it, waive it, or acknowledge
+it — and when the required set is terminal are `CONTRIBUTING.md`'s: "Triage
+every finding" and "Stop when the required reviews are green".
 
 ## When a change owes both lenses
 
@@ -200,42 +88,23 @@ that surface (ADR-0015 §1; `CONTRIBUTING.md` → "Stop when the required review
 are green" owns the test). On those, **run both lenses in the same round, from
 round 1** — `just review-codex-both`, or the `-both-start`/`-both-wait` pair
 where the round has to be polled — and triage the union before editing anything.
+One lens can reverse the other, and running them in sequence decides that after
+the edits are paid for (PR #1377, issue #1387).
 
-**The reason is that one lens can reverse the other, and running them in
-sequence decides that after the edits are paid for.** On PR #1377 (ADR-0178)
-architecture returned `APPROVE` with no findings at rounds 2–3 and did not run
-again while adversarial worked rounds 8–9: a blocker there called a browser
-rendering requirement unsatisfiable and directed a *cross-language derivation
-contract the browser may implement*, and the next round required that contract's
-full field schema. When architecture next ran, at rounds 10–11, it returned a
-blocker on exactly that result — recomputing the canonical destination set in the
-browser is "business logic in `interfaces/`, violating golden rule 3" — and
-directed the opposite: `core` derives the set, surfaces only render it. That
-reading is the one the ADR shipped with. Both lenses on round 8's tree would have
-put the contradiction in front of the author before the first edit, instead of
-after three rounds of them.
-
-**Terminal is both verdicts green on one tree**, which is what the rule above
-already says: the required *set* coming back green is the terminal state
-(ADR-0020 §2), not each lens in turn. Nothing about shipping changes — what
-changes is that the set is measured every round rather than once at the end.
+**Terminal is both lenses terminal on one tree** — the required *set* coming
+back green is the terminal state (ADR-0020 §2), not each lens in turn.
 
 **When the two lenses contradict, take neither.** Complying with whichever
 arrived last is the failure this exists to prevent.
 
 1. **Resolve it against the texts.** The authority hierarchy above ranks them,
-   and a golden rule or a ratified ADR settles most such pairs outright — golden
-   rule 3 settled #1377's.
+   and a golden rule or a ratified ADR settles most such pairs outright.
 2. **Record the reading in the PR**, as the grounds for the finding you are now
-   waiving. Both lenses are advisory; a waived finding with grounding on the
-   record is a normal outcome.
-3. **Where the texts do not settle it, that is a deadlock, not a finding** —
-   issue #1155's case. Nothing puts your counter-evidence in front of a lens, so
-   the moves are to waive with grounding, or to hand the loop over (ADR-0138).
-   Editing back and forth to satisfy each lens in turn is the one move that
-   cannot terminate.
+   waiving. A waived finding with grounding on the record is a normal outcome.
+3. **Where the texts do not settle it, that is a deadlock, not a finding**
+   (issue #1155). Waive with grounding, or hand the loop over (ADR-0138).
+   Editing back and forth to satisfy each lens in turn cannot terminate.
 
 **A both-lens round is one round.** `scripts/codex-review.sh` counts distinct
-reviewed *trees* of the branch, so two personas on one tree print the same round
-number and ADR-0138 §2's per-lens counts each advance by one. Running both does
-not spend the handoff threshold twice as fast.
+reviewed *trees*, so two personas on one tree print the same round number and
+each lens's ADR-0138 §2 count advances by one.
