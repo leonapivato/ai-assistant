@@ -1,121 +1,76 @@
 name: gate
 
-# The Definition-of-Done gate (CONTRIBUTING, "The gate"), run remotely so a
-# passing PR means the gate passed on neutral ground — not just on the author's
-# machine. Ratified in ADR-0010.
-
+# SPIKE (do not merge): measure the gate's test step split across parallel jobs.
 on:
-  # The default pull_request set, named so that nothing is added by accident.
-  # Marking a draft ready runs nothing (ADR-0288 §1): the job has no draft
-  # condition, so the run on the head's own push is already the one the merger
-  # reads, and a run on the flip would test identical content.
   pull_request:
     types: [opened, synchronize, reopened]
-  push:
-    branches: [main]
 
-# A newer push to the same ref supersedes an in-flight run.
 concurrency:
   group: gate-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  gate:
+  static:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-
-      - name: Install the pinned Python
-        run: uv python install
-
-      - name: Sync the locked environment
-        run: uv sync --locked
-
-      # A fifth preparation step beside the four above, and not a sixth gate step
-      # (ADR-0216 §5): it prepares the environment the `Tests` step runs in, it
-      # asserts nothing, and it can fail only as an environment failure. ADR-0010's
-      # five steps and their order are untouched.
-      #
-      # **Unconditional, which is what makes §6's local skip payable.** "CI installs
-      # the browser unconditionally, so the layer runs on every push to an open PR
-      # and every push to `main`. A local run is never the only place it ran." The
-      # full `chromium` rather than the headless shell, because §5 defaults to the
-      # expensive build until a recorded comparison over this layer's cases licenses
-      # the other one. `--with-deps` because a bare runner has none of the shared
-      # libraries the build links against, and a browser that will not start is a
-      # failure rather than a skip.
-      - name: Install the browser the gateway's page layer drives
-        run: uv run playwright install --with-deps chromium
-
-      # No `just` here: it was installed only for the tests that drove the
-      # justfile end to end (test_workspace.py's
-      # test_just_claim_workspace_recipe_*), and ADR-0015 removed those along
-      # with the recipes they covered. Nothing in the suite shells out to
-      # `just` now — the gate steps below call `uv run` directly, same as the
-      # local gate. Dropping it also drops a dependency on the GitHub releases
-      # API, whose 503 failed this workflow on its first run.
-
-      # The five gate steps, in the same order as the local gate. `--check`
-      # makes the formatter report drift instead of rewriting files in CI.
+      - run: uv python install
+      - run: uv sync --locked
       - name: Format
         run: uv run ruff format --check .
-
       - name: Lint
         run: uv run ruff check .
-
       - name: Type check
         run: uv run mypy
-
       - name: Architecture boundaries
         run: uv run lint-imports
 
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        split: [1, 2, 3, 4]
+        index: [0, 1, 2, 3]
+        exclude:
+          - {split: 1, index: 1}
+          - {split: 1, index: 2}
+          - {split: 1, index: 3}
+          - {split: 2, index: 2}
+          - {split: 2, index: 3}
+          - {split: 3, index: 3}
+    name: tests n${{ matrix.split }} i${{ matrix.index }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --locked
+      - name: Install the browser
+        run: uv run playwright install --with-deps chromium
       - name: Tests
-        # `GH_TOKEN` is here for one test: ADR-0088 §6's Tier 1 includes "a
-        # tracker citation naming an issue number that does not exist", and
-        # `tests/scripts/test_adr_citations_corpus.py` can only ask GitHub that
-        # question with a token. Without one the checker treats the citations as
-        # unevaluable and passes them silently (§6), and the test skips — so this
-        # is what makes half of Tier 1 actually run, rather than what makes it
-        # pass. It is the workflow's own read-only token; nothing here writes.
-        #
-        # `-n auto` distributes the suite across the runner's cores (four, on
-        # `ubuntu-latest` for a public repository). It is the whole suite either
-        # way: since ADR-0179 the Protocol-triad check aggregates every worker's
-        # record on the controller, so the one file that could not run
-        # distributed now does, and nothing is deselected here or in
-        # `just test-fast`. This step was ~273s of a ~5m28s run.
-        #
-        # `--basetemp` is the same 108-byte `sun_path` margin the `test-fast`
-        # recipe explains at length: xdist adds a `popen-gwN/` component, and
-        # the default root (`/tmp/pytest-of-runner/pytest-N/`) leaves the
-        # suite's worst AF_UNIX path within a byte or two of the budget. A short
-        # root buys the margin back. A fixed name is safe here where it is not
-        # locally: the runner is a fresh VM with exactly one run on it.
-        #
-        # One job, not two. The serial suite is still what `uv run pytest` does
-        # on any machine, and ADR-0136 §1 lets a lane discharge either anchor
-        # with it, so a serial re-run in CI would buy a diagnosis a lane can
-        # already get in one command (ADR-0179 §3).
         env:
           GH_TOKEN: ${{ github.token }}
-        run: uv run pytest -n auto --basetemp=/tmp/pt
+        run: >-
+          uv run pytest -n auto --basetemp=/tmp/pt
+          --shard-index ${{ matrix.index }} --shard-count ${{ matrix.split }}
+          --junitxml=junit.xml -o junit_family=xunit2
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-n${{ matrix.split }}-i${{ matrix.index }}
+          path: junit.xml
 
-      # Not a sixth gate step: Tier 2 never fails a change (ADR-0088 §3), and
-      # Tier 1 already runs inside `Tests` above. This publishes the standing
-      # Tier 2 list — unresolved code citations and liveness disagreements — to
-      # the run's summary page, which is the answer to §Consequences' "Tier 2
-      # needs someone to read it. A report nobody reads is worse than no report,
-      # because it looks like coverage." `--report-only` keeps a Tier 1 finding
-      # from failing this step twice.
-      - name: ADR citation report (Tier 2, advisory)
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
+  gate:
+    if: always()
+    needs: [static, tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every part passed
         run: |
-          uv run python scripts/check_citations.py \
-            --report-only --summary "$GITHUB_STEP_SUMMARY"
+          test "${{ needs.static.result }}" = success
+          test "${{ needs.tests.result }}" = success

@@ -65,6 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "core"))
 # abstract is dropped from collection in silence, taking every test it inherits
 # with it and leaving the run green (issue #1757). Its directory is already on
 # `sys.path`: pytest's prepend import mode put it there to import this file.
+import spike_shard  # SPIKE: registered in pytest_configure
 from collection_guard import pytest_pycollect_makeitem  # noqa: F401  # a hook, by name
 
 if TYPE_CHECKING:
@@ -86,6 +87,7 @@ _FILTERING_OPTIONS = (
     "maxfail",
     "ignore",
     "ignore_glob",
+    "shard_index",  # SPIKE: a non-zero shard is a narrowed run
 )
 
 #: The check whose subject is every other test, so it has to run after them.
@@ -114,6 +116,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "it deselects nothing."
         ),
     )
+    # SPIKE (do not merge): CI test sharding measurement.
+    parser.addoption("--shard-index", type=int, default=0)
+    parser.addoption("--shard-count", type=int, default=0)
 
 
 @pytest.fixture(scope="session")
@@ -335,6 +340,7 @@ def pytest_configure(config: pytest.Config) -> None:
     Raises:
         pytest.UsageError: If the run is distributed under any mode but ``loadgroup``.
     """
+    config.pluginmanager.register(spike_shard, "spike_shard")
     mode = str(config.getoption("dist", "no"))
     if not getattr(config.option, "tx", []) or mode == "no":
         return
