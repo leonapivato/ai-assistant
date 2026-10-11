@@ -12,8 +12,9 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from structlog.testing import capture_logs
 
-from ai_assistant.core.errors import AuthorisationSpentError
+from ai_assistant.core.errors import AuditError, AuthorisationSpentError
 from ai_assistant.core.types import (
     ActionRequest,
     ActivationEffect,
@@ -379,6 +380,27 @@ async def test_a_refusal_before_the_call_is_not_done() -> None:
     assert acted.calls[0].outcome is ActedOutcome.NOT_DONE
     (record,) = await plans.activation_effects(["act-1"])
     assert record.outcome is ToolOutcome.FAILED
+
+
+async def test_a_refusal_logs_no_class_name_it_did_not_author() -> None:
+    """ADR-0004 §5, ADR-0192 §3: a collaborator's class name may carry content.
+
+    A ledger can raise a dynamically named ``AuditError``; acting logs a code-owned
+    reason and never that name.
+    """
+    leaking = type("recipient@example.com", (AuditError,), {})
+
+    def refuse(_: ToolCall) -> ToolResult:
+        raise leaking
+
+    with capture_logs() as logs:
+        acted = await _stage(FakePlanStore(now=_now), _Invoker(refuse)).act(
+            _round(_authorized("book", effect="e1"))
+        )
+
+    assert acted.calls[0].outcome is ActedOutcome.NOT_DONE
+    assert logs
+    assert "recipient@example.com" not in repr(logs)
 
 
 async def test_a_call_on_the_assistants_own_records_runs_directly() -> None:
