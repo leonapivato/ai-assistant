@@ -210,7 +210,9 @@
   the hub, its result, whether its outcome can be unknown and whether it is safe to
   repeat, each required with no default, and the required-field clause binds them with no
   exception. A declaration whose `side_effecting` disagrees with its effect does not
-  validate. Every other clause stands. This scope reaches every declaration, on both
+  validate, nor does one that cannot have an unknown outcome while its effect is not the
+  assistant's own records and its `interrupted_outcome` is `indeterminate`. Every other
+  clause stands. This scope reaches every declaration, on both
   paths. This scoped replacement takes effect on ratification of ADR-0306. This reciprocal
   header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
