@@ -17,8 +17,11 @@ native form, so the request never carries an assistant or a tool turn.
 story links; the place window and the episode window; this activation's earlier rounds
 and their notes, shown on every pass whatever the audience; acting's outcomes; the
 offered capabilities and the channel kind's description; the current time; and
-digested evidence, which the digesting stage supplies. The episode window's notes
-follow the reader's audience (ADR-0307 §6:4, ADR-0312 §4:2). **Left to later phase
+digested evidence, which the digesting stage supplies, each digest under the label of
+the result it read and each item under its source's label (ADR-0308 §5:1). The episode
+window's notes follow the reader's audience (ADR-0307 §6:4, ADR-0312 §4:2). Raw outside
+content is never shown (§9:2): not a place item someone else wrote, not an outside
+episode's input, and not a referent's excerpt. **Left to later phase
 lanes:** recall's finds, the story views (a story's summary, notes and episodes, its
 tidy-up facts and where its matter stands, and the short view of a referent story),
 the owner-only views of other episodes and stories those bring, and the calls planning
@@ -104,6 +107,7 @@ __all__ = [
     "LOOKING_FOR",
     "CallOutcome",
     "CallOutcomeKind",
+    "DigestItem",
     "DigestedEvidence",
     "PlaceAuthor",
     "PlaceItem",
@@ -115,7 +119,6 @@ __all__ = [
     "RefusedCall",
     "RoundRecorder",
     "offered_tools",
-    "result_id",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -142,6 +145,23 @@ _DELIBERATE_REPEAT_SCHEMA: Final[dict[str, Any]] = {
         "already made in this matter. Otherwise such a call is refused as already done."
     ),
 }
+
+#: The top-level schema keywords the hub keeps true when it adds or removes an argument.
+_TRANSFORMABLE: Final = frozenset(
+    {
+        "type",
+        "properties",
+        "required",
+        "additionalProperties",
+        "title",
+        "description",
+        "$schema",
+        "$id",
+        "$comment",
+        "$defs",
+        "definitions",
+    }
+)
 
 #: How much of a label the model wrote a refusal's reason quotes back.
 _QUOTED_LABEL_CHARS: Final = 32
@@ -231,34 +251,70 @@ class CallOutcome:
         call_id: The provider's id for the call in that round.
         kind: What came of it.
         reason: Why it was not done or was refused, in code-owned words.
+        result_id: For a done call that brought a result, the id acting minted for it,
+            which its R label names (ADR-0307 §5:1, ADR-0308 §6:1).
         result: What a done call returned, where its result goes to planning whole
-            (ADR-0306 §5:14). A result for a digest reaches planning only as
-            :class:`DigestedEvidence`.
+            (ADR-0306 §5:14). A result for a digest reaches planning only as the
+            :class:`DigestedEvidence` that names its ``result_id``.
+
+    Raises:
+        ValueError: If it carries a result without the result's id.
     """
 
     round_id: str
     call_id: str
     kind: CallOutcomeKind
     reason: str | None = None
+    result_id: str | None = None
     result: FrozenJsonValue = None
+
+    def __post_init__(self) -> None:
+        """A result is shown under its label, so it carries the id the label names."""
+        if self.result is not None and self.result_id is None:
+            msg = "a call's result carries the id acting minted for it (ADR-0308 §6:1)"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class DigestItem:
+    """One item of a digest's evidence (ADR-0308 §5:1).
+
+    Attributes:
+        text: What the item says.
+        source_kind: What kind of record it rests on: a result, or a memory record.
+        source_id: That record's id. The record is shown by its label (ADR-0308 §4:15).
+    """
+
+    text: str
+    source_kind: LabelKind
+    source_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class DigestedEvidence:
-    """What a digest found in one call's result for planning (ADR-0308).
+    """One digest, as planning is shown it (ADR-0308 §4, §5): the seam B3 fills.
 
-    The seam the digesting stage fills. Evidence rests on outside content, so it is
-    shown as such, and an activation shown any has read outside content (ADR-0306 §4:5).
+    Evidence rests on outside content, so each item is shown as such, with its source
+    by label. An activation shown a digest that answered, with or without items, has
+    read outside content (ADR-0308 §5:4). A failed digest shows no content: planning is
+    told it could not read the result (§4:13).
 
     Attributes:
-        round_id: The round whose call brought the result.
-        call_id: That call.
-        text: What the digest found.
+        result_id: The result digested, as a :class:`CallOutcome` names it, or ``None``
+            for recall's digest.
+        answered: Whether the digest answered; ``False`` where it failed.
+        items: The evidence, empty where it failed or nothing answered the question.
     """
 
-    round_id: str
-    call_id: str
-    text: str
+    result_id: str | None
+    answered: bool
+    items: tuple[DigestItem, ...] = ()
+
+    def __post_init__(self) -> None:
+        """A failed digest records no evidence (ADR-0308 §7's ``ActivationDigest``)."""
+        if self.items and not self.answered:
+            msg = "a failed digest carries no evidence"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,11 +430,6 @@ class RoundRecorder(Protocol):
         ...
 
 
-def result_id(round_id: str, call_id: str) -> str:
-    """The id a result's label names: the call that brought it, in its round."""
-    return f"result:{round_id}:{call_id}"
-
-
 # --- offering the capabilities -----------------------------------------------------------
 
 
@@ -427,23 +478,35 @@ def _declared(tool: ToolDefinition) -> tuple[object, ...]:
 
 
 def _offered_schema(tool: ToolDefinition) -> dict[str, Any] | None:
-    """The declaration's schema with the added arguments, or ``None`` where it has no room."""
+    """The declaration's schema with the added arguments, or ``None`` where it has no room.
+
+    The hub changes a schema only where every rule in it is one it knows how to keep
+    true: the properties, the required list and ``additionalProperties``. A schema
+    carrying anything else at its top, a combinator, a conditional or a rule on the
+    number or names of its properties, may forbid an argument the hub adds or require
+    one it removes, so its capability is not offered rather than offered with
+    arguments no call could satisfy. So is one that already declares an added
+    argument, as a property or as one the hub fills.
+    """
     schema: dict[str, Any] = dict(tool.model_dump()["parameters_schema"])
     if schema.get("type", "object") != "object":
         return None
+    added: dict[str, dict[str, Any]] = {}
+    if tool.result is CapabilityResult.MAY_CARRY_OUTSIDE_TEXT:
+        added[LOOKING_FOR] = dict(_LOOKING_FOR_SCHEMA)
+    if not tool.safe_to_repeat:
+        added[DELIBERATE_REPEAT] = dict(_DELIBERATE_REPEAT_SCHEMA)
     properties: dict[str, Any] = dict(schema.get("properties") or {})
+    if set(added) & (set(properties) | set(tool.system_supplied)):
+        return None
+    if (added or tool.system_supplied) and set(schema) - _TRANSFORMABLE:
+        return None
     required = [name for name in schema.get("required") or [] if name not in tool.system_supplied]
     for name in tool.system_supplied:
         properties.pop(name, None)
-    if tool.result is CapabilityResult.MAY_CARRY_OUTSIDE_TEXT:
-        if LOOKING_FOR in properties:
-            return None
-        properties[LOOKING_FOR] = dict(_LOOKING_FOR_SCHEMA)
+    properties.update(added)
+    if LOOKING_FOR in added:
         required.append(LOOKING_FOR)
-    if not tool.safe_to_repeat:
-        if DELIBERATE_REPEAT in properties:
-            return None
-        properties[DELIBERATE_REPEAT] = dict(_DELIBERATE_REPEAT_SCHEMA)
     schema.update({"type": "object", "properties": properties})
     if required:
         schema["required"] = required
@@ -568,6 +631,11 @@ _WITHHELD_ITEM: Final = (
     "reaches you only through understanding's record"
 )
 _NO_UNDERSTANDING: Final = "missing: understanding recorded no reading of this input"
+#: ADR-0308 §4:13: a failed digest records no evidence, and planning is told so.
+_DIGEST_FAILED: Final = "could not be read: its digest failed, and its content is not shown"
+_NOTHING_ANSWERED: Final = "nothing in it answered what was looked for"
+_RECALL_DIGEST: Final = "the outside memories recall found"
+_DIGESTED_RESULT: Final = "read for you by a digest, under evidence"
 
 _AUTHOR_TEXT: Final = {
     PlaceAuthor.USER: "the user",
@@ -667,19 +735,26 @@ class _Request:
             ]
         return shown
 
-    def _referent(self, referent: UnderstandingReferent) -> object:
-        """A referent by its label where it names a thing planning may name."""
+    def _referent(self, referent: UnderstandingReferent) -> str:
+        """A referent by its label where it names a thing planning may name.
+
+        Never its excerpt: a channel item's excerpt is the item's own words, which may
+        be what someone other than the user wrote, and planning never reads raw outside
+        content (ADR-0307 §9:2). The place window shows the items it may.
+        """
         kinds = {
             "story": LabelKind.STORY,
             "episode": LabelKind.EPISODE,
             "memory": LabelKind.MEMORY,
         }
         kind = kinds.get(referent.kind)
-        if kind is not None and referent.id:
+        if kind is not None and referent.id is not None:
             return self._book.label(kind, referent.id)
         if referent.kind == "input":
             return "the input"
-        return {"item": referent.source or referent.kind, "excerpt": referent.excerpt}
+        if referent.kind == "channel_item":
+            return "an item of the place window"
+        return f"a {referent.kind} no longer named"
 
     def _item(self, item: PlaceItem) -> dict[str, object]:
         shown: dict[str, object] = {"from": _AUTHOR_TEXT[item.author]}
@@ -752,9 +827,7 @@ class _Request:
             where = "written into the place" if self._inputs.place.takes_message else "kept"
             shown["text"] = one.text
             shown["text_was"] = where
-        shown["calls"] = [
-            self._call(one.id, call, outcomes.get(call.call_id)) for call in one.calls
-        ]
+        shown["calls"] = [self._call(call, outcomes.get(call.call_id)) for call in one.calls]
         if one.notes is not None:
             shown["notes"] = one.notes
             if one.notes_marked:
@@ -764,9 +837,7 @@ class _Request:
             shown["asked_for_another_round"] = True
         return shown
 
-    def _call(
-        self, round_id: str, call: ProposedCall, outcome: CallOutcome | None
-    ) -> dict[str, object]:
+    def _call(self, call: ProposedCall, outcome: CallOutcome | None) -> dict[str, object]:
         shown: dict[str, object] = {
             "capability": call.name,
             "arguments": call.model_dump()["arguments"],
@@ -778,28 +849,41 @@ class _Request:
         if outcome.reason is not None:
             text = f"{text}: {outcome.reason}"
         shown["outcome"] = text
-        if outcome.kind is CallOutcomeKind.DONE and outcome.result is not None:
-            shown["result"] = {
-                "label": self._book.label(LabelKind.RESULT, result_id(round_id, call.call_id)),
-                "value": _thawed(outcome.result),
-            }
+        if outcome.kind is not CallOutcomeKind.DONE or outcome.result_id is None:
+            return shown
+        result: dict[str, object] = {"label": self._book.label(LabelKind.RESULT, outcome.result_id)}
+        if outcome.result is not None:
+            result["value"] = _thawed(outcome.result)
+        else:
+            result["value"] = _DIGESTED_RESULT
+        shown["result"] = result
         return shown
 
     def _evidence(self, one: DigestedEvidence) -> dict[str, object]:
-        self.shown.marked = True
-        number = next(
-            (
-                index
-                for index, planned in enumerate(self._inputs.rounds, 1)
-                if planned.id == one.round_id
-            ),
-            None,
+        """One digest, under the label of the result it read (ADR-0308 §5)."""
+        digest_of = (
+            _RECALL_DIGEST
+            if one.result_id is None
+            else self._book.label(LabelKind.RESULT, one.result_id)
         )
+        return {"digest_of": digest_of, "digest": self._digest(one)}
+
+    def _digest(self, one: DigestedEvidence) -> dict[str, object] | str:
+        """One digest's evidence, each item with its source's label (ADR-0308 §5:1)."""
+        if not one.answered:
+            return _DIGEST_FAILED
+        # ADR-0308 §5:4: a digest that answered, with or without items, is read.
+        self.shown.marked = True
         return {
-            "round": number,
-            "call": one.call_id,
-            "evidence": one.text,
-            "outside_content": _OUTSIDE,
+            "evidence": [
+                {
+                    "text": item.text,
+                    "source": self._book.label(item.source_kind, item.source_id),
+                    "outside_content": _OUTSIDE,
+                }
+                for item in one.items
+            ]
+            or _NOTHING_ANSWERED
         }
 
 
