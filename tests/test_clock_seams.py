@@ -79,6 +79,7 @@ from ai_assistant.core.types import (
     ChannelInput,
     CostBasis,
     CurrentContext,
+    DataTier,
     DestinationProtocol,
     DestinationTrust,
     DestinationTrustRecord,
@@ -115,6 +116,7 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
     ToolOutcome,
+    ToolResult,
 )
 from ai_assistant.learning import RuleBasedFeedbackProcessor
 from ai_assistant.memory import (
@@ -151,6 +153,7 @@ from ai_assistant.orchestration import (
     UpcomingEventStage,
 )
 from ai_assistant.orchestration import traces as operation_traces
+from ai_assistant.orchestration.acting import ActingStage, AuthorizedCall, AuthorizedRound
 from ai_assistant.orchestration.activation_coordinator import ActivationCoordinator
 from ai_assistant.orchestration.activation_state import admit_channel
 from ai_assistant.orchestration.activation_writer import ActivationWriter
@@ -421,6 +424,61 @@ async def _learning_loop(now: Clock) -> None:
         now=now,
         registry=FakeToolRegistry(),
     ).respond("book the flight")
+
+
+async def _acting_stage(now: Clock) -> None:
+    """ADR-0306 §6's ``claimed_at``, read where acting builds the record it claims.
+
+    Driven through ``act`` on a round with one call in the world, which is claimed
+    before it runs, so the reading is taken before anything is invoked.
+    """
+    tool = ToolDefinition(
+        id="book",
+        capability="book",
+        description="Book a stay.",
+        risk_level=RiskLevel.HIGH,
+        reversibility=Reversibility.IRREVERSIBLE,
+        side_effecting=True,
+        reads=(),
+        writes=(DataTier.PERSONAL,),
+        discloses=(),
+        cost=ToolCost(basis=CostBasis.FREE),
+        idempotency=Idempotency.NONE,
+        effect=CapabilityEffect.WORLD,
+        leaves_hub=True,
+        result=CapabilityResult.NO_OUTSIDE_TEXT,
+        outcome_can_be_unknown=True,
+        safe_to_repeat=False,
+    )
+    request = ActionRequest(tool=tool)
+    decision = PermissionDecision.from_request(
+        request,
+        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="allowed"),
+        id="d-1",
+        decided_at=_AWARE,
+        effect="e-1",
+    )
+
+    class _Unreached:
+        async def invoke(self, call: ToolCall, *, timeout: timedelta) -> ToolResult:  # noqa: ASYNC109 — the seam's own signature
+            raise AssertionError
+
+        async def run(self, call: ToolCall) -> ToolResult:
+            raise AssertionError
+
+    await ActingStage(
+        plans=FakePlanStore(),
+        invoker=_Unreached(),
+        own_records=_Unreached(),
+        timeout=timedelta(seconds=5),
+        now=now,
+    ).act(
+        AuthorizedRound(
+            activation_id="act-1",
+            round_id="r-1",
+            calls=(AuthorizedCall(ToolCall(request=request, decision=decision)),),
+        )
+    )
 
 
 async def _search_servicer(now: Clock) -> None:
@@ -1217,6 +1275,8 @@ SEAMS = [
     # ADR-0231 §6's recorder clock, propagating rather than translating for the
     # reason `PROPAGATED` records — `Fetcher`'s clause above, one seam over.
     Seam("SearchServicer", _search_servicer, ClockReadingError),
+    # ADR-0306 §6's record clock, propagating for the reason `PROPAGATED` records.
+    Seam("ActingStage", _acting_stage, ClockReadingError),
     # ADR-0260 §7's recorder clock, propagating for `SearchServicer`'s own reason one
     # kind over: ADR-0260 adds **no** error class to `core.errors` either.
     Seam("ForecastServicer", _forecast_servicer, ClockReadingError),
@@ -1567,6 +1627,10 @@ PROPAGATED: Final[dict[str, str]] = {
         "process cannot read is none of ADR-0260 §8's decline causes — a binder, a "
         "policy, a trail — so reporting it as one of them would report one stage's "
         "fault under another stage's member, which §8 forbids in terms"
+    ),
+    "ActingStage": (
+        "ADR-0306 adds **no** error class to `core.errors`, and a clock this process "
+        "cannot read is not a refusal of the call: no record was claimed and nothing ran"
     ),
     "ConsolidationStage": _UNDECLARED,
     "CurrentTime": ("documented at ``tools/builtin.py:148``, and `tools` is not in §4's list"),

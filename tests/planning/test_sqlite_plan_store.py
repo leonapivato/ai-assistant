@@ -42,6 +42,8 @@ from ai_assistant.core.types import (
     MAX_GOAL_EVIDENCE,
     ActionPlan,
     ActionQuoteMinting,
+    ActivationEffect,
+    ActivationEffectClaim,
     AttemptOutcome,
     AttemptState,
     AttemptTransition,
@@ -211,6 +213,12 @@ _SYNC_METHODS = {
     "claim_effect": "_claim_effect_sync",
     # ADR-0297 §1's member: the write every later claim is decided against.
     "record_stop": "_record_stop_sync",
+    # ADR-0306 §6's three members: the claim is one `BEGIN IMMEDIATE` deciding the
+    # stop, the backstop and the write; the finish reads and writes in one; the read
+    # holds the connection lock like every other.
+    "claim_activation_effect": "_claim_activation_effect_sync",
+    "finish_activation_effect": "_finish_activation_effect_sync",
+    "activation_effects": "_activation_effects_sync",
 }
 
 
@@ -4662,3 +4670,109 @@ async def _claimed_effect(path: Path) -> str:
     finally:
         store.close()
     return state.id
+
+
+# --- ADR-0306 §6: acting's effect records on the durable store -----------------
+
+
+def _version_9_database(path: Path) -> None:
+    """A version 9 file: the version 8 one with ADR-0297 §1's stop records beside it.
+
+    The previous version, which ADR-0306 §6's table is added over. Built from the rung
+    below, so the two statements stay one.
+
+    Args:
+        path: Where to build it.
+    """
+    _version_8_database(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE stopped_activations(activation_id TEXT PRIMARY KEY)")
+        conn.execute("UPDATE meta SET value = '9' WHERE key = 'schema_version'")
+
+
+def _acted(effect_id: str, *, activation: str = "act-1") -> ActivationEffect:
+    """A call's effect record as acting claims it, with no outcome."""
+    return ActivationEffect(
+        id=effect_id,
+        activation_id=activation,
+        round="r1",
+        capability="book_stay",
+        values_digest="a" * 64,
+        decision_id=f"d-{effect_id}",
+        claimed_at=_AT,
+    )
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(_version_5_database, id="from-version-5"),
+        pytest.param(_version_9_database, id="from-version-9"),
+    ],
+)
+async def test_an_earlier_plan_store_opens_holding_no_activation_effect(
+    tmp_path: Path, build: Callable[[Path], None]
+) -> None:
+    """ADR-0306 §6's table, created **empty** on every earlier file, at version 10."""
+    path = tmp_path / "plans.db"
+    build(path)
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        assert (await store.export()).activation_effects == (), "the table is created empty"
+        assert await store.claim_activation_effect(_acted("e1"), match=None) is (
+            ActivationEffectClaim.CLAIMED
+        )
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
+            "10",
+        )
+
+
+async def test_an_activation_effect_survives_a_restart(tmp_path: Path) -> None:
+    """A claimed record outlives the process, and still refuses an equal call.
+
+    ADR-0306 §5:6: a record given no outcome, as after a crash, is never resolved by
+    guessing; the reopened store holds it unfinished, and it counts as done for the
+    backstop (§5:11).
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.claim_activation_effect(_acted("e1"), match=None)
+    finally:
+        store.close()
+
+    reopened = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        assert await reopened.activation_effects(["act-1"]) == (_acted("e1"),)
+        assert await reopened.claim_activation_effect(_acted("e2"), match=("act-1",)) is (
+            ActivationEffectClaim.ALREADY_DONE
+        )
+    finally:
+        reopened.close()
+
+
+async def test_an_activation_effect_whose_columns_disagree_with_its_record_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A promoted column an outside writer changed is corruption, not a different record.
+
+    The backstop selects on ``activation_id``, so a column that disagreed with the
+    record would hide it from the match; the read refuses it as ``PlanningError``.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.claim_activation_effect(_acted("e1"), match=None)
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE activation_effects SET activation_id = 'act-2'")
+        with pytest.raises(PlanningError):
+            await store.activation_effects(["act-2"])
+        with pytest.raises(PlanningError):
+            await store.export()
+    finally:
+        store.close()

@@ -52,6 +52,7 @@ from ai_assistant.core.types import (
     Confirmation,
     ContinuationToken,
     CostBasis,
+    DataTier,
     Evidence,
     Idempotency,
     MemoryKind,
@@ -767,3 +768,45 @@ def test_a_permission_decision_carrying_a_per_call_cost_crosses_the_wire() -> No
     assert amount is not None
     assert amount.as_tuple() == Decimal("1.50").as_tuple()
     assert canonical_payload(restored) == encoded
+
+
+def test_a_decision_carries_the_declaration_and_its_effect_across_the_wire() -> None:
+    """ADR-0306 §6:6: the five declaration fields and the decision's ``effect`` cross.
+
+    They ride inside every ``PermissionDecision`` the engine's decision reads return,
+    which is why ``PROTOCOL_VERSION`` moved; what goes out comes back equal.
+    """
+    definition = ToolDefinition(
+        id="search",
+        capability="web_search",
+        description="Search the web.",
+        risk_level=RiskLevel.LOW,
+        reversibility=Reversibility.REVERSIBLE,
+        side_effecting=True,
+        effect=CapabilityEffect.NONE,
+        leaves_hub=True,
+        result=CapabilityResult.MAY_CARRY_OUTSIDE_TEXT,
+        outcome_can_be_unknown=True,
+        safe_to_repeat=True,
+        reads=(),
+        writes=(),
+        discloses=(DataTier.PERSONAL,),
+        cost=ToolCost(basis=CostBasis.FREE),
+        idempotency=Idempotency.NONE,
+    )
+    decision = PermissionDecision.from_request(
+        ActionRequest(tool=definition),
+        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="because it is allowed"),
+        id="d-1",
+        decided_at=_AT,
+        effect="e-1",
+    )
+
+    encoded = _both(decision)
+    projected = json.loads(encoded)
+    restored = TypeAdapter(PermissionDecision).validate_python(projected)
+
+    assert projected["effect"] == "e-1"
+    assert projected["tool"]["effect"] == "none"
+    assert projected["tool"]["result"] == "may_carry_outside_text"
+    assert restored == decision
