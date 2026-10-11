@@ -61,6 +61,7 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodicMemory,
     InputOrigin,
+    LabelKind,
     MemoryKind,
     MemoryRecord,
     MemorySearchResult,
@@ -73,9 +74,12 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
+    PlanningLabel,
+    PlanningRound,
     PreferenceMemory,
     ProcessingReason,
     ProcessingStatus,
+    ProposedCall,
     Provenance,
     RecallCue,
     RecalledItem,
@@ -6516,6 +6520,45 @@ class MemoryStoreContract:
 
         assert await store.get("companion") is None
         assert _unstamped_or_none(await store.get("episode")) == stored_record
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    async def test_the_guard_admits_planning_rounds_and_labels_appended(
+        self, store: MemoryStore, door: str
+    ) -> None:
+        """ADR-0307 §10: rounds and labels append to an open episode and read back whole.
+
+        A recorded round is never edited: a revision rewriting one is refused, and the
+        stored episode keeps the round as it was written.
+        """
+        opened = _open_episode("episode")
+        await store.add(opened)
+        first = PlanningRound(
+            id="round:1",
+            recorded_at=_IN_WINDOW,
+            text="On it.",
+            calls=(
+                ProposedCall(
+                    call_id="c1",
+                    name="web_search",
+                    arguments={"query": "q", "looking_for": "hours", "filters": {"days": [1, 2]}},
+                ),
+            ),
+            notes="the user asked for tonight",
+            another_round=True,
+            notes_marked=True,
+        )
+        second = PlanningRound(id="round:2", follows="round:1", recorded_at=_IN_WINDOW)
+        label = PlanningLabel(label="R1", kind=LabelKind.RESULT, id="result:round:1:c1")
+        once = _revised(opened, processing={"rounds": (first,)})
+        twice = _revised(once, processing={"rounds": (first, second), "labels": (label,)})
+        for revision in (once, twice):
+            await _replace(store, revision, door)
+            assert _unstamped_or_none(await store.get("episode")) == revision
+
+        edited = first.model_copy(update={"text": "Done."})
+        with pytest.raises(MemoryStoreError):
+            await _replace(store, _revised(twice, processing={"rounds": (edited, second)}), door)
+        assert _unstamped_or_none(await store.get("episode")) == twice
 
     @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
     async def test_the_guard_admits_a_placement_only_change_to_a_frozen_episode(
