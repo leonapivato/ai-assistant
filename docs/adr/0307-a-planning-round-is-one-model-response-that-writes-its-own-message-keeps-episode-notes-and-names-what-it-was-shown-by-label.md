@@ -244,7 +244,7 @@ once every call of the last one has finished and something calls for it.
 | `ProposedCall` | New frozen record: the provider's `call_id`, the capability `name`, and `arguments` as a JSON object |
 | `RoundResponse` | New frozen record: `text`, `calls: tuple[ProposedCall, ...]`, `notes: str \| None` and `another_round: bool` |
 | `PlanningRound` | New frozen record: its `id`; `follows`, the round before it or `None`; `recorded_at`; the four parts of its `RoundResponse`; and `notes_marked: bool` |
-| `PlanningLabel` | New frozen record: `label`, `kind` (story, episode, note, memory or result) and the `id` it names |
+| `PlanningLabel`, `LabelKind` | New frozen record: `label`, `kind: LabelKind` and the `id` it names; and a new closed enumeration: `story`, `episode`, `note`, `memory`, `result` |
 | `EpisodeProcessingRecord` | Gains `rounds: tuple[PlanningRound, ...]` and `labels: tuple[PlanningLabel, ...]`, both empty by default; `schema_version` advances by one |
 | `EpisodicMemory.outcome` | Holds the activation's messages in the order written, joined by a blank line, or `None` where it wrote none (ADR-0284 §4:1) |
 | `ActivationEffect` (ADR-0306 §6) | Gains `round: DurableIdentifier \| None`, the round whose call or message it claims, `None` only on the *couldn't finish* message |
