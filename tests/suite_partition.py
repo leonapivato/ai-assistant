@@ -179,7 +179,7 @@ def holds_the_triad_evidence(config: pytest.Config) -> bool:
     return partition is None or partition.index == EVIDENCE_INDEX
 
 
-def configure(config: pytest.Config, *, narrowed: bool) -> None:
+def configure(config: pytest.Config, *, narrowed: bool, handed_over_by: str) -> None:
     """Register the partition for a run that names one, and refuse a narrowed one.
 
     Args:
@@ -187,6 +187,9 @@ def configure(config: pytest.Config, *, narrowed: bool) -> None:
         narrowed: Whether something other than the partition narrows the run: a
             filtering option or a path argument. ``tests/conftest.py`` owns that
             question and answers it.
+        handed_over_by: The fixture whose items ADR-0179 §3:3 hands to the
+            controller of a distributed run, the one removal besides the
+            partition's own that a partitioned run admits (ADR-0310 §1:3).
 
     Raises:
         pytest.UsageError: If the run names a partition and is also narrowed.
@@ -202,7 +205,7 @@ def configure(config: pytest.Config, *, narrowed: bool) -> None:
             "forbids: they are decided there, or the run fails. Drop the narrowing, "
             "or drop --partition-index and --partition-count."
         )
-    config.pluginmanager.register(PartitionPlugin(partition), PLUGIN_NAME)
+    config.pluginmanager.register(PartitionPlugin(partition, handed_over_by), PLUGIN_NAME)
 
 
 def group_of(item: pytest.Item) -> str | None:
@@ -320,8 +323,15 @@ class PartitionPlugin:
     Registered only when a run names a partition (see :func:`configure`).
     """
 
-    def __init__(self, partition: Partition) -> None:
+    def __init__(self, partition: Partition, handed_over_by: str = "") -> None:
         self.partition = partition
+        self.handed_over_by = handed_over_by
+        #: The whole collection, as the partition received it. A check whose subject
+        #: is the whole suite reads this rather than ``session.items``, which in a
+        #: job of the partition is that job's share.
+        self.collection: list[pytest.Item] = []
+        #: The items this job kept.
+        self.share: list[pytest.Item] = []
         #: The whole collection's assignment, once collection has finished.
         self.assignment: dict[str, int] = {}
         #: The node ids the partition took as triad evidence.
@@ -339,6 +349,7 @@ class PartitionPlugin:
         """
         if not items:
             return
+        self.collection = list(items)
         is_evidence = evidence_predicate()
         units = units_of(items, is_evidence)
         self.assignment = assign(units, self.partition.count)
@@ -350,8 +361,40 @@ class PartitionPlugin:
         keep = [item for item in items if self.assignment[item.nodeid] == self.partition.index]
         drop = [item for item in items if self.assignment[item.nodeid] != self.partition.index]
         items[:] = keep
+        self.share = list(keep)
         if drop:
             config.hook.pytest_deselected(items=drop)
+
+    def pytest_collection_finish(self, session: pytest.Session) -> None:
+        """Refuse a run from which anything but the triad hand-over took an item.
+
+        ADR-0310 §1:3: the partition is the only selection. :func:`configure`
+        refuses the options and path arguments that narrow a run, but a run can be
+        narrowed after collection by a hook no option names in advance: ``--sw``
+        with a cached position deselects every item before it. This compares what
+        is left to run, once every hook has had its turn, with the share the
+        partition kept, by identity because an xdist worker renames grouped items.
+        Only the items ADR-0179 §3:3 hands to the controller may be missing.
+
+        Raises:
+            pytest.UsageError: If the run lost an item of its share to anything
+                else.
+        """
+        remaining = {id(item) for item in session.items}
+        lost = [
+            item.nodeid
+            for item in self.share
+            if id(item) not in remaining
+            and self.handed_over_by not in getattr(item, "fixturenames", ())
+        ]
+        if lost:
+            named = ", ".join(lost[:3])
+            raise pytest.UsageError(
+                f"{len(lost)} item(s) of this job's share were removed after the "
+                f"partition kept them (first: {named}), and ADR-0310 §1:3 makes the "
+                f"partition the only selection. Something narrowed the run after "
+                f"collection; drop it, or drop --partition-index and --partition-count."
+            )
 
 
 def write_manifest(target: Path, partition: Partition, assignment: dict[str, int]) -> None:
