@@ -1,6 +1,6 @@
 # 309. The phases are built beside the old path, and one cutover switches the controller over, deletes the old path and goes live in one deploy
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0312 (§2:2's module naming: it names the phases, not their modules' file names)
 - Date: 2026-10-11
 - Scope: the phases after understanding ([#2723](https://github.com/leonapivato/ai-assistant/pull/2723)), milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)), the last of their four decisions: how the phases are built, the controller's table they run on, the lanes that build them, what retires, and the one cutover that takes them live. ADR-0306 decided capabilities, authorizing and acting, ADR-0307 planning, and ADR-0308 recall's second run and digesting.
 - Dependency: [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md) and [ADR-0308](0308-recall-runs-again-on-what-understanding-found-and-outside-content-reaches-planning-only-as-a-digests-evidence.md), all Accepted and merged at `edd58306`, each of which waits on this decision before any lane implements it.
@@ -43,6 +43,14 @@
   [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) (§1:4's resume clause; §2:1; §2:3's association limb; §3:3, for the round's step; §3:5 and §3:7, in the removed members and the additions; §4:1–§4:2, in the removal and the additions; §4:3's table; §4:5's composition sentence; §4:6's loop guard, for authorizing, acting and digesting; §4:7; §4:8's last sentence);
   [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md) (§5:1–§5:2's verdict fields; §5:4–§5:5's resume record);
   [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md) (§13:1, for `resume` alone).
+- Partially superseded: 2026-10-11 by ADR-0312 — one scope. §2:2's module naming: it
+  names the phases and not their modules' file names. The authorizing phase's module
+  takes a name other than `authorizing`, chosen by the lane that builds it, so §5:3 binds
+  it as written, and §2:3's `independence` contract covers it under that name. The
+  controller stage keeps the name `authorizing`. Every other clause stands. This scoped
+  replacement takes effect on ratification of ADR-0312. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the
+  ratified body below are preserved.
 
 ## Context
 
