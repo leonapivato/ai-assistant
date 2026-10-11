@@ -37,7 +37,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         else:
             mark = item.get_closest_marker("xdist_group")
             key = item.nodeid
-            if mark is not None:
+            # Spike 2: the browser layer is divided among jobs (one browser per job);
+            # every other group stays whole.
+            if mark is not None and mark.args[:1] != ("gateway_browser",):
                 key = str(mark.args[0] if mark.args else mark.kwargs.get("name"))
             point = (zlib.crc32(key.encode()) % 100_000) / 100_000
             shard = sum(point >= cut for cut in [first, *cuts[:-1]]) if count > 1 else 0

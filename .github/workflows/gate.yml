@@ -33,12 +33,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        split: [1, 2, 3, 4]
+        split: [2, 3, 4]
         index: [0, 1, 2, 3]
         exclude:
-          - {split: 1, index: 1}
-          - {split: 1, index: 2}
-          - {split: 1, index: 3}
           - {split: 2, index: 2}
           - {split: 2, index: 3}
           - {split: 3, index: 3}
