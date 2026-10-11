@@ -15,6 +15,13 @@
   [ADR-0303](0303-a-storys-page-is-free-notes-rewritten-whole-and-the-place-window-links-each-item-to-its-activation.md) (§6:2's *passed over*, for a split or move whose actor is planning);
   [ADR-0304](0304-a-storys-page-is-its-summary-shown-where-owner-records-are-a-lookalike-is-not-read-and-a-story-is-a-referent.md) (§9:3's and §9:5's treatment of a named note the story does not hold, for a move whose actor is planning);
   [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md) (§6:1's `ActivationEffect`, in the addition alone).
+- Recorded: 2026-10-11 — §10's `project_episode` row also partially supersedes
+  [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md) §8:1's
+  projection, in the addition alone: it renders an episode's round messages and episode
+  notes, under the reader's audience. The header above did not name it when this ADR merged
+  ([#2835](https://github.com/leonapivato/ai-assistant/issues/2835)); this note records the
+  decision §10 made and alters none, and ADR-0284's status line and a dated note there now
+  carry it.
 
 ## Context
 
