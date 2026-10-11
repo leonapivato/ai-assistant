@@ -1,6 +1,6 @@
 # 293. The hub's chat is a hosted medium, and a conversation keeps its own transcript
 
-- Status: Partially superseded by ADR-0295 (§8:3's list of endings, in the addition alone; §9:1 and §10:2, for a stopped activation) and ADR-0296 (§11:1's delivery poll as the change stream's transport, once the change stream is built)
+- Status: Partially superseded by ADR-0295 (§8:3's list of endings, in the addition alone; §9:1 and §10:2, for a stopped activation) and ADR-0296 (§11:1's delivery poll as the change stream's transport, once the change stream is built) and ADR-0307 (§6:14 and §11:6, each whole; §6:10, §6:11 and §10:4, until the timers and proactivity milestone)
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the conversation channel, the first channel ADR-0292's model is applied to.
 - Authorization: the owner accepted proposal #2680 on 2026-10-04, at `f21aeb7b`, after walking it through section by section the same day, and the dispatcher assigned 0293. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
@@ -28,6 +28,15 @@
   §11:1 decides (ADR-0296 §Decision:2). Every other clause stands. This reciprocal
   header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-11 by ADR-0307 — two scopes. §6:14 and §11:6, each whole:
+  questions and answers are ordinary messages, so a question carries no options and an
+  answer names no question, and `answer` retires as the cutover decision decides (ADR-0307
+  §3:6). §6:10, §6:11 and §10:4, until the timers and proactivity milestone: a message
+  goes only into the place the input came from, an activation whose place takes no message
+  writes none, and the assistant starts no conversation (ADR-0307 §3:1, §3:8). Every other
+  clause stands. These scoped replacements take effect on ratification of ADR-0307. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  prior supersessions and the ratified body below are preserved.
 
 ## Context
 

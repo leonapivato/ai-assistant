@@ -1,6 +1,6 @@
 # 170. A reply is not a tool: the turn composes its answer, and the outcome carries it
 
-- Status: Partially superseded by ADR-0173 (§4's clause that `reply_degraded` is never `True` beside a non-`None` `reply`, and §8's clause naming `ModelProvider.complete()` as the one call an answer-owing pass originates — each only as it reaches a **streamed** pass; §4's other invariants, §8's one-call budget, and every other section stand) and ADR-0197 (§4's second `None` shape and its two clauses stated in the "`turn is None`" direction, each only as it reaches an outcome carrying `TurnOutcome.routed`) and ADR-0250 (§4's `turn`-`None` enumeration, in its count alone: the turn whose goal association came back `UNDECIDED` engaged no goal, took no relevance read, no episodic supplement and no `Planner.plan` call, so it has no `TurnResult` — a second shape beyond the recovered park, returning a `GoalDisambiguation` beside a reply `orchestration` composed from that typed value. That one scope, and nothing else in this ADR: §4's `reply` enumeration does not move, the three shapes on which `reply` is `None` staying exactly the three it names; §4's both-directions rule binds entire and the new shape is stated in both; `reply_degraded` stays `True` on the composition-failure shape and on no other and is never `True` where `turn` is `None`; §4's park clause, its recovered-park clause and its composition-failure clause are untouched; and §§1-3 and §§5-9 stand entire) and ADR-0297 (§4:1's shapes on which `reply` is `None`, in the addition alone: a stopped resume's outcome, marked by `TurnOutcome.stopped`)
+- Status: Partially superseded by ADR-0173 (§4's clause that `reply_degraded` is never `True` beside a non-`None` `reply`, and §8's clause naming `ModelProvider.complete()` as the one call an answer-owing pass originates — each only as it reaches a **streamed** pass; §4's other invariants, §8's one-call budget, and every other section stand) and ADR-0197 (§4's second `None` shape and its two clauses stated in the "`turn is None`" direction, each only as it reaches an outcome carrying `TurnOutcome.routed`) and ADR-0250 (§4's `turn`-`None` enumeration, in its count alone: the turn whose goal association came back `UNDECIDED` engaged no goal, took no relevance read, no episodic supplement and no `Planner.plan` call, so it has no `TurnResult` — a second shape beyond the recovered park, returning a `GoalDisambiguation` beside a reply `orchestration` composed from that typed value. That one scope, and nothing else in this ADR: §4's `reply` enumeration does not move, the three shapes on which `reply` is `None` staying exactly the three it names; §4's both-directions rule binds entire and the new shape is stated in both; `reply_degraded` stays `True` on the composition-failure shape and on no other and is never `True` where `turn` is `None`; §4's park clause, its recovered-park clause and its composition-failure clause are untouched; and §§1-3 and §§5-9 stand entire) and ADR-0297 (§4:1's shapes on which `reply` is `None`, in the addition alone: a stopped resume's outcome, marked by `TurnOutcome.stopped`) and ADR-0307 (whole, for an activation the phases plan: the reply is planning's own text, and no compose stage runs)
 - Date: 2026-08-21
 - **Partially superseded: 2026-08-21 by
   [ADR-0173](0173-an-answer-streams-as-chunks-of-one-reply-and-the-result-frame-is-still-the-answer.md),
@@ -134,6 +134,14 @@
   ratification of ADR-0297. This reciprocal header record accompanies the numbered draft
   under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
   preserved.
+- Partially superseded: 2026-10-11 by ADR-0307 — one scope. The whole decision, for an
+  activation the phases plan: the reply is the text of planning's own round, written into
+  the place the input came from as soon as the round is recorded, and no compose stage
+  runs (ADR-0307 §3). The old turn loop keeps this decision until the cutover decision
+  removes it. For every other activation, every clause stands. This scoped replacement
+  takes effect on ratification of ADR-0307. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
+  below are preserved.
 
 ## Context
 
