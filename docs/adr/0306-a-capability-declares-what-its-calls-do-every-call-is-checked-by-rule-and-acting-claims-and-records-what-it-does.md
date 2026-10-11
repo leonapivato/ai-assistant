@@ -1,6 +1,6 @@
 # 306. A capability declares what its calls do, every call is checked by rule, and acting claims and records what it does
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Scope: the phases after understanding ([#2723](https://github.com/leonapivato/ai-assistant/pull/2723)), milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)), the first of their four decisions: what a capability declares, how the assistant's own records are declared, how authorizing checks a call until the authority milestone, and how acting runs, claims and records calls. The planning decision, the digesting decision and the cutover decision are the other three.
 - Dependency: the story calls ADR-0300 §10, ADR-0303 §9 and ADR-0304 §9 declare, and ADR-0297's stop, all implemented at `5166d5bc`.
