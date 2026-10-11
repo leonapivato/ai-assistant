@@ -303,8 +303,9 @@ once every call of the last one has finished and something calls for it.
 
 > **Normative.** This numbered draft records its replacements on the status lines and in
 > a dated header note of ADR-0170, ADR-0226, ADR-0228, ADR-0251, ADR-0280, ADR-0286,
-> ADR-0293, ADR-0303, ADR-0304 and ADR-0306, atomically with this ADR under ADR-0070 and ADR-0082, preserving their
-> ratified bodies. The replacements take effect on this ADR's ratification.
+> ADR-0293, ADR-0303, ADR-0304 and ADR-0306, atomically with this ADR under ADR-0070 and
+> ADR-0082, preserving their ratified bodies. The replacements take effect on this ADR's
+> ratification.
 
 ## Consequences
 
