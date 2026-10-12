@@ -60,6 +60,7 @@ from ai_assistant.core.errors import AuditError, EgressBindingError, StoryStoreE
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     ActionRequest,
+    ActivationDigest,
     CapabilityEffect,
     CarriedProvenance,
     DigestOutcome,
@@ -124,6 +125,7 @@ __all__ = [
     "RoundMessage",
     "RoundToAuthorize",
     "Verdict",
+    "WorkingRecord",
     "gets_effect_record",
     "read_outside_content",
 ]
@@ -199,6 +201,26 @@ class RoundMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkingRecord:
+    """What the working set holds of the activation's record, whether or not it was kept.
+
+    An append that fails is a capture failure and holds nothing back (ADR-0307 §2:4,
+    ADR-0308 §5:2), so the episode in the store may lack a round or a digest planning was
+    shown. The lane that wires the phases fills this from the working set, so that what
+    the activation read is computed over everything it read.
+
+    Attributes:
+        rounds: This activation's rounds. The stage adds the one it is authorizing.
+        labels: The labels those rounds assigned, the round being authorized's included.
+        digests: This activation's digests, recall's included.
+    """
+
+    rounds: tuple[PlanningRound, ...] = ()
+    labels: tuple[PlanningLabel, ...] = ()
+    digests: tuple[ActivationDigest, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class RoundToAuthorize:
     """One recorded planning round, as authorizing takes it.
 
@@ -206,7 +228,8 @@ class RoundToAuthorize:
         activation_id: The activation the round belongs to.
         round: The round, as planning recorded it, or as it would have been where its
             append failed (ADR-0307 §2:4).
-        labels: The labels the round assigned, which its record carries with it.
+        working: What the working set holds of the activation's record, with the labels
+            this round assigned.
         calls: The calls that passed planning's check, in the round's order.
         input_place: The place the activation's input came from, or ``None`` where it
             came from none.
@@ -219,7 +242,7 @@ class RoundToAuthorize:
 
     activation_id: str
     round: PlanningRound
-    labels: tuple[PlanningLabel, ...] = ()
+    working: WorkingRecord
     calls: tuple[CallToAuthorize, ...] = ()
     input_place: str | None = None
     message: RoundMessage | None = None
@@ -343,26 +366,25 @@ def gets_effect_record(tool: ToolDefinition) -> bool:
     return tool.effect is CapabilityEffect.WORLD or not tool.safe_to_repeat
 
 
-def _shows_a_marked_note(record: EpisodicMemory) -> bool:
-    """Whether another episode, shown to planning, carries a marked note (ADR-0307 §4:3)."""
-    processing = record.processing_record
-    return processing is not None and any(one.notes_marked for one in processing.rounds)
-
-
-def _own_record_says_so(record: EpisodicMemory, processing: EpisodeProcessingRecord) -> bool:
-    """Whether the activation's own record says it has read outside content.
-
-    Its episode's mark (ADR-0106 §1), an outside trigger (ADR-0284 §2:1), a digest that
-    answered with or without items (ADR-0308 §5:4), or a round whose notes the hub marked
-    because the activation had read outside content when they were written (ADR-0307
-    §4:3, ADR-0303 §3:1).
-    """
+def _outside_trigger(processing: EpisodeProcessingRecord) -> bool:
+    """Whether an episode's trigger came from outside (ADR-0284 §2:1)."""
     trigger = processing.trigger
-    return (
-        rests_on_recorded_external_content(record.provenance)
-        or (isinstance(trigger, RecordedChannelTrigger) and trigger.origin is InputOrigin.OUTSIDE)
-        or any(one.outcome is DigestOutcome.ANSWERED for one in processing.digests)
-        or any(one.notes_marked for one in processing.rounds)
+    return isinstance(trigger, RecordedChannelTrigger) and trigger.origin is InputOrigin.OUTSIDE
+
+
+def _shown_episode_is_marked(record: EpisodicMemory) -> bool:
+    """Whether another episode, shown to planning, is shown resting on outside content.
+
+    Planning is shown such an episode as outside content where its provenance rests on
+    recorded external content (ADR-0106 §1), where its input came from outside, whose
+    understood meaning it is still shown (ADR-0303 §3:2), or where its rounds carry a
+    marked note (ADR-0307 §4:3).
+    """
+    if rests_on_recorded_external_content(record.provenance):
+        return True
+    processing = record.processing_record
+    return processing is not None and (
+        _outside_trigger(processing) or any(one.notes_marked for one in processing.rounds)
     )
 
 
@@ -370,24 +392,25 @@ async def read_outside_content(
     memory: MemoryStore,
     activation_id: str,
     *,
-    round_: PlanningRound | None = None,
-    labels: Sequence[PlanningLabel] = (),
+    working: WorkingRecord,
 ) -> bool:
     """Whether the activation's record says it has read outside content (ADR-0306 §4:5).
 
     Computed over the activation's whole record, every round included (§4:6), and never
     from a value a model, a tool or a plan emits. The record is the activation's episode
-    at its address, with the round in hand and the labels it assigned added, since the
-    round's own append may have failed (ADR-0307 §2:4). It has read outside content
-    where:
+    at its address together with ``working``, what the working set holds of it, since an
+    append that fails holds nothing back (ADR-0307 §2:4, ADR-0308 §5:2) and so cannot be
+    what clears the lineage. It has read outside content where:
 
-    - its own record says so (:func:`_own_record_says_so`): an outside trigger, digested
-      evidence, a marked round's notes, or the episode's own mark;
-    - the round in hand's notes are marked;
+    - its episode is marked (ADR-0106 §1), or its trigger came from outside;
+    - a digest answered, with or without items (ADR-0308 §5:4);
+    - a round's notes are marked, which the hub does where the activation had read
+      outside content when they were written (ADR-0307 §4:3, ADR-0303 §3:1);
     - planning was shown a story's note (an ``N`` label), whose mark this stage does not
       read, so it counts, failing closed;
-    - or planning was shown an episode (an ``E`` label) whose rounds carry a marked note
-      (ADR-0307 §4:3), or one that can no longer be read, which fails closed too.
+    - or planning was shown an episode (an ``E`` label) shown as resting on outside
+      content (:func:`_shown_episode_is_marked`), or one that can no longer be read,
+      which fails closed too.
 
     Where the activation's own episode cannot be read, or carries no processing record,
     nothing says it has not read outside content, so it has.
@@ -395,8 +418,7 @@ async def read_outside_content(
     Args:
         memory: The memory store the episodes are read from.
         activation_id: The activation.
-        round_: The round being authorized, where there is one.
-        labels: The labels that round assigned.
+        working: What the working set holds of the activation's record.
 
     Returns:
         Whether the activation has read outside content.
@@ -410,18 +432,24 @@ async def read_outside_content(
         _log.info("authorizing_record_unread", stage="authorizing", reason="no_episode")
         return True
     processing = record.processing_record
-    if _own_record_says_so(record, processing) or (round_ is not None and round_.notes_marked):
+    rounds = (*processing.rounds, *working.rounds)
+    digests = (*processing.digests, *working.digests)
+    labels = (*processing.labels, *working.labels)
+    if (
+        rests_on_recorded_external_content(record.provenance)
+        or _outside_trigger(processing)
+        or any(one.outcome is DigestOutcome.ANSWERED for one in digests)
+        or any(one.notes_marked for one in rounds)
+        or any(one.kind is LabelKind.NOTE for one in labels)
+    ):
         return True
-    every = (*processing.labels, *labels)
-    if any(one.kind is LabelKind.NOTE for one in every):
-        return True
-    shown = sorted({one.id for one in every if one.kind is LabelKind.EPISODE} - {own})
+    shown = sorted({one.id for one in labels if one.kind is LabelKind.EPISODE} - {own})
     if not shown:
         return False
     found = await memory.get_many(shown)
     for episode_id in shown:
         other = found.get(episode_id)
-        if not isinstance(other, EpisodicMemory) or _shows_a_marked_note(other):
+        if not isinstance(other, EpisodicMemory) or _shown_episode_is_marked(other):
             return True
     return False
 
@@ -442,10 +470,17 @@ def _declared(tool: ToolDefinition) -> tuple[object, ...]:
 def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
     """Revalidate and detach the round, so nothing a caller still holds is ruled on."""
     message = given.message
+    working = given.working
     return RoundToAuthorize(
         activation_id=str(given.activation_id),
         round=PlanningRound.model_validate(given.round.model_dump()),
-        labels=tuple(PlanningLabel.model_validate(one.model_dump()) for one in given.labels),
+        working=WorkingRecord(
+            rounds=tuple(PlanningRound.model_validate(one.model_dump()) for one in working.rounds),
+            labels=tuple(PlanningLabel.model_validate(one.model_dump()) for one in working.labels),
+            digests=tuple(
+                ActivationDigest.model_validate(one.model_dump()) for one in working.digests
+            ),
+        ),
         calls=tuple(
             CallToAuthorize(
                 call=ProposedCall.model_validate(one.call.model_dump()),
@@ -578,8 +613,11 @@ class AuthorizingStage:
                 the refusals handled here. Nothing has run.
         """
         snapshot = _detached_round(given)
+        held = snapshot.working
         read_outside = await read_outside_content(
-            self._memory, snapshot.activation_id, round_=snapshot.round, labels=snapshot.labels
+            self._memory,
+            snapshot.activation_id,
+            working=WorkingRecord((*held.rounds, snapshot.round), held.labels, held.digests),
         )
         state = _Round(activation_id=snapshot.activation_id, read_outside=read_outside)
         for one in snapshot.calls:
