@@ -46,8 +46,12 @@ medium returns, beside the round's calls. An empty text writes nothing; where th
 takes no message the text is kept with the round and written nowhere. When the round
 limit or a deadline ends the activation, or a stage fails, the fixed *couldn't finish*
 message is written, whatever earlier rounds wrote (ADR-0307 §3:7, ADR-0293 §9:1, §10:2);
-a stop writes nothing (ADR-0295 §3:3). The activation's messages, joined by a blank
-line, are the episode's ``outcome`` at the freeze (ADR-0307 §10).
+a stop writes nothing (ADR-0295 §3:3). Wherever it is written the activation did not
+finish, so its episode freezes ``failed`` and the conversation's current state reads
+*couldn't finish* beside the message (ADR-0293 §8:3): a stage's failure classifies as it
+is, and an activation that returned on the round limit or having written nothing is
+``failed / processing_failed`` (ADR-0275 §5:3). The activation's messages, joined by a
+blank line, are the episode's ``outcome`` at the freeze (ADR-0307 §10).
 
 **The thin path's capabilities** (ADR-0309 §4:2). The web search, remembering and the
 simulated booking act. The search is registered at the egress seam and in no
@@ -1088,7 +1092,9 @@ class PhasePath:
         fixed *couldn't finish* message is written into the input's place, whatever
         earlier rounds wrote (ADR-0307 §3:7, ADR-0293 §9:1, §10:2), and so it is where
         the activation ends having written nothing; a stop and a cancellation write
-        nothing (ADR-0295 §3:3, ADR-0293 §9:2). However it ended,
+        nothing (ADR-0295 §3:3, ADR-0293 §9:2). Where a pass that returned owes it, the
+        state is marked unfinished, so the episode freezes ``failed`` and the current
+        state reads *couldn't finish*, not done (ADR-0293 §8:3). However it ended,
         the activation's messages become the episode's ``outcome``, and the facts the
         freeze derives are set (ADR-0286 §4:2).
 
@@ -1109,6 +1115,10 @@ class PhasePath:
             # or every message refused or gone), owes the fixed message (ADR-0293 §9:1).
             limited = state is not None and _ended_by(state, ControllerRule.ROUND_LIMIT_REACHED)
             if (limited or not working.messages) and not _stopped(state):
+                if state is not None:
+                    # Unfinished, so the episode and the state say *couldn't finish*
+                    # beside the message, not done (ADR-0293 §8:3).
+                    state.unfinished = True
                 await self._couldnt_finish(working)
         finally:
             if state is not None:
