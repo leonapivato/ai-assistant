@@ -82,6 +82,8 @@ from ai_assistant.core.types import (
     CapabilityResult,
     EgressBinding,
     ToolCall,
+    ToolFailure,
+    ToolFailureKind,
     ToolOutcome,
     ToolResult,
     canonical_json_bytes,
@@ -90,7 +92,7 @@ from ai_assistant.orchestration.activation_cleanup import drain_registered
 from ai_assistant.orchestration.held_results import HeldResult
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import PlanStore, ToolInvoker
     from ai_assistant.core.types import (
@@ -107,6 +109,7 @@ __all__ = [
     "ActingStage",
     "AuthorizedCall",
     "AuthorizedRound",
+    "OwnRecordsByCapability",
     "OwnRecordsCalls",
     "ResultRoute",
     "gets_effect_record",
@@ -221,6 +224,47 @@ class OwnRecordsCalls(Protocol):
             assistant's own records is awaited to its end.
         """
         ...
+
+
+class OwnRecordsByCapability:
+    """The own-records seam, filled: each capability's runner, by capability name.
+
+    ADR-0306 §3:3. Structurally :class:`OwnRecordsCalls`. The composition root hands
+    it one runner per capability whose effect is the assistant's own records, such as
+    :class:`~ai_assistant.orchestration.remembering.RememberCalls`, and acting hands
+    every such call to it. A call to a capability it holds no runner for is not done,
+    and nothing runs.
+    """
+
+    def __init__(self, runners: Mapping[str, OwnRecordsCalls]) -> None:
+        """Hold a snapshot of ``runners``, so a caller's later change reaches nothing.
+
+        Args:
+            runners: The runner for each capability, by the capability's name.
+        """
+        self._runners: dict[str, OwnRecordsCalls] = dict(runners)
+
+    async def run(self, call: ToolCall) -> ToolResult:
+        """Run ``call`` through its capability's runner, or say none holds it.
+
+        Args:
+            call: The authorized call.
+
+        Returns:
+            The runner's answer, or ``failed`` where no runner is held for the
+            call's capability.
+        """
+        runner = self._runners.get(str(call.request.tool.capability))
+        if runner is None:
+            _log.info("acting_call_not_done", stage="acting", reason="no_own_records_runner")
+            return ToolResult(
+                outcome=ToolOutcome.FAILED,
+                failure=ToolFailure(
+                    kind=ToolFailureKind.INVALID_REQUEST,
+                    message="no runner is held for this capability on the assistant's records",
+                ),
+            )
+        return await runner.run(call)
 
 
 @dataclass(frozen=True, slots=True)

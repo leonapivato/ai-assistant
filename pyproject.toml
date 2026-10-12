@@ -668,6 +668,8 @@ modules = [
     "ai_assistant.orchestration.acting",
     "ai_assistant.orchestration.planning",
     "ai_assistant.orchestration.digesting",
+    # ADR-0312 §3: the authorizing phase's module, under the name it takes.
+    "ai_assistant.orchestration.authorizer",
 ]
 
 [[tool.importlinter.contracts]]
@@ -680,6 +682,7 @@ source_modules = [
     "ai_assistant.orchestration.recall",
     "ai_assistant.orchestration.understanding",
     "ai_assistant.orchestration.planning",
+    "ai_assistant.orchestration.authorizer",
 ]
 forbidden_modules = ["ai_assistant.orchestration.held_results"]
 
