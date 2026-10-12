@@ -163,6 +163,7 @@ from ai_assistant.orchestration.authorizer import (
     AuthorizingStage,
     CallToAuthorize,
     RoundToAuthorize,
+    WorkingRecord,
 )
 from ai_assistant.orchestration.digesting import ActivationLabels, DigestingStage
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
@@ -513,6 +514,7 @@ async def _authorizing_stage(now: Clock) -> None:
         RoundToAuthorize(
             activation_id="act-1",
             round=PlanningRound(id="r-1", recorded_at=_AWARE, calls=(planned,)),
+            working=WorkingRecord(),
             calls=(CallToAuthorize(planned),),
         )
     )

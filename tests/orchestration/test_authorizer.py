@@ -67,6 +67,7 @@ from ai_assistant.orchestration.authorizer import (
     RoundMessage,
     RoundToAuthorize,
     Verdict,
+    WorkingRecord,
     gets_effect_record,
     read_outside_content,
 )
@@ -201,7 +202,7 @@ def _round(
     *calls: ProposedCall,
     deliberate: frozenset[str] = frozenset(),
     message: RoundMessage | None = None,
-    labels: Sequence[PlanningLabel] = (),
+    working: WorkingRecord | None = None,
     notes_marked: bool = False,
 ) -> RoundToAuthorize:
     """A recorded round proposing ``calls``, each handed on as planning judged it."""
@@ -215,7 +216,7 @@ def _round(
     return RoundToAuthorize(
         activation_id=_ACTIVATION,
         round=planning_round,
-        labels=tuple(labels),
+        working=working or WorkingRecord(),
         calls=tuple(
             CallToAuthorize(one, deliberate_repeat=one.call_id in deliberate) for one in calls
         ),
@@ -546,37 +547,75 @@ async def test_the_record_says_whether_outside_content_was_read(
     memory = FakeMemoryStore(now=_now)
     await memory.add(episode)
 
-    assert await read_outside_content(memory, _ACTIVATION) is read
+    assert await read_outside_content(memory, _ACTIVATION, working=WorkingRecord()) is read
 
 
-async def test_the_round_in_hand_counts_where_its_append_failed() -> None:
-    """ADR-0307 §2:4: the record may not hold the round; its own marks still count."""
+@pytest.mark.parametrize(
+    "working",
+    [
+        WorkingRecord(rounds=(_marked_round("round:1"),)),
+        WorkingRecord(digests=(_digest(DigestOutcome.ANSWERED),)),
+        WorkingRecord(labels=(PlanningLabel(label="N1", kind=LabelKind.NOTE, id="7"),)),
+    ],
+)
+async def test_what_the_working_set_holds_counts_where_its_append_failed(
+    working: WorkingRecord,
+) -> None:
+    """ADR-0307 §2:4, ADR-0308 §5:2: a failed append clears no lineage."""
     memory = FakeMemoryStore(now=_now)
     await memory.add(_episode())
 
-    marked = _marked_round("round:1")
-    assert await read_outside_content(memory, _ACTIVATION, round_=marked) is True
+    assert await read_outside_content(memory, _ACTIVATION, working=working) is True
 
 
-async def test_an_episode_planning_was_shown_counts_by_its_marked_notes() -> None:
-    """ADR-0307 §4:3: another episode's marked note, shown to planning, is read."""
+async def test_a_failed_digest_append_still_counts_through_the_stage() -> None:
+    """The adversarial round-1 case: evidence read, nothing kept, no notes written."""
+    hub = _Hub()
+    held = WorkingRecord(digests=(_digest(DigestOutcome.ANSWERED, "the 9:10"),))
+
+    decided = await hub.authorize(_round(_call("c1", "book", q="seat"), working=held))
+
+    assert decided.read_outside_content is True
+    assert decided.verdicts[0].verdict is Verdict.NEEDS_YOU
+
+
+@pytest.mark.parametrize(
+    ("shown", "read"),
+    [
+        (_episode("activation:other"), False),
+        (_episode("activation:other", rounds=(_marked_round(),)), True),
+        # Shown with its outside mark, notes or none (ADR-0181 §4's disjunction).
+        (_episode("activation:other", derived_from_external=True), True),
+        # Its input is withheld, but its understood meaning is shown (ADR-0303 §3:2).
+        (_episode("activation:other", origin=InputOrigin.OUTSIDE), True),
+    ],
+)
+async def test_an_episode_planning_was_shown_counts_by_its_marks(
+    shown: EpisodicMemory, *, read: bool
+) -> None:
+    """ADR-0307 §4:3, ADR-0181 §4: an episode shown as outside content is read."""
     memory = FakeMemoryStore(now=_now)
     await memory.add(_episode())
-    await memory.add(_episode("activation:clean"))
-    await memory.add(_episode("activation:marked", rounds=(_marked_round(),)))
-    clean = PlanningLabel(label="E1", kind=LabelKind.EPISODE, id="activation:clean")
-    marked = PlanningLabel(label="E2", kind=LabelKind.EPISODE, id="activation:marked")
-    gone = PlanningLabel(label="E3", kind=LabelKind.EPISODE, id="activation:gone")
+    await memory.add(shown)
+    label = PlanningLabel(label="E1", kind=LabelKind.EPISODE, id="activation:other")
 
-    assert await read_outside_content(memory, _ACTIVATION, labels=(clean,)) is False
-    assert await read_outside_content(memory, _ACTIVATION, labels=(clean, marked)) is True
-    # An episode that can no longer be read fails closed.
-    assert await read_outside_content(memory, _ACTIVATION, labels=(gone,)) is True
+    working = WorkingRecord(labels=(label,))
+    assert await read_outside_content(memory, _ACTIVATION, working=working) is read
+
+
+async def test_an_episode_planning_was_shown_that_is_gone_fails_closed() -> None:
+    memory = FakeMemoryStore(now=_now)
+    await memory.add(_episode())
+    gone = PlanningLabel(label="E1", kind=LabelKind.EPISODE, id="activation:gone")
+
+    working = WorkingRecord(labels=(gone,))
+    assert await read_outside_content(memory, _ACTIVATION, working=working) is True
 
 
 async def test_an_activation_with_no_readable_record_has_read_outside_content() -> None:
     """Nothing says it has not, so it fails closed."""
-    assert await read_outside_content(FakeMemoryStore(now=_now), _ACTIVATION) is True
+    memory = FakeMemoryStore(now=_now)
+    assert await read_outside_content(memory, _ACTIVATION, working=WorkingRecord()) is True
 
 
 # --- remembering --------------------------------------------------------------------------------
@@ -708,12 +747,14 @@ def test_a_round_hands_on_only_the_calls_it_proposed() -> None:
         RoundToAuthorize(
             activation_id=_ACTIVATION,
             round=planning_round,
+            working=WorkingRecord(),
             calls=(CallToAuthorize(_call("c1", "book")),),
         )
     with pytest.raises(ValueError, match="once"):
         RoundToAuthorize(
             activation_id=_ACTIVATION,
             round=planning_round,
+            working=WorkingRecord(),
             calls=(CallToAuthorize(_call("c1", "lookup")), CallToAuthorize(_call("c1", "lookup"))),
         )
 
