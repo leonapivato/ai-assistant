@@ -3973,6 +3973,18 @@ class ControllerStage(StrEnum):
     WINDOWS = "windows"
     STORY_LINKS = "story_links"
     """Record the understanding's story links in the story store (ADR-0300 §6:10)."""
+    PLANNING = "planning"
+    """One planning round: one model response, recorded with the episode (ADR-0307 §2,
+    §10)."""
+    AUTHORIZING = "authorizing"
+    """Every call of the latest round checked by rule, and its message by its place
+    (ADR-0306 §4, ADR-0309 §3:2)."""
+    ACTING = "acting"
+    """The latest round's allowed calls run, claimed and recorded, and its message
+    written (ADR-0306 §5, ADR-0309 §3:2)."""
+    DIGESTING = "digesting"
+    """Outside text read for planning as marked evidence, beside acting (ADR-0308 §4:5,
+    ADR-0309 §3:3)."""
 
 
 class ControllerRule(StrEnum):
@@ -4018,6 +4030,23 @@ class ControllerRule(StrEnum):
     """The story-links stage is wired, the understanding outcome is a recorded
     version, and there is no story-links decision (ADR-0300 §6:11): ``story_links``
     is due. It makes a stage due, so it is not among the ending rules."""
+    FIRST_ROUND_DUE = "first_round_due"
+    """Understanding has recorded and no planning round has run (ADR-0307 §8:6,
+    ADR-0309 §3): ``planning`` is due."""
+    ROUND_UNAUTHORIZED = "round_unauthorized"
+    """The latest round has a call or text, and there is no authorizing decision for
+    it (ADR-0309 §3): ``authorizing`` is due."""
+    ROUND_AUTHORIZED = "round_authorized"
+    """The latest round's authorizing decision allows a call or its message, and there
+    is no acting decision for that round (ADR-0309 §3): ``acting`` is due, with
+    ``digesting`` beside it (§3:3)."""
+    ROUND_LIMIT_REACHED = "round_limit_reached"
+    """Another round would be due, and the round limit has been reached (ADR-0307 §8:4,
+    ADR-0309 §3). It ends a pass, so it is in :data:`ENDING_CONTROLLER_RULES`."""
+    ROUND_DUE = "round_due"
+    """Every call of the latest round has finished, and one brought a result, was not
+    done, came back unknown, needed the user or was refused, or the round was marked
+    (ADR-0307 §8:1): ``planning`` is due."""
 
 
 #: The rules that end a pass rather than make a stage due (ADR-0280 §4, §5).
@@ -4033,6 +4062,7 @@ ENDING_CONTROLLER_RULES: Final[frozenset[ControllerRule]] = frozenset(
         ControllerRule.ENDED_BEFORE_CONTROLLER,
         ControllerRule.HUB_STOPPED,
         ControllerRule.STOPPED,
+        ControllerRule.ROUND_LIMIT_REACHED,
     }
 )
 
