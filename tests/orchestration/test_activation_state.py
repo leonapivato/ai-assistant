@@ -19,13 +19,18 @@ from ai_assistant.core.errors import (
     UnderstandingError,
 )
 from ai_assistant.core.types import (
+    ActivationDigest,
     ActivationUnderstanding,
     ChannelContext,
     ChannelContextItem,
     ChannelInput,
     ControllerRule,
     ControllerStage,
+    DigestOutcome,
+    LabelKind,
     NewConversation,
+    PlanningLabel,
+    PlanningRound,
     ProcessingReason,
     ProcessingStatus,
     RecordedChannelTrigger,
@@ -87,6 +92,25 @@ def test_record_preserves_exact_admitted_material_and_reversed_wall_clock() -> N
     assert record.trigger.context.history[0].text == "quoted input"
     assert record.trigger.channel is None
     assert record.status is ProcessingStatus.COMPLETED
+
+
+def test_the_rounds_labels_and_digests_recorded_reach_the_open_and_the_frozen_record() -> None:
+    """ADR-0307 §2:3, §5:7 and ADR-0308 §5:2: each appended in the order recorded."""
+    state = _admitted()
+    first = PlanningRound(id="round:1", recorded_at=_AT, text="Looking.")
+    result = PlanningLabel(label="R1", kind=LabelKind.RESULT, id="result:1")
+    digest = ActivationDigest(
+        result="R1", question="when", outcome=DigestOutcome.FAILED, recorded_at=_AT
+    )
+    state.recorded_round(first, ())
+    state.recorded_digest(digest, (result,))
+    state.recorded_round(
+        PlanningRound(id="round:2", follows="round:1", recorded_at=_AT, text="Nine."), ()
+    )
+    for record in (state.open_processing(), state.processing(_AT, None)):
+        assert [one.id for one in record.rounds] == ["round:1", "round:2"]
+        assert record.labels == (result,)
+        assert record.digests == (digest,)
 
 
 @pytest.mark.parametrize("transcript", [None, "", "  \n", "  exact transcript\n"])

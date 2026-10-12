@@ -559,6 +559,8 @@ class AuthorizingStage:
         memory: MemoryStore,
         binder: EgressBinder | None = None,
         preference: Preference | None = None,
+        registered_search: frozenset[str] = frozenset(),
+        registered_forecast: frozenset[str] = frozenset(),
         now: Callable[[], datetime] = _utcnow,
         new_decision_id: Callable[[], str] = _new_decision_id,
         new_effect_id: Callable[[], str] = _new_effect_id,
@@ -575,6 +577,11 @@ class AuthorizingStage:
             memory: The memory store the activation's record is read from.
             binder: The egress binding seam, or ``None`` where none is wired.
             preference: The deployment's tool preference sequence (ADR-0144 §4).
+            registered_search: The ids of the tools that are this deployment's own
+                registered search (ADR-0247 §4), whose calls carry ``closed_loop``.
+            registered_forecast: The ids of the tools that are this deployment's own
+                configured forecast read (ADR-0260 §6), whose calls carry
+                ``forecast_reach``.
             now: The clock a decision's ``decided_at`` is read from.
             new_decision_id: Mints a decision's id.
             new_effect_id: Mints an effect record's id, before the ruling.
@@ -587,6 +594,8 @@ class AuthorizingStage:
         self._memory = memory
         self._binder = binder
         self._preference = Preference() if preference is None else preference
+        self._registered_search = frozenset(registered_search)
+        self._registered_forecast = frozenset(registered_forecast)
         self._now = checked_clock(now, owner="AuthorizingStage")
         self._new_decision_id = new_decision_id
         self._new_effect_id = new_effect_id
@@ -708,7 +717,16 @@ class AuthorizingStage:
     async def _ruled(
         self, call: ProposedCall, selected: _Selected, state: _Round
     ) -> _Ruled | CallVerdict:
-        """Bind the egress, build the request, ask the policy, and record the ruling."""
+        """Bind the egress, build the request, ask the policy, and record the ruling.
+
+        **The kind's carried fact is written here, as the old path writes it**
+        (ADR-0247 §4, ADR-0260 §6): ``closed_loop`` exactly for a call to this
+        deployment's own registered search, and ``forecast_reach`` exactly for a call to
+        its configured forecast read, each decided by the selected tool being the one the
+        deployment registered and never by a value a model wrote. The policy reaches
+        ADR-0247 §2's configured-provider route only through it, so ADR-0247 §3's
+        exception, which the stand-in keeps (ADR-0306 §4:4), holds for the phases' calls.
+        """
         tool = selected.tool
         parameters: Mapping[str, FrozenJson] = selected.parameters
         binding: EgressBinding | None = None
@@ -721,6 +739,8 @@ class AuthorizingStage:
                         spans={},
                         planned_with_external_content=state.read_outside,
                         coverage=SpanCoverage.MODEL_ON_EVERY_PATH,
+                        closed_loop=str(tool.id) in self._registered_search,
+                        forecast_reach=str(tool.id) in self._registered_forecast,
                     ),
                 )
             except EgressBindingError:

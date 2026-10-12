@@ -178,6 +178,7 @@ from ai_assistant.core.types import (
     ReadCancellation,
     ReadKind,
     RecallOutcome,
+    RecordedChannelTrigger,
     RecordedResumeTrigger,
     ReferenceOutcome,
     ReplyCapability,
@@ -261,11 +262,14 @@ from ai_assistant.orchestration.chat import (
 )
 from ai_assistant.orchestration.composing import ComposedReply
 from ai_assistant.orchestration.controller import (
+    ACTIVATION_RULES,
     DEFAULT_STAGE_RECORD_LIMIT,
     NO_VERDICT,
+    PHASE_RULES,
     ActivationController,
     ControllerStageRun,
     PassFacts,
+    Rule,
     Stage,
     StageRecord,
     StageResult,
@@ -457,6 +461,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.matters_pass import MattersPass, MattersPassReport
     from ai_assistant.orchestration.parked_reads import ParkedReadOperations
+    from ai_assistant.orchestration.phase_path import PhasePath, PhaseWorking
     from ai_assistant.orchestration.questions import QuestionStage
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
@@ -2246,6 +2251,10 @@ class _ActivationPass:
             missing; written by that phase alone, never persisted (§12:3).
         story_links: The story-links stage's decision (§6:10); written by that stage
             alone, never persisted (§12:3).
+        phases: The phases' part of the working set, where the pass runs them on a
+            test hub (ADR-0309 §2:6, §3:2): each round's planning, authorizing and
+            acting decisions, the digests and the held results. ``None`` on every
+            pass the phases do not plan, which no phase rule answers on.
     """
 
     deadline: float
@@ -2260,6 +2269,7 @@ class _ActivationPass:
     understanding: ActivationUnderstanding | None = None
     story_candidates: Candidates | None = None
     story_links: StoryLinksDecision | None = None
+    phases: PhaseWorking | None = None
 
     @property
     def text(self) -> str:
@@ -2538,6 +2548,34 @@ def _windows_expired(working: _ActivationPass) -> Exception | None:
     if isinstance(working, _EventPass):
         return ChannelProcessingTimeoutError("informational event processing timed out")
     return ModelTimeoutError(_WINDOWS_EXPIRED)
+
+
+def _wired_phases(
+    phases: PhasePath | None,
+    *,
+    understanding: bool,
+    chat_reader: bool,
+    append: Callable[[], Awaitable[None]],
+) -> PhasePath | None:
+    """The phases' thin path, wired only beside understanding and the chat's reader.
+
+    Planning's first round runs once understanding has recorded (ADR-0307 §8:6), and
+    the thin path plans the input the chat's reader takes in (ADR-0309 §2:6). Its
+    recorders extend the episode through ``append``.
+
+    Raises:
+        ConfigurationError: If the path is given without understanding or the reader.
+    """
+    if phases is None:
+        return None
+    if not understanding or not chat_reader:
+        msg = (
+            "the phases plan after understanding, for an input the chat's reader takes "
+            "in, so they are wired only beside both (ADR-0309 §2:6, ADR-0307 §8:6)"
+        )
+        raise ConfigurationError(msg)
+    phases.attach(append)
+    return phases
 
 
 def _check_story_wiring(
@@ -3111,6 +3149,7 @@ class Engine:
         drain_timeout: timedelta | None = None,
         chat_reader: bool = True,
         chat_turn_budget: timedelta = CHAT_TURN_BUDGET,
+        phases: PhasePath | None = None,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -3685,6 +3724,12 @@ class Engine:
             chat_turn_budget: The budget each activation the reader starts is given
                 (:data:`~ai_assistant.orchestration.chat.CHAT_TURN_BUDGET`); the
                 reader has no caller to hand it one (ADR-0029 §4).
+            phases: The phases' thin path, which the composition root builds only
+                where ``Settings.phases_thin_path`` is set, on a test hub alone
+                (ADR-0309 §2:6). Where it is given, each activation the chat's reader
+                starts runs :data:`~ai_assistant.orchestration.controller.PHASE_RULES`
+                over its stages, and the phases write its messages; ``None``, the
+                default, is every other deployment's, whose table runs unchanged.
 
         Raises:
             TypeError: If ``max_outstanding_confirmations``,
@@ -4013,6 +4058,14 @@ class Engine:
             )
             if chat_reader
             else None
+        )
+        # ADR-0309 §2:6: the phases' thin path, handed over only where a test hub set
+        # the opt-in. Its stages follow understanding, so it is wired only beside it.
+        self._phases = _wired_phases(
+            phases,
+            understanding=understanding is not None,
+            chat_reader=chat_reader,
+            append=self._episode_appended,
         )
         # ADR-0298 §7: the engine's half of the change stream, over the same chat
         # space and the same account of what runs as ``conversation`` reads.
@@ -10006,7 +10059,7 @@ class Engine:
         )
         marked: list[int] = []
 
-        async def turn() -> TurnOutcome:
+        async def turn() -> TurnOutcome | None:
             await reader.take_in(taken, into=marked)
             if not marked:
                 raise _NothingTakenInError
@@ -10015,7 +10068,7 @@ class Engine:
             # stage. The episode keeps the text the activation was admitted with: an
             # open episode is only ever extended (ADR-0286 §3:4, §12:2), and what an
             # episode records is never kept in step with the transcript (ADR-0293 §5:5).
-            return await self._chat_turn(taken.narrowed(marked))
+            return await self._chat_input_turn(taken.narrowed(marked))
 
         deadline = asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()
         task = self._activation_task(
@@ -10042,6 +10095,19 @@ class Engine:
                 _log.warning("chat_input_not_taken_in", stage="chat_reader", exc_info=True)
                 return False
             _log.warning("chat_activation_failed", stage="chat_reader", exc_info=True)
+        await self._adapted(taken, state, outcome)
+        return True
+
+    async def _adapted(
+        self, taken: ChatInput, state: ActivationState, outcome: TurnOutcome | None
+    ) -> None:
+        """The adapter: write what the pass ended with into its conversation (§10).
+
+        Where the phases planned the turn they wrote every message it owed while it ran,
+        the *couldn't finish* message included (ADR-0307 §3), so nothing is written here.
+        """
+        if self._phases is not None:
+            return
         driven = state.working.driven if isinstance(state.working, _TurnPass) else None
         reply = chat_reply(
             outcome,
@@ -10051,7 +10117,13 @@ class Engine:
             await self._chat_writer.send(taken.conversation_id, reply)
         except ConversationStoreError:
             _log.warning("chat_message_unwritten", stage="chat_writer", exc_info=True)
-        return True
+
+    async def _chat_input_turn(self, taken: ChatInput) -> TurnOutcome | None:
+        """The reader's input as a turn: the phases' where they are wired, else today's."""
+        if self._phases is not None:
+            await self._phases_turn(taken)
+            return None
+        return await self._chat_turn(taken)
 
     async def _chat_turn(self, taken: ChatInput) -> TurnOutcome:
         """The reader's input as one typed turn, composed whole, over its window."""
@@ -10068,6 +10140,71 @@ class Engine:
             ),
             operation=ConversationalOperation.CONVERSE,
             transcript=taken.window,
+        )
+
+    async def _phases_turn(self, taken: ChatInput) -> None:
+        """The reader's input planned by the phases, on a test hub (ADR-0309 §2:6, §3).
+
+        The turn's working set is the one :meth:`_chat_turn` assembles, holding the
+        phases' part beside it, and the controller runs ADR-0309 §3's table over the
+        stages before planning — the conversation, the windows, recall, understanding
+        and the story links, each exactly as today — and the four phase stages. No
+        routing, goal, turn loop, drive or compose stage runs, and no ``TurnOutcome``
+        is built: the phases write the activation's messages as it runs, and the path
+        carries what the episode freezes with.
+        """
+        phases = self._phases
+        assert phases is not None  # noqa: S101 — the reader calls this only where they are wired
+        state = active_state()
+        trigger = None if state is None else state.trigger
+        timeout = self._chat_turn_budget
+        working = _TurnPass(
+            utterance=taken.text,
+            requested=taken.conversation_id,
+            context=_EMPTY_CHANNEL_CONTEXT,
+            timeout=timeout,
+            remaining=None,
+            deadline=asyncio.get_running_loop().time() + timeout.total_seconds(),
+            compose=self._composed_whole,
+            compose_routed=self._composed_routed_whole,
+            # The conversation's own devices (ADR-0293 §7:4): a bounded audience, so a
+            # record placed for the owner alone may be shown (ADR-0307 §6:4).
+            supply=BoundedAudienceSupply(
+                speakable_attested_sources=self._speakable_attested_sources
+            ),
+            operation=ConversationalOperation.CONVERSE,
+            spoken=None,
+            reference=None,
+            transcript=taken.window,
+            routing_wired=False,
+            understanding_wired=self._understanding is not None,
+            recall_wired=self._recall is not None,
+            story_links_wired=self._story_links is not None,
+            reconciliation_wired=False,
+            phases=phases.begin(
+                activation_id=taken.activation_id,
+                window=taken.window,
+                conversation_id=taken.conversation_id,
+                trigger_origin=(
+                    trigger.origin if isinstance(trigger, RecordedChannelTrigger) else None
+                ),
+                owner_records=True,
+            ),
+        )
+        stages: list[ControllerStageRun[_TurnPass]] = [
+            Stage(ControllerStage.BEGIN_CONVERSATION, self._begin_conversation_stage),
+            Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),
+            TolerantStage(ControllerStage.RECALL, self._recall_stage, expired=_recall_expired),
+            Stage(ControllerStage.UNDERSTANDING, self._understanding_stage, expired=_turn_expired),
+            TolerantStage(
+                ControllerStage.STORY_LINKS, self._story_links_stage, expired=_story_links_expired
+            ),
+            *phases.stages(),
+        ]
+        await phases.run(
+            working,
+            lambda: self._controlled(working, stages, rules=PHASE_RULES),
+            state=state,
         )
 
     def _activation_task[T](
@@ -12574,7 +12711,11 @@ class Engine:
         )
 
     async def _controlled[P: PassFacts](
-        self, working: P, stages: Sequence[ControllerStageRun[P]]
+        self,
+        working: P,
+        stages: Sequence[ControllerStageRun[P]],
+        *,
+        rules: Sequence[Rule] = ACTIVATION_RULES,
     ) -> None:
         """Run one pass's stages by ADR-0280 §4's rules, recording on its state.
 
@@ -12582,7 +12723,8 @@ class Engine:
         (§3), and the entries accumulate there, each appended to the open episode as
         its stage ends (ADR-0286 §3). A pass with no admitted activation — an
         internal call no channel admitted — still runs by the rules, into a record
-        nothing writes.
+        nothing writes. ``rules`` is today's table everywhere but a pass the phases
+        plan, which is handed ADR-0309 §3's (§2:6).
         """
         state = active_state()
         record = StageRecord() if state is None else state.stages
@@ -12591,6 +12733,7 @@ class Engine:
         await ActivationController(
             stages=stages,
             clock=self._clock,
+            rules=rules,
             appended=self._episode_appended,
             stopped=None if state is None else (lambda: state.stopped),
         ).run(working, record)

@@ -19,6 +19,7 @@ from ai_assistant.core.errors import MemoryStoreError, ModelTimeoutError, Planni
 from ai_assistant.core.types import ControllerRule, ControllerStage, StageEntry, StageOutcome
 from ai_assistant.orchestration.controller import (
     ACTIVATION_RULES,
+    PHASE_RULES,
     ActivationController,
     Rule,
     Stage,
@@ -63,6 +64,24 @@ class _Facts:
     drive_decided: bool = False
     parked: bool = False
     reply_composed: bool = False
+    phases: _Phases | None = None
+
+
+@dataclass
+class _Phases:
+    """A constructed phase working set: every decision a plain field (``PhaseFacts``)."""
+
+    rounds: int = 0
+    round_limit: int = 3
+    latest_round: str | None = None
+    latest_has_calls: bool = False
+    latest_has_text: bool = False
+    latest_marked: bool = False
+    latest_authorized: bool = False
+    latest_allows: bool = False
+    latest_acted: bool = False
+    latest_digests_due: bool = False
+    latest_brought_something: bool = False
 
 
 def _due(facts: _Facts) -> Rule:
@@ -856,3 +875,323 @@ async def test_a_recorded_stage_that_raises_after_the_mark_ends_stopped_and_rera
         (ControllerStage.DRIVE, ControllerRule.PARK_ANSWERED, StageOutcome.FAILED),
         (ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE),
     ]
+
+
+# --- ADR-0309 §3: the phases' table, the round's step and the per-round guard ----------
+
+
+_PHASE_PASS: Final = _Facts(
+    conversation_turn=True,
+    conversation_resolved=True,
+    understanding_wired=True,
+    windows_decided=True,
+    understanding_decided=True,
+    understanding_recorded=True,
+)
+
+
+def _phase_due(phases: _Phases, facts: _Facts = _PHASE_PASS) -> Rule:
+    return next(rule for rule in PHASE_RULES if rule.answers(replace(facts, phases=phases)))
+
+
+def test_the_phase_table_keeps_the_first_rows_and_adds_the_rounds_in_order() -> None:
+    """§3's rows the thin path has: rows 6 and 7 are recall's second run's, a later lane's."""
+    assert [rule.name for rule in PHASE_RULES] == [
+        ControllerRule.CONVERSATION_UNRESOLVED,
+        ControllerRule.WINDOWS_UNASSEMBLED,
+        ControllerRule.NOT_RECALLED,
+        ControllerRule.NOT_UNDERSTOOD,
+        ControllerRule.STORY_LINKS_UNRECORDED,
+        ControllerRule.FIRST_ROUND_DUE,
+        ControllerRule.ROUND_UNAUTHORIZED,
+        ControllerRule.ROUND_AUTHORIZED,
+        ControllerRule.ROUND_LIMIT_REACHED,
+        ControllerRule.ROUND_DUE,
+        ControllerRule.NOTHING_DUE,
+    ]
+    kept = {rule.name for rule in PHASE_RULES}
+    assert ControllerRule.UNPLANNED not in kept
+    assert ControllerRule.ROUTE_UNCHECKED not in kept
+
+
+def test_a_phase_rule_on_a_pass_the_phases_do_not_plan_is_a_defect() -> None:
+    with pytest.raises(RuntimeError, match="only on a pass the phases plan"):
+        next(rule for rule in PHASE_RULES if rule.answers(_PHASE_PASS))
+
+
+def test_the_first_round_is_due_once_understanding_has_recorded() -> None:
+    """ADR-0307 §8:6, and §3's row 8 following ``story_links_unrecorded``."""
+    rule = _phase_due(_Phases())
+    assert (rule.name, rule.makes_due) == (ControllerRule.FIRST_ROUND_DUE, ControllerStage.PLANNING)
+    linking = replace(_PHASE_PASS, story_links_wired=True)
+    assert _phase_due(_Phases(), linking).name is ControllerRule.STORY_LINKS_UNRECORDED
+
+
+@pytest.mark.parametrize(
+    "latest",
+    [
+        _Phases(rounds=1, latest_round="r1", latest_has_calls=True),
+        _Phases(rounds=1, latest_round="r1", latest_has_text=True),
+    ],
+)
+def test_a_round_with_a_call_or_text_is_authorized_first(latest: _Phases) -> None:
+    rule = _phase_due(latest)
+    assert (rule.name, rule.makes_due) == (
+        ControllerRule.ROUND_UNAUTHORIZED,
+        ControllerStage.AUTHORIZING,
+    )
+
+
+def test_a_round_with_neither_a_call_nor_text_ends_the_pass_whatever_its_mark() -> None:
+    """ADR-0307 §8:3: no progress ends the activation after its message."""
+    latest = _Phases(rounds=1, latest_round="r1", latest_marked=True)
+    assert _phase_due(latest).name is ControllerRule.NOTHING_DUE
+
+
+def test_an_authorized_round_runs_acting_and_digesting_beside_it_for_outside_text() -> None:
+    """§3:3: digesting beside acting only where an allowed call may bring outside text."""
+    decided = _Phases(
+        rounds=1,
+        latest_round="r1",
+        latest_has_calls=True,
+        latest_authorized=True,
+        latest_allows=True,
+    )
+    rule = _phase_due(decided)
+    assert (rule.name, rule.makes_due, rule.beside) == (
+        ControllerRule.ROUND_AUTHORIZED,
+        ControllerStage.ACTING,
+        ControllerStage.DIGESTING,
+    )
+    assert rule.beside_when is not None
+    assert not rule.beside_when(replace(_PHASE_PASS, phases=decided))
+    assert rule.beside_when(replace(_PHASE_PASS, phases=replace(decided, latest_digests_due=True)))
+
+
+_FINISHED: Final = _Phases(
+    rounds=1,
+    latest_round="r",
+    latest_has_calls=True,
+    latest_authorized=True,
+    latest_allows=True,
+    latest_acted=True,
+)
+
+
+@pytest.mark.parametrize(
+    ("latest", "due"),
+    [
+        # A call brought something, so another round runs (ADR-0307 §8:1).
+        (replace(_FINISHED, latest_brought_something=True), ControllerRule.ROUND_DUE),
+        # Nothing was allowed, so nothing ran: every call has finished, needing the user.
+        (
+            replace(
+                _FINISHED, latest_allows=False, latest_acted=False, latest_brought_something=True
+            ),
+            ControllerRule.ROUND_DUE,
+        ),
+        # The round was marked.
+        (replace(_FINISHED, latest_marked=True), ControllerRule.ROUND_DUE),
+        # Every call done with nothing brought, unmarked: the activation ends.
+        (_FINISHED, ControllerRule.NOTHING_DUE),
+        # A round past the limit ends the pass instead of running (§3).
+        (
+            replace(_FINISHED, rounds=3, latest_brought_something=True),
+            ControllerRule.ROUND_LIMIT_REACHED,
+        ),
+        # Calls still running: neither another round nor the end.
+        (
+            replace(_FINISHED, latest_acted=False, latest_brought_something=True),
+            ControllerRule.ROUND_AUTHORIZED,
+        ),
+    ],
+)
+def test_the_next_round_is_due_only_once_every_call_has_finished_and_something_calls_for_it(
+    latest: _Phases, due: ControllerRule
+) -> None:
+    assert _phase_due(latest).name is due
+
+
+@dataclass
+class _PhaseStage:
+    """A phase stage over ``_Phases``: it applies its decisions, then ends as scripted."""
+
+    name: ControllerStage
+    decide: dict[str, object] = field(default_factory=dict)
+    result: StageResult = field(default_factory=lambda: StageResult(StageOutcome.DONE))
+    wait: asyncio.Event | None = None
+    runs: int = 0
+    cancelled: bool = False
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def run(self, state: _Facts) -> StageResult:
+        self.runs += 1
+        self.started.set()
+        assert state.phases is not None
+        for name, value in self.decide.items():
+            setattr(state.phases, name, value)
+        if self.wait is not None:
+            try:
+                await self.wait.wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+        return self.result
+
+
+def _phase_controller(*stages: _PhaseStage) -> ActivationController[_Facts]:
+    _, now = _clock()
+    return ActivationController(
+        stages=stages,
+        clock=now,  # type: ignore[arg-type]  # a plain callable
+        rules=PHASE_RULES,
+    )
+
+
+_PLANS_A_CALL: Final[dict[str, object]] = {
+    "rounds": 1,
+    "latest_round": "r1",
+    "latest_has_calls": True,
+    "latest_has_text": True,
+}
+_ALLOWS_A_SEARCH: Final[dict[str, object]] = {
+    "latest_authorized": True,
+    "latest_allows": True,
+    "latest_digests_due": True,
+}
+
+
+async def test_one_round_runs_acting_and_digesting_as_one_step_each_with_its_own_entry() -> None:
+    """§3:3-§3:4: the step ends when both have, and each records an entry due the rule."""
+    record = StageRecord()
+    await _phase_controller(
+        _PhaseStage(ControllerStage.PLANNING, dict(_PLANS_A_CALL)),
+        _PhaseStage(ControllerStage.AUTHORIZING, dict(_ALLOWS_A_SEARCH)),
+        _PhaseStage(ControllerStage.ACTING, {"latest_acted": True}),
+        _PhaseStage(ControllerStage.DIGESTING),
+    ).run(replace(_PHASE_PASS, phases=_Phases()), record)
+    assert _shape(record) == [
+        (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE, StageOutcome.DONE),
+        (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED, StageOutcome.DONE),
+        (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED, StageOutcome.DONE),
+        (ControllerStage.DIGESTING, ControllerRule.ROUND_AUTHORIZED, StageOutcome.DONE),
+        (ControllerStage.END, ControllerRule.NOTHING_DUE, StageOutcome.DONE),
+    ]
+    acting, digesting = record.entries[2:4]
+    assert acting.started_at == digesting.started_at
+
+
+async def test_acting_alone_runs_where_no_allowed_call_may_bring_outside_text() -> None:
+    digesting = _PhaseStage(ControllerStage.DIGESTING)
+    record = StageRecord()
+    await _phase_controller(
+        _PhaseStage(ControllerStage.PLANNING, dict(_PLANS_A_CALL)),
+        _PhaseStage(
+            ControllerStage.AUTHORIZING, {"latest_authorized": True, "latest_allows": True}
+        ),
+        _PhaseStage(ControllerStage.ACTING, {"latest_acted": True}),
+        digesting,
+    ).run(replace(_PHASE_PASS, phases=_Phases()), record)
+    assert digesting.runs == 0
+    assert [entry.stage for entry in record.entries][2:] == [
+        ControllerStage.ACTING,
+        ControllerStage.END,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "ending"),
+    [
+        (StageOutcome.FAILED, ControllerRule.STAGE_FAILED),
+        (StageOutcome.TIMED_OUT, ControllerRule.STAGE_TIMED_OUT),
+    ],
+)
+async def test_acting_that_does_not_end_done_cancels_digesting_and_ends_on_its_error(
+    outcome: StageOutcome, ending: ControllerRule
+) -> None:
+    """§3:4: the fixed default for acting; digesting, cancelled, records ``failed``."""
+    error = PlanningError("the claim failed")
+    digesting = _PhaseStage(ControllerStage.DIGESTING, wait=asyncio.Event())
+    record = StageRecord()
+    with pytest.raises(PlanningError) as caught:
+        await _phase_controller(
+            _PhaseStage(ControllerStage.PLANNING, dict(_PLANS_A_CALL)),
+            _PhaseStage(ControllerStage.AUTHORIZING, dict(_ALLOWS_A_SEARCH)),
+            _PhaseStage(ControllerStage.ACTING, result=StageResult(outcome, error)),
+            digesting,
+        ).run(replace(_PHASE_PASS, phases=_Phases()), record)
+    assert caught.value is error
+    assert digesting.cancelled
+    assert _shape(record)[2:] == [
+        (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED, outcome),
+        (ControllerStage.DIGESTING, ControllerRule.ROUND_AUTHORIZED, StageOutcome.FAILED),
+        (ControllerStage.END, ending, StageOutcome.DONE),
+    ]
+
+
+async def test_a_cancelled_step_cancels_both_stages_and_ends_interrupted() -> None:
+    acting = _PhaseStage(ControllerStage.ACTING, wait=asyncio.Event())
+    digesting = _PhaseStage(ControllerStage.DIGESTING, wait=asyncio.Event())
+    record = StageRecord()
+    controller = _phase_controller(
+        _PhaseStage(ControllerStage.PLANNING, dict(_PLANS_A_CALL)),
+        _PhaseStage(ControllerStage.AUTHORIZING, dict(_ALLOWS_A_SEARCH)),
+        acting,
+        digesting,
+    )
+    task = asyncio.ensure_future(controller.run(replace(_PHASE_PASS, phases=_Phases()), record))
+    await asyncio.gather(acting.started.wait(), digesting.started.wait())
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert acting.cancelled
+    assert digesting.cancelled
+    assert record.entries[-1].due is ControllerRule.INTERRUPTED
+
+
+@dataclass
+class _NextRound(_PhaseStage):
+    """A planning stage that records one more round each time it runs."""
+
+    async def run(self, state: _Facts) -> StageResult:
+        result = await super().run(state)
+        assert state.phases is not None
+        state.phases.rounds += 1
+        state.phases.latest_round = f"r{state.phases.rounds}"
+        return result
+
+
+async def test_planning_runs_once_per_round_until_the_round_limit_ends_the_pass() -> None:
+    """§3:5, ADR-0307 §11: the guard is scoped to the latest round, not to the pass."""
+    planning = _NextRound(
+        ControllerStage.PLANNING,
+        {"latest_has_calls": True, "latest_authorized": True, "latest_brought_something": True},
+    )
+    record = StageRecord()
+    await _phase_controller(planning).run(
+        replace(_PHASE_PASS, phases=_Phases(round_limit=3)), record
+    )
+    assert planning.runs == 3
+    assert [entry.due for entry in record.entries] == [
+        ControllerRule.FIRST_ROUND_DUE,
+        ControllerRule.ROUND_DUE,
+        ControllerRule.ROUND_DUE,
+        ControllerRule.ROUND_LIMIT_REACHED,
+    ]
+
+
+async def test_planning_due_again_for_a_round_it_already_followed_is_guarded() -> None:
+    stuck = _PhaseStage(
+        ControllerStage.PLANNING,
+        {
+            "rounds": 1,
+            "latest_round": "r1",
+            "latest_has_calls": True,
+            "latest_authorized": True,
+            "latest_brought_something": True,
+        },
+    )
+    record = StageRecord()
+    await _phase_controller(stuck).run(replace(_PHASE_PASS, phases=_Phases()), record)
+    assert stuck.runs == 2
+    assert record.entries[-1].due is ControllerRule.STAGE_REPEATED

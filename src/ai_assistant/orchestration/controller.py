@@ -14,6 +14,7 @@ the turn loop and the drive into stages of their own.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, Protocol
 
@@ -174,14 +175,93 @@ class PassFacts(Protocol):
     def reply_composed(self) -> bool:
         """A composed reply is present, degraded or not."""
 
+    @property
+    def phases(self) -> PhaseFacts | None:
+        """The phases' decisions, where the pass runs them (ADR-0309 §2:6, §3).
+
+        ``None`` on a pass the phases do not plan, which no phase rule answers on.
+        """
+
+
+class PhaseFacts(Protocol):
+    """The phases' part of the working set, as the phase rules read it (ADR-0309 §3).
+
+    Each member answers from a decision a phase recorded for the latest round, a
+    decision nothing came of included (ADR-0280 §3:6). "The latest round" is the last
+    planning round the working set holds, whether or not its append returned (ADR-0307
+    §2:4).
+    """
+
+    @property
+    def rounds(self) -> int:
+        """How many planning rounds the pass has run."""
+
+    @property
+    def round_limit(self) -> int:
+        """The most rounds a pass runs (ADR-0307 §8:4); its value is #2589's."""
+
+    @property
+    def latest_round(self) -> str | None:
+        """The latest round's id, or ``None`` before the first."""
+
+    @property
+    def latest_has_calls(self) -> bool:
+        """The latest round proposed at least one call, refused ones included."""
+
+    @property
+    def latest_has_text(self) -> bool:
+        """The latest round's text is not blank."""
+
+    @property
+    def latest_marked(self) -> bool:
+        """The latest round asked for another round (ADR-0307 §2:1)."""
+
+    @property
+    def latest_authorized(self) -> bool:
+        """There is an authorizing decision for the latest round, whatever came of it."""
+
+    @property
+    def latest_allows(self) -> bool:
+        """The latest round's authorizing decision allows a call or its message."""
+
+    @property
+    def latest_acted(self) -> bool:
+        """There is an acting decision for the latest round, whatever came of it."""
+
+    @property
+    def latest_digests_due(self) -> bool:
+        """A call the latest round allows declares a result that may carry outside text."""
+
+    @property
+    def latest_brought_something(self) -> bool:
+        """A call of the latest round brought something that calls for a round.
+
+        A result, or a call not done, unknown, needing the user or refused (ADR-0307
+        §8:1).
+        """
+
 
 @dataclass(frozen=True)
 class Rule:
-    """One row of §4's table: the rule, when it answers, and what it makes due."""
+    """One row of §4's table: the rule, when it answers, and what it makes due.
+
+    ``per`` scopes ADR-0280 §4:6's loop guard: a stage made due under a rule with
+    ``per`` runs at most once for each value it answers, rather than once a pass. The
+    phase rows scope it to the latest round, so each phase runs at most once per round
+    and planning once per round, bounded by the round limit (ADR-0307 §11, ADR-0309
+    §3:5).
+
+    ``beside`` names a stage run side by side with the one the rule makes due, in one
+    step, where ``beside_when`` answers (ADR-0309 §3:3, §7's *a rule may name a stage
+    run beside the one it makes due*). Each records its own entry, due the rule.
+    """
 
     name: ControllerRule
     answers: Callable[[PassFacts], bool]
     makes_due: ControllerStage
+    per: Callable[[PassFacts], object] | None = None
+    beside: ControllerStage | None = None
+    beside_when: Callable[[PassFacts], bool] | None = None
 
 
 def _turn_asks_nothing(facts: PassFacts) -> bool:
@@ -272,6 +352,114 @@ ACTIVATION_RULES: Final[tuple[Rule, ...]] = (
         ControllerStage.COMPOSE,
     ),
     Rule(ControllerRule.NOTHING_DUE, lambda _: True, ControllerStage.END),
+)
+
+
+def _rule(name: ControllerRule) -> Rule:
+    """The row of :data:`ACTIVATION_RULES` named ``name``, which the phase table keeps."""
+    return next(rule for rule in ACTIVATION_RULES if rule.name is name)
+
+
+def _phases(facts: PassFacts) -> PhaseFacts:
+    """The pass's phase decisions, which a phase rule reads only where the pass has them.
+
+    Raises:
+        RuntimeError: If the pass runs no phases; :data:`PHASE_RULES` is handed only to
+            a pass that does (ADR-0309 §2:6).
+    """
+    phases = facts.phases
+    if phases is None:
+        msg = "the phase rules run only on a pass the phases plan (ADR-0309 §2:6)"
+        raise RuntimeError(msg)
+    return phases
+
+
+def _latest_round(facts: PassFacts) -> object:
+    """The loop guard's scope for a phase stage: the latest round (ADR-0309 §3:5)."""
+    return _phases(facts).latest_round
+
+
+def _round_finished(phases: PhaseFacts) -> bool:
+    """Every call of the latest round has finished, digests included (ADR-0307 §8:1).
+
+    The round's authorizing decision is made, and where it allowed anything, the step
+    that ran it, acting with its digests beside it, has ended.
+    """
+    return phases.latest_authorized and (phases.latest_acted or not phases.latest_allows)
+
+
+def _another_round_called_for(facts: PassFacts) -> bool:
+    """ADR-0307 §8:1 and §8:3: a new round is called for.
+
+    The latest round proposed a call, every call of it has finished, and one brought a
+    result, was not done, came back unknown, needed the user or was refused, or the
+    round was marked. A round with no calls is no progress, and ends the activation
+    after its message whatever its mark.
+    """
+    phases = _phases(facts)
+    return (
+        phases.rounds > 0
+        and phases.latest_has_calls
+        and _round_finished(phases)
+        and (phases.latest_brought_something or phases.latest_marked)
+    )
+
+
+#: ADR-0309 §3's table, for the rows the thin path has: rows 6 and 7,
+#: ``understood_not_recalled`` and ``recall_undigested``, are recall's second run's, a
+#: later lane's, so ``first_round_due`` follows ``story_links_unrecorded``. The old
+#: path's rows are absent. The composition root hands it to the controller only where
+#: the opt-in is set, and :data:`ACTIVATION_RULES` runs unchanged otherwise (§2:6).
+PHASE_RULES: Final[tuple[Rule, ...]] = (
+    _rule(ControllerRule.CONVERSATION_UNRESOLVED),
+    _rule(ControllerRule.WINDOWS_UNASSEMBLED),
+    _rule(ControllerRule.NOT_RECALLED),
+    _rule(ControllerRule.NOT_UNDERSTOOD),
+    _rule(ControllerRule.STORY_LINKS_UNRECORDED),
+    # ADR-0307 §8:6: planning's first round runs once understanding has recorded.
+    Rule(
+        ControllerRule.FIRST_ROUND_DUE,
+        lambda f: f.understanding_recorded and _phases(f).rounds == 0,
+        ControllerStage.PLANNING,
+        per=_latest_round,
+    ),
+    Rule(
+        ControllerRule.ROUND_UNAUTHORIZED,
+        lambda f: (
+            (phases := _phases(f)).rounds > 0
+            and (phases.latest_has_calls or phases.latest_has_text)
+            and not phases.latest_authorized
+        ),
+        ControllerStage.AUTHORIZING,
+        per=_latest_round,
+    ),
+    # ADR-0309 §3:3: acting, with digesting beside it where an allowed call's result
+    # may carry outside text.
+    Rule(
+        ControllerRule.ROUND_AUTHORIZED,
+        lambda f: (
+            (phases := _phases(f)).latest_authorized
+            and phases.latest_allows
+            and not phases.latest_acted
+        ),
+        ControllerStage.ACTING,
+        per=_latest_round,
+        beside=ControllerStage.DIGESTING,
+        beside_when=lambda f: _phases(f).latest_digests_due,
+    ),
+    # Read before `round_due`, so a round past the limit ends the pass (§3).
+    Rule(
+        ControllerRule.ROUND_LIMIT_REACHED,
+        lambda f: _another_round_called_for(f) and _phases(f).rounds >= _phases(f).round_limit,
+        ControllerStage.END,
+    ),
+    Rule(
+        ControllerRule.ROUND_DUE,
+        _another_round_called_for,
+        ControllerStage.PLANNING,
+        per=_latest_round,
+    ),
+    _rule(ControllerRule.NOTHING_DUE),
 )
 
 
@@ -618,19 +806,82 @@ class ActivationController[P: PassFacts]:
         msg = "no rule answered: the table ends with one that always does (ADR-0280 §4)"
         raise RuntimeError(msg)
 
-    async def run(self, state: P, record: StageRecord) -> None:  # noqa: C901 — §3's one step, with ADR-0297 §4's two readings of the stop mark in it
+    def _runner(self, rule: Rule, stage: ControllerStage) -> ControllerStageRun[P]:
+        """The stage ``rule`` names, which this pass must wire.
+
+        Raises:
+            RuntimeError: If the pass does not wire it.
+        """
+        runner = self._stages.get(stage)
+        if runner is None:
+            msg = f"rule {rule.name} made {stage} due, which this pass does not wire"
+            raise RuntimeError(msg)
+        return runner
+
+    def _beside(self, rule: Rule, state: P) -> ControllerStage | None:
+        """The stage run beside the one ``rule`` makes due, where it answers (§3:3)."""
+        if rule.beside is None or (rule.beside_when is not None and not rule.beside_when(state)):
+            return None
+        return rule.beside
+
+    async def _timed(self, runner: ControllerStageRun[P], state: P) -> tuple[StageResult, datetime]:
+        """Run one stage and read the clock as it ends."""
+        result = await runner.run(state)
+        return result, self._clock()
+
+    async def _side_by_side(
+        self, state: P, main: ControllerStageRun[P], beside: ControllerStageRun[P]
+    ) -> tuple[tuple[StageResult, datetime], tuple[StageResult, datetime]]:
+        """Run two stages as one step, the second beside the first (ADR-0309 §3:3-§3:4).
+
+        The step ends when both have ended. Where the first ends in anything but
+        ``done``, the second is cancelled, and its result is ``failed``: it did not
+        finish, and the step ends under the fixed default for the first's outcome.
+        A cancellation of the step itself cancels both and propagates.
+        """
+        first = asyncio.ensure_future(self._timed(main, state))
+        second = asyncio.ensure_future(self._timed(beside, state))
+        try:
+            ran = await first
+            if ran[0].outcome is not StageOutcome.DONE:
+                second.cancel()
+            try:
+                alongside = await second
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
+                alongside = (
+                    StageResult(StageOutcome.FAILED, _CancelledBeside(beside.name)),
+                    self._clock(),
+                )
+        except BaseException:
+            for task in (first, second):
+                task.cancel()
+            await asyncio.gather(first, second, return_exceptions=True)
+            raise
+        return ran, alongside
+
+    async def run(self, state: P, record: StageRecord) -> None:  # noqa: C901 — §3's one step, with ADR-0297 §4's two readings of the stop mark and ADR-0309 §3:3's step of two stages in it
         """Run the pass to its end entry.
 
         Ends with the rule that ended it; with ``stage_repeated`` where the first
-        rule that answers names a stage this pass already ran (the M38 loop guard);
-        with ``stage_failed`` or ``stage_timed_out`` where a stage did not end
+        rule that answers names a stage this pass already ran within the rule's
+        scope (the M38 loop guard, scoped per round for the phase rows, ADR-0309
+        §3:5); with ``stage_failed`` or ``stage_timed_out`` where a stage did not end
         ``done``, re-raising its error — save a failure-tolerant stage's tolerated
         result while the pass's deadline has not passed, after which the rules are
         evaluated again (ADR-0281 §5); and with ``interrupted`` where the pass is
         cancelled or interrupted while the controller runs.
 
+        **A rule that names a stage beside the one it makes due runs both as one
+        step** (ADR-0309 §3:3-§3:4). Each records its own entry, due the rule, the
+        first's ahead of the second's; the step ends when both have, and where the
+        first did not end ``done`` the second is cancelled and the pass ends under
+        the fixed default for the first.
+
         **A stopped pass leaves the loop** (ADR-0297 §4). The stop mark is read before
-        each evaluation of the rules and again once each stage's result is in hand,
+        each evaluation of the rules and again once each step's result is in hand,
         before the fixed default; where it is set, the loop is left without evaluating
         the rules, running a stage or appending an end entry, and the ``finally``
         appends ``stopped`` where it would append ``interrupted``. A stage that failed
@@ -643,7 +894,7 @@ class ActivationController[P: PassFacts]:
             Exception: The error a stage that failed or timed out carried, on a pass
                 whose stop mark was not set when its result was in hand.
         """
-        ran: set[ControllerStage] = set()
+        ran: set[tuple[ControllerStage, object]] = set()
         try:
             while True:
                 if self._marked():
@@ -653,46 +904,71 @@ class ActivationController[P: PassFacts]:
                 if stage is ControllerStage.END:
                     record.end(rule.name, self._clock())
                     return
-                if stage in ran:
+                scope = None if rule.per is None else rule.per(state)
+                beside = self._beside(rule, state)
+                keys = [(stage, scope)] + ([] if beside is None else [(beside, scope)])
+                if any(key in ran for key in keys):
                     record.end(ControllerRule.STAGE_REPEATED, self._clock())
                     return
-                runner = self._stages.get(stage)
-                if runner is None:
-                    msg = f"rule {rule.name} made {stage} due, which this pass does not wire"
-                    raise RuntimeError(msg)
-                ran.add(stage)
+                runner = self._runner(rule, stage)
+                alongside = None if beside is None else self._runner(rule, beside)
+                ran.update(keys)
                 started_at = self._clock()
-                result = await runner.run(state)
-                record.append(
-                    StageEntry(
-                        stage=stage,
-                        due=rule.name,
-                        started_at=started_at,
-                        ended_at=self._clock(),
-                        outcome=result.outcome,
-                        step_disposition=result.verdict.step_disposition,
-                        route_outcome=result.verdict.route_outcome,
+                steps: list[tuple[ControllerStage, tuple[StageResult, datetime]]]
+                if alongside is None:
+                    steps = [(stage, await self._timed(runner, state))]
+                else:
+                    ran_first, ran_beside = await self._side_by_side(state, runner, alongside)
+                    steps = [(stage, ran_first), (alongside.name, ran_beside)]
+                for name, (result, ended_at) in steps:
+                    record.append(
+                        StageEntry(
+                            stage=name,
+                            due=rule.name,
+                            started_at=started_at,
+                            ended_at=ended_at,
+                            outcome=result.outcome,
+                            step_disposition=result.verdict.step_disposition,
+                            route_outcome=result.verdict.route_outcome,
+                        )
                     )
-                )
                 if self._appended is not None:
                     await self._appended()
                 if self._marked():
                     return
-                if result.outcome is StageOutcome.DONE:
-                    continue
-                if result.tolerated and not state.deadline_passed:
+                ending = next(
+                    (
+                        result
+                        for _, (result, _) in steps
+                        if result.outcome is not StageOutcome.DONE
+                        and not (result.tolerated and not state.deadline_passed)
+                    ),
+                    None,
+                )
+                if ending is None:
                     continue
                 record.end(
                     ControllerRule.STAGE_TIMED_OUT
-                    if result.outcome is StageOutcome.TIMED_OUT
+                    if ending.outcome is StageOutcome.TIMED_OUT
                     else ControllerRule.STAGE_FAILED,
                     self._clock(),
                 )
-                assert result.error is not None  # noqa: S101 — a stage that did not end done carries its error
-                raise result.error
+                assert ending.error is not None  # noqa: S101 — a stage that did not end done carries its error
+                raise ending.error
         finally:
             if not record.ended:
                 record.end(
                     ControllerRule.STOPPED if self._marked() else ControllerRule.INTERRUPTED,
                     self._clock(),
                 )
+
+
+class _CancelledBeside(Exception):  # noqa: N818 — names what happened to the stage, and is never raised
+    """The stage run beside another was cancelled because the other did not end ``done``.
+
+    Carried on that stage's ``failed`` result and never re-raised: the stage it ran
+    beside ended the pass first (ADR-0309 §3:4).
+    """
+
+    def __init__(self, stage: ControllerStage) -> None:
+        super().__init__(f"{stage} was cancelled: the stage it ran beside did not end done")
