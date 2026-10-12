@@ -254,32 +254,64 @@ def test_the_working_set_answers_the_rules_from_the_latest_rounds_decisions() ->
 
 
 async def test_records_side_by_side_extend_the_episode_one_append_at_a_time() -> None:
-    """ADR-0286 §3:4, ADR-0306 §5:17: one owner appends, and no lock is taken.
+    """ADR-0286 §3:4, ADR-0306 §5:17, ADR-0308 §5:2: one owner appends, and no lock.
 
-    A recorder that finds the episode being extended leaves its addition owed and
-    returns; the owner appends once more, and that append carries every addition.
+    Recorders that find the episode being extended await the owner's next append,
+    which carries both their additions, and return only once it has returned.
     """
     state = _admitted()
     gate = asyncio.Event()
     running = 0
     most = 0
-    appends = 0
+    appended = 0
+    returned: list[int] = []
 
     async def append() -> None:
-        nonlocal running, most, appends
+        nonlocal running, most, appended
         running += 1
-        appends += 1
         most = max(most, running)
         await gate.wait()
         running -= 1
+        appended += 1
+
+    async def recorder() -> None:
+        await _extended(state, append)
+        returned.append(appended)
+
+    owner = asyncio.create_task(recorder())
+    await asyncio.sleep(0)
+    waiting = [asyncio.create_task(recorder()) for _ in range(2)]
+    await asyncio.sleep(0)
+    assert not any(one.done() for one in waiting)
+    gate.set()
+    await asyncio.gather(owner, *waiting)
+
+    assert (appended, most) == (2, 1)
+    # Every recorder returned once the append carrying its addition had: the second.
+    assert returned == [2, 2, 2]
+    assert (state.extending, state.extension) == (False, None)
+
+
+async def test_a_recorder_waiting_on_an_owner_that_stopped_takes_the_appends_over() -> None:
+    """The owner cancelled mid-append: the waiting recorder's addition is still appended."""
+    state = _admitted()
+    gate = asyncio.Event()
+    appended = 0
+
+    async def append() -> None:
+        nonlocal appended
+        await gate.wait()
+        appended += 1
 
     owner = asyncio.create_task(_extended(state, append))
     await asyncio.sleep(0)
-    assert state.extending
-    await _extended(state, append)
-    await _extended(state, append)
+    waiting = asyncio.create_task(_extended(state, append))
+    await asyncio.sleep(0)
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
     gate.set()
-    await owner
+    await waiting
 
-    assert (appends, most) == (2, 1)
-    assert (state.extending, state.extension_owed) == (False, False)
+    assert appended == 1
+    assert (state.extending, state.extension) == (False, None)
