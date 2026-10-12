@@ -504,11 +504,12 @@ class ChatReader:
         the bookkeeping (§6:6). An assistant's message links to the activation that
         wrote it, by acting's effect record, where the reader is handed ``written``:
         the candidates are the activations the bookkeeping names for the window's
-        messages and for as many positions again just before it, since a message at
-        the window's head was written by an activation whose input may lie just
-        before it. A writer whose whole input lies further back is not found, and its
-        message stays not linkable, the conservative direction (§7:5). A message
-        nothing links is simply missing.
+        messages, and for as many positions again just before the recent messages and
+        just before each earlier assistant message an input replies to, since such a
+        message was written by an activation whose input may lie just before it. A
+        writer whose whole input lies further back is not found, and its message stays
+        not linkable, the conservative direction (§7:5). A message nothing links is
+        simply missing.
         """
         shown = [one.position for one in (*recent, *replied)]
         links = await self._taken_in(conversation_id, shown)
@@ -519,10 +520,17 @@ class ChatReader:
         ]
         if self._written is None or not writes:
             return links
-        first = min(one.position for one in recent) if recent else min(writes)
-        before = await self._taken_in(
-            conversation_id, list(range(max(1, first - self._window_size), first))
+        recent_positions = {one.position for one in recent}
+        heads = {min(recent_positions)} if recent_positions else set()
+        heads.update(position for position in writes if position not in recent_positions)
+        looked = sorted(
+            {
+                position
+                for head in heads
+                for position in range(max(1, head - self._window_size), head)
+            }
         )
+        before = await self._taken_in(conversation_id, looked)
         candidates = list(dict.fromkeys((*links.values(), *before.values())))
         if not candidates:
             return links

@@ -51,7 +51,7 @@ from ai_assistant.orchestration.chat import (
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.conversations import fitted_message
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
-from ai_assistant.orchestration.understanding import WindowsStage
+from ai_assistant.orchestration.understanding import TranscriptWindow, WindowsStage
 from ai_assistant.testing import (
     FakeConversationStore,
     FakeMemoryStore,
@@ -762,36 +762,47 @@ class _Writers:
         }
 
 
-async def _seeded(store: FakeConversationStore) -> str:
-    """A conversation: A took in 1 and wrote 2 and 3; B took in 4 and wrote 5; 6 waits."""
+_USER: Final = MessageAuthor.USER
+_ASSISTANT: Final = MessageAuthor.ASSISTANT
+
+
+async def _seeded(
+    store: FakeConversationStore,
+    authors: Sequence[MessageAuthor] = (_USER, _ASSISTANT, _ASSISTANT, _USER, _ASSISTANT, _USER),
+    taken: dict[int, str] | None = None,
+    *,
+    replies_to: int | None = None,
+) -> str:
+    """A conversation of ``authors``, the ``taken`` positions taken in by their activation.
+
+    By default: A took in 1 and wrote 2 and 3; B took in 4 and wrote 5; 6 waits. The
+    last message, which waits, replies to ``replies_to``.
+    """
     await store.set_my_devices([_PHONE])
     conversation = (await store.start()).id
-    written: list[tuple[MessageAuthor, str]] = [
-        (MessageAuthor.USER, "first"),
-        (MessageAuthor.ASSISTANT, "one"),
-        (MessageAuthor.ASSISTANT, "two"),
-        (MessageAuthor.USER, "second"),
-        (MessageAuthor.ASSISTANT, "three"),
-        (MessageAuthor.USER, "third"),
-    ]
-    for n, (author, text) in enumerate(written):
-        user = author is MessageAuthor.USER
+    for n, author in enumerate(authors, 1):
+        user = author is _USER
         message = NewMessage(
             author=author,
-            text=text,
+            text=f"message {n}",
             device_id=_PHONE.device_id if user else None,
             message_id=f"m-{n}" if user else None,
+            replies_to=replies_to if n == len(authors) else None,
         )
         await store.append_message(conversation, message)
-    await store.take_in(conversation, positions=[1], activation_id=_WRITER_A)
-    await store.take_in(conversation, positions=[4], activation_id=_WRITER_B)
+    for position, activation_id in (taken or {1: _WRITER_A, 4: _WRITER_B}).items():
+        await store.take_in(conversation, positions=[position], activation_id=activation_id)
     return conversation
 
 
-async def _window_links(
-    store: FakeConversationStore, conversation: str, written: _Writers | None
-) -> dict[int, str]:
-    """The links of the window the reader brings in with the waiting message."""
+async def _window(
+    store: FakeConversationStore,
+    conversation: str,
+    written: _Writers | None,
+    *,
+    window_size: int = 3,
+) -> TranscriptWindow:
+    """The window the reader brings in with the waiting message."""
     taken: list[ChatInput] = []
     tasks: list[asyncio.Future[None]] = []
 
@@ -805,14 +816,22 @@ async def _window_links(
         spawn=lambda work: tasks.append(asyncio.ensure_future(work)),
         closing=lambda: False,
         mint=lambda: "00000000-0000-4000-8000-00000000000c",
-        window_size=3,
+        window_size=window_size,
         written=written,
     )
     reader.notice(conversation)
     await asyncio.wait_for(asyncio.gather(*tasks), _SETTLE)
     (one,) = taken
-    assert [message.position for message in one.window.messages] == [3, 4, 5]
-    return dict(one.window.links)
+    return one.window
+
+
+async def _window_links(
+    store: FakeConversationStore, conversation: str, written: _Writers | None
+) -> dict[int, str]:
+    """The links of the default conversation's window, its recent messages 3 to 5."""
+    window = await _window(store, conversation, written)
+    assert [message.position for message in window.messages] == [3, 4, 5]
+    return dict(window.links)
 
 
 async def test_an_assistant_message_links_to_the_activation_that_wrote_it() -> None:
@@ -849,3 +868,27 @@ async def test_an_assistant_message_no_record_names_stays_not_linkable() -> None
     links = await _window_links(store, conversation, _Writers({5: _WRITER_B}))
 
     assert links == {4: _WRITER_B, 5: _WRITER_B}
+
+
+async def test_an_earlier_assistant_message_an_input_replies_to_links_to_its_writer() -> None:
+    """ADR-0303 §7:1, §7:3: the look-back runs before a replied-to message too.
+
+    A took in 1 and wrote 2; B took in 3 and wrote 4; C took in 5 and wrote 6. The
+    waiting 7 replies to 2, which the two-message window does not show, so the
+    reader brings it in, and finds its writer by looking back from it.
+    """
+    store = FakeConversationStore(now=lambda: AT)
+    writer_c = "00000000-0000-4000-8000-00000000000e"
+    conversation = await _seeded(
+        store,
+        (_USER, _ASSISTANT, _USER, _ASSISTANT, _USER, _ASSISTANT, _USER),
+        {1: _WRITER_A, 3: _WRITER_B, 5: writer_c},
+        replies_to=2,
+    )
+    writers = _Writers({2: _WRITER_A, 4: _WRITER_B, 6: writer_c})
+
+    window = await _window(store, conversation, writers, window_size=2)
+
+    assert [one.position for one in window.messages] == [5, 6]
+    assert [one.position for one in window.replied_to] == [2]
+    assert dict(window.links) == {2: _WRITER_A, 5: writer_c, 6: writer_c}
