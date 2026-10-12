@@ -225,6 +225,18 @@ class ChatWriter:
         self._conversations = conversations
         self._max_payload_bytes = max_payload_bytes
 
+    def fitted(self, conversation_id: str, message: NewMessage) -> NewMessage:
+        """``message`` exactly as :meth:`send` records it: cut to what a read can return.
+
+        So a caller that keeps what it wrote keeps the text the conversation holds
+        (ADR-0307 §10's ``outcome``), and :meth:`send` of what this returns writes it
+        unchanged.
+
+        Raises:
+            OversizedValueError: If no non-blank prefix of the text fits.
+        """
+        return fitted_message(conversation_id, message, max_bytes=self._max_payload_bytes)
+
     async def send(self, conversation_id: str, message: NewMessage) -> MessageReceipt | None:
         """Write one assistant message into a conversation, or ``None`` where it is gone.
 
@@ -234,7 +246,7 @@ class ChatWriter:
         Raises:
             ConversationStoreError: If the store cannot be written.
         """
-        fitted = fitted_message(conversation_id, message, max_bytes=self._max_payload_bytes)
+        fitted = self.fitted(conversation_id, message)
         try:
             return await self._conversations.append_message(conversation_id, fitted)
         except UnknownConversationError:

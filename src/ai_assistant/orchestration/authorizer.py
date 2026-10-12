@@ -213,11 +213,15 @@ class WorkingRecord:
         rounds: This activation's rounds. The stage adds the one it is authorizing.
         labels: The labels those rounds assigned, the round being authorized's included.
         digests: This activation's digests, recall's included.
+        fetched_outside: Whether a record the activation read before planning, its
+            windows' or recall's, rests on outside content (ADR-0181 §4, ADR-0223),
+            which neither its episode nor its labels need carry.
     """
 
     rounds: tuple[PlanningRound, ...] = ()
     labels: tuple[PlanningLabel, ...] = ()
     digests: tuple[ActivationDigest, ...] = ()
+    fetched_outside: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,6 +406,8 @@ async def read_outside_content(
     append that fails holds nothing back (ADR-0307 §2:4, ADR-0308 §5:2) and so cannot be
     what clears the lineage. It has read outside content where:
 
+    - a record it read before planning rests on outside content
+      (``working.fetched_outside``);
     - its episode is marked (ADR-0106 §1), or its trigger came from outside;
     - a digest answered, with or without items (ADR-0308 §5:4);
     - a round's notes are marked, which the hub does where the activation had read
@@ -426,6 +432,8 @@ async def read_outside_content(
     Raises:
         MemoryStoreError: If the memory store cannot be read.
     """
+    if working.fetched_outside:
+        return True
     own = episode_address(activation_id)
     record = await memory.get(own)
     if not isinstance(record, EpisodicMemory) or record.processing_record is None:
@@ -480,6 +488,7 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
             digests=tuple(
                 ActivationDigest.model_validate(one.model_dump()) for one in working.digests
             ),
+            fetched_outside=bool(working.fetched_outside),
         ),
         calls=tuple(
             CallToAuthorize(
@@ -626,7 +635,12 @@ class AuthorizingStage:
         read_outside = await read_outside_content(
             self._memory,
             snapshot.activation_id,
-            working=WorkingRecord((*held.rounds, snapshot.round), held.labels, held.digests),
+            working=WorkingRecord(
+                (*held.rounds, snapshot.round),
+                held.labels,
+                held.digests,
+                fetched_outside=held.fetched_outside,
+            ),
         )
         state = _Round(activation_id=snapshot.activation_id, read_outside=read_outside)
         for one in snapshot.calls:

@@ -86,7 +86,6 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEffect,
-    CapabilityEffect,
     CapabilityResult,
     ControllerRule,
     ControllerStage,
@@ -207,6 +206,10 @@ class MessageWriter(Protocol):
 
     Structurally the chat's :class:`~ai_assistant.orchestration.chat.ChatWriter`.
     """
+
+    def fitted(self, conversation_id: str, message: NewMessage) -> NewMessage:
+        """``message`` exactly as :meth:`send` records it, cut to what a read returns."""
+        ...
 
     async def send(self, conversation_id: str, message: NewMessage) -> MessageReceipt | None:
         """Write one assistant message into a conversation, or ``None`` where it is gone."""
@@ -503,6 +506,9 @@ class PhaseWorking:
         self.digests: list[ActivationDigest] = []
         self.evidence: list[DigestedEvidence] = []
         self.messages: list[str] = []
+        # Set once a record the windows or recall brought is seen resting on outside
+        # content, before the first round is planned (ADR-0181 §4, ADR-0223).
+        self.fetched_outside = False
         self._rounds: list[_Round] = []
 
     # --- what the rules read (PhaseFacts) ---
@@ -633,10 +639,11 @@ class PhaseWorking:
 
         Authorizing computes it over the activation's whole record (ADR-0306 §4:5-§4:6);
         a digest that answered says so too (ADR-0308 §5:4), and so does an outside
-        trigger.
+        trigger or a fetched record resting on outside content.
         """
         return (
             self.trigger_origin is InputOrigin.OUTSIDE
+            or self.fetched_outside
             or any(
                 one.authorization is not None and one.authorization.read_outside_content
                 for one in self._rounds
@@ -804,7 +811,8 @@ class _RoundRecorder:
         if state is None:
             return
         state.recorded_round(planning_round, labels)
-        await self._path.append()
+        async with state.recording:
+            await self._path.append()
 
 
 class _DigestRecorder:
@@ -821,8 +829,12 @@ class _DigestRecorder:
         state = active_state()
         if state is None:
             return
+        # Added at once, in the order digests are recorded, and the episode extended one
+        # append at a time: digests recorded side by side would otherwise race the
+        # writer's conditioned write and end capture (ADR-0286 §3:4).
         state.recorded_digest(digest, labels)
-        await self._path.append()
+        async with state.recording:
+            await self._path.append()
 
 
 # --- the path ------------------------------------------------------------------------------
@@ -869,6 +881,11 @@ def _ended_by(state: ActivationState, rule: ControllerRule) -> bool:
     """Whether the pass's end entry is due ``rule``."""
     entries = state.stages.entries
     return bool(entries) and entries[-1].stage is ControllerStage.END and entries[-1].due is rule
+
+
+def _stopped(state: ActivationState | None) -> bool:
+    """Whether the pass ended on a stop, which writes nothing (ADR-0295 §3:3)."""
+    return state is not None and _ended_by(state, ControllerRule.STOPPED)
 
 
 def _fetched_external(fetched: Fetched | None) -> bool:
@@ -1026,8 +1043,9 @@ class PhasePath:
 
         Where the round limit ends the activation, or a stage fails or times out, the
         fixed *couldn't finish* message is written into the input's place, whatever
-        earlier rounds wrote (ADR-0307 §3:7, ADR-0293 §9:1, §10:2); a stop and a
-        cancellation write nothing (ADR-0295 §3:3, ADR-0293 §9:2). However it ended,
+        earlier rounds wrote (ADR-0307 §3:7, ADR-0293 §9:1, §10:2), and so it is where
+        the activation ends having written nothing; a stop and a cancellation write
+        nothing (ADR-0295 §3:3, ADR-0293 §9:2). However it ended,
         the activation's messages become the episode's ``outcome``, and the facts the
         freeze derives are set (ADR-0286 §4:2).
 
@@ -1040,10 +1058,14 @@ class PhasePath:
         except ActivationStoppedError:
             raise
         except Exception:
-            await self._couldnt_finish(working)
+            if not _stopped(state):
+                await self._couldnt_finish(working)
             raise
         else:
-            if state is not None and _ended_by(state, ControllerRule.ROUND_LIMIT_REACHED):
+            # Ending on the round limit, or ending with nothing written (an empty round,
+            # or every message refused or gone), owes the fixed message (ADR-0293 §9:1).
+            limited = state is not None and _ended_by(state, ControllerRule.ROUND_LIMIT_REACHED)
+            if (limited or not working.messages) and not _stopped(state):
                 await self._couldnt_finish(working)
         finally:
             if state is not None:
@@ -1073,6 +1095,10 @@ class PhasePath:
         """One planning round, over everything the thin path gives it (ADR-0307 §6)."""
         working = _working(given)
         fetched = given.understanding_fetch
+        if _fetched_external(fetched):
+            # Carried into planning's notes and authorizing's rulings from the first
+            # round, not only into the frozen episode (ADR-0181 §4, ADR-0306 §4:6).
+            working.fetched_outside = True
         inputs = PlanningInputs(
             activation_id=working.activation_id,
             place=working.place,
@@ -1087,8 +1113,11 @@ class PhasePath:
             evidence=tuple(working.evidence),
             outside_content_read=working.read_outside_content,
         )
-        async with asyncio.timeout_at(given.deadline):
-            planned = await self._planning.plan(inputs)
+        try:
+            async with asyncio.timeout_at(given.deadline):
+                planned = await self._planning.plan(inputs)
+        except TimeoutError:
+            raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         working.planned(planned)
 
     async def _authorize(self, given: PhasePass) -> None:
@@ -1113,14 +1142,20 @@ class PhasePath:
             activation_id=working.activation_id,
             round=planned.round,
             working=WorkingRecord(
-                rounds=rounds[:-1], labels=working.labels.labels, digests=tuple(working.digests)
+                rounds=rounds[:-1],
+                labels=working.labels.labels,
+                digests=tuple(working.digests),
+                fetched_outside=working.fetched_outside,
             ),
             calls=tuple(calls),
             input_place=place,
             message=message,
         )
-        async with asyncio.timeout_at(given.deadline):
-            decided = await self._authorizing.authorize(given_round)
+        try:
+            async with asyncio.timeout_at(given.deadline):
+                decided = await self._authorizing.authorize(given_round)
+        except TimeoutError:
+            raise ModelTimeoutError(_AUTHORIZING_EXPIRED) from None
         latest.authorization = decided
         looking = {one.call.call_id: one.looking_for for one in planned.calls if one.looking_for}
         latest.looking_for = {
@@ -1152,11 +1187,12 @@ class PhasePath:
             )
         finally:
             step.held.put_nowait(None)
+        if isinstance(ran, ActedRound):
+            # Kept even where the message beside it failed: what acting ran happened.
+            latest.acted = ran
         for answer in (ran, wrote):
             if isinstance(answer, BaseException):
                 raise answer
-        assert isinstance(ran, ActedRound)  # noqa: S101 — the one other answer it has
-        latest.acted = ran
 
     async def _calls(self, working: PhaseWorking, decided: RoundAuthorization) -> ActedRound:
         if not decided.allowed:
@@ -1214,6 +1250,15 @@ class PhasePath:
         conversation_id = working.conversation_id
         if conversation_id is None:
             return False
+        cut = len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS
+        fitted = self._writer.fitted(
+            conversation_id,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT,
+                text=text[:TRANSCRIPT_MESSAGE_MAX_CHARS],
+                cut_off=cut,
+            ),
+        )
         effect = ActivationEffect(
             id=effect_id,
             activation_id=working.activation_id,
@@ -1226,18 +1271,18 @@ class PhasePath:
         except ClaimStopped:
             _log.info("phase_message_unwritten", stage="acting", reason="stopped")
             return False
-        cut = len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS
-        body = text[:TRANSCRIPT_MESSAGE_MAX_CHARS]
         try:
-            receipt = await self._writer.send(
-                conversation_id,
-                NewMessage(author=MessageAuthor.ASSISTANT, text=body, cut_off=cut),
-            )
+            receipt = await self._writer.send(conversation_id, fitted)
         except ConversationStoreError:
             # Whether the store recorded it is not known: unknown, with no position.
             _log.warning("phase_message_unwritten", stage="acting", reason="store_failed")
             await self._plans.finish_activation_effect(effect_id, ToolOutcome.INDETERMINATE)
             return False
+        except Exception:
+            # Whatever else the writer raised, whether it wrote is not known either; the
+            # record is finished so, and the stage ends on the error.
+            await self._plans.finish_activation_effect(effect_id, ToolOutcome.INDETERMINATE)
+            raise
         if (
             receipt is None
             or receipt.outcome is not SendOutcome.RECORDED
@@ -1246,27 +1291,30 @@ class PhasePath:
             _log.info("phase_message_unwritten", stage="acting", reason="place_gone")
             await self._plans.finish_activation_effect(effect_id, ToolOutcome.FAILED, reason=_GONE)
             return False
+        # Written, as the conversation holds it, whatever becomes of the record's finish.
+        working.messages.append(fitted.text)
         await self._plans.finish_activation_effect(
             effect_id, ToolOutcome.SUCCEEDED, position=receipt.position
         )
-        working.messages.append(body)
         return True
 
     async def _couldnt_finish(self, working: PhaseWorking) -> None:
         """Write the fixed *couldn't finish* message, listing the effects that happened.
 
-        Claimed under a record naming no round (ADR-0307 §10). It never raises but for
-        a cancellation: a pass that failed is already ending on its own error.
+        The effects are read from the activation's durable effect records, each call
+        done whose record says so, so a call that finished is listed whatever became of
+        the step it ran in (ADR-0293 §9:1). Claimed under a record naming no round
+        (ADR-0307 §10). It never raises but for a cancellation: a pass that failed is
+        already ending on its own error.
         """
-        effects = tuple(
-            f"the tool {one.call.call.request.tool.id} ran"
-            for each in working.acted_rounds()
-            for one in each.calls
-            if one.outcome is ActedOutcome.DONE
-            and one.call.call.request.tool.effect is not CapabilityEffect.NONE
-        )
-        text = couldnt_finish(effects).text
         try:
+            recorded = await self._plans.activation_effects([working.activation_id])
+            effects = tuple(
+                f"the tool {one.capability} ran"
+                for one in recorded
+                if one.capability is not None and one.outcome is ToolOutcome.SUCCEEDED
+            )
+            text = couldnt_finish(effects).text
             await self._write(working, text, effect_id=self._new_effect_id(), round_id=None)
         except Exception:  # the pass is ending on its own error, or on the round limit
             _log.warning("phase_message_unwritten", stage="end", reason="couldnt_finish_failed")
