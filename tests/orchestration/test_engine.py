@@ -176,6 +176,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.delivery import DeliveryOutbox
     from ai_assistant.orchestration.informational_events import InformationalEventStage
     from ai_assistant.orchestration.matters_pass import MattersPass
+    from ai_assistant.orchestration.phase_path import PhasePath
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.reconciling import ReconciliationStage
     from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
@@ -744,6 +745,10 @@ class Harness:
         # into a conversation is taken in and answered. A case holding the medium alone
         # switches it off.
         chat_reader: bool = True,
+        # ADR-0309 §2:6's thin path, built over this harness's own stores once they
+        # exist. `None` is every other case's deployment: the opt-in unset, and the
+        # controller's table unchanged.
+        phases: Callable[[Harness], PhasePath] | None = None,
     ) -> None:
         # ADR-0197's knobs. The recorder lives on the *stage* (§9), so a case that wants
         # to read the rows builds its own ``RoutingStage(model=…, recorder=…)`` and keeps
@@ -1069,6 +1074,7 @@ class Harness:
             # edge to it, which a subject holding no outbox at all cannot show.
             notification_outbox=notification_outbox,
             chat_reader=chat_reader,
+            phases=None if phases is None else phases(self),
         )
 
 

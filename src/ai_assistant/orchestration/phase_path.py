@@ -1,0 +1,1272 @@
+"""The phases' thin path: one activation's rounds, wired across the phase modules.
+
+**Glue, and not a phase module** (ADR-0309 §2:3). Each phase takes and returns its own
+shapes, because no phase module imports another; this module converts between them,
+holds what they decide in the episode's working set, and runs each as a controller
+stage. It is outside the ``independence`` contract over the phase modules, so it may
+import all of them, and none of them imports it.
+
+**Only where the opt-in is set** (ADR-0309 §2:6). The composition root builds a
+:class:`PhasePath` only where ``Settings.phases_thin_path`` is set, which it is on a
+test hub alone; the engine then hands the controller
+:data:`~ai_assistant.orchestration.controller.PHASE_RULES` and these stages for a
+conversation turn the chat's reader starts. Everywhere else today's table runs
+unchanged.
+
+**What one round is** (ADR-0307 §2, ADR-0309 §3). Planning asks the model once and
+records the round; authorizing checks every call by rule and the message by its place;
+acting runs the allowed calls and writes the message, with digesting beside it reading
+each held result as acting holds it (§3:3); and the next round is due where a call
+brought something or the round was marked (ADR-0307 §8:1). Each is one controller step,
+and each decision is held here, in :class:`PhaseWorking`, present once its stage has run
+whatever came of it (ADR-0280 §3:6).
+
+**The conversions** (the brief's item 3). Planning's recorded round becomes
+authorizing's :class:`~ai_assistant.orchestration.authorizer.RoundToAuthorize`, and
+authorizing's decision acting's :class:`~ai_assistant.orchestration.acting.
+AuthorizedRound`. Acting's outcomes and the digests become planning's
+:class:`~ai_assistant.orchestration.planning.CallOutcome` and
+:class:`~ai_assistant.orchestration.planning.DigestedEvidence`, each item under its
+source's planning label (ADR-0308 §4:15). One
+:class:`~ai_assistant.orchestration.digesting.ActivationLabels` holds the activation's
+labels, seeded from the episode and given each round's. Whether the activation has read
+digested evidence (ADR-0308 §5:4) reaches authorizing as the digests on its
+:class:`~ai_assistant.orchestration.authorizer.WorkingRecord`.
+
+**The recorders** (ADR-0307 §2:4, ADR-0308 §5:2). Planning's ``RoundRecorder`` and
+digesting's ``DigestRecorder`` are one object here, which adds the round or the digest,
+with its labels, to the activation's state and extends the open episode through the
+episode writer. A failed append is a capture failure, which the writer handles and
+which holds nothing back.
+
+**The message** (ADR-0307 §3, ADR-0306 §5). The round's text is written into the
+input's place through the chat's writer, claimed first under an
+:class:`~ai_assistant.core.types.ActivationEffect` and finished with the position the
+medium returns, beside the round's calls. An empty text writes nothing; where the place
+takes no message the text is kept with the round and written nowhere. When the round
+limit or a deadline ends the activation, or a stage fails, the fixed *couldn't finish*
+message is written, whatever earlier rounds wrote (ADR-0307 §3:7, ADR-0293 §9:1, §10:2);
+a stop writes nothing (ADR-0295 §3:3). The activation's messages, joined by a blank
+line, are the episode's ``outcome`` at the freeze (ADR-0307 §10).
+
+**The thin path's capabilities** (ADR-0309 §4:2). The web search, remembering and the
+simulated booking act. The search is registered at the egress seam and in no
+``ToolRegistry`` (ADR-0231 §5), and remembering runs against the assistant's own records
+(ADR-0306 §3:3), so :class:`PhaseTools` puts both declarations in front of authorizing's
+selection beside the deployment's registry, and routes a search call to the
+``WebSearcher`` that proposes and performs it. The search's ``origin`` is the connected
+account's: planning is offered the search without it, and the hub fills it from the
+searcher's own proposal (``WebSearcher.request``).
+
+**Left to later lanes:** recall's second run and its digest (rows 6 and 7), the story
+views and story calls, planning's look-ups, the follow-up, an event through the phases,
+and ADR-0309 §5:10's evaluation of the episode's placement over what the activation was
+given, for which the thin path places the episode for the owner alone.
+
+**It logs stage and code-owned reason only** (ADR-0275 §8).
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Final, Protocol
+from uuid import uuid4
+
+import structlog
+
+from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.errors import (
+    ActivationStoppedError,
+    ClaimStopped,
+    ConversationStoreError,
+    ModelTimeoutError,
+)
+from ai_assistant.core.types import (
+    TRANSCRIPT_MESSAGE_MAX_CHARS,
+    ActivationEffect,
+    CapabilityEffect,
+    CapabilityResult,
+    ControllerRule,
+    ControllerStage,
+    DigestOutcome,
+    InputOrigin,
+    MessageAuthor,
+    Modality,
+    NewMessage,
+    PlanningLabel,
+    ProposedCall,
+    SendOutcome,
+    ToolFailure,
+    ToolFailureKind,
+    ToolOutcome,
+    ToolResult,
+    TranscriptMessage,
+    rests_on_recorded_external_content,
+)
+from ai_assistant.orchestration.acting import (
+    ActedOutcome,
+    ActedRound,
+    ActingStage,
+    AuthorizedCall,
+    AuthorizedRound,
+    ResultRoute,
+)
+from ai_assistant.orchestration.activation_state import CaptureFacts, active_state
+from ai_assistant.orchestration.authorizer import (
+    AuthorizingStage,
+    CallToAuthorize,
+    RoundAuthorization,
+    RoundMessage,
+    RoundToAuthorize,
+    Verdict,
+    WorkingRecord,
+)
+from ai_assistant.orchestration.chat import couldnt_finish
+from ai_assistant.orchestration.controller import Stage
+from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
+from ai_assistant.orchestration.held_results import HeldResult, HeldResults
+from ai_assistant.orchestration.planning import (
+    CallOutcome,
+    CallOutcomeKind,
+    DigestedEvidence,
+    DigestItem,
+    PlaceAuthor,
+    PlaceItem,
+    PlaceWindow,
+    PlannedRound,
+    PlanningInputs,
+    PlanningStage,
+)
+from ai_assistant.orchestration.stories import episode_address
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
+
+    from ai_assistant.core.protocols import (
+        ModelProvider,
+        PlanStore,
+        ToolCallingCompleter,
+        ToolInvoker,
+        ToolRegistry,
+        WebSearcher,
+    )
+    from ai_assistant.core.types import (
+        ActivationDigest,
+        ActivationUnderstanding,
+        FrozenJson,
+        MessageReceipt,
+        PlanningRound,
+        SearchOutcome,
+        ToolCall,
+        ToolDefinition,
+    )
+    from ai_assistant.orchestration.activation_state import ActivationState
+    from ai_assistant.orchestration.controller import ControllerStageRun
+    from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow
+
+__all__ = [
+    "CHAT_DESCRIPTION",
+    "MessageWriter",
+    "PhasePass",
+    "PhasePath",
+    "PhaseTools",
+    "PhaseWorking",
+    "authorized_round",
+    "call_outcomes",
+    "digested_evidence",
+    "place_window",
+]
+
+_log = structlog.get_logger(__name__)
+
+#: The conversation channel kind's description, which planning is shown with the place
+#: (ADR-0307 §6:1, ADR-0292 §8:1). No store holds a kind's description yet, so the thin
+#: path states the chat's here.
+CHAT_DESCRIPTION: Final = (
+    "The hub's chat: a conversation with the user, on the devices they chose for it. "
+    "A message you write is added to this conversation for the user to read."
+)
+
+_PLANNING_EXPIRED: Final = "the activation's deadline passed before the next round"
+_AUTHORIZING_EXPIRED: Final = "the activation's deadline passed before the round was checked"
+_ACTING_EXPIRED: Final = "the activation's deadline passed before the round's calls ran"
+_GONE: Final = "the place took no message: the conversation is gone or refused it"
+
+#: The search refusals that leave a search's outcome unknown: it may have reached the
+#: provider, and an unknown outcome is reported as unknown (ADR-0312 §2, ADR-0306 §5:13).
+_UNKNOWN_SEARCHES: Final = frozenset({"deadline_expired", "transport_failed"})
+
+
+# --- the seams this module is handed ---------------------------------------------------
+
+
+class MessageWriter(Protocol):
+    """The place's writer: *send a message* (ADR-0293 §6:10-§6:13).
+
+    Structurally the chat's :class:`~ai_assistant.orchestration.chat.ChatWriter`.
+    """
+
+    async def send(self, conversation_id: str, message: NewMessage) -> MessageReceipt | None:
+        """Write one assistant message into a conversation, or ``None`` where it is gone."""
+        ...
+
+
+class PhasePass(Protocol):
+    """What a phase stage reads of the pass's working set (ADR-0280 §3).
+
+    The engine's working set satisfies it: the pass's deadline, the understanding the
+    understanding stage recorded, what that phase fetched for the windows, and the
+    phases' own part, :class:`PhaseWorking`.
+    """
+
+    @property
+    def deadline(self) -> float:
+        """The pass's deadline, on the running loop's clock."""
+
+    @property
+    def understanding(self) -> ActivationUnderstanding | None:
+        """The understanding version the stage recorded, where it recorded one."""
+
+    @property
+    def understanding_fetch(self) -> Fetched | None:
+        """The window's and recall's records the understanding phase fetched by id."""
+
+    @property
+    def phases(self) -> PhaseWorking | None:
+        """The phases' working set, where the pass runs them."""
+
+
+# --- the capabilities --------------------------------------------------------------------
+
+
+class PhaseTools:
+    """The thin path's registry and invoker over the deployment's (ADR-0309 §4:2).
+
+    Structurally a :class:`~ai_assistant.core.protocols.ToolRegistry` and a
+    :class:`~ai_assistant.core.protocols.ToolInvoker`. The registry answers what the
+    deployment's answers, and also each own-records declaration it is handed, such as
+    remembering, and the configured search's declaration, so authorizing's selection
+    reaches them. The invoker sends a search call to the ``WebSearcher`` and every other
+    call to the deployment's invoker. A call to the assistant's own records never
+    reaches it: acting runs those directly (ADR-0306 §3:3).
+
+    **The arguments the hub fills.** A connected account's destination is the hub's,
+    never a model's: the search's ``origin`` is its searcher's own proposal, and a
+    registered tool's, such as the booking act's, is the configured value ``fills``
+    names. Planning is offered each capability without them, as it is offered none the
+    declaration names in ``system_supplied`` (ADR-0306 §2:10), and they are filled
+    before authorizing selects and rules.
+    """
+
+    def __init__(  # noqa: PLR0913 — the deployment's pair, the added declarations, the searcher, and the two ways the hub fills an argument
+        self,
+        *,
+        registry: ToolRegistry,
+        invoker: ToolInvoker,
+        own_records: Sequence[ToolDefinition] = (),
+        searcher: WebSearcher | None = None,
+        search_query: str = "query",
+        fills: Mapping[str, Mapping[str, FrozenJson]] | None = None,
+    ) -> None:
+        """Wire the pair over the deployment's.
+
+        Args:
+            registry: The deployment's registry.
+            invoker: The deployment's invoker, the same object in production.
+            own_records: The declarations of capabilities on the assistant's own
+                records, which no registry holds.
+            searcher: The configured search, or ``None`` where no account is connected.
+            search_query: The one argument of the search planning writes; the hub
+                fills every other from the searcher's own proposal.
+            fills: For a registered capability, the arguments the hub fills and their
+                configured values, such as a connected account's destination.
+        """
+        self._registry = registry
+        self._invoker = invoker
+        self._own_records = tuple(own_records)
+        self._searcher = searcher
+        self._search_query = search_query
+        self._fills = {
+            capability: dict(arguments) for capability, arguments in (fills or {}).items()
+        }
+        self._search: ToolDefinition | None = None
+
+    async def search_declaration(self) -> ToolDefinition | None:
+        """The configured search's declaration, as its searcher proposes it, or ``None``.
+
+        Read from the searcher's own proposal, once: the declaration a deployment
+        registered carries its configured cost (ADR-0236 §1), so no copy is made here.
+        """
+        if self._search is None and self._searcher is not None:
+            proposed = await self._searcher.request(self._search_query)
+            if proposed is not None:
+                self._search = proposed.tool
+        return self._search
+
+    async def _extra(self) -> list[ToolDefinition]:
+        search = await self.search_declaration()
+        return [*self._own_records, *(() if search is None else (search,))]
+
+    async def get(self, tool_id: str) -> ToolDefinition | None:
+        """The definition registered as ``tool_id``, the added ones included."""
+        for one in await self._extra():
+            if str(one.id) == tool_id:
+                return one
+        return await self._registry.get(tool_id)
+
+    async def find(self, capability: str) -> list[ToolDefinition]:
+        """Every tool advertising ``capability``, ordered by id, the added ones included."""
+        found = [one for one in await self._extra() if str(one.capability) == capability]
+        found.extend(await self._registry.find(capability))
+        return sorted(found, key=lambda one: str(one.id))
+
+    async def capabilities(self) -> tuple[str, ...]:
+        """Every advertised capability, sorted and de-duplicated."""
+        names = {str(one.capability) for one in await self._extra()}
+        names.update(await self._registry.capabilities())
+        return tuple(sorted(names))
+
+    async def all_tools(self) -> list[ToolDefinition]:
+        """Every definition, ordered by id, the added ones included."""
+        every = [*await self._extra(), *await self._registry.all_tools()]
+        return sorted(every, key=lambda one: str(one.id))
+
+    async def offered(self, capabilities: Sequence[str]) -> tuple[ToolDefinition, ...]:
+        """The declarations planning is offered, for the named capabilities (§4:2).
+
+        Each is offered without the arguments the hub fills, which planning's offer
+        leaves out as it leaves out any argument the declaration names in
+        ``system_supplied`` (ADR-0306 §2:10). A capability no tool satisfies is not
+        offered.
+        """
+        search = await self.search_declaration()
+        offered: list[ToolDefinition] = []
+        for name in capabilities:
+            for one in await self.find(name):
+                if search is not None and one == search:
+                    hidden = _properties(one) - {self._search_query}
+                else:
+                    hidden = set(self._fills.get(name, {}))
+                offered.append(_without(one, hidden))
+        return tuple(offered)
+
+    async def filled(self, call: ProposedCall) -> ProposedCall:
+        """``call`` with the arguments the hub fills.
+
+        A search's are its searcher's proposal for the query planning wrote, so its
+        ``origin`` is the connected account's and never a model's; any other's are the
+        configured ``fills``. Whatever else planning wrote is kept, so an argument the
+        tool does not take still fails its schema at authorizing. A search whose query
+        is missing is handed on as it was, and authorizing finds it fits no tool.
+        """
+        search = await self.search_declaration()
+        filled: Mapping[str, FrozenJson] | None = self._fills.get(call.name)
+        if (
+            search is not None
+            and self._searcher is not None
+            and call.name == str(search.capability)
+        ):
+            query = call.arguments.get(self._search_query)
+            proposed = None if not isinstance(query, str) else await self._searcher.request(query)
+            filled = None if proposed is None else proposed.parameters
+        if not filled:
+            return call
+        arguments: dict[str, FrozenJson] = {**call.arguments, **filled}
+        return ProposedCall(call_id=call.call_id, name=call.name, arguments=arguments)
+
+    async def invoke(self, call: ToolCall, *, timeout: timedelta) -> ToolResult:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4)
+        """Invoke ``call``: a search through its searcher, any other through the invoker."""
+        search = await self.search_declaration()
+        if search is None or self._searcher is None or call.request.tool != search:
+            return await self._invoker.invoke(call, timeout=timeout)
+        return _searched(await self._searcher.search(call, timeout=timeout))
+
+
+def _properties(tool: ToolDefinition) -> set[str]:
+    """The argument names a declaration's schema lists."""
+    properties = tool.model_dump()["parameters_schema"].get("properties") or {}
+    return {str(name) for name in properties}
+
+
+def _without(tool: ToolDefinition, hidden: set[str]) -> ToolDefinition:
+    """``tool`` as planning is offered it: the ``hidden`` arguments are the hub's to fill.
+
+    A copy for planning's offer alone, never ruled on: authorizing selects and the
+    policy rules on the registered declaration (ADR-0029 §2).
+    """
+    added = tuple(sorted(hidden - set(tool.system_supplied)))
+    if not added:
+        return tool
+    return tool.model_copy(update={"system_supplied": (*tool.system_supplied, *added)})
+
+
+def _searched(outcome: SearchOutcome) -> ToolResult:
+    """A search's outcome as a call's result: its records' texts, or why there are none.
+
+    A search that came back with no result completed, with nothing in it; one cut
+    short, at the deadline or mid-exchange, may have reached the provider, so its
+    outcome is unknown; any other refusal is not done.
+    """
+    if outcome.refusal is None or outcome.refusal.value == "no_result":
+        texts: list[FrozenJson] = [record.content for record in outcome.records]
+        return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=texts)
+    kind = (
+        ToolFailureKind.REFUSED
+        if outcome.refusal.value == "spend_refused"
+        else ToolFailureKind.UNAVAILABLE
+    )
+    failure = ToolFailure(kind=kind, message=f"the search was refused: {outcome.refusal.value}")
+    if outcome.refusal.value in _UNKNOWN_SEARCHES:
+        return ToolResult(outcome=ToolOutcome.INDETERMINATE, failure=failure)
+    return ToolResult(outcome=ToolOutcome.FAILED, failure=failure)
+
+
+# --- the working set ---------------------------------------------------------------------
+
+
+@dataclass
+class _Step:
+    """The step that runs a round's calls, acting with digesting beside it (§3:3)."""
+
+    deadline: datetime
+    held: asyncio.Queue[HeldResult | None] = field(default_factory=asyncio.Queue)
+
+
+@dataclass
+class _Round:
+    """One round's decisions, each present once its stage has run (ADR-0309 §3:2).
+
+    Attributes:
+        planned: Planning's decision.
+        authorization: Authorizing's decision, once it has run.
+        acted: Acting's decision, once it has run.
+        looking_for: What each allowed call is looking for, by its decision's id.
+        step: The step running the round's calls, once it has begun.
+    """
+
+    planned: PlannedRound
+    authorization: RoundAuthorization | None = None
+    acted: ActedRound | None = None
+    looking_for: dict[str, str] = field(default_factory=dict)
+    step: _Step | None = None
+
+
+class PhaseWorking:
+    """The phases' part of one activation's working set (ADR-0280 §3, ADR-0309 §3:2).
+
+    Structurally :class:`~ai_assistant.orchestration.controller.PhaseFacts`, which the
+    phase rules read. It holds each round's decisions, the activation's labels, its
+    digests and the evidence they gave, its held results (acting's part of the working
+    episode, never saved), and the messages it wrote.
+    """
+
+    def __init__(  # noqa: PLR0913 — the activation, its place, its trigger's origin, its audience, its round limit and its recorded labels
+        self,
+        *,
+        activation_id: str,
+        place: PlaceWindow,
+        conversation_id: str | None,
+        trigger_origin: InputOrigin | None,
+        owner_records: bool,
+        round_limit: int,
+        labels: Sequence[PlanningLabel] = (),
+    ) -> None:
+        """Start an activation's working set, before its first round.
+
+        Args:
+            activation_id: The activation.
+            place: The place the input came from, and what planning is shown of it.
+            conversation_id: The conversation a message is written into, or ``None``
+                where the place takes none.
+            trigger_origin: Who the trigger's input came from.
+            owner_records: Whether a record placed for the owner alone may be shown on
+                this pass (ADR-0307 §6:4).
+            round_limit: The most rounds the activation runs (ADR-0307 §8:4).
+            labels: The labels the episode already records.
+
+        Raises:
+            ValueError: If ``round_limit`` is below 1.
+        """
+        if round_limit < 1:
+            msg = "the round limit is at least one round (ADR-0307 §8:4)"
+            raise ValueError(msg)
+        self.activation_id = activation_id
+        self.place = place
+        self.conversation_id = conversation_id
+        self.trigger_origin = trigger_origin
+        self.owner_records = owner_records
+        self._round_limit = round_limit
+        self.labels = ActivationLabels(labels)
+        self.held = HeldResults(on_hold=self._on_hold)
+        self.digests: list[ActivationDigest] = []
+        self.evidence: list[DigestedEvidence] = []
+        self.messages: list[str] = []
+        self._rounds: list[_Round] = []
+
+    # --- what the rules read (PhaseFacts) ---
+
+    @property
+    def rounds(self) -> int:
+        """How many planning rounds the pass has run."""
+        return len(self._rounds)
+
+    @property
+    def round_limit(self) -> int:
+        """The most rounds the activation runs."""
+        return self._round_limit
+
+    @property
+    def latest_round(self) -> str | None:
+        """The latest round's id, or ``None`` before the first."""
+        return None if not self._rounds else self._rounds[-1].planned.round.id
+
+    @property
+    def latest_has_calls(self) -> bool:
+        """The latest round proposed a call, refused ones included."""
+        return bool(self._rounds) and bool(self._rounds[-1].planned.round.calls)
+
+    @property
+    def latest_has_text(self) -> bool:
+        """The latest round's text is not blank."""
+        return bool(self._rounds) and bool(self._rounds[-1].planned.round.text.strip())
+
+    @property
+    def latest_marked(self) -> bool:
+        """The latest round asked for another round."""
+        return bool(self._rounds) and self._rounds[-1].planned.round.another_round
+
+    @property
+    def latest_authorized(self) -> bool:
+        """There is an authorizing decision for the latest round."""
+        return bool(self._rounds) and self._rounds[-1].authorization is not None
+
+    @property
+    def latest_allows(self) -> bool:
+        """The latest round's authorizing decision allows a call or its message."""
+        decided = self._rounds[-1].authorization if self._rounds else None
+        if decided is None:
+            return False
+        return bool(decided.allowed) or (decided.message is not None and decided.message.allowed)
+
+    @property
+    def latest_acted(self) -> bool:
+        """There is an acting decision for the latest round."""
+        return bool(self._rounds) and self._rounds[-1].acted is not None
+
+    @property
+    def latest_digests_due(self) -> bool:
+        """A call the latest round allows may bring outside text, which a digest reads."""
+        decided = self._rounds[-1].authorization if self._rounds else None
+        return decided is not None and any(
+            one.call.request.tool.result is CapabilityResult.MAY_CARRY_OUTSIDE_TEXT
+            for one in decided.allowed
+        )
+
+    @property
+    def latest_brought_something(self) -> bool:
+        """A call of the latest round brought a result or was not done (ADR-0307 §8:1)."""
+        if not self._rounds:
+            return False
+        latest = self._rounds[-1]
+        return any(
+            one.kind is not CallOutcomeKind.DONE or one.result_id is not None
+            for one in call_outcomes(latest.planned, latest.authorization, latest.acted)
+        )
+
+    # --- what the stages read and write ---
+
+    @property
+    def latest(self) -> _Round:
+        """The latest round.
+
+        Raises:
+            RuntimeError: If no round has run, which the rules make impossible.
+        """
+        if not self._rounds:
+            msg = "a round's stages run after its planning round (ADR-0309 §3)"
+            raise RuntimeError(msg)
+        return self._rounds[-1]
+
+    def planned(self, planned: PlannedRound) -> None:
+        """Hold a round planning decided, and the labels it assigned."""
+        self.labels.add(planned.labels)
+        self._rounds.append(_Round(planned=planned))
+
+    def step(self, at: datetime, wait: timedelta) -> _Step:
+        """The latest round's step, begun at ``at`` and waited on for ``wait`` at most.
+
+        Begun by whichever of its two stages reaches it first, so each sees one step.
+        """
+        latest = self.latest
+        if latest.step is None:
+            latest.step = _Step(deadline=at + wait)
+        return latest.step
+
+    def _on_hold(self, held: HeldResult) -> None:
+        """Hand a result acting holds to the step digesting it (ADR-0308 §4:2)."""
+        for one in reversed(self._rounds):
+            if one.planned.round.id == held.round_id and one.step is not None:
+                one.step.held.put_nowait(held)
+                return
+
+    def outcomes(self) -> tuple[CallOutcome, ...]:
+        """What came of every round's calls, as planning reads them."""
+        return tuple(
+            outcome
+            for one in self._rounds
+            for outcome in call_outcomes(one.planned, one.authorization, one.acted)
+        )
+
+    def planning_rounds(self) -> tuple[PlanningRound, ...]:
+        """Every round, as planning recorded it or as it would have been."""
+        return tuple(one.planned.round for one in self._rounds)
+
+    def acted_rounds(self) -> tuple[ActedRound, ...]:
+        """Every acting decision, in round order."""
+        return tuple(one.acted for one in self._rounds if one.acted is not None)
+
+    @property
+    def read_outside_content(self) -> bool:
+        """Whether a ruling or a digest says the activation has read outside content.
+
+        Authorizing computes it over the activation's whole record (ADR-0306 §4:5-§4:6);
+        a digest that answered says so too (ADR-0308 §5:4), and so does an outside
+        trigger.
+        """
+        return (
+            self.trigger_origin is InputOrigin.OUTSIDE
+            or any(
+                one.authorization is not None and one.authorization.read_outside_content
+                for one in self._rounds
+            )
+            or any(one.outcome is DigestOutcome.ANSWERED for one in self.digests)
+        )
+
+    def outcome(self) -> str | None:
+        """The episode's ``outcome``: the messages written, joined by a blank line (§10)."""
+        return "\n\n".join(self.messages) if self.messages else None
+
+
+# --- the conversions ---------------------------------------------------------------------
+
+
+def place_window(
+    window: TranscriptWindow, *, description: str | None = CHAT_DESCRIPTION
+) -> PlaceWindow:
+    """The chat's window as planning is shown it: a place that takes a message.
+
+    Each message keeps its author; the input's messages are marked as the input; and a
+    message the bookkeeping links to an activation names that activation's episode
+    (ADR-0303 §7:1, ADR-0307 §5:6). A deleted message is not shown.
+
+    Args:
+        window: The conversation's recent transcript, brought in with the input.
+        description: The channel kind's description.
+
+    Returns:
+        The place, oldest item first.
+    """
+    inputs = {one.position for one in window.input_messages}
+    shown: dict[int, TranscriptMessage] = {}
+    for one in (*window.replied_to, *window.messages, *window.input_messages):
+        if isinstance(one, TranscriptMessage):
+            shown[one.position] = one
+    items = tuple(
+        PlaceItem(
+            author=PlaceAuthor.USER if one.author is MessageAuthor.USER else PlaceAuthor.ASSISTANT,
+            text=one.text,
+            at=one.written_at,
+            is_input=position in inputs,
+            episode_id=(
+                None if (linked := window.links.get(position)) is None else episode_address(linked)
+            ),
+        )
+        for position, one in sorted(shown.items())
+    )
+    return PlaceWindow(takes_message=True, description=description, items=items)
+
+
+def call_outcomes(
+    planned: PlannedRound,
+    authorization: RoundAuthorization | None,
+    acted: ActedRound | None,
+) -> tuple[CallOutcome, ...]:
+    """What came of one round's calls, as planning reads them, in the round's order.
+
+    A call planning's own check refused, or authorizing found not done, is refused;
+    one authorizing sent to the user needs you; and one it allowed is what acting made
+    of it, its result under the id acting minted (ADR-0306 §5:1, §5:14). A call with no
+    decision yet has no outcome.
+    """
+    refused = {one.call.call_id: one.reason for one in planned.refused}
+    verdicts = {} if authorization is None else {one.call_id: one for one in authorization.verdicts}
+    ran = {} if acted is None else {one.call.call.decision.id: one for one in acted.calls}
+    round_id = planned.round.id
+    outcomes: list[CallOutcome] = []
+    for call in planned.round.calls:
+        call_id = call.call_id
+        if call_id in refused:
+            outcomes.append(
+                CallOutcome(round_id, call_id, CallOutcomeKind.REFUSED, reason=refused[call_id])
+            )
+            continue
+        verdict = verdicts.get(call_id)
+        if verdict is None:
+            continue
+        if verdict.verdict is Verdict.NEEDS_YOU:
+            outcomes.append(
+                CallOutcome(round_id, call_id, CallOutcomeKind.NEEDS_YOU, reason=verdict.reason)
+            )
+            continue
+        if verdict.verdict is Verdict.NOT_DONE:
+            outcomes.append(
+                CallOutcome(round_id, call_id, CallOutcomeKind.REFUSED, reason=verdict.reason)
+            )
+            continue
+        one = None if verdict.decision_id is None else ran.get(verdict.decision_id)
+        if one is None:
+            continue
+        kind = {
+            ActedOutcome.DONE: CallOutcomeKind.DONE,
+            ActedOutcome.NOT_DONE: CallOutcomeKind.NOT_DONE,
+            ActedOutcome.UNKNOWN: CallOutcomeKind.UNKNOWN,
+        }[one.outcome]
+        digested = one.route is ResultRoute.DIGEST
+        outcomes.append(
+            CallOutcome(
+                round_id,
+                call_id,
+                kind,
+                reason=one.reason,
+                result_id=one.result_id,
+                result=one.output if one.route is ResultRoute.PLANNING else None,
+                digested=digested,
+            )
+        )
+    return tuple(outcomes)
+
+
+def authorized_round(decided: RoundAuthorization) -> AuthorizedRound:
+    """Authorizing's decision as acting's input: the allowed calls, in the round's order."""
+    return AuthorizedRound(
+        activation_id=decided.activation_id,
+        round_id=decided.round_id,
+        calls=tuple(
+            AuthorizedCall(one.call, deliberate_repeat=one.deliberate_repeat)
+            for one in decided.allowed
+        ),
+        story_activations=decided.story_activations,
+    )
+
+
+def digested_evidence(digested: Digested, labels: Sequence[PlanningLabel]) -> DigestedEvidence:
+    """A recorded digest as planning is shown it, each item under its source's thing.
+
+    The digest records each item's source by label (ADR-0308 §4:15); planning names it
+    by the thing that label names, so the labels the digest took resolve it.
+    """
+    named = {one.label: one for one in labels}
+    items: list[DigestItem] = []
+    for item in digested.digest.evidence:
+        source = named.get(item.source)
+        if source is None:  # pragma: no cover — the digest took every label it recorded
+            continue
+        items.append(DigestItem(text=item.text, source_kind=source.kind, source_id=source.id))
+    return DigestedEvidence(
+        result_id=digested.result_id,
+        answered=digested.digest.outcome is DigestOutcome.ANSWERED,
+        items=tuple(items),
+    )
+
+
+# --- the recorders -----------------------------------------------------------------------
+
+
+class _RoundRecorder:
+    """Planning's ``RoundRecorder``, over the episode writer (ADR-0307 §2:4).
+
+    It adds the round and its labels to the state of the activation this task runs,
+    which the open episode is built from, and extends the episode (ADR-0286 §3). The
+    writer never raises but for a cancellation: a failed append ends capture, and holds
+    nothing back (§3:7). A pass no channel admitted has no episode, and records nothing.
+    """
+
+    def __init__(self, path: PhasePath) -> None:
+        self._path = path
+
+    async def record(
+        self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]
+    ) -> None:
+        """Add the round and its labels to the activation's record, and extend it."""
+        state = active_state()
+        if state is None:
+            return
+        state.recorded_round(planning_round, labels)
+        await self._path.append()
+
+
+class _DigestRecorder:
+    """Digesting's ``DigestRecorder``, over the episode writer (ADR-0308 §5:2).
+
+    As :class:`_RoundRecorder`, for a digest and the labels it took.
+    """
+
+    def __init__(self, path: PhasePath) -> None:
+        self._path = path
+
+    async def record(self, digest: ActivationDigest, labels: tuple[PlanningLabel, ...]) -> None:
+        """Add the digest and its labels to the activation's record, and extend it."""
+        state = active_state()
+        if state is None:
+            return
+        state.recorded_digest(digest, labels)
+        await self._path.append()
+
+
+# --- the path ------------------------------------------------------------------------------
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _new_effect_id() -> str:
+    return f"effect:{uuid4().hex}"
+
+
+def _place_id(conversation_id: str) -> str:
+    """The place a message goes into: the conversation, by its id (ADR-0306 §6)."""
+    return f"conversation:{conversation_id}"
+
+
+def _working(given: PhasePass) -> PhaseWorking:
+    """The pass's phase working set, which a phase stage runs only where it is held.
+
+    Raises:
+        RuntimeError: If the pass runs no phases, which the rules make impossible.
+    """
+    working = given.phases
+    if working is None:
+        msg = "a phase stage runs only on a pass the phases plan (ADR-0309 §2:6)"
+        raise RuntimeError(msg)
+    return working
+
+
+def _expired(message: str) -> Callable[[PhasePass], Exception | None]:
+    """A phase stage is not entered once the pass's deadline has passed (ADR-0280 §5)."""
+
+    def expired(given: PhasePass) -> Exception | None:
+        if given.deadline <= asyncio.get_running_loop().time():
+            return ModelTimeoutError(message)
+        return None
+
+    return expired
+
+
+def _ended_by(state: ActivationState, rule: ControllerRule) -> bool:
+    """Whether the pass's end entry is due ``rule``."""
+    entries = state.stages.entries
+    return bool(entries) and entries[-1].stage is ControllerStage.END and entries[-1].due is rule
+
+
+def _fetched_external(fetched: Fetched | None) -> bool:
+    """Whether a record the windows or recall brought rests on outside content (ADR-0223)."""
+    if fetched is None:
+        return False
+    records = (*(fetched.episodes or ()), *fetched.recalled)
+    return any(rests_on_recorded_external_content(one.provenance) for one in records)
+
+
+class PhasePath:
+    """The thin path's stages, and what one activation's rounds need around them.
+
+    Built by the composition root only where the opt-in is set (ADR-0309 §2:6). The
+    engine attaches its episode append, starts each activation's working set with
+    :meth:`begin`, hands the controller :meth:`stages` beside its own, and runs the
+    pass through :meth:`run`, which writes the *couldn't finish* message where it is
+    owed and carries what the episode freezes with.
+    """
+
+    def __init__(  # noqa: PLR0913 — the four phases' seams, the tools, the writer, the store, and the provisional numbers
+        self,
+        *,
+        completer: ToolCallingCompleter,
+        provider: ModelProvider,
+        authorizing: AuthorizingStage,
+        acting: ActingStage,
+        tools: PhaseTools,
+        plans: PlanStore,
+        writer: MessageWriter,
+        capabilities: Sequence[str],
+        round_limit: int,
+        round_wait: timedelta,
+        excerpt_chars: int,
+        part_chars: int,
+        planning_model: str | None = None,
+        now: Callable[[], datetime] = _utcnow,
+        new_effect_id: Callable[[], str] = _new_effect_id,
+    ) -> None:
+        """Wire the path.
+
+        Args:
+            completer: The native tool-calling seam planning's rounds go through.
+            provider: The model seam a digest's calls go through (ADR-0308 §4:10).
+            authorizing: The authorizing stage, built over :class:`PhaseTools`.
+            acting: The acting stage, its invoker :class:`PhaseTools`.
+            tools: The thin path's registry and invoker.
+            plans: The plan store a message's effect record is claimed in.
+            writer: The place's writer.
+            capabilities: The capabilities planning is offered, by name (§4:2).
+            round_limit: The most rounds an activation runs (ADR-0307 §8:4).
+            round_wait: How long the step running a round's calls waits on its
+                digests at most: the call's deadline that bounds the wait (§8:2).
+            excerpt_chars: The bound planning cuts another episode's texts to.
+            part_chars: ``DIGEST_PART_CHARS`` (ADR-0308 §4:9).
+            planning_model: Optional ``"provider:model"`` override for planning.
+            now: The clock a step's start and an effect's claim are read from.
+            new_effect_id: Mints the *couldn't finish* message's effect record id.
+
+        Raises:
+            ValueError: If ``round_limit`` is below 1 or ``round_wait`` not positive.
+        """
+        if round_limit < 1:
+            msg = "the round limit is at least one round (ADR-0307 §8:4)"
+            raise ValueError(msg)
+        if round_wait <= timedelta(0):
+            msg = "a round's wait is positive (ADR-0307 §8:2)"
+            raise ValueError(msg)
+        self._now = checked_clock(now, owner="PhasePath")
+        self._planning = PlanningStage(
+            completer=completer,
+            recorder=_RoundRecorder(self),
+            excerpt_chars=excerpt_chars,
+            model=planning_model,
+            now=now,
+        )
+        self._digesting = DigestingStage(
+            provider=provider, recorder=_DigestRecorder(self), part_chars=part_chars, now=now
+        )
+        self._authorizing = authorizing
+        self._acting = acting
+        self._tools = tools
+        self._plans = plans
+        self._writer = writer
+        self._capabilities = tuple(capabilities)
+        self._round_limit = round_limit
+        self._round_wait = round_wait
+        self._new_effect_id = new_effect_id
+        self._append: Callable[[], Awaitable[None]] | None = None
+
+    def attach(self, append: Callable[[], Awaitable[None]]) -> None:
+        """Attach the engine's episode append, which extends the current activation's."""
+        self._append = append
+
+    async def append(self) -> None:
+        """Extend the current activation's open episode, where an append is attached."""
+        if self._append is not None:
+            await self._append()
+
+    def begin(  # noqa: PLR0913 — the activation, its window, its place, its origin, its audience and its recorded labels
+        self,
+        *,
+        activation_id: str,
+        window: TranscriptWindow,
+        conversation_id: str,
+        trigger_origin: InputOrigin | None,
+        owner_records: bool,
+        labels: Sequence[PlanningLabel] = (),
+    ) -> PhaseWorking:
+        """Start one conversation turn's working set, before its first stage.
+
+        Args:
+            activation_id: The activation.
+            window: The conversation's recent transcript, brought in with the input.
+            conversation_id: The conversation the input came from, which a message is
+                written into (ADR-0307 §3:1).
+            trigger_origin: Who the trigger's input came from.
+            owner_records: Whether a record placed for the owner alone may be shown.
+            labels: The labels the episode already records.
+
+        Returns:
+            The working set, which the engine holds on the pass.
+        """
+        return PhaseWorking(
+            activation_id=activation_id,
+            place=place_window(window),
+            conversation_id=conversation_id,
+            trigger_origin=trigger_origin,
+            owner_records=owner_records,
+            round_limit=self._round_limit,
+            labels=labels,
+        )
+
+    def stages(self) -> tuple[ControllerStageRun[PhasePass], ...]:
+        """The four phase stages, as the controller runs them (ADR-0309 §3)."""
+        return (
+            Stage(ControllerStage.PLANNING, self._plan, expired=_expired(_PLANNING_EXPIRED)),
+            Stage(
+                ControllerStage.AUTHORIZING,
+                self._authorize,
+                expired=_expired(_AUTHORIZING_EXPIRED),
+            ),
+            Stage(ControllerStage.ACTING, self._act, expired=_expired(_ACTING_EXPIRED)),
+            Stage(ControllerStage.DIGESTING, self._digest),
+        )
+
+    async def run(
+        self,
+        given: PhasePass,
+        controlled: Callable[[], Awaitable[None]],
+        *,
+        state: ActivationState | None,
+    ) -> None:
+        """Run the pass, then write what its end owes and carry what the episode keeps.
+
+        Where the round limit ends the activation, or a stage fails or times out, the
+        fixed *couldn't finish* message is written into the input's place, whatever
+        earlier rounds wrote (ADR-0307 §3:7, ADR-0293 §9:1, §10:2); a stop and a
+        cancellation write nothing (ADR-0295 §3:3, ADR-0293 §9:2). However it ended,
+        the activation's messages become the episode's ``outcome``, and the facts the
+        freeze derives are set (ADR-0286 §4:2).
+
+        Raises:
+            Exception: Whatever ``controlled`` raised, once the message is written.
+        """
+        working = _working(given)
+        try:
+            await controlled()
+        except ActivationStoppedError:
+            raise
+        except Exception:
+            await self._couldnt_finish(working)
+            raise
+        else:
+            if state is not None and _ended_by(state, ControllerRule.ROUND_LIMIT_REACHED):
+                await self._couldnt_finish(working)
+        finally:
+            if state is not None:
+                external = working.read_outside_content or _fetched_external(
+                    given.understanding_fetch
+                )
+                state.response = working.outcome()
+                # The thin path places its episode for the owner alone, the safe
+                # direction, until ADR-0309 §5:10's evaluation is built.
+                state.facts = CaptureFacts(
+                    modality=Modality.TEXT,
+                    supplied_withheld=True,
+                    derived_from_external=external,
+                    parked=None,
+                    delivery=None,
+                )
+                state.holds_external(value=external)
+
+    # --- the stages ---
+
+    def _wait(self, given: PhasePass) -> timedelta:
+        """A round's wait: its call deadline, cut to what the pass has left (§8:2)."""
+        left = max(given.deadline - asyncio.get_running_loop().time(), 0.0)
+        return min(self._round_wait, timedelta(seconds=left))
+
+    async def _plan(self, given: PhasePass) -> None:
+        """One planning round, over everything the thin path gives it (ADR-0307 §6)."""
+        working = _working(given)
+        fetched = given.understanding_fetch
+        inputs = PlanningInputs(
+            activation_id=working.activation_id,
+            place=working.place,
+            understanding=given.understanding,
+            trigger_origin=working.trigger_origin,
+            episodes=() if fetched is None or fetched.episodes is None else fetched.episodes,
+            owner_records=working.owner_records,
+            rounds=working.planning_rounds(),
+            labels=working.labels.labels,
+            outcomes=working.outcomes(),
+            capabilities=await self._tools.offered(self._capabilities),
+            evidence=tuple(working.evidence),
+            outside_content_read=working.read_outside_content,
+        )
+        async with asyncio.timeout_at(given.deadline):
+            planned = await self._planning.plan(inputs)
+        working.planned(planned)
+
+    async def _authorize(self, given: PhasePass) -> None:
+        """Check the latest round's calls by rule, and its message by its place."""
+        working = _working(given)
+        latest = working.latest
+        planned = latest.planned
+        calls = [
+            CallToAuthorize(
+                call=await self._tools.filled(one.call), deliberate_repeat=one.deliberate_repeat
+            )
+            for one in planned.calls
+        ]
+        place = None if working.conversation_id is None else _place_id(working.conversation_id)
+        message = (
+            None
+            if planned.message is None or place is None
+            else RoundMessage(planned.message, place)
+        )
+        rounds = working.planning_rounds()
+        given_round = RoundToAuthorize(
+            activation_id=working.activation_id,
+            round=planned.round,
+            working=WorkingRecord(
+                rounds=rounds[:-1], labels=working.labels.labels, digests=tuple(working.digests)
+            ),
+            calls=tuple(calls),
+            input_place=place,
+            message=message,
+        )
+        async with asyncio.timeout_at(given.deadline):
+            decided = await self._authorizing.authorize(given_round)
+        latest.authorization = decided
+        looking = {one.call.call_id: one.looking_for for one in planned.calls if one.looking_for}
+        latest.looking_for = {
+            verdict.decision_id: looking[verdict.call_id]
+            for verdict in decided.verdicts
+            if verdict.verdict is Verdict.ALLOWED
+            and verdict.decision_id is not None
+            and verdict.call_id in looking
+        }
+
+    async def _act(self, given: PhasePass) -> None:
+        """Run the latest round's allowed calls, and write its message beside them.
+
+        The step is begun here or by digesting, whichever is first, and is told once
+        acting has ended, however it ended, so digesting stops waiting for results.
+        """
+        working = _working(given)
+        latest = working.latest
+        decided = latest.authorization
+        if decided is None:  # pragma: no cover — `round_authorized` answers only once it is
+            msg = "acting runs a round authorizing has decided (ADR-0309 §3)"
+            raise RuntimeError(msg)
+        step = working.step(self._now(), self._wait(given))
+        try:
+            ran, wrote = await asyncio.gather(
+                self._calls(working, decided),
+                self._message(working, latest),
+                return_exceptions=True,
+            )
+        finally:
+            step.held.put_nowait(None)
+        for answer in (ran, wrote):
+            if isinstance(answer, BaseException):
+                raise answer
+        assert isinstance(ran, ActedRound)  # noqa: S101 — the one other answer it has
+        latest.acted = ran
+
+    async def _calls(self, working: PhaseWorking, decided: RoundAuthorization) -> ActedRound:
+        if not decided.allowed:
+            return ActedRound(round_id=decided.round_id)
+        return await self._acting.act(authorized_round(decided), held=working.held)
+
+    async def _message(self, working: PhaseWorking, latest: _Round) -> None:
+        """Write the round's message into the input's place, where it may go (§3:1)."""
+        decided = latest.authorization
+        text = latest.planned.message
+        verdict = None if decided is None else decided.message
+        if verdict is None or not verdict.allowed or verdict.effect_id is None or text is None:
+            return
+        await self._write(
+            working, text, effect_id=verdict.effect_id, round_id=latest.planned.round.id
+        )
+
+    async def _digest(self, given: PhasePass) -> None:
+        """Digest each result acting holds as it is held, until acting has ended (§3:3)."""
+        working = _working(given)
+        latest = working.latest
+        step = working.step(self._now(), self._wait(given))
+        async with asyncio.TaskGroup() as group:
+            while (held := await step.held.get()) is not None:
+                question = latest.looking_for.get(held.decision_id)
+                if question is None:
+                    # No question to answer, so nothing can be read for planning: it
+                    # is told it could not read the result (ADR-0308 §4:13).
+                    _log.info("digest_failed", stage="digesting", reason="no_question")
+                    working.evidence.append(
+                        DigestedEvidence(result_id=held.result_id, answered=False)
+                    )
+                    continue
+                group.create_task(self._digested(working, held, question, step.deadline))
+
+    async def _digested(
+        self, working: PhaseWorking, held: HeldResult, question: str, deadline: datetime
+    ) -> None:
+        digested = await self._digesting.digest_result(
+            held, question=question, labels=working.labels, deadline=deadline
+        )
+        working.digests.append(digested.digest)
+        working.evidence.append(digested_evidence(digested, working.labels.labels))
+
+    # --- the place ---
+
+    async def _write(
+        self, working: PhaseWorking, text: str, *, effect_id: str, round_id: str | None
+    ) -> bool:
+        """Claim, write and finish one message into the input's place (ADR-0306 §5:3-§5:5).
+
+        Returns:
+            Whether the medium recorded it.
+        """
+        conversation_id = working.conversation_id
+        if conversation_id is None:
+            return False
+        effect = ActivationEffect(
+            id=effect_id,
+            activation_id=working.activation_id,
+            round=round_id,
+            place=_place_id(conversation_id),
+            claimed_at=self._now(),
+        )
+        try:
+            await self._plans.claim_activation_effect(effect, match=None)
+        except ClaimStopped:
+            _log.info("phase_message_unwritten", stage="acting", reason="stopped")
+            return False
+        cut = len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS
+        body = text[:TRANSCRIPT_MESSAGE_MAX_CHARS]
+        try:
+            receipt = await self._writer.send(
+                conversation_id,
+                NewMessage(author=MessageAuthor.ASSISTANT, text=body, cut_off=cut),
+            )
+        except ConversationStoreError:
+            # Whether the store recorded it is not known: unknown, with no position.
+            _log.warning("phase_message_unwritten", stage="acting", reason="store_failed")
+            await self._plans.finish_activation_effect(effect_id, ToolOutcome.INDETERMINATE)
+            return False
+        if (
+            receipt is None
+            or receipt.outcome is not SendOutcome.RECORDED
+            or receipt.position is None
+        ):
+            _log.info("phase_message_unwritten", stage="acting", reason="place_gone")
+            await self._plans.finish_activation_effect(effect_id, ToolOutcome.FAILED, reason=_GONE)
+            return False
+        await self._plans.finish_activation_effect(
+            effect_id, ToolOutcome.SUCCEEDED, position=receipt.position
+        )
+        working.messages.append(body)
+        return True
+
+    async def _couldnt_finish(self, working: PhaseWorking) -> None:
+        """Write the fixed *couldn't finish* message, listing the effects that happened.
+
+        Claimed under a record naming no round (ADR-0307 §10). It never raises but for
+        a cancellation: a pass that failed is already ending on its own error.
+        """
+        effects = tuple(
+            f"the tool {one.call.call.request.tool.id} ran"
+            for each in working.acted_rounds()
+            for one in each.calls
+            if one.outcome is ActedOutcome.DONE
+            and one.call.call.request.tool.effect is not CapabilityEffect.NONE
+        )
+        text = couldnt_finish(effects).text
+        try:
+            await self._write(working, text, effect_id=self._new_effect_id(), round_id=None)
+        except Exception:  # the pass is ending on its own error, or on the round limit
+            _log.warning("phase_message_unwritten", stage="end", reason="couldnt_finish_failed")

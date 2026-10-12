@@ -60,6 +60,7 @@ from ai_assistant.models import (
     HashingEmbedder,
     PydanticAIProvider,
     PydanticAIStreamingCompleter,
+    PydanticAIToolCallingCompleter,
     RetryingProvider,
     Route,
     RoutingProvider,
@@ -92,11 +93,17 @@ from ai_assistant.orchestration import (
     StepRunner,
     UpcomingEventStage,
 )
+from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
+from ai_assistant.orchestration.authorizer import AuthorizingStage
+from ai_assistant.orchestration.chat import CHAT_TURN_BUDGET, ChatWriter
 from ai_assistant.orchestration.informational_events import InformationalEventStage
 from ai_assistant.orchestration.matters_pass import MattersPass
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
+from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.reconciling import ReconciliationStage
+from ai_assistant.orchestration.remembering import REMEMBER, REMEMBER_CAPABILITY, RememberCalls
+from ai_assistant.orchestration.selection import Preference
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
 from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
 from ai_assistant.orchestration.story_tidy_up_interim import InterimTidyUp
@@ -135,11 +142,16 @@ from ai_assistant.tools import (
     build_web_search_integration,
     egress_registrations,
 )
+from ai_assistant.tools.booking import BOOKING_ACT
+from ai_assistant.tools.booking import ORIGIN_ARGUMENT as BOOKING_ORIGIN_ARGUMENT
 from ai_assistant.tools.connection_store import SqliteConnectionStore
 from ai_assistant.tools.destinations import DestinationCanonicalisationError
 from ai_assistant.tools.egress import StreamOutboundTransport
 from ai_assistant.tools.egress_binder import EgressBindingSeam, canonical_destination
+from ai_assistant.tools.forecast import FORECAST_READ_ID
 from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
+from ai_assistant.tools.web_search import QUERY_ARGUMENT as SEARCH_QUERY_ARGUMENT
+from ai_assistant.tools.web_search import WEB_SEARCH, WEB_SEARCH_ID
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -147,15 +159,26 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import (
+        AuditTrail,
         ConnectionPurger,
+        ConversationStore,
+        EgressBinder,
         Embedder,
+        MemoryStore,
+        MemoryWriter,
+        ModelProvider,
         OutboundTransport,
+        PlanStore,
         Reader,
+        RecipientGrants,
         Secrets,
         SpeechSynthesizer,
         SpeechTranscriber,
+        StoryStore,
         TraceSink,
+        WebSearcher,
     )
+    from ai_assistant.tools.registry import InMemoryToolRegistry
 
 
 #: What this layer tunes :class:`LearningLoop`'s retrieval to, and **passed
@@ -436,6 +459,35 @@ _CONFLICT_PROBE_OVERSHOOT: Final = 2
 #: still-``PENDING`` step. An id naming no registered tool is permitted and
 #: matches nothing; naming one twice is refused at construction.
 TOOL_PREFERENCE: Final[tuple[str, ...]] = ()
+
+# --- The phases' thin path, on a test hub (ADR-0309 §2:6, §4) -------------------
+#
+# Every number below is **provisional**: the round limit, the deadlines and the digest
+# part size belong to #2589, which has not set them. Each is chosen for a test hub to
+# run the thin path's five acceptance cases without being the reason one ends.
+
+#: The most planning rounds one activation runs (ADR-0307 §8:4). **Provisional
+#: (#2589).** Enough for a search, its digest, an answer and a correction, and few
+#: enough that a loop of refused calls ends quickly.
+PHASES_ROUND_LIMIT: Final = 6
+
+#: Each invoked call's deadline, which also bounds a round's wait for its digests
+#: (ADR-0307 §8:2, ADR-0029 §4). **Provisional (#2589).**
+PHASES_CALL_DEADLINE: Final = timedelta(seconds=30)
+
+#: ``DIGEST_PART_CHARS``: the most characters of outside records one digest call
+#: reads (ADR-0308 §4:9). **Provisional (#2589).** A search's three bounded results
+#: fit in one part.
+PHASES_DIGEST_PART_CHARS: Final = 12_000
+
+#: The budget one activation the chat's reader starts is given where the thin path
+#: runs, in place of ``CHAT_TURN_BUDGET``: several rounds, each a model call, a
+#: search and a digest, do not fit the one-reply minute. **Provisional (#2589).**
+PHASES_TURN_BUDGET: Final = timedelta(minutes=3)
+
+#: The bound planning cuts another episode's texts to, as understanding's is
+#: (ADR-0307 §6:1). **Provisional (#2589).**
+PHASES_EXCERPT_CHARS: Final = UNDERSTANDING_EXCERPT_CHARS
 
 
 @dataclass(frozen=True, slots=True)
@@ -2200,6 +2252,31 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # deployment value to read. The stage's own default *is* the production
         # reading, so naming it here would restate it rather than decide it.
         reconciliation = ReconciliationStage(plans=plans, trail=trail, invoker=tools)
+        # ADR-0309 §2:6: the phases' thin path, only where a test hub set the opt-in,
+        # over the objects this root already built (:class:`_PhaseSeams`).
+        phases = (
+            _build_phase_path(
+                settings,
+                _PhaseSeams(
+                    model=model,
+                    registry=tools,
+                    plans=plans,
+                    trail=trail,
+                    stories=stories,
+                    memory=memory,
+                    writer=writer,
+                    binder=binder,
+                    chat=conversations,
+                    searcher=None if search is None else search.searcher,
+                    forecast_configured=forecast is not None,
+                    booking_configured=booking is not None,
+                    grants=recipient_grants,
+                    max_payload_bytes=settings.hub_max_frame_bytes - ENVELOPE_RESERVE_BYTES,
+                ),
+            )
+            if settings.phases_thin_path
+            else None
+        )
         engine = Engine(
             loop=loop,
             # ADR-0250 §4's one seam, over the **same** model seam the planner and the
@@ -2886,6 +2963,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # encoders are byte-identical or the vectors fail), and reading it
             # beside the engine that will measure with it adds no package edge here.
             max_payload_bytes=settings.hub_max_frame_bytes - ENVELOPE_RESERVE_BYTES,
+            # ADR-0309 §2:6: the phases' thin path, built above only where a test hub
+            # set the opt-in, and with it the longer budget its rounds need; ``None``
+            # everywhere else, whose controller table runs unchanged.
+            phases=phases,
+            chat_turn_budget=CHAT_TURN_BUDGET if phases is None else PHASES_TURN_BUDGET,
         )
         # The **same** trace store again, narrowed a third way (ADR-0119 §7): a
         # ``TraceSink`` for `service`'s startup stamp, which appends one
@@ -3065,6 +3147,132 @@ def _model_specs(settings: Settings) -> tuple[str, ...]:
         The model specs in preference order. Never empty: ``default_model`` leads.
     """
     return (settings.default_model, *settings.fallback_models)
+
+
+@dataclass(frozen=True, slots=True)
+class _PhaseSeams:
+    """The objects the composition root already built that the thin path reuses.
+
+    Each is the **same** instance the old path holds, for that object's own reason:
+    one trail every ruling is recorded in, one plan store every effect is claimed in,
+    one story store the backstop's match is read from, one memory store and writer,
+    one egress binder, and one registry that is also the invoker.
+    """
+
+    model: ModelProvider
+    registry: InMemoryToolRegistry
+    plans: PlanStore
+    trail: AuditTrail
+    stories: StoryStore
+    memory: MemoryStore
+    writer: MemoryWriter
+    binder: EgressBinder
+    chat: ConversationStore
+    searcher: WebSearcher | None
+    grants: RecipientGrants
+    max_payload_bytes: int
+    forecast_configured: bool
+    booking_configured: bool
+
+
+def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
+    """The phases' thin path, for a test hub that set the opt-in (ADR-0309 §2:6, §4).
+
+    **The capabilities** are §4:2's three: the web search, remembering, and the
+    simulated booking provider's booking act, which is in the registry only where a
+    deployment configured the provider whole (ADR-0273 §1) — a test hub alone. The
+    search and remembering are in no registry, so :class:`PhaseTools` adds both
+    declarations beside the registry's for authorizing's selection.
+
+    **The policy is the deployment's thresholds and standing grants, with no goal
+    authorizations and no goal quotes** (ADR-0306 §4:11, §6): a second
+    ``ThresholdActionPolicy`` built from the same settings and the same grants store,
+    holding neither, so no ruling a phase asks for reads the goal model. Remembering
+    also passes ``DefaultMemoryPolicy`` (§4:3).
+
+    **Planning** asks through pydantic-ai's native tool calling, on the deployment's
+    default model (ADR-0307 §10); **a digest** is a plain completion on the routed
+    ``ModelProvider`` the other stages reach through, with no ``model=`` override
+    (ADR-0308 §4:10). The numbers are the provisional ones above (#2589).
+
+    **The configured providers' route** (ADR-0247 §2-§4, ADR-0260 §6). Authorizing is
+    told which tools are this deployment's own registered search and its configured
+    forecast read, so their calls carry ``closed_loop`` and ``forecast_reach`` as the
+    old path's servicing writes them, and the policy reaches its configured-provider
+    route, which the stand-in keeps (ADR-0306 §4:4).
+
+    **A connected account's destination is the hub's** (ADR-0306 §2:10): the search's
+    is its searcher's proposal, and the booking act's ``origin`` is the configured
+    endpoint, so planning is offered neither.
+    """
+    policy = ThresholdActionPolicy(
+        confirm_at_risk=settings.confirm_at_risk,
+        confirm_at_reversibility=settings.confirm_at_reversibility,
+        deny_at_risk=settings.deny_at_risk,
+        deny_at_reversibility=settings.deny_at_reversibility,
+        grants=seams.grants,
+        configured_search=_configured_search(
+            settings.web_search_connection, _search_destinations(settings.web_search_origin)
+        ),
+        configured_forecast=_configured_forecast(
+            settings.forecast_connection, _forecast_destinations(settings.forecast_origin)
+        ),
+    )
+    tools = PhaseTools(
+        registry=seams.registry,
+        invoker=seams.registry,
+        own_records=(REMEMBER,),
+        searcher=seams.searcher,
+        search_query=SEARCH_QUERY_ARGUMENT,
+        fills=(
+            {str(BOOKING_ACT.capability): {BOOKING_ORIGIN_ARGUMENT: settings.booking_endpoint}}
+            if seams.booking_configured and settings.booking_endpoint is not None
+            else None
+        ),
+    )
+    return PhasePath(
+        completer=PydanticAIToolCallingCompleter(settings.default_model),
+        provider=seams.model,
+        authorizing=AuthorizingStage(
+            registry=tools,
+            policy=policy,
+            memory_policy=DefaultMemoryPolicy(),
+            trail=seams.trail,
+            stories=seams.stories,
+            memory=seams.memory,
+            binder=seams.binder,
+            preference=Preference(TOOL_PREFERENCE),
+            registered_search=(
+                frozenset() if seams.searcher is None else frozenset({WEB_SEARCH_ID})
+            ),
+            registered_forecast=(
+                frozenset({FORECAST_READ_ID}) if seams.forecast_configured else frozenset()
+            ),
+            now=_utcnow,
+        ),
+        acting=ActingStage(
+            plans=seams.plans,
+            invoker=tools,
+            own_records=OwnRecordsByCapability(
+                {REMEMBER_CAPABILITY: RememberCalls(writer=seams.writer, now=_utcnow)}
+            ),
+            timeout=PHASES_CALL_DEADLINE,
+            now=_utcnow,
+        ),
+        tools=tools,
+        plans=seams.plans,
+        writer=ChatWriter(conversations=seams.chat, max_payload_bytes=seams.max_payload_bytes),
+        capabilities=(
+            str(WEB_SEARCH.capability),
+            REMEMBER_CAPABILITY,
+            str(BOOKING_ACT.capability),
+        ),
+        round_limit=PHASES_ROUND_LIMIT,
+        round_wait=PHASES_CALL_DEADLINE,
+        excerpt_chars=PHASES_EXCERPT_CHARS,
+        part_chars=PHASES_DIGEST_PART_CHARS,
+        now=_utcnow,
+    )
 
 
 def _build_model_provider(settings: Settings, specs: Sequence[str]) -> RoutingProvider:

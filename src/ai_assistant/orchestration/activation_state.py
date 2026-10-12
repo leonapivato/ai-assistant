@@ -56,12 +56,15 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
+        ActivationDigest,
         ActivationRecall,
         ActivationUnderstanding,
         ChannelInput,
         EpisodicMemory,
         Modality,
         ParkedBinding,
+        PlanningLabel,
+        PlanningRound,
         RecordedActivationTrigger,
         ReplyCapability,
         SpokenDelivery,
@@ -148,6 +151,12 @@ class ActivationState:
     #: ADR-0281 §6: recall's decision, held once the stage ends and written with the
     #: stage's append (ADR-0286 §3). ``None`` where recall made no decision on the pass.
     recall: ActivationRecall | None = None
+    #: ADR-0307 §2:3-§2:4, §5:7: the planning rounds and the labels they and the
+    #: digests assigned, and ADR-0308 §5:2's digests, each added as its recorder is
+    #: called and written with the append that follows (ADR-0286 §3).
+    rounds: tuple[PlanningRound, ...] = ()
+    labels: tuple[PlanningLabel, ...] = ()
+    digests: tuple[ActivationDigest, ...] = ()
     #: ADR-0280 §6: the stages the controller ran, readable while the pass runs and
     #: written as each ends (ADR-0286 §3), bounded at ``stage_limit`` entries.
     stages: StageRecord = field(default_factory=StageRecord)
@@ -197,6 +206,18 @@ class ActivationState:
             return False
         self.stopped = True
         return True
+
+    def recorded_round(
+        self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]
+    ) -> None:
+        """Add a planning round and the labels it assigned, after those recorded (§2:3)."""
+        self.rounds = (*self.rounds, planning_round)
+        self.labels = (*self.labels, *labels)
+
+    def recorded_digest(self, digest: ActivationDigest, labels: tuple[PlanningLabel, ...]) -> None:
+        """Add a digest and the labels it took, after those recorded (ADR-0308 §5:2)."""
+        self.digests = (*self.digests, digest)
+        self.labels = (*self.labels, *labels)
 
     def holds_external(self, *, value: bool) -> None:
         """Record ADR-0223's value as the pass now holds it (ADR-0286 §4:3)."""
@@ -322,6 +343,9 @@ class ActivationState:
             stages=stages,
             recall=self.recall,
             stages_elided=stages_elided,
+            rounds=self.rounds,
+            labels=self.labels,
+            digests=self.digests,
         )
 
     def open_processing(self) -> EpisodeProcessingRecord:
@@ -353,6 +377,9 @@ class ActivationState:
             stages=stages,
             recall=self.recall,
             stages_elided=stages_elided,
+            rounds=self.rounds,
+            labels=self.labels,
+            digests=self.digests,
         )
 
     def _stage_record(
