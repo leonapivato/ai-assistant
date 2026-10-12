@@ -53,6 +53,12 @@ is, and an activation that returned on the round limit or having written nothing
 ``failed / processing_failed`` (ADR-0275 §5:3). The activation's messages, joined by a
 blank line, are the episode's ``outcome`` at the freeze (ADR-0307 §10).
 
+**What wrote each message** (ADR-0303 §7:1, ADR-0306 §5:3). The chat's reader links an
+assistant message in the window to the activation that wrote it, by the effect record
+its message carries with its position; :meth:`PhasePath.written` is that read, over the
+plan store's records of the candidate activations the reader names. A message the old
+path wrote has no record, and stays not linkable (§7:5).
+
 **The thin path's capabilities** (ADR-0309 §4:2). The web search, remembering and the
 simulated booking act. The search is registered at the egress seam and in no
 ``ToolRegistry`` (ADR-0231 §5), and remembering runs against the assistant's own records
@@ -676,8 +682,9 @@ def place_window(
     """The chat's window as planning is shown it: a place that takes a message.
 
     Each message keeps its author; the input's messages are marked as the input; and a
-    message the bookkeeping links to an activation names that activation's episode
-    (ADR-0303 §7:1, ADR-0307 §5:6). A deleted message is not shown.
+    message the window links to an activation, the one that took it in or wrote it,
+    names that activation's episode (ADR-0303 §7:1, ADR-0307 §5:6). A deleted message
+    is not shown.
 
     Args:
         window: The conversation's recent transcript, brought in with the input.
@@ -1065,6 +1072,44 @@ class PhasePath:
             round_limit=self._round_limit,
             labels=labels,
         )
+
+    async def written(
+        self, conversation_id: str, activation_ids: Sequence[str], positions: Sequence[int]
+    ) -> dict[int, str]:
+        """Which of ``activation_ids`` wrote each message at ``positions`` (ADR-0303 §7:1).
+
+        Read from their effect records (ADR-0306 §5:3): a message done in this
+        conversation, at a named position, links to the activation that wrote it. A
+        position no record names is simply missing, as is every one where the records
+        cannot be read: the message is then not linkable, the conservative direction
+        (§7:5), and the window is still brought in.
+
+        Args:
+            conversation_id: The conversation the messages are in.
+            activation_ids: The candidate activations.
+            positions: The assistant messages' positions.
+
+        Returns:
+            The activation that wrote each message, by its position.
+        """
+        wanted = frozenset(positions)
+        if not activation_ids or not wanted:
+            return {}
+        try:
+            recorded = await self._plans.activation_effects(activation_ids)
+        except Exception:  # the store is down: nothing is linked by what wrote it
+            _log.warning("phase_writers_unread", stage="reader", reason="store_failed")
+            return {}
+        place = _place_id(conversation_id)
+        return {
+            one.position: one.activation_id
+            for one in recorded
+            if not one.is_call
+            and one.place == place
+            and one.outcome is ToolOutcome.SUCCEEDED
+            and one.position is not None
+            and one.position in wanted
+        }
 
     def stages(self) -> tuple[ControllerStageRun[PhasePass], ...]:
         """The four phase stages, as the controller runs them (ADR-0309 §3)."""
