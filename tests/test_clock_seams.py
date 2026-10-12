@@ -102,7 +102,9 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    PlanningRound,
     PlanStep,
+    ProposedCall,
     Provenance,
     Reversibility,
     RiskLevel,
@@ -157,11 +159,17 @@ from ai_assistant.orchestration.acting import ActingStage, AuthorizedCall, Autho
 from ai_assistant.orchestration.activation_coordinator import ActivationCoordinator
 from ai_assistant.orchestration.activation_state import admit_channel
 from ai_assistant.orchestration.activation_writer import ActivationWriter
+from ai_assistant.orchestration.authorizer import (
+    AuthorizingStage,
+    CallToAuthorize,
+    RoundToAuthorize,
+)
 from ai_assistant.orchestration.digesting import ActivationLabels, DigestingStage
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
 from ai_assistant.orchestration.planning import PlaceWindow, PlanningInputs, PlanningStage
 from ai_assistant.orchestration.reads import _SearchCounts
+from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls
 from ai_assistant.orchestration.traces import OperationTraces
 from ai_assistant.permissions import (
     SqliteAuditTrail,
@@ -483,6 +491,64 @@ async def _acting_stage(now: Clock) -> None:
             round_id="r-1",
             calls=(AuthorizedCall(ToolCall(request=request, decision=decision)),),
         ),
+    )
+
+
+async def _authorizing_stage(now: Clock) -> None:
+    """ADR-0037 §2's ``decided_at``, read where a ruling is bound to its request.
+
+    Driven through ``authorize``: selection, the activation's record and the policy all
+    run first, and the reading is the last thing before the trail is written.
+    """
+    planned = ProposedCall(call_id="c-1", name="remember", arguments={"statement": "tea"})
+    await AuthorizingStage(
+        registry=FakeToolRegistry([REMEMBER]),
+        policy=FakeActionPolicy(),
+        memory_policy=FakeMemoryPolicy(),
+        trail=FakeAuditTrail(),
+        stories=FakeStoryStore(),
+        memory=FakeMemoryStore(),
+        now=now,
+    ).authorize(
+        RoundToAuthorize(
+            activation_id="act-1",
+            round=PlanningRound(id="r-1", recorded_at=_AWARE, calls=(planned,)),
+            calls=(CallToAuthorize(planned),),
+        )
+    )
+
+
+async def _remember_calls(now: Clock) -> None:
+    """ADR-0045 §3's transaction time, read as a remembered statement is proposed.
+
+    Driven through ``run``: the reading comes before the proposal is built or the writer
+    is reached.
+    """
+
+    class _Unreached:
+        async def ingest(self, proposal: object) -> object:
+            raise AssertionError
+
+        async def ingest_reading(self, reading: object) -> object:
+            raise AssertionError
+
+    request = ActionRequest(
+        tool=REMEMBER,
+        parameters={
+            "statement": "tea",
+            "episode": "activation:a",
+            "rests_on_outside_content": False,
+        },
+    )
+    decision = PermissionDecision.from_request(
+        request,
+        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="allowed"),
+        id="d-1",
+        decided_at=_AWARE,
+        effect="e-1",
+    )
+    await RememberCalls(writer=_Unreached(), now=now).run(  # type: ignore[arg-type]  # never reached
+        ToolCall(request=request, decision=decision)
     )
 
 
@@ -1319,6 +1385,10 @@ SEAMS = [
     Seam("SearchServicer", _search_servicer, ClockReadingError),
     # ADR-0306 §6's record clock, propagating for the reason `PROPAGATED` records.
     Seam("ActingStage", _acting_stage, ClockReadingError),
+    # ADR-0037 §2's decision stamp, propagating for `ActingStage`'s reason one phase over.
+    Seam("AuthorizingStage", _authorizing_stage, ClockReadingError),
+    # ADR-0045 §3's transaction time, propagating for the same reason.
+    Seam("RememberCalls", _remember_calls, ClockReadingError),
     # ADR-0307 §6's current time, propagating for `ActingStage`'s reason one phase over.
     Seam("PlanningStage", _planning_stage, ClockReadingError),
     # ADR-0308 §4:11's deadline, propagating for `PlanningStage`'s reason one phase over.
@@ -1677,6 +1747,14 @@ PROPAGATED: Final[dict[str, str]] = {
     "ActingStage": (
         "ADR-0306 adds **no** error class to `core.errors`, and a clock this process "
         "cannot read is not a refusal of the call: no record was claimed and nothing ran"
+    ),
+    "AuthorizingStage": (
+        "ADR-0306 adds **no** error class to `core.errors`, and a clock this process "
+        "cannot read is not a ruling: nothing was recorded and nothing runs"
+    ),
+    "RememberCalls": (
+        "ADR-0306 adds **no** error class to `core.errors`, and a clock this process "
+        "cannot read is not a refused write: nothing was proposed or written"
     ),
     "PlanningStage": (
         "ADR-0307 adds **no** error class to `core.errors`, and a clock this process "
