@@ -157,11 +157,14 @@ class ActivationState:
     rounds: tuple[PlanningRound, ...] = ()
     labels: tuple[PlanningLabel, ...] = ()
     digests: tuple[ActivationDigest, ...] = ()
-    #: Held while a recorder adds to the record and extends the episode, so digests
-    #: recorded side by side extend it one after another: the writer's append reads,
-    #: then writes conditioned on what it read, and two at once would end capture
-    #: (ADR-0286 §3:4).
-    recording: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+    #: Whether a recorder is extending the episode, and whether a later one has added
+    #: to the record since that append began. The writer's append reads, then writes
+    #: conditioned on what it read, so two at once would end capture (ADR-0286 §3:4):
+    #: the recorder extending it owns the appends, and a recorder that finds it owned
+    #: leaves its addition for the owner's next append rather than waiting. No lock is
+    #: taken (ADR-0306 §5:17).
+    extending: bool = field(default=False, repr=False, compare=False)
+    extension_owed: bool = field(default=False, repr=False, compare=False)
     #: ADR-0280 §6: the stages the controller ran, readable while the pass runs and
     #: written as each ends (ADR-0286 §3), bounded at ``stage_limit`` entries.
     stages: StageRecord = field(default_factory=StageRecord)
