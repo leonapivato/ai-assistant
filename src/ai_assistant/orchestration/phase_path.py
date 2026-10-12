@@ -842,25 +842,35 @@ class _DigestRecorder:
 async def _extended(state: ActivationState, append: Callable[[], Awaitable[None]]) -> None:
     """Extend the episode with what the record now holds, one append at a time.
 
-    Each append writes the whole record as it stands, so a recorder that finds another
-    extending the episode marks the extension owed and returns: the owner appends again
-    once its append ends, and that append carries both. Digests recorded side by side
+    Each append writes the whole record as it stands. A recorder that finds another
+    extending the episode awaits the owner's next append, which begins after its
+    addition and so carries it, and returns once that append has returned: a digest is
+    recorded only then (ADR-0308 §5:2, ADR-0286 §3:1). Digests recorded side by side
     would otherwise race the writer's conditioned write and end capture (ADR-0286 §3:4).
-    No lock is taken (ADR-0306 §5:17); a cancelled owner leaves the rest to the freeze,
-    which writes the whole record.
+    No lock is taken (ADR-0306 §5:17). Where the owner stops before that append, a
+    waiting recorder takes the appends over.
     """
-    if state.extending:
-        state.extension_owed = True
-        return
+    while state.extending:
+        if state.extension is None:
+            state.extension = asyncio.get_running_loop().create_future()
+        # Shielded: a waiting recorder cancelled leaves the owner's append to the rest.
+        if await asyncio.shield(state.extension):
+            return
     state.extending = True
+    owed: asyncio.Future[bool] | None = None
     try:
-        while True:
-            state.extension_owed = False
+        await append()
+        while state.extension is not None:
+            owed, state.extension = state.extension, None
             await append()
-            if not state.extension_owed:
-                return
+            owed.set_result(True)
+            owed = None
     finally:
         state.extending = False
+        for left in (owed, state.extension):
+            if left is not None and not left.done():
+                left.set_result(False)
+        state.extension = None
 
 
 # --- the path ------------------------------------------------------------------------------
