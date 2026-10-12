@@ -605,6 +605,11 @@ def test_the_fact_is_written_at_one_site_and_defaults_restrictive_everywhere_els
         # The one site §5 names: `SearchServicer._bound`, at the moment the request is
         # built, from the four conditions evaluated at their own instants.
         "orchestration/reads.py",
+        # The phases' one site, the authorizing phase's binding of a call, which writes
+        # it for the call to the deployment's own registered search and for no other
+        # (ADR-0247 §4's two conditions, read from the tool selected), so ADR-0247 §3's
+        # exception reaches the phases' calls as ADR-0306 §4:4 keeps it.
+        "orchestration/authorizer.py",
         # The seam, which writes the binding's value **from the carrier's unchanged**
         # (§5) and derives nothing — and its canonical fake, which states the same rule.
         "tools/egress_binder.py",

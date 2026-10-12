@@ -162,13 +162,20 @@ from ai_assistant.orchestration.activation_writer import ActivationWriter
 from ai_assistant.orchestration.authorizer import (
     AuthorizingStage,
     CallToAuthorize,
+    RoundAuthorization,
     RoundToAuthorize,
     WorkingRecord,
 )
 from ai_assistant.orchestration.digesting import ActivationLabels, DigestingStage
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
-from ai_assistant.orchestration.planning import PlaceWindow, PlanningInputs, PlanningStage
+from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, PhaseWorking
+from ai_assistant.orchestration.planning import (
+    PlaceWindow,
+    PlannedRound,
+    PlanningInputs,
+    PlanningStage,
+)
 from ai_assistant.orchestration.reads import _SearchCounts
 from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls
 from ai_assistant.orchestration.traces import OperationTraces
@@ -589,6 +596,60 @@ async def _planning_stage(now: Clock) -> None:
     await PlanningStage(
         completer=FakeToolCallingCompleter(), recorder=_Unreached(), excerpt_chars=50, now=now
     ).plan(PlanningInputs(activation_id="act-1", place=PlaceWindow(takes_message=True)))
+
+
+@dataclass
+class _PhasePass:
+    """A pass the phases plan, as a phase stage reads it: its deadline far off."""
+
+    phases: PhaseWorking
+    deadline: float = 1e18
+    understanding: None = None
+    understanding_fetch: None = None
+
+
+async def _phase_path(now: Clock) -> None:
+    """ADR-0309 §3:3's step start, read as a round's acting stage begins.
+
+    Driven through the acting stage the path hands the controller: the step's start is
+    its first reading, before any call runs or any message is claimed. A stage
+    classifies what it raised, so the driver raises the error its result carries.
+    """
+
+    class _Unreached:
+        async def send(self, *args: object) -> object:
+            raise AssertionError
+
+    path = PhasePath(
+        completer=FakeToolCallingCompleter(),
+        provider=FakeModelProvider(),
+        authorizing=_Unreached(),  # type: ignore[arg-type]  # never reached
+        acting=_Unreached(),  # type: ignore[arg-type]  # never reached
+        tools=PhaseTools(registry=FakeToolRegistry([]), invoker=_Unreached()),  # type: ignore[arg-type]  # never reached
+        plans=FakePlanStore(),
+        writer=_Unreached(),  # type: ignore[arg-type]  # never reached
+        capabilities=(),
+        round_limit=1,
+        round_wait=timedelta(seconds=5),
+        excerpt_chars=50,
+        part_chars=50,
+        now=now,
+    )
+    working = PhaseWorking(
+        activation_id="act-1",
+        place=PlaceWindow(takes_message=True),
+        conversation_id="c-1",
+        trigger_origin=None,
+        owner_records=True,
+        round_limit=1,
+    )
+    working.planned(
+        PlannedRound(round=PlanningRound(id="r-1", recorded_at=_AWARE), labels=(), recorded=True)
+    )
+    working.latest.authorization = RoundAuthorization(activation_id="act-1", round_id="r-1")
+    result = await path.stages()[2].run(_PhasePass(working))
+    if result.error is not None:
+        raise result.error
 
 
 async def _search_servicer(now: Clock) -> None:
@@ -1395,6 +1456,9 @@ SEAMS = [
     Seam("PlanningStage", _planning_stage, ClockReadingError),
     # ADR-0308 §4:11's deadline, propagating for `PlanningStage`'s reason one phase over.
     Seam("DigestingStage", _digesting_stage, ClockReadingError),
+    # ADR-0309 §3:3's step start, propagating for `ActingStage`'s reason: the glue that
+    # runs the phases adds no error class either.
+    Seam("PhasePath", _phase_path, ClockReadingError),
     # ADR-0260 §7's recorder clock, propagating for `SearchServicer`'s own reason one
     # kind over: ADR-0260 adds **no** error class to `core.errors` either.
     Seam("ForecastServicer", _forecast_servicer, ClockReadingError),
@@ -1767,6 +1831,10 @@ PROPAGATED: Final[dict[str, str]] = {
         "cannot read is none of §4:11's three failures — a call that raised, a reply "
         "that did not parse, a deadline passed — so it is not a failed digest: no "
         "model was asked and nothing was recorded"
+    ),
+    "PhasePath": (
+        "ADR-0309 adds **no** error class to `core.errors`, and a clock this process "
+        "cannot read is not a round's outcome: no call ran and no message was claimed"
     ),
     "ConsolidationStage": _UNDECLARED,
     "CurrentTime": ("documented at ``tools/builtin.py:148``, and `tools` is not in §4's list"),
