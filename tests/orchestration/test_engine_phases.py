@@ -54,6 +54,7 @@ from ai_assistant.core.types import (
     InputOrigin,
     LabelKind,
     MessageAuthor,
+    NewMessage,
     PermissionOutcome,
     PermissionRuling,
     ProcessingReason,
@@ -103,7 +104,6 @@ if TYPE_CHECKING:
         ActivationUnderstanding,
         Message,
         MessageReceipt,
-        NewMessage,
         OfferedTool,
         PermissionDecision,
     )
@@ -1038,6 +1038,113 @@ async def test_couldnt_finish_is_written_where_the_effect_records_cannot_be_read
     monkeypatch.setattr(harness.plans, "activation_effects", unreadable)
 
     assert await _ended_failing(harness, completer) == COULDNT_FINISH
+
+
+# --- what wrote each message (ADR-0303 §7:1) ---------------------------------------------
+
+_OLD_PATH: Final = "00000000-0000-4000-8000-0000000000d0"
+
+
+async def _all_settled(harness: Harness, conversation: str, count: int) -> None:
+    """Wait for ``count`` activations to end and their episodes to freeze."""
+    deadline = asyncio.get_running_loop().time() + _SETTLE
+    while True:
+        state = await harness.engine.conversation(conversation)
+        frozen = [
+            one
+            for one in await harness.memory.export()
+            if isinstance(one, EpisodicMemory)
+            and one.processing_record is not None
+            and not one.processing_record.is_open
+        ]
+        if state is not None and not state.state.working and len(frozen) == count:
+            return
+        if asyncio.get_running_loop().time() > deadline:
+            msg = "the activations never settled"
+            raise AssertionError(msg)
+        await asyncio.sleep(0.001)
+
+
+async def test_a_later_activation_sees_what_an_earlier_one_wrote_under_its_episode() -> None:
+    """ADR-0303 §7:1, §7:5, ADR-0306 §5:3, ADR-0307 §5:6.
+
+    The phases' message links to the activation that wrote it, by its effect record,
+    and is shown under that activation's episode label, as the message it took in is.
+    A message the old path wrote has no effect record and stays not linkable.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(text="Hello!"), RoundResponse(text="Again.")
+    )
+    harness = _harness(completer)
+    conversation = await _conversation(harness)
+    store = harness.conversation_store
+    # What the old path left: a message it took in, and the reply its adapter wrote.
+    old = NewMessage(author=MessageAuthor.USER, text="old", device_id="phone", message_id="m-0")
+    await store.append_message(conversation, old)
+    await store.take_in(conversation, positions=[1], activation_id=_OLD_PATH)
+    await store.append_message(
+        conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="Old reply.")
+    )
+
+    await _say(harness, conversation, "hi")
+    first = await _settled(harness, conversation)
+    again = UserMessage(device_id=_PHONE.device_id, message_id="m-2", text="again")
+    await harness.engine.write_message(conversation, message=again)
+    await _all_settled(harness, conversation, 2)
+
+    shown = json.loads(completer.calls[1].messages[1].content)["place_window"]
+    assert [one["text"] for one in shown] == ["old", "Old reply.", "hi", "Hello!", "again"]
+    old_item, old_reply, taken, wrote, _input = shown
+    assert "episode" in old_item
+    assert "episode" not in old_reply
+    assert taken["episode"] == wrote["episode"] != old_item["episode"]
+    # The first activation's episode is the one its message's effect record names.
+    (effect,) = await harness.plans.activation_effects([first.id.removeprefix("activation:")])
+    assert effect.position == 4
+
+
+async def test_the_writers_read_keeps_only_a_message_done_in_the_conversation() -> None:
+    """ADR-0306 §5:5: only a message done carries its position, in its own place."""
+    completer = FakeToolCallingCompleter.scripted()
+    harness = _harness(completer)
+    path = _phases(completer)(harness)
+
+    async def claimed(effect: ActivationEffect, outcome: ToolOutcome, **finish: Any) -> None:
+        await harness.plans.claim_activation_effect(effect, match=None)
+        await harness.plans.finish_activation_effect(effect.id, outcome, **finish)
+
+    def message(effect_id: str, place: str = "conversation:c1") -> ActivationEffect:
+        return ActivationEffect(
+            id=effect_id, activation_id=_ACTIVATION, round="round:1", place=place, claimed_at=AT
+        )
+
+    await claimed(message("e1"), ToolOutcome.SUCCEEDED, position=2)
+    await claimed(message("e2", place="conversation:c2"), ToolOutcome.SUCCEEDED, position=3)
+    await claimed(message("e3"), ToolOutcome.FAILED, reason="the place took no message")
+    await claimed(message("e4"), ToolOutcome.SUCCEEDED, position=9)
+    await _claimed(harness, "e5", "remember", ToolOutcome.SUCCEEDED)
+
+    assert await path.written("c1", [_ACTIVATION], [2, 3, 5]) == {2: _ACTIVATION}
+    assert await path.written("c1", [], [2]) == {}
+    assert await path.written("c1", ["activation-unknown"], [2]) == {}
+
+
+async def test_the_writers_read_links_nothing_where_the_records_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0303 §7:5: not linkable, the conservative direction; the window still comes."""
+    completer = FakeToolCallingCompleter.scripted()
+    harness = _harness(completer)
+    path = _phases(completer)(harness)
+
+    async def unreadable(activation_ids: Sequence[str], /) -> tuple[ActivationEffect, ...]:
+        del activation_ids
+        msg = "the plan store is down"
+        raise PlanningError(msg)
+
+    monkeypatch.setattr(harness.plans, "activation_effects", unreadable)
+
+    assert await path.written("c1", [_ACTIVATION], [2]) == {}
 
 
 # --- with the opt-in unset ---------------------------------------------------------------

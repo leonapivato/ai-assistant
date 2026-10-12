@@ -42,6 +42,8 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.chat import (
     COULDNT_FINISH,
+    ChatInput,
+    ChatReader,
     chat_effects,
     chat_reply,
     couldnt_finish,
@@ -733,3 +735,117 @@ async def test_a_marking_that_fails_part_way_ends_as_couldnt_finish() -> None:
     assert taken[1] == taken[1000] != taken[1001]
     inputs = sorted((_input_of(one) for one in await _episodes(memory)), key=len)
     assert inputs[0] == "w1001"
+
+
+# --- what wrote each assistant message (ADR-0303 §7:1) ------------------------------------
+
+_WRITER_A: Final = "00000000-0000-4000-8000-00000000000a"
+_WRITER_B: Final = "00000000-0000-4000-8000-00000000000b"
+
+
+class _Writers:
+    """A ``written`` reader over a fixed table of which activation wrote each position."""
+
+    def __init__(self, table: dict[int, str]) -> None:
+        self._table = table
+        self.asked: list[tuple[tuple[str, ...], tuple[int, ...]]] = []
+
+    async def __call__(
+        self, conversation_id: str, activation_ids: Sequence[str], positions: Sequence[int]
+    ) -> dict[int, str]:
+        del conversation_id
+        self.asked.append((tuple(activation_ids), tuple(positions)))
+        return {
+            position: writer
+            for position, writer in self._table.items()
+            if position in positions and writer in activation_ids
+        }
+
+
+async def _seeded(store: FakeConversationStore) -> str:
+    """A conversation: A took in 1 and wrote 2 and 3; B took in 4 and wrote 5; 6 waits."""
+    await store.set_my_devices([_PHONE])
+    conversation = (await store.start()).id
+    written: list[tuple[MessageAuthor, str]] = [
+        (MessageAuthor.USER, "first"),
+        (MessageAuthor.ASSISTANT, "one"),
+        (MessageAuthor.ASSISTANT, "two"),
+        (MessageAuthor.USER, "second"),
+        (MessageAuthor.ASSISTANT, "three"),
+        (MessageAuthor.USER, "third"),
+    ]
+    for n, (author, text) in enumerate(written):
+        user = author is MessageAuthor.USER
+        message = NewMessage(
+            author=author,
+            text=text,
+            device_id=_PHONE.device_id if user else None,
+            message_id=f"m-{n}" if user else None,
+        )
+        await store.append_message(conversation, message)
+    await store.take_in(conversation, positions=[1], activation_id=_WRITER_A)
+    await store.take_in(conversation, positions=[4], activation_id=_WRITER_B)
+    return conversation
+
+
+async def _window_links(
+    store: FakeConversationStore, conversation: str, written: _Writers | None
+) -> dict[int, str]:
+    """The links of the window the reader brings in with the waiting message."""
+    taken: list[ChatInput] = []
+    tasks: list[asyncio.Future[None]] = []
+
+    async def activate(one: ChatInput) -> bool:
+        taken.append(one)
+        return False
+
+    reader = ChatReader(
+        conversations=store,
+        activate=activate,
+        spawn=lambda work: tasks.append(asyncio.ensure_future(work)),
+        closing=lambda: False,
+        mint=lambda: "00000000-0000-4000-8000-00000000000c",
+        window_size=3,
+        written=written,
+    )
+    reader.notice(conversation)
+    await asyncio.wait_for(asyncio.gather(*tasks), _SETTLE)
+    (one,) = taken
+    assert [message.position for message in one.window.messages] == [3, 4, 5]
+    return dict(one.window.links)
+
+
+async def test_an_assistant_message_links_to_the_activation_that_wrote_it() -> None:
+    """ADR-0303 §7:1: by acting's effect record, beside the bookkeeping's links.
+
+    The window's head, 3, was written by A, whose input lies just before the window:
+    the look-back over as many positions again finds it.
+    """
+    store = FakeConversationStore(now=lambda: AT)
+    conversation = await _seeded(store)
+    writers = _Writers({2: _WRITER_A, 3: _WRITER_A, 5: _WRITER_B})
+
+    links = await _window_links(store, conversation, writers)
+
+    assert links == {3: _WRITER_A, 4: _WRITER_B, 5: _WRITER_B}
+    # The candidates are the window's and the look-back's; only its assistant
+    # messages are asked about.
+    assert writers.asked == [((_WRITER_B, _WRITER_A), (3, 5))]
+
+
+async def test_without_a_writers_reader_no_assistant_message_links() -> None:
+    """Before the phases nothing records a writer, so only taken-in messages link."""
+    store = FakeConversationStore(now=lambda: AT)
+    conversation = await _seeded(store)
+
+    assert await _window_links(store, conversation, None) == {4: _WRITER_B}
+
+
+async def test_an_assistant_message_no_record_names_stays_not_linkable() -> None:
+    """ADR-0303 §7:5: one the old path wrote carries no effect record."""
+    store = FakeConversationStore(now=lambda: AT)
+    conversation = await _seeded(store)
+
+    links = await _window_links(store, conversation, _Writers({5: _WRITER_B}))
+
+    assert links == {4: _WRITER_B, 5: _WRITER_B}

@@ -4055,6 +4055,9 @@ class Engine:
                 spawn=self._spawn_read,
                 closing=lambda: self._closing,
                 mint=self._chat_activation_id,
+                # ADR-0303 §7:1: where the phases write messages, an assistant message
+                # links to the activation that wrote it, by its effect record.
+                written=None if phases is None else phases.written,
             )
             if chat_reader
             else None

@@ -31,7 +31,9 @@ did not, and they are taken in as usual. A message never taken in is found by
 reader with the input and handed to the activation beside it: each message keeps its
 author, and the window informs and never authorizes. The reader brings its bookkeeping
 with it: the activation that took in each message of the window, where one did, which
-is what the message links to (ADR-0303 §7:3).
+is what the message links to (ADR-0303 §7:3). Where the phases write messages, it also
+brings the activation that **wrote** each assistant message, by acting's effect record
+(ADR-0303 §7:1, ADR-0306 §5:3), read through the ``written`` reader it is handed.
 
 **The adapter and the writer** (§9, §10). The reply the compose stage produced is
 written as one assistant message into the conversation the input came from; a pass
@@ -67,7 +69,7 @@ from ai_assistant.orchestration.conversations import conversation_channel, fitte
 from ai_assistant.orchestration.understanding import TranscriptWindow
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 
     from ai_assistant.core.protocols import ConversationStore
     from ai_assistant.core.types import MessageReceipt, StepOutcome, TurnOutcome
@@ -263,7 +265,7 @@ class ChatReader:
     and looks again when that activation has ended, until nothing is waiting.
     """
 
-    def __init__(  # noqa: PLR0913 — the medium, how an activation runs, and three engine seams
+    def __init__(  # noqa: PLR0913 — the medium, how an activation runs, three engine seams, and the writers' links
         self,
         *,
         conversations: ConversationStore,
@@ -272,6 +274,8 @@ class ChatReader:
         closing: Callable[[], bool],
         mint: Callable[[], str],
         window_size: int = CHAT_WINDOW_SIZE,
+        written: Callable[[str, Sequence[str], Sequence[int]], Awaitable[Mapping[int, str]]]
+        | None = None,
     ) -> None:
         """Wire the reader.
 
@@ -288,8 +292,15 @@ class ChatReader:
             mint: The activation id the next input is admitted with, and marked taken
                 in by.
             window_size: How many recent messages the window holds.
+            written: Reads which activation wrote each assistant message, by its
+                effect record, where the phases write messages (ADR-0303 §7:1):
+                given the conversation, the candidate activations and the assistant
+                messages' positions, it answers the activation by position, a
+                position no record names simply missing. ``None``, the default,
+                links no assistant message, as before the phases.
         """
         self._conversations = conversations
+        self._written = written
         self._activate = activate
         self._spawn = spawn
         self._closing = closing
@@ -477,17 +488,53 @@ class ChatReader:
             messages=recent,
             input_messages=tuple(waiting),
             replied_to=tuple(replied),
-            links=await self._links(conversation_id, [one.position for one in (*recent, *replied)]),
+            links=await self._links(conversation_id, recent, replied),
         )
 
-    async def _links(self, conversation_id: str, positions: Sequence[int]) -> dict[int, str]:
-        """The activation that took in each window message, by the bookkeeping (§6:6).
+    async def _links(
+        self,
+        conversation_id: str,
+        recent: Sequence[TranscriptMessage],
+        replied: Sequence[TranscriptMessage | DeletedMessage],
+    ) -> dict[int, str]:
+        """The activation each window message links to (ADR-0303 §7:1-§7:3).
 
         Brought with the window, so the understanding phase reads no further store to
-        link a message (ADR-0303 §7:3). Read in as many calls as the store's bound
-        needs; a message no activation took in — every assistant's message among them —
-        is simply missing.
+        link a message. A user's message links to the activation that took it in, by
+        the bookkeeping (§6:6). An assistant's message links to the activation that
+        wrote it, by acting's effect record, where the reader is handed ``written``:
+        the candidates are the activations the bookkeeping names for the window's
+        messages and for as many positions again just before it, since a message at
+        the window's head was written by an activation whose input may lie just
+        before it. A writer whose whole input lies further back is not found, and its
+        message stays not linkable, the conservative direction (§7:5). A message
+        nothing links is simply missing.
         """
+        shown = [one.position for one in (*recent, *replied)]
+        links = await self._taken_in(conversation_id, shown)
+        writes = [
+            one.position
+            for one in (*recent, *replied)
+            if isinstance(one, TranscriptMessage) and one.author is MessageAuthor.ASSISTANT
+        ]
+        if self._written is None or not writes:
+            return links
+        first = min(one.position for one in recent) if recent else min(writes)
+        before = await self._taken_in(
+            conversation_id, list(range(max(1, first - self._window_size), first))
+        )
+        candidates = list(dict.fromkeys((*links.values(), *before.values())))
+        if not candidates:
+            return links
+        written = await self._written(conversation_id, candidates, writes)
+        for position in writes:
+            writer = written.get(position)
+            if writer is not None and position not in links:
+                links[position] = writer
+        return links
+
+    async def _taken_in(self, conversation_id: str, positions: Sequence[int]) -> dict[int, str]:
+        """The bookkeeping for ``positions``, in as many calls as the store's bound needs."""
         links: dict[int, str] = {}
         for start in range(0, len(positions), _MARK_CHUNK):
             links.update(
