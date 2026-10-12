@@ -37,6 +37,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     ActivationDigest,
     ActivationEffect,
+    ActivationEnding,
     ActivationStop,
     CapabilityEffect,
     CapabilityResult,
@@ -56,6 +57,7 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
     ProcessingReason,
+    ProcessingStatus,
     ProposedCall,
     Reversibility,
     RiskLevel,
@@ -305,6 +307,19 @@ async def _settled(harness: Harness, conversation: str) -> EpisodicMemory:
         await asyncio.sleep(0.001)
 
 
+async def _last_ended(harness: Harness, conversation: str) -> ActivationEnding | None:
+    """How the conversation's current state says its last activation ended (§8:3)."""
+    digest = await harness.engine.conversation(conversation)
+    assert digest is not None
+    return digest.state.last_ended
+
+
+def _classified(episode: EpisodicMemory) -> tuple[ProcessingStatus | None, object]:
+    record = episode.processing_record
+    assert record is not None
+    return record.status, record.reason
+
+
 def _said(written: Sequence[TranscriptMessage]) -> list[tuple[MessageAuthor, str]]:
     return [(one.author, one.text) for one in written]
 
@@ -356,6 +371,9 @@ async def test_a_quick_question_is_answered_in_one_round() -> None:
     # No old-path stage ran.
     ran = {stage for stage, _ in _stages(episode)}
     assert not ran & {ControllerStage.ASSOCIATE_GOAL, ControllerStage.COMPOSE}
+    # It answered, so the state says done (ADR-0293 §8:3).
+    assert _classified(episode) == (ProcessingStatus.COMPLETED, ProcessingReason.RETURNED)
+    assert await _last_ended(harness, conversation) is ActivationEnding.DONE
 
 
 async def test_a_search_is_digested_then_answered_in_a_second_round() -> None:
@@ -582,6 +600,10 @@ async def test_a_stop_mid_task_ends_after_the_current_round_and_writes_nothing_m
     assert episode.processing_record.reason is ProcessingReason.STOPPED
     assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.STOPPED)
     assert episode.outcome == "Let me look that up."
+    # A stop is no failure: the state tells it apart, and never as couldn't finish
+    # (ADR-0295 §3:4, ADR-0297 §4).
+    assert _classified(episode) == (ProcessingStatus.INTERRUPTED, ProcessingReason.STOPPED)
+    assert await _last_ended(harness, conversation) is ActivationEnding.STOPPED
 
 
 # --- a message the place did not take ----------------------------------------------------
@@ -754,6 +776,9 @@ async def test_an_activation_that_writes_nothing_writes_couldnt_finish() -> None
     ]
     assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.NOTHING_DUE)
     assert episode.outcome == COULDNT_FINISH
+    # It could not finish, and the state says so beside the message (ADR-0293 §8:3).
+    assert _classified(episode) == (ProcessingStatus.FAILED, ProcessingReason.PROCESSING_FAILED)
+    assert await _last_ended(harness, conversation) is ActivationEnding.COULDNT_FINISH
 
 
 async def test_the_round_limit_writes_couldnt_finish_after_earlier_messages() -> None:
@@ -778,6 +803,9 @@ async def test_the_round_limit_writes_couldnt_finish_after_earlier_messages() ->
     assert effects[-1].round is None
     assert episode.outcome is not None
     assert episode.outcome.endswith(COULDNT_FINISH)
+    # Ended by the round limit, not done: the state reads couldn't finish (#2855).
+    assert _classified(episode) == (ProcessingStatus.FAILED, ProcessingReason.PROCESSING_FAILED)
+    assert await _last_ended(harness, conversation) is ActivationEnding.COULDNT_FINISH
 
 
 async def test_a_planning_round_that_fails_writes_couldnt_finish() -> None:
@@ -792,6 +820,52 @@ async def test_a_planning_round_that_fails_writes_couldnt_finish() -> None:
         (MessageAuthor.ASSISTANT, COULDNT_FINISH)
     ]
     assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.STAGE_FAILED)
+    assert await _last_ended(harness, conversation) is ActivationEnding.COULDNT_FINISH
+
+
+class _TimesOut(FakeToolCallingCompleter):
+    """A completer whose round meets the activation's deadline: a classified timeout."""
+
+    async def respond(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[OfferedTool],
+        *,
+        model: str | None = None,
+    ) -> RoundResponse:
+        del messages, tools, model
+        msg = "the activation's deadline passed"
+        raise ModelTimeoutError(msg)
+
+
+async def test_a_deadline_ending_writes_couldnt_finish_and_the_state_says_so() -> None:
+    """ADR-0307 §3:7, ADR-0293 §8:3: a deadline ends it, and it could not finish."""
+    harness = _harness(_TimesOut())
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "hi")
+    episode = await _settled(harness, conversation)
+
+    assert _said(await _messages(harness, conversation))[1:] == [
+        (MessageAuthor.ASSISTANT, COULDNT_FINISH)
+    ]
+    assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.STAGE_TIMED_OUT)
+    assert _classified(episode) == (ProcessingStatus.FAILED, ProcessingReason.TIMEOUT)
+    assert await _last_ended(harness, conversation) is ActivationEnding.COULDNT_FINISH
+
+
+async def test_an_activation_whose_every_message_the_place_refused_reads_couldnt_finish() -> None:
+    """ADR-0293 §9:1: every message gone is an activation that wrote nothing."""
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Hello."))
+    harness = _harness(completer, writer=_Gone())
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "hi")
+    episode = await _settled(harness, conversation)
+
+    assert episode.outcome is None
+    assert _classified(episode) == (ProcessingStatus.FAILED, ProcessingReason.PROCESSING_FAILED)
+    assert await _last_ended(harness, conversation) is ActivationEnding.COULDNT_FINISH
 
 
 # --- one stage, apart from the controller ------------------------------------------------
@@ -987,6 +1061,7 @@ async def test_with_the_opt_in_unset_todays_path_answers_unchanged() -> None:
     }
     assert episode.processing_record is not None
     assert episode.processing_record.rounds == ()
+    assert await _last_ended(harness, conversation) is ActivationEnding.DONE
 
 
 def test_the_phases_are_wired_only_beside_understanding() -> None:

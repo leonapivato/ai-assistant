@@ -139,6 +139,13 @@ class ActivationState:
     reply_degraded: bool = False
     spoken_degraded: bool = False
     no_words: bool = False
+    #: The phases ended the pass without finishing it, having returned rather than
+    #: raised: the round limit ended it, or it wrote nothing (ADR-0307 §3:7, ADR-0293
+    #: §9:1). The *couldn't finish* message is owed, so the pass is classified
+    #: ``failed / processing_failed`` (ADR-0275 §5:3's sixth row) and the current state
+    #: reads *couldn't finish* beside that message (ADR-0293 §8:3). A stop still
+    #: classifies first: a stop is no failure (ADR-0297 §4).
+    unfinished: bool = False
     #: The episode's id once its conversation recorded the turn (ADR-0283 §7:1): set
     #: when ``ConversationStore.record_turn`` returned the conversation, so the
     #: episode is on the channel and any delivery row it wrote exists. ``None`` for a
@@ -626,6 +633,10 @@ def terminal_status(  # noqa: C901, PLR0911, PLR0912 — ADR-0275's ordered term
     A pass whose end entry is the stop's — whose mark is set, which is the same fact
     (ADR-0297 §3:3) — is ``interrupted / stopped``, ahead of every other row, the
     cancellation row included (ADR-0297 §4).
+
+    A phases pass that returned unfinished (:attr:`ActivationState.unfinished`) is
+    ``failed / processing_failed``: it could not finish, so the state shows *couldn't
+    finish* beside the message saying so (ADR-0293 §8:3, §9:1).
     """
     if state.stopped:
         return ProcessingStatus.INTERRUPTED, ProcessingReason.STOPPED
@@ -655,10 +666,14 @@ def terminal_status(  # noqa: C901, PLR0911, PLR0912 — ADR-0275's ordered term
     outcome = state.outcome
     if state.reply_degraded or (outcome is not None and outcome.reply_degraded):
         return ProcessingStatus.FAILED, ProcessingReason.COMPOSITION_FAILED
-    if isinstance(failure, AssistantError) or (
-        outcome is not None
-        and outcome.routed is not None
-        and outcome.routed.outcome is RouteOutcome.FAILED
+    if (
+        isinstance(failure, AssistantError)
+        or (
+            outcome is not None
+            and outcome.routed is not None
+            and outcome.routed.outcome is RouteOutcome.FAILED
+        )
+        or (failure is None and state.unfinished)
     ):
         return ProcessingStatus.FAILED, ProcessingReason.PROCESSING_FAILED
     if failure is not None:

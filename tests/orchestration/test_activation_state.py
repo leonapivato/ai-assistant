@@ -485,6 +485,28 @@ def test_a_marked_pass_is_interrupted_stopped_ahead_of_every_other_row(
     )
 
 
+def test_a_pass_the_phases_left_unfinished_is_failed_processing_failed() -> None:
+    """ADR-0293 §8:3, ADR-0275 §5:3: it returned owing *couldn't finish*, so it failed."""
+    state = _admitted()
+    assert terminal_status(state, None) == (ProcessingStatus.COMPLETED, ProcessingReason.RETURNED)
+    state.unfinished = True
+    assert terminal_status(state, None) == (
+        ProcessingStatus.FAILED,
+        ProcessingReason.PROCESSING_FAILED,
+    )
+    # A failure that raised classifies as it is: the mark adds nothing to it.
+    assert terminal_status(state, ModelTimeoutError("late")) == (
+        ProcessingStatus.FAILED,
+        ProcessingReason.TIMEOUT,
+    )
+    # A stop is no failure, whatever else the pass holds (ADR-0297 §4).
+    state.stop()
+    assert terminal_status(state, None) == (
+        ProcessingStatus.INTERRUPTED,
+        ProcessingReason.STOPPED,
+    )
+
+
 @pytest.mark.parametrize("failure", [None, asyncio.CancelledError(), ChannelProcessingError("x")])
 def test_a_marked_pass_that_never_entered_the_controller_ends_with_the_stops_entry(
     failure: BaseException | None,
