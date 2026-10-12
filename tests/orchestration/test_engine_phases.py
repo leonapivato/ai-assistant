@@ -16,16 +16,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from test_authorizer import _ACTIVATION, _episode
 from test_engine import AT, Harness, NoStepPlanner
 from test_loop_search import _ACCOUNT, _CONFIGURED_SEARCH
 from understanding_support import understanding_stage
 
-from ai_assistant.core.errors import ConfigurationError, ConversationStoreError
+from ai_assistant.core.errors import (
+    ConfigurationError,
+    ConversationStoreError,
+    ModelTimeoutError,
+)
 from ai_assistant.core.types import (
     ActivationStop,
     CapabilityEffect,
@@ -40,6 +46,7 @@ from ai_assistant.core.types import (
     EgressBinding,
     EpisodicMemory,
     Idempotency,
+    InputOrigin,
     LabelKind,
     MessageAuthor,
     PermissionOutcome,
@@ -49,6 +56,7 @@ from ai_assistant.core.types import (
     Reversibility,
     RiskLevel,
     RoundResponse,
+    StageOutcome,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
@@ -57,10 +65,17 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.authorizer import AuthorizingStage
-from ai_assistant.orchestration.chat import COULDNT_FINISH, ChatWriter
+from ai_assistant.orchestration.chat import COULDNT_FINISH, ChatWriter, couldnt_finish
+from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
-from ai_assistant.orchestration.phase_path import MessageWriter, PhasePath, PhaseTools
+from ai_assistant.orchestration.phase_path import (
+    MessageWriter,
+    PhasePath,
+    PhaseTools,
+    PhaseWorking,
+)
 from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls, remembered_record_id
+from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
     FakeEgressBinder,
@@ -79,6 +94,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import ActionPolicy, EgressBinder
     from ai_assistant.core.types import (
         ActionRequest,
+        ActivationUnderstanding,
         Message,
         MessageReceipt,
         NewMessage,
@@ -183,6 +199,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     binder: EgressBinder | None = None,
     registered_search: frozenset[str] = frozenset(),
     writer: MessageWriter | None = None,
+    wrap: Callable[[ChatWriter], MessageWriter] | None = None,
 ) -> Callable[[Harness], PhasePath]:
     """The thin path as the composition root builds it, over the harness's own stores."""
 
@@ -197,6 +214,10 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
         memory_writer = FakeMemoryWriter(
             store=harness.memory, policy=FakeMemoryPolicy(), now=lambda: AT
         )
+        chat = ChatWriter(
+            conversations=harness.conversation_store, max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES
+        )
+        place: MessageWriter = chat if wrap is None else wrap(chat)
         return PhasePath(
             completer=completer,
             provider=digests if digests is not None else FakeModelProvider(reply=_DIGESTED),
@@ -222,14 +243,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             ),
             tools=tools,
             plans=harness.plans,
-            writer=(
-                ChatWriter(
-                    conversations=harness.conversation_store,
-                    max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES,
-                )
-                if writer is None
-                else writer
-            ),
+            writer=place if writer is None else writer,
             capabilities=_CAPABILITIES,
             round_limit=3,
             round_wait=timedelta(seconds=5),
@@ -572,6 +586,10 @@ async def test_a_stop_mid_task_ends_after_the_current_round_and_writes_nothing_m
 class _Gone:
     """A place's writer whose conversation is gone: nothing is recorded."""
 
+    def fitted(self, conversation_id: str, message: NewMessage) -> NewMessage:
+        del conversation_id
+        return message
+
     async def send(self, conversation_id: str, message: NewMessage) -> MessageReceipt | None:
         del conversation_id, message
         return None
@@ -579,6 +597,10 @@ class _Gone:
 
 class _Broken:
     """A place's writer whose store fails: whether it recorded the message is unknown."""
+
+    def fitted(self, conversation_id: str, message: NewMessage) -> NewMessage:
+        del conversation_id
+        return message
 
     async def send(self, conversation_id: str, message: NewMessage) -> MessageReceipt | None:
         del conversation_id, message
@@ -604,14 +626,130 @@ async def test_a_message_the_place_did_not_take_is_finished_without_a_position(
     await _say(harness, conversation, "hi")
     episode = await _settled(harness, conversation)
 
-    (effect,) = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
-    assert effect.outcome is outcome
-    assert effect.position is None
-    assert (effect.reason is not None) is reason
+    effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
+    # The round's message, then the *couldn't finish* an activation that wrote nothing
+    # owes (ADR-0293 §9:1), which the place took no better.
+    assert [one.round is None for one in effects] == [False, True]
+    assert all(one.outcome is outcome and one.position is None for one in effects)
+    assert all((one.reason is not None) is reason for one in effects)
     assert episode.outcome is None
 
 
+class _FailsOnce:
+    """A place's writer whose first write raises what no store does: a fault."""
+
+    def __init__(self, writer: ChatWriter) -> None:
+        self._writer = writer
+        self._failed = False
+
+    def fitted(self, conversation_id: str, message: NewMessage) -> NewMessage:
+        return self._writer.fitted(conversation_id, message)
+
+    async def send(self, conversation_id: str, message: NewMessage) -> MessageReceipt | None:
+        if not self._failed:
+            self._failed = True
+            msg = "the writer broke"
+            raise RuntimeError(msg)
+        return await self._writer.send(conversation_id, message)
+
+
+async def test_a_message_that_fails_beside_a_remember_still_lists_what_was_remembered() -> None:
+    """ADR-0293 §9:1: *couldn't finish* lists the effects the records say happened.
+
+    The remember beside the failing message finished, so it is listed, though the step
+    it ran in ended ``failed``; the message's own record is finished unknown.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            text="I'll remember that.",
+            calls=(_call("c1", "remember", statement="The user likes green tea."),),
+        )
+    )
+    harness = _harness(completer, wrap=_FailsOnce)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "remember I like green tea")
+    episode = await _settled(harness, conversation)
+
+    expected = couldnt_finish(("the tool remember ran",)).text
+    assert _said(await _messages(harness, conversation))[1:] == [
+        (MessageAuthor.ASSISTANT, expected)
+    ]
+    assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.STAGE_FAILED)
+    effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
+    (message,) = [one for one in effects if one.capability is None and one.round is not None]
+    assert message.outcome is ToolOutcome.INDETERMINATE
+    assert episode.outcome == expected
+
+
+class _Cuts:
+    """A place's writer that fits every message to its first five characters."""
+
+    def __init__(self, writer: ChatWriter) -> None:
+        self._writer = writer
+
+    def fitted(self, conversation_id: str, message: NewMessage) -> NewMessage:
+        del conversation_id
+        return message.model_copy(update={"text": message.text[:5], "cut_off": True})
+
+    async def send(self, conversation_id: str, message: NewMessage) -> MessageReceipt | None:
+        return await self._writer.send(conversation_id, message)
+
+
+async def test_the_outcome_keeps_the_text_the_place_holds() -> None:
+    """ADR-0307 §10: the messages written, as the conversation holds them."""
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Hello, how can I help?"))
+    harness = _harness(completer, wrap=_Cuts)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "hi")
+    episode = await _settled(harness, conversation)
+
+    assert _said(await _messages(harness, conversation))[1:] == [(MessageAuthor.ASSISTANT, "Hello")]
+    assert episode.outcome == "Hello"
+
+
+async def test_two_results_digested_side_by_side_are_both_kept() -> None:
+    """ADR-0286 §3:4, ADR-0308 §5:2: two digests recorded at once both reach the episode."""
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(
+                _call("c1", "web_search", query="museum hours", looking_for="when it opens"),
+                _call("c2", "web_search", query="museum prices", looking_for="what it costs"),
+            )
+        ),
+        RoundResponse(text="It opens at nine."),
+    )
+    searcher = FakeWebSearcher(results=("Open daily from 9:00 to 17:00.",))
+    harness = _harness(completer, searcher=searcher)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "when does the museum open, and what does it cost?")
+    episode = await _settled(harness, conversation)
+
+    assert len(searcher.searched) == 2
+    record = episode.processing_record
+    assert record is not None
+    assert sorted(one.question for one in record.digests) == ["what it costs", "when it opens"]
+    assert episode.outcome == "It opens at nine."
+
+
 # --- the ends that write *couldn't finish* ----------------------------------------------
+
+
+async def test_an_activation_that_writes_nothing_writes_couldnt_finish() -> None:
+    """ADR-0293 §9:1: a round with no text and no call ends having written nothing."""
+    harness = _harness(FakeToolCallingCompleter.scripted(RoundResponse()))
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "hi")
+    episode = await _settled(harness, conversation)
+
+    assert _said(await _messages(harness, conversation))[1:] == [
+        (MessageAuthor.ASSISTANT, COULDNT_FINISH)
+    ]
+    assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.NOTHING_DUE)
+    assert episode.outcome == COULDNT_FINISH
 
 
 async def test_the_round_limit_writes_couldnt_finish_after_earlier_messages() -> None:
@@ -650,6 +788,78 @@ async def test_a_planning_round_that_fails_writes_couldnt_finish() -> None:
         (MessageAuthor.ASSISTANT, COULDNT_FINISH)
     ]
     assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.STAGE_FAILED)
+
+
+# --- one stage, apart from the controller ------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Given:
+    """A pass's working set as a phase stage reads it (``PhasePass``)."""
+
+    deadline: float
+    phases: PhaseWorking
+    understanding: ActivationUnderstanding | None = None
+    understanding_fetch: Fetched | None = None
+
+
+def _begun(path: PhasePath) -> PhaseWorking:
+    return path.begin(
+        activation_id=_ACTIVATION,
+        window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
+        conversation_id="c1",
+        trigger_origin=InputOrigin.USER,
+        owner_records=True,
+    )
+
+
+async def test_a_deadline_passing_inside_planning_is_the_classified_timeout() -> None:
+    """ADR-0280 §5: a deadline met inside the round is a model timeout, not a fault."""
+    completer = _GatedCompleter(RoundResponse(text="late"), gated=1)
+    harness = _harness(completer)
+    path = _phases(completer)(harness)
+    given = _Given(deadline=asyncio.get_running_loop().time() + 0.05, phases=_begun(path))
+    (planning,) = [one for one in path.stages() if one.name is ControllerStage.PLANNING]
+
+    result = await planning.run(given)
+
+    assert result.outcome is StageOutcome.TIMED_OUT
+    assert isinstance(result.error, ModelTimeoutError)
+
+
+async def test_a_fetched_record_resting_on_outside_content_reaches_the_first_ruling() -> None:
+    """ADR-0181 §4, ADR-0306 §4:6: what understanding read is read before any round.
+
+    The activation's own episode is clean and planning is shown no label for the
+    recalled record, so only the fetched material says outside content was read.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", "book", date="2026-10-12"),))
+    )
+    harness = _harness(completer)
+    await harness.memory.add(_episode())
+    path = _phases(completer)(harness)
+    fetched = Fetched(
+        episodes=None,
+        recalled=(_episode("activation:other", derived_from_external=True),),
+        fetched=("activation:other",),
+        missing=(),
+    )
+    working = _begun(path)
+    given = _Given(
+        deadline=asyncio.get_running_loop().time() + _SETTLE,
+        phases=working,
+        understanding_fetch=fetched,
+    )
+    stages = {one.name: one for one in path.stages()}
+
+    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING):
+        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+
+    assert working.read_outside_content
+    decided = working.latest.authorization
+    assert decided is not None
+    assert decided.read_outside_content
 
 
 # --- with the opt-in unset ---------------------------------------------------------------

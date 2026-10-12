@@ -556,6 +556,8 @@ async def test_the_record_says_whether_outside_content_was_read(
         WorkingRecord(rounds=(_marked_round("round:1"),)),
         WorkingRecord(digests=(_digest(DigestOutcome.ANSWERED),)),
         WorkingRecord(labels=(PlanningLabel(label="N1", kind=LabelKind.NOTE, id="7"),)),
+        # A record the windows or recall brought rests on outside content (ADR-0181 §4).
+        WorkingRecord(fetched_outside=True),
     ],
 )
 async def test_what_the_working_set_holds_counts_where_its_append_failed(
@@ -572,6 +574,18 @@ async def test_a_failed_digest_append_still_counts_through_the_stage() -> None:
     """The adversarial round-1 case: evidence read, nothing kept, no notes written."""
     hub = _Hub()
     held = WorkingRecord(digests=(_digest(DigestOutcome.ANSWERED, "the 9:10"),))
+
+    decided = await hub.authorize(_round(_call("c1", "book", q="seat"), working=held))
+
+    assert decided.read_outside_content is True
+    assert decided.verdicts[0].verdict is Verdict.NEEDS_YOU
+
+
+async def test_a_fetched_record_resting_on_outside_content_counts_through_the_stage() -> None:
+    """The architecture round-1 case: understanding read an outside record, before any
+    round was planned or recorded, and a call leaving the hub needs you."""
+    hub = _Hub()
+    held = WorkingRecord(fetched_outside=True)
 
     decided = await hub.authorize(_round(_call("c1", "book", q="seat"), working=held))
 
