@@ -22,6 +22,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from test_activation_state import _admitted
 from test_authorizer import _ACTIVATION, _episode
 from test_engine import AT, Harness, NoStepPlanner
 from test_loop_search import _ACCOUNT, _CONFIGURED_SEARCH
@@ -31,8 +32,11 @@ from ai_assistant.core.errors import (
     ConfigurationError,
     ConversationStoreError,
     ModelTimeoutError,
+    PlanningError,
 )
 from ai_assistant.core.types import (
+    ActivationDigest,
+    ActivationEffect,
     ActivationStop,
     CapabilityEffect,
     CapabilityResult,
@@ -860,6 +864,106 @@ async def test_a_fetched_record_resting_on_outside_content_reaches_the_first_rul
     decided = working.latest.authorization
     assert decided is not None
     assert decided.read_outside_content
+
+
+async def test_a_digest_the_state_holds_marks_the_episode_though_the_working_set_lacks_it() -> None:
+    """ADR-0308 §5:4: a digest recorded whose append was cancelled still counts.
+
+    Its recorder added it to the state before the append that was cancelled, so the
+    working set never had it; the freeze's facts read the state's digests too.
+    """
+    completer = FakeToolCallingCompleter.scripted()
+    harness = _harness(completer)
+    path = _phases(completer)(harness)
+    working = _begun(path)
+    working.messages.append("Hi.")
+    given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
+    state = _admitted()
+    answered = ActivationDigest(
+        result="R1", question="when", outcome=DigestOutcome.ANSWERED, recorded_at=AT
+    )
+
+    async def controlled() -> None:
+        state.recorded_digest(answered, ())
+
+    await path.run(given, controlled, state=state)
+
+    assert not working.read_outside_content
+    assert state.facts is not None
+    assert state.facts.derived_from_external
+
+
+_UNKNOWN_BOOKING: Final = "the tool book may have run; whether it did is not known"
+
+
+async def _ended_failing(harness: Harness, completer: FakeToolCallingCompleter) -> str:
+    """End a pass on a stage's error, over the effect records already in the store."""
+    conversation = await _conversation(harness)
+    path = _phases(completer)(harness)
+    working = path.begin(
+        activation_id=_ACTIVATION,
+        window=TranscriptWindow(conversation=conversation_channel(conversation), messages=()),
+        conversation_id=conversation,
+        trigger_origin=InputOrigin.USER,
+        owner_records=True,
+    )
+    given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
+
+    async def failing() -> None:
+        msg = "a stage failed"
+        raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="a stage failed"):
+        await path.run(given, failing, state=None)
+    (*_, last) = await _messages(harness, conversation)
+    return last.text
+
+
+async def _claimed(harness: Harness, effect_id: str, capability: str, outcome: ToolOutcome) -> None:
+    effect = ActivationEffect(
+        id=effect_id,
+        activation_id=_ACTIVATION,
+        round="round:1",
+        capability=capability,
+        values_digest="0" * 64,
+        decision_id=f"decision:{effect_id}",
+        claimed_at=AT,
+    )
+    await harness.plans.claim_activation_effect(effect, match=None)
+    await harness.plans.finish_activation_effect(effect_id, outcome)
+
+
+async def test_couldnt_finish_lists_an_unknown_outcome_as_unknown() -> None:
+    """ADR-0307 §3:4-§3:5: an unknown outcome is always reported, and never as done.
+
+    Where no later round can report it, *couldn't finish* does.
+    """
+    completer = FakeToolCallingCompleter.scripted()
+    harness = _harness(completer)
+    await _claimed(harness, "e1", "remember", ToolOutcome.SUCCEEDED)
+    await _claimed(harness, "e2", "book", ToolOutcome.INDETERMINATE)
+    await _claimed(harness, "e3", "book", ToolOutcome.FAILED)
+
+    written = await _ended_failing(harness, completer)
+
+    assert written == couldnt_finish(("the tool remember ran", _UNKNOWN_BOOKING)).text
+
+
+async def test_couldnt_finish_is_written_where_the_effect_records_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0293 §9:1: the fixed message is owed whatever the effect history's store says."""
+    completer = FakeToolCallingCompleter.scripted()
+    harness = _harness(completer)
+
+    async def unreadable(activation_ids: Sequence[str], /) -> tuple[ActivationEffect, ...]:
+        del activation_ids
+        msg = "the plan store is down"
+        raise PlanningError(msg)
+
+    monkeypatch.setattr(harness.plans, "activation_effects", unreadable)
+
+    assert await _ended_failing(harness, completer) == COULDNT_FINISH
 
 
 # --- with the opt-in unset ---------------------------------------------------------------

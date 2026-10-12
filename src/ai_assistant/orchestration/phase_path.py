@@ -86,6 +86,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEffect,
+    CapabilityEffect,
     CapabilityResult,
     ControllerRule,
     ControllerStage,
@@ -191,6 +192,12 @@ CHAT_DESCRIPTION: Final = (
 _PLANNING_EXPIRED: Final = "the activation's deadline passed before the next round"
 _AUTHORIZING_EXPIRED: Final = "the activation's deadline passed before the round was checked"
 _ACTING_EXPIRED: Final = "the activation's deadline passed before the round's calls ran"
+#: What acting decided, as the durable record would have it, for a call that may have
+#: happened.
+_ACTED_OUTCOMES: Final = {
+    ActedOutcome.DONE: ToolOutcome.SUCCEEDED,
+    ActedOutcome.UNKNOWN: ToolOutcome.INDETERMINATE,
+}
 _GONE: Final = "the place took no message: the conversation is gone or refused it"
 
 #: The search refusals that leave a search's outcome unknown: it may have reached the
@@ -811,8 +818,7 @@ class _RoundRecorder:
         if state is None:
             return
         state.recorded_round(planning_round, labels)
-        async with state.recording:
-            await self._path.append()
+        await _extended(state, self._path.append)
 
 
 class _DigestRecorder:
@@ -829,12 +835,32 @@ class _DigestRecorder:
         state = active_state()
         if state is None:
             return
-        # Added at once, in the order digests are recorded, and the episode extended one
-        # append at a time: digests recorded side by side would otherwise race the
-        # writer's conditioned write and end capture (ADR-0286 §3:4).
         state.recorded_digest(digest, labels)
-        async with state.recording:
-            await self._path.append()
+        await _extended(state, self._path.append)
+
+
+async def _extended(state: ActivationState, append: Callable[[], Awaitable[None]]) -> None:
+    """Extend the episode with what the record now holds, one append at a time.
+
+    Each append writes the whole record as it stands, so a recorder that finds another
+    extending the episode marks the extension owed and returns: the owner appends again
+    once its append ends, and that append carries both. Digests recorded side by side
+    would otherwise race the writer's conditioned write and end capture (ADR-0286 §3:4).
+    No lock is taken (ADR-0306 §5:17); a cancelled owner leaves the rest to the freeze,
+    which writes the whole record.
+    """
+    if state.extending:
+        state.extension_owed = True
+        return
+    state.extending = True
+    try:
+        while True:
+            state.extension_owed = False
+            await append()
+            if not state.extension_owed:
+                return
+    finally:
+        state.extending = False
 
 
 # --- the path ------------------------------------------------------------------------------
@@ -881,6 +907,13 @@ def _ended_by(state: ActivationState, rule: ControllerRule) -> bool:
     """Whether the pass's end entry is due ``rule``."""
     entries = state.stages.entries
     return bool(entries) and entries[-1].stage is ControllerStage.END and entries[-1].due is rule
+
+
+def _listed(capability: str, outcome: ToolOutcome) -> str:
+    """One effect, as *couldn't finish* lists it: done, or not known to be."""
+    if outcome is ToolOutcome.INDETERMINATE:
+        return f"the tool {capability} may have run; whether it did is not known"
+    return f"the tool {capability} ran"
 
 
 def _stopped(state: ActivationState | None) -> bool:
@@ -1069,8 +1102,12 @@ class PhasePath:
                 await self._couldnt_finish(working)
         finally:
             if state is not None:
-                external = working.read_outside_content or _fetched_external(
-                    given.understanding_fetch
+                # The state's digests are counted too: one recorded there whose append
+                # was cancelled never reached the working set (ADR-0308 §5:4).
+                external = (
+                    working.read_outside_content
+                    or _fetched_external(given.understanding_fetch)
+                    or any(one.outcome is DigestOutcome.ANSWERED for one in state.digests)
                 )
                 state.response = working.outcome()
                 # The thin path places its episode for the owner alone, the safe
@@ -1307,14 +1344,34 @@ class PhasePath:
         (ADR-0307 §10). It never raises but for a cancellation: a pass that failed is
         already ending on its own error.
         """
+        effects = await self._effects(working)
+        text = couldnt_finish(effects).text
         try:
-            recorded = await self._plans.activation_effects([working.activation_id])
-            effects = tuple(
-                f"the tool {one.capability} ran"
-                for one in recorded
-                if one.capability is not None and one.outcome is ToolOutcome.SUCCEEDED
-            )
-            text = couldnt_finish(effects).text
             await self._write(working, text, effect_id=self._new_effect_id(), round_id=None)
         except Exception:  # the pass is ending on its own error, or on the round limit
             _log.warning("phase_message_unwritten", stage="end", reason="couldnt_finish_failed")
+
+    async def _effects(self, working: PhaseWorking) -> tuple[str, ...]:
+        """The calls that happened, and those whose outcome is unknown, as listed.
+
+        Read from the durable effect records; where they cannot be read, from what
+        acting decided on this pass, which is what is known (ADR-0293 §9:1). An unknown
+        outcome is listed as unknown, never as done (ADR-0307 §3:4-§3:5, ADR-0306 §5).
+        """
+        try:
+            recorded = await self._plans.activation_effects([working.activation_id])
+        except Exception:  # the store is down: list what this pass's working set knows
+            _log.warning("phase_effects_unread", stage="end", reason="store_failed")
+            return tuple(
+                _listed(one.call.call.request.tool.capability, _ACTED_OUTCOMES[one.outcome])
+                for each in working.acted_rounds()
+                for one in each.calls
+                if one.outcome in _ACTED_OUTCOMES
+                and one.call.call.request.tool.effect is not CapabilityEffect.NONE
+            )
+        return tuple(
+            _listed(one.capability, one.outcome)
+            for one in recorded
+            if one.capability is not None
+            and one.outcome in {ToolOutcome.SUCCEEDED, ToolOutcome.INDETERMINATE}
+        )

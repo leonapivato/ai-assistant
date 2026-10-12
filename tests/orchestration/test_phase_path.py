@@ -7,10 +7,12 @@ authorizing. The whole path runs in ``test_engine_phases.py``.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
+from test_activation_state import _admitted
 
 from ai_assistant.core.types import (
     ActivationDigest,
@@ -32,6 +34,7 @@ from ai_assistant.orchestration.digesting import Digested
 from ai_assistant.orchestration.phase_path import (
     PhaseTools,
     PhaseWorking,
+    _extended,
     _searched,
     call_outcomes,
     digested_evidence,
@@ -248,3 +251,35 @@ def test_the_working_set_answers_the_rules_from_the_latest_rounds_decisions() ->
             owner_records=False,
             round_limit=0,
         )
+
+
+async def test_records_side_by_side_extend_the_episode_one_append_at_a_time() -> None:
+    """ADR-0286 §3:4, ADR-0306 §5:17: one owner appends, and no lock is taken.
+
+    A recorder that finds the episode being extended leaves its addition owed and
+    returns; the owner appends once more, and that append carries every addition.
+    """
+    state = _admitted()
+    gate = asyncio.Event()
+    running = 0
+    most = 0
+    appends = 0
+
+    async def append() -> None:
+        nonlocal running, most, appends
+        running += 1
+        appends += 1
+        most = max(most, running)
+        await gate.wait()
+        running -= 1
+
+    owner = asyncio.create_task(_extended(state, append))
+    await asyncio.sleep(0)
+    assert state.extending
+    await _extended(state, append)
+    await _extended(state, append)
+    gate.set()
+    await owner
+
+    assert (appends, most) == (2, 1)
+    assert (state.extending, state.extension_owed) == (False, False)
