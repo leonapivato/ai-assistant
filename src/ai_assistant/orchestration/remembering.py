@@ -278,9 +278,12 @@ class RememberCalls:
         if tool.capability != REMEMBER_CAPABILITY or effect_id is None:
             _log.info("remember_not_done", stage="acting", reason="not_a_remember_call")
             return _not_done(ToolFailureKind.INVALID_REQUEST, "not a claimed remember call")
+        # Read before the refusal below: a clock fault is a `ValueError` too, and it is
+        # this process's fault, never a malformed call (ADR-0026 §2).
+        at = self._now()
         try:
             proposal = remembered_proposal(
-                call.request.parameters, record_id=remembered_record_id(effect_id), at=self._now()
+                call.request.parameters, record_id=remembered_record_id(effect_id), at=at
             )
         except ValueError:
             _log.info("remember_not_done", stage="acting", reason="malformed")
