@@ -94,6 +94,12 @@ def test_the_stage_enumeration_carries_exactly_the_members_the_adr_lists() -> No
         "recall",
         "windows",
         "story_links",
+        # ADR-0307 §10 and ADR-0309 §3:2 add the phases' stages, and ADR-0308 §4:5
+        # digesting.
+        "planning",
+        "authorizing",
+        "acting",
+        "digesting",
     ]
 
 
@@ -126,6 +132,12 @@ def test_the_rule_enumeration_carries_the_table_the_guard_and_the_endings() -> N
         "hub_stopped",
         "stopped",
         "story_links_unrecorded",
+        # ADR-0307 §10's three planning rows and ADR-0309 §3:2's two.
+        "first_round_due",
+        "round_unauthorized",
+        "round_authorized",
+        "round_limit_reached",
+        "round_due",
     ]
 
 
@@ -141,6 +153,7 @@ def test_exactly_the_rules_that_end_a_pass_are_ending_rules() -> None:
         "ended_before_controller",
         "hub_stopped",
         "stopped",
+        "round_limit_reached",
     }
 
 

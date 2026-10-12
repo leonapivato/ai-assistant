@@ -2516,7 +2516,14 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``EvidenceItem``), and moves its ``schema_version`` to ``Literal[8]``: a peer at
 #:     92 refuses the field as extra and the version as unknown, and a version-7 record
 #:     does not validate here (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 93
+#: 94: ADR-0309 §3:2 and ADR-0307 §10 give ``ControllerStage`` the members
+#:     ``planning``, ``authorizing``, ``acting`` and ``digesting``, and
+#:     ``ControllerRule`` ``first_round_due``, ``round_unauthorized``,
+#:     ``round_authorized``, ``round_limit_reached`` and ``round_due``, each carried in
+#:     the ``StageEntry`` records of the wire-carried
+#:     ``EpisodicMemory.processing_record``: a peer at 93 refuses each new member
+#:     (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 94
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client
