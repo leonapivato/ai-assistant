@@ -384,6 +384,71 @@ async def test_the_instruction_states_the_rounds_rules() -> None:
     assert "cite" not in instruction.lower()
 
 
+async def test_the_instruction_has_the_whole_message_written_before_notes_and_calls() -> None:
+    """#2851: a provider's turn ends at its first tool call, so nothing after it is written."""
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs())
+    instruction = _instruction(completer)
+    assert (
+        "Write the whole message first, before you propose any call, keep notes or ask for "
+        "another round: your response ends there, and anything you would write after them "
+        "is lost."
+    ) in instruction
+    assert "the answer itself is the message, never a line saying that one follows" in (instruction)
+
+
+async def test_the_instruction_makes_the_message_the_assistants_own_words_to_the_user() -> None:
+    """#2852: no compose step (ADR-0307 §3:3), so the instruction gives the voice."""
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs())
+    instruction = _instruction(completer)
+    assert instruction.startswith("You are the assistant, working for the user")
+    assert "plan for an assistant" not in instruction
+    assert "your own words to the user" in instruction
+    assert "Speak to them directly, as you, and of yourself as I; never call them the user" in (
+        instruction
+    )
+    assert (
+        "Labels such as S1, E1, N1, M1 and R1, rounds, episode notes, digests, tools and "
+        "calls are your own working vocabulary and never appear in a message"
+    ) in instruction
+    assert "never how you are working it out" in instruction
+
+
+async def test_a_needs_you_call_is_instructed_as_cannot_be_done_yet_with_no_way_to_approve() -> (
+    None
+):
+    """#2853: nothing parks or resumes (ADR-0306 §4:8), so no yes can let it run (§9:4)."""
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs())
+    instruction = _instruction(completer)
+    assert "Say plainly that you can't do it yet." in instruction
+    assert "there is no way yet for them to approve it" in instruction
+    assert "a yes, more details or asking again would not let it run" in instruction
+    assert (
+        "Never ask them to confirm, approve or say go ahead, never suggest that anything they "
+        "say or do would let it run, and never describe a way to approve it."
+    ) in instruction
+
+
+async def test_a_needs_you_outcome_is_rendered_as_nothing_the_user_can_unlock() -> None:
+    """#2853: the outcome itself says no answer from the user lets the call run."""
+    earlier = _earlier(calls=(_call("c1", "book", slot="19:00"),))
+    stage, completer, _ = _stage()
+    await stage.plan(
+        _inputs(
+            rounds=(earlier,),
+            outcomes=(CallOutcome(earlier.id, "c1", CallOutcomeKind.NEEDS_YOU),),
+        )
+    )
+    shown = _sent(completer)["rounds"][0]["calls"][0]["outcome"]
+    assert shown == (
+        "needs the user: it cannot be done yet, and no answer from the user can let it run"
+    )
+    for invitation in ("confirm", "approve", "go ahead", "once"):
+        assert invitation not in shown
+
+
 # --- the offered capabilities ----------------------------------------------------------------
 
 
