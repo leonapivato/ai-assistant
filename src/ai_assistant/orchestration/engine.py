@@ -4413,6 +4413,10 @@ class Engine:
                 being observed — "a purge that silently did nothing would let a
                 store grow without bound behind a horizon an operator believes is
                 enforced".
+            DiagnosticRecordError: If the diagnostic record's files could not be
+                listed or deleted (ADR-0314 §7:2), which reaches the caller for the
+                trace sweep's reason: the window is the record's forgetting, and a
+                sweep that silently did nothing would keep what it exists to delete.
         """
         self._reject_if_closing()
         return await self._tracked(self._purge_expired(), "purge_expired", _purged)
