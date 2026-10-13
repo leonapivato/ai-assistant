@@ -1,6 +1,6 @@
 # 130. A notification is a proposal, and only a perishable one earns an interruption
 
-- Status: Partially superseded by ADR-0215 (the population §8's duplicate lookup reads — §3's atomicity phrase naming the absence of an actionable record for one key, §5's third `DROP` condition, §7's sentence "§8's duplicate rule reads the same population" in its **dismissed** half, §7's purge clause, §8's duplicate-lookup clause, and the two clauses of §9's conformance list that pin them)
+- Status: Partially superseded by ADR-0215 (the population §8's duplicate lookup reads — §3's atomicity phrase naming the absence of an actionable record for one key, §5's third `DROP` condition, §7's sentence "§8's duplicate rule reads the same population" in its **dismissed** half, §7's purge clause, §8's duplicate-lookup clause, and the two clauses of §9's conformance list that pin them) and ADR-0313 (§2:1's `Goal` reference)
 - Date: 2026-08-10
 - Partially superseded: 2026-08-29 by ADR-0215 — **a dismissal ended the
   suppression §8 promised, and a delivery is a dismissal.** ADR-0131 §3b rules
@@ -32,6 +32,15 @@
   ADR-0215 repairs rather than narrows. §2's refusal of delivery state on the
   candidate is kept expressly (ADR-0215 §5), and is why ADR-0215 adds a predicate
   over the record's existing stamps rather than a `delivered` state.
+- Partially superseded: 2026-10-12 by ADR-0313 — one scope. §2:1's optional `Goal`
+  reference: the goal model retires at the cutover (ADR-0309 §5), and
+  `NotificationCandidate` loses `goal_id` with it (ADR-0313 §5:4). Every other
+  clause stands.
+  The old path keeps the replaced clauses until the lane that changes that member
+  or type merges (ADR-0313 §1:3).
+  This replacement takes effect on ratification of ADR-0313. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 207. A parked spoken turn says one fixed sentence naming the screen, and nothing else fills the silence
 
-- Status: Accepted
+- Status: Superseded by ADR-0313
 - Date: 2026-08-28
 - **Partially supersedes:**
   [ADR-0200](0200-a-spoken-turn-is-one-operation-on-the-promoted-surface-and-speech-is-two-seams-beside-the-model-provider.md)
@@ -53,6 +53,15 @@
   Where a later ADR changes one of the ADRs cited, this ADR is read against the text
   quoted here and that ADR's own record says what moved. This is ADR-0143's clause,
   taken for its reason.
+- Superseded: 2026-10-12 by ADR-0313 — the whole decision. The phases park nothing
+  (ADR-0306 §4:8), so no spoken pass is a live confirmation park and no fixed
+  sentence is spoken for one; a call that needs the user is answered by planning's
+  own message (ADR-0307 §9:4), spoken with the pass's other messages (ADR-0313 §3).
+  The old path keeps the replaced clauses until the lane that changes that member
+  or type merges (ADR-0313 §1:3).
+  This replacement takes effect on ratification of ADR-0313. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

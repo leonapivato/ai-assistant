@@ -1,6 +1,6 @@
 # 200. A spoken turn is one operation on the promoted surface, and speech is two seams beside the model provider
 
-- Status: Partially superseded by ADR-0203 (§4's second-difference clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0205 (§3's four-argument count, §4's enumeration of `SpokenTurn`'s members, and §10's enumeration of the browser-owned body members) and ADR-0207 (§4's park clause and the two clauses it controls, only as each reaches a converse_spoken pass whose outcome is a live confirmation park) and ADR-0275 (§4's no-capture speech endings and capture-before-synthesis ordering)
+- Status: Partially superseded by ADR-0203 (§4's second-difference clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0205 (§3's four-argument count, §4's enumeration of `SpokenTurn`'s members, and §10's enumeration of the browser-owned body members) and ADR-0207 (§4's park clause and the two clauses it controls, only as each reaches a converse_spoken pass whose outcome is a live confirmation park) and ADR-0275 (§4's no-capture speech endings and capture-before-synthesis ordering) and ADR-0313 (§3:4's expiry during the turn; §4:1's members; §4:2, §4:6–§4:8 and §4:10–§4:14, in their subject, the turn's outcome)
 - Date: 2026-08-27
 - **Partially superseded: 2026-08-28 by ADR-0203 — §4's second-difference clause,
   only as it reaches an operation whose output channel's audience is unbounded, and
@@ -250,6 +250,20 @@
   replacements recorded by the ADR-0275 note above took effect then; that note's
   "which remains Proposed" was true when written and is stale. The Status line above
   is unchanged (#2555).
+- Partially superseded: 2026-10-12 by ADR-0313 — three scopes. §3:4's expiry during
+  the turn: a spoken pass that cannot finish, its budget included, is returned
+  with how it ended (ADR-0313 §3:13). §4:1's members: `SpokenTurn` carries the
+  pass's activation, episode, messages and ending in place of `outcome` (§3:5).
+  §4:2, §4:6–§4:8 and §4:10–§4:14, in their subject: the no-words pair is `heard`
+  with the activation (§3:6), `spoken` renders the messages the pass wrote (§3:11),
+  and the degradation ladder reads those messages as the answer and the result less
+  its rendering as the `TurnOutcome` (§3:12). Every other clause stands, the
+  failing-versus-degrading line and the retention clauses included.
+  The old path keeps the replaced clauses until the lane that changes that member
+  or type merges (ADR-0313 §1:3).
+  This replacement takes effect on ratification of ADR-0313. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

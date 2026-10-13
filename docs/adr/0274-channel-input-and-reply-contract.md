@@ -1,6 +1,6 @@
 # 274. Channel inputs share an assistant receiver, and reply delivery is optional
 
-- Status: Partially superseded by ADR-0275 (§1, §3 and §5–§8's event/context and speech-ending persistence, capture reporting and post-processing cleanup) and ADR-0276 (§5's third clause, in its prompt and reference-resolution halves alone: the understanding stage renders supplied context into its own prompt as quoted data and resolves the input's references against it) and ADR-0293 (§2–§6, in so far as they govern a typed text input to the conversation and its reply) and ADR-0309 (§7's informational processing, in its summary stage)
+- Status: Partially superseded by ADR-0275 (§1, §3 and §5–§8's event/context and speech-ending persistence, capture reporting and post-processing cleanup) and ADR-0276 (§5's third clause, in its prompt and reference-resolution halves alone: the understanding stage renders supplied context into its own prompt as quoted data and resolves the input's references against it) and ADR-0293 (§2–§6, in so far as they govern a typed text input to the conversation and its reply) and ADR-0309 (§7's informational processing, in its summary stage) and ADR-0313 (§3:1's shapes of `ConversationInputOptions`, `TextChannelResult` and `InformationalEventResult`; §4:3's and §4:4's reference limbs; §7:6 and §8:6–§8:7, for an event)
 - Date: 2026-09-17
 - Scope: [Milestone 1](https://github.com/leonapivato/ai-assistant/milestone/1), [#2521](https://github.com/leonapivato/ai-assistant/issues/2521).
 - Owner authorization: Reviewed and authorized for ratification on 2026-09-18; the owner assigned ADR-0274.
@@ -48,6 +48,18 @@
   code merges (ADR-0309 §1:3). This scoped replacement takes effect on ratification of
   ADR-0309. This reciprocal header record accompanies the numbered draft under ADR-0070 and
   ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-12 by ADR-0313 — three scopes. §3:1's shapes:
+  `ConversationInputOptions` loses `reference`, `TextChannelResult` leaves, and
+  `InformationalEventResult` loses `summary` and gains `ended` (ADR-0313 §4:1,
+  §4:4, §4:6). §4:3's and §4:4's reference limbs go with `reference`. §7:6 and
+  §8:6–§8:7, for an event: an event runs through the phases, returns nothing it
+  wrote, and an activation that cannot finish is a result rather than a
+  `ChannelProcessingError` (§4:3–§4:5). Every other clause stands.
+  The old path keeps the replaced clauses until the lane that changes that member
+  or type merges (ADR-0313 §1:3).
+  This replacement takes effect on ratification of ADR-0313. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 
