@@ -1,6 +1,6 @@
 # 314. A diagnostic record keeps what each phase was given and returned, and nothing reads it back
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-13
 - Scope: the phases, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): a per-activation record of what each phase was given and what it returned, for the owner to read on the server when a decision cannot otherwise be explained ([#2863](https://github.com/leonapivato/ai-assistant/issues/2863)).
 - Authorization: the owner agreed the design on 2026-10-12 in #2863: on all hubs as an opt-in, with a retention window, strictly write-only, raw outside text kept within the window, and forgetting covering it later or the window doing the forgetting. The dispatcher assigned 0314 and authorized ratifying it once its reviews are green. The clauses that settle what that agreement leaves open are listed as such in the pull request.
