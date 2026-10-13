@@ -66,10 +66,11 @@ default; and leave it out of backups, so that the window is its forgetting.
 
 > **Normative.** Nothing in `ai_assistant` reads an entry back. No Protocol carries a read
 > of the record; no stage, capability, tool, model call, wire operation, gateway route,
-> command or export serves or reads it; and nothing the system does is conditioned on it.
+> command or export serves or reads it; and no decision the system makes is conditioned on
+> it.
 
-> **Normative.** No entry, and nothing taken from one, reaches a prompt, a message, a
-> memory, an episode, a story, a trace or a log.
+> **Normative.** No entry's body, and nothing taken from one, reaches a prompt, a message,
+> a memory, an episode, a story, a trace or a log.
 
 > **Normative.** The store lives in `evaluation/`, which no subsystem imports. Each
 > emitter is handed a `DiagnosticSink`, which writes; the engine's sweep is handed a
@@ -116,6 +117,8 @@ people wrote in a shared place.
 
 > **Normative.** The completer writes planning's returned entry from the provider's
 > response, whether or not the response reads as a round, before it returns or raises.
+> Where no response came back, planning's module writes the returned entry, with the
+> failure.
 
 > **Normative.** The thinking reaches the record and nothing else. `RoundResponse`, the
 > episode and the next round never carry it (ADR-0307 §2:1, §2:6).
@@ -161,8 +164,8 @@ runaway activation from filling the disk; the window bounds the rest.
 > **Normative.** The sweep runs whatever `diagnostic_record` says, so files written while
 > it was on are still deleted after it is turned off.
 
-> **Normative.** `Settings` refuses to load with `diagnostic_record` true and the
-> retention purge job disabled.
+> **Normative.** `Settings` refuses to load with `diagnostic_record` true and
+> `retention_purge_interval` disabled.
 
 > **Normative.** A backup excludes the record's directory and every file beneath it. Its
 > path comes from the composition root, where the store is created (ADR-0123 §3:3).
@@ -192,7 +195,7 @@ sweep can reach.
 | `evaluation/` | The store, implementing both Protocols, and their canonical fakes and conformance suites as a triad |
 | `PydanticAIToolCallingCompleter` | Takes a `DiagnosticSink` or `None`, asks for the thinking's text where it has one, and writes planning's returned entry (§5) |
 | The controller and the phase modules | Each writes §4's entries; `read_outside_content` gives the grounds that held |
-| `Engine._purge_expired`, `PurgeReport` | The fourth purge, and its count; the composition test's sweep guard gains its line |
+| `Engine._purge_expired`, `PurgeReport` | One more purge, and its count; the composition test's sweep guard gains its line |
 | The backup | Excludes the record's directory (§7:5) |
 | `ToolCallingCompleter`, `ModelProvider`, `RoundResponse`, `EvaluationTrace`, the trace Protocols | Unchanged |
 
