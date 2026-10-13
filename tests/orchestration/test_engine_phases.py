@@ -55,6 +55,7 @@ from ai_assistant.core.types import (
     DigestOutcome,
     EgressBinding,
     EpisodicMemory,
+    EvidenceItem,
     Idempotency,
     InputOrigin,
     LabelKind,
@@ -1212,6 +1213,55 @@ async def test_a_found_episode_with_marked_notes_counts_as_the_episode_windows_d
     assert decided.read_outside_content
     assert working.found is not None
     assert working.found.fetched == ("activation:found",)
+
+
+async def test_a_found_episodes_evidence_reaches_the_ruling_with_no_notes_written() -> None:
+    """ADR-0308 §5:4-§5:5, ADR-0306 §4:5: evidence planning is shown is outside content read.
+
+    The found episode's provenance is clean and its rounds carry no marked note; only
+    its evidence is outside content, and the round writes no notes to carry a mark, so
+    the working set alone says the activation has read it.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", "book", date="2026-10-12"),))
+    )
+    harness = _harness(completer)
+    await harness.memory.add(_episode())
+    found = _past_episode("activation:found")
+    assert found.processing_record is not None
+    digest = ActivationDigest(
+        result="R1",
+        question="when is it",
+        outcome=DigestOutcome.ANSWERED,
+        evidence=(EvidenceItem(text="The appointment is Friday at 3pm.", source="R1"),),
+        recorded_at=AT,
+    )
+    await harness.memory.add(
+        found.model_copy(
+            update={
+                "processing_record": found.processing_record.model_copy(
+                    update={"digests": (digest,)}
+                )
+            }
+        )
+    )
+    path = _phases(completer)(harness)
+    working = _begun(path)
+    given = _Given(
+        deadline=asyncio.get_running_loop().time() + _SETTLE,
+        phases=working,
+        recalled=_found("activation:found"),
+    )
+    stages = {one.name: one for one in path.stages()}
+
+    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING):
+        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+
+    assert working.latest.planned.round.notes is None
+    assert working.fetched_outside
+    decided = working.latest.authorization
+    assert decided is not None
+    assert decided.read_outside_content
 
 
 async def test_planning_fetches_what_recall_found_once_for_every_round() -> None:

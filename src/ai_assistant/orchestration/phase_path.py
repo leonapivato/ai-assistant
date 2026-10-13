@@ -192,6 +192,7 @@ if TYPE_CHECKING:
         MessageReceipt,
         PlanningRound,
         SearchOutcome,
+        SemanticMemory,
         ToolCall,
         ToolDefinition,
     )
@@ -1000,23 +1001,44 @@ def _stopped(state: ActivationState | None) -> bool:
 
 
 def _fetched_external(fetched: Fetched | None) -> bool:
-    """Whether a record the windows or recall brought rests on outside content (ADR-0223)."""
+    """Whether a record the windows or recall brought rests on outside content (ADR-0223).
+
+    An episode carrying evidence counts too: planning is shown an earlier episode's
+    evidence, which is outside content (ADR-0308 §5:4-§5:5), whether or not the episode's
+    own provenance says so and whether or not the round that reads it keeps notes.
+    """
     if fetched is None:
         return False
     records = (*(fetched.episodes or ()), *fetched.recalled)
-    return any(rests_on_recorded_external_content(one.provenance) for one in records)
+    return any(
+        rests_on_recorded_external_content(one.provenance) or _carries_evidence(one)
+        for one in records
+    )
 
 
 def _found_external(found: Fetched) -> bool:
     """Whether a found episode planning is shown rests on outside content (ADR-0223).
 
-    Counted as the episode window's are. A found memory record whose source is outside
-    is never shown to planning (ADR-0308 §3:3), and one whose source is not outside
-    rests on none, so only an episode can count.
+    Counted as the episode window's are, its evidence included. A found memory record
+    whose source is outside is never shown to planning (ADR-0308 §3:3), and one whose
+    source is not outside rests on none, so only an episode can count.
     """
     return any(
-        isinstance(one, EpisodicMemory) and rests_on_recorded_external_content(one.provenance)
+        isinstance(one, EpisodicMemory)
+        and (rests_on_recorded_external_content(one.provenance) or _carries_evidence(one))
         for one in found.recalled
+    )
+
+
+def _carries_evidence(record: EpisodicMemory | SemanticMemory) -> bool:
+    """Whether an episode records a digest that answered with evidence (ADR-0308 §5:5).
+
+    Counted whatever the reader's audience, the conservative direction: where the
+    evidence is withheld it was not read, and counting it only marks more.
+    """
+    processing = record.processing_record if isinstance(record, EpisodicMemory) else None
+    return processing is not None and any(
+        one.outcome is DigestOutcome.ANSWERED and one.evidence for one in processing.digests
     )
 
 
