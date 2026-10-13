@@ -108,6 +108,8 @@ class Phased:
     model: FakeModelProvider
     #: Every planning round, answered.
     completer: FakeToolCallingCompleter
+    #: The settings the root was built from, the opt-in set.
+    settings: Settings
     _messages: Any = field(default_factory=lambda: count(1))
 
     @property
@@ -283,7 +285,7 @@ def build_phased(
     )
     engine = build_engine(built, data_dir=tmp_path)
     assert engine._phases is not None, "the root wired the phases"
-    return Phased(engine=engine, model=model, completer=planning)
+    return Phased(engine=engine, model=model, completer=planning, settings=built)
 
 
 def phased(record: EpisodicMemory | None) -> EpisodicMemory:
