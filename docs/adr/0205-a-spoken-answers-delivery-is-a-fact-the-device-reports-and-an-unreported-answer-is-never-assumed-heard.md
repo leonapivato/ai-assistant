@@ -16,9 +16,9 @@
 - Partially superseded: 2026-10-12 by ADR-0313 — two scopes. §1:3's count:
   `SpokenTurn` has eight members, and `episode_id` names the episode recording the
   pass (ADR-0313 §3:5, §3:7). §5:1's composing stage and replay tail: planning is
-  told the delivery fact of each earlier spoken pass its episode window shows
-  (§3:15), and §5:2–§5:9 bind that telling. The report, its argument and its
-  once-only stamp stand, with *turn* read as *pass* (§3:14).
+  told the delivery fact of each earlier spoken pass wherever it is shown one, its
+  place window included (§3:15), and §5:2–§5:9 bind that telling. The report, its
+  argument and its once-only stamp stand, with *turn* read as *pass* (§3:14).
   The old path keeps the replaced clauses until the lane that changes that member
   or type merges (ADR-0313 §1:3).
   This replacement takes effect on ratification of ADR-0313. This reciprocal header
