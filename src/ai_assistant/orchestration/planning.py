@@ -1125,9 +1125,8 @@ class _Request:
     def _story_episode(self, record: EpisodicMemory) -> dict[str, object]:
         """An episode of a story, rendered whole once and named by its label after.
 
-        One resting on outside content, by its provenance or because its input came
-        from outside, whose understood meaning it is still shown (ADR-0303 §3:2), is
-        outside content planning has read (§3:1).
+        One resting on outside content is outside content planning has read, as
+        :meth:`_episode` counts it.
         """
         label = self._book.label(LabelKind.EPISODE, record.id)
         if record.id in self._rendered:
@@ -1136,8 +1135,6 @@ class _Request:
             record, excerpt_chars=self._excerpt_chars, owner_records=self._inputs.owner_records
         )
         self._rendered.add(record.id)
-        if projection.derived_from_external or projection.origin is InputOrigin.OUTSIDE:
-            self.shown.marked = True
         return self._episode(label, projection)
 
     def _short(self, view: ShortView, *, inherited: bool = False) -> dict[str, object]:
@@ -1225,9 +1222,19 @@ class _Request:
         }
 
     def _episode(self, label: str, projection: EpisodeProjection) -> dict[str, object]:
+        """Another episode, shown whole: the episode window's, recall's or a story's.
+
+        An outside episode (ADR-0303 §3:2) is outside content planning has read (§3:1),
+        so the round's notes are marked (ADR-0307 §4:3) wherever it is shown, as
+        authorizing counts its label (ADR-0306 §4:5): where its provenance rests on
+        outside content, its input came from outside, whose understood meaning it is
+        still shown, or it shows evidence or a marked note. What the reader's audience
+        withholds of it is not read.
+        """
         shown: dict[str, object] = {"label": label, "at": projection.occurred_at.isoformat()}
         if projection.origin is InputOrigin.OUTSIDE:
             shown["input"] = "an outside report, not shown"
+            self.shown.marked = True
         elif projection.input is not None:
             shown["input"] = _text(projection.input)
         if projection.meaning is not None:
@@ -1242,6 +1249,7 @@ class _Request:
             shown["ended"] = f"{projection.status.value}: {projection.reason.value}"
         if projection.derived_from_external:
             shown["outside_content"] = _OUTSIDE
+            self.shown.marked = True
         if projection.rounds:
             shown["rounds"] = [self._episode_round(one) for one in projection.rounds]
         if projection.evidence:

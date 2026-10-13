@@ -106,10 +106,12 @@ in. Each is read under the pass's audience: the summary and notes by whether a r
 placed for the owner alone may be shown (ADR-0304 §4), the episodes and where the matter
 stands by the audience predicate (ADR-0282 §2:8). A story-store or plan-store failure
 shows planning that the stories could not be read, and planning goes on. A view resting
-on outside content, a marked summary or note, an episode resting on outside content or
-carrying evidence, or a marked moment of where a matter stands, sets the working set's
+on outside content, a marked summary or note, an episode resting on outside content by
+its own record, or a marked moment of where a matter stands, sets the working set's
 ``fetched_outside``, which reaches authorizing's ruling and planning's notes alike
-(ADR-0306 §4:5-§4:6).
+(ADR-0306 §4:5-§4:6). Every note shown is held in the working set with its mark and
+handed to authorizing, which reads each ``N`` label's mark from it, so a note the user
+wrote is not counted as outside content read.
 
 **Left to later lanes:** the story calls and the full view of a story by look-up,
 planning's other look-ups, the follow-up, an event through the phases, and ADR-0309 §5:10's
@@ -157,7 +159,6 @@ from ai_assistant.core.types import (
     PlanningLabel,
     ProposedCall,
     RecallOutcome,
-    RecordedChannelTrigger,
     SemanticMemory,
     SendOutcome,
     StageOutcome,
@@ -198,6 +199,7 @@ from ai_assistant.orchestration.controller import (
 )
 from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
+from ai_assistant.orchestration.outside_content import rests_on_outside_content
 from ai_assistant.orchestration.planning import (
     CallOutcome,
     CallOutcomeKind,
@@ -239,6 +241,7 @@ if TYPE_CHECKING:
         MessageReceipt,
         PlanningRound,
         SearchOutcome,
+        StoryNote,
         StoryStanding,
         ToolCall,
         ToolDefinition,
@@ -713,10 +716,10 @@ def _cited(understanding: ActivationUnderstanding | None) -> list[str]:
 def _stories_external(given: PlanningStories) -> bool:
     """Whether a story view planning is shown rests on outside content (ADR-0303 §3:6).
 
-    A marked summary or note shown; an episode shown resting on outside content, carrying
-    evidence, as the episode window's count (ADR-0308 §5:4-§5:5), or whose input came
-    from outside, whose understood meaning is still shown (ADR-0303 §3:2); or a marked
-    moment of where a matter stands.
+    A marked summary or note shown; an episode shown resting on outside content by its
+    provenance, its input from outside, whose understood meaning is still shown, or its
+    evidence (ADR-0303 §3:2, ADR-0308 §5:4-§5:5), counted as the episode window's are;
+    or a marked moment of where a matter stands.
     """
     shorts: list[ShortView] = [
         *given.cited,
@@ -744,20 +747,20 @@ def _stories_external(given: PlanningStories) -> bool:
         summaries
         or notes
         or moments
-        or any(
-            rests_on_recorded_external_content(record.provenance)
-            or _carries_evidence(record)
-            or _from_outside(record)
-            for record in episodes
-        )
+        or any(rests_on_outside_content(record) for record in episodes)
     )
 
 
-def _from_outside(record: EpisodicMemory) -> bool:
-    """Whether an episode's input came from outside (ADR-0284 §2:1, ADR-0303 §3:2)."""
-    processing = record.processing_record
-    trigger = None if processing is None else processing.trigger
-    return isinstance(trigger, RecordedChannelTrigger) and trigger.origin is InputOrigin.OUTSIDE
+def _shown_notes(given: PlanningStories) -> tuple[StoryNote, ...]:
+    """Every story note a story view planning is shown carries, with its mark."""
+    shorts: list[ShortView] = [
+        *given.cited,
+        *(one for story in given.stories for one in story.inherited),
+    ]
+    return (
+        *(note for story in given.stories for note in story.notes),
+        *(note for one in shorts for note in one.notes),
+    )
 
 
 # --- the working set ---------------------------------------------------------------------
@@ -844,6 +847,9 @@ class PhaseWorking:
         # Set once a record the windows or recall brought is seen resting on outside
         # content, before the first round is planned (ADR-0181 §4, ADR-0223).
         self.fetched_outside = False
+        # The story notes planning has been shown, by id, whose marks authorizing reads
+        # for their labels (ADR-0303 §3:1, ADR-0306 §4:5).
+        self.notes: dict[int, StoryNote] = {}
         # Recall's second decision, once that run ends (ADR-0308 §2), and the records
         # either run kept as planning fetched them before its first round (§3).
         self.second_recall: Recalled | None = None
@@ -1289,15 +1295,19 @@ def _stopped(state: ActivationState | None) -> bool:
 def _fetched_external(fetched: Fetched | None) -> bool:
     """Whether a record the windows or recall brought rests on outside content (ADR-0223).
 
-    An episode carrying evidence counts too: planning is shown an earlier episode's
-    evidence, which is outside content (ADR-0308 §5:4-§5:5), whether or not the episode's
-    own provenance says so and whether or not the round that reads it keeps notes.
+    An episode counts by its provenance, its input from outside, whose understood
+    meaning planning is still shown (ADR-0303 §3:2), or its evidence (ADR-0308
+    §5:4-§5:5), whether or not the round that reads it keeps notes; a marked note of its
+    rounds is counted where planning is shown it, and by authorizing from its label. A
+    memory record counts by its provenance.
     """
     if fetched is None:
         return False
     records = (*(fetched.episodes or ()), *fetched.recalled)
     return any(
-        rests_on_recorded_external_content(one.provenance) or _carries_evidence(one)
+        rests_on_outside_content(one)
+        if isinstance(one, EpisodicMemory)
+        else rests_on_recorded_external_content(one.provenance)
         for one in records
     )
 
@@ -1305,26 +1315,12 @@ def _fetched_external(fetched: Fetched | None) -> bool:
 def _found_external(found: Fetched) -> bool:
     """Whether a found episode planning is shown rests on outside content (ADR-0223).
 
-    Counted as the episode window's are, its evidence included. A found memory record
-    whose source is outside is never shown to planning (ADR-0308 §3:3), and one whose
-    source is not outside rests on none, so only an episode can count.
+    Counted as the episode window's are. A found memory record whose source is outside
+    is never shown to planning (ADR-0308 §3:3), and one whose source is not outside rests
+    on none, so only an episode can count.
     """
     return any(
-        isinstance(one, EpisodicMemory)
-        and (rests_on_recorded_external_content(one.provenance) or _carries_evidence(one))
-        for one in found.recalled
-    )
-
-
-def _carries_evidence(record: EpisodicMemory | SemanticMemory) -> bool:
-    """Whether an episode records a digest that answered with evidence (ADR-0308 §5:5).
-
-    Counted whatever the reader's audience, the conservative direction: where the
-    evidence is withheld it was not read, and counting it only marks more.
-    """
-    processing = record.processing_record if isinstance(record, EpisodicMemory) else None
-    return processing is not None and any(
-        one.outcome is DigestOutcome.ANSWERED and one.evidence for one in processing.digests
+        isinstance(one, EpisodicMemory) and rests_on_outside_content(one) for one in found.recalled
     )
 
 
@@ -1734,6 +1730,8 @@ class PhasePath:
             # Carried into planning's notes and authorizing's rulings from the first
             # round, not only into the frozen episode (ADR-0181 §4, ADR-0306 §4:6).
             working.fetched_outside = True
+        if stories is not None:
+            working.notes.update((one.note_id, one) for one in _shown_notes(stories))
         inputs = PlanningInputs(
             activation_id=working.activation_id,
             place=working.place,
@@ -1944,6 +1942,7 @@ class PhasePath:
                 labels=working.labels.labels,
                 digests=tuple(working.digests),
                 fetched_outside=working.fetched_outside,
+                notes=tuple(working.notes.values()),
             ),
             calls=tuple(calls),
             input_place=place,
