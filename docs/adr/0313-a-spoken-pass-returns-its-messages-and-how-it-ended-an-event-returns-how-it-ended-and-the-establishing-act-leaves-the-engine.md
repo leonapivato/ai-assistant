@@ -12,7 +12,7 @@
   [ADR-0200](0200-a-spoken-turn-is-one-operation-on-the-promoted-surface-and-speech-is-two-seams-beside-the-model-provider.md) (§3:4's expiry during the turn; §4:1's members; §4:2, §4:6–§4:8 and §4:10–§4:14, in their subject, the turn's outcome);
   [ADR-0205](0205-a-spoken-answers-delivery-is-a-fact-the-device-reports-and-an-unreported-answer-is-never-assumed-heard.md) (§1:3's count of `SpokenTurn`'s members; §5:1's composing stage and replay tail);
   [ADR-0235](0235-the-establishing-act-rides-an-answer-to-a-confirmation-live-or-recorded-and-a-refused-search-reaches-the-user-as-history-and-not-as-work.md) (§3, whole; §9:1's `assistant remember-recipients`);
-  [ADR-0274](0274-channel-input-and-reply-contract.md) (§3:1's shapes of `ConversationInputOptions`, `TextChannelResult` and `InformationalEventResult`; §4:3's and §4:4's reference limbs; §7:6; §8:6–§8:7, for an event);
+  [ADR-0274](0274-channel-input-and-reply-contract.md) (§3:1's shapes of `ConversationInputOptions`, `TextChannelResult` and `InformationalEventResult`; §4:3's and §4:4's reference limbs; §7:6–§7:7; §8:6–§8:7, for an event);
   [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md) (§6:1, in the addition alone: an earlier spoken pass's delivery fact);
   [ADR-0309](0309-the-phases-are-built-beside-the-old-path-and-one-cutover-switches-the-controller-over-deletes-the-old-path-and-goes-live-in-one-deploy.md) (§5:1's list, in classing `grantable_decisions` and `establish_recipient_grant` as reworked: they retire).
 
@@ -110,9 +110,12 @@ stands, its result types losing the members of the families that retire.
 > `SpokenAudio | None`; and `spoken_degraded`, a `bool`. It has no `outcome`.
 
 > **Normative.** `heard` is `None` exactly when `conversation_id`, `activation_id` and
-> `ended` are `None`, and that is the recording that carried no words: no activation ran,
-> no conversation was started, `messages` is empty, `spoken` and `episode_id` are `None`
-> and `spoken_degraded` is `False`.
+> `ended` are `None`, and that is the recording that carried no words. Its activation is
+> admitted and captured as ADR-0275 §2:1–§2:3 decide, and `receive` reports that capture,
+> but nothing past transcription runs: no planning, no conversation started and no
+> message. The result names none of that activation: its record carries no delivery
+> (ADR-0275 §7:8), so there is nothing a later report could name. `messages` is empty,
+> `spoken` and `episode_id` are `None` and `spoken_degraded` is `False`.
 
 > **Normative.** `episode_id` is `None` beside an activation only where capture recorded no
 > episode for it, and it is the name a later `delivery` gives back (ADR-0205 §1:2).
@@ -145,9 +148,9 @@ stands, its result types losing the members of the families that retire.
 > what the device played of that pass's one rendering. ADR-0205 §1 binds it with *turn*
 > read as *pass*.
 
-> **Normative.** Planning is told the delivery fact of each earlier spoken pass its
-> episode window shows, as ADR-0205 §5 told the composing stage, with planning in that
-> stage's place and the episode window in the replay tail's.
+> **Normative.** Wherever planning is shown an earlier spoken pass, its place window
+> included, it is told that pass's delivery fact, as ADR-0205 §5 told the composing
+> stage, with planning in that stage's place and what it is shown in the replay tail's.
 
 ### 4. `receive`
 
@@ -222,7 +225,7 @@ stands, its result types losing the members of the families that retire.
 | `ChannelProcessingError`, `ChannelProcessingTimeoutError` | Leave with the event-summary stage |
 | `AssistantEngine.grantable_decisions`, `.establish_recipient_grant`; `assistant remember-recipients` | Leave |
 | `PermissionDecision`, `PermissionRuling`, `ToolDefinition`, `NotificationCandidate` | Lose the members §5:4 names |
-| Planning's episode window | Carries an earlier spoken pass's delivery fact (§3:15) |
+| Planning's inputs | Carry an earlier spoken pass's delivery fact wherever they show that pass (§3:15) |
 | `PROTOCOL_VERSION` | Advances in each lane §6 names |
 
 ### 8. Relationship to earlier decisions
@@ -233,12 +236,12 @@ stands, its result types losing the members of the families that retire.
 | ADR-0200 §3:4 | Its expiry during the turn: the pass ends couldn't finish and is returned (§3:13) |
 | ADR-0200 §4:1, §4:2, §4:6–§4:8, §4:10–§4:14 | `SpokenTurn`'s members are §3:5's; the no-words pair is `heard` with the activation (§3:6); `spoken` renders the messages (§3:11); the degradation ladder reads the messages as the answer (§3:12). §4:3–§4:5, §4:9 and §4:15–§4:29 stand |
 | ADR-0205 §1:3 | Its count: `SpokenTurn` has eight members, and `episode_id` names the pass's episode (§3:7) |
-| ADR-0205 §5:1 | Planning is told the delivery fact, over the episode window (§3:15); §5:2–§5:9 bind it |
+| ADR-0205 §5:1 | Planning is told the delivery fact wherever it is shown the earlier pass, its place window included (§3:15); §5:2–§5:9 bind it |
 | ADR-0207 | Whole: the phases park nothing, so no fixed sentence is spoken for a park; planning's message says what cannot be done yet (ADR-0307 §9:4) |
 | ADR-0235 §3, §9:1 | The recorded `CONFIRM`'s establishing act and its listing leave the surface, with their command (§5:1); the authority milestone redoes the act |
 | ADR-0274 §3:1, §4:3, §4:4 | `ConversationInputOptions` loses `reference`, with the reference limbs; `TextChannelResult` leaves; `InformationalEventResult` is §4:4's |
-| ADR-0274 §7:6, §8:6–§8:7 | For an event: no summary is returned, and an activation that cannot finish is a result (§4:3–§4:5) |
-| ADR-0307 §6:1 | In the addition alone: the delivery fact rides the episode window (§3:15) |
+| ADR-0274 §7:6–§7:7, §8:6–§8:7 | For an event: no summary is returned, and an activation that cannot finish is a result (§4:3–§4:5) |
+| ADR-0307 §6:1 | In the addition alone: the delivery fact rides whatever shows planning an earlier spoken pass (§3:15) |
 | ADR-0309 §5:1 | `grantable_decisions` and `establish_recipient_grant` retire rather than being reworked, the act being the whole of the one and the reason for the other (§5:1) |
 | ADR-0309 §5:9, §5:11; ADR-0306 §4:12 | Nothing: this is the decision §5:11 asks for, and §5:1 here is §5:9's retirement |
 | ADR-0124 §9:2 | Nothing: §6:4 applies it |
