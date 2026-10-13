@@ -417,16 +417,22 @@ RECALL_BUDGET: Final = timedelta(seconds=2)
 #: The recall threshold for each embedder (ADR-0281 §3): a score's scale belongs to
 #: its embedder, so the value is chosen beside the one wired, never shared.
 #:
-#: **Provisional, and not measured.** ADR-0281 §3 has the implementation record the
-#: measurement the on-device value was chosen from; the owner deferred that
-#: measurement (2026-09-28), so these are reasoned starting points, tracked for
-#: measurement by #2601. The vendored ``bge-small-en-v1.5`` scores unrelated text
-#: high on cosine (commonly 0.4 to 0.6) and paraphrases above about 0.75, so 0.65
-#: sits in that gap, leaning towards keeping a marginal memory rather than missing a
-#: real one. The hashing embedder's similarity is word overlap, not meaning, so its
-#: value asks for a substantial share of shared words.
+#: **The on-device value is measured** (#2601), as ADR-0281 §3 asks:
+#: ``scripts/measure_recall_threshold.py`` scores content-free replies ("yes", "ok",
+#: "same as before" and their kind) and paraphrases of stored facts and episodes
+#: against a store over the vendored ``bge-small-en-v1.5``. The best score any
+#: content-free reply gave any record was 0.566, and the lowest a paraphrase gave its
+#: own record was 0.613, so 0.58 sits in that gap, below its middle, leaning towards
+#: keeping a borderline memory rather than missing a real one. The PR that set it
+#: records the whole table, and ``tests/app/test_recall_threshold_measured.py`` pins
+#: both sides, so a change of model that closes the gap fails there.
+#:
+#: The hashing embedder's value is reasoned, not measured into a gap, because there
+#: is none: its similarity is word overlap, not meaning, so a reply sharing a common
+#: word with a record can outscore a paraphrase sharing none. It asks for a
+#: substantial share of shared words.
 RECALL_THRESHOLDS: Final[Mapping[EmbedderKind, float]] = {
-    EmbedderKind.ON_DEVICE: 0.65,
+    EmbedderKind.ON_DEVICE: 0.58,
     EmbedderKind.HASHING: 0.3,
 }
 
