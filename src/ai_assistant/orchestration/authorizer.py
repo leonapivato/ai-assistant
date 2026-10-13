@@ -53,7 +53,7 @@ ground of ADR-0306 §4:5 that held and the record it rests on, as
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
@@ -231,16 +231,33 @@ class WorkingRecord:
         fetched_outside: Whether a record the activation read before planning, its
             windows' or recall's, rests on outside content (ADR-0181 §4, ADR-0223),
             which neither its episode nor its labels need carry.
+        fetched_outside_from: What made ``fetched_outside`` hold, each named once, for
+            the diagnostic record (ADR-0314 §4): a fetched episode or memory record by
+            its id, a story's marked summary by the story's id, a marked note by its
+            id, and a marked moment of where a matter stands by its episode's address.
+            Empty where the working set keeps no name for it.
         notes: The story notes planning was shown, as the stories held them, whose
             marks (ADR-0303 §3:1) say whether each ``N`` label is outside content
             read. A note's mark never changes once it is written.
+
+    Raises:
+        ValueError: If ``fetched_outside_from`` names something while
+            ``fetched_outside`` does not hold: a name says why it holds, and never makes
+            it hold.
     """
 
     rounds: tuple[PlanningRound, ...] = ()
     labels: tuple[PlanningLabel, ...] = ()
     digests: tuple[ActivationDigest, ...] = ()
     fetched_outside: bool = False
+    fetched_outside_from: tuple[str, ...] = ()
     notes: tuple[StoryNote, ...] = ()
+
+    def __post_init__(self) -> None:
+        """A name is given only where ``fetched_outside`` holds."""
+        if self.fetched_outside_from and not self.fetched_outside:
+            msg = "what a fetched record rests on is named only where it rests on outside content"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,8 +413,8 @@ class OutsideGround:
     Attributes:
         ground: Which ground, as a code-owned word.
         record: The record it rests on: an episode's or a round's id, a digest's result
-            label, a note's id; ``None`` where the working set holds no record for it,
-            as for a fetched record it only holds as a fact.
+            label, a note's id, a story's id for its marked summary, a moment's episode
+            address; ``None`` where the working set holds no name for it.
     """
 
     ground: str
@@ -414,6 +431,15 @@ _NOTES_MARKED: Final = "notes_marked"
 _NOTE_SHOWN_MARKED: Final = "note_shown_marked"
 _EPISODE_SHOWN_UNREAD: Final = "episode_shown_unread"
 _OUTSIDE_EPISODE_SHOWN: Final = "outside_episode_shown"
+
+
+def _digest_identity(digest: ActivationDigest) -> tuple[object, ...]:
+    """What tells one digest from another: a digest is never edited (ADR-0308 §5:2).
+
+    Its result label alone does not, since a search's digest and a follow-up's both
+    name the result they read; its question and the instant it was recorded do.
+    """
+    return (digest.result, digest.question, digest.recorded_at)
 
 
 def _note_is_marked(label_id: str, notes: Sequence[StoryNote]) -> bool:
@@ -463,6 +489,9 @@ async def read_outside_content(  # noqa: C901, PLR0911, PLR0912 — §4:5's grou
     appended with the record it rests on, for the diagnostic record. The answer is the
     same either way: a read that fails once a ground already held ends the going
     through, since the answer is already yes, and costs only the grounds after it.
+    Each ground is appended once per record it rests on: the episode's record and the
+    working set hold the same rounds, digests and labels once their appends landed, and
+    a round, a digest or a label held twice is counted once, by its identity.
 
     Args:
         memory: The memory store the episodes are read from.
@@ -480,13 +509,24 @@ async def read_outside_content(  # noqa: C901, PLR0911, PLR0912 — §4:5's grou
     every = grounds is not None
     held: list[OutsideGround] = [] if grounds is None else grounds
 
+    counted: set[object] = set()
+
+    def first(identity: object) -> bool:
+        """Whether ``identity`` is seen here for the first time; noting it."""
+        if identity in counted:
+            return False
+        counted.add(identity)
+        return True
+
     def found(ground: str, record: str | None = None) -> bool:
         """Note ``ground``; whether to stop here, which is unless every ground is asked."""
         held.append(OutsideGround(ground, record))
         return not every
 
-    if working.fetched_outside and found(_FETCHED_OUTSIDE):
-        return True
+    if working.fetched_outside:
+        for fetched in dict.fromkeys(working.fetched_outside_from) or (None,):
+            if found(_FETCHED_OUTSIDE, fetched):
+                return True
     own = episode_address(activation_id)
     try:
         record = await memory.get(own)
@@ -510,15 +550,24 @@ async def read_outside_content(  # noqa: C901, PLR0911, PLR0912 — §4:5's grou
     if from_outside(record) and found(_TRIGGER_OUTSIDE, own):
         return True
     for digest in digests:
-        if digest.outcome is DigestOutcome.ANSWERED and found(_DIGEST_ANSWERED, digest.result):
+        if (
+            digest.outcome is DigestOutcome.ANSWERED
+            and first((_DIGEST_ANSWERED, *_digest_identity(digest)))
+            and found(_DIGEST_ANSWERED, digest.result)
+        ):
             return True
     for planned in rounds:
-        if planned.notes_marked and found(_NOTES_MARKED, planned.id):
+        if (
+            planned.notes_marked
+            and first((_NOTES_MARKED, planned.id))
+            and found(_NOTES_MARKED, planned.id)
+        ):
             return True
     for label in labels:
         if (
             label.kind is LabelKind.NOTE
             and _note_is_marked(label.id, working.notes)
+            and first((_NOTE_SHOWN_MARKED, label.id))
             and found(_NOTE_SHOWN_MARKED, label.id)
         ):
             return True
@@ -568,6 +617,7 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
                 ActivationDigest.model_validate(one.model_dump()) for one in working.digests
             ),
             fetched_outside=bool(working.fetched_outside),
+            fetched_outside_from=tuple(str(one) for one in working.fetched_outside_from),
             notes=tuple(StoryNote.model_validate(one.model_dump()) for one in working.notes),
         ),
         calls=tuple(
@@ -757,13 +807,7 @@ class AuthorizingStage:
         read_outside = await read_outside_content(
             self._memory,
             snapshot.activation_id,
-            working=WorkingRecord(
-                (*held.rounds, snapshot.round),
-                held.labels,
-                held.digests,
-                fetched_outside=held.fetched_outside,
-                notes=held.notes,
-            ),
+            working=replace(held, rounds=(*held.rounds, snapshot.round)),
             grounds=grounds,
         )
         state = _Round(

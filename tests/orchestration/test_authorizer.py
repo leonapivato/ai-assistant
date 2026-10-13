@@ -1056,6 +1056,111 @@ async def test_an_unreadable_shown_episode_is_a_ground_with_its_id() -> None:
     assert grounds == [OutsideGround("episode_shown_unread", "activation:other")]
 
 
+def _follow_up(*items: str) -> ActivationDigest:
+    """A follow-up's digest: it names the result it reads again, R1, as the search's does."""
+    return ActivationDigest(
+        result="R1",
+        question="which of them runs latest",
+        outcome=DigestOutcome.ANSWERED,
+        evidence=tuple(EvidenceItem(text=one, source="R1") for one in items),
+        recorded_at=_AT + timedelta(minutes=1),
+    )
+
+
+async def test_each_ground_is_noted_once_where_the_record_and_working_set_both_hold_it() -> None:
+    """#2895, ADR-0314 §4: once the appends landed, the episode's record and the working
+    set hold the same rounds, digests and labels, and each is one ground, not two."""
+    marked = _marked_round("round:0")
+    digests = (_digest(DigestOutcome.ANSWERED, "the 9:10"), _follow_up("the 23:40"))
+    memory = FakeMemoryStore(now=_now)
+    await memory.add(_episode(rounds=(marked,), digests=digests, labels=(_N1,)))
+    working = WorkingRecord(
+        rounds=(marked,), digests=digests, labels=(_N1,), notes=(_note(7, outside=True),)
+    )
+    grounds: list[OutsideGround] = []
+
+    read = await read_outside_content(memory, _ACTIVATION, working=working, grounds=grounds)
+
+    assert read is True
+    # The search's digest and the follow-up's are two digests, each of R1.
+    assert grounds == [
+        OutsideGround("digest_answered", "R1"),
+        OutsideGround("digest_answered", "R1"),
+        OutsideGround("notes_marked", "round:0"),
+        OutsideGround("note_shown_marked", "7"),
+    ]
+
+
+async def test_one_note_shown_under_two_labels_is_one_ground() -> None:
+    """The ground rests on the note, which planning was shown twice."""
+    memory = FakeMemoryStore(now=_now)
+    await memory.add(_episode(labels=(_N1,)))
+    again = PlanningLabel(label="N2", kind=LabelKind.NOTE, id="7")
+    grounds: list[OutsideGround] = []
+
+    working = WorkingRecord(labels=(_N1, again), notes=(_note(7, outside=True),))
+    assert await read_outside_content(memory, _ACTIVATION, working=working, grounds=grounds)
+    assert grounds == [OutsideGround("note_shown_marked", "7")]
+
+
+async def test_a_fetched_ground_is_noted_once_for_each_thing_that_set_it() -> None:
+    """#2895: ``fetched_outside`` names what it rests on, each once, in the order seen."""
+    memory = FakeMemoryStore(now=_now)
+    await memory.add(_episode())
+    working = WorkingRecord(
+        fetched_outside=True,
+        fetched_outside_from=("activation:other", "story:trip", "7", "activation:other"),
+    )
+    grounds: list[OutsideGround] = []
+
+    assert await read_outside_content(memory, _ACTIVATION, working=working, grounds=grounds)
+    assert grounds == [
+        OutsideGround("fetched_outside", "activation:other"),
+        OutsideGround("fetched_outside", "story:trip"),
+        OutsideGround("fetched_outside", "7"),
+    ]
+
+
+async def test_naming_what_was_fetched_never_makes_the_fetched_ground_hold() -> None:
+    """The answer is the flag's: a name says why it holds, and never makes it hold."""
+    with pytest.raises(ValueError, match="named only where"):
+        WorkingRecord(fetched_outside_from=("activation:other",))
+
+
+async def test_without_grounds_asked_a_named_fetched_record_still_ends_the_read_at_once() -> None:
+    """The answer alone stops at the first fetched record, reading nothing more."""
+    working = WorkingRecord(fetched_outside=True, fetched_outside_from=("a", "b"))
+
+    assert await read_outside_content(_Unreadable(now=_now), _ACTIVATION, working=working)
+
+
+async def test_the_diagnostic_record_shows_each_ground_once_with_its_record() -> None:
+    """#2895 through the stage: the authorizing entry lists each ground once, named."""
+    sink = FakeDiagnosticSink()
+    marked = _marked_round("round:0")
+    digest = _digest(DigestOutcome.ANSWERED, "the 9:10")
+    episode = _episode(rounds=(marked,), digests=(digest,))
+    hub = _Hub(episode=episode, diagnostics=sink)
+    working = WorkingRecord(
+        rounds=(marked,),
+        digests=(digest,),
+        fetched_outside=True,
+        fetched_outside_from=("activation:other",),
+    )
+
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_clock):
+        decided = await hub.authorize(_round(_call("c1", "lookup", q="trains"), working=working))
+
+    (entry,) = sink.of(DiagnosticSource.AUTHORIZING)
+    body = entry.model_dump(mode="json")["body"]
+    assert decided.read_outside_content is True
+    assert body["grounds"] == [
+        {"ground": "fetched_outside", "record": "activation:other"},
+        {"ground": "digest_answered", "record": "R1"},
+        {"ground": "notes_marked", "record": "round:0"},
+    ]
+
+
 class _Unreadable(FakeMemoryStore):
     """A memory store whose every read fails."""
 
