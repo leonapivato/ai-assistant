@@ -2375,7 +2375,14 @@ class PhasePath:
             with self._look_ups.scope(
                 audience=given.supply, owner_records=working.owner_records
             ) as scope:
-                acted = await self._acting.act(authorized, held=working.held)
+                try:
+                    acted = await self._acting.act(authorized, held=working.held)
+                finally:
+                    # Every view a story read read was obtained, whatever became of
+                    # the round's other calls (ADR-0309 §5:10).
+                    working.supplied.obtained(
+                        _story_records(PlanningStories(stories=tuple(scope.views.values())))
+                    )
         self._pages(working, acted, scope.views)
         return acted
 
@@ -2402,7 +2409,6 @@ class PhasePath:
             working.pages[one.result_id] = view
             shown = PlanningStories(stories=(view,))
             working.notes.update((note.note_id, note) for note in _shown_notes(shown))
-            working.supplied.obtained(_story_records(shown))
             if _stories_external(shown):
                 working.fetched_outside = True
 
