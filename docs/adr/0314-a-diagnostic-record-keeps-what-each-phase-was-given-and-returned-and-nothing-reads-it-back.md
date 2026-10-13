@@ -1,6 +1,6 @@
 # 314. A diagnostic record keeps what each phase was given and returned, and nothing reads it back
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0316 (§3:4, in the addition alone: the server's own tools include ADR-0316's activation viewer)
 - Date: 2026-10-13
 - Scope: the phases, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): a per-activation record of what each phase was given and what it returned, for the owner to read on the server when a decision cannot otherwise be explained ([#2863](https://github.com/leonapivato/ai-assistant/issues/2863)).
 - Authorization: the owner agreed the design on 2026-10-12 in #2863: on all hubs as an opt-in, with a retention window, strictly write-only, raw outside text kept within the window, and forgetting covering it later or the window doing the forgetting. The dispatcher assigned 0314 and authorized ratifying it once its reviews are green. The clauses that settle what that agreement leaves open are listed as such in the pull request.
@@ -9,6 +9,12 @@
   [ADR-0004](0004-privacy-and-data-handling.md) (§6's view and export limbs, each only as they reach the diagnostic record, which no surface shows and no export carries, and which the owner reads and copies as files on the server);
   [ADR-0308](0308-recall-runs-again-on-what-understanding-found-and-outside-content-reaches-planning-only-as-a-digests-evidence.md) (§6:4's *and go when the activation ends*, for the copy of a held result's text a digest's prompt carries into the diagnostic record, until the record's window deletes it);
   [ADR-0123](0123-a-backup-is-the-cold-data-directory-encrypted-to-a-passphrase-the-operator-holds.md) (§3:1's exclusions, in the addition alone: the diagnostic record's directory; §3:4's exact match, for that directory alone, every file beneath which is excluded).
+- Partially superseded: 2026-10-13 by ADR-0316 — one scope. §3:4, in the addition alone:
+  the owner reads the record on the server with the server's own tools, ADR-0316's
+  activation viewer among them, which stands outside `ai_assistant` and imports nothing
+  from it. §3:1–§3:3 and every other clause stand. This replacement takes effect on
+  ratification of ADR-0316. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
