@@ -40,7 +40,11 @@ Where the composition root hands the completer a
 model with Anthropic's adaptive thinking asks for the thinking's summarised text, which
 that thinking otherwise omits, and the completer writes planning's returned entry from
 the provider's whole response, every part in order, thinking included, whether or not
-it reads as a round, before it returns or raises. The entry is written for the
+it reads as a round, before it returns or raises. Beside the response it writes every
+tool the request offered, :data:`ROUND_TOOL` and its description included (#2894):
+planning's module writes the given entry with the capabilities it offers, and the
+reserved tool is added here, so this is the one place the record can show the whole
+list the provider received. The entry is written for the
 activation :mod:`ai_assistant.core.diagnostics` carries, and nothing is written where
 none is bound. The thinking still reaches nothing else: :class:`RoundResponse`, the
 episode and the next round never carry it (§5:3). Where the record is off, the request
@@ -206,9 +210,8 @@ class PydanticAIToolCallingCompleter:
         if ROUND_TOOL in names:
             msg = f"the tool name {ROUND_TOOL!r} is reserved for the round's notes"
             raise ModelError(msg)
-        parameters = ModelRequestParameters(
-            function_tools=[*offered, _round_tool()], allow_text_output=True
-        )
+        sent = [*offered, _round_tool()]
+        parameters = ModelRequestParameters(function_tools=sent, allow_text_output=True)
         try:
             chosen = infer_model(self._default_model if model is None else model)
             response = await model_request(
@@ -226,20 +229,27 @@ class PydanticAIToolCallingCompleter:
         try:
             read = _round(response)
         except ModelResponseError as exc:
-            await self._returned(response, exc)
+            await self._returned(sent, response, exc)
             raise
-        await self._returned(response, None)
+        await self._returned(sent, response, None)
         return read
 
-    async def _returned(self, response: ModelResponse, failure: ModelResponseError | None) -> None:
+    async def _returned(
+        self,
+        sent: Sequence[NativeTool],
+        response: ModelResponse,
+        failure: ModelResponseError | None,
+    ) -> None:
         """Write planning's returned entry from the provider's whole response (§5:2).
 
         Every part in order, thinking included, as pydantic-ai serialises the response;
-        and where it did not read as a round, why not.
+        every tool the request offered, in the order it offered them, the reserved one
+        included (#2894); and where the response did not read as a round, why not.
         """
 
         def body() -> dict[str, object]:
             returned: dict[str, object] = {
+                "offered_tools": [_recorded(tool) for tool in sent],
                 "response": ModelMessagesTypeAdapter.dump_python([response], mode="json")[0],
                 "read_as_round": failure is None,
             }
@@ -330,6 +340,15 @@ def _native(tool: OfferedTool) -> NativeTool:
     """One offered capability as a pydantic-ai function tool, its schema thawed."""
     schema: dict[str, Any] = tool.model_dump()["parameters"]
     return NativeTool(name=tool.name, description=tool.description, parameters_json_schema=schema)
+
+
+def _recorded(tool: NativeTool) -> dict[str, object]:
+    """One offered tool as the record keeps it, in the shape planning's given entry has."""
+    return {
+        "name": tool.name,
+        "description": tool.description,
+        "parameters": copy.deepcopy(tool.parameters_json_schema),
+    }
 
 
 def _round_tool() -> NativeTool:
