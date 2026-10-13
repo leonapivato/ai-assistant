@@ -109,13 +109,17 @@ stands, its result types losing the members of the families that retire.
 > `tuple[NonBlankEncodableText, ...]`; `ended`, an `ActivationEnding | None`; `spoken`, a
 > `SpokenAudio | None`; and `spoken_degraded`, a `bool`. It has no `outcome`.
 
-> **Normative.** `heard` is `None` exactly when `conversation_id`, `activation_id` and
-> `ended` are `None`, and that is the recording that carried no words. Its activation is
-> admitted and captured as ADR-0275 §2:1–§2:3 decide, and `receive` reports that capture,
-> but nothing past transcription runs: no planning, no conversation started and no
-> message. The result names none of that activation: its record carries no delivery
-> (ADR-0275 §7:8), so there is nothing a later report could name. `messages` is empty,
-> `spoken` and `episode_id` are `None` and `spoken_degraded` is `False`.
+> **Normative.** `heard` is `None` exactly when `ended` is `None`, and that is the
+> recording that carried no words. Its activation is admitted and captured as ADR-0275
+> §2:1–§2:3 decide, and `receive` reports that capture, but nothing past transcription
+> runs: no planning, no conversation started and no message. The result names none of
+> that activation: its record carries no delivery (ADR-0275 §7:8), so there is nothing a
+> later report could name. `conversation_id`, `activation_id`, `spoken` and `episode_id`
+> are `None`, `messages` is empty and `spoken_degraded` is `False`.
+
+> **Normative.** Beside a `heard`, `conversation_id` is `None` only where the pass ended
+> before its place was resolved, and then `messages` is empty and `ended` is not done;
+> `activation_id` is `None` only where its allocation failed (ADR-0275 §2:2).
 
 > **Normative.** `episode_id` is `None` beside an activation only where capture recorded no
 > episode for it, and it is the name a later `delivery` gives back (ADR-0205 §1:2).
@@ -176,7 +180,8 @@ stands, its result types losing the members of the families that retire.
 > produces it once `converse` retires.
 
 > **Normative.** `ChannelResult`'s check that a conversational result names its
-> conversation reads `SpokenTurn.conversation_id`.
+> conversation reads `SpokenTurn.conversation_id`, and a spoken result whose
+> `conversation_id` is `None` carries no channel, as a no-words result does today.
 
 ### 5. The grant, decision and notification members
 
@@ -216,7 +221,7 @@ stands, its result types losing the members of the families that retire.
 
 | Code | Change |
 | --- | --- |
-| `SpokenTurn` | Loses `outcome`; gains `conversation_id`, `activation_id`, `messages` and `ended`; its validator states the shapes §3:6, §3:7, §3:11 and §3:12 admit |
+| `SpokenTurn` | Loses `outcome`; gains `conversation_id`, `activation_id`, `messages` and `ended`; its validator states the shapes §3:6, §3:7, §3:8, §3:12 and §3:13 admit |
 | `AssistantEngine.converse_spoken` | Signature unchanged; returns §3's `SpokenTurn`; a pass that cannot finish is a result |
 | `ConversationInputOptions` | Loses `reference` |
 | `ChannelOutcome`, `TextChannelResult` | `TextChannelResult` leaves the union and the module |
@@ -225,7 +230,7 @@ stands, its result types losing the members of the families that retire.
 | `ChannelProcessingError`, `ChannelProcessingTimeoutError` | Leave with the event-summary stage |
 | `AssistantEngine.grantable_decisions`, `.establish_recipient_grant`; `assistant remember-recipients` | Leave |
 | `PermissionDecision`, `PermissionRuling`, `ToolDefinition`, `NotificationCandidate` | Lose the members §5:4 names |
-| Planning's inputs | Carry an earlier spoken pass's delivery fact wherever they show that pass (§3:15) |
+| Planning's inputs | Carry an earlier spoken pass's delivery fact wherever they show that pass (§3:16) |
 | `PROTOCOL_VERSION` | Advances in each lane §6 names |
 
 ### 8. Relationship to earlier decisions
@@ -233,15 +238,15 @@ stands, its result types losing the members of the families that retire.
 | Earlier decision | What changes |
 | --- | --- |
 | ADR-0130 §2:1 | Its optional `Goal` reference: `NotificationCandidate` loses `goal_id` (§5:4) |
-| ADR-0200 §3:4 | Its expiry during the turn: the pass ends couldn't finish and is returned (§3:13) |
-| ADR-0200 §4:1, §4:2, §4:6–§4:8, §4:10–§4:14 | `SpokenTurn`'s members are §3:5's; the no-words pair is `heard` with the activation (§3:6); `spoken` renders the messages (§3:11); the degradation ladder reads the messages as the answer (§3:12). §4:3–§4:5, §4:9 and §4:15–§4:29 stand |
-| ADR-0205 §1:3 | Its count: `SpokenTurn` has eight members, and `episode_id` names the pass's episode (§3:7) |
-| ADR-0205 §5:1 | Planning is told the delivery fact wherever it is shown the earlier pass, its place window included (§3:15); §5:2–§5:9 bind it |
+| ADR-0200 §3:4 | Its expiry during the turn: the pass ends couldn't finish and is returned (§3:14) |
+| ADR-0200 §4:1, §4:2, §4:6–§4:8, §4:10–§4:14 | `SpokenTurn`'s members are §3:5's; the no-words pair is `heard` with the activation (§3:6); `spoken` renders the messages (§3:12); the degradation ladder reads the messages as the answer (§3:13). §4:3–§4:5, §4:9 and §4:15–§4:29 stand |
+| ADR-0205 §1:3 | Its count: `SpokenTurn` has eight members, and `episode_id` names the pass's episode (§3:8) |
+| ADR-0205 §5:1 | Planning is told the delivery fact wherever it is shown the earlier pass, its place window included (§3:16); §5:2–§5:9 bind it |
 | ADR-0207 | Whole: the phases park nothing, so no fixed sentence is spoken for a park; planning's message says what cannot be done yet (ADR-0307 §9:4) |
 | ADR-0235 §3, §9:1 | The recorded `CONFIRM`'s establishing act and its listing leave the surface, with their command (§5:1); the authority milestone redoes the act |
 | ADR-0274 §3:1, §4:3, §4:4 | `ConversationInputOptions` loses `reference`, with the reference limbs; `TextChannelResult` leaves; `InformationalEventResult` is §4:4's |
 | ADR-0274 §7:6–§7:7, §8:6–§8:7 | For an event: no summary is returned, and an activation that cannot finish is a result (§4:3–§4:5) |
-| ADR-0307 §6:1 | In the addition alone: the delivery fact rides whatever shows planning an earlier spoken pass (§3:15) |
+| ADR-0307 §6:1 | In the addition alone: the delivery fact rides whatever shows planning an earlier spoken pass (§3:16) |
 | ADR-0309 §5:1 | `grantable_decisions` and `establish_recipient_grant` retire rather than being reworked, the act being the whole of the one and the reason for the other (§5:1) |
 | ADR-0309 §5:9, §5:11; ADR-0306 §4:12 | Nothing: this is the decision §5:11 asks for, and §5:1 here is §5:9's retirement |
 | ADR-0124 §9:2 | Nothing: §6:4 applies it |

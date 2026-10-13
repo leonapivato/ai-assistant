@@ -33,7 +33,7 @@
   ratified body below are preserved.
 - Partially superseded: 2026-10-12 by ADR-0313 — one scope. §6:1, in the addition
   alone: planning is also told the delivery fact of each earlier spoken pass wherever
-  it is shown one, its place window included (ADR-0313 §3:15). Every other clause
+  it is shown one, its place window included (ADR-0313 §3:16). Every other clause
   stands.
   This replacement takes effect on ratification of ADR-0313. This reciprocal header
   record accompanies the numbered draft under ADR-0070 and ADR-0082; prior

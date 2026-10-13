@@ -252,12 +252,12 @@
   is unchanged (#2555).
 - Partially superseded: 2026-10-12 by ADR-0313 — three scopes. §3:4's expiry during
   the turn: a spoken pass that cannot finish, its budget included, is returned
-  with how it ended (ADR-0313 §3:13). §4:1's members: `SpokenTurn` carries the
+  with how it ended (ADR-0313 §3:14). §4:1's members: `SpokenTurn` carries the
   pass's activation, episode, messages and ending in place of `outcome` (§3:5).
   §4:2, §4:6–§4:8 and §4:10–§4:14, in their subject: the no-words pair is `heard`
-  with the activation (§3:6), `spoken` renders the messages the pass wrote (§3:11),
+  with the activation (§3:6), `spoken` renders the messages the pass wrote (§3:12),
   and the degradation ladder reads those messages as the answer and the result less
-  its rendering as the `TurnOutcome` (§3:12). Every other clause stands, the
+  its rendering as the `TurnOutcome` (§3:13). Every other clause stands, the
   failing-versus-degrading line and the retention clauses included.
   The old path keeps the replaced clauses until the lane that changes that member
   or type merges (ADR-0313 §1:3).
