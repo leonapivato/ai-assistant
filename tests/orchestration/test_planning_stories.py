@@ -6,12 +6,14 @@ glue would hand them over; ``test_phase_path_stories`` reads them from the store
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 from test_planning import _AT, _earlier, _episode, _inputs, _sent, _stage
 
 from ai_assistant.core.types import (
+    InputOrigin,
     LabelKind,
     PlanningLabel,
     RoundResponse,
@@ -336,3 +338,25 @@ async def test_nothing_done_is_said_and_a_merged_story_names_where_it_went() -> 
     assert first["where_it_stands"]["done"] == "nothing recorded"
     assert first["where_it_stands"]["timeline"] == "none shown"
     assert second["where_it_stands"] == {"merged_into": "S3"}
+
+
+async def test_an_outside_episode_in_an_inherited_or_cited_view_marks_the_rounds_notes() -> None:
+    """ADR-0303 §3:1-§3:2, ADR-0307 §4:3: an episode whose input came from outside is read.
+
+    Its provenance carries no mark and it holds no digest, so only its origin says so;
+    the round's notes are recorded marked.
+    """
+    outside = _episode("activation:report", origin=InputOrigin.OUTSIDE)
+    for stories in (
+        PlanningStories(
+            stories=(_story(inherited=(_short("story:summer", episodes=(outside,)),)),)
+        ),
+        PlanningStories(cited=(_short("story:car", episodes=(outside,)),)),
+    ):
+        stage, completer, recorder = _stage(RoundResponse(text="ok", notes="from what I saw"))
+
+        await stage.plan(_inputs(stories=stories))
+
+        assert "an outside report" in json.dumps(_sent(completer))
+        ((recorded, _),) = recorder.recorded
+        assert recorded.notes_marked is True
