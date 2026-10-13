@@ -1,6 +1,6 @@
 # 313. Spoken conversation retires at the cutover, an event returns how it ended, and the establishing act leaves the engine
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-13
 - Scope: the phases after understanding, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): the decision [ADR-0309](0309-the-phases-are-built-beside-the-old-path-and-one-cutover-switches-the-controller-over-deletes-the-old-path-and-goes-live-in-one-deploy.md) §5:11 asks for, on each `AssistantEngine` member that stays and whose signature or result reaches a type its §5 retires, and the owner's ruling that spoken conversation retires at the cutover.
 - Dependency: ADR-0306, ADR-0307, ADR-0308, ADR-0309 and ADR-0312, all Accepted.
