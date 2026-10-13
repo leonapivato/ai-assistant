@@ -11,11 +11,21 @@ innocuous name — `error=str(exc)` where the provider quoted the user's prompt 
 the canonical example, and no key-based rule would spot it. The primary defence
 remains the convention: log identifiers, classes, and counts, never content. See
 :func:`redact_sensitive` for what "fail closed" does and does not buy here.
+
+**An exception is logged by its class and its frames, never its words.** A
+rendered traceback is out of the redactor's reach — it is a string by the time it
+exists — and the renderer's default one prints the exception's message and every
+raising frame's locals, which hold the conversation's text. So the chain renders
+an exception itself, before redaction, as its class and the frames it passed
+through (:func:`scrub_exceptions`), and the renderer's exception formatter does
+the same should anything reach it. No content reaches a log (ADR-0314 §3:2).
 """
 
 from __future__ import annotations
 
 import logging
+import sys
+import traceback
 from collections.abc import Mapping, Sequence, Set
 from dataclasses import fields, is_dataclass
 from datetime import date, datetime, time, timedelta
@@ -30,6 +40,9 @@ from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from collections.abc import MutableMapping
+    from typing import TextIO
+
+    from structlog.typing import ExcInfo
 
     from ai_assistant.core.config import Settings
 
@@ -263,6 +276,168 @@ def redact_sensitive(
         raise structlog.DropEvent from exc
 
 
+class _Described(str):
+    """An exception already rendered here, as its class and frames alone.
+
+    Marked by type so a second pass of :func:`scrub_exceptions` keeps it rather
+    than masking it as a string it cannot vouch for.
+    """
+
+    __slots__ = ()
+
+
+def _class_name(failure: BaseException) -> str:
+    """``failure``'s class, qualified by its module unless it is a builtin."""
+    cls = type(failure)
+    module = cls.__module__
+    if module in {"builtins", "__main__"}:
+        return cls.__qualname__
+    return f"{module}.{cls.__qualname__}"
+
+
+def _chain(failure: BaseException, seen: set[int]) -> list[tuple[BaseException, str | None]]:
+    """``failure``'s chain, oldest first, each with the line leading to the one after it.
+
+    Walked iteratively, so a long ``__context__`` chain — a retry loop raising
+    inside its own handler — renders instead of overflowing the stack. The newest,
+    ``failure`` itself, is last and has no line after it. An exception in ``seen``
+    is already rendered and ends the walk, so a cycle — a member whose context is
+    its own group — ends rather than recursing; each one walked is added to it.
+    """
+    chain: list[tuple[BaseException, str | None]] = [(failure, None)]
+    seen.add(id(failure))
+    current = failure
+    while True:
+        earlier: BaseException | None
+        if current.__cause__ is not None:
+            earlier = current.__cause__
+            link = "The above exception was the direct cause of the following exception:"
+        elif current.__context__ is not None and not current.__suppress_context__:
+            earlier = current.__context__
+            link = "During handling of the above exception, another exception occurred:"
+        else:
+            earlier = None
+        if earlier is None or id(earlier) in seen:
+            return chain[::-1]
+        seen.add(id(earlier))
+        chain.append((earlier, link))
+        current = earlier
+
+
+def _describe(failure: BaseException, seen: set[int] | None = None) -> list[str]:
+    """``failure`` as its frames and class, with its chain and a group's members.
+
+    Each frame is its file, line, function and source line. What is never read:
+    the exception's message, a chained or held exception's message, its notes,
+    and any frame's locals — each can carry what the user or a model said. A
+    group's members are listed under it, indented, each with its own frames and
+    chain, so a failure in a task group's child keeps its class and where it was
+    raised.
+    """
+    seen = set() if seen is None else seen
+    lines: list[str] = []
+    for one, link in _chain(failure, seen):
+        lines.extend(traceback.format_list(traceback.extract_tb(one.__traceback__)))
+        lines.append(f"{_class_name(one)}\n")
+        if isinstance(one, BaseExceptionGroup):
+            held = one.exceptions
+            for number, member in enumerate(held, start=1):
+                lines.append(f"+ {number}/{len(held)}\n")
+                lines.extend(
+                    f"| {line}"
+                    for line in "".join(_describe(member, seen)).splitlines(keepends=True)
+                )
+        if link is not None:
+            lines.append(f"\n{link}\n\n")
+    return lines
+
+
+def _described(failure: BaseException) -> _Described:
+    """``failure`` rendered by :func:`_describe`, as one marked string."""
+    return _Described("".join(_describe(failure)).rstrip("\n"))
+
+
+def _raised(exc_info: object) -> BaseException | None:
+    """The exception an ``exc_info`` value names, read as the renderer would read it.
+
+    An exception, an ``exc_info`` tuple, or any other true value for the exception
+    being handled — structlog's own reading, so nothing the renderer would have
+    found is missed here.
+    """
+    if isinstance(exc_info, BaseException):
+        return exc_info
+    if isinstance(exc_info, tuple) and len(exc_info) == len(("type", "value", "traceback")):
+        held = exc_info[1]
+        if isinstance(held, BaseException):
+            return held
+    if exc_info:
+        return sys.exc_info()[1]
+    return None
+
+
+def scrub_exceptions(
+    _logger: object,
+    _method_name: str,
+    event_dict: MutableMapping[str, Any],
+) -> MutableMapping[str, Any]:
+    """Render an event's exception as its class and frames alone (a structlog processor).
+
+    The event's ``exc_info`` is replaced by an ``exception`` the renderer prints as
+    it stands: the class, a group's member classes, any chained exception's class,
+    and the frames each passed through — never a message, a note or a frame's
+    locals. An exception object under ``exception`` is rendered the same way. Any
+    other value there is a traceback rendered before this net, whose words cannot be
+    told from its frames, so it is masked.
+
+    The trade-off is deliberate: an operator reads what happened from the event's
+    name and the class, never from the message. Detail that carries content belongs
+    in the diagnostic record (ADR-0314), not in a log.
+
+    Args:
+        _logger: The wrapped logger (unused).
+        _method_name: The log method called (unused).
+        event_dict: The event being logged.
+
+    Returns:
+        The event with no exception content left in it.
+
+    Raises:
+        structlog.DropEvent: If the exception cannot be rendered. As with
+            :func:`redact_sensitive`, an event that cannot be made safe is
+            dropped rather than emitted with its exception intact.
+    """
+    try:
+        failure = _raised(event_dict.pop("exc_info", None))
+        if failure is not None:
+            event_dict["exception"] = _described(failure)
+        elif "exception" in event_dict:
+            given = event_dict["exception"]
+            if isinstance(given, BaseException):
+                event_dict["exception"] = _described(given)
+            elif not isinstance(given, _Described):
+                event_dict["exception"] = REDACTED
+    except Exception as exc:  # losing a log line beats leaking one
+        raise structlog.DropEvent from exc
+    return event_dict
+
+
+def _write_exception(sio: TextIO, exc_info: ExcInfo) -> None:
+    """Write an exception as its class and frames: the renderer's exception formatter.
+
+    The second net. :func:`scrub_exceptions` leaves no ``exc_info`` for the
+    renderer to format, but were one to reach it — a processor reordered, a chain
+    assembled by hand — it is written without its message or any frame's locals,
+    where the renderer's default formatter prints both.
+
+    Raises:
+        structlog.DropEvent: If the exception cannot be rendered.
+    """
+    try:
+        sio.write("\n" + _described(exc_info[1]))
+    except Exception as exc:  # losing a log line beats leaking one
+        raise structlog.DropEvent from exc
+
+
 def _configure(level: int) -> None:
     """Install the processor chain at ``level``."""
     logging.basicConfig(format="%(message)s", level=level)
@@ -271,10 +446,17 @@ def _configure(level: int) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
+            # Before redaction, which would mask an exception object passed as
+            # ``exc_info`` to a string the renderer reads as "the exception being
+            # handled".
+            scrub_exceptions,
             # Redaction runs last among the enrichers, so it also scrubs keys
             # added by the processors above, not just by the call site.
             redact_sensitive,
-            structlog.dev.ConsoleRenderer(),
+            # The renderer's own exception formatter prints the message and every
+            # frame's locals; this one prints neither, should an ``exc_info``
+            # ever reach it.
+            structlog.dev.ConsoleRenderer(exception_formatter=_write_exception),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
         logger_factory=structlog.PrintLoggerFactory(),
@@ -322,10 +504,10 @@ def install_redaction() -> None:
     because the host had already solved the problem.
 
     So: if structlog is unconfigured, install the full chain. If it is already
-    configured, leave every processor the host chose in place and *insert* ours
-    ahead of the renderer. Both configurations end up strictly more redacted
-    than either was alone, and the host keeps its formatting, level, and
-    factory.
+    configured, leave every processor the host chose in place and *insert* ours —
+    :func:`scrub_exceptions`, then :func:`redact_sensitive` — ahead of the
+    renderer. Both configurations end up strictly more redacted than either was
+    alone, and the host keeps its formatting, level, and factory.
     """
     if not structlog.is_configured():
         _configure(logging.INFO)
@@ -340,11 +522,19 @@ def install_redaction() -> None:
     # cached logger holds a reference to this very list, so inserting into it is
     # what actually reaches those loggers.
     processors = structlog.get_config()["processors"]
-    if redact_sensitive in processors:
-        return
     # Before the renderer, which is by convention last and turns the event dict
-    # into a string — after which there is nothing structured left to scrub.
-    processors.insert(max(len(processors) - 1, 0), redact_sensitive)
+    # into a string — after which there is nothing structured left to scrub. The
+    # exception scrubber goes ahead of the redactor, as in our own chain: the
+    # redactor masks an exception object, which then names nothing to render.
+    if scrub_exceptions not in processors:
+        at = (
+            processors.index(redact_sensitive)
+            if redact_sensitive in processors
+            else max(len(processors) - 1, 0)
+        )
+        processors.insert(at, scrub_exceptions)
+    if redact_sensitive not in processors:
+        processors.insert(max(len(processors) - 1, 0), redact_sensitive)
 
 
 install_redaction()
