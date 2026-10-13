@@ -31,6 +31,11 @@ from ai_assistant.testing.conversations import FakeConversationStore
 from ai_assistant.testing.coverage_answers import FakeCoverageAnswers
 from ai_assistant.testing.deferrals import FakeDeferralStore
 from ai_assistant.testing.destination_trust import FakeDestinationTrustStore
+from ai_assistant.testing.diagnostics import (
+    FakeDiagnosticRetention,
+    FakeDiagnosticSink,
+    diagnostic_entry,
+)
 from ai_assistant.testing.egress import FakeEgressBinder
 from ai_assistant.testing.embeddings import FakeEmbedder
 from ai_assistant.testing.engine import FakeAssistantEngine
@@ -283,6 +288,8 @@ __all__ = [
     "FakeCoverageAnswers",
     "FakeDeferralStore",
     "FakeDestinationTrustStore",
+    "FakeDiagnosticRetention",
+    "FakeDiagnosticSink",
     "FakeEgressBinder",
     "FakeEmbedder",
     "FakeFeedbackProcessor",
@@ -351,6 +358,7 @@ __all__ = [
     "authorization",
     "authorization_basis",
     "coverage_member",
+    "diagnostic_entry",
     "disclosure_of",
     "evaluation_trace",
     "forecast_day",

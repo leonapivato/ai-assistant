@@ -34478,3 +34478,61 @@ class StoryStanding(BaseModel):
             msg = "the stories it is part of come before the stories it contains"
             raise ValueError(msg)
         return self
+
+
+# --- the diagnostic record (ADR-0314) ------------------------------------------
+
+
+class DiagnosticSource(StrEnum):
+    """Which part of the pipeline wrote a diagnostic entry (ADR-0314 §4, §8).
+
+    A **closed** enumeration, added to and never renamed: a member names the lines
+    of files an owner reads with the server's own tools, and a renamed member would
+    leave older files speaking a word nothing writes any more.
+    """
+
+    CONTROLLER = "controller"
+    UNDERSTANDING = "understanding"
+    RECALL = "recall"
+    PLANNING = "planning"
+    AUTHORIZING = "authorizing"
+    DIGESTING = "digesting"
+
+
+class DiagnosticKind(StrEnum):
+    """Whether an entry is what a source was given, what it returned, or a step (§4)."""
+
+    GIVEN = "given"
+    RETURNED = "returned"
+    STEP = "step"
+
+
+class DiagnosticEntry(BaseModel):
+    """One line of an activation's diagnostic record (ADR-0314 §6, §8).
+
+    **Tier 1 under ADR-0004 §1** (§2:3), and the opposite of an
+    :class:`EvaluationTrace` in the one way that matters: its ``body`` holds what a
+    phase was given and returned, raw outside text and planning's thinking
+    included. That is safe only because nothing reads an entry back (§3): no
+    Protocol carries a read of the record, and no body, nor anything taken from
+    one, reaches a prompt, a message, a memory, an episode, a story, a trace or a
+    log.
+
+    Frozen at both levels, as every mapping-holding record here is: the body
+    detaches into a copy the model owns and exposes as an immutable view.
+
+    Attributes:
+        activation_id: The activation the entry is written for, which names its file.
+        source: Which part of the pipeline wrote it.
+        kind: Given, returned, or a controller step.
+        recorded_at: When it was written, from the activation's clock.
+        body: What the source gives the record (§4's table).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    activation_id: Identifier
+    source: DiagnosticSource
+    kind: DiagnosticKind
+    recorded_at: UtcInstant
+    body: FrozenJsonMapping

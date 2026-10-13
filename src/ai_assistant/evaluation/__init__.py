@@ -67,7 +67,8 @@ door".
 
 from __future__ import annotations
 
+from ai_assistant.evaluation.diagnostic_record import FileDiagnosticRecord
 from ai_assistant.evaluation.measures import MeasureReader, MeasureReport
 from ai_assistant.evaluation.sqlite_store import SqliteTraceStore
 
-__all__ = ["MeasureReader", "MeasureReport", "SqliteTraceStore"]
+__all__ = ["FileDiagnosticRecord", "MeasureReader", "MeasureReport", "SqliteTraceStore"]
