@@ -6,6 +6,7 @@
 - Authorization: the owner agreed the design on 2026-10-12 in #2863: on all hubs as an opt-in, with a retention window, strictly write-only, raw outside text kept within the window, and forgetting covering it later or the window doing the forgetting. The dispatcher assigned 0314 and authorized ratifying it once its reviews are green. The clauses that settle what that agreement leaves open are listed as such in the pull request.
 - **Changes `core`, so it is a contract-surface decision.** Two Protocols, `DiagnosticSink` and `DiagnosticRetention`, three types, one module carrying the activation outside every signature, and two `Settings` fields (§8). No existing Protocol or type changes, nothing the wire carries changes, and `PROTOCOL_VERSION` does not move.
 - **Partially supersedes**:
+  [ADR-0004](0004-privacy-and-data-handling.md) (§6's view and export limbs, each only as they reach the diagnostic record, which no surface shows and no export carries, and which the owner reads and copies as files on the server);
   [ADR-0308](0308-recall-runs-again-on-what-understanding-found-and-outside-content-reaches-planning-only-as-a-digests-evidence.md) (§6:4's *and go when the activation ends*, for the copy of a held result's text a digest's prompt carries into the diagnostic record, until the record's window deletes it);
   [ADR-0123](0123-a-backup-is-the-cold-data-directory-encrypted-to-a-passphrase-the-operator-holds.md) (§3:1's exclusions, in the addition alone: the diagnostic record's directory; §3:4's exact match, for that directory alone, every file beneath which is excluded).
 
@@ -61,6 +62,10 @@ default; and leave it out of backups, so that the window is its forgetting.
 > no stage fails, retries or changes its result because an entry could not be written. It
 > is logged naming the activation, the source and the failure's class, and never any of
 > the entry's content (ADR-0004 §5).
+
+> **Normative.** An externally delivered cancellation is not a failure to write: a write
+> it reaches makes its file safe and re-raises it (ADR-0060), as ADR-0119 §3 has a trace
+> emitter re-raise one.
 
 ### 3. Write-only
 
@@ -164,8 +169,10 @@ runaway activation from filling the disk; the window bounds the rest.
 > **Normative.** The sweep runs whatever `diagnostic_record` says, so files written while
 > it was on are still deleted after it is turned off.
 
-> **Normative.** `Settings` refuses to load with `diagnostic_record` true and
-> `retention_purge_interval` disabled.
+> **Normative.** Where `retention_purge_interval` is disabled, the hub refuses to start
+> while `diagnostic_record` is true or the record's directory holds a file, before the
+> API accepts a request, naming the directory. It reads the directory's listing and no
+> entry.
 
 > **Normative.** A backup excludes the record's directory and every file beneath it. Its
 > path comes from the composition root, where the store is created (ADR-0123 §3:3).
@@ -188,10 +195,11 @@ sweep can reach.
 | `DiagnosticSource` | New closed enumeration, added to and never renamed: `controller`, `understanding`, `recall`, `planning`, `authorizing`, `digesting` |
 | `DiagnosticKind` | New closed enumeration: `given`, `returned`, `step` |
 | `DiagnosticEntry` | New frozen record: `activation_id: Identifier`, `source: DiagnosticSource`, `kind: DiagnosticKind`, `recorded_at: UtcInstant`, `body: FrozenJsonMapping` |
-| `DiagnosticSink` | New Protocol: `async write(entry: DiagnosticEntry) -> None`, which never raises (§2:4) |
+| `DiagnosticSink` | New Protocol: `async write(entry: DiagnosticEntry) -> None`, which raises nothing but an external cancellation (§2:4–§2:5) |
 | `DiagnosticRetention` | New Protocol: `async purge_before(instant: UtcInstant) -> int`, the number of files deleted |
 | `core/diagnostics.py` | New module: binding the activation for a run, and reading it (§5:4) |
-| `Settings` | Gains `diagnostic_record` and `diagnostic_retention`, and the refusal of §7:4 |
+| `Settings` | Gains `diagnostic_record` and `diagnostic_retention` |
+| The hub's startup | The refusal of §7:4 |
 | `evaluation/` | The store, implementing both Protocols, and their canonical fakes and conformance suites as a triad |
 | `PydanticAIToolCallingCompleter` | Takes a `DiagnosticSink` or `None`, asks for the thinking's text where it has one, and writes planning's returned entry (§5) |
 | The controller and the phase modules | Each writes §4's entries; `read_outside_content` gives the grounds that held |
@@ -207,6 +215,8 @@ sweep can reach.
 | Earlier decision | What changes |
 | --- | --- |
 | ADR-0004 §1, §4, §5 | Nothing: the record is Tier 1, owner-only on disk, and never logged |
+| ADR-0004 §6 | The view and export limbs, only as they reach the record: no surface shows it and no export carries it, and the owner reads and copies its files on the server. The deletion limb binds entire (§7:6), and the window answers the retention limb |
+| ADR-0060 | Nothing: a write re-raises an external cancellation (§2:5) |
 | ADR-0119 §2, §7:3, §11 | Nothing: no trace carries content, nothing reads a trace back, and the record is neither a trace nor in the trace store |
 | ADR-0119 §10 | Nothing: the record's sweep runs in the one sweep, as the trace store's does |
 | ADR-0123 §3:1, §3:4 | The exclusions gain the record's directory, and every file beneath it is excluded rather than a file matched exactly (§7:5) |
@@ -217,7 +227,7 @@ sweep can reach.
 | ADR-0308 §6:5 | Nothing: digesting alone reads the held results, and the record is not a stage |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in
-> a dated header note of ADR-0308 and ADR-0123, atomically with this ADR under ADR-0070
+> a dated header note of ADR-0004, ADR-0308 and ADR-0123, atomically with this ADR under ADR-0070
 > and ADR-0082, preserving their ratified bodies. The replacements take effect on this
 > ADR's ratification.
 
