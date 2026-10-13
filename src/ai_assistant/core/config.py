@@ -2955,6 +2955,34 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The diagnostic record (ADR-0314 §2, §7) --------------------------
+    # One file per activation under `<data_dir>/diagnostics`, holding what each phase
+    # was given and returned, raw outside text and planning's thinking included. It is
+    # Tier 1, nothing in the system reads it back, and the owner reads it on the server
+    # with the server's own tools. Off by default (§2:1): where it is false no entry is
+    # built and nothing is written.
+    diagnostic_record: bool = Field(
+        default=False,
+        description=(
+            "Keep a per-activation record of what each phase was given and returned, "
+            "for the owner to read on the server (ADR-0314). Off by default."
+        ),
+    )
+    # The record's window (§7:1), and its forgetting: the retention sweep deletes a
+    # file whose last write is older than this, whatever `diagnostic_record` says now
+    # (§7:3), and a backup never carries one (§7:5). A `_DurationSetting` rather than
+    # `trace_retention`'s optional alias, because §7:1 gives it no spelling for keep
+    # forever: finite and strictly positive, refused at load otherwise.
+    diagnostic_retention: _DurationSetting = Field(
+        default=timedelta(days=30),
+        gt=timedelta(0),
+        description=(
+            "How long a diagnostic record's file is kept after its last write before the "
+            "retention sweep deletes it (ADR-0314 §7). Positive and finite; there is no "
+            "keep-forever spelling."
+        ),
+    )
+
     # --- The calendar reader (ADR-0093 §7, §7a; ADR-0095 §1) --------------
     # Leg 6 configures **exactly one source, by explicit fields**. There is no
     # source registry and no list-valued source configuration, on ADR-0083 §7's

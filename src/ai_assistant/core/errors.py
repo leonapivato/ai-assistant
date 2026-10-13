@@ -888,6 +888,16 @@ class TraceStoreError(AssistantError):
     """
 
 
+class DiagnosticRecordError(AssistantError):
+    """The diagnostic record's sweep could not list or delete its files (ADR-0314 §7).
+
+    **It never reaches an emitter**, for the reason :class:`TraceStoreError` never
+    does: ``DiagnosticSink.write`` drops an entry it cannot write and logs it,
+    because a failure to describe the work may not propagate into the work
+    (§2:4). Only ``DiagnosticRetention.purge_before``, the hub's sweep, raises it.
+    """
+
+
 class ContextError(AssistantError):
     """Situational context could not be assembled (e.g. a source-wiring bug)."""
 

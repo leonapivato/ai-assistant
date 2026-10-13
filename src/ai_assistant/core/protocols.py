@@ -165,6 +165,7 @@ if TYPE_CHECKING:
         DestinationTrustRecord,
         DeviceChanges,
         DeviceConversation,
+        DiagnosticEntry,
         DurableIdentifier,
         EffectKey,
         EffectOutcome,
@@ -14374,6 +14375,81 @@ class TraceStore(TraceSink, TraceRetention, Protocol):
                 :class:`AuditTrail` and :class:`MemoryStore` already give, for the
                 reason ``AuditTrail`` states: ``frozen=True`` refuses
                 ``x.outcome = …`` and not ``x.__dict__["outcome"] = …``.
+        """
+        ...
+
+
+@runtime_checkable
+class DiagnosticSink(Protocol):
+    """Where an emitter writes a diagnostic entry, and all it can do there (ADR-0314 §3).
+
+    The write seam of the diagnostic record: one file per activation, holding what
+    each phase was given and returned (§6). **There is no read.** No Protocol in
+    this module carries a read of the record, so nothing handed this seam can read
+    an entry back, and nothing the system decides is conditioned on one (§3:1).
+    The store implementing it lives in ``evaluation/``, which no subsystem imports,
+    and the composition root hands each emitter this seam, or ``None`` where
+    ``Settings.diagnostic_record`` is false (§4:4).
+
+    **The instrument is subordinate to the work it describes** (§2:4): no stage
+    fails, retries or changes its result because an entry could not be written;
+    see :meth:`write`.
+
+    Cancelling :meth:`write` is governed by this module's cancellation clause
+    (ADR-0060). Its input-observation clause (ADR-0065) is vacuous: the one
+    argument is a :class:`~ai_assistant.core.types.DiagnosticEntry`, immutable all
+    the way down.
+    """
+
+    async def write(self, entry: DiagnosticEntry) -> None:
+        """Append ``entry`` to its activation's file. **No failure escapes** (§2:4).
+
+        An entry that cannot be written — a refused activation id, a full file, a
+        full disk — is dropped and logged naming the activation, the source and the
+        failure's class, never any of the entry's content (ADR-0004 §5).
+
+        Args:
+            entry: The entry, stamped by its emitter.
+
+        Raises:
+            CancelledError: **Not a blanket no-raise.** A cancellation delivered
+                from outside the call makes the file safe and is re-raised (§2:5,
+                ADR-0060 §1), as :meth:`TraceSink.emit` re-raises one.
+        """
+        ...
+
+
+@runtime_checkable
+class DiagnosticRetention(Protocol):
+    """The diagnostic record's deletion seam: its window, swept by the one sweep (§7).
+
+    What the ``Engine``'s retention sweep is handed, beside the trace store's
+    :class:`TraceRetention`; it deletes files by age and reads no entry (§3:3).
+    The sweep runs whether or not the record is on, so files written while it was
+    on are still deleted after it is turned off (§7:3).
+
+    Cancelling :meth:`purge_before` is governed by this module's cancellation
+    clause (ADR-0060); its input-observation clause (ADR-0065) is vacuous, the one
+    argument being an instant.
+    """
+
+    async def purge_before(self, instant: UtcInstant) -> int:
+        """Delete every file in the record whose last write is older than ``instant``.
+
+        **This one raises**, as :meth:`TraceRetention.purge_before` does: a sweep is
+        not the work being described, and a sweep that silently did nothing would
+        keep raw outside text past the window the owner believes deletes it.
+
+        Args:
+            instant: The window's edge. A file last written strictly before it is
+                deleted; one written at it or after is kept.
+
+        Returns:
+            How many files were deleted.
+
+        Raises:
+            DiagnosticRecordError: If the record's directory cannot be listed or a
+                file in it cannot be deleted.
         """
         ...
 
