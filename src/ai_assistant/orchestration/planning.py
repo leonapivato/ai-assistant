@@ -951,6 +951,15 @@ class _Request:
             shown["outside_content"] = _OUTSIDE
         if projection.rounds:
             shown["rounds"] = [self._episode_round(one) for one in projection.rounds]
+        if projection.evidence:
+            # ADR-0308 §3:1, §5:5: the episode's evidence, each item's text and its mark
+            # and never its source label, under the reader's audience as the projection
+            # decides it. It is outside content, so planning has read it (§5:4).
+            shown["evidence"] = [
+                {"text": _text(one.text), "outside_content": _OUTSIDE}
+                for one in projection.evidence
+            ]
+            self.shown.marked = True
         return shown
 
     def _episode_round(self, one: ProjectedRound) -> dict[str, object]:
