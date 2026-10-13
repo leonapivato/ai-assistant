@@ -11,10 +11,11 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 
+from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
     ActionRequest,
     CapabilityEffect,
@@ -73,6 +74,7 @@ from ai_assistant.orchestration.story_calls import (
     STORY_LABEL_ARGUMENTS,
     TIDY_STORY,
     UNLINK_STORY,
+    StartUnfinishedError,
     StoryCalls,
 )
 from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
@@ -85,6 +87,7 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
+    from ai_assistant.core.protocols import StoryStore
     from ai_assistant.core.types import FrozenJson, ToolDefinition
 
 _AT: Final = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
@@ -309,6 +312,88 @@ async def test_a_start_repeated_identically_is_refused_as_already_done() -> None
     )
     assert [one.outcome for one in third.calls] == [ActedOutcome.DONE]
     assert len(await stories.stories_of(own)) == 2
+
+
+class _FailsAfterCreate:
+    """A story store that fails one write a start makes after creating its story.
+
+    It wraps the canonical fake, which is final, and hands every other read and write
+    to it.
+    """
+
+    def __init__(self, *, note_at: int | None = None, link: bool = False) -> None:
+        self.inner = FakeStoryStore(now=_now)
+        self._note_at = note_at
+        self._link = link
+        self._notes = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    async def append_note(self, story_id: str, text: str, **kwargs: Any) -> Any:
+        self._notes += 1
+        if self._notes == self._note_at:
+            msg = "the store could not write the note"
+            raise StoryStoreError(msg)
+        return await self.inner.append_note(story_id, text, **kwargs)
+
+    async def link(self, story_id: str, members: Any, **kwargs: Any) -> Any:
+        if self._link and any(one.kind is StoryMemberKind.STORY for one in members):
+            msg = "the store could not write the link"
+            raise StoryStoreError(msg)
+        return await self.inner.link(story_id, members, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "stories",
+    [
+        pytest.param(_FailsAfterCreate(note_at=1), id="the-first-note"),
+        pytest.param(_FailsAfterCreate(note_at=2), id="between-the-notes"),
+        pytest.param(_FailsAfterCreate(link=True), id="placing-it-inside"),
+    ],
+)
+async def test_a_start_that_made_its_story_is_never_reported_not_done(
+    stories: _FailsAfterCreate,
+) -> None:
+    """ADR-0306 §5:6, §5:11: its record stays unfinished, so a repeat is already done.
+
+    Reported not done, the backstop would let an identical start make a second story;
+    reported done, it would claim what was not all written.
+    """
+    memory = FakeMemoryStore(now=_now)
+    await memory.add(_episode(_EPISODE))
+    await memory.add(_episode("activation:act-0"))
+    summer = await _story(stories.inner)
+    plans = FakePlanStore(now=_now)
+    acting = _acting(plans, StoryCalls(stories=cast("StoryStore", stories), memory=memory))
+    arguments: dict[str, FrozenJson] = {
+        NOTES_ARGUMENT: ["A camping trip.", "Waiting on the reply."],
+        INSIDE_ARGUMENT: summer,
+    }
+
+    with pytest.raises(StartUnfinishedError):
+        await acting.act(
+            AuthorizedRound(
+                _ACTIVATION,
+                "round:1",
+                (AuthorizedCall(_call(START_STORY, arguments, decision="d1")),),
+            ),
+            held=HeldResults(),
+        )
+    (claimed,) = await plans.activation_effects([_ACTIVATION])
+    assert claimed.outcome is None
+    repeated = await acting.act(
+        AuthorizedRound(
+            _ACTIVATION, "round:2", (AuthorizedCall(_call(START_STORY, arguments, decision="d2")),)
+        ),
+        held=HeldResults(),
+    )
+
+    assert [one.outcome for one in repeated.calls] == [ActedOutcome.NOT_DONE]
+    assert repeated.calls[0].reason is not None
+    assert repeated.calls[0].reason.startswith("already done")
+    own = StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)
+    assert len(await stories.inner.stories_of(own)) == 1
 
 
 # --- note ----------------------------------------------------------------------------------
