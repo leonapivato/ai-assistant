@@ -825,11 +825,14 @@ _ROUNDS: Final = (
     "you what came of them. So a step that has to wait for this round's calls goes in "
     "that round, and you need not ask for it. A round with no calls, or whose only calls "
     "are tidy-ups, ends the work after its message. A round that follows your calls "
-    "writes only what is new and the user will want to hear, such as a result they asked "
-    "for, a call that was not done or a question; where an earlier message already said "
-    "what you are doing, write no text: never repeat it, never confirm it, and never say "
-    "that the work is done. Leaving the text empty is how you say nothing, since "
-    "whatever you write is sent to the user, so never write that there is nothing to add."
+    "writes what is new and the user will want to hear: a result or a confirmation they "
+    "asked for, and always a call that was not done or whose outcome is unknown. A call "
+    "that did just what an earlier message said you would do is not new to them. Where "
+    "there is nothing new for them, because an earlier message already said what you are "
+    "doing and nothing came of the calls that they will want to hear, write no text: "
+    "never repeat that message, and never add a line only saying that the work is done. "
+    "Leaving the text empty is how you say nothing, since whatever you write is sent to "
+    "the user, so never write that there is nothing to add."
 )
 
 _NOTES_AND_ROUNDS: Final = (

@@ -414,8 +414,16 @@ async def test_the_instruction_says_a_round_with_a_call_brings_another_and_names
         "A round with no calls, or whose only calls are tidy-ups, ends the work after its message."
     ) in instruction
     assert (
-        "where an earlier message already said what you are doing, write no text: never "
-        "repeat it, never confirm it, and never say that the work is done."
+        "writes what is new and the user will want to hear: a result or a confirmation they "
+        "asked for, and always a call that was not done or whose outcome is unknown."
+    ) in instruction
+    assert (
+        "A call that did just what an earlier message said you would do is not new to them."
+    ) in instruction
+    assert (
+        "Where there is nothing new for them, because an earlier message already said what "
+        "you are doing and nothing came of the calls that they will want to hear, write no "
+        "text"
     ) in instruction
     assert "never write that there is nothing to add" in instruction
     assert "ask for another round" not in instruction
