@@ -15,8 +15,9 @@ cutover's lanes, and a ported case must not lose its fixtures with them.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 from channel_receiver_contract import event_input
 from test_engine import Harness, NoStepPlanner
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
         OfferedTool,
         StageOutcome,
     )
+    from ai_assistant.orchestration.phase_path import PhasePath
     from ai_assistant.testing import FakeMemoryStore
 
 #: The device every case writes from: the owner's own, so it may read and write.
@@ -104,6 +106,44 @@ def phases_harness(
         phases=_phases(completer or FakeToolCallingCompleter(), **(phases or {})),
         **knobs,
     )
+
+
+@dataclass(frozen=True)
+class _Seams:
+    """The harness attributes ``test_engine_phases._phases`` builds the path over."""
+
+    invoker: object
+    memory: object
+    plans: object
+    trail: object
+    conversation_store: object
+
+
+def phase_path(  # noqa: PLR0913 — the seams an engine already holds, and the path's knobs
+    completer: FakeToolCallingCompleter | None = None,
+    *,
+    invoker: object,
+    memory: object,
+    plans: object,
+    trail: object,
+    conversations: object,
+    **knobs: Any,
+) -> PhasePath:
+    """The phases, built as ``test_engine_phases`` builds them, over an engine's own seams.
+
+    For a suite that builds its ``Engine`` directly rather than through the harness:
+    the path holds the same invoker, memory store, plan store, trail and chat space the
+    engine is handed, as the composition root's does (``_PhaseSeams``).
+    """
+    seams = _Seams(
+        invoker=invoker,
+        memory=memory,
+        plans=plans,
+        trail=trail,
+        conversation_store=conversations,
+    )
+    build = _phases(completer or FakeToolCallingCompleter(), **knobs)
+    return build(cast("Harness", seams))
 
 
 class Gated(FakeToolCallingCompleter):

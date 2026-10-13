@@ -23,10 +23,12 @@ from phases_support import (
     Gated,
     answered,
     episodes,
+    idle,
     input_of,
     open_conversation,
     phases_harness,
     said,
+    working,
     written,
 )
 from test_engine import AT, Harness
@@ -176,6 +178,29 @@ async def test_the_state_is_working_until_the_reply_is_written_then_done() -> No
     assert not ended.state.working
     assert ended.state.activation_id is None
     assert ended.state.last_ended is ActivationEnding.DONE
+
+
+async def test_forgetting_reaches_an_activation_running_on_the_conversation() -> None:
+    """ADR-0293 §2:6: an activation running when its conversation is forgotten leaves no
+    episode once it finishes, and the conversation stays.
+
+    The shared chat-surface contract drives this over a spoken turn, which retires at the
+    cutover (ADR-0313 §3:1); here it is the reader's activation, held in planning.
+    """
+    completer = Gated()
+    harness = phases_harness(completer)
+    conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("m-1", "hi"))
+    await asyncio.wait_for(completer.entered.wait(), SETTLE)
+    running = await working(harness, conversation)
+
+    assert await harness.engine.forget_conversation(conversation) is True
+    completer.release.set()
+    await idle(harness, conversation)
+
+    assert await harness.memory.get(f"activation:{running}") is None
+    assert await episodes(harness.memory) == []
+    assert await harness.engine.conversation(conversation) is not None
 
 
 async def test_a_shutdown_that_cancels_the_activation_writes_nothing() -> None:
