@@ -419,7 +419,8 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
     §3 admits:
 
     - a field at its unset value taking a value: the trigger's ``channel``, a speech
-      trigger's ``transcript``, each field of ``links``, ``recall`` and ``outcome``
+      trigger's ``transcript``, each field of ``links``, ``recall``,
+      ``recall_second_run`` (ADR-0308 §7, in the addition alone) and ``outcome``
       (from ``None``), and ``response_degraded`` and ``output_degraded`` (from
       ``False``);
     - entries appended at the end of ``understanding`` and of ``stages``, each under
@@ -485,6 +486,11 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
             "trigger": _settled_trigger(before.trigger, after.trigger),
             "links": _settled_links(before.links, after.links),
             "recall": after.recall if before.recall is None else before.recall,
+            "recall_second_run": (
+                after.recall_second_run
+                if before.recall_second_run is None
+                else before.recall_second_run
+            ),
             "response_degraded": before.response_degraded or after.response_degraded,
             "output_degraded": before.output_degraded or after.output_degraded,
             "understanding": after.understanding,

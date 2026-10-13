@@ -138,6 +138,8 @@ def test_the_rule_enumeration_carries_the_table_the_guard_and_the_endings() -> N
         "round_authorized",
         "round_limit_reached",
         "round_due",
+        # ADR-0308 §2:9's row for recall's second run.
+        "understood_not_recalled",
     ]
 
 
@@ -216,7 +218,7 @@ def test_the_end_entry_records_done_at_one_instant() -> None:
 
 
 def test_the_record_is_the_current_schema_version_and_refuses_an_earlier_one() -> None:
-    assert _record().schema_version == 8
+    assert _record().schema_version == 9
     with pytest.raises(ValidationError):
         _record(schema_version=4)
 

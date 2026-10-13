@@ -33,8 +33,10 @@ from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 #: validate as, so the marker advances to 8 on the same terms: the phases start on the
 #: cutover's fresh data directory (ADR-0309 §6:1). ADR-0308 §7 advances the record to
 #: schema_version 8 for the digests, which a version-7 record does not validate as, so
-#: the marker advances to 9 on the same terms (ADR-0308 §7:3).
-EPISODE_RECORD_FORMAT: Final[int] = 9
+#: the marker advances to 9 on the same terms (ADR-0308 §7:3). ADR-0308 §7 advances the
+#: record to schema_version 9 for recall's second run, which a version-8 record does not
+#: validate as, so the marker advances to 10 on the same terms.
+EPISODE_RECORD_FORMAT: Final[int] = 10
 
 
 def check_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool:
