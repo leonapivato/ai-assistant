@@ -33,7 +33,8 @@ the sweep's deletions, anywhere else.
 
 **A line lands whole or not at all** (§6:2). An append that fails part-way — a full
 disk — is cut back to the length the file had before it, so the next line never joins
-a torn one.
+a torn one. Where even the cut fails, the length is remembered, and no later line is
+appended to that file until the cut has been made.
 
 **A failure to write never propagates** (§2:4): it is logged naming the activation, the
 source and the failure's class, and never any content. A cancellation reaching a write
@@ -82,6 +83,9 @@ _DIRECTORY_FLAGS: Final = os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 #: The one write every append goes through, named so a test can make it fail part-way.
 _write: Callable[[int, memoryview], int] = os.write
 
+#: The one cut every rollback goes through, named so a test can make it fail too.
+_truncate: Callable[[int, int], None] = os.ftruncate
+
 #: What a refused or unreadable id is logged as, since it may carry anything.
 _UNREADABLE: Final = "unreadable"
 
@@ -123,6 +127,9 @@ class FileDiagnosticRecord:
         # The files marked truncated by this process. Nothing is read from disk to
         # learn it: reading a file's tail would be reading an entry back (§3:1).
         self._truncated: set[str] = set()
+        # The files left with a torn tail a rollback could not cut, by the length of
+        # their last whole line: cut before anything more is appended to them (§6:2).
+        self._torn: dict[str, int] = {}
 
     @property
     def directory(self) -> Path:
@@ -171,12 +178,17 @@ class FileDiagnosticRecord:
             descriptor = os.open(name, _OPEN_FLAGS, _FILE_MODE, dir_fd=directory)
             try:
                 os.fchmod(descriptor, _FILE_MODE)
+                self._mend(name, descriptor)
                 size = os.fstat(descriptor).st_size
-                if size + len(line) + len(marker) <= self._file_bytes:
-                    _append_whole(descriptor, line, size)
-                    return
-                if size + len(marker) <= self._file_bytes:
-                    _append_whole(descriptor, marker, size)
+                try:
+                    if size + len(line) + len(marker) <= self._file_bytes:
+                        _append_whole(descriptor, line, size)
+                        return
+                    if size + len(marker) <= self._file_bytes:
+                        _append_whole(descriptor, marker, size)
+                except _TornError as torn:
+                    self._torn[name] = torn.size
+                    raise
                 self._truncated.add(name)
             finally:
                 os.close(descriptor)
@@ -184,6 +196,18 @@ class FileDiagnosticRecord:
             os.close(directory)
         msg = "the entry would take the activation's file past its bound, which is now marked"
         raise DiagnosticRecordError(msg)
+
+    def _mend(self, name: str, descriptor: int) -> None:
+        """Cut a torn tail an earlier failed rollback left, before anything is appended.
+
+        Raises:
+            OSError: If the cut fails again; the file stays torn and nothing is appended.
+        """
+        size = self._torn.get(name)
+        if size is None:
+            return
+        _truncate(descriptor, size)
+        del self._torn[name]
 
     def _opened_directory(self, *, create: bool) -> int:
         """The record's directory, opened, verified a directory and owner-only (§2:3).
@@ -210,8 +234,13 @@ class FileDiagnosticRecord:
         except OSError as exc:
             msg = "the diagnostic record's directory is a symbolic link or not a directory"
             raise DiagnosticRecordError(msg) from exc
-        if create and stat.S_IMODE(os.fstat(descriptor).st_mode) != _DIRECTORY_MODE:
-            os.fchmod(descriptor, _DIRECTORY_MODE)
+        try:
+            if create and stat.S_IMODE(os.fstat(descriptor).st_mode) != _DIRECTORY_MODE:
+                os.fchmod(descriptor, _DIRECTORY_MODE)
+        except BaseException:
+            # Not yet the caller's to close, so closed here on every way out.
+            os.close(descriptor)
+            raise
         return descriptor
 
     # --- the retention seam ---------------------------------------------------
@@ -270,12 +299,21 @@ class FileDiagnosticRecord:
                 msg = "a file in the diagnostic record could not be deleted"
                 raise DiagnosticRecordError(msg) from exc
             self._truncated.discard(name)
+            self._torn.pop(name, None)
             deleted += 1
         return deleted
 
 
 class _RefusedIdError(DiagnosticRecordError):
     """An activation id that is not a plain file name (§6:1)."""
+
+
+class _TornError(OSError):
+    """An append failed part-way and its rollback failed too, leaving ``size`` to cut to."""
+
+    def __init__(self, size: int) -> None:
+        super().__init__("an append failed part-way and could not be cut back")
+        self.size = size
 
 
 def _file_name(activation_id: str) -> str:
@@ -313,13 +351,17 @@ def _append_whole(descriptor: int, data: bytes, size: int) -> None:
 
     Raises:
         OSError: If the append failed, once the file is its old length again.
+        _TornError: If the append failed and so did the cut, naming the length the
+            file must be cut to before anything more is appended.
     """
     try:
         _write_all(descriptor, data)
-    except OSError:
-        with contextlib.suppress(OSError):
-            os.ftruncate(descriptor, size)
-        raise
+    except OSError as failed:
+        try:
+            _truncate(descriptor, size)
+        except OSError as uncut:
+            raise _TornError(size) from uncut
+        raise failed from None
 
 
 def _write_all(descriptor: int, data: bytes) -> None:
