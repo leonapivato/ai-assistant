@@ -111,6 +111,7 @@ from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     MAX_ASSOCIATION_CANDIDATES,
     TERMINAL_ATTEMPT_STATES,
+    ActivationEnding,
     ActivationRecall,
     ActivationStop,
     AttemptOutcome,
@@ -156,6 +157,7 @@ from ai_assistant.core.types import (
     GoalRevision,
     GoalStatus,
     GoalSummary,
+    InformationalEventResult,
     IntendedActionMinting,
     MemoryKind,
     MemoryWrite,
@@ -245,6 +247,7 @@ from ai_assistant.orchestration.activation_writer import capture_loss
 from ai_assistant.orchestration.authorization_surface import projection_of
 from ai_assistant.orchestration.change_stream import Activity, ChangeStream
 from ai_assistant.orchestration.channels import (
+    UNCAPTURED,
     ChannelProjection,
     ResolvedChannelInput,
     captured_result,
@@ -2516,8 +2519,11 @@ def _resolved_turn(working: _TurnPass) -> ResolvedChannelInput:
     return working.input
 
 
-def _turn_expired(working: _TurnPass) -> Exception | None:
+def _turn_expired(working: _ActivationPass) -> Exception | None:
     """ADR-0280 §5: the understanding stage is not entered past the pass's deadline.
+
+    A turn's, and an event's that the phases run, whose deadline is classified as a
+    turn's (ADR-0313 §4:5).
 
     Checked before the stage reads the conversation's history, so an expired pass does
     no I/O for it. The error is the one the stage's own pre-check raised (ADR-0276 §6).
@@ -2545,6 +2551,15 @@ def _event_expired(event: _EventPass) -> Exception | None:
     return None
 
 
+def _summarized_event(working: _ActivationPass) -> bool:
+    """An event on today's path, whose deadline its event-summary stage's error names.
+
+    An event the phases run classifies its deadline as a turn does: its stages' errors
+    end the pass, and it returns *couldn't finish* rather than raising (ADR-0313 §4:5).
+    """
+    return isinstance(working, _EventPass) and working.phases is None
+
+
 def _recall_expired(working: _ActivationPass) -> Exception | None:
     """ADR-0281 §5: the activation's deadline, classified as its pass kind classifies it.
 
@@ -2553,7 +2568,7 @@ def _recall_expired(working: _ActivationPass) -> Exception | None:
     """
     if not working.deadline_passed:
         return None
-    if isinstance(working, _EventPass):
+    if _summarized_event(working):
         return ChannelProcessingTimeoutError("informational event processing timed out")
     return ModelTimeoutError(_RECALL_EXPIRED)
 
@@ -2566,7 +2581,7 @@ def _windows_expired(working: _ActivationPass) -> Exception | None:
     """
     if not working.deadline_passed:
         return None
-    if isinstance(working, _EventPass):
+    if _summarized_event(working):
         return ChannelProcessingTimeoutError("informational event processing timed out")
     return ModelTimeoutError(_WINDOWS_EXPIRED)
 
@@ -2583,7 +2598,8 @@ def _wired_phases(  # noqa: PLR0913 — the path, the two wirings it needs besid
     """The phases' thin path, wired only beside understanding and the chat's reader.
 
     Planning's first round runs once understanding has recorded (ADR-0307 §8:6), and
-    the thin path plans the input the chat's reader takes in (ADR-0309 §2:6). Its
+    the thin path plans the input the chat's reader takes in (ADR-0309 §2:6), and an
+    event ``receive`` admits (ADR-0313 §4:3). Its
     recorders extend the episode through ``append``, and a tidy-up call nobody waits
     on starts through ``spawn`` unless ``closing`` says shutdown has begun (§7:2).
 
@@ -2652,7 +2668,7 @@ def _story_links_expired(working: _ActivationPass) -> Exception | None:
     """
     if not working.deadline_passed:
         return None
-    if isinstance(working, _EventPass):
+    if _summarized_event(working):
         return ChannelProcessingTimeoutError("informational event processing timed out")
     return ModelTimeoutError(_STORY_LINKS_EXPIRED)
 
@@ -2796,6 +2812,40 @@ def _stopped_failure(
     stopped = ActivationStoppedError(_STOPPED_MESSAGE)
     stopped.__cause__ = failure
     return stopped
+
+
+def _answered[T](
+    value: T | None,
+    failure: BaseException | None,
+    *,
+    state: ActivationState | None,
+    unfinished: Callable[[ActivationEnding], T] | None,
+) -> T:
+    """What a call awaiting an activation is answered with, once it has frozen.
+
+    Its value, or its failure raised; where ``unfinished`` is given, an event the phases
+    run (ADR-0313 §4:5), a failure other than a cancellation is answered with the result
+    ``unfinished`` builds, reading *stopped* where the stop mark is set and *couldn't
+    finish* otherwise.
+
+    **Except the output bound's refusal.** A result too large for the payload limit is
+    refused as every result is (ADR-0085 §8e), and the one ``unfinished`` builds names
+    the same channel, so it could not be returned either: an ``OversizedValueError``
+    raises, as it does on every other path.
+
+    Raises:
+        BaseException: ``failure``, where it is not answered with a result.
+    """
+    if (
+        unfinished is not None
+        and isinstance(failure, Exception)
+        and not isinstance(failure, OversizedValueError)
+    ):
+        stopped = state is not None and state.stopped
+        return unfinished(ActivationEnding.STOPPED if stopped else ActivationEnding.COULDNT_FINISH)
+    if failure is not None:
+        raise failure
+    return cast("T", value)
 
 
 async def _kept_if_stopped(
@@ -4687,6 +4737,14 @@ class Engine:
         The text conversational combination is refused here (ADR-0293 §11): a typed
         message is written into a conversation, and :meth:`converse` is the one
         entry that still runs a typed turn.
+
+        **An event returns how its activation ended** (ADR-0313 §4:4). Where the phases
+        are wired, on a test hub (ADR-0309 §2:6), it runs through them as one activation
+        whose place takes no message, its ``timeout`` the activation's budget, and one
+        that cannot finish or is stopped returns its result rather than raising (§4:3,
+        §4:5). Elsewhere today's event-summary stage runs, its result in the same
+        shape, and its failures still raise as before until the cutover deletes it
+        (§6:2).
         """
         return await self._receive(
             input, reply=reply, timeout=timeout, projection=ChannelProjection("receive")
@@ -4715,7 +4773,7 @@ class Engine:
         event = isinstance(accepted.target, ChannelIdentity) and (
             accepted.target.channel_type == "informational_event"
         )
-        if event and self._informational_events is None:
+        if event and self._informational_events is None and self._phases is None:
             raise ConfigurationError("informational event processing is not wired")
         device = current_requesting_device()
         if not device.is_hub:
@@ -4731,6 +4789,20 @@ class Engine:
             stage_limit=self._stage_record_limit,
         )
         projection = replace(projection, capture_report=state.reserved_report)
+        target = accepted.target
+        # ADR-0313 §4:5: an event the phases run that cannot finish, or is stopped, is a
+        # result reading how it ended, never a raise. Today's event path still raises.
+        unfinished = (
+            (
+                lambda ended: ChannelResult(
+                    channel=target,
+                    capture=UNCAPTURED,
+                    result=InformationalEventResult(ended=ended),
+                )
+            )
+            if event and self._phases is not None and isinstance(target, ChannelIdentity)
+            else None
+        )
         task = self._activation_task(
             ActivationScope(state),
             # A spoken call's budget is the whole call's, starting at receiver
@@ -4754,6 +4826,7 @@ class Engine:
                 subject=f"the result of {projection.method}()",
             ),
             deadline=deadline,
+            unfinished=unfinished,
         )
         result, report = await task if event else await asyncio.shield(task)
         assert report is not None  # noqa: S101 — channel admission always creates state
@@ -4773,10 +4846,12 @@ class Engine:
         options = input.conversation or ConversationInputOptions()
         if isinstance(target, ChannelIdentity) and target.channel_type == "informational_event":
             assert isinstance(input.payload, TextChannelPayload)  # noqa: S101 — narrowed by validated channel dispatch
-            assert self._informational_events is not None  # noqa: S101 — narrowed by validated channel dispatch
             resolved = ResolvedChannelInput(
                 target, input.payload.text, input.payload.modality, input.context
             )
+            if self._phases is not None:
+                return await self._phases_event(resolved, deadline=deadline, projection=projection)
+            assert self._informational_events is not None  # noqa: S101 — refused at admission where neither is wired
             event = _EventPass(
                 input=resolved,
                 deadline=deadline,
@@ -4789,7 +4864,7 @@ class Engine:
                 story_links_wired=self._story_links is not None,
             )
             # ADR-0280 §4: the windows, recall, understanding, the story links, then the
-            # event summary, by the rules.
+            # event summary, by the rules: today's path, where the phases are not wired.
             await self._controlled(
                 event,
                 (
@@ -10287,7 +10362,89 @@ class Engine:
             state=state,
         )
 
-    def _activation_task[T](
+    async def _phases_event(
+        self,
+        resolved: ResolvedChannelInput,
+        *,
+        deadline: float,
+        projection: ChannelProjection,
+    ) -> ChannelResult:
+        """An event run through the phases, on a test hub (ADR-0313 §4:3-§4:5).
+
+        One activation whose place takes no message (ADR-0307 §3:8): the windows,
+        recall, understanding and the story links run exactly as on today's event path,
+        then recall's second run and the four phase stages by ADR-0309 §3's table. Its
+        rounds' text is kept with the episode and written nowhere, nothing they wrote is
+        returned, and it cannot message the user (ADR-0309 §5:6); planning can still
+        remember, note and change stories (§5:5). ``deadline`` is the event's
+        ``timeout`` read at admission, the activation's budget (§4:5).
+
+        Returns:
+            The result: *done*, or *couldn't finish* where the round limit ended it.
+            One whose stage failed or timed out, or that was stopped, raises here and
+            :meth:`_activation_task` answers it with its result once the episode has
+            frozen (§4:5).
+        """
+        phases = self._phases
+        assert phases is not None  # noqa: S101 — dispatched here only where they are wired
+        state = active_state()
+        trigger = None if state is None else state.trigger
+        activation_id = None if state is None else state.activation_id
+        event = _EventPass(
+            input=resolved,
+            deadline=deadline,
+            # ADR-0276 §4: an informational-event pass is of bounded audience, so a
+            # record placed for the owner alone may be shown (ADR-0307 §6:4).
+            supply=BoundedAudienceSupply(
+                speakable_attested_sources=self._speakable_attested_sources
+            ),
+            understanding_wired=self._understanding is not None,
+            recall_wired=self._recall is not None,
+            story_links_wired=self._story_links is not None,
+            phases=phases.begin_event(
+                # An activation whose id was not minted has a degraded capture
+                # (ADR-0275 §2); its rounds still need one to claim under.
+                activation_id=_uuid() if activation_id is None else activation_id,
+                trigger_origin=(
+                    trigger.origin if isinstance(trigger, RecordedChannelTrigger) else None
+                ),
+                owner_records=True,
+            ),
+        )
+        stages: list[ControllerStageRun[_EventPass]] = [
+            Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),
+            # ADR-0308 §2: recall runs twice on a phases pass, as on a turn's.
+            phases.recall_stage(
+                TolerantStage(ControllerStage.RECALL, self._recall_stage, expired=_recall_expired),
+                self._recall,
+            ),
+            Stage(
+                ControllerStage.UNDERSTANDING,
+                self._phases_event_understanding_stage,
+                expired=_turn_expired,
+            ),
+            TolerantStage(
+                ControllerStage.STORY_LINKS, self._story_links_stage, expired=_story_links_expired
+            ),
+            *phases.stages(),
+        ]
+        await phases.run(
+            event,
+            lambda: self._controlled(event, stages, rules=PHASE_RULES),
+            state=state,
+        )
+        unfinished = state is not None and state.unfinished
+        result = ChannelResult(
+            channel=resolved.channel,
+            capture=UNCAPTURED,
+            result=InformationalEventResult(
+                ended=ActivationEnding.COULDNT_FINISH if unfinished else ActivationEnding.DONE
+            ),
+        )
+        self._checked(projection.terminal(result), projection.method)
+        return result
+
+    def _activation_task[T](  # noqa: PLR0913 — the scope, the work, and one knob per way a kind's call is answered
         self,
         scope: ActivationScope,
         work: Callable[[], Awaitable[T]],
@@ -10295,6 +10452,7 @@ class Engine:
         seam: str,
         check_output: Callable[[T], None],
         deadline: float | None = None,
+        unfinished: Callable[[ActivationEnding], T] | None = None,
     ) -> asyncio.Task[tuple[T, EpisodeCaptureReport | None]]:
         """Enter cleanup before cancellation is possible, register, then release work.
 
@@ -10315,6 +10473,11 @@ class Engine:
         itself and is classified as its kind classifies it, and the freeze's read
         settles whether the cut-off insert landed (ADR-0286 §3:4).
 
+        ``unfinished`` answers an activation that could not finish, or was stopped,
+        with a result rather than a raise: an event the phases run (ADR-0313 §4:5). It
+        is handed *stopped* where the stop mark is set and *couldn't finish* for any
+        other failure, once the episode has frozen classified by that failure, so the
+        record keeps why it did not finish. A cancellation still propagates as itself.
         """
         self._reject_if_closing()
         admitted = asyncio.Event()
@@ -10357,9 +10520,7 @@ class Engine:
                         # `story_tidy_up_interim`.
                         self._start_interim_tidy_ups(state)
                 failure = _stopped_failure(state, failure)
-                if failure is not None:
-                    raise failure
-                return cast("T", value), report
+                return _answered(value, failure, state=state, unfinished=unfinished), report
             finally:
                 self._running[:] = [one for one in self._running if one is not scope]
                 self._count_end(scope)
@@ -13191,6 +13352,19 @@ class Engine:
     async def _event_understanding_stage(self, event: _EventPass) -> None:
         """ADR-0276 §5: after the event input is resolved and before the event stage."""
         await self._understand_event(event)
+        event.understood = True
+
+    async def _phases_event_understanding_stage(self, event: _EventPass) -> None:
+        """ADR-0276 §5's stage for an event the phases run, as a turn's is entered.
+
+        Its failures propagate as themselves, a classified model timeout included: the
+        pass ends on them and the event returns *couldn't finish* (ADR-0313 §4:5), so
+        nothing maps them to the event-summary stage's errors.
+
+        Raises:
+            ModelTimeoutError: If the deadline expired before the stage or inside it.
+        """
+        await self._understand(event.input, working=event)
         event.understood = True
 
     async def _event_summary_stage(self, event: _EventPass) -> None:

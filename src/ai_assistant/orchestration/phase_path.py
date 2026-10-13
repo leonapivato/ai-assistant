@@ -10,8 +10,17 @@ import all of them, and none of them imports it.
 :class:`PhasePath` only where ``Settings.phases_thin_path`` is set, which it is on a
 test hub alone; the engine then hands the controller
 :data:`~ai_assistant.orchestration.controller.PHASE_RULES` and these stages for a
-conversation turn the chat's reader starts. Everywhere else today's table runs
-unchanged.
+conversation turn the chat's reader starts, and for an event ``receive`` admits
+(ADR-0313 §4:3). Everywhere else today's table runs unchanged.
+
+**An event** (ADR-0313 §4:3-§4:5, ADR-0307 §3:8, ADR-0309 §5:5-§5:6). It runs as one
+activation whose place takes no message: :meth:`PhasePath.begin_event` starts its
+working set with no conversation, so planning is told up front that its text is kept and
+written nowhere, authorizing is handed no message to check and no place, and the event
+cannot message the user. Its rounds' text is kept with the episode's rounds, and nothing
+is written for it, the *couldn't finish* message included. Having written nothing is not
+how an event fails to finish, since it never writes: only the round limit, a stage's
+failure or its deadline is, and the engine reads which from the state.
 
 **What one round is** (ADR-0307 §2, ADR-0309 §3). Planning asks the model once and
 records the round; authorizing checks every call by rule and the message by its place;
@@ -145,8 +154,7 @@ for the owner alone where it is ``True``. Before each round is planned the value
 what planning has been given so far is set on the activation's state, so a belief that
 round remembers is placed by the supply it was produced over.
 
-**Left to later lanes:** pulls (ADR-0292 §13:3), which nothing builds yet; and an event
-through the phases.
+**Left to later lanes:** pulls (ADR-0292 §13:3), which nothing builds yet.
 
 **It logs stage and code-owned reason only** (ADR-0275 §8).
 """
@@ -301,6 +309,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CHAT_DESCRIPTION",
+    "EVENT_DESCRIPTION",
     "MessageWriter",
     "PhasePass",
     "PhasePath",
@@ -321,6 +330,14 @@ _log = structlog.get_logger(__name__)
 CHAT_DESCRIPTION: Final = (
     "The hub's chat: a conversation with the user, on the devices they chose for it. "
     "A message you write is added to this conversation for the user to read."
+)
+
+#: The informational-event channel kind's description, shown with its place as the
+#: chat's is (ADR-0292 §8:1); stated here for the same reason. The place takes no
+#: message (ADR-0307 §3:8), which planning's instruction says up front.
+EVENT_DESCRIPTION: Final = (
+    "An event a source reported to the hub, such as a device changing state. No one is "
+    "waiting on a reply, and nothing you write here reaches the user."
 )
 
 _PLANNING_EXPIRED: Final = "the activation's deadline passed before the next round"
@@ -1826,6 +1843,40 @@ class PhasePath:
             labels=labels,
         )
 
+    def begin_event(
+        self,
+        *,
+        activation_id: str,
+        trigger_origin: InputOrigin | None,
+        owner_records: bool,
+        labels: Sequence[PlanningLabel] = (),
+    ) -> PhaseWorking:
+        """Start one event's working set: a place that takes no message (ADR-0313 §4:3).
+
+        There is no conversation, so no message is written for the event, the *couldn't
+        finish* message included, and authorizing is handed no place (ADR-0307 §3:8,
+        ADR-0309 §5:6). The event's own words reach planning through understanding's
+        record alone, as an outside report (ADR-0307 §9:2), so its place window is empty.
+
+        Args:
+            activation_id: The activation.
+            trigger_origin: Who the trigger's input came from.
+            owner_records: Whether a record placed for the owner alone may be shown.
+            labels: The labels the episode already records.
+
+        Returns:
+            The working set, which the engine holds on the pass.
+        """
+        return PhaseWorking(
+            activation_id=activation_id,
+            place=PlaceWindow(takes_message=False, description=EVENT_DESCRIPTION),
+            conversation_id=None,
+            trigger_origin=trigger_origin,
+            owner_records=owner_records,
+            round_limit=self._round_limit,
+            labels=labels,
+        )
+
     async def written(
         self, conversation_id: str, activation_ids: Sequence[str], positions: Sequence[int]
     ) -> dict[int, str]:
@@ -1928,7 +1979,10 @@ class PhasePath:
         the activation ends having written nothing; a stop and a cancellation write
         nothing (ADR-0295 §3:3, ADR-0293 §9:2). Where a pass that returned owes it, the
         state is marked unfinished, so the episode freezes ``failed`` and the current
-        state reads *couldn't finish*, not done (ADR-0293 §8:3). However it ended,
+        state reads *couldn't finish*, not done (ADR-0293 §8:3). Where the place takes
+        no message, an event's, nothing is written, and only the round limit marks a
+        pass that returned unfinished: having written nothing is how such a pass always
+        ends (ADR-0307 §3:8, ADR-0313 §4:5). However it ended,
         the activation's messages become the episode's ``outcome``, and the facts the
         freeze derives are set (ADR-0286 §4:2): among them ADR-0204 §2's value, taken
         here once over everything the activation was given or obtained in every round
@@ -1949,8 +2003,11 @@ class PhasePath:
         else:
             # Ending on the round limit, or ending with nothing written (an empty round,
             # or every message refused or gone), owes the fixed message (ADR-0293 §9:1).
+            # A place that takes no message is never written to, so there only the
+            # round limit leaves the activation unfinished (ADR-0313 §4:5).
             limited = state is not None and _ended_by(state, ControllerRule.ROUND_LIMIT_REACHED)
-            if (limited or not working.messages) and not _stopped(state):
+            unwritten = working.place.takes_message and not working.messages
+            if (limited or unwritten) and not _stopped(state):
                 if state is not None:
                     # Unfinished, so the episode and the state say *couldn't finish*
                     # beside the message, not done (ADR-0293 §8:3).
@@ -2602,8 +2659,11 @@ class PhasePath:
         done whose record says so, so a call that finished is listed whatever became of
         the step it ran in (ADR-0293 §9:1). Claimed under a record naming no round
         (ADR-0307 §10). It never raises but for a cancellation: a pass that failed is
-        already ending on its own error.
+        already ending on its own error. Where the place takes no message, an event's,
+        nothing is written and nothing read (ADR-0307 §3:8, ADR-0309 §5:6).
         """
+        if working.conversation_id is None:
+            return
         effects = await self._effects(working)
         text = couldnt_finish(effects).text
         try:
