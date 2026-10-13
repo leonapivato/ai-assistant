@@ -12737,8 +12737,9 @@ class StoryStore(Protocol):
     :class:`~ai_assistant.core.types.StoryRefusalReason`, and writes nothing. The
     checks are made in a fixed order — no members, then the story written to
     (unknown, then merged), then each story member named (unknown, then merged), then
-    the operation's own rule (self-merge, not a member, a note move's notes, loop) —
-    and the first that fails is the one reported.
+    the operation's own rule (self-merge, not a member, a note planning names that is
+    not held, a note move's notes, loop) — and the first that fails is the one
+    reported.
     :class:`~ai_assistant.core.errors.StoryStoreError` is raised only where the store
     could not read or write its file, and a malformed argument is a ``ValueError``.
 
@@ -12770,7 +12771,11 @@ class StoryStore(Protocol):
     (ADR-0303 §6): a merge moves every note the absorbed story holds to the story it
     is merged into; a split and a move each move exactly the notes they name that the
     story moved from holds, and no note by the activation it was written during; an
-    unlink moves no note. The store still reads no other store (ADR-0289 §1:3), and
+    unlink moves no note. **A split or a move whose actor is** ``planning`` **is
+    refused whole** with ``note_not_held`` where a note it names is not held by the
+    story moved from when it runs, checked inside its own transaction, so a note moved
+    away meanwhile still refuses it (ADR-0307 §5:4); every other actor's passes such a
+    note over. The store still reads no other store (ADR-0289 §1:3), and
     refuses a summary write only on what ADR-0300 §3, ADR-0302 §7 and ADR-0303 §4 state
     and on an identity naming nothing it holds: the hub's checks on a tidy-up's output
     are the hub's, and so is the summary's mark, which the store records as it is given.
@@ -12968,7 +12973,9 @@ class StoryStore(Protocol):
         In the same transaction it moves to C exactly the notes named in ``notes``
         that A holds, whoever wrote them; a note named that A does not hold is passed
         over, as a member not held is by an unlink, and no note moves by the
-        activation it was written during (ADR-0303 §6). Every other note stays on A.
+        activation it was written during (ADR-0303 §6). Where ``actor`` is
+        ``planning``, a note named that A does not hold when the split runs refuses
+        the whole split instead (ADR-0307 §5:4). Every other note stays on A.
         Each note that goes is logged ``note_moved_out`` on A and ``note_moved_in``
         on C, each line naming the note and the other story (ADR-0304 §9:6). What C
         receives is pending on C (ADR-0300 §3). Given ``answers``, it records the
@@ -12984,8 +12991,9 @@ class StoryStore(Protocol):
 
         Returns:
             C's id, or a refusal: ``no_members``, ``unknown_story``,
-            ``merged_story``, or ``not_a_member`` naming a member A does not hold,
-            then ``unknown_flag`` or ``already_decided``.
+            ``merged_story``, ``not_a_member`` naming a member A does not hold, or,
+            for ``planning``, ``note_not_held`` naming A, then ``unknown_flag`` or
+            ``already_decided``.
 
         Raises:
             ValueError: If an argument is malformed.
@@ -13020,7 +13028,9 @@ class StoryStore(Protocol):
 
         A **note move** names no member and one or more notes, and carries exactly
         the named notes the first story holds. Where the move names members as well,
-        a named note the first story does not hold is passed over.
+        a named note the first story does not hold is passed over. Where ``actor`` is
+        ``planning``, a named note the first story does not hold when the move runs
+        refuses the whole move instead, members and notes alike (ADR-0307 §5:4).
 
         Args:
             story_id: The story moved from.
@@ -13036,9 +13046,11 @@ class StoryStore(Protocol):
             The second story's id with the count of lines appended, or a refusal:
             ``no_members`` where it names no member and no note; ``unknown_story``
             or ``merged_story`` for either side, the first story first;
-            ``not_a_member`` naming a member the first story does not hold; or, for
-            a note move, ``no_notes`` naming the first story where it holds none of
-            the notes named; then ``unknown_flag`` or ``already_decided``.
+            ``not_a_member`` naming a member the first story does not hold; for
+            ``planning``, ``note_not_held`` naming the first story where it does not
+            hold a note named; or, for a note move, ``no_notes`` naming the first
+            story where it holds none of the notes named; then ``unknown_flag`` or
+            ``already_decided``.
 
         Raises:
             ValueError: If an argument is malformed: a story member named, or the

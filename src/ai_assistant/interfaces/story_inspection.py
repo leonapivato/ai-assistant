@@ -179,6 +179,8 @@ def refusal_text(refusal: StoryRefusal) -> str:  # noqa: C901 — one arm per me
             detail = f"{flag} was already decided"
         case StoryRefusalReason.NO_NOTES:
             detail = f"{story} holds none of the notes named"
+        case StoryRefusalReason.NOTE_NOT_HELD:
+            detail = f"{story} does not hold a note named"
         case _:  # pragma: no cover — exhaustive over a closed enumeration
             assert_never(refusal.reason)
     return f"Refused ({refusal.reason.value}): {detail}."

@@ -346,6 +346,10 @@ def _refusals() -> list[tuple[StoryRefusal, str]]:
             StoryRefusal(reason=StoryRefusalReason.NO_NOTES, story_id="story:x"),
             'story "story:x" holds none of the notes named',
         ),
+        (
+            StoryRefusal(reason=StoryRefusalReason.NOTE_NOT_HELD, story_id="story:x"),
+            'story "story:x" does not hold a note named',
+        ),
     ]
 
 
