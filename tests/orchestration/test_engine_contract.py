@@ -24,7 +24,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import count
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
 import pytest
 from assistant_engine_contract import (
@@ -746,6 +746,11 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
 
 class TestEngineContract(AssistantEngineContract):
     """The concrete engine, held to the shared contract."""
+
+    #: Wired without the phases' opt-in, so an event runs today's event-summary stage,
+    #: which raises where it cannot finish until the cutover deletes it (ADR-0313 §6:2).
+    #: An event the phases run returns its result: ``test_engine_phases``.
+    an_unfinished_event_raises: ClassVar[bool] = True
 
     @pytest.fixture
     async def chat_surface(self) -> AsyncIterator[ChatSurfaceSubject]:

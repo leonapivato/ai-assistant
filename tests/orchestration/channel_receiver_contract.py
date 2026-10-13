@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 from uuid import UUID, uuid4
 
 import pytest
@@ -129,6 +129,13 @@ async def read_episode(engine: AssistantEngine, address: str) -> EpisodicMemory:
 class ChannelReceiverContract:
     """Channel obligations shared by every AssistantEngine implementation."""
 
+    #: Whether an event whose activation cannot finish raises rather than returning its
+    #: result. ADR-0313 §4:5 makes it a result reading *couldn't finish*; today's event
+    #: path, which still answers where the phases' opt-in is unset, raises
+    #: ``ChannelProcessingTimeoutError`` until the cutover deletes it with the
+    #: event-summary stage (§6:2), so a binding over that path sets this.
+    an_unfinished_event_raises: ClassVar[bool] = False
+
     async def test_channel_speech_continues_and_preserves_identity(
         self, engine: AssistantEngine
     ) -> None:
@@ -243,18 +250,19 @@ class ChannelReceiverContract:
         assert "audio" not in processing.trigger.payload.model_dump()
         assert len((await engine.episodes(channel=identity)).items) == 2
 
-    async def test_channel_event_returns_a_summary_and_creates_no_conversation(
+    async def test_channel_event_returns_how_it_ended_and_creates_no_conversation(
         self,
         engine: AssistantEngine,
     ) -> None:
+        """ADR-0313 §4:3-§4:4: an event returns how its activation ended, nothing it wrote."""
         before = await engine.recent_conversations()
         result = await engine.receive(event_input(), reply=None, timeout=_BUDGET)
         assert result.channel == event_input().target
         assert isinstance(result.result, InformationalEventResult)
-        assert result.result.summary.strip()
+        assert result.result.ended is ActivationEnding.DONE
+        assert set(result.result.model_dump()) == {"kind", "ended"}
         assert await engine.recent_conversations() == before
         episode = await captured_episode(engine, result)
-        assert episode.outcome == result.result.summary
         processing = episode.processing_record
         assert processing is not None
         assert processing.status is ProcessingStatus.COMPLETED
@@ -266,13 +274,24 @@ class ChannelReceiverContract:
         assert processing.trigger.origin is InputOrigin.OUTSIDE
 
     @pytest.mark.parametrize("budget", [timedelta(0), timedelta(seconds=-1)])
-    async def test_channel_event_nonpositive_budget_is_a_typed_failure(
+    async def test_channel_event_whose_budget_runs_out_couldnt_finish(
         self,
         engine: AssistantEngine,
         budget: timedelta,
     ) -> None:
-        with pytest.raises(ChannelProcessingTimeoutError):
-            await engine.receive(event_input(), reply=None, timeout=budget)
+        """ADR-0313 §4:5: the timeout is the activation's budget, and running out is a result.
+
+        Today's event path still raises its typed failure in its place
+        (:attr:`an_unfinished_event_raises`); the episode is classified alike.
+        """
+        if self.an_unfinished_event_raises:
+            with pytest.raises(ChannelProcessingTimeoutError):
+                await engine.receive(event_input(), reply=None, timeout=budget)
+        else:
+            result = await engine.receive(event_input(), reply=None, timeout=budget)
+            assert result.channel == event_input().target
+            assert isinstance(result.result, InformationalEventResult)
+            assert result.result.ended is ActivationEnding.COULDNT_FINISH
         (summary,) = (await engine.episodes()).items
         episode = await read_episode(engine, summary.position.episode_id)
         assert episode.processing_record is not None

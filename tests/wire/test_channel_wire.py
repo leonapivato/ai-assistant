@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ai_assistant.core.errors import ChannelProcessingError, ChannelProcessingTimeoutError
-from ai_assistant.core.types import SpokenAudio
+from ai_assistant.core.types import (
+    ActivationEnding,
+    ChannelIdentity,
+    ChannelResult,
+    EpisodeCaptureReport,
+    InformationalEventResult,
+    SpokenAudio,
+)
+from ai_assistant.wire.codec import encode_projection, project
 from ai_assistant.wire.errors import UndecodableFrameError, error_payload, raise_from_payload
 from ai_assistant.wire.server import _decode_arguments
-from ai_assistant.wire.surface import _reaches_audio, audio_bearing
+from ai_assistant.wire.surface import _reaches_audio, audio_bearing, return_adapter
 
 
 def test_nested_audio_is_discovered() -> None:
@@ -101,3 +110,28 @@ def test_event_failure_types_round_trip_through_existing_error_reflection(kind: 
     payload = error_payload(kind("informational event processing failed"), max_bytes=1024)
     with pytest.raises(kind, match="informational event processing failed"):
         raise_from_payload(payload)
+
+
+@pytest.mark.parametrize("ended", list(ActivationEnding))
+def test_an_events_result_round_trips_with_how_it_ended(ended: ActivationEnding) -> None:
+    """ADR-0313 §4:4, §6:4: ``receive``'s event result carries ``ended`` and no summary."""
+    sent = ChannelResult(
+        channel=ChannelIdentity(channel_type="informational_event", instance_id="thermostat-1"),
+        capture=EpisodeCaptureReport(activation_id=None, episode_id=None, state="degraded"),
+        result=InformationalEventResult(ended=ended),
+    )
+    projected = json.loads(encode_projection(project(sent)))
+
+    assert projected["result"] == {"kind": "informational_event", "ended": ended.value}
+    assert return_adapter("receive").validate_python(projected) == sent
+
+
+def test_an_events_result_carrying_a_summary_does_not_validate() -> None:
+    """A peer at 97 sends ``summary`` and no ``ended``, which a peer at 98 refuses."""
+    older = {
+        "channel": {"channel_type": "informational_event", "instance_id": "thermostat-1"},
+        "capture": {"activation_id": None, "episode_id": None, "state": "degraded"},
+        "result": {"kind": "informational_event", "summary": "The thermostat entered eco mode."},
+    }
+    with pytest.raises(ValidationError):
+        return_adapter("receive").validate_python(older)

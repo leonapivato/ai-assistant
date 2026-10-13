@@ -14,6 +14,7 @@ from ai_assistant.core.errors import (
     AssistantError,
     ChannelProcessingTimeoutError,
     MemoryStoreConflictError,
+    ModelTimeoutError,
     OversizedValueError,
     TranscriptionFailedError,
 )
@@ -239,7 +240,8 @@ class FakeActivation:
         """Observe the fake's produced result before a size check can refuse it."""
         if isinstance(result, ChannelResult):
             if isinstance(result.result, InformationalEventResult):
-                self.response = result.result.summary
+                # ADR-0313 §4:3: an event's place takes no message, so it wrote none
+                # and nothing it wrote is returned; its episode keeps no outcome.
                 return
             result = result.result.outcome
         if isinstance(result, SpokenTurn):
@@ -274,7 +276,7 @@ class FakeActivation:
             return ProcessingStatus.INTERRUPTED, ProcessingReason.STOPPED
         if isinstance(failure, asyncio.CancelledError):
             return ProcessingStatus.INTERRUPTED, ProcessingReason.CANCELLED
-        if isinstance(failure, ChannelProcessingTimeoutError):
+        if isinstance(failure, ChannelProcessingTimeoutError | ModelTimeoutError):
             return ProcessingStatus.FAILED, ProcessingReason.TIMEOUT
         if isinstance(failure, TranscriptionFailedError):
             return ProcessingStatus.FAILED, ProcessingReason.TRANSCRIPTION_FAILED

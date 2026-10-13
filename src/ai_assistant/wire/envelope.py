@@ -2538,7 +2538,11 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     that names a note the story moved from does not hold: ``StoryRefusalReason``
 #:     gains ``note_not_held``, which the engine's story writes carry. A peer at 96
 #:     refuses the new member (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 97
+#: 98: ADR-0313 §4:4 takes ``summary`` off ``InformationalEventResult`` and gives it
+#:     ``ended``, an ``ActivationEnding``, which ``receive``'s ``ChannelResult`` carries
+#:     for an event: a peer at 97 refuses ``ended`` as extra and requires ``summary``,
+#:     and a result carrying ``summary`` does not validate here (§6:4, ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 98
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

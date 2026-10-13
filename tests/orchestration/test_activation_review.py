@@ -19,6 +19,7 @@ from ai_assistant.core.types import (
     TextChannelPayload,
 )
 from ai_assistant.orchestration.activation_state import ActivationScope
+from ai_assistant.orchestration.channels import ChannelProjection
 from ai_assistant.orchestration.engine import DrainPhase
 from ai_assistant.testing import FakeAssistantEngine
 
@@ -111,15 +112,24 @@ async def test_declined_routed_confirmation_preserves_the_supplied_timestamp() -
 
 
 async def test_fake_metadata_failure_does_not_bypass_the_event_output_bound() -> None:
+    """The fake measures an event's result against the bound with no capture to reserve.
+
+    ADR-0313 §4:4 leaves an event's result no free text, so an input inside the bound
+    can no longer carry a result past it through ``receive``; the check that would
+    refuse one is held to the bound directly, and the call itself records nothing.
+    """
     engine = FakeAssistantEngine(max_payload_bytes=512)
     engine.activation_id_factory = lambda: "bad"
-    with pytest.raises(OversizedValueError):
-        await engine.receive(
-            ChannelInput(
-                target=ChannelIdentity(channel_type="informational_event", instance_id="e" * 270),
-                payload=TextChannelPayload(text=""),
-            ),
-            reply=None,
-            timeout=timedelta(seconds=1),
-        )
+    target = ChannelIdentity(channel_type="informational_event", instance_id="e" * 270)
+    result = await engine.receive(
+        ChannelInput(target=target, payload=TextChannelPayload(text="")),
+        reply=None,
+        timeout=timedelta(seconds=1),
+    )
+    assert result.capture.state == "degraded"
     assert await engine.episode_memory.export() == []
+    oversized = result.model_copy(
+        update={"channel": target.model_copy(update={"instance_id": "e" * 600})}
+    )
+    with pytest.raises(OversizedValueError):
+        engine._check_channel_result(oversized, ChannelProjection("receive"))

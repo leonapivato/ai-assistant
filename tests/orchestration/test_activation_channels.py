@@ -13,10 +13,13 @@ from test_engine import Harness, NoStepPlanner
 
 from ai_assistant.core.errors import ChannelProcessingError, ModelError, OversizedValueError
 from ai_assistant.core.types import (
+    ActivationEnding,
     ChannelContext,
     ChannelContextItem,
+    ChannelIdentity,
     ChannelInput,
     EpisodicMemory,
+    InformationalEventResult,
     NewConversation,
     ProcessingReason,
     ProcessingStatus,
@@ -112,14 +115,36 @@ async def test_event_failure_or_cancellation_records_once_after_model_cleanup(
     assert "private diagnostic" not in episode.model_dump_json()
 
 
-async def test_oversized_event_keeps_the_complete_summary_and_output_failure() -> None:
+async def test_a_long_summary_is_kept_whole_and_no_longer_bounds_the_result() -> None:
+    """ADR-0313 §4:4: the summary is not returned, so its length no longer reaches the bound."""
     answer = "long summary " * 100
     harness = Harness(
         informational_events=InformationalEventStage(FakeModelProvider(answer)),
         max_payload_bytes=1024,
     )
+    result = await harness.engine.receive(event_input(), reply=None, timeout=_BUDGET)
+    assert isinstance(result.result, InformationalEventResult)
+    assert result.result.ended is ActivationEnding.DONE
+    (episode,) = await harness.memory.export()
+    assert isinstance(episode, EpisodicMemory)
+    assert episode.outcome == answer
+    assert episode.processing_record is not None
+    assert episode.processing_record.reason is ProcessingReason.RETURNED
+
+
+async def test_oversized_event_keeps_the_complete_summary_and_output_failure() -> None:
+    """A result the output bound refuses, by its channel's identity, still raises."""
+    answer = "long summary " * 100
+    harness = Harness(
+        informational_events=InformationalEventStage(FakeModelProvider(answer)),
+        max_payload_bytes=512,
+    )
+    supplied = ChannelInput(
+        target=ChannelIdentity(channel_type="informational_event", instance_id="e" * 270),
+        payload=TextChannelPayload(text="x"),
+    )
     with pytest.raises(OversizedValueError):
-        await harness.engine.receive(event_input(), reply=None, timeout=_BUDGET)
+        await harness.engine.receive(supplied, reply=None, timeout=_BUDGET)
     (episode,) = await harness.memory.export()
     assert isinstance(episode, EpisodicMemory)
     assert episode.outcome == answer
