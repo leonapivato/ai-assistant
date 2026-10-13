@@ -37,6 +37,7 @@ import argparse
 import bisect
 import hashlib
 import json
+import math
 import os
 import stat
 import sys
@@ -198,6 +199,15 @@ def _refuse_constant(name: str) -> object:
     raise ValueError(msg)
 
 
+def _finite(text: str) -> float:
+    """A JSON number as a float, refusing one too large to be finite, as ``1e400`` is."""
+    value = float(text)
+    if not math.isfinite(value):
+        msg = "a number too large to be finite"
+        raise ValueError(msg)
+    return value
+
+
 def parse_line(line: int, raw: bytes) -> Line:
     """Read one complete line (ADR-0316 §5).
 
@@ -213,7 +223,7 @@ def parse_line(line: int, raw: bytes) -> Line:
     try:
         # NaN and the infinities are not JSON: a line holding one is unreadable, and
         # would otherwise reach the page as a body its JSON parser refuses.
-        value = json.loads(raw, parse_constant=_refuse_constant)
+        value = json.loads(raw, parse_constant=_refuse_constant, parse_float=_finite)
     except _UNPARSABLE:
         return None
     if not isinstance(value, dict):
@@ -493,8 +503,11 @@ class _Timeline:
             elif entry.source in KNOWN_SOURCES and entry.kind == "given":
                 given.setdefault((entry.source, _pairing(entry)), []).append(entry)
             elif entry.source in KNOWN_SOURCES and entry.kind == "returned":
+                # The latest request still waiting is this one's: a request whose
+                # returned entry was never written (ADR-0314 §2:4) stays unanswered
+                # rather than taking a later round's response.
                 waiting = given.get((entry.source, _pairing(entry)))
-                self._returned(entry, waiting.pop(0) if waiting else None)
+                self._returned(entry, waiting.pop() if waiting else None)
             else:
                 self._point(entry, entry.kind, f"{entry.source} {entry.kind}", "unknown")
         for waiting in given.values():
@@ -1061,7 +1074,9 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _json(self, value: object, status: HTTPStatus = HTTPStatus.OK) -> None:
-        body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        # ASCII with escapes: a lone surrogate an entry holds is sent as its escape,
+        # which JSON admits, rather than failing to encode the whole response.
+        body = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("ascii")
         self._send(status, body, "application/json")
 
     def do_GET(self) -> None:  # the base class's name
@@ -1652,6 +1667,12 @@ SCRIPT: Final = r"""
       state.detailVersion = null;
       state.detail = null;
       closeDrawer();
+      // The previous activation's details come down at once: nothing of one
+      // activation stays clickable while another's load.
+      $("detail-body").hidden = true;
+      const empty = $("detail-empty");
+      empty.hidden = false;
+      empty.textContent = "Loading\u2026";
     }
     const hash = "#" + encodeURIComponent(id);
     if (location.hash !== hash) history.replaceState(null, "", hash);
@@ -1720,16 +1741,18 @@ SCRIPT: Final = r"""
   }
 
   // --- the timeline ------------------------------------------------------------------
+  // A step of 1, 2 or 5 times a power of ten, so no span draws more than seven ticks.
   function niceStep(span) {
-    const steps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 15000,
-                   30000, 60000, 120000, 300000, 600000];
-    for (const step of steps) if (span / step <= 7) return step;
-    return 1200000;
+    for (let base = 1; ; base *= 10) {
+      for (const m of [1, 2, 5]) if (span / (base * m) <= 7) return base * m;
+    }
   }
   function tickLabel(ms, step) {
     if (step < 1000) return ms + " ms";
-    if (step < 60000) return (ms / 1000) + " s";
-    return (ms / 60000) + " m";
+    if (step < 60000) return +(ms / 1000).toFixed(3) + " s";
+    if (step < 3600000) return +(ms / 60000).toFixed(3) + " m";
+    if (step < 86400000) return +(ms / 3600000).toFixed(3) + " h";
+    return +(ms / 86400000).toFixed(3) + " d";
   }
   function renderTimeline() {
     const d = state.detail;
@@ -1797,19 +1820,23 @@ SCRIPT: Final = r"""
     node.style.left = pos(item.start) + "%";
     let title = laneName(item.lane) + " · " + item.label;
     if (item.round) title += " · round " + item.round;
-    if (item.type === "span") {
-      title += " · " + (item.end === null ? "running" : duration(itemEnd - item.start));
+    const open = isOpen(state.detail.summary);
+    if (item.type === "span" && item.end !== null) {
+      title += " · " + duration(itemEnd - item.start);
+    } else if (item.type === "span") {
+      title += " · " + (open ? "running" : "no returned entry was recorded");
     }
     if (item.kind === "message") {
       title += " · allowed by authorizing; whether it was written is not recorded";
     }
-    if (item.tone && !["ok", "done", "end"].includes(item.tone)) {
+    if (item.tone && !["ok", "done", "end", "pending"].includes(item.tone)) {
       title += " · " + words(item.tone);
     }
     node.title = title;
+    const owner = state.detail.id;
     node.addEventListener("click", (event) => {
       event.stopPropagation();
-      openLines(title, item.lines);
+      openLines(owner, title, item.lines);
     });
     return node;
   }
@@ -1879,7 +1906,7 @@ SCRIPT: Final = r"""
         box.appendChild(el("div", "msg-note no", "message not allowed" + why));
       }
       const lines = [r.given, r.returned, r.authorizing].filter((one) => one !== undefined);
-      box.addEventListener("click", () => openLines("Round " + r.round, lines));
+      box.addEventListener("click", () => openLines(d.id, "Round " + r.round, lines));
       root.appendChild(box);
     }
   }
@@ -1894,7 +1921,7 @@ SCRIPT: Final = r"""
       row.appendChild(el("span", null, e.source));
       row.appendChild(el("span", null, e.kind));
       row.appendChild(el("span", null, e.round ? "round " + e.round : ""));
-      row.addEventListener("click", () => openLines(e.source + " " + e.kind, [e.line]));
+      row.addEventListener("click", () => openLines(d.id, e.source + " " + e.kind, [e.line]));
       root.appendChild(row);
     }
     if (d.truncated) {
@@ -1908,7 +1935,7 @@ SCRIPT: Final = r"""
 
   // --- details on click --------------------------------------------------------------
   let drawn = 0;
-  async function openLines(title, lines) {
+  async function openLines(id, title, lines) {
     // Each opening is one generation: a load still in flight from an earlier click,
     // on this activation or another, finds its generation gone and draws nothing.
     const generation = ++drawn;
@@ -1916,7 +1943,6 @@ SCRIPT: Final = r"""
     const body = $("drawer-body");
     clear(body);
     $("drawer").hidden = false;
-    const id = state.selected;
     for (const line of lines) {
       const holder = el("div");
       body.appendChild(holder);

@@ -574,3 +574,45 @@ def test_a_string_that_names_no_instant_is_no_instant() -> None:
     values: tuple[object, ...] = ("", "not a time", "2026-13-40T00:00:00", [], None, 7)
     for value in values:
         assert viewer.instant(value) is None
+
+
+def test_a_number_too_large_to_be_finite_makes_its_line_unreadable() -> None:
+    raw = '{"activation_id": "a", "source": "planning", "kind": "given", '
+    raw += f'"recorded_at": "{iso(0)}", "body": {{"x": 1e400}}}}'
+    assert viewer.parse_line(0, raw.encode()) is None
+
+
+def test_a_lone_surrogate_in_an_entry_is_served_not_fatal(server: Any, record: Path) -> None:
+    # The input as understanding's request carries it: JSON inside a message's content,
+    # here with a lone surrogate escaped in it.
+    content = '{"input": {"text": "before \\ud800 after"}}'
+    line = {
+        "activation_id": "lone",
+        "source": "understanding",
+        "kind": "given",
+        "recorded_at": iso(300_000),
+        "body": {"messages": [{"role": "user", "content": content}]},
+    }
+    (record / "lone.jsonl").write_text(json.dumps(line) + "\n")
+    shown = _summary(server.port, "lone")
+    assert shown["input"] == "before \ud800 after"
+    assert _summary(server.port, "act-1")["rounds"] == 2
+    entry = _get_json(server.port, "/api/entry?id=lone&line=0")
+    assert entry["body"]["messages"][0]["content"] == content
+
+
+def test_a_request_whose_response_was_never_written_keeps_no_later_response() -> None:
+    lines = [
+        viewer.Entry(0, "planning", "given", 1.0, "", {"messages": []}),
+        # Round 1's returned entry was never written (ADR-0314 §2:4).
+        viewer.Entry(1, "planning", "given", 5.0, "", {"messages": []}),
+        viewer.Entry(2, "planning", "returned", 6.0, "", {"response": {"parts": []}}),
+    ]
+    shown = viewer.timeline("a", lines)
+    calls = [one for one in shown["items"] if one["kind"] == "call"]
+    assert [(one["round"], one["lines"], one["tone"]) for one in calls] == [
+        (2, [1, 2], "ok"),
+        (1, [0], "pending"),
+    ]
+    assert "returned" not in shown["rounds"][0]
+    assert shown["rounds"][1]["returned"] == 2
