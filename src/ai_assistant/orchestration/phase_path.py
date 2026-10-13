@@ -305,6 +305,7 @@ if TYPE_CHECKING:
         SearchOutcome,
         StoryNote,
         StoryStanding,
+        StorySummaryState,
         ToolCall,
         ToolDefinition,
     )
@@ -775,7 +776,8 @@ class StoryReads:
             The view, or ``None`` where the store does not hold the story.
 
         Raises:
-            StoryStoreError: If the story store cannot be read.
+            StoryStoreError: If the story store cannot be read, or the story was written
+                while its notes were read, every time they were read.
             PlanningError: If the plan store cannot be read.
             MemoryStoreError: If the story's episodes cannot be read.
         """
@@ -797,10 +799,19 @@ class StoryReads:
         """One story's view, or ``None`` where the store no longer holds it.
 
         With ``older_page``, a full view: it also carries that page of the older notes.
+
+        Raises:
+            StoryStoreError: If the story store cannot be read, or, for a full view, the
+                story was written while its notes were read, every time they were read.
         """
         state = await self._stories.current_summary(story_id)
         if state is None:
             return None
+        taken_in: tuple[StoryNote, ...] | None = None
+        if older_page is not None and visibility.owner_records:
+            state, taken_in = await self._older(story_id, state, visibility)
+            if state is None:
+                return None
         standing = await story_standing(
             self._stories, self._memory, story_id, reader=audience, plans=self._plans
         )
@@ -827,8 +838,7 @@ class StoryReads:
         notes_shown = visibility.owner_records
         older: tuple[StoryNote, ...] | None = None
         more = 0
-        if older_page is not None and notes_shown:
-            taken_in = await self._older(story_id, state.pending_notes, visibility)
+        if older_page is not None and taken_in is not None:
             start = (older_page - 1) * OLDER_NOTES_PAGE
             older = taken_in[start : start + OLDER_NOTES_PAGE]
             more = max(0, len(taken_in) - start - OLDER_NOTES_PAGE)
@@ -852,33 +862,56 @@ class StoryReads:
         )
 
     async def _older(
-        self,
-        story_id: str,
-        pending: Sequence[StoryNote],
-        visibility: SummaryVisibility,
-    ) -> tuple[StoryNote, ...]:
-        """The notes ``story_id`` holds that no pending list carries, newest first.
+        self, story_id: str, state: StorySummaryState, visibility: SummaryVisibility
+    ) -> tuple[StorySummaryState | None, tuple[StoryNote, ...]]:
+        """The notes ``story_id`` holds that are not pending on it, newest first.
 
         The story store pages a story's notes in the order written; every page is read,
         as the check that a move's notes are held reads them, and the notes pending on
-        the story are left out, so a note is never in both lists (#2893).
+        the story are left out, so a note is never in both lists (#2893). The notes are
+        read between two reads of the summary's state, as the owner's summary read reads
+        them (:func:`~ai_assistant.orchestration.stories.owner_summary`), and kept only
+        where the two are one read, ``as_of`` included: every write that adds, carries
+        or takes in a note advances it (ADR-0300 §3:8), so a note written meanwhile is
+        never taken for one a tidy-up took in.
+
+        Returns:
+            The state the notes were read under, ``None`` where the story is no longer
+            held, and the older notes.
+
+        Raises:
+            StoryStoreError: If the store cannot be read, or the story was written
+                while its notes were read, every one of :data:`_OLDER_READS` times.
         """
-        pending_ids = {note.note_id for note in pending}
-        held: list[StoryNote] = []
-        cursor: int | None = None
-        while True:
-            page = await self._stories.notes(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
-            if page is None:
-                break
-            held.extend(
-                note
-                for note in page.notes
-                if note.note_id not in pending_ids and visibility.note(note)
-            )
-            if page.next_cursor is None:
-                break
-            cursor = page.next_cursor
-        return tuple(reversed(held))
+        for _ in range(_OLDER_READS):
+            held: list[StoryNote] = []
+            cursor: int | None = None
+            while True:
+                page = await self._stories.notes(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
+                if page is None:
+                    break
+                held.extend(page.notes)
+                if page.next_cursor is None:
+                    break
+                cursor = page.next_cursor
+            again = await self._stories.current_summary(story_id)
+            if again is None:
+                return None, ()
+            if again == state:
+                pending = {note.note_id for note in state.pending_notes}
+                return state, tuple(
+                    note
+                    for note in reversed(held)
+                    if note.note_id not in pending and visibility.note(note)
+                )
+            state = again
+        msg = "the story was written while its notes were read, every time they were read"
+        raise StoryStoreError(msg)
+
+
+#: How many times a full view reads a story's notes before it gives up on a story being
+#: written meanwhile, as the owner's summary read does.
+_OLDER_READS: Final = 5
 
 
 def _latest(standing: StoryStanding, count: int) -> list[str]:
