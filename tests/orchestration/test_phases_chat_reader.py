@@ -31,12 +31,14 @@ from phases_support import (
     working,
     written,
 )
+from structlog.testing import capture_logs
 from test_engine import AT, Harness
 from understanding_support import STATED_PROPOSAL, understanding_stage
 
-from ai_assistant.core.errors import ConversationStoreError
+from ai_assistant.core.errors import ConversationStoreError, ModelError
 from ai_assistant.core.types import (
     ActivationEnding,
+    ActivationStop,
     MessageAuthor,
     ProcessingStatus,
 )
@@ -51,6 +53,8 @@ from ai_assistant.testing.tool_calling import DEFAULT_ROUND_TEXT
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from ai_assistant.core.types import Message, OfferedTool, RoundResponse
 
 
 class _DeletedBeforeMarking(FakeConversationStore):
@@ -73,20 +77,78 @@ class _DeletedBeforeMarking(FakeConversationStore):
 class _FailsSecondMarking(FakeConversationStore):
     """A store whose second ``take_in`` call fails once, after the first committed."""
 
-    def __init__(self) -> None:
+    def __init__(self, error: Exception | None = None) -> None:
         super().__init__(now=lambda: AT)
         self.calls = 0
+        self._error = error
 
     async def take_in(
         self, conversation_id: str, *, positions: Sequence[int], activation_id: str
     ) -> tuple[int, ...]:
         self.calls += 1
         if self.calls == 2:
+            if self._error is not None:
+                raise self._error
             msg = "the store is busy"
             raise ConversationStoreError(msg)
         return await super().take_in(
             conversation_id, positions=positions, activation_id=activation_id
         )
+
+
+class _HeldSecondMarking(FakeConversationStore):
+    """A store whose second ``take_in`` call waits for :attr:`release`, then fails.
+
+    The first call commits, so the activation has marked messages before its phases
+    begin; :attr:`entered` is set once the second call is waiting.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.calls = 0
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def take_in(
+        self, conversation_id: str, *, positions: Sequence[int], activation_id: str
+    ) -> tuple[int, ...]:
+        self.calls += 1
+        if self.calls == 2:
+            self.entered.set()
+            await self.release.wait()
+            msg = "the store is busy"
+            raise ConversationStoreError(msg)
+        return await super().take_in(
+            conversation_id, positions=positions, activation_id=activation_id
+        )
+
+
+class _FailingRounds(FakeToolCallingCompleter):
+    """Planning whose every round raises ``error`` as itself, once the phases began."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self._error = error
+
+    async def respond(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[OfferedTool],
+        *,
+        model: str | None = None,
+    ) -> RoundResponse:
+        del messages, tools, model
+        raise self._error
+
+
+async def _backlog(store: FakeConversationStore, memory: FakeMemoryStore) -> str:
+    """A conversation holding more waiting messages than one marking call takes in."""
+    before = _idle(store, memory)
+    conversation = await open_conversation(before)
+    for n in range(1, 1002):
+        await before.engine.write_message(conversation, message=said(f"m-{n}", f"w{n}"))
+    await before.engine.aclose()
+    return conversation
 
 
 def _idle(store: FakeConversationStore, memory: FakeMemoryStore) -> Harness:
@@ -283,10 +345,6 @@ async def test_messages_written_while_one_runs_wait_and_are_taken_in_as_one_inpu
     assert taken[2] == taken[3] != taken[1]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#2900: a failure before the phases start writes no couldn't-finish message",
-)
 async def test_a_marking_that_fails_part_way_ends_as_couldnt_finish() -> None:
     """§9:1, §10:2: what was marked is consumed, so its activation's failure is written;
     what was not is taken in by the next activation."""
@@ -306,6 +364,80 @@ async def test_a_marking_that_fails_part_way_ends_as_couldnt_finish() -> None:
     assert taken[1] == taken[1000] != taken[1001]
     inputs = sorted((input_of(one) for one in await episodes(memory)), key=len)
     assert inputs[0] == "w1001"
+
+
+async def test_a_defect_marking_part_way_is_logged_at_error_and_still_answered() -> None:
+    """#2904: before the phases began too, a defect is told apart only in the log."""
+    store = _FailsSecondMarking(ValueError("the user's private words"))
+    memory = FakeMemoryStore(now=lambda: AT)
+    conversation = await _backlog(store, memory)
+    after = phases_harness(conversation_store=store, memory=memory)
+    with capture_logs() as logs:
+        await after.engine.start()
+        messages = await answered(after, conversation, 2)
+    replies = [one.text for one in messages if one.author is MessageAuthor.ASSISTANT]
+    assert replies == [COULDNT_FINISH, DEFAULT_ROUND_TEXT]
+    (line,) = [one for one in logs if one["log_level"] == "error"]
+    assert line["event"] == "chat_activation_failed"
+    assert (line["stage"], line["error"]) == ("chat_reader", "ValueError")
+    taken = await store.taken_in(conversation, positions=[1])
+    assert line["activation_id"] == taken[1]
+    assert "private words" not in repr(logs)
+
+
+@pytest.mark.parametrize("error", [ModelError("provider down"), ValueError("a bug")])
+async def test_a_failure_once_the_phases_began_writes_couldnt_finish_once(
+    error: Exception,
+) -> None:
+    """§9:1: the phases' run writes the message, and nothing writes it again (#2900)."""
+    harness = phases_harness(_FailingRounds(error))
+    conversation = await open_conversation(harness)
+    with capture_logs():
+        await harness.engine.write_message(conversation, message=said("m-1", "hi"))
+        await answered(harness, conversation, 1)
+    replies = [
+        one.text
+        for one in await written(harness, conversation)
+        if one.author is MessageAuthor.ASSISTANT
+    ]
+    assert replies == [COULDNT_FINISH]
+
+
+async def test_a_stop_before_the_phases_began_writes_nothing() -> None:
+    """ADR-0295 §3:3: a stopped activation writes no *couldn't finish*, however early."""
+    store = _HeldSecondMarking()
+    memory = FakeMemoryStore(now=lambda: AT)
+    conversation = await _backlog(store, memory)
+    after = phases_harness(conversation_store=store, memory=memory)
+    await after.engine.start()
+    await asyncio.wait_for(store.entered.wait(), SETTLE)
+    running = await working(after, conversation)
+
+    assert await after.engine.stop_activation(running) is ActivationStop.STOPPED
+    store.release.set()
+
+    # What the stopped activation did not mark is answered by the next (ADR-0295 §3:6),
+    # and that answer is the only message written.
+    messages = await answered(after, conversation, 1)
+    replies = [one.text for one in messages if one.author is MessageAuthor.ASSISTANT]
+    assert replies == [DEFAULT_ROUND_TEXT]
+    taken = await store.taken_in(conversation, positions=[1, 1001])
+    assert taken[1] == running != taken[1001]
+
+
+async def test_a_shutdown_before_the_phases_began_writes_nothing() -> None:
+    """§9:2: a cancellation is not a failure, so nothing is written for it."""
+    store = _HeldSecondMarking()
+    memory = FakeMemoryStore(now=lambda: AT)
+    conversation = await _backlog(store, memory)
+    after = phases_harness(
+        conversation_store=store, memory=memory, drain_timeout=timedelta(milliseconds=10)
+    )
+    await after.engine.start()
+    await asyncio.wait_for(store.entered.wait(), SETTLE)
+    await after.engine.aclose()
+
+    assert all(one.author is MessageAuthor.USER for one in await written(after, conversation))
 
 
 async def test_the_window_is_the_recent_transcript_each_message_keeping_its_author() -> None:
