@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any, Final
 
 import pytest
+from test_activation_state import _admitted
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
@@ -21,6 +22,9 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     Provenance,
     SemanticMemory,
     ToolCall,
@@ -29,6 +33,7 @@ from ai_assistant.core.types import (
     ToolResult,
 )
 from ai_assistant.orchestration.acting import OwnRecordsByCapability
+from ai_assistant.orchestration.activation_state import CURRENT_ACTIVATION, ActivationScope
 from ai_assistant.orchestration.planning import DELIBERATE_REPEAT, offered_tools
 from ai_assistant.orchestration.remembering import (
     EPISODE_ARGUMENT,
@@ -160,6 +165,58 @@ async def test_a_remember_call_writes_its_belief_at_the_derived_id() -> None:
     written = await store.get(remembered_record_id("effect:1"))
     assert isinstance(written, SemanticMemory)
     assert written.fact == "likes green tea"
+
+
+@pytest.mark.parametrize(
+    ("planned_over_withheld", "placed"),
+    [
+        pytest.param(False, Placement(), id="a clean supply: anyone"),
+        pytest.param(
+            True,
+            Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_AT),
+            id="a supply holding withheld content: the owner",
+        ),
+    ],
+)
+async def test_the_belief_is_placed_by_the_supply_its_round_was_planned_over(
+    *, planned_over_withheld: bool, placed: Placement
+) -> None:
+    """ADR-0217 §3:12, ADR-0204 §5:2: the current activation's round decides the reach."""
+    runner, store = await _runner()
+    state = _admitted()
+    state.planned_over_withheld = planned_over_withheld
+    token = CURRENT_ACTIVATION.set(ActivationScope(state))
+    try:
+        result = await runner.run(_call())
+    finally:
+        CURRENT_ACTIVATION.reset(token)
+
+    assert result.outcome is ToolOutcome.SUCCEEDED
+    written = await store.get(remembered_record_id("effect:1"))
+    assert written is not None
+    assert written.placement == placed
+
+
+async def test_a_belief_remembered_with_no_current_activation_has_the_default_placement() -> None:
+    """No activation is current, so no supply was given: the default (ADR-0204 §1:3)."""
+    runner, store = await _runner()
+
+    await runner.run(_call())
+
+    written = await store.get(remembered_record_id("effect:1"))
+    assert written is not None
+    assert written.placement == Placement()
+
+
+def test_the_proposal_carries_the_placement_it_is_given_and_the_default_otherwise() -> None:
+    """The placement is the runner's, set by rule; authorizing's proposal carries none."""
+    narrowed = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_AT)
+
+    given = remembered_proposal(_arguments(), record_id="r", at=_AT, placement=narrowed)
+    default = remembered_proposal(_arguments(), record_id="r", at=_AT)
+
+    assert given.proposed.placement == narrowed
+    assert default.proposed.placement == Placement()
 
 
 @pytest.mark.parametrize("kind", [MemoryDecisionKind.ASK_USER, MemoryDecisionKind.REJECT])
