@@ -96,8 +96,23 @@ is failure-tolerant (§4:12), and once decided, whatever came of it, its row doe
 answer again; ADR-0280 §4:6's guard ends a pass that would run it twice (ADR-0309
 §3:5). Its deadline is the composition root's, cut to what the pass has left.
 
-**Left to later lanes:** the story views and story calls,
-planning's look-ups, the follow-up, an event through the phases, and ADR-0309 §5:10's
+**The story views** (ADR-0307 §6:1, §6:3-§6:4, ADR-0300 §8). Before each round,
+:class:`StoryReads` reads the stories the activation belongs to, as the story store
+holds its links then, and gives planning each one's summary state, the episodes newer
+than its summary and its latest, the short views of the stories it is part of, and where
+its matter stands, what was done included from the plan store's effect records; and the
+short view of each story understanding cited as a referent that the activation is not
+in. Each is read under the pass's audience: the summary and notes by whether a record
+placed for the owner alone may be shown (ADR-0304 §4), the episodes and where the matter
+stands by the audience predicate (ADR-0282 §2:8). A story-store or plan-store failure
+shows planning that the stories could not be read, and planning goes on. A view resting
+on outside content, a marked summary or note, an episode resting on outside content or
+carrying evidence, or a marked moment of where a matter stands, sets the working set's
+``fetched_outside``, which reaches authorizing's ruling and planning's notes alike
+(ADR-0306 §4:5-§4:6).
+
+**Left to later lanes:** the story calls and the full view of a story by look-up,
+planning's other look-ups, the follow-up, an event through the phases, and ADR-0309 §5:10's
 evaluation of the episode's placement over what the activation was given, for which the
 thin path places the episode for the owner alone.
 
@@ -120,6 +135,8 @@ from ai_assistant.core.errors import (
     ClaimStopped,
     ConversationStoreError,
     ModelTimeoutError,
+    PlanningError,
+    StoryStoreError,
 )
 from ai_assistant.core.types import (
     RECALLED_ITEMS_MAX,
@@ -143,6 +160,9 @@ from ai_assistant.core.types import (
     SemanticMemory,
     SendOutcome,
     StageOutcome,
+    StoryMember,
+    StoryMemberKind,
+    StoryRelation,
     ToolFailure,
     ToolFailureKind,
     ToolOutcome,
@@ -188,9 +208,14 @@ from ai_assistant.orchestration.planning import (
     PlannedRound,
     PlanningInputs,
     PlanningStage,
+    PlanningStories,
+    PlanningStory,
 )
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.stories import episode_address
+from ai_assistant.orchestration.story_links import admitted_episodes
+from ai_assistant.orchestration.story_privacy import SummaryVisibility
+from ai_assistant.orchestration.story_standing import story_standing
 from ai_assistant.orchestration.understanding import fetch_held
 
 if TYPE_CHECKING:
@@ -200,6 +225,7 @@ if TYPE_CHECKING:
         MemoryStore,
         ModelProvider,
         PlanStore,
+        StoryStore,
         ToolCallingCompleter,
         ToolInvoker,
         ToolRegistry,
@@ -212,6 +238,7 @@ if TYPE_CHECKING:
         MessageReceipt,
         PlanningRound,
         SearchOutcome,
+        StoryStanding,
         ToolCall,
         ToolDefinition,
     )
@@ -219,6 +246,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.controller import ControllerStageRun
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.recall import RecallStage
+    from ai_assistant.orchestration.story_links import ShortView, StoryCandidates
     from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow, Windows
 
 __all__ = [
@@ -228,6 +256,7 @@ __all__ = [
     "PhasePath",
     "PhaseTools",
     "PhaseWorking",
+    "StoryReads",
     "authorized_round",
     "call_outcomes",
     "digested_evidence",
@@ -511,6 +540,213 @@ def _searched(outcome: SearchOutcome) -> ToolResult:
     if outcome.refusal.value in _UNKNOWN_SEARCHES:
         return ToolResult(outcome=ToolOutcome.INDETERMINATE, failure=failure)
     return ToolResult(outcome=ToolOutcome.FAILED, failure=failure)
+
+
+# --- the story views ---------------------------------------------------------------------
+
+
+class StoryReads:
+    """What planning is shown of stories, read under the pass's audience (ADR-0307 §6:1).
+
+    It holds the story store, the memory store the episodes are read from, the plan
+    store the effect records are read from, the short views' reader, and how many of a
+    story's episodes are shown. It reads; it writes nothing and calls no model.
+    """
+
+    def __init__(
+        self,
+        *,
+        stories: StoryStore,
+        memory: MemoryStore,
+        plans: PlanStore,
+        short_views: StoryCandidates,
+        episodes: int,
+    ) -> None:
+        """Wire the reads to their stores.
+
+        Args:
+            stories: The story store.
+            memory: The memory store the stories' episodes are fetched from.
+            plans: The plan store holding the effect records (ADR-0306 §6).
+            short_views: The short views' reader, understanding's (ADR-0300 §6:2).
+            episodes: How many of a story's latest episodes are shown, and of the
+                episodes newer than its summary (#2589's numbers).
+
+        Raises:
+            ValueError: If ``episodes`` is below 1.
+        """
+        if episodes < 1:
+            msg = "a story view shows at least one episode"
+            raise ValueError(msg)
+        self._stories = stories
+        self._memory = memory
+        self._plans = plans
+        self._short = short_views
+        self._episodes = episodes
+
+    async def read(
+        self,
+        activation_id: str,
+        *,
+        understanding: ActivationUnderstanding | None,
+        audience: TurnSupply,
+        owner_records: bool,
+    ) -> PlanningStories:
+        """The views of the activation's stories, and of the stories understanding cited.
+
+        Args:
+            activation_id: The activation.
+            understanding: Its latest recorded understanding, whose ``story``
+                referents name the stories cited (ADR-0304 §8).
+            audience: The pass's audience posture, which admits the episodes.
+            owner_records: Whether a record placed for the owner alone may be shown,
+                which decides the summaries and the notes (ADR-0304 §4).
+
+        Returns:
+            The views, or none with ``unreadable`` set where the story store or the
+            plan store could not be read.
+
+        Raises:
+            MemoryStoreError: If the episodes cannot be read, as planning's own fetch.
+        """
+        visibility = SummaryVisibility(owner_records=owner_records)
+        member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation_id)
+        try:
+            belongs = [
+                header.story_id
+                for header in await self._stories.stories_of(member)
+                if header.merged_into is None
+            ]
+            views = [
+                view
+                for story_id in belongs
+                if (view := await self._story(story_id, audience, visibility)) is not None
+            ]
+            shown = {*belongs, *(one.story_id for view in views for one in view.inherited)}
+            cited = await self._short.short_views(
+                [story_id for story_id in _cited(understanding) if story_id not in shown],
+                audience=audience,
+                visibility=visibility,
+            )
+        except StoryStoreError, PlanningError:
+            _log.warning("planning_stories_unreadable", stage="planning")
+            return PlanningStories(unreadable=True)
+        _log.info("planning_stories", stage="planning", stories=len(views), cited=len(cited))
+        return PlanningStories(stories=tuple(views), cited=cited)
+
+    async def _story(
+        self, story_id: str, audience: TurnSupply, visibility: SummaryVisibility
+    ) -> PlanningStory | None:
+        """One story's view, or ``None`` where the store no longer holds it."""
+        state = await self._stories.current_summary(story_id)
+        if state is None:
+            return None
+        standing = await story_standing(
+            self._stories, self._memory, story_id, reader=audience, plans=self._plans
+        )
+        parents: list[str] = (
+            []
+            if standing is None
+            else [
+                related.story_id
+                for related in standing.related
+                if related.relation is StoryRelation.PART_OF
+            ]
+        )
+        inherited = await self._short.short_views(parents, audience=audience, visibility=visibility)
+        latest = [] if standing is None else _latest(standing, self._episodes)
+        newer = [episode_address(activation) for activation in state.pending_episodes]
+        fetched = await admitted_episodes(self._memory, dict.fromkeys([*newer, *latest]), audience)
+        pending = sorted(
+            (record for address in newer if (record := fetched.get(address)) is not None),
+            key=lambda record: (record.occurred_at, record.id),
+            reverse=True,
+        )
+        summary = state.summary
+        shown = summary is not None and visibility.summary()
+        notes_shown = visibility.owner_records
+        return PlanningStory(
+            story_id=story_id,
+            tidied_at=None if summary is None else summary.written_at,
+            changes=len(state.pending_notes) + len(state.pending_episodes),
+            written=summary is not None,
+            lines=summary.lines if shown and summary is not None else (),
+            outside=shown and summary is not None and summary.outside,
+            withheld=summary is not None and not shown,
+            notes=tuple(note for note in state.pending_notes if visibility.note(note)),
+            notes_withheld=not notes_shown,
+            newer=tuple(pending[: self._episodes]),
+            latest=tuple(record for address in latest if (record := fetched.get(address))),
+            inherited=inherited,
+            standing=standing,
+        )
+
+
+def _latest(standing: StoryStanding, count: int) -> list[str]:
+    """The addresses of a story's latest ``count`` episodes the reader is shown.
+
+    Where the matter stands lists them most recent first, by each episode's own
+    instant, already under the reader's audience (ADR-0300 §8:1).
+    """
+    return [episode_address(moment.activation_id) for moment in standing.recent[:count]]
+
+
+def _cited(understanding: ActivationUnderstanding | None) -> list[str]:
+    """The stories understanding cited as referents (ADR-0304 §8:1), in order, once each."""
+    if understanding is None:
+        return []
+    referents = [
+        *understanding.meaning_referents,
+        *(one for reference in understanding.references for one in reference.referents),
+        *(one for relationship in understanding.relationships for one in relationship.referents),
+    ]
+    return list(
+        dict.fromkeys(
+            referent.id
+            for referent in referents
+            if referent.kind == "story" and referent.id is not None
+        )
+    )
+
+
+def _stories_external(given: PlanningStories) -> bool:
+    """Whether a story view planning is shown rests on outside content (ADR-0303 §3:6).
+
+    A marked summary or note shown, an episode shown resting on outside content or
+    carrying evidence, as the episode window's count (ADR-0308 §5:4-§5:5), or a marked
+    moment of where a matter stands.
+    """
+    shorts: list[ShortView] = [
+        *given.cited,
+        *(one for story in given.stories for one in story.inherited),
+    ]
+    summaries = any(story.outside for story in given.stories) or any(one.outside for one in shorts)
+    notes = any(
+        note.outside
+        for note in (
+            *(note for story in given.stories for note in story.notes),
+            *(note for one in shorts for note in one.notes),
+        )
+    )
+    episodes = (
+        *(record for story in given.stories for record in (*story.newer, *story.latest)),
+        *(record for one in shorts for record in one.episodes),
+    )
+    moments = any(
+        moment.outside
+        for story in given.stories
+        if story.standing is not None
+        for moment in story.standing.recent
+    )
+    return (
+        summaries
+        or notes
+        or moments
+        or any(
+            rests_on_recorded_external_content(record.provenance) or _carries_evidence(record)
+            for record in episodes
+        )
+    )
 
 
 # --- the working set ---------------------------------------------------------------------
@@ -1189,6 +1425,7 @@ class PhasePath:
         recall_cap: int,
         recall_digest_wait: timedelta,
         planning_model: str | None = None,
+        story_reads: StoryReads | None = None,
         now: Callable[[], datetime] = _utcnow,
         new_effect_id: Callable[[], str] = _new_effect_id,
     ) -> None:
@@ -1216,6 +1453,8 @@ class PhasePath:
                 included, cut to what the pass has left (ADR-0308 §4:11 names only a
                 result's; this one is the composition root's).
             planning_model: Optional ``"provider:model"`` override for planning.
+            story_reads: What planning is shown of stories (ADR-0307 §6:1), or
+                ``None`` where no story store is wired, which shows it none.
             now: The clock a step's start and an effect's claim are read from.
             new_effect_id: Mints the *couldn't finish* message's effect record id.
 
@@ -1259,6 +1498,7 @@ class PhasePath:
         self._memory = memory
         self._recall_cap = recall_cap
         self._recall_digest_wait = recall_digest_wait
+        self._story_reads = story_reads
         self._append: Callable[[], Awaitable[None]] | None = None
 
     def attach(self, append: Callable[[], Awaitable[None]]) -> None:
@@ -1472,9 +1712,14 @@ class PhasePath:
         try:
             async with asyncio.timeout_at(given.deadline):
                 found = await self._found(given, working)
+                stories = await self._stories(given, working)
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
-        if _fetched_external(fetched) or _found_external(found):
+        if (
+            _fetched_external(fetched)
+            or _found_external(found)
+            or (stories is not None and _stories_external(stories))
+        ):
             # Carried into planning's notes and authorizing's rulings from the first
             # round, not only into the frozen episode (ADR-0181 §4, ADR-0306 §4:6).
             working.fetched_outside = True
@@ -1493,6 +1738,7 @@ class PhasePath:
             capabilities=await self._tools.offered(self._capabilities),
             evidence=tuple(working.evidence),
             outside_content_read=working.read_outside_content,
+            stories=stories,
         )
         try:
             async with asyncio.timeout_at(given.deadline):
@@ -1529,6 +1775,21 @@ class PhasePath:
                 missing=len(working.found.missing),
             )
         return working.found
+
+    async def _stories(self, given: PhasePass, working: PhaseWorking) -> PlanningStories | None:
+        """What planning is shown of stories this round, read as the stores stand now.
+
+        Read before every round, so a later round is shown the stories as they stand
+        then, under the pass's audience (ADR-0307 §6:1, §6:4).
+        """
+        if self._story_reads is None:
+            return None
+        return await self._story_reads.read(
+            working.activation_id,
+            understanding=given.understanding,
+            audience=given.supply,
+            owner_records=working.owner_records,
+        )
 
     async def _recall_again(self, given: PhasePass, recall: RecallStage | None) -> StageResult:
         """Recall's second run, on what understanding found (ADR-0308 §2).

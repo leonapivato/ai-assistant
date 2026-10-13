@@ -20,7 +20,10 @@ for the owner alone (ADR-0303 §3:9, ADR-0304 §4:1); otherwise the view says th
 was withheld (§4:2), and says nothing about notes (ADR-0305 §4). Nothing behind a
 summary is read to decide it (§4:3). A
 ``StoryStoreError`` leaves no candidates, and the decision says the stories could not be
-read.
+read. The same reads give planning the short views it is shown
+(:meth:`StoryCandidates.short_views`, ADR-0307 §6:1): those of the stories a story the
+activation belongs to is part of, and of a story understanding cited, under the same
+minimum; planning renders them itself, since no phase module imports another.
 
 **The story-links stage** (:class:`StoryLinksStage`, §6:12-§6:14). Once understanding
 is a recorded version, the stage writes its links through the story store with the
@@ -81,6 +84,7 @@ __all__ = [
     "StoryCandidates",
     "StoryLinksDecision",
     "StoryLinksStage",
+    "admitted_episodes",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -109,6 +113,8 @@ class ShortView:
             for the owner alone may not be (ADR-0303 §3:9): the view carries none,
             and renders nothing about its notes — neither that it has none nor that
             any was withheld (ADR-0305 §4).
+        written: A summary has been written, whether or not it is shown, so a reader
+            can tell a summary of no line from one not written yet.
     """
 
     story_id: str
@@ -118,6 +124,7 @@ class ShortView:
     outside: bool = False
     withheld: bool = False
     notes_withheld: bool = False
+    written: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +200,7 @@ class _Read:
             # asked once, so a pass that may not be shown notes is told nothing of them.
             notes_withheld=not visibility.owner_records,
             episodes=tuple(record for id_ in latest if (record := fetched.get(id_)) is not None),
+            written=self.written,
         )
 
 
@@ -278,23 +286,9 @@ class StoryCandidates:
         except StoryStoreError:
             _log.warning("story_candidates_unreadable", stage="understanding")
             return Candidates(unreadable=True)
-        # ADR-0282 §2:5, §2:8: the reads that choose, and only admitted ids chosen. Every
-        # member is read once, through the audience predicate, to choose which members are
-        # the latest; nothing refused is chosen or recorded.
-        chosen_from = await self._admitted(
-            dict.fromkeys(address for read in reads for address in read.addresses()),
-            audience,
-        )
-        latest = [read.latest(chosen_from, episodes=self._episodes) for read in reads]
-        # §2:6-§2:8: the chosen ids fetched for their current versions, the predicate
-        # applied again, and what came back missing recorded beside what was fetched.
-        fetched = tuple(dict.fromkeys(id_ for ids in latest for id_ in ids))
-        held = await self._admitted(fetched, audience)
         # ADR-0304 §4: one question about the reader decides every note and the summary.
         visibility = SummaryVisibility(owner_records=admits_owner_placed(audience))
-        views = tuple(
-            read.view(visibility, ids, held) for read, ids in zip(reads, latest, strict=True)
-        )
+        views, fetched, held = await self._viewed(reads, audience, visibility)
         _log.info(
             "story_candidates",
             stage="understanding",
@@ -307,18 +301,63 @@ class StoryCandidates:
             missing=tuple(id_ for id_ in fetched if id_ not in held),
         )
 
-    async def _admitted(
-        self, addresses: Iterable[str], audience: TurnSupply
-    ) -> dict[str, EpisodicMemory]:
-        """The frozen episodes at ``addresses`` the audience admits, by address."""
-        wanted = list(addresses)
-        if not wanted:
-            return {}
-        found = without_open_episodes(await self._memory.get_many(wanted))
-        episodes = [
-            record for address in wanted if isinstance(record := found.get(address), EpisodicMemory)
+    async def short_views(
+        self,
+        story_ids: Sequence[str],
+        *,
+        audience: TurnSupply,
+        visibility: SummaryVisibility,
+    ) -> tuple[ShortView, ...]:
+        """The named stories as short views, for a reader other than understanding.
+
+        Read exactly as a candidate is (§6:2): the first lines of its summary and its
+        mark, its newest pending notes and its latest episodes by occurrence, fetched
+        and admitted under ADR-0282 §2:6-§2:8, the summary and notes under ADR-0304
+        §4's minimum as ``visibility`` answers it. Planning is shown these for the
+        stories a story it belongs to is part of, and for a story understanding cited
+        (ADR-0307 §6:1). A story the store does not hold is left out, and each story is
+        read once, in the order named.
+
+        Args:
+            story_ids: The stories, in the order they are shown.
+            audience: The pass's audience posture, which admits the episodes.
+            visibility: Whether the reader may be shown the summary and the notes.
+
+        Returns:
+            The short views, in the order named.
+
+        Raises:
+            StoryStoreError: If the story store cannot be read.
+            MemoryStoreError: If the episodes cannot be fetched.
+        """
+        reads = [
+            read for story_id in dict.fromkeys(story_ids) if (read := await self._read(story_id))
         ]
-        return {record.id: record for record in admitted_to_understanding(audience, episodes)}
+        views, _, _ = await self._viewed(reads, audience, visibility)
+        return views
+
+    async def _viewed(
+        self, reads: Sequence[_Read], audience: TurnSupply, visibility: SummaryVisibility
+    ) -> tuple[tuple[ShortView, ...], tuple[str, ...], dict[str, EpisodicMemory]]:
+        """The short views of ``reads``, with the ids fetched for them and what came back.
+
+        ADR-0282 §2:5, §2:8: the reads that choose, and only admitted ids chosen. Every
+        member is read once, through the audience predicate, to choose which members are
+        the latest; nothing refused is chosen or recorded. §2:6-§2:8: the chosen ids are
+        then fetched for their current versions, the predicate applied again.
+        """
+        chosen_from = await admitted_episodes(
+            self._memory,
+            dict.fromkeys(address for read in reads for address in read.addresses()),
+            audience,
+        )
+        latest = [read.latest(chosen_from, episodes=self._episodes) for read in reads]
+        fetched = tuple(dict.fromkeys(id_ for ids in latest for id_ in ids))
+        held = await admitted_episodes(self._memory, fetched, audience)
+        views = tuple(
+            read.view(visibility, ids, held) for read, ids in zip(reads, latest, strict=True)
+        )
+        return views, fetched, held
 
     async def _chosen(
         self, place: Sequence[str], window: Sequence[EpisodicMemory], recalled: Sequence[str]
@@ -383,6 +422,28 @@ class StoryCandidates:
                 break
             cursor = page.next_cursor
         return tuple(members)
+
+
+async def admitted_episodes(
+    memory: MemoryStore, addresses: Iterable[str], audience: TurnSupply
+) -> dict[str, EpisodicMemory]:
+    """The frozen episodes at ``addresses`` the audience admits, by address.
+
+    One ``MemoryStore.get_many``, an open episode left out (ADR-0286 §6) and the
+    audience predicate applied (ADR-0282 §2:8), so a reader is shown only what its pass
+    may be shown.
+
+    Raises:
+        MemoryStoreError: If the episodes cannot be read.
+    """
+    wanted = list(addresses)
+    if not wanted:
+        return {}
+    found = without_open_episodes(await memory.get_many(wanted))
+    episodes = [
+        record for address in wanted if isinstance(record := found.get(address), EpisodicMemory)
+    ]
+    return {record.id: record for record in admitted_to_understanding(audience, episodes)}
 
 
 # --- the story-links stage ------------------------------------------------------
