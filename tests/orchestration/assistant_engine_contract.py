@@ -72,6 +72,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, Protocol, get_type_hints
 
 import pytest
 from channel_receiver_contract import ChannelReceiverContract
+from chat_reader_lifecycle_contract import ChatReaderLifecycleContract
 from chat_surface_contract import ChatReaderContract, ChatSurfaceContract
 from episode_inspection_contract import EpisodeInspectionContract
 from pydantic import SecretStr
@@ -1426,6 +1427,7 @@ class AssistantEngineContract(
     StorySurfaceContract,
     ChatSurfaceContract,
     ChatReaderContract,
+    ChatReaderLifecycleContract,
     ABC,
 ):
     """What every ``AssistantEngine`` implementation must do."""
