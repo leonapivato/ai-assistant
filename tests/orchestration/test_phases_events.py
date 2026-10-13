@@ -14,14 +14,15 @@ the episode once, with no private diagnostic in it.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
 from channel_receiver_contract import event_input
-from phases_support import entries, phases_harness, processing
+from phases_support import SETTLE, entries, phases_harness, processing
 from test_engine import AT
-from understanding_support import recall_stage
+from understanding_support import recall_stage, understanding_stage
 
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
@@ -39,7 +40,7 @@ from ai_assistant.core.types import (
     StageOutcome,
     TextChannelPayload,
 )
-from ai_assistant.testing import FakeMemoryStore, FakeToolCallingCompleter
+from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, FakeToolCallingCompleter
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -57,12 +58,14 @@ _DONE = StageOutcome.DONE
 class _Controlled(FakeToolCallingCompleter):
     """A planning barrier with observable cancellation cleanup."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, arrivals: int = 1) -> None:
         super().__init__()
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.cleaned = asyncio.Event()
         self.error: BaseException | None = None
+        self._arrivals = arrivals
+        self._arrived = 0
 
     async def respond(
         self,
@@ -71,7 +74,10 @@ class _Controlled(FakeToolCallingCompleter):
         *,
         model: str | None = None,
     ) -> RoundResponse:
-        self.entered.set()
+        self._arrived += 1
+        if self._arrived >= self._arrivals:
+            # Set once ``arrivals`` calls are all held at the barrier.
+            self.entered.set()
         try:
             await self.release.wait()
             if self.error is not None:
@@ -171,8 +177,20 @@ async def test_the_drain_waits_for_an_admitted_event_and_refuses_new_work() -> N
 
 
 async def test_overlapping_events_keep_separate_identity_context_and_receipts() -> None:
-    completer = _Controlled()
-    harness = phases_harness(completer)
+    """Two events in flight at once: each is processed over its own input and context.
+
+    Both are held in planning together before either is released, so what each stage
+    was handed is read while the other runs, not after it ended.
+    """
+
+    def meaning_of(messages: Sequence[Message]) -> str:
+        """Understanding's reading names the input it was handed, so it can be traced."""
+        text = json.loads(messages[1].content)["input"]["text"]
+        return json.dumps({"meaning": f"It reported {text}.", "meaning_ground": "stated"})
+
+    completer = _Controlled(arrivals=2)
+    understood = FakeModelProvider(meaning_of)
+    harness = phases_harness(completer, understanding=understanding_stage(model=understood))
 
     async def receive(text: str) -> ChannelResult:
         supplied = event_input().model_copy(
@@ -185,10 +203,23 @@ async def test_overlapping_events_keep_separate_identity_context_and_receipts() 
 
     first = asyncio.create_task(receive("first"))
     second = asyncio.create_task(receive("second"))
-    await completer.entered.wait()
+    await asyncio.wait_for(completer.entered.wait(), SETTLE)
+    # Both are in planning at once, and each was understood over its own input and
+    # its own supplied history, never the other's.
+    assert len(completer.calls) == 0  # neither round has been answered yet
+    seen = sorted(
+        (sent["input"]["text"], [item.get("text") for item in sent["channel_window"]])
+        for sent in (json.loads(call.messages[1].content) for call in understood.calls)
+    )
+    assert seen == [("first", ["first"]), ("second", ["second"])]
     completer.release.set()
     results = await asyncio.gather(first, second)
     assert len({result.capture.activation_id for result in results}) == 2
+    # And each planning round was handed the understanding of its own input alone.
+    planned = sorted(
+        json.loads(call.messages[1].content)["understanding"]["meaning"] for call in completer.calls
+    )
+    assert planned == ["It reported first.", "It reported second."]
     for result, expected in zip(results, ("first", "second"), strict=True):
         assert result.capture.episode_id is not None
         episode = await harness.memory.get(result.capture.episode_id)
