@@ -26,6 +26,15 @@ past the bound either.
 **Owner-only** (§2:3). The directory is created ``0700`` and each file ``0600``, and a
 directory found wider is narrowed before a file is written into it.
 
+**Through the directory it verified.** The directory is opened once per operation,
+refusing a symbolic link in its place, and every file is reached relative to that
+descriptor: a name swapped for a link between a check and a use cannot send a write, or
+the sweep's deletions, anywhere else.
+
+**A line lands whole or not at all** (§6:2). An append that fails part-way — a full
+disk — is cut back to the length the file had before it, so the next line never joins
+a torn one.
+
 **A failure to write never propagates** (§2:4): it is logged naming the activation, the
 source and the failure's class, and never any content. A cancellation reaching a write
 waits for the line to land whole, then is re-raised (§2:5).
@@ -66,6 +75,12 @@ MIN_FILE_BYTES: Final = 4096
 _DIRECTORY_MODE: Final = 0o700
 _FILE_MODE: Final = 0o600
 _OPEN_FLAGS: Final = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+#: The directory itself, opened for its listing and as the anchor of every file
+#: operation; never a symbolic link in its place.
+_DIRECTORY_FLAGS: Final = os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+#: The one write every append goes through, named so a test can make it fail part-way.
+_write: Callable[[int, memoryview], int] = os.write
 
 #: What a refused or unreadable id is logged as, since it may carry anything.
 _UNREADABLE: Final = "unreadable"
@@ -151,36 +166,53 @@ class FileDiagnosticRecord:
         if name in self._truncated:
             msg = "the activation's file is marked truncated; nothing more is written to it"
             raise DiagnosticRecordError(msg)
-        self._prepare_directory()
-        descriptor = os.open(self._directory / name, _OPEN_FLAGS, _FILE_MODE)
+        directory = self._opened_directory(create=True)
         try:
-            os.fchmod(descriptor, _FILE_MODE)
-            size = os.fstat(descriptor).st_size
-            if size + len(line) + len(marker) <= self._file_bytes:
-                _write_all(descriptor, line)
-                return
-            if size + len(marker) <= self._file_bytes:
-                _write_all(descriptor, marker)
-            self._truncated.add(name)
+            descriptor = os.open(name, _OPEN_FLAGS, _FILE_MODE, dir_fd=directory)
+            try:
+                os.fchmod(descriptor, _FILE_MODE)
+                size = os.fstat(descriptor).st_size
+                if size + len(line) + len(marker) <= self._file_bytes:
+                    _append_whole(descriptor, line, size)
+                    return
+                if size + len(marker) <= self._file_bytes:
+                    _append_whole(descriptor, marker, size)
+                self._truncated.add(name)
+            finally:
+                os.close(descriptor)
         finally:
-            os.close(descriptor)
+            os.close(directory)
         msg = "the entry would take the activation's file past its bound, which is now marked"
         raise DiagnosticRecordError(msg)
 
-    def _prepare_directory(self) -> None:
-        """Create the directory owner-only, or narrow one found wider (§2:3).
+    def _opened_directory(self, *, create: bool) -> int:
+        """The record's directory, opened, verified a directory and owner-only (§2:3).
+
+        Args:
+            create: Create it ``0700`` where it is missing, and narrow it where it is
+                found wider, as a write does; a sweep does neither.
+
+        Returns:
+            A descriptor on it, which the caller closes.
 
         Raises:
-            DiagnosticRecordError: If the name is taken by something not a directory.
+            FileNotFoundError: If it is missing and ``create`` is not set.
+            DiagnosticRecordError: If its name is taken by a symbolic link or by
+                anything not a directory.
         """
-        with contextlib.suppress(FileExistsError):
-            self._directory.mkdir(mode=_DIRECTORY_MODE)
-        found = self._directory.lstat()
-        if not stat.S_ISDIR(found.st_mode):
-            msg = "the diagnostic record's directory is not a directory"
-            raise DiagnosticRecordError(msg)
-        if stat.S_IMODE(found.st_mode) != _DIRECTORY_MODE:
-            self._directory.chmod(_DIRECTORY_MODE)
+        if create:
+            with contextlib.suppress(FileExistsError):
+                self._directory.mkdir(mode=_DIRECTORY_MODE)
+        try:
+            descriptor = os.open(self._directory, _DIRECTORY_FLAGS)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            msg = "the diagnostic record's directory is a symbolic link or not a directory"
+            raise DiagnosticRecordError(msg) from exc
+        if create and stat.S_IMODE(os.fstat(descriptor).st_mode) != _DIRECTORY_MODE:
+            os.fchmod(descriptor, _DIRECTORY_MODE)
+        return descriptor
 
     # --- the retention seam ---------------------------------------------------
 
@@ -204,28 +236,40 @@ class FileDiagnosticRecord:
             return await _run_to_completion(self._purge_sync, horizon)
 
     def _purge_sync(self, horizon_ns: int) -> int:
-        """Unlink each regular file last written before ``horizon_ns``; count them."""
+        """Unlink each regular file last written before ``horizon_ns``; count them.
+
+        Every name is taken relative to the verified directory, and a symbolic link in
+        the directory's place refuses the sweep rather than sweeping where it points.
+        """
         try:
-            with os.scandir(self._directory) as listing:
-                entries = list(listing)
+            directory = self._opened_directory(create=False)
         except FileNotFoundError:
             return 0
+        try:
+            return self._swept(directory, horizon_ns)
+        finally:
+            os.close(directory)
+
+    def _swept(self, directory: int, horizon_ns: int) -> int:
+        try:
+            with os.scandir(directory) as listing:
+                names = [one.name for one in listing]
         except OSError as exc:
             msg = "the diagnostic record's directory could not be listed"
             raise DiagnosticRecordError(msg) from exc
         deleted = 0
-        for found in entries:
+        for name in names:
             try:
-                status = found.stat(follow_symlinks=False)
+                status = os.stat(name, dir_fd=directory, follow_symlinks=False)
                 if not stat.S_ISREG(status.st_mode) or status.st_mtime_ns >= horizon_ns:
                     continue
-                Path(found.path).unlink()
+                os.unlink(name, dir_fd=directory)
             except FileNotFoundError:
                 continue
             except OSError as exc:
                 msg = "a file in the diagnostic record could not be deleted"
                 raise DiagnosticRecordError(msg) from exc
-            self._truncated.discard(found.name)
+            self._truncated.discard(name)
             deleted += 1
         return deleted
 
@@ -264,11 +308,25 @@ def _marker(activation_id: str, at: datetime) -> bytes:
     return (json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8")
 
 
+def _append_whole(descriptor: int, data: bytes, size: int) -> None:
+    """Append all of ``data``, or cut the file back to ``size`` and raise (§6:2).
+
+    Raises:
+        OSError: If the append failed, once the file is its old length again.
+    """
+    try:
+        _write_all(descriptor, data)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.ftruncate(descriptor, size)
+        raise
+
+
 def _write_all(descriptor: int, data: bytes) -> None:
     """Write all of ``data`` at the file's end, as one append where the system allows."""
     view = memoryview(data)
     while view:
-        written = os.write(descriptor, view)
+        written = _write(descriptor, view)
         view = view[written:]
 
 

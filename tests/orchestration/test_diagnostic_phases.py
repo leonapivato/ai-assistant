@@ -12,6 +12,7 @@ Every case binds an activation itself, as the controller does for a pass (§5:4)
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from datetime import UTC, datetime, timedelta
@@ -379,11 +380,64 @@ async def test_digesting_writes_each_part_s_prompt_its_reply_and_the_items_dropp
         )
 
     given, returned = sink.of(DiagnosticSource.DIGESTING)
-    assert _body(given) == {"messages": [one.model_dump(mode="json") for one in provider.calls[0]]}
+    about = {"result": "result:1", "question": "when", "part": 1, "parts": 1}
+    assert _body(given) == {
+        **about,
+        "messages": [one.model_dump(mode="json") for one in provider.calls[0]],
+    }
     assert _body(returned) == {
+        **about,
         "reply": reply,
         "dropped": [{"source": "D9", "text": "made up"}],
     }
+
+
+async def test_parts_run_in_parallel_are_told_apart_however_they_finish() -> None:
+    """Each part's labels start at ``D1``, so its entries name the digest and the part."""
+    later_answered = asyncio.Event()
+
+    class _Reversed:
+        """Echoes which piece it read, the first piece answering last."""
+
+        async def complete(
+            self, messages: Sequence[Message], *, model: str | None = None
+        ) -> Message:
+            del model
+            piece = json.loads(messages[-1].content)["records"][0]["part"]
+            if piece.startswith("1 of"):
+                await later_answered.wait()
+            else:
+                later_answered.set()
+            evidence = [{"text": f"read {piece}", "source": "D1"}]
+            return Message(role=Role.ASSISTANT, content=json.dumps({"evidence": evidence}))
+
+    held = HeldResult(result_id="result:2", round_id="r1", decision_id="d1", content="x" * 150)
+    sink = FakeDiagnosticSink()
+    stage = DigestingStage(
+        provider=_Reversed(), recorder=_DigestRecorder(), part_chars=60, now=_now, diagnostics=sink
+    )
+
+    with diagnosed_activation(_ACTIVATION, clock=_now):
+        await stage.digest_result(
+            held, question="what", labels=ActivationLabels(), deadline=_AT + timedelta(seconds=30)
+        )
+
+    entries = [_body(one) for one in sink.of(DiagnosticSource.DIGESTING)]
+    read = {
+        one["part"]: json.loads(one["reply"])["evidence"][0]["text"]
+        for one in entries
+        if "reply" in one
+    }
+    shown = {
+        one["part"]: json.loads(one["messages"][-1]["content"])["records"][0]["part"]
+        for one in entries
+        if "messages" in one
+    }
+    assert len(read) == len(shown) == 3
+    assert {part: f"read {piece}" for part, piece in shown.items()} == read
+    returned = [one["part"] for one in entries if "reply" in one]
+    assert returned[-1] == 1, "the first part answered last, and is still matched"
+    assert {(one["result"], one["parts"]) for one in entries} == {("result:2", 3)}
 
 
 async def test_a_failed_digest_writes_the_part_s_reply_and_the_digest_s_reason() -> None:
@@ -396,8 +450,16 @@ async def test_a_failed_digest_writes_the_part_s_reply_and_the_digest_s_reason()
 
     returned = [_body(one) for one in sink.of(DiagnosticSource.DIGESTING, DiagnosticKind.RETURNED)]
     assert returned == [
-        {"reply": "not json", "dropped": [], "failure": "unparsable"},
-        {"digest": "failed", "reason": "unparsable"},
+        {
+            "result": "result:1",
+            "question": "when",
+            "part": 1,
+            "parts": 1,
+            "reply": "not json",
+            "dropped": [],
+            "failure": "unparsable",
+        },
+        {"result": "result:1", "question": "when", "digest": "failed", "reason": "unparsable"},
     ]
 
 
