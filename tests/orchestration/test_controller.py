@@ -72,6 +72,8 @@ class _Phases:
     """A constructed phase working set: every decision a plain field (``PhaseFacts``)."""
 
     recalled_again: bool = False
+    recall_kept_outside: bool = False
+    recall_digested: bool = False
     rounds: int = 0
     round_limit: int = 3
     latest_round: str | None = None
@@ -896,7 +898,7 @@ def _phase_due(phases: _Phases, facts: _Facts = _PHASE_PASS) -> Rule:
 
 
 def test_the_phase_table_keeps_the_first_rows_and_adds_the_rounds_in_order() -> None:
-    """§3's rows the phases have: row 7, recall's digest, is a later lane's."""
+    """§3's rows the phases have, row 7, recall's digest, after the second run."""
     assert [rule.name for rule in PHASE_RULES] == [
         ControllerRule.CONVERSATION_UNRESOLVED,
         ControllerRule.WINDOWS_UNASSEMBLED,
@@ -904,6 +906,7 @@ def test_the_phase_table_keeps_the_first_rows_and_adds_the_rounds_in_order() -> 
         ControllerRule.NOT_UNDERSTOOD,
         ControllerRule.STORY_LINKS_UNRECORDED,
         ControllerRule.UNDERSTOOD_NOT_RECALLED,
+        ControllerRule.RECALL_UNDIGESTED,
         ControllerRule.FIRST_ROUND_DUE,
         ControllerRule.ROUND_UNAUTHORIZED,
         ControllerRule.ROUND_AUTHORIZED,
@@ -917,8 +920,9 @@ def test_the_phase_table_keeps_the_first_rows_and_adds_the_rounds_in_order() -> 
 
 
 def test_todays_table_is_unchanged_where_the_phases_are_not_wired() -> None:
-    """ADR-0309 §2:6: the second run's row is the phases' table's alone."""
+    """ADR-0309 §2:6: the second run's row and recall's digest's are the phases' alone."""
     assert ControllerRule.UNDERSTOOD_NOT_RECALLED not in {rule.name for rule in ACTIVATION_RULES}
+    assert ControllerRule.RECALL_UNDIGESTED not in {rule.name for rule in ACTIVATION_RULES}
     assert [rule.name for rule in ACTIVATION_RULES][3:6] == [
         ControllerRule.WINDOWS_UNASSEMBLED,
         ControllerRule.NOT_RECALLED,
@@ -1277,4 +1281,112 @@ async def test_a_pass_that_would_run_recall_a_third_time_is_guarded() -> None:
         ControllerRule.NOT_RECALLED,
         ControllerRule.UNDERSTOOD_NOT_RECALLED,
         ControllerRule.STAGE_REPEATED,
+    ]
+
+
+# --- ADR-0308 §4:5-§4:6, ADR-0309 §3's row 7: recall's digest ---------------------------
+
+
+_RECALLED_OUTSIDE: Final = _Phases(recalled_again=True, recall_kept_outside=True)
+
+
+def test_recall_digest_is_due_once_the_second_run_has_decided_and_kept_outside_records() -> None:
+    """§4:5: after the second run's row, before ``first_round_due``."""
+    rule = _phase_due(_RECALLED_OUTSIDE)
+    assert (rule.name, rule.makes_due, rule.beside) == (
+        ControllerRule.RECALL_UNDIGESTED,
+        ControllerStage.DIGESTING,
+        None,
+    )
+    # The second run's row is read first: no digest before the second-run decision.
+    facts = replace(_PHASE_PASS, recall_wired=True, recall_decided=True)
+    assert (
+        _phase_due(replace(_RECALLED_OUTSIDE, recalled_again=False), facts).name
+        is ControllerRule.UNDERSTOOD_NOT_RECALLED
+    )
+
+
+@pytest.mark.parametrize(
+    "phases",
+    [
+        # No second-run decision: recall's not wired, so neither run row answers.
+        _Phases(recall_kept_outside=True),
+        # Neither run kept a memory record whose source is outside.
+        _Phases(recalled_again=True),
+        # Recall's digest is recorded, whatever came of it.
+        replace(_RECALLED_OUTSIDE, recall_digested=True),
+    ],
+)
+def test_recall_digest_is_not_due_otherwise_and_the_first_round_follows(phases: _Phases) -> None:
+    assert _phase_due(phases).name is ControllerRule.FIRST_ROUND_DUE
+
+
+def test_the_first_round_waits_for_recall_digest() -> None:
+    """§4:6, ADR-0307 §8:6: the second run has finished only once its digest is recorded."""
+    assert _phase_due(_RECALLED_OUTSIDE).name is ControllerRule.RECALL_UNDIGESTED
+    digested = replace(_RECALLED_OUTSIDE, recall_digested=True)
+    assert _phase_due(digested).name is ControllerRule.FIRST_ROUND_DUE
+
+
+async def test_recall_digest_runs_once_before_the_first_round_then_digesting_beside_acting() -> (
+    None
+):
+    """ADR-0309 §3:5: once for recall's digest, and once per round beside acting."""
+    recall = _Recalling()
+    digesting = _PhaseStage(ControllerStage.DIGESTING, {"recall_digested": True})
+    record = StageRecord()
+    await _phase_controller(
+        recall,
+        digesting,
+        _PhaseStage(ControllerStage.PLANNING, dict(_PLANS_A_CALL)),
+        _PhaseStage(ControllerStage.AUTHORIZING, dict(_ALLOWS_A_SEARCH)),
+        _PhaseStage(ControllerStage.ACTING, {"latest_acted": True}),
+    ).run(
+        replace(_PHASE_PASS, recall_wired=True, phases=_Phases(recall_kept_outside=True)),
+        record,
+    )
+    assert digesting.runs == 2
+    assert _shape(record) == [
+        (ControllerStage.RECALL, ControllerRule.NOT_RECALLED, StageOutcome.DONE),
+        (ControllerStage.RECALL, ControllerRule.UNDERSTOOD_NOT_RECALLED, StageOutcome.DONE),
+        (ControllerStage.DIGESTING, ControllerRule.RECALL_UNDIGESTED, StageOutcome.DONE),
+        (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE, StageOutcome.DONE),
+        (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED, StageOutcome.DONE),
+        (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED, StageOutcome.DONE),
+        (ControllerStage.DIGESTING, ControllerRule.ROUND_AUTHORIZED, StageOutcome.DONE),
+        (ControllerStage.END, ControllerRule.NOTHING_DUE, StageOutcome.DONE),
+    ]
+
+
+async def test_a_pass_that_would_run_recall_digest_again_is_guarded() -> None:
+    """§3:5: digesting runs once for recall's digest; ADR-0280 §4:6's guard ends a second."""
+    stuck = _PhaseStage(ControllerStage.DIGESTING)
+    planning = _PhaseStage(ControllerStage.PLANNING)
+    record = StageRecord()
+    await _phase_controller(stuck, planning).run(
+        replace(_PHASE_PASS, phases=replace(_RECALLED_OUTSIDE)), record
+    )
+    assert (stuck.runs, planning.runs) == (1, 0)
+    assert [entry.due for entry in record.entries] == [
+        ControllerRule.RECALL_UNDIGESTED,
+        ControllerRule.STAGE_REPEATED,
+    ]
+
+
+async def test_a_failed_recall_digest_tolerated_goes_on_to_the_first_round() -> None:
+    """§4:12: digesting is failure-tolerant; its decision is held, so the row is done."""
+    digesting = _PhaseStage(
+        ControllerStage.DIGESTING,
+        {"recall_digested": True},
+        result=StageResult(StageOutcome.FAILED, PlanningError("unread"), tolerated=True),
+    )
+    planning = _PhaseStage(ControllerStage.PLANNING, {"rounds": 1, "latest_round": "r1"})
+    record = StageRecord()
+    await _phase_controller(digesting, planning).run(
+        replace(_PHASE_PASS, phases=replace(_RECALLED_OUTSIDE)), record
+    )
+    assert _shape(record) == [
+        (ControllerStage.DIGESTING, ControllerRule.RECALL_UNDIGESTED, StageOutcome.FAILED),
+        (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE, StageOutcome.DONE),
+        (ControllerStage.END, ControllerRule.NOTHING_DUE, StageOutcome.DONE),
     ]

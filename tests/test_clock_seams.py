@@ -642,6 +642,7 @@ async def _phase_path(now: Clock) -> None:
         part_chars=50,
         memory=FakeMemoryStore(),
         recall_cap=1,
+        recall_digest_wait=timedelta(seconds=5),
         now=now,
     )
     working = PhaseWorking(

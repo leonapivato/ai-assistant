@@ -80,10 +80,23 @@ planning fetches both runs' kept ids in one read, the audience predicate applied
 (ADR-0282 §2:4-§2:8), and holds what came back. A found episode is shown by its records
 under its label with the labels of the stories it is in; a found memory record is shown
 only where its source is not outside (ADR-0306 §5:16). Every outside memory record is
-withheld: it reaches planning only as recall's digest's evidence, which is a later
-lane's.
+withheld: it reaches planning only as recall's digest's evidence.
 
-**Left to later lanes:** recall's digest (row 7), the story views and story calls,
+**Recall's digest** (ADR-0308 §4:4-§4:6, ADR-0309 §3's row 7). Once the second run has
+decided, the ids of every memory record either run kept whose source is outside are
+held beside its decision, and where there are any, ``recall_undigested`` makes
+``digesting`` due before planning's first round. The controller runs one stage per
+name, so :meth:`PhasePath.stages` hands it one ``digesting`` stage: recall's digest
+while that row's facts hold, and a round's digests beside acting otherwise. Recall's
+digest fetches its records by id through the same read planning's fetch uses
+(ADR-0282 §2:4-§2:8), holds what it fetched and what came back missing, and answers the
+latest understanding's meaning; its evidence reaches planning under each record's own
+label, and a failed one tells planning it could not read recall's outside records. It
+is failure-tolerant (§4:12), and once decided, whatever came of it, its row does not
+answer again; ADR-0280 §4:6's guard ends a pass that would run it twice (ADR-0309
+§3:5). Its deadline is the composition root's, cut to what the pass has left.
+
+**Left to later lanes:** the story views and story calls,
 planning's look-ups, the follow-up, an event through the phases, and ADR-0309 §5:10's
 evaluation of the episode's placement over what the activation was given, for which the
 thin path places the episode for the owner alone.
@@ -120,12 +133,14 @@ from ai_assistant.core.types import (
     DigestOutcome,
     EpisodicMemory,
     InputOrigin,
+    MemoryKind,
     MessageAuthor,
     Modality,
     NewMessage,
     PlanningLabel,
     ProposedCall,
     RecallOutcome,
+    SemanticMemory,
     SendOutcome,
     StageOutcome,
     ToolFailure,
@@ -154,7 +169,12 @@ from ai_assistant.orchestration.authorizer import (
     WorkingRecord,
 )
 from ai_assistant.orchestration.chat import couldnt_finish
-from ai_assistant.orchestration.controller import Stage, StageResult, TolerantStage
+from ai_assistant.orchestration.controller import (
+    Stage,
+    StageResult,
+    TolerantStage,
+    recall_digest_due,
+)
 from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.planning import (
@@ -192,7 +212,6 @@ if TYPE_CHECKING:
         MessageReceipt,
         PlanningRound,
         SearchOutcome,
-        SemanticMemory,
         ToolCall,
         ToolDefinition,
     )
@@ -229,6 +248,9 @@ _PLANNING_EXPIRED: Final = "the activation's deadline passed before the next rou
 _AUTHORIZING_EXPIRED: Final = "the activation's deadline passed before the round was checked"
 _ACTING_EXPIRED: Final = "the activation's deadline passed before the round's calls ran"
 _RECALL_EXPIRED: Final = "the activation's deadline passed during recall's second run"
+_RECALL_DIGEST_EXPIRED: Final = "the activation's deadline passed before recall's digest"
+#: The error a failed recall digest's tolerated stage result carries (ADR-0308 §4:12).
+_RECALL_DIGEST_FAILED: Final = "recall's digest failed, so planning could not read its records"
 #: What a recall decision makes of its stage's entry (ADR-0281 §5), for the second run
 #: as for the first (ADR-0308 §2:7).
 _RECALL_STAGE_OUTCOMES: Final = {
@@ -579,6 +601,13 @@ class PhaseWorking:
         # either run kept as planning fetched them before its first round (§3).
         self.second_recall: Recalled | None = None
         self.found: Fetched | None = None
+        # The ids of the memory records either run kept whose source is outside, held
+        # with the second decision (§4:4-§4:5); what recall's digest fetched of them
+        # and what came back missing (ADR-0282 §2:7); and whether recall's digest has
+        # been decided, whatever came of it.
+        self.recall_outside: tuple[str, ...] = ()
+        self.recall_digest_fetch: Fetched | None = None
+        self.recall_digest_decided = False
         self._rounds: list[_Round] = []
 
     # --- what the rules read (PhaseFacts) ---
@@ -587,6 +616,16 @@ class PhaseWorking:
     def recalled_again(self) -> bool:
         """Recall's second run made its decision, a failed one included (ADR-0308 §2)."""
         return self.second_recall is not None
+
+    @property
+    def recall_kept_outside(self) -> bool:
+        """Either recall run kept a memory record whose source is outside (§4:5)."""
+        return bool(self.recall_outside)
+
+    @property
+    def recall_digested(self) -> bool:
+        """Recall's digest has been decided, a failed one included (§4:4)."""
+        return self.recall_digest_decided
 
     @property
     def rounds(self) -> int:
@@ -1053,6 +1092,50 @@ def _recalled_stories(*decisions: Recalled | None) -> dict[str, tuple[str, ...]]
     }
 
 
+def _kept_outside(*decisions: Recalled | None) -> tuple[str, ...]:
+    """The memory records the runs kept whose source is outside, once each, in order.
+
+    Read off each kept item's recorded origin (ADR-0306 §5:16, ADR-0281 §6): a semantic
+    record resting on recorded external content. A found episode is never digested,
+    and is shown by its records instead (ADR-0308 §3:1).
+    """
+    return tuple(
+        dict.fromkeys(
+            item.id
+            for decision in decisions
+            if decision is not None
+            for item in decision.result.items
+            if item.kind is MemoryKind.SEMANTIC and item.rests_on_recorded_external_content
+        )
+    )
+
+
+@dataclass(frozen=True)
+class _DigestRuns:
+    """One ``digesting`` stage for recall's digest and a round's (ADR-0308 §4, ADR-0309 §3).
+
+    ``recall_undigested`` makes digesting due for recall's digest before the first
+    round, and ``round_authorized`` runs it beside acting for a round's results. The
+    controller runs one stage per name, so this one runs recall's digest while that
+    row's facts hold, and the round's otherwise. Recall's digest is decided before
+    either returns, so the row does not answer again.
+    """
+
+    recall: ControllerStageRun[PhasePass]
+    rounds: ControllerStageRun[PhasePass]
+
+    @property
+    def name(self) -> ControllerStage:
+        """Digesting, under either row."""
+        return ControllerStage.DIGESTING
+
+    async def run(self, state: PhasePass) -> StageResult:
+        """Run recall's digest where it is due, else the latest round's digests."""
+        if recall_digest_due(_working(state)):
+            return await self.recall.run(state)
+        return await self.rounds.run(state)
+
+
 @dataclass(frozen=True)
 class _RecallRuns[P: PhasePass]:
     """One ``recall`` stage over both runs, the rows deciding which is due (ADR-0308 §2).
@@ -1104,6 +1187,7 @@ class PhasePath:
         part_chars: int,
         memory: MemoryStore,
         recall_cap: int,
+        recall_digest_wait: timedelta,
         planning_model: str | None = None,
         now: Callable[[], datetime] = _utcnow,
         new_effect_id: Callable[[], str] = _new_effect_id,
@@ -1128,19 +1212,26 @@ class PhasePath:
                 (ADR-0282 §2:4).
             recall_cap: ``RECALL_SECOND_RUN_CAP``: how many records recall's second
                 run keeps in all (ADR-0308 §2:4-§2:5).
+            recall_digest_wait: The deadline bounding recall's digest, its fetch
+                included, cut to what the pass has left (ADR-0308 §4:11 names only a
+                result's; this one is the composition root's).
             planning_model: Optional ``"provider:model"`` override for planning.
             now: The clock a step's start and an effect's claim are read from.
             new_effect_id: Mints the *couldn't finish* message's effect record id.
 
         Raises:
-            ValueError: If ``round_limit`` is below 1, ``round_wait`` not positive, or
-                ``recall_cap`` below 1 or above ``RECALLED_ITEMS_MAX``.
+            ValueError: If ``round_limit`` is below 1, ``round_wait`` or
+                ``recall_digest_wait`` not positive, or ``recall_cap`` below 1 or above
+                ``RECALLED_ITEMS_MAX``.
         """
         if round_limit < 1:
             msg = "the round limit is at least one round (ADR-0307 §8:4)"
             raise ValueError(msg)
         if round_wait <= timedelta(0):
             msg = "a round's wait is positive (ADR-0307 §8:2)"
+            raise ValueError(msg)
+        if recall_digest_wait <= timedelta(0):
+            msg = "recall's digest's deadline is positive (ADR-0308 §4:11)"
             raise ValueError(msg)
         if not 1 <= recall_cap <= RECALLED_ITEMS_MAX:
             msg = "the second run's cap is between 1 and RECALLED_ITEMS_MAX (ADR-0308 §2:5)"
@@ -1167,6 +1258,7 @@ class PhasePath:
         self._new_effect_id = new_effect_id
         self._memory = memory
         self._recall_cap = recall_cap
+        self._recall_digest_wait = recall_digest_wait
         self._append: Callable[[], Awaitable[None]] | None = None
 
     def attach(self, append: Callable[[], Awaitable[None]]) -> None:
@@ -1260,7 +1352,14 @@ class PhasePath:
                 expired=_expired(_AUTHORIZING_EXPIRED),
             ),
             Stage(ControllerStage.ACTING, self._act, expired=_expired(_ACTING_EXPIRED)),
-            Stage(ControllerStage.DIGESTING, self._digest),
+            _DigestRuns(
+                recall=TolerantStage(
+                    ControllerStage.DIGESTING,
+                    self._digest_recall,
+                    expired=_expired(_RECALL_DIGEST_EXPIRED),
+                ),
+                rounds=Stage(ControllerStage.DIGESTING, self._digest),
+            ),
         )
 
     def recall_stage[P: PhasePass](
@@ -1358,8 +1457,13 @@ class PhasePath:
 
     def _wait(self, given: PhasePass) -> timedelta:
         """A round's wait: its call deadline, cut to what the pass has left (§8:2)."""
+        return self._left(given, self._round_wait)
+
+    @staticmethod
+    def _left(given: PhasePass, bound: timedelta) -> timedelta:
+        """``bound``, cut to what the pass has left."""
         left = max(given.deadline - asyncio.get_running_loop().time(), 0.0)
-        return min(self._round_wait, timedelta(seconds=left))
+        return min(bound, timedelta(seconds=left))
 
     async def _plan(self, given: PhasePass) -> None:
         """One planning round, over everything the thin path gives it (ADR-0307 §6)."""
@@ -1464,6 +1568,9 @@ class PhasePath:
                 ActivationRecall(outcome=RecallOutcome.TIMED_OUT, cues=recalled.result.cues),
                 error=late,
             )
+        # ADR-0308 §4:4: the outside memory records either run kept, which recall's
+        # digest reads, are held with the second decision.
+        working.recall_outside = _kept_outside(first, recalled)
         working.second_recall = recalled
         if (state := active_state()) is not None:
             state.recall_second_run = recalled.result
@@ -1471,6 +1578,73 @@ class PhasePath:
         if outcome is StageOutcome.DONE:
             return StageResult(StageOutcome.DONE)
         return StageResult(outcome, recalled.error, tolerated=True)
+
+    async def _digest_recall(self, given: PhasePass) -> StageResult:
+        """Recall's digest: its outside memory records, read against the meaning (§4:4).
+
+        The digest fetches the held ids with planning's read (ADR-0282 §2:4-§2:8), holds
+        what it fetched and what came back missing, and reads every record still resting
+        on outside content, both runs' together, against the latest understanding's
+        meaning. The decision is held before the stage returns, whatever came of it, so
+        ``recall_undigested`` does not answer again. A failed digest is recorded with no
+        evidence, planning is told it could not read recall's outside records (§4:13),
+        and the stage returns ``failed``, or ``timed_out`` where its deadline passed,
+        ``tolerated`` (§4:12). Where no record came back to read, nothing is recorded
+        and planning is shown nothing of them, as for any id with no record (§2:6).
+
+        Raises:
+            RuntimeError: If there is no recorded understanding, which the rows make
+                impossible.
+        """
+        working = _working(given)
+        understanding = given.understanding
+        if understanding is None:
+            msg = "recall's digest answers a recorded understanding's meaning (ADR-0308 §4:4)"
+            raise RuntimeError(msg)
+        ids = working.recall_outside
+
+        async def fetch() -> tuple[SemanticMemory, ...]:
+            fetched = await fetch_held(
+                self._memory, episode_ids=None, recalled_ids=ids, audience=given.supply
+            )
+            working.recall_digest_fetch = fetched
+            _log.info(
+                "stage_fetch",
+                stage="digesting",
+                fetched=len(fetched.fetched),
+                missing=len(fetched.missing),
+            )
+            # A record whose current version no longer rests on outside content is
+            # shown to planning by its fact (§3:3), so it is not read here as well.
+            return tuple(
+                one
+                for one in fetched.recalled
+                if isinstance(one, SemanticMemory)
+                and rests_on_recorded_external_content(one.provenance)
+            )
+
+        try:
+            digested = await self._digesting.digest_recall(
+                fetch,
+                question=understanding.meaning,
+                labels=working.labels,
+                deadline=self._now() + self._left(given, self._recall_digest_wait),
+            )
+        finally:
+            working.recall_digest_decided = True
+        if digested is None:
+            return StageResult(StageOutcome.DONE)
+        working.digests.append(digested.digest)
+        working.evidence.append(digested_evidence(digested, working.labels.labels))
+        if digested.failure is None:
+            return StageResult(StageOutcome.DONE)
+        if digested.failure == "deadline":
+            return StageResult(
+                StageOutcome.TIMED_OUT, ModelTimeoutError(_RECALL_DIGEST_FAILED), tolerated=True
+            )
+        return StageResult(
+            StageOutcome.FAILED, _RecallDigestFailedError(_RECALL_DIGEST_FAILED), tolerated=True
+        )
 
     async def _authorize(self, given: PhasePass) -> None:
         """Check the latest round's calls by rule, and its message by its place."""
@@ -1690,3 +1864,12 @@ class PhasePath:
             if one.capability is not None
             and one.outcome in {ToolOutcome.SUCCEEDED, ToolOutcome.INDETERMINATE}
         )
+
+
+class _RecallDigestFailedError(Exception):
+    """Recall's digest failed: carried on its stage's tolerated ``failed`` result.
+
+    Never re-raised while the pass's deadline holds; the digest is recorded with no
+    evidence and planning is told it could not read recall's outside records
+    (ADR-0308 §4:12-§4:13).
+    """
