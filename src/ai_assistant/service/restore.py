@@ -33,7 +33,9 @@ refusing restores the hub would have handled.
 trade** (§6). Tier 0 lives in the OS keyring and never enters an artifact, so the
 hub comes up with the accumulated model intact and its provider credentials
 absent. Neither is the trace store there: §3 excludes it under ADR-0119 §12, and
-ADR-0120 §8 already rules what a report over an empty stream says.
+ADR-0120 §8 already rules what a report over an empty stream says. Nor is the
+diagnostic record: ADR-0314 §7:5 excludes its directory, because a backup outlives
+the window that is the record's forgetting.
 """
 
 from __future__ import annotations
@@ -277,8 +279,9 @@ def _announce(target: Path, manifest: Manifest) -> None:
     print(f"  by:     ai-assistant {manifest.project_version}")
     print(
         "\nThis is not yet a working installation. Provider credentials live in the OS "
-        "keyring and are not in a backup, and the trace store is not either. Point a hub "
-        "at this directory — by moving it into place — once you have looked at it."
+        "keyring and are not in a backup, and the trace store and the diagnostic record "
+        "are not either. Point a hub at this directory — by moving it into place — once "
+        "you have looked at it."
     )
 
 

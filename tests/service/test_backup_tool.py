@@ -480,6 +480,21 @@ def test_the_tool_states_what_it_is_writing_and_where_before_it_writes(
     assert str(out_dir / "a.age") in reported
 
 
+def test_the_help_names_everything_a_backup_leaves_out(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """§3's exclusions and ADR-0314 §7:5's, in the text an operator reads first."""
+    with pytest.raises(SystemExit) as exited:
+        backup.main(["--help"])
+
+    assert exited.value.code == 0
+    shown = " ".join(capsys.readouterr().out.split())
+    assert (
+        "except the trace store, the diagnostic record's directory, the instance lock "
+        "and the two sockets"
+    ) in shown
+
+
 def test_a_run_using_a_supplied_passphrase_states_the_custody_obligation(
     settings: Settings,
     out_dir: Path,

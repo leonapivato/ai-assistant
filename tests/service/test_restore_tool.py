@@ -156,6 +156,8 @@ def test_the_restore_says_what_landed_and_what_is_still_missing(
     reported = capsys.readouterr().out
     assert "restored 3 file(s)" in reported
     assert "keyring" in reported
+    # ADR-0314's consequences: "Restoring a backup brings back no diagnostic record".
+    assert "the trace store and the diagnostic record are not either" in reported
 
 
 def test_nothing_is_left_beside_the_target_after_a_successful_restore(

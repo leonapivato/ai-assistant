@@ -109,9 +109,9 @@ file (ADR-0123).
 
 Run it with the hub stopped: it takes the same instance lock, so it cannot run
 beside one. It copies every regular file in the data directory except the trace
-store, the instance lock and the two sockets, encrypts the whole thing to a passphrase
-you hold, and then proves the artifact by restoring it into a scratch directory
-before it publishes it.
+store, the diagnostic record's directory, the instance lock and the two sockets,
+encrypts the whole thing to a passphrase you hold, and then proves the artifact by
+restoring it into a scratch directory before it publishes it.
 
 The passphrase is the only key. Nothing on this machine can recover it, which is
 the property that makes the artifact worth having: a key kept only on the laptop
