@@ -1,6 +1,6 @@
 # 4. Privacy and data handling
 
-- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete), ADR-0155 (§2's residency clause), ADR-0172 (§3's keyring clause, §6's Tier 0 purge clause and §7's gating clause, each only as it reaches a web-session credential), ADR-0202 (§3's keyring clause and §7's gating clause, each only as it reaches the remote browser listener's TLS key material) and ADR-0268 (§6's view and export limbs, each only as they reach one datum: the goal authorization store's per-goal closure record — a goal identifier, a goal version and whether that store's write fence stands — which is reached by no export and no viewing surface and carries no content of the user's. §6's deletion limb binds entire and the record is erased with the store's rows; §6's retention limb is reached by those rows before it is reached by the record; no other store and no other datum takes this scope)
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete), ADR-0155 (§2's residency clause), ADR-0172 (§3's keyring clause, §6's Tier 0 purge clause and §7's gating clause, each only as it reaches a web-session credential), ADR-0202 (§3's keyring clause and §7's gating clause, each only as it reaches the remote browser listener's TLS key material) and ADR-0268 (§6's view and export limbs, each only as they reach one datum: the goal authorization store's per-goal closure record — a goal identifier, a goal version and whether that store's write fence stands — which is reached by no export and no viewing surface and carries no content of the user's. §6's deletion limb binds entire and the record is erased with the store's rows; §6's retention limb is reached by those rows before it is reached by the record; no other store and no other datum takes this scope) and ADR-0314 (§6's view and export limbs, each only as they reach the diagnostic record, which no surface shows and no export carries, and which the owner reads and copies as files on the server)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
@@ -407,6 +407,20 @@
   anything else outside an export has breached it. Whether the projection that would satisfy both
   limbs should be built, and what it would cost (a `core` type, a third store member and a scope
   on ADR-0254 §16's export clause), is **#2410**.
+- Partially superseded: 2026-10-13 by ADR-0314 — **two limbs of one clause, one store.**
+  ADR-0314 adds a diagnostic record, opt-in and off by default: one file per activation in
+  the data directory holding what each phase was given and returned. It is Tier 1, and it is
+  safe to hold only because nothing in the system reads it back.
+
+  **Replaced — §6's view and export limbs, each only as they reach that record.** No surface
+  of the system shows it and no export carries it; the owner reads and copies its files on
+  the server, as JSON lines. **§6's deletion limb binds entire**: deleting the owner's data
+  destroys the record with the data directory (ADR-0126 §1:2). §6's retention limb is
+  answered by the record's window, which deletes each file after 30 days by default.
+  **§§1-5 and §7 stand entire**, and no other store takes this scope. This scoped replacement
+  takes effect on ratification of ADR-0314. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below
+  are preserved.
 - Note (2026-07-20): **§2's egress clause is superseded by ADR-0017.** That
   clause named `models/` the only component permitted to send user data
   off-device; ADR-0017 §1 replaces it with `models/` plus a designated
