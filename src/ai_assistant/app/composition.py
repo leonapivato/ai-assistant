@@ -99,7 +99,7 @@ from ai_assistant.orchestration.chat import CHAT_TURN_BUDGET, ChatWriter
 from ai_assistant.orchestration.informational_events import InformationalEventStage
 from ai_assistant.orchestration.matters_pass import MattersPass
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
-from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools
+from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, StoryReads
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.reconciling import ReconciliationStage
 from ai_assistant.orchestration.remembering import REMEMBER, REMEMBER_CAPABILITY, RememberCalls
@@ -501,6 +501,13 @@ PHASES_TURN_BUDGET: Final = timedelta(minutes=3)
 #: The bound planning cuts another episode's texts to, as understanding's is
 #: (ADR-0307 §6:1). **Provisional (#2589).**
 PHASES_EXCERPT_CHARS: Final = UNDERSTANDING_EXCERPT_CHARS
+
+#: How many of a story's latest episodes planning is shown whole, and how many of the
+#: episodes newer than its summary (ADR-0307 §6:1). **Provisional (#2589).** Where the
+#: matter stands already lists its newest moments one by one, so this is what planning
+#: reads in full: one more than a short view's, and how many changes have come since
+#: says what is not shown.
+PHASES_STORY_EPISODES: Final = STORY_SHORT_VIEW_EPISODES + 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -3290,6 +3297,22 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
         memory=seams.memory,
         recall_cap=RECALL_SECOND_RUN_CAP,
         recall_digest_wait=PHASES_RECALL_DIGEST_DEADLINE,
+        # ADR-0307 §6:1: the story views, over the one story store, memory store and
+        # plan store; a short view is read as understanding's are, at its bounds.
+        story_reads=StoryReads(
+            stories=seams.stories,
+            memory=seams.memory,
+            plans=seams.plans,
+            short_views=StoryCandidates(
+                stories=seams.stories,
+                memory=seams.memory,
+                limit=UNDERSTANDING_STORY_CANDIDATES,
+                lines=STORY_SHORT_VIEW_LINES,
+                notes=STORY_SHORT_VIEW_NOTES,
+                episodes=STORY_SHORT_VIEW_EPISODES,
+            ),
+            episodes=PHASES_STORY_EPISODES,
+        ),
         now=_utcnow,
     )
 

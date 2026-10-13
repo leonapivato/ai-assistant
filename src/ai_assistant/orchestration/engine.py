@@ -6691,13 +6691,16 @@ class Engine:
         )
 
     async def story_standing(self, story_id: Identifier) -> StoryStanding | None:
-        """Read where a story's matter stands, worked out for the owner (ADR-0300 §8:1)."""
+        """Read where a story's matter stands, worked out for the owner (ADR-0300 §8:1).
+
+        What was done is read from the plan store's effect records (ADR-0306 §6).
+        """
         self._reject_if_closing()
         target = identifier(story_id, name="story_id")
         check_arguments("story_standing", max_bytes=self._max_payload_bytes, story_id=target)
         stories = self._story_store()
         return await self._tracked(
-            standing_of(stories, self._memory, target, reader=OWNER_READER),
+            standing_of(stories, self._memory, target, reader=OWNER_READER, plans=self._plans),
             "story_standing",
             checked=True,
         )

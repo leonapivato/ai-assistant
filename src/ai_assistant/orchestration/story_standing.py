@@ -5,8 +5,13 @@ No record stores where a matter stands (ADR-0300 §2:1). Each time a reader need
 episodes its members name:
 
 * **What was done** (``done``), from the effect records of the story's current
-  episodes. Effect records come with the phases' acting (§8), which fills the slot;
-  nothing here reads one.
+  episodes (ADR-0306 §6), read with ``PlanStore.activation_effects`` for the episodes
+  the reader is shown: each call's record, unknown first, then not done, then done, and
+  most recent first within each. A record still carrying no outcome is unknown, never
+  done (ADR-0306 §5:5). A message's record is not listed: what was done is what the
+  activations' calls did, and the messages they wrote are their episodes' own. Where no
+  plan store is handed in, as on the canonical fake engine, which holds none, nothing
+  is listed.
 * **When things happened** (``recent`` and ``earlier``), a short timeline of the
   member episodes by each episode's own instant and latest understood meaning, most
   recent first, the newest :data:`~ai_assistant.core.types.STORY_STANDING_RECENT`
@@ -57,6 +62,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     InputOrigin,
     RecordedChannelTrigger,
+    StoryEffectState,
     StoryEntry,
     StoryMember,
     StoryMemberKind,
@@ -64,7 +70,9 @@ from ai_assistant.core.types import (
     StoryRelation,
     StoryStanding,
     StoryStandingEarlier,
+    StoryStandingEffect,
     StoryStandingEpisode,
+    ToolOutcome,
     rests_on_recorded_external_content,
 )
 from ai_assistant.orchestration.disclosure import TurnSupply, admitted_to_understanding
@@ -74,8 +82,8 @@ from ai_assistant.orchestration.stories import episode_address
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from ai_assistant.core.protocols import MemoryStore, StoryStore
-    from ai_assistant.core.types import MemoryRecord, StoryHeader
+    from ai_assistant.core.protocols import MemoryStore, PlanStore, StoryStore
+    from ai_assistant.core.types import ActivationEffect, MemoryRecord, StoryHeader
 
 
 @final
@@ -95,6 +103,22 @@ OWNER_READER: Final = OwnerReader()
 #: within an activation pass, named by that pass's audience posture (ADR-0300 §8, §11).
 type StandingReader = OwnerReader | TurnSupply
 
+#: What an effect record's outcome makes of the thing done (ADR-0306 §6): ``succeeded``
+#: is done, ``failed`` not done and ``indeterminate`` unknown. A record with no outcome
+#: yet is unknown too.
+_EFFECT_STATES: Final = {
+    ToolOutcome.SUCCEEDED: StoryEffectState.DONE,
+    ToolOutcome.FAILED: StoryEffectState.NOT_DONE,
+    ToolOutcome.INDETERMINATE: StoryEffectState.UNKNOWN,
+}
+
+#: The order ADR-0300 §8:1 lists what was done in, by state.
+_EFFECT_RANK: Final = {
+    StoryEffectState.UNKNOWN: 0,
+    StoryEffectState.NOT_DONE: 1,
+    StoryEffectState.DONE: 2,
+}
+
 
 async def story_standing(
     stories: StoryStore,
@@ -102,6 +126,7 @@ async def story_standing(
     story_id: str,
     *,
     reader: StandingReader,
+    plans: PlanStore | None = None,
 ) -> StoryStanding | None:
     """Assemble where a story's matter stands, for one reader (ADR-0300 §8:1).
 
@@ -119,6 +144,8 @@ async def story_standing(
         memory: The memory store holding the members' episodes.
         story_id: The story to read.
         reader: Who is reading, which decides the episodes shown.
+        plans: The plan store holding the effect records, or ``None`` where there is
+            none to read, which lists nothing done.
 
     Returns:
         Where the matter stands, or ``None`` where the store holds no such story. A
@@ -129,6 +156,7 @@ async def story_standing(
         StoryStoreError: If the story store cannot be read, or holds a story member
             it cannot read back.
         MemoryStoreError: If an episode cannot be read.
+        PlanningError: If the effect records cannot be read.
     """
     page = await stories.view(story_id, limit=MAX_STORY_PAGE)
     if page is None:
@@ -145,9 +173,11 @@ async def story_standing(
         _keep_latest(entries, more.entries)
         cursor = more.next_cursor
     members = list(entries.values())
-    recent, earlier = _timeline(await _shown(memory, members, reader))
+    shown = await _shown(memory, members, reader)
+    recent, earlier = _timeline(shown)
     return StoryStanding(
         story=page.story,
+        done=await _done(plans, shown),
         recent=recent,
         earlier=earlier,
         related=await _related(stories, page.story, members),
@@ -186,6 +216,36 @@ async def _shown(
     if not isinstance(reader, OwnerReader):
         episodes = list(admitted_to_understanding(reader, episodes))
     return [(record, members[record.id]) for record in episodes]
+
+
+async def _done(
+    plans: PlanStore | None, shown: Sequence[tuple[EpisodicMemory, StoryEntry]]
+) -> tuple[StoryStandingEffect, ...]:
+    """What was done, from the effect records of the episodes shown (ADR-0300 §8:1).
+
+    Only the episodes this reader is shown are read, so a reader is never told of an
+    effect of an episode it may not be shown. Each call's record is listed, by the
+    activation that made it, never a story (§8:2), and when it was claimed; unknown
+    first, then not done, then done, the most recently claimed first within each.
+    """
+    if plans is None or not shown:
+        return ()
+    recorded: Sequence[ActivationEffect] = await plans.activation_effects(
+        [entry.member.id for _, entry in shown]
+    )
+    effects = [
+        StoryStandingEffect(
+            activation_id=one.activation_id,
+            state=(
+                StoryEffectState.UNKNOWN if one.outcome is None else _EFFECT_STATES[one.outcome]
+            ),
+            at=one.claimed_at,
+        )
+        for one in recorded
+        if one.is_call
+    ]
+    ordered = sorted(enumerate(effects), key=lambda pair: (_EFFECT_RANK[pair[1].state], -pair[0]))
+    return tuple(effect for _, effect in ordered)
 
 
 def _timeline(
