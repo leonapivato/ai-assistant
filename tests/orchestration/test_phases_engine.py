@@ -140,8 +140,15 @@ async def test_phase_a_ends_and_phase_b_cancels_the_remainder() -> None:
 
 
 async def test_nothing_is_closed_until_the_cancelled_work_has_completed() -> None:
-    """Phase B awaits what it cancelled, and that is ADR-0042 §2 satisfied literally."""
+    """Phase B awaits what it cancelled, and that is ADR-0042 §2 satisfied literally.
+
+    The cancelled call's cleanup is held behind its own gate, standing in for ADR-0054's
+    worker thread finishing after the cancellation and before the error surfaces: while
+    it is held, shutdown stays pending and nothing is closed.
+    """
     closed = asyncio.Event()
+    unwinding = asyncio.Event()
+    finish_unwinding = asyncio.Event()
     unwound = asyncio.Event()
 
     class _SlowToUnwind(NeverFinishing):
@@ -155,8 +162,8 @@ async def test_nothing_is_closed_until_the_cancelled_work_has_completed() -> Non
             try:
                 return await super().respond(messages, tools, model=model)
             except asyncio.CancelledError:
-                # Stands in for ADR-0054's worker thread finishing after the
-                # cancellation and before the error surfaces.
+                unwinding.set()
+                await finish_unwinding.wait()
                 assert not closed.is_set(), "a resource was closed while work was unwinding"
                 unwound.set()
                 raise
@@ -168,7 +175,16 @@ async def test_nothing_is_closed_until_the_cancelled_work_has_completed() -> Non
     harness = phases_harness(completer, closers=(close,), drain_timeout=timedelta(milliseconds=20))
     await _running(harness, completer.entered)
 
-    await harness.engine.aclose()
+    closing = asyncio.ensure_future(harness.engine.aclose())
+    await asyncio.wait_for(unwinding.wait(), SETTLE)
+    # Phase B has cancelled the call, whose cleanup is still running.
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not closing.done(), "shutdown finished while cancelled work was still unwinding"
+    assert not closed.is_set(), "a resource was closed while cancelled work was unwinding"
+
+    finish_unwinding.set()
+    await asyncio.wait_for(closing, SETTLE)
 
     assert unwound.is_set()
     assert closed.is_set()
