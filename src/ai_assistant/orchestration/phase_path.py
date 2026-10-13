@@ -113,8 +113,16 @@ its own record, or a marked moment of where a matter stands, sets the working se
 handed to authorizing, which reads each ``N`` label's mark from it, so a note the user
 wrote is not counted as outside content read.
 
-**Left to later lanes:** the story calls and the full view of a story by look-up,
-planning's other look-ups, the follow-up, an event through the phases, and ADR-0309 §5:10's
+**The story calls** (ADR-0300 §10, ADR-0303 §9). Planning names stories by ``S`` label
+and activations by their episodes' ``E`` labels; the composition root hands this path
+which of each offered capability's arguments are labels, and planning maps them to ids
+or refuses the call whole (ADR-0307 §5:2-§5:3). Each runs through acting's own-records
+seam, **the tidy-up apart**: it is started in a task of its own that nothing awaits,
+neither the next round nor the activation's end (ADR-0307 §7:2), which the engine
+tracks so its shutdown drains it, and whatever came of it, it brings no round (§7:1).
+
+**Left to later lanes:** move, merge, split and group, the full view of a story by
+look-up, planning's other look-ups, the follow-up, an event through the phases, and ADR-0309 §5:10's
 evaluation of the episode's placement over what the activation was given, for which the
 thin path places the episode for the owner alone.
 
@@ -124,7 +132,8 @@ thin path places the episode for the owner alone.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+import contextvars
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, Protocol
 from uuid import uuid4
@@ -152,6 +161,7 @@ from ai_assistant.core.types import (
     DigestOutcome,
     EpisodicMemory,
     InputOrigin,
+    LabelKind,
     MemoryKind,
     MessageAuthor,
     Modality,
@@ -182,6 +192,7 @@ from ai_assistant.orchestration.acting import (
 )
 from ai_assistant.orchestration.activation_state import CaptureFacts, active_state
 from ai_assistant.orchestration.authorizer import (
+    AllowedCall,
     AuthorizingStage,
     CallToAuthorize,
     RoundAuthorization,
@@ -216,13 +227,14 @@ from ai_assistant.orchestration.planning import (
 )
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.stories import episode_address
+from ai_assistant.orchestration.story_calls import TIDY_STORY_CAPABILITY
 from ai_assistant.orchestration.story_links import admitted_episodes
 from ai_assistant.orchestration.story_privacy import SummaryVisibility
 from ai_assistant.orchestration.story_standing import story_standing
 from ai_assistant.orchestration.understanding import fetch_held
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 
     from ai_assistant.core.protocols import (
         MemoryStore,
@@ -939,13 +951,21 @@ class PhaseWorking:
 
     @property
     def latest_brought_something(self) -> bool:
-        """A call of the latest round brought a result or was not done (ADR-0307 §8:1)."""
+        """A call of the latest round brought a result or was not done (ADR-0307 §8:1).
+
+        A tidy-up never brings a round, even when it fails or is refused (§7:1), so
+        whatever came of one is passed over here.
+        """
         if not self._rounds:
             return False
         latest = self._rounds[-1]
+        tidies = {
+            one.call_id for one in latest.planned.round.calls if one.name == TIDY_STORY_CAPABILITY
+        }
         return any(
             one.kind is not CallOutcomeKind.DONE or one.result_id is not None
             for one in call_outcomes(latest.planned, latest.authorization, latest.acted)
+            if one.call_id not in tidies
         )
 
     # --- what the stages read and write ---
@@ -1241,6 +1261,10 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _never() -> bool:
+    return False
+
+
 def _new_effect_id() -> str:
     return f"effect:{uuid4().hex}"
 
@@ -1433,6 +1457,7 @@ class PhasePath:
         recall_digest_wait: timedelta,
         planning_model: str | None = None,
         story_reads: StoryReads | None = None,
+        label_arguments: Mapping[str, Mapping[str, LabelKind]] | None = None,
         now: Callable[[], datetime] = _utcnow,
         new_effect_id: Callable[[], str] = _new_effect_id,
     ) -> None:
@@ -1462,6 +1487,10 @@ class PhasePath:
             planning_model: Optional ``"provider:model"`` override for planning.
             story_reads: What planning is shown of stories (ADR-0307 §6:1), or
                 ``None`` where no story store is wired, which shows it none.
+            label_arguments: For an offered capability, which of its arguments name
+                things by label and what kind of thing each names, such as the story
+                calls' (ADR-0307 §5:2); planning maps them to ids, and refuses whole a
+                call naming a label it was never shown (§5:3).
             now: The clock a step's start and an effect's claim are read from.
             new_effect_id: Mints the *couldn't finish* message's effect record id.
 
@@ -1506,11 +1535,44 @@ class PhasePath:
         self._recall_cap = recall_cap
         self._recall_digest_wait = recall_digest_wait
         self._story_reads = story_reads
+        self._label_arguments: dict[str, Mapping[str, LabelKind]] = {
+            name: dict(arguments) for name, arguments in (label_arguments or {}).items()
+        }
         self._append: Callable[[], Awaitable[None]] | None = None
+        self._spawn: Callable[[Coroutine[None, None, None]], None] = self._spawn_held
+        self._closing: Callable[[], bool] = _never
+        # The tidy-ups this path started itself, held so none is collected mid-run,
+        # where no engine is attached to track them.
+        self._held: set[asyncio.Task[None]] = set()
 
-    def attach(self, append: Callable[[], Awaitable[None]]) -> None:
-        """Attach the engine's episode append, which extends the current activation's."""
+    def attach(
+        self,
+        append: Callable[[], Awaitable[None]],
+        *,
+        spawn: Callable[[Coroutine[None, None, None]], None] | None = None,
+        closing: Callable[[], bool] | None = None,
+    ) -> None:
+        """Attach the engine's episode append, and its seams for work nobody waits on.
+
+        Args:
+            append: Extends the current activation's open episode.
+            spawn: Starts a coroutine as work the engine tracks and drains at shutdown,
+                in a context of its own; a tidy-up call runs under it (ADR-0307 §7:2).
+                Unattached, this path holds the task itself.
+            closing: Whether the engine's shutdown has begun, after which no tidy-up
+                starts: what it would take in stays pending (ADR-0300 §5).
+        """
         self._append = append
+        if spawn is not None:
+            self._spawn = spawn
+        if closing is not None:
+            self._closing = closing
+
+    def _spawn_held(self, work: Coroutine[None, None, None]) -> None:
+        """Start ``work`` as a task this path holds until it ends."""
+        task = asyncio.get_running_loop().create_task(work, context=contextvars.Context())
+        self._held.add(task)
+        task.add_done_callback(self._held.discard)
 
     async def append(self) -> None:
         """Extend the current activation's open episode, where an append is attached."""
@@ -1745,6 +1807,7 @@ class PhasePath:
             labels=working.labels.labels,
             outcomes=working.outcomes(),
             capabilities=await self._tools.offered(self._capabilities),
+            label_arguments=self._label_arguments,
             evidence=tuple(working.evidence),
             outside_content_read=working.read_outside_content,
             stories=stories,
@@ -1992,9 +2055,57 @@ class PhasePath:
                 raise answer
 
     async def _calls(self, working: PhaseWorking, decided: RoundAuthorization) -> ActedRound:
-        if not decided.allowed:
+        """Run the round's allowed calls; its tidy-ups run on their own, unawaited.
+
+        **The tidy-up exception** (ADR-0307 §7:2, §8:1). A new round waits for every
+        call of the last one but a tidy-up, and neither it nor the activation's end
+        waits for one. So the round's allowed tidy-ups are split off and handed to
+        acting in a task of their own, which this does not await: acting runs them
+        through its own-records seam and awaits each to its end (ADR-0306 §3:3), after
+        the activation has ended if need be. What came of one is written to the story's
+        version log, never to the episode (§7:1), so no acting decision of it is held.
+        """
+        tidies = tuple(
+            one
+            for one in decided.allowed
+            if str(one.call.request.tool.capability) == TIDY_STORY_CAPABILITY
+        )
+        if tidies:
+            self._start_tidies(working, decided, tidies)
+        started = {one.call.decision.id for one in tidies}
+        rest = tuple(one for one in decided.allowed if one.call.decision.id not in started)
+        if not rest:
             return ActedRound(round_id=decided.round_id)
-        return await self._acting.act(authorized_round(decided), held=working.held)
+        return await self._acting.act(
+            authorized_round(replace(decided, allowed=rest)), held=working.held
+        )
+
+    def _start_tidies(
+        self,
+        working: PhaseWorking,
+        decided: RoundAuthorization,
+        tidies: tuple[AllowedCall, ...],
+    ) -> None:
+        """Start the round's tidy-ups as work nobody waits on, unless shutdown has begun.
+
+        A tidy-up not started loses nothing: what it would have taken in stays pending
+        on the story for a later run (ADR-0300 §5).
+        """
+        if self._closing():
+            _log.info("phase_tidy_up_not_started", stage="acting", reason="closing")
+            return
+        self._spawn(self._tidy(working, authorized_round(replace(decided, allowed=tidies))))
+
+    async def _tidy(self, working: PhaseWorking, tidies: AuthorizedRound) -> None:
+        """Run the tidy-ups through acting, logging rather than raising what escapes.
+
+        Nobody awaits this coroutine, so an unexpected error is logged here by its class
+        alone, never its message, which could carry a story's words (ADR-0275 §8).
+        """
+        try:
+            await self._acting.act(tidies, held=working.held)
+        except Exception as exc:
+            _log.error("phase_tidy_up_crashed", stage="acting", error=type(exc).__name__)
 
     async def _message(self, working: PhaseWorking, latest: _Round) -> None:
         """Write the round's message into the input's place, where it may go (§3:1)."""

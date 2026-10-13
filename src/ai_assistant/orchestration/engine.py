@@ -2550,18 +2550,21 @@ def _windows_expired(working: _ActivationPass) -> Exception | None:
     return ModelTimeoutError(_WINDOWS_EXPIRED)
 
 
-def _wired_phases(
+def _wired_phases(  # noqa: PLR0913 — the path, the two wirings it needs beside it, and the three seams it is handed
     phases: PhasePath | None,
     *,
     understanding: bool,
     chat_reader: bool,
     append: Callable[[], Awaitable[None]],
+    spawn: Callable[[Coroutine[None, None, None]], None],
+    closing: Callable[[], bool],
 ) -> PhasePath | None:
     """The phases' thin path, wired only beside understanding and the chat's reader.
 
     Planning's first round runs once understanding has recorded (ADR-0307 §8:6), and
     the thin path plans the input the chat's reader takes in (ADR-0309 §2:6). Its
-    recorders extend the episode through ``append``.
+    recorders extend the episode through ``append``, and a tidy-up call nobody waits
+    on starts through ``spawn`` unless ``closing`` says shutdown has begun (§7:2).
 
     Raises:
         ConfigurationError: If the path is given without understanding or the reader.
@@ -2574,7 +2577,7 @@ def _wired_phases(
             "in, so they are wired only beside both (ADR-0309 §2:6, ADR-0307 §8:6)"
         )
         raise ConfigurationError(msg)
-    phases.attach(append)
+    phases.attach(append, spawn=spawn, closing=closing)
     return phases
 
 
@@ -4069,6 +4072,10 @@ class Engine:
             understanding=understanding is not None,
             chat_reader=chat_reader,
             append=self._episode_appended,
+            # ADR-0307 §7:2: a tidy-up call nobody waits on is work this engine tracks,
+            # as a chat read is, so its shutdown drains it; none starts once it closes.
+            spawn=self._spawn_read,
+            closing=lambda: self._closing,
         )
         # ADR-0298 §7: the engine's half of the change stream, over the same chat
         # space and the same account of what runs as ``conversation`` reads.

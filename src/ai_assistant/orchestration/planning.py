@@ -107,6 +107,10 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
 )
 from ai_assistant.orchestration.stories import episode_address
+from ai_assistant.orchestration.story_calls import (
+    STORY_CALL_CAPABILITIES,
+    TIDY_STORY_CAPABILITY,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -793,10 +797,32 @@ _NOTES_AND_ROUNDS: Final = (
 )
 
 
-def _instruction(*, takes_message: bool) -> str:
-    """The system message, with §3:8's paragraph where the place takes no message."""
+#: ADR-0300 §10, ADR-0303 §9, ADR-0307 §7: the story calls, where they are offered.
+_STORY_CALLS: Final = (
+    "Stories are yours to keep, through the story calls. Start one when the user takes up "
+    "a matter that will come up again, with its first notes. Note on a story what its "
+    "records cannot show: what is open, what you are waiting on, who will do what, why "
+    "something was decided and what comes next. Episode notes stay with this episode and "
+    "never reach a story. Link or unlink an activation or a story where it does or does "
+    "not belong to that matter. Tidy a story's summary when many changes have come since "
+    "it was last tidied: a tidy-up runs on its own, never brings another round, and how it "
+    "went is not shown to you.\n"
+    "\n"
+)
+
+
+def _instruction(*, takes_message: bool, story_calls: bool = False) -> str:
+    """The system message, with §3:8's paragraph where the place takes no message.
+
+    The story calls' paragraph is there only where a story call is offered.
+    """
     return (
-        _ROLE + _LABELS + _CALLS + (_MESSAGE if takes_message else _NO_MESSAGE) + _NOTES_AND_ROUNDS
+        _ROLE
+        + _LABELS
+        + _CALLS
+        + (_STORY_CALLS if story_calls else "")
+        + (_MESSAGE if takes_message else _NO_MESSAGE)
+        + _NOTES_AND_ROUNDS
     )
 
 
@@ -828,6 +854,9 @@ _SHOWN_ABOVE: Final = "shown above under this label"
 _NOTHING_DONE: Final = "nothing recorded"
 _NO_MEANING: Final = "no meaning understood"
 _INHERITED: Final = "a larger matter this story is part of"
+_TIDY_STARTED: Final = (
+    "started: it runs on its own, and how it went is recorded on the story, not here"
+)
 
 #: Who wrote a story's note: the note's own record of its author, never its text.
 _NOTE_AUTHOR_TEXT: Final = {
@@ -1303,7 +1332,11 @@ class _Request:
             "arguments": call.model_dump()["arguments"],
         }
         if outcome is None:
-            shown["outcome"] = "no outcome recorded"
+            # ADR-0307 §7:1: a tidy-up's outcome is the story's version log's, never
+            # the episode's, and nothing waits for it.
+            shown["outcome"] = (
+                _TIDY_STARTED if call.name == TIDY_STORY_CAPABILITY else "no outcome recorded"
+            )
             return shown
         text = _OUTCOME_TEXT[outcome.kind]
         if outcome.reason is not None:
@@ -1503,7 +1536,11 @@ class PlanningStage:
         rendered = request.rendered(offered)
         messages = (
             Message(
-                role=Role.SYSTEM, content=_instruction(takes_message=inputs.place.takes_message)
+                role=Role.SYSTEM,
+                content=_instruction(
+                    takes_message=inputs.place.takes_message,
+                    story_calls=any(tool.name in STORY_CALL_CAPABILITIES for tool in offered),
+                ),
             ),
             Message(role=Role.USER, content=rendered),
         )

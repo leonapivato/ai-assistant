@@ -104,6 +104,12 @@ from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.reconciling import ReconciliationStage
 from ai_assistant.orchestration.remembering import REMEMBER, REMEMBER_CAPABILITY, RememberCalls
 from ai_assistant.orchestration.selection import Preference
+from ai_assistant.orchestration.story_calls import (
+    STORY_CALL_CAPABILITIES,
+    STORY_CALLS,
+    STORY_LABEL_ARGUMENTS,
+    StoryCalls,
+)
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
 from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
 from ai_assistant.orchestration.story_tidy_up_interim import InterimTidyUp
@@ -2272,6 +2278,25 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # deployment value to read. The stage's own default *is* the production
         # reading, so naming it here would restate it rather than decide it.
         reconciliation = ReconciliationStage(plans=plans, trail=trail, invoker=tools)
+        # ADR-0300 §5's tidy-up, **one operation** for the interim run below and for
+        # planning's tidy-up call (ADR-0300 §10:4), so at most one run is on a story at
+        # a time whichever started it (§5:10). Its lookalike search keeps what recall
+        # would, at recall's threshold for the embedder wired (ADR-0303 §5:7). It runs
+        # on **consolidation's route**, the one this deployment names for background
+        # work over the assistant's own records (ADR-0285 §5): a tidy-up is that kind
+        # of work, nobody waits on it, and one skipped or failed loses nothing (§5), so
+        # it needs no fallback route and takes no share of the conversational route's
+        # limits.
+        tidy_up = StoryTidyUp(
+            model=consolidation_model,
+            stories=stories,
+            memory=memory,
+            excerpt_chars=STORY_TIDY_UP_EXCERPT_CHARS,
+            other_stories=STORY_TIDY_UP_OTHER_STORIES,
+            decisions=STORY_TIDY_UP_DECISIONS,
+            budget=STORY_TIDY_UP_BUDGET,
+            threshold=RECALL_THRESHOLDS[settings.embedder],
+        )
         # ADR-0309 §2:6: the phases' thin path, only where a test hub set the opt-in,
         # over the objects this root already built (:class:`_PhaseSeams`).
         phases = (
@@ -2292,6 +2317,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                     booking_configured=booking is not None,
                     grants=recipient_grants,
                     max_payload_bytes=settings.hub_max_frame_bytes - ENVELOPE_RESERVE_BYTES,
+                    tidy_up=tidy_up,
                 ),
             )
             if settings.phases_thin_path
@@ -2440,18 +2466,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # records (ADR-0285 §5): a tidy-up is that kind of work, nobody waits on
             # it, and one skipped or failed loses nothing (§5), so it needs no
             # fallback route and takes no share of the conversational route's limits.
-            interim_tidy_up=InterimTidyUp(
-                tidy_up=StoryTidyUp(
-                    model=consolidation_model,
-                    stories=stories,
-                    memory=memory,
-                    excerpt_chars=STORY_TIDY_UP_EXCERPT_CHARS,
-                    other_stories=STORY_TIDY_UP_OTHER_STORIES,
-                    decisions=STORY_TIDY_UP_DECISIONS,
-                    budget=STORY_TIDY_UP_BUDGET,
-                    threshold=RECALL_THRESHOLDS[settings.embedder],
-                )
-            ),
+            interim_tidy_up=InterimTidyUp(tidy_up=tidy_up),
             # ADR-0300 §9:3's matters pass, as ADR-0302 §5 builds it, which the
             # scheduler's `matters_pass` row runs on consolidation's interval. On
             # **consolidation's route**, for the tidy-up's reason: background work over
@@ -3176,7 +3191,8 @@ class _PhaseSeams:
     Each is the **same** instance the old path holds, for that object's own reason:
     one trail every ruling is recorded in, one plan store every effect is claimed in,
     one story store the backstop's match is read from, one memory store and writer,
-    one egress binder, and one registry that is also the invoker.
+    one egress binder, one registry that is also the invoker, and one tidy-up, so at
+    most one run is on a story at a time (ADR-0300 §5:10).
     """
 
     model: ModelProvider
@@ -3193,6 +3209,7 @@ class _PhaseSeams:
     max_payload_bytes: int
     forecast_configured: bool
     booking_configured: bool
+    tidy_up: StoryTidyUp
 
 
 def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
@@ -3202,7 +3219,11 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
     simulated booking provider's booking act, which is in the registry only where a
     deployment configured the provider whole (ADR-0273 §1) — a test hub alone. The
     search and remembering are in no registry, so :class:`PhaseTools` adds both
-    declarations beside the registry's for authorizing's selection.
+    declarations beside the registry's for authorizing's selection. **And planning's
+    story calls that write** (ADR-0300 §10, ADR-0303 §9): start, note, link, unlink
+    and tidy-up, in no registry either, each run through acting's own-records seam by
+    one :class:`StoryCalls` over the one story store, memory store and tidy-up, with
+    the arguments that name things by label handed to planning (ADR-0307 §5:2).
 
     **The policy is the deployment's thresholds and standing grants, with no goal
     authorizations and no goal quotes** (ADR-0306 §4:11, §6): a second
@@ -3238,10 +3259,11 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
             settings.forecast_connection, _forecast_destinations(settings.forecast_origin)
         ),
     )
+    story_calls = StoryCalls(stories=seams.stories, memory=seams.memory, tidy_up=seams.tidy_up)
     tools = PhaseTools(
         registry=seams.registry,
         invoker=seams.registry,
-        own_records=(REMEMBER,),
+        own_records=(REMEMBER, *STORY_CALLS),
         searcher=seams.searcher,
         search_query=SEARCH_QUERY_ARGUMENT,
         fills=(
@@ -3274,7 +3296,10 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
             plans=seams.plans,
             invoker=tools,
             own_records=OwnRecordsByCapability(
-                {REMEMBER_CAPABILITY: RememberCalls(writer=seams.writer, now=_utcnow)}
+                {
+                    REMEMBER_CAPABILITY: RememberCalls(writer=seams.writer, now=_utcnow),
+                    **dict.fromkeys(STORY_CALL_CAPABILITIES, story_calls),
+                }
             ),
             timeout=PHASES_CALL_DEADLINE,
             now=_utcnow,
@@ -3286,7 +3311,9 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
             str(WEB_SEARCH.capability),
             REMEMBER_CAPABILITY,
             str(BOOKING_ACT.capability),
+            *STORY_CALL_CAPABILITIES,
         ),
+        label_arguments=STORY_LABEL_ARGUMENTS,
         round_limit=PHASES_ROUND_LIMIT,
         round_wait=PHASES_CALL_DEADLINE,
         excerpt_chars=PHASES_EXCERPT_CHARS,
