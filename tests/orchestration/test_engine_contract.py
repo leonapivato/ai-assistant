@@ -77,6 +77,7 @@ from episode_inspection_contract import (
     INSPECTION_LIMIT,
     EpisodeInspectionSubject,
 )
+from phases_support import phase_path
 from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
 from understanding_support import VERSION_LIMIT, understanding_stage, windows_stage
 
@@ -741,16 +742,30 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         max_outstanding_confirmations=max_outstanding_confirmations,
         stories=stories,
         chat_reader=chat_reader,
+        # ADR-0309 §2:6: the phases plan what the chat's reader takes in and every event,
+        # as they will on every deployment once the switch lane lands; they are wired
+        # only beside the reader, so a subject with it off has none. Over the same
+        # invoker, stores, trail and chat space the engine holds, as the root's are.
+        phases=(
+            phase_path(
+                invoker=invoker,
+                memory=records,
+                plans=store,
+                trail=audit,
+                conversations=conversation_store,
+            )
+            if chat_reader
+            else None
+        ),
     )
 
 
 class TestEngineContract(AssistantEngineContract):
     """The concrete engine, held to the shared contract."""
 
-    #: Wired without the phases' opt-in, so an event runs today's event-summary stage,
-    #: which raises where it cannot finish until the cutover deletes it (ADR-0313 §6:2).
-    #: An event the phases run returns its result: ``test_engine_phases``.
-    an_unfinished_event_raises: ClassVar[bool] = True
+    #: Wired with the phases, so an event that cannot finish returns its result, as
+    #: every event will once the switch lane lands (ADR-0313 §4:5, ADR-0309 §2:6).
+    an_unfinished_event_raises: ClassVar[bool] = False
 
     @pytest.fixture
     async def chat_surface(self) -> AsyncIterator[ChatSurfaceSubject]:
