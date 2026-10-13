@@ -14,7 +14,6 @@ waits there. A process that dies mid-pass is a writer whose freeze never runs.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -25,7 +24,6 @@ import pytest
 
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
-from ai_assistant.core.errors import ChannelProcessingTimeoutError
 from ai_assistant.core.types import (
     ActionPlan,
     AssociationVerdict,
@@ -34,20 +32,16 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
     ChannelResult,
-    ControllerRule,
     CostBasis,
     EpisodeProcessingRecord,
     EpisodicMemory,
     GoalAssociation,
     Idempotency,
-    MemoryWrite,
-    MemoryWriteMode,
     NewConversation,
     PlacementReach,
     PlacementSetter,
     PlannerOutput,
     PlanStep,
-    ProcessingStatus,
     ProposedAction,
     Reversibility,
     RiskLevel,
@@ -325,71 +319,3 @@ async def test_an_informational_events_episode_is_stored_open_before_its_first_s
     assert processing.stages == ()
     assert processing.trigger.channel == _SENSOR
     _frozen(await composed.stored(_address(result)))
-
-
-async def test_an_append_runs_inside_the_pass_deadline(composed: Composed) -> None:
-    """§3:8: an append whose store never answers is cut off at the pass's deadline; the
-    pass times out as its kind classifies the expiry, and the freeze still records."""
-    addresses: list[str] = []
-
-    async def never(state: ActivationState, **_kwargs: object) -> None:
-        assert state.episode_address is not None
-        addresses.append(state.episode_address)
-        await asyncio.Event().wait()
-
-    # A test double for the bound method: the store read it makes never returns.
-    composed.writer.append = never  # type: ignore[method-assign]
-
-    with pytest.raises(ChannelProcessingTimeoutError):
-        await asyncio.wait_for(
-            composed.engine.receive(
-                ChannelInput(target=_SENSOR, payload=TextChannelPayload(text="eco mode")),
-                reply=None,
-                timeout=timedelta(milliseconds=300),
-            ),
-            timeout=5,
-        )
-
-    processing = _frozen(await composed.stored(addresses[0]))
-    assert processing.status is not ProcessingStatus.COMPLETED
-    assert processing.stages[-1].due is ControllerRule.STAGE_TIMED_OUT
-
-
-async def test_the_admission_write_runs_inside_the_calls_deadline(
-    composed: Composed, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ADR-0274 §7, ADR-0286 §2:1: an event's budget starts at receiver admission, so an
-    admission insert the store never answers is cut off there; the event times out as
-    its kind classifies the expiry, and the insert that never landed leaves nothing."""
-    addresses = _admission_never_answers(monkeypatch, composed)
-
-    with pytest.raises(ChannelProcessingTimeoutError):
-        await asyncio.wait_for(
-            composed.engine.receive(
-                ChannelInput(target=_SENSOR, payload=TextChannelPayload(text="eco mode")),
-                reply=None,
-                timeout=timedelta(milliseconds=300),
-            ),
-            timeout=5,
-        )
-
-    (address,) = addresses
-    assert await composed.stored(address) is None
-    assert not composed.writer.holds(address)
-
-
-def _admission_never_answers(monkeypatch: pytest.MonkeyPatch, composed: Composed) -> list[str]:
-    """Make the store never answer the first admission insert; record its address."""
-    addresses: list[str] = []
-    original = composed.memory.write_atomic
-
-    async def write_atomic(writes: Sequence[MemoryWrite]) -> Sequence[str]:
-        if not addresses and any(
-            write.mode is MemoryWriteMode.INSERT_IF_ABSENT for write in writes
-        ):
-            addresses.append(writes[0].record.id)
-            await asyncio.Event().wait()
-        return await original(writes)
-
-    monkeypatch.setattr(composed.memory, "write_atomic", write_atomic)
-    return addresses

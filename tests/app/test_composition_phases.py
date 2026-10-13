@@ -1,14 +1,15 @@
-"""The phases' thin path is wired only where the opt-in is set (ADR-0309 §2:6, §4:2).
+"""The composition root always wires the phases (ADR-0309 §2:6, §4:2).
 
-The composition root builds a :class:`~ai_assistant.orchestration.phase_path.PhasePath`
-only where ``Settings.phases_thin_path`` is set, which only a test hub does; every other
-deployment's engine holds none and runs today's table. Where it is built, it reuses the
-objects the root already holds — one plan store, one trail, one memory store, one story
-store — and its policy holds no goal authorizations and no goal quotes (ADR-0306 §4:11).
+The switch removed the opt-in: every deployment's engine holds a
+:class:`~ai_assistant.orchestration.phase_path.PhasePath`, which plans every activation.
+It reuses the objects the root already holds — one plan store, one trail, one memory
+store, one story store — and its policy holds no goal authorizations and no goal quotes
+(ADR-0306 §4:11). Planning is offered every capability the phases' tools advertise: the
+registry's, the configured search, and the assistant's own records' (ADR-0306 §2:7).
 
 **Nothing here opens a socket.** Every case builds the engine over a hashing embedder and
-closes it; the deployment that connects a search account names an ``.invalid`` origin
-(RFC 6761 §6.4) and no transport is driven.
+closes it; a deployment that connects an account names an ``.invalid`` origin (RFC 6761
+§6.4) and no transport is driven.
 """
 
 from __future__ import annotations
@@ -26,8 +27,7 @@ from ai_assistant.app.composition import (
     RECALL_SECOND_RUN_CAP,
 )
 from ai_assistant.core.config import EmbedderKind, Settings
-from ai_assistant.core.types import RECALLED_ITEMS_MAX, ProposedCall
-from ai_assistant.orchestration.chat import CHAT_TURN_BUDGET
+from ai_assistant.core.types import RECALLED_ITEMS_MAX, ProposedCall, ToolDefinition
 from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
     LOOK_UP_LABEL_ARGUMENTS,
@@ -48,25 +48,22 @@ CONNECTION: Final = "conn-0001"
 SEARCH_ORIGIN: Final = "https://search.example.invalid"
 
 
-def test_the_opt_in_is_unset_by_default() -> None:
-    """ADR-0309 §2:6: unset by default, and only a test hub sets it."""
-    assert Settings().phases_thin_path is False
+async def _offered(phases: PhasePath) -> tuple[ToolDefinition, ...]:
+    """What planning is offered: every capability the phases' tools advertise."""
+    assert phases._capabilities is None, "no fixed list: every one advertised"
+    return await phases._tools.offered(await phases._tools.capabilities())
 
 
-async def test_a_deployment_without_the_opt_in_wires_no_phases(tmp_path: Path) -> None:
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    try:
-        assert engine._phases is None
-        assert engine._chat_turn_budget == CHAT_TURN_BUDGET
-    finally:
-        await engine.aclose()
+def test_the_opt_in_is_gone() -> None:
+    """ADR-0309 §2:6: the switch removes it, so no setting reads it."""
+    assert "phases_thin_path" not in Settings.model_fields
 
 
-async def test_the_opt_in_wires_the_path_over_the_roots_own_stores(tmp_path: Path) -> None:
+async def test_every_deployment_wires_the_path_over_the_roots_own_stores(
+    tmp_path: Path,
+) -> None:
     """One plan store, one trail, one memory store and one story store (§2:6)."""
-    engine = build_engine(
-        Settings(embedder=EmbedderKind.HASHING, phases_thin_path=True), data_dir=tmp_path
-    )
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         phases = engine._phases
         assert isinstance(phases, PhasePath)
@@ -87,16 +84,18 @@ async def test_the_opt_in_wires_the_path_over_the_roots_own_stores(tmp_path: Pat
         assert 1 <= RECALL_SECOND_RUN_CAP <= RECALLED_ITEMS_MAX
         assert phases._memory is engine._memory
         assert engine._chat_turn_budget == PHASES_TURN_BUDGET
-        # ADR-0309 §4:2: remembering is offered; the search and the booking are not
-        # configured here, so neither is. Planning's story calls that write are offered
-        # beside it (ADR-0300 §10, ADR-0303 §9), with their label arguments.
-        # Planning's look-ups are offered too (ADR-0307 §6:6), with theirs.
-        offered = await phases._tools.offered(phases._capabilities)
-        assert [str(one.capability) for one in offered] == [
+        # ADR-0306 §2:7: every capability the tools advertise — here the registry's
+        # current time and remembering; no search, account or booking is configured,
+        # so none of theirs. Planning's story calls that write are offered beside them
+        # (ADR-0300 §10, ADR-0303 §9), with their label arguments, and its look-ups
+        # (ADR-0307 §6:6), with theirs.
+        offered = await _offered(phases)
+        assert {str(one.capability) for one in offered} == {
+            "report_current_time",
             "remember",
             *STORY_CALL_CAPABILITIES,
             *LOOK_UP_CAPABILITIES,
-        ]
+        }
         assert phases._label_arguments == {**STORY_LABEL_ARGUMENTS, **LOOK_UP_LABEL_ARGUMENTS}
         # One look-ups runner behind every look-up, over the root's own memory store and
         # the story views' reads, whose scope the path opens around acting.
@@ -106,8 +105,8 @@ async def test_the_opt_in_wires_the_path_over_the_roots_own_stores(tmp_path: Pat
         assert look_ups._views is phases._story_reads
         assert look_ups._search_limit == PHASES_MEMORY_SEARCH_LIMIT
         # Each story call runs through acting's own-records seam, over the root's own
-        # stores and the one tidy-up the interim run holds, so at most one run is on a
-        # story at a time (ADR-0300 §5:10).
+        # stores and the one tidy-up, so at most one run is on a story at a time
+        # (ADR-0300 §5:10).
         runners = phases._acting._own_records._runners  # type: ignore[attr-defined]
         held = {id(runners[name]): runners[name] for name in STORY_CALL_CAPABILITIES}
         (story_calls,) = held.values()
@@ -115,9 +114,8 @@ async def test_the_opt_in_wires_the_path_over_the_roots_own_stores(tmp_path: Pat
         assert all(runners[name] is look_ups for name in LOOK_UP_CAPABILITIES)
         assert story_calls._stories is engine._stories
         assert story_calls._memory is engine._memory
-        interim = engine._interim_tidy_up
-        assert interim is not None
-        assert story_calls._tidy_up is interim._tidy_up
+        assert story_calls._tidy_up is not None
+        assert not hasattr(engine, "_interim_tidy_up"), "the interim run is gone (§5:8)"
         # The same runner makes the hub's check of a move or a split before authorizing
         # (ADR-0307 §5:3-§5:4).
         assert phases._story_calls is story_calls
@@ -133,7 +131,6 @@ async def test_a_connected_search_is_offered_without_the_origin_the_hub_fills(
     engine = build_engine(
         Settings(
             embedder=EmbedderKind.HASHING,
-            phases_thin_path=True,
             web_search_connection=CONNECTION,
             web_search_origin=SEARCH_ORIGIN,
         ),
@@ -142,10 +139,9 @@ async def test_a_connected_search_is_offered_without_the_origin_the_hub_fills(
     try:
         phases = engine._phases
         assert phases is not None
-        offered = {
-            str(one.capability): one for one in await phases._tools.offered(phases._capabilities)
-        }
+        offered = {str(one.capability): one for one in await _offered(phases)}
         assert set(offered) == {
+            "report_current_time",
             "web_search",
             "remember",
             *STORY_CALL_CAPABILITIES,
@@ -172,7 +168,6 @@ async def test_a_configured_booking_act_is_offered_with_its_endpoint_filled(
     engine = build_engine(
         Settings(
             embedder=EmbedderKind.HASHING,
-            phases_thin_path=True,
             booking_connection="conn-booking-0001",
             booking_endpoint=endpoint,
             booking_available_from=date(2026, 10, 1),
@@ -188,10 +183,10 @@ async def test_a_configured_booking_act_is_offered_with_its_endpoint_filled(
     try:
         phases = engine._phases
         assert phases is not None
-        offered = {
-            str(one.capability): one for one in await phases._tools.offered(phases._capabilities)
-        }
+        offered = {str(one.capability): one for one in await _offered(phases)}
         assert set(offered) == {
+            "report_current_time",
+            "booking_availability",
             "book_stay",
             "remember",
             *STORY_CALL_CAPABILITIES,
@@ -201,5 +196,24 @@ async def test_a_configured_booking_act_is_offered_with_its_endpoint_filled(
         call = ProposedCall(call_id="c1", name="book_stay", arguments={"date": "2026-10-02"})
         filled = await phases._tools.filled(call)
         assert filled.arguments == {"date": "2026-10-02", "origin": endpoint}
+    finally:
+        await engine.aclose()
+
+
+async def test_a_connected_account_s_send_is_offered(tmp_path: Path) -> None:
+    """ADR-0306 §2:7: ``send_email``, registered where an account is connected, is offered."""
+    engine = build_engine(
+        Settings(
+            embedder=EmbedderKind.HASHING,
+            send_email_connection="conn-mail-0001",
+            send_email_endpoint="smtps://mail.example.invalid:465",
+        ),
+        data_dir=tmp_path,
+    )
+    try:
+        phases = engine._phases
+        assert phases is not None
+        offered = {str(one.capability) for one in await _offered(phases)}
+        assert "send_email" in offered
     finally:
         await engine.aclose()

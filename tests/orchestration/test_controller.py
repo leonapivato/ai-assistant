@@ -27,8 +27,8 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.controller import (
     ACTIVATION_RULES,
-    PHASE_RULES,
     ActivationController,
+    PassFacts,
     Rule,
     Stage,
     StageRecord,
@@ -95,8 +95,101 @@ class _Phases:
     latest_calls_beyond_tidy_ups: bool = False
 
 
+def _turn_asks_nothing(facts: PassFacts) -> bool:
+    return facts.conversation_turn and facts.associated and not facts.asks_which_goal
+
+
+#: The controller's mechanism cases' own table: the rows the old path's table ran
+#: before the switch (ADR-0309 §2:6), kept here so those cases exercise the mechanism —
+#: the first answer decides, the loop guard, tolerance, deadlines, the stop mark and the
+#: record — over stages a case can fake without the phases' working set. The
+#: controller's own table is §3's, :data:`ACTIVATION_RULES`, pinned below.
+_MECHANISM_RULES: Final[tuple[Rule, ...]] = (
+    Rule(
+        ControllerRule.CONVERSATION_UNRESOLVED,
+        lambda f: f.conversation_turn and not f.conversation_resolved,
+        ControllerStage.BEGIN_CONVERSATION,
+    ),
+    Rule(
+        ControllerRule.ROUTE_UNCHECKED,
+        lambda f: f.conversation_turn and f.routing_wired and not f.route_decided,
+        ControllerStage.ROUTING,
+    ),
+    Rule(ControllerRule.ROUTE_TAKEN, lambda f: f.route_taken, ControllerStage.END),
+    # ADR-0282 §3: the windows are assembled before recall, wherever understanding is.
+    Rule(
+        ControllerRule.WINDOWS_UNASSEMBLED,
+        lambda f: f.understanding_wired and not f.windows_decided,
+        ControllerStage.WINDOWS,
+    ),
+    # ADR-0281 §2: recall runs before understanding, and only where both are wired.
+    Rule(
+        ControllerRule.NOT_RECALLED,
+        lambda f: f.recall_wired and f.understanding_wired and not f.recall_decided,
+        ControllerStage.RECALL,
+    ),
+    Rule(
+        ControllerRule.NOT_UNDERSTOOD,
+        lambda f: f.understanding_wired and not f.understanding_decided,
+        ControllerStage.UNDERSTANDING,
+    ),
+    # ADR-0300 §6:11: the understanding's story links are recorded once it is a
+    # recorded version, before anything the pass does with the input.
+    Rule(
+        ControllerRule.STORY_LINKS_UNRECORDED,
+        lambda f: f.story_links_wired and f.understanding_recorded and not f.story_links_decided,
+        ControllerStage.STORY_LINKS,
+    ),
+    Rule(
+        ControllerRule.EVENT_UNSUMMARIZED,
+        lambda f: (
+            f.informational_event
+            and not f.event_summarized
+            and (f.understanding_decided or not f.understanding_wired)
+        ),
+        ControllerStage.EVENT_SUMMARY,
+    ),
+    Rule(
+        ControllerRule.ASSOCIATION_DUE,
+        lambda f: f.conversation_turn and not f.associated,
+        ControllerStage.ASSOCIATE_GOAL,
+    ),
+    Rule(
+        ControllerRule.DISAMBIGUATION_RAISED,
+        lambda f: f.asks_which_goal and not f.disambiguation_asked,
+        ControllerStage.ASK_DISAMBIGUATION,
+    ),
+    Rule(
+        ControllerRule.CONTINUING_UNRECONCILED,
+        lambda f: f.continues_goal and f.reconciliation_wired and not f.reconciled,
+        ControllerStage.RECONCILE,
+    ),
+    Rule(
+        ControllerRule.UNPLANNED,
+        lambda f: _turn_asks_nothing(f) and not f.turn_decided,
+        ControllerStage.TURN_LOOP,
+    ),
+    Rule(
+        ControllerRule.PLAN_HAS_STEPS,
+        lambda f: (
+            f.turn_decided
+            and not f.turn_raised_question
+            and f.plan_has_steps
+            and not f.drive_decided
+        ),
+        ControllerStage.DRIVE,
+    ),
+    Rule(
+        ControllerRule.REPLY_OWED,
+        lambda f: f.turn_decided and not f.parked and not f.reply_composed,
+        ControllerStage.COMPOSE,
+    ),
+    Rule(ControllerRule.NOTHING_DUE, lambda _: True, ControllerStage.END),
+)
+
+
 def _due(facts: _Facts) -> Rule:
-    return next(rule for rule in ACTIVATION_RULES if rule.answers(facts))
+    return next(rule for rule in _MECHANISM_RULES if rule.answers(facts))
 
 
 _TURN: Final = _Facts(conversation_turn=True)
@@ -304,47 +397,6 @@ def test_the_first_rule_that_answers_decides(
     assert (due.name, due.makes_due) == (rule, stage)
 
 
-def test_the_table_is_the_adrs_rows_in_order_ending_in_one_that_always_answers() -> None:
-    """ADR-0280 §4's twelve rows, with ADR-0282 §3's and ADR-0281 §2's between
-    ``route_taken`` and ``not_understood``, and ADR-0300 §6:11's immediately after
-    ``not_understood``."""
-    assert [rule.name for rule in ACTIVATION_RULES] == [
-        ControllerRule.CONVERSATION_UNRESOLVED,
-        ControllerRule.ROUTE_UNCHECKED,
-        ControllerRule.ROUTE_TAKEN,
-        ControllerRule.WINDOWS_UNASSEMBLED,
-        ControllerRule.NOT_RECALLED,
-        ControllerRule.NOT_UNDERSTOOD,
-        ControllerRule.STORY_LINKS_UNRECORDED,
-        ControllerRule.EVENT_UNSUMMARIZED,
-        ControllerRule.ASSOCIATION_DUE,
-        ControllerRule.DISAMBIGUATION_RAISED,
-        ControllerRule.CONTINUING_UNRECONCILED,
-        ControllerRule.UNPLANNED,
-        ControllerRule.PLAN_HAS_STEPS,
-        ControllerRule.REPLY_OWED,
-        ControllerRule.NOTHING_DUE,
-    ]
-    assert ACTIVATION_RULES[-1].answers(_Facts())
-
-
-def test_an_event_waits_for_a_wired_understanding_before_its_summary() -> None:
-    event = _Facts(informational_event=True, understanding_wired=True, windows_decided=True)
-    assert _due(event).name is ControllerRule.NOT_UNDERSTOOD
-
-
-def test_a_turn_asking_which_goal_is_not_planned() -> None:
-    asked = replace(_ASSOCIATED, asks_which_goal=True, disambiguation_asked=True)
-    assert not any(
-        rule.name is ControllerRule.UNPLANNED for rule in ACTIVATION_RULES if rule.answers(asked)
-    )
-
-
-def test_an_unwired_reconciliation_leaves_a_continuing_goal_to_the_turn_loop() -> None:
-    continuing = replace(_ASSOCIATED, continues_goal=True)
-    assert _due(continuing).name is ControllerRule.UNPLANNED
-
-
 # --- §3, §5, §6: the loop, over fake stages ---------------------------------------
 
 
@@ -377,7 +429,7 @@ class _FakeStage:
 
 
 async def _run(
-    facts: _Facts, *stages: _FakeStage, rules: tuple[Rule, ...] = ACTIVATION_RULES
+    facts: _Facts, *stages: _FakeStage, rules: tuple[Rule, ...] = _MECHANISM_RULES
 ) -> StageRecord:
     _, now = _clock()
     record = StageRecord()
@@ -433,6 +485,7 @@ async def test_a_stage_that_did_not_end_done_ends_the_pass_and_reraises_its_erro
     controller = ActivationController(
         stages=(_FakeStage(ControllerStage.EVENT_SUMMARY, result=StageResult(outcome, error)),),
         clock=now,  # type: ignore[arg-type]  # a plain callable
+        rules=_MECHANISM_RULES,
     )
     with pytest.raises(type(error)) as caught:
         await controller.run(_Facts(informational_event=True), record)
@@ -491,6 +544,7 @@ async def test_a_tolerated_result_past_the_pass_deadline_ends_the_pass_and_rerai
     controller = ActivationController(
         stages=(_tolerated(StageOutcome.TIMED_OUT, late),),
         clock=now,  # type: ignore[arg-type]  # a plain callable
+        rules=_MECHANISM_RULES,
     )
     with pytest.raises(ModelTimeoutError) as caught:
         await controller.run(replace(_EVENT_WIRED, deadline_passed=True), record)
@@ -512,6 +566,7 @@ async def test_an_error_escaping_a_tolerant_stage_ends_the_pass_as_stage_failed(
     controller = ActivationController(
         stages=(TolerantStage(ControllerStage.RECALL, body),),
         clock=now,  # type: ignore[arg-type]  # a plain callable
+        rules=_MECHANISM_RULES,
     )
     with pytest.raises(PlanningError) as caught:
         await controller.run(replace(_EVENT_WIRED), record)
@@ -536,6 +591,7 @@ async def test_a_result_not_marked_tolerated_takes_the_fixed_default() -> None:
             ),
         ),
         clock=now,  # type: ignore[arg-type]  # a plain callable
+        rules=_MECHANISM_RULES,
     )
     with pytest.raises(MemoryStoreError):
         await controller.run(replace(_EVENT_WIRED), record)
@@ -618,6 +674,7 @@ async def test_a_pass_cancelled_inside_a_stage_ends_interrupted() -> None:
     controller = ActivationController(
         stages=(Stage(ControllerStage.EVENT_SUMMARY, hang),),
         clock=now,  # type: ignore[arg-type]  # a plain callable
+        rules=_MECHANISM_RULES,
     )
     task = asyncio.create_task(controller.run(_Facts(informational_event=True), record))
     await entered.wait()
@@ -762,6 +819,7 @@ def _stoppable(mark: _Mark, *stages: _FakeStage) -> ActivationController[_Facts]
     return ActivationController(
         stages=stages,
         clock=now,  # type: ignore[arg-type]  # a plain callable
+        rules=_MECHANISM_RULES,
         stopped=mark,
     )
 
@@ -836,6 +894,7 @@ async def test_a_cancellation_reaching_a_marked_pass_propagates_with_the_stops_e
     controller = ActivationController(
         stages=(Stage(ControllerStage.EVENT_SUMMARY, hang),),
         clock=now,  # type: ignore[arg-type]  # a plain callable
+        rules=_MECHANISM_RULES,
         stopped=mark,
     )
     task = asyncio.create_task(controller.run(_Facts(informational_event=True), record))
@@ -902,12 +961,16 @@ _PHASE_PASS: Final = _Facts(
 
 
 def _phase_due(phases: _Phases, facts: _Facts = _PHASE_PASS) -> Rule:
-    return next(rule for rule in PHASE_RULES if rule.answers(replace(facts, phases=phases)))
+    return next(rule for rule in ACTIVATION_RULES if rule.answers(replace(facts, phases=phases)))
 
 
-def test_the_phase_table_keeps_the_first_rows_and_adds_the_rounds_in_order() -> None:
-    """§3's rows the phases have, row 7, recall's digest, after the second run."""
-    assert [rule.name for rule in PHASE_RULES] == [
+def test_the_controllers_one_table_is_section_3s_rows_in_order() -> None:
+    """ADR-0309 §3's thirteen rows, in order, the last always answering (§2:6, §7:1).
+
+    The old path's rows are gone from it (§3:6): no routing, event summary, goal, turn
+    loop, drive or compose row answers on any pass.
+    """
+    assert [rule.name for rule in ACTIVATION_RULES] == [
         ControllerRule.CONVERSATION_UNRESOLVED,
         ControllerRule.WINDOWS_UNASSEMBLED,
         ControllerRule.NOT_RECALLED,
@@ -922,20 +985,33 @@ def test_the_phase_table_keeps_the_first_rows_and_adds_the_rounds_in_order() -> 
         ControllerRule.ROUND_DUE,
         ControllerRule.NOTHING_DUE,
     ]
-    kept = {rule.name for rule in PHASE_RULES}
-    assert ControllerRule.UNPLANNED not in kept
-    assert ControllerRule.ROUTE_UNCHECKED not in kept
-
-
-def test_todays_table_is_unchanged_where_the_phases_are_not_wired() -> None:
-    """ADR-0309 §2:6: the second run's row and recall's digest's are the phases' alone."""
-    assert ControllerRule.UNDERSTOOD_NOT_RECALLED not in {rule.name for rule in ACTIVATION_RULES}
-    assert ControllerRule.RECALL_UNDIGESTED not in {rule.name for rule in ACTIVATION_RULES}
-    assert [rule.name for rule in ACTIVATION_RULES][3:6] == [
-        ControllerRule.WINDOWS_UNASSEMBLED,
-        ControllerRule.NOT_RECALLED,
-        ControllerRule.NOT_UNDERSTOOD,
-    ]
+    assert ACTIVATION_RULES[-1].answers(_Facts())
+    kept = {rule.name for rule in ACTIVATION_RULES}
+    assert kept.isdisjoint(
+        {
+            ControllerRule.ROUTE_UNCHECKED,
+            ControllerRule.ROUTE_TAKEN,
+            ControllerRule.EVENT_UNSUMMARIZED,
+            ControllerRule.ASSOCIATION_DUE,
+            ControllerRule.DISAMBIGUATION_RAISED,
+            ControllerRule.CONTINUING_UNRECONCILED,
+            ControllerRule.UNPLANNED,
+            ControllerRule.PLAN_HAS_STEPS,
+            ControllerRule.REPLY_OWED,
+        }
+    )
+    assert {rule.makes_due for rule in ACTIVATION_RULES}.isdisjoint(
+        {
+            ControllerStage.ROUTING,
+            ControllerStage.EVENT_SUMMARY,
+            ControllerStage.ASSOCIATE_GOAL,
+            ControllerStage.ASK_DISAMBIGUATION,
+            ControllerStage.RECONCILE,
+            ControllerStage.TURN_LOOP,
+            ControllerStage.DRIVE,
+            ControllerStage.COMPOSE,
+        }
+    )
 
 
 def test_recall_runs_again_once_understanding_has_recorded_and_before_the_first_round() -> None:
@@ -961,7 +1037,7 @@ def test_recall_does_not_run_again_where_it_is_not_wired_or_nothing_is_recorded(
 
 def test_a_phase_rule_on_a_pass_the_phases_do_not_plan_is_a_defect() -> None:
     with pytest.raises(RuntimeError, match="only on a pass the phases plan"):
-        next(rule for rule in PHASE_RULES if rule.answers(_PHASE_PASS))
+        next(rule for rule in ACTIVATION_RULES if rule.answers(_PHASE_PASS))
 
 
 def test_the_first_round_is_due_once_understanding_has_recorded() -> None:
@@ -1113,7 +1189,7 @@ def _phase_controller(*stages: _PhaseStage | _Recalling) -> ActivationController
     return ActivationController(
         stages=stages,
         clock=now,  # type: ignore[arg-type]  # a plain callable
-        rules=PHASE_RULES,
+        rules=ACTIVATION_RULES,
     )
 
 
@@ -1440,6 +1516,7 @@ def _diagnosed(
     return ActivationController(
         stages=stages,  # type: ignore[arg-type]  # fakes standing for stages
         clock=now,  # type: ignore[arg-type]  # a plain callable
+        rules=_MECHANISM_RULES,
         activation_id=activation_id,
         diagnostics=sink,
     )

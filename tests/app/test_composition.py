@@ -664,11 +664,17 @@ def _spy_on_policy(
     exactly what reached ``ThresholdActionPolicy`` — which settings field mapped
     to which constructor parameter — without depending on the policy's private,
     deliberately opaque rule table.
+
+    **The root's policy alone**, the one built with the goal authorizations and quotes.
+    The phases build a second from the same settings and grants, holding neither
+    (ADR-0306 §4:11), which ``test_composition_phases`` asserts on; it is told apart
+    here by holding no ``authorizations``.
     """
     calls: list[dict[str, object]] = []
 
     def factory(**kwargs: object) -> ThresholdActionPolicy:
-        calls.append(kwargs)
+        if "authorizations" in kwargs:
+            calls.append(kwargs)
         return ThresholdActionPolicy(**kwargs)  # type: ignore[arg-type]  # forwarded kwargs
 
     monkeypatch.setattr(composition_module, "ThresholdActionPolicy", factory)

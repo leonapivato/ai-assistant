@@ -70,6 +70,7 @@ def _wired(
     objects and the same fakes — with the two collaborators ADR-0130 §9 adds.
     """
     return Engine(
+        chat_reader=False,
         associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         grant_operations=_grant_operations(),

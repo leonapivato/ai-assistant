@@ -99,10 +99,9 @@ class ChannelReceiverContract:
     """Channel obligations shared by every AssistantEngine implementation."""
 
     #: Whether an event whose activation cannot finish raises rather than returning its
-    #: result. ADR-0313 §4:5 makes it a result reading *couldn't finish*; today's event
-    #: path, which still answers where the phases' opt-in is unset, raises
-    #: ``ChannelProcessingTimeoutError`` until the cutover deletes it with the
-    #: event-summary stage (§6:2), so a binding over that path sets this.
+    #: result. ADR-0313 §4:5 makes it a result reading *couldn't finish*, which every
+    #: event the phases run returns; the event-summary path that raised is gone from the
+    #: engine with the switch (ADR-0309 §2:6), so no binding sets this.
     an_unfinished_event_raises: ClassVar[bool] = False
 
     async def test_a_stop_naming_no_activation_answers_no_such_activation(

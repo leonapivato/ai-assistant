@@ -10,15 +10,13 @@ alone are in ``test_controller.py``.
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from test_activation_state import _admitted
-from test_engine import AT, Harness, NoStepPlanner
+from test_engine import AT, Harness
 from understanding_support import STATED_PROPOSAL, recall_stage, understanding_stage
 
-from ai_assistant.core.errors import ModelTimeoutError
 from ai_assistant.core.types import (
     ChannelInput,
     ControllerRule,
@@ -78,26 +76,6 @@ async def _entries(harness: Harness) -> list[tuple[ControllerStage, ControllerRu
 
 
 # --- typed turns --------------------------------------------------------------------
-
-
-async def test_a_history_read_outlasting_the_deadline_times_the_stage_out() -> None:
-    """§5: expiry during the windows stage's history read, before recall or the
-    understanding model runs (ADR-0282 §3)."""
-    model = FakeModelProvider(STATED_PROPOSAL)
-    harness = _harness(planner=NoStepPlanner(), understanding_model=model)
-
-    async def hangs(conversation_id: str) -> Any:
-        await asyncio.sleep(10)
-
-    harness.engine._conversations.history = hangs  # type: ignore[method-assign]  # a read that never returns in time
-    with pytest.raises(ModelTimeoutError):
-        await harness.engine.converse("book the campsite", timeout=timedelta(milliseconds=50))
-    assert model.calls == []
-    assert await _entries(harness) == [
-        (_S.BEGIN_CONVERSATION, _R.CONVERSATION_UNRESOLVED, _DONE),
-        (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, StageOutcome.TIMED_OUT),
-        (_S.END, _R.STAGE_TIMED_OUT, _DONE),
-    ]
 
 
 # --- cancellation -------------------------------------------------------------------------

@@ -1,10 +1,9 @@
 """The production root with the phases wired, and a chat activation driven through it.
 
-Until the switch lane (ADR-0309 §2:6, §4:5) the composition root builds the phases only
-where ``Settings.phases_thin_path`` is set. The ``test_phases_*`` suites under
-``tests/app`` set it, so a case asserting behaviour that survives the cutover — the open
-episode, a channel's history, a restart's closing — runs through the root the switch
-leaves, and stays green before and after it.
+The composition root builds the phases on every deployment (ADR-0309 §2:6), so the
+``test_phases_*`` suites under ``tests/app`` run a case asserting behaviour that
+survived the cutover — the open episode, a channel's history, a restart's closing —
+through the root as it is.
 
 The substitutes are the model-facing seams alone, as the old-path composition suites
 substitute them: the provider's ``complete``, answering the understanding stage with a
@@ -108,7 +107,7 @@ class Phased:
     model: FakeModelProvider
     #: Every planning round, answered.
     completer: FakeToolCallingCompleter
-    #: The settings the root was built from, the opt-in set.
+    #: The settings the root was built from.
     settings: Settings
     _messages: Any = field(default_factory=lambda: count(1))
 
@@ -280,9 +279,7 @@ def build_phased(
     recorded = model
     monkeypatch.setattr(PydanticAIProvider, "complete", complete)
     monkeypatch.setattr(PydanticAIToolCallingCompleter, "respond", respond)
-    built = Settings(
-        data_dir=tmp_path, embedder=EmbedderKind.HASHING, phases_thin_path=True, **settings
-    )
+    built = Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING, **settings)
     engine = build_engine(built, data_dir=tmp_path)
     assert engine._phases is not None, "the root wired the phases"
     return Phased(engine=engine, model=model, completer=planning, settings=built)

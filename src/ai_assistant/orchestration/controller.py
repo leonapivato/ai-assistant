@@ -277,112 +277,17 @@ class Rule:
     beside_when: Callable[[PassFacts], bool] | None = None
 
 
-def _turn_asks_nothing(facts: PassFacts) -> bool:
-    return facts.conversation_turn and facts.associated and not facts.asks_which_goal
-
-
-#: ADR-0280 §4's table, in its order, with ADR-0281 §2's row, ADR-0282 §3's and
-#: ADR-0300 §6:11's. The first rule that answers decides, and ``nothing_due`` is last
-#: and always answers, so every pass ends by a rule.
-ACTIVATION_RULES: Final[tuple[Rule, ...]] = (
-    Rule(
-        ControllerRule.CONVERSATION_UNRESOLVED,
-        lambda f: f.conversation_turn and not f.conversation_resolved,
-        ControllerStage.BEGIN_CONVERSATION,
-    ),
-    Rule(
-        ControllerRule.ROUTE_UNCHECKED,
-        lambda f: f.conversation_turn and f.routing_wired and not f.route_decided,
-        ControllerStage.ROUTING,
-    ),
-    Rule(ControllerRule.ROUTE_TAKEN, lambda f: f.route_taken, ControllerStage.END),
-    # ADR-0282 §3: the windows are assembled before recall, wherever understanding is.
-    Rule(
-        ControllerRule.WINDOWS_UNASSEMBLED,
-        lambda f: f.understanding_wired and not f.windows_decided,
-        ControllerStage.WINDOWS,
-    ),
-    # ADR-0281 §2: recall runs before understanding, and only where both are wired.
-    Rule(
-        ControllerRule.NOT_RECALLED,
-        lambda f: f.recall_wired and f.understanding_wired and not f.recall_decided,
-        ControllerStage.RECALL,
-    ),
-    Rule(
-        ControllerRule.NOT_UNDERSTOOD,
-        lambda f: f.understanding_wired and not f.understanding_decided,
-        ControllerStage.UNDERSTANDING,
-    ),
-    # ADR-0300 §6:11: the understanding's story links are recorded once it is a
-    # recorded version, before anything the pass does with the input.
-    Rule(
-        ControllerRule.STORY_LINKS_UNRECORDED,
-        lambda f: f.story_links_wired and f.understanding_recorded and not f.story_links_decided,
-        ControllerStage.STORY_LINKS,
-    ),
-    Rule(
-        ControllerRule.EVENT_UNSUMMARIZED,
-        lambda f: (
-            f.informational_event
-            and not f.event_summarized
-            and (f.understanding_decided or not f.understanding_wired)
-        ),
-        ControllerStage.EVENT_SUMMARY,
-    ),
-    Rule(
-        ControllerRule.ASSOCIATION_DUE,
-        lambda f: f.conversation_turn and not f.associated,
-        ControllerStage.ASSOCIATE_GOAL,
-    ),
-    Rule(
-        ControllerRule.DISAMBIGUATION_RAISED,
-        lambda f: f.asks_which_goal and not f.disambiguation_asked,
-        ControllerStage.ASK_DISAMBIGUATION,
-    ),
-    Rule(
-        ControllerRule.CONTINUING_UNRECONCILED,
-        lambda f: f.continues_goal and f.reconciliation_wired and not f.reconciled,
-        ControllerStage.RECONCILE,
-    ),
-    Rule(
-        ControllerRule.UNPLANNED,
-        lambda f: _turn_asks_nothing(f) and not f.turn_decided,
-        ControllerStage.TURN_LOOP,
-    ),
-    Rule(
-        ControllerRule.PLAN_HAS_STEPS,
-        lambda f: (
-            f.turn_decided
-            and not f.turn_raised_question
-            and f.plan_has_steps
-            and not f.drive_decided
-        ),
-        ControllerStage.DRIVE,
-    ),
-    Rule(
-        ControllerRule.REPLY_OWED,
-        lambda f: f.turn_decided and not f.parked and not f.reply_composed,
-        ControllerStage.COMPOSE,
-    ),
-    Rule(ControllerRule.NOTHING_DUE, lambda _: True, ControllerStage.END),
-)
-
-
-def _rule(name: ControllerRule) -> Rule:
-    """The row of :data:`ACTIVATION_RULES` named ``name``, which the phase table keeps."""
-    return next(rule for rule in ACTIVATION_RULES if rule.name is name)
-
-
 def _phases(facts: PassFacts) -> PhaseFacts:
     """The pass's phase decisions, which a phase rule reads only where the pass has them.
 
     Raises:
-        RuntimeError: If the pass runs no phases; :data:`PHASE_RULES` is handed only to
-            a pass that does (ADR-0309 §2:6).
+        RuntimeError: If the pass runs no phases. Every pass the controller runs is
+            planned by them (ADR-0309 §2:6), so one that is not reached this table
+            from a path the cutover retired.
     """
     phases = facts.phases
     if phases is None:
-        msg = "the phase rules run only on a pass the phases plan (ADR-0309 §2:6)"
+        msg = "the controller's rules run only on a pass the phases plan (ADR-0309 §2:6)"
         raise RuntimeError(msg)
     return phases
 
@@ -444,15 +349,40 @@ def _recall_digest(_: PassFacts) -> object:
     return ControllerRule.RECALL_UNDIGESTED
 
 
-#: ADR-0309 §3's table, for the rows the phases have so far. The old path's rows are
-#: absent. The composition root hands it to the controller only where the opt-in is
-#: set, and :data:`ACTIVATION_RULES` runs unchanged otherwise (§2:6).
-PHASE_RULES: Final[tuple[Rule, ...]] = (
-    _rule(ControllerRule.CONVERSATION_UNRESOLVED),
-    _rule(ControllerRule.WINDOWS_UNASSEMBLED),
-    _rule(ControllerRule.NOT_RECALLED),
-    _rule(ControllerRule.NOT_UNDERSTOOD),
-    _rule(ControllerRule.STORY_LINKS_UNRECORDED),
+#: ADR-0309 §3's table, in its order, the controller's only table (§2:6, §7:1). The first
+#: rule that answers decides, and ``nothing_due`` is last and always answers, so every
+#: pass ends by a rule. The old path's rows are gone from it (§3:6); the members that
+#: named them stay in ``ControllerRule`` until the types lane removes them.
+ACTIVATION_RULES: Final[tuple[Rule, ...]] = (
+    Rule(
+        ControllerRule.CONVERSATION_UNRESOLVED,
+        lambda f: f.conversation_turn and not f.conversation_resolved,
+        ControllerStage.BEGIN_CONVERSATION,
+    ),
+    # ADR-0282 §3: the windows are assembled before recall, wherever understanding is.
+    Rule(
+        ControllerRule.WINDOWS_UNASSEMBLED,
+        lambda f: f.understanding_wired and not f.windows_decided,
+        ControllerStage.WINDOWS,
+    ),
+    # ADR-0281 §2: recall runs before understanding, and only where both are wired.
+    Rule(
+        ControllerRule.NOT_RECALLED,
+        lambda f: f.recall_wired and f.understanding_wired and not f.recall_decided,
+        ControllerStage.RECALL,
+    ),
+    Rule(
+        ControllerRule.NOT_UNDERSTOOD,
+        lambda f: f.understanding_wired and not f.understanding_decided,
+        ControllerStage.UNDERSTANDING,
+    ),
+    # ADR-0300 §6:11: the understanding's story links are recorded once it is a
+    # recorded version, before anything the pass does with the input.
+    Rule(
+        ControllerRule.STORY_LINKS_UNRECORDED,
+        lambda f: f.story_links_wired and f.understanding_recorded and not f.story_links_decided,
+        ControllerStage.STORY_LINKS,
+    ),
     # ADR-0308 §2:9: recall runs again once an understanding is recorded, where it is
     # wired, as the first run is (ADR-0281 §2:3).
     Rule(
@@ -514,7 +444,7 @@ PHASE_RULES: Final[tuple[Rule, ...]] = (
         ControllerStage.PLANNING,
         per=_latest_round,
     ),
-    _rule(ControllerRule.NOTHING_DUE),
+    Rule(ControllerRule.NOTHING_DUE, lambda _: True, ControllerStage.END),
 )
 
 

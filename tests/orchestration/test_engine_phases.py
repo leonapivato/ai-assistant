@@ -1,11 +1,10 @@
-"""The phases' thin path end to end through the engine, over fakes (ADR-0309 §2:6, §3, §4).
+"""The phases end to end through the engine, over fakes (ADR-0309 §2:6, §3, §4).
 
-With the opt-in set, a message the chat's reader takes in runs ADR-0309 §3's table:
+A message the chat's reader takes in runs ADR-0309 §3's table:
 the conversation, the windows and understanding as today, then planning, authorizing,
 acting with digesting beside it, and planning again where a call brought something.
 The phases write the activation's messages into the conversation as it runs, and the
-episode freezes with its rounds, labels, digests and messages. With the opt-in unset,
-today's path answers as it always has.
+episode freezes with its rounds, labels, digests and messages.
 
 The five cases are the brief's: a quick question in one round, a search digested and
 answered in a second, a remember, a booking that comes back *needs you*, and a stop
@@ -27,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from channel_receiver_contract import event_input
+from structlog.testing import capture_logs
 from test_activation_state import _admitted
 from test_authorizer import _ACTIVATION, _episode
 from test_engine import AT, Harness, NoStepPlanner
@@ -865,8 +865,11 @@ async def test_a_message_that_fails_beside_a_remember_still_lists_what_was_remem
     harness = _harness(completer, wrap=_FailsOnce)
     conversation = await _conversation(harness)
 
-    await _say(harness, conversation, "remember I like green tea")
-    episode = await _settled(harness, conversation)
+    # The failed activation's log carries its traceback, whose rendering can outlast the
+    # wait below on a loaded machine; captured, it is not rendered.
+    with capture_logs():
+        await _say(harness, conversation, "remember I like green tea")
+        episode = await _settled(harness, conversation)
 
     expected = couldnt_finish(("the tool remember ran",)).text
     assert _said(await _messages(harness, conversation))[1:] == [
@@ -2783,14 +2786,14 @@ async def test_on_an_owner_only_pass_a_move_naming_notes_is_refused_and_members_
     assert len(holders) == 2  # the split took it into a story of its own
 
 
-# --- with the opt-in unset ---------------------------------------------------------------
+# --- an engine with no phases wired ------------------------------------------------------
 
 
-async def test_with_the_opt_in_unset_the_story_standing_command_lists_what_was_done() -> None:
+async def test_the_story_standing_command_lists_what_was_done() -> None:
     """ADR-0300 §8:1: the owner's story-standing command reads the effect records.
 
-    The one change to today's path: where a matter stands lists what was done, from the
-    plan store the engine holds, unknown first, then not done, then done.
+    Where a matter stands lists what was done, from the plan store the engine holds,
+    unknown first, then not done, then done; an engine with no phases wired reads it too.
     """
     stories = FakeStoryStore(now=lambda: AT)
     harness = Harness(planner=NoStepPlanner(), stories=stories)

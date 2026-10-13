@@ -97,9 +97,7 @@ async def test_on_each_emitter_holds_the_one_record_as_its_sink(
 ) -> None:
     """§4:4: the controller's engine, recall and understanding, and the phases' four."""
     built = _spy(monkeypatch)
-    settings = Settings(
-        embedder=EmbedderKind.HASHING, diagnostic_record=True, phases_thin_path=True
-    )
+    settings = Settings(embedder=EmbedderKind.HASHING, diagnostic_record=True)
     engine = build_engine(settings, data_dir=tmp_path)
     try:
         record = built[0]

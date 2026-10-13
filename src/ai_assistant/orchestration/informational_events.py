@@ -1,9 +1,10 @@
 """Transient informational processing with one model call (ADR-0274 §7).
 
-Today's event path, which still answers where the phases' opt-in is unset (ADR-0309
-§2:6). Its result takes ADR-0313 §4:4's shape: the summary it writes is validated and
-kept with the episode as before, and the result says only that the activation ended
-*done* (§6:2). The stage leaves with the old path at the cutover (§4:5).
+The old event path, which no activation reaches since the switch: every event runs
+through the phases (ADR-0309 §2:6, ADR-0313 §4:3). Its result takes ADR-0313 §4:4's
+shape: the summary it writes is validated and kept with the episode as before, and the
+result says only that the activation ended *done* (§6:2). The stage leaves with the old
+path in its deletion lane (§4:5).
 """
 
 from __future__ import annotations
