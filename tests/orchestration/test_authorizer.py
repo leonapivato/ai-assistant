@@ -46,6 +46,8 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryMember,
     StoryMemberKind,
+    StoryNote,
+    StoryNoteAuthor,
     ToolCall,
     ToolCost,
     ToolDefinition,
@@ -536,7 +538,8 @@ def _marked_round(round_id: str = "round:0") -> PlanningRound:
         (_episode(digests=(_digest(DigestOutcome.ANSWERED, "the 9:10"),)), True),
         (_episode(digests=(_digest(DigestOutcome.FAILED),)), False),
         (_episode(rounds=(_marked_round(),)), True),
-        # A story's note planning was shown: its mark is not read here, so it counts.
+        # A story's note planning was shown, whose mark the working set does not hold:
+        # it cannot be read, so it counts, failing closed.
         (_episode(labels=(PlanningLabel(label="N1", kind=LabelKind.NOTE, id="7"),)), True),
     ],
 )
@@ -602,6 +605,13 @@ async def test_a_fetched_record_resting_on_outside_content_counts_through_the_st
         (_episode("activation:other", derived_from_external=True), True),
         # Its input is withheld, but its understood meaning is shown (ADR-0303 §3:2).
         (_episode("activation:other", origin=InputOrigin.OUTSIDE), True),
+        # #2870: its evidence is outside content planning is shown (ADR-0308 §5:5).
+        (
+            _episode("activation:other", digests=(_digest(DigestOutcome.ANSWERED, "the 9:10"),)),
+            True,
+        ),
+        # A digest that answered nothing shows planning no evidence of another episode.
+        (_episode("activation:other", digests=(_digest(DigestOutcome.ANSWERED),)), False),
     ],
 )
 async def test_an_episode_planning_was_shown_counts_by_its_marks(
@@ -615,6 +625,73 @@ async def test_an_episode_planning_was_shown_counts_by_its_marks(
 
     working = WorkingRecord(labels=(label,))
     assert await read_outside_content(memory, _ACTIVATION, working=working) is read
+
+
+def _note(note_id: int, *, outside: bool) -> StoryNote:
+    """A story note as the story store holds it: the owner's, or a marked one planning wrote."""
+    return StoryNote(
+        note_id=note_id,
+        text="I prefer the morning." if not outside else "The email said 9:10.",
+        author=StoryNoteAuthor.PLANNING if outside else StoryNoteAuthor.OWNER,
+        written_during="act-0" if outside else None,
+        outside=outside,
+        written_at=_AT,
+    )
+
+
+_N1: Final = PlanningLabel(label="N1", kind=LabelKind.NOTE, id="7")
+
+
+@pytest.mark.parametrize(
+    ("notes", "read"),
+    [
+        # #2875: a note the owner wrote is never marked (ADR-0303 §3:1), so it is not
+        # outside content read.
+        ((_note(7, outside=False),), False),
+        # ADR-0303 §3:6, ADR-0306 §4:5: a marked note planning reads is.
+        ((_note(7, outside=True),), True),
+        # Held notes that are not the one labelled leave its mark unread: fails closed.
+        ((_note(8, outside=False),), True),
+    ],
+)
+async def test_a_note_planning_was_shown_counts_by_its_mark(
+    notes: tuple[StoryNote, ...], *, read: bool
+) -> None:
+    memory = FakeMemoryStore(now=_now)
+    await memory.add(_episode())
+
+    working = WorkingRecord(labels=(_N1,), notes=notes)
+    assert await read_outside_content(memory, _ACTIVATION, working=working) is read
+
+
+async def test_a_note_held_in_the_episode_record_is_read_by_its_mark_too() -> None:
+    """A label an earlier append recorded is read against the notes the working set holds."""
+    memory = FakeMemoryStore(now=_now)
+    await memory.add(_episode(labels=(_N1,)))
+
+    working = WorkingRecord(notes=(_note(7, outside=False),))
+    assert await read_outside_content(memory, _ACTIVATION, working=working) is False
+
+
+async def test_a_note_the_owner_wrote_leaves_a_call_leaving_the_hub_and_a_remember_allowed() -> (
+    None
+):
+    """#2875 through the stage: the note's mark, not its label, decides the stand-in."""
+    hub = _Hub()
+    held = WorkingRecord(labels=(_N1,), notes=(_note(7, outside=False),))
+
+    decided = await hub.authorize(
+        _round(
+            _call("c1", "lookup", q="x"),
+            _call("c2", "remember", statement="likes mornings"),
+            working=held,
+        )
+    )
+
+    assert decided.read_outside_content is False
+    assert [one.verdict for one in decided.verdicts] == [Verdict.ALLOWED, Verdict.ALLOWED]
+    (_, remembered) = decided.allowed
+    assert remembered.call.request.parameters[OUTSIDE_CONTENT_ARGUMENT] is False
 
 
 async def test_an_episode_planning_was_shown_that_is_gone_fails_closed() -> None:
