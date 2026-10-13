@@ -15,10 +15,10 @@
 - Partially superseded: 2026-10-01 by ADR-0283 — one scope across fourteen clauses. The delivery is a row the conversation store keys by episode id, written `UNKNOWN` by `record_turn`, stamped by `record_delivery`, which returns whether it stamped, and read by `deliveries` in one further call on the history path. The stamped-once rule, the refusals and every other clause stand. These scoped replacements take effect on ratification of ADR-0283. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 - Partially superseded: 2026-10-12 by ADR-0313 — two scopes. §1:3's count:
   `SpokenTurn` has eight members, and `episode_id` names the episode recording the
-  pass (ADR-0313 §3:5, §3:7). §5:1's composing stage and replay tail: planning is
+  pass (ADR-0313 §3:5, §3:8). §5:1's composing stage and replay tail: planning is
   told the delivery fact of each earlier spoken pass wherever it is shown one, its
-  place window included (§3:15), and §5:2–§5:9 bind that telling. The report, its
-  argument and its once-only stamp stand, with *turn* read as *pass* (§3:14).
+  place window included (§3:16), and §5:2–§5:9 bind that telling. The report, its
+  argument and its once-only stamp stand, with *turn* read as *pass* (§3:15).
   The old path keeps the replaced clauses until the lane that changes that member
   or type merges (ADR-0313 §1:3).
   This replacement takes effect on ratification of ADR-0313. This reciprocal header
