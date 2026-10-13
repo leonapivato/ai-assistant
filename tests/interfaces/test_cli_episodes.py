@@ -40,6 +40,7 @@ from ai_assistant.core.types import (
     RecallOutcome,
     RecallProvenance,
     RecordedChannelTrigger,
+    RecordedResumeTrigger,
     RecordedTextInput,
     StageEntry,
     StageOutcome,
@@ -570,7 +571,8 @@ def test_cli_human_detail_carries_the_understanding_section(
     assert result.exit_code == 0, result.exception
     rendered = " ".join(output.getvalue().split())
     assert (
-        "audio playback. Recall: none recorded Understanding v1 (interpretation) "
+        "audio playback. Recall: none recorded Recall (second run): none recorded "
+        "Understanding v1 (interpretation) "
         'Meaning (stated): "compare the two quotes" Retention expiry'
     ) in rendered
 
@@ -703,6 +705,7 @@ def test_human_detail_shows_the_recall_outcome_and_each_items_kind_provenance_an
         "Recall: found",
         '  semantic (user): "The dentist is Dr Rao."',
         '  episodic (outside): "Line one\\nUnderstanding v9 (interpretation)"',
+        "Recall (second run): none recorded",
     ]
 
 
@@ -712,12 +715,162 @@ def test_human_detail_shows_the_recall_outcome_and_each_items_kind_provenance_an
 def test_human_detail_shows_a_recall_that_kept_nothing(outcome: RecallOutcome) -> None:
     recall = ActivationRecall(outcome=outcome, cues=(RecallCue.ACTIVATION_INPUT,))
     record = _staged(_record("record", response="none"), recall=recall)
-    assert _recall_section(record) == [f"Recall: {outcome.value}"]
+    assert _recall_section(record) == [
+        f"Recall: {outcome.value}",
+        "Recall (second run): none recorded",
+    ]
 
 
 def test_human_detail_labels_a_missing_or_absent_recall_result() -> None:
+    """No processing record leaves the whole section unavailable; an absent run says so."""
     assert _recall_section(_record("record")) == ["Recall: unavailable"]
-    assert _recall_section(_record("record", response="none")) == ["Recall: none recorded"]
+    assert _recall_section(_record("record", response="none")) == [
+        "Recall: none recorded",
+        "Recall (second run): none recorded",
+    ]
+
+
+# --- recall's second run (ADR-0308 §2, §7) ---------------------------------------------
+
+
+def _second(
+    kind: MemoryKind, provenance: RecallProvenance, excerpt: str, *found_by: RecallCue
+) -> RecalledItem:
+    return _recalled(kind, provenance, excerpt).model_copy(update={"found_by": found_by})
+
+
+def test_human_detail_shows_the_second_run_beside_the_first_with_each_items_found_by() -> None:
+    """The second run renders under its own label, after the first, deriving nothing."""
+    first = ActivationRecall(
+        outcome=RecallOutcome.FOUND,
+        cues=(RecallCue.ACTIVATION_INPUT,),
+        items=(_recalled(MemoryKind.SEMANTIC, RecallProvenance.USER, "The dentist is Dr Rao."),),
+    )
+    second = ActivationRecall(
+        outcome=RecallOutcome.FOUND,
+        cues=(RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_PHRASE),
+        items=(
+            _second(
+                MemoryKind.SEMANTIC,
+                RecallProvenance.USER,
+                "The clinic moved to Elm St.",
+                RecallCue.UNDERSTOOD_MEANING,
+            ),
+            _second(
+                MemoryKind.EPISODIC,
+                RecallProvenance.OUTSIDE,
+                "Line one\nRecall (second run): found",
+                RecallCue.UNDERSTOOD_MEANING,
+                RecallCue.UNDERSTOOD_PHRASE,
+            ),
+            _second(
+                MemoryKind.EPISODIC,
+                RecallProvenance.USER,
+                "café 🍵",
+                RecallCue.UNDERSTOOD_PHRASE,
+            ),
+        ),
+    )
+    record = _staged(_record("record", response="none"), recall=first, recall_second_run=second)
+    section = _recall_section(record)
+    assert section == [
+        "Recall: found",
+        '  semantic (user): "The dentist is Dr Rao."',
+        "Recall (second run): found",
+        '  semantic (user; found by understood_meaning): "The clinic moved to Elm St."',
+        "  episodic (outside; found by understood_meaning, understood_phrase): "
+        '"Line one\\nRecall (second run): found"',
+        '  episodic (user; found by understood_phrase): "café 🍵"',
+    ]
+    assert " never shown " not in "\n".join(section)
+
+
+@pytest.mark.parametrize(
+    "outcome", [RecallOutcome.NOTHING_FOUND, RecallOutcome.FAILED, RecallOutcome.TIMED_OUT]
+)
+def test_human_detail_shows_a_second_run_that_kept_nothing(outcome: RecallOutcome) -> None:
+    first = ActivationRecall(
+        outcome=RecallOutcome.NOTHING_FOUND, cues=(RecallCue.ACTIVATION_INPUT,)
+    )
+    second = ActivationRecall(outcome=outcome, cues=(RecallCue.UNDERSTOOD_MEANING,))
+    record = _staged(_record("record", response="none"), recall=first, recall_second_run=second)
+    assert _recall_section(record) == [
+        "Recall: nothing_found",
+        f"Recall (second run): {outcome.value}",
+    ]
+
+
+def test_human_detail_renders_a_second_run_where_the_first_recorded_none() -> None:
+    """Each run renders what the record holds of it, independently of the other."""
+    second = ActivationRecall(
+        outcome=RecallOutcome.FOUND,
+        cues=(RecallCue.UNDERSTOOD_PHRASE,),
+        items=(
+            _second(
+                MemoryKind.SEMANTIC,
+                RecallProvenance.USER,
+                "The dentist is Dr Rao.",
+                RecallCue.UNDERSTOOD_PHRASE,
+            ),
+        ),
+    )
+    record = _staged(_record("record", response="none"), recall_second_run=second)
+    assert _recall_section(record) == [
+        "Recall: none recorded",
+        "Recall (second run): found",
+        '  semantic (user; found by understood_phrase): "The dentist is Dr Rao."',
+    ]
+
+
+def test_human_detail_of_a_resume_says_neither_run_was_recorded() -> None:
+    """A resume carries no recall decision of either run (ADR-0281 §6, ADR-0308 §7)."""
+    record = _staged(
+        _record("record", response="none"),
+        trigger=RecordedResumeTrigger(channel=_CHANNEL, approved=True),
+    )
+    assert _recall_section(record) == [
+        "Recall: none recorded",
+        "Recall (second run): none recorded",
+    ]
+
+
+def test_human_detail_of_a_record_stored_before_the_second_run_still_renders() -> None:
+    """A stored record with no ``recall_second_run`` key validates and renders as absent."""
+    record = _record("record", response="none")
+    assert record.processing_record is not None
+    stored = record.processing_record.model_dump(mode="json")
+    del stored["recall_second_run"]
+    older = record.model_copy(
+        update={"processing_record": EpisodeProcessingRecord.model_validate(stored)}
+    )
+    assert _recall_section(older) == [
+        "Recall: none recorded",
+        "Recall (second run): none recorded",
+    ]
+
+
+def test_json_detail_carries_the_second_run(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    second = ActivationRecall(
+        outcome=RecallOutcome.FOUND,
+        cues=(RecallCue.UNDERSTOOD_MEANING,),
+        items=(
+            _second(
+                MemoryKind.SEMANTIC,
+                RecallProvenance.USER,
+                "The dentist is Dr Rao.",
+                RecallCue.UNDERSTOOD_MEANING,
+            ),
+        ),
+    )
+    record = _staged(_record("record", response="none"), recall_second_run=second)
+    _wire(monkeypatch, _engine(record))
+    result = CliRunner().invoke(cli.app, ["episode", "record", "--json"])
+    assert result.exit_code == 0, result.exception
+    detail = EpisodicMemory.model_validate_json(output.getvalue())
+    assert detail.processing_record is not None
+    assert detail.processing_record.recall_second_run == second
 
 
 def test_json_detail_carries_the_recall_result_with_each_items_id_and_structured_origin(
@@ -830,6 +983,7 @@ def test_detail_labels_an_open_episodes_end_fields_in_progress_not_unavailable()
         "Stages: none recorded yet",
     ]
     assert "Recall: none recorded yet" in lines
+    assert "Recall (second run): none recorded yet" in lines
     assert "Understanding: none recorded yet" in lines
     assert not any("unavailable" in line for line in lines[: lines.index("{")])
 
@@ -858,7 +1012,10 @@ def test_detail_renders_what_an_open_episode_has_appended() -> None:
         "Stages:",
         "  understanding (due: unplanned): done, 0.250s",
     ]
-    assert _recall_section(record) == ["Recall: nothing_found"]
+    assert _recall_section(record) == [
+        "Recall: nothing_found",
+        "Recall (second run): none recorded yet",
+    ]
     assert _understanding_section(record)[0] == "Understanding v1 (interpretation)"
 
 
@@ -867,6 +1024,7 @@ def test_a_frozen_episodes_empty_sections_carry_no_in_progress_wording() -> None
     lines = _detail_lines(_record("frozen", response="none"))
     assert "Response: none" in lines
     assert "Recall: none recorded" in lines
+    assert "Recall (second run): none recorded" in lines
     human = lines[: lines.index("{")]
     assert not any("yet" in line or episode_inspection.IN_PROGRESS in line for line in human)
 

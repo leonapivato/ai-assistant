@@ -271,22 +271,37 @@ def _stage_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
 
 
 def _recall_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
-    """Render the recall result the processing record carries (ADR-0281 §6), deriving none.
+    """Render the recall results the processing record carries, deriving none.
 
-    Its outcome, and each kept item's kind, provenance and excerpt in recall's order.
-    ``none recorded`` where recall made no decision on the pass — a resume, a pass
-    that ended before recall, or one where it was not wired. Item ids and each item's
-    structured origin stay in the ``--json`` detail.
+    The first run (ADR-0281 §6): its outcome, and each kept item's kind, provenance
+    and excerpt in recall's order. Then the second run, made on what understanding
+    found (ADR-0308 §2, §7), the same way under its own label, with each item's
+    ``found_by`` cues as the record holds them. Each run reads ``none recorded``
+    where recall made no such decision on the pass — a resume, a pass that ended
+    before it, one where it was not wired, or a record from before the second run.
+    Item ids and each item's structured origin stay in the ``--json`` detail.
     """
     if processing is None:
         return ["Recall: unavailable"]
+    lines: list[str] = []
     if processing.recall is None:
-        return [f"Recall: {_none_recorded(processing)}"]
-    lines = [f"Recall: {processing.recall.outcome.value}"]
-    lines.extend(
-        f"  {item.kind.value} ({item.provenance.value}): {_quoted(item.excerpt)}"
-        for item in processing.recall.items
-    )
+        lines.append(f"Recall: {_none_recorded(processing)}")
+    else:
+        lines.append(f"Recall: {processing.recall.outcome.value}")
+        lines.extend(
+            f"  {item.kind.value} ({item.provenance.value}): {_quoted(item.excerpt)}"
+            for item in processing.recall.items
+        )
+    second = processing.recall_second_run
+    if second is None:
+        lines.append(f"Recall (second run): {_none_recorded(processing)}")
+    else:
+        lines.append(f"Recall (second run): {second.outcome.value}")
+        lines.extend(
+            f"  {item.kind.value} ({item.provenance.value}; found by "
+            f"{', '.join(cue.value for cue in item.found_by)}): {_quoted(item.excerpt)}"
+            for item in second.items
+        )
     return lines
 
 
