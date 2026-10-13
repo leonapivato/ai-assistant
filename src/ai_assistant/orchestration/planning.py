@@ -24,8 +24,14 @@ under the label of the result it read and each item under its source's label (AD
 §5:1). The episode window's and the found episodes' notes follow the reader's audience
 (ADR-0307 §6:4, ADR-0312 §4:2). Raw outside content is never shown (§9:2): not a place
 item someone else wrote, not an outside episode's input, not an outside memory record,
-and not a referent's excerpt. **Left to later phase lanes:** the full view of a story by
-look-up, and the other calls planning may make to look things up for itself (§6:6).
+and not a referent's excerpt.
+
+**What planning looked up for itself** (§6:6). A done look-up's result is shown under its
+R label: a memory search's records whose source is not outside, each under its own M label
+as a found one is, its outside records only as its digest's evidence; a story's full view
+as the story views are rendered, its marks with it; and a follow-up's result is the
+result it names, read again by a digest against its new question. The phases' glue
+fetches and reads these and hands them on with the outcome; this module renders them.
 
 **The story views** (§6:1, §6:3-§6:4, ADR-0300 §8). For each story the activation belongs
 to, planning is shown its summary, the notes and episodes newer than it, when it was
@@ -291,13 +297,21 @@ class CallOutcome:
             call brought none, as for a capability whose result is none.
         result: What a done call returned, where its result goes to planning whole
             (ADR-0306 §5:14), JSON ``null`` included.
-        digested: Whether the result went to a digest instead (ADR-0306 §5:14). It
-            reaches planning only as the :class:`DigestedEvidence` naming its
-            ``result_id``, and ``result`` is then ``None``.
+        digested: Whether the result, or its outside part, went to a digest instead
+            (ADR-0306 §5:14). That reaches planning only as the
+            :class:`DigestedEvidence` naming its ``result_id``, and ``result`` is then
+            ``None``.
+        records: For a memory search planning made (§6:6), its records whose source is
+            not outside, as planning fetched them by id (ADR-0282 §2:4), each shown under
+            its own M label; ``None`` for any other call. Its outside records went to a
+            digest, and ``digested`` says so.
+        story: For a story read planning made (§6:6), the story's full view as it was
+            read; ``None`` for any other call.
 
     Raises:
         ValueError: If it carries a result, or says one was digested, without the
-            result's id, or carries a result it says was digested.
+            result's id, or carries a raw result beside a digested one or a looked-up
+            one.
     """
 
     round_id: str
@@ -307,14 +321,20 @@ class CallOutcome:
     result_id: str | None = None
     result: FrozenJsonValue = None
     digested: bool = False
+    records: tuple[SemanticMemory, ...] | None = None
+    story: PlanningStory | None = None
 
     def __post_init__(self) -> None:
         """A result is shown under its label, so it carries the id the label names."""
-        if (self.result is not None or self.digested) and self.result_id is None:
+        looked_up = self.records is not None or self.story is not None
+        if (self.result is not None or self.digested or looked_up) and self.result_id is None:
             msg = "a call's result carries the id acting minted for it (ADR-0308 §6:1)"
             raise ValueError(msg)
         if self.digested and self.result is not None:
             msg = "a digested result reaches planning only as its digest's evidence"
+            raise ValueError(msg)
+        if looked_up and self.result is not None:
+            msg = "a looked-up result reaches planning as what was looked up"
             raise ValueError(msg)
 
 
@@ -347,11 +367,16 @@ class DigestedEvidence:
             for recall's digest.
         answered: Whether the digest answered; ``False`` where it failed.
         items: The evidence, empty where it failed or nothing answered the question.
+        question: What the digest answered, where planning asked it: a call's *looking
+            for*, which tells a follow-up's digest apart from the first one of the same
+            result (ADR-0308 §6:7); ``None`` for recall's digest, which answers the
+            understood meaning.
     """
 
     result_id: str | None
     answered: bool
     items: tuple[DigestItem, ...] = ()
+    question: str | None = None
 
     def __post_init__(self) -> None:
         """A failed digest records no evidence (ADR-0308 §7's ``ActivationDigest``)."""
@@ -845,6 +870,7 @@ _DIGEST_FAILED: Final = "could not be read: its digest failed, and its content i
 _NOTHING_ANSWERED: Final = "nothing in it answered what was looked for"
 _RECALL_DIGEST: Final = "the outside memories recall found"
 _DIGESTED_RESULT: Final = "read for you by a digest, under evidence"
+_NONE_FOUND: Final = "none"
 _STORIES_UNREADABLE: Final = "missing: the stories could not be read"
 _NO_STORIES: Final = "none: this activation belongs to no story yet"
 _NO_SUMMARY: Final = "none written yet"
@@ -1351,8 +1377,33 @@ class _Request:
         if outcome.kind is not CallOutcomeKind.DONE or outcome.result_id is None:
             return shown
         result: dict[str, object] = {"label": self._book.label(LabelKind.RESULT, outcome.result_id)}
-        result["value"] = _DIGESTED_RESULT if outcome.digested else _thawed(outcome.result)
+        if outcome.story is not None:
+            # ADR-0300 §10:6: a story's full view, its marks with it; a marked line is
+            # outside content read, which rendering it counts.
+            result["value"] = self._story(outcome.story)
+        elif outcome.records is not None:
+            result["value"] = self._searched(outcome)
+        else:
+            result["value"] = _DIGESTED_RESULT if outcome.digested else _thawed(outcome.result)
         shown["result"] = result
+        return shown
+
+    def _searched(self, outcome: CallOutcome) -> dict[str, object]:
+        """A memory search's result: its records not outside, and where the rest went.
+
+        Each record whose source is not outside is shown by its fact under its own M
+        label, as a found one is (ADR-0308 §3:3); one whose current version rests on
+        outside content is withheld. The outside records reach planning only as the
+        digest's evidence (ADR-0306 §5:16).
+        """
+        records = [
+            self._memory(record)
+            for record in outcome.records or ()
+            if not rests_on_recorded_external_content(record.provenance)
+        ]
+        shown: dict[str, object] = {"remembered": records or _NONE_FOUND}
+        if outcome.digested:
+            shown["resting_on_outside_content"] = _DIGESTED_RESULT
         return shown
 
     def _evidence(self, one: DigestedEvidence) -> dict[str, object]:
@@ -1362,7 +1413,11 @@ class _Request:
             if one.result_id is None
             else self._book.label(LabelKind.RESULT, one.result_id)
         )
-        return {"digest_of": digest_of, "digest": self._digest(one)}
+        shown: dict[str, object] = {"digest_of": digest_of}
+        if one.question is not None:
+            shown["looking_for"] = one.question
+        shown["digest"] = self._digest(one)
+        return shown
 
     def _digest(self, one: DigestedEvidence) -> dict[str, object] | str:
         """One digest's evidence, each item with its source's label (ADR-0308 §5:1)."""

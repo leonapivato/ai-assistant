@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Final
 from ai_assistant.app import build_engine
 from ai_assistant.app.composition import (
     PHASES_CALL_DEADLINE,
+    PHASES_MEMORY_SEARCH_LIMIT,
     PHASES_ROUND_LIMIT,
     PHASES_TURN_BUDGET,
     RECALL_SECOND_RUN_CAP,
@@ -27,6 +28,11 @@ from ai_assistant.app.composition import (
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import RECALLED_ITEMS_MAX, ProposedCall
 from ai_assistant.orchestration.chat import CHAT_TURN_BUDGET
+from ai_assistant.orchestration.lookups import (
+    LOOK_UP_CAPABILITIES,
+    LOOK_UP_LABEL_ARGUMENTS,
+    LookUps,
+)
 from ai_assistant.orchestration.phase_path import PhasePath
 from ai_assistant.orchestration.story_calls import (
     STORY_CALL_CAPABILITIES,
@@ -84,9 +90,21 @@ async def test_the_opt_in_wires_the_path_over_the_roots_own_stores(tmp_path: Pat
         # ADR-0309 §4:2: remembering is offered; the search and the booking are not
         # configured here, so neither is. Planning's story calls that write are offered
         # beside it (ADR-0300 §10, ADR-0303 §9), with their label arguments.
+        # Planning's look-ups are offered too (ADR-0307 §6:6), with theirs.
         offered = await phases._tools.offered(phases._capabilities)
-        assert [str(one.capability) for one in offered] == ["remember", *STORY_CALL_CAPABILITIES]
-        assert phases._label_arguments == STORY_LABEL_ARGUMENTS
+        assert [str(one.capability) for one in offered] == [
+            "remember",
+            *STORY_CALL_CAPABILITIES,
+            *LOOK_UP_CAPABILITIES,
+        ]
+        assert phases._label_arguments == {**STORY_LABEL_ARGUMENTS, **LOOK_UP_LABEL_ARGUMENTS}
+        # One look-ups runner behind every look-up, over the root's own memory store and
+        # the story views' reads, whose scope the path opens around acting.
+        look_ups = phases._look_ups
+        assert isinstance(look_ups, LookUps)
+        assert look_ups._memory is engine._memory
+        assert look_ups._views is phases._story_reads
+        assert look_ups._search_limit == PHASES_MEMORY_SEARCH_LIMIT
         # Each story call runs through acting's own-records seam, over the root's own
         # stores and the one tidy-up the interim run holds, so at most one run is on a
         # story at a time (ADR-0300 §5:10).
@@ -94,6 +112,7 @@ async def test_the_opt_in_wires_the_path_over_the_roots_own_stores(tmp_path: Pat
         held = {id(runners[name]): runners[name] for name in STORY_CALL_CAPABILITIES}
         (story_calls,) = held.values()
         assert isinstance(story_calls, StoryCalls)
+        assert all(runners[name] is look_ups for name in LOOK_UP_CAPABILITIES)
         assert story_calls._stories is engine._stories
         assert story_calls._memory is engine._memory
         interim = engine._interim_tidy_up
@@ -126,7 +145,12 @@ async def test_a_connected_search_is_offered_without_the_origin_the_hub_fills(
         offered = {
             str(one.capability): one for one in await phases._tools.offered(phases._capabilities)
         }
-        assert set(offered) == {"web_search", "remember", *STORY_CALL_CAPABILITIES}
+        assert set(offered) == {
+            "web_search",
+            "remember",
+            *STORY_CALL_CAPABILITIES,
+            *LOOK_UP_CAPABILITIES,
+        }
         assert "origin" in offered["web_search"].system_supplied
         # Authorizing selects the search's own declaration, which the searcher compares
         # every call against (ADR-0029 §2).
@@ -167,7 +191,12 @@ async def test_a_configured_booking_act_is_offered_with_its_endpoint_filled(
         offered = {
             str(one.capability): one for one in await phases._tools.offered(phases._capabilities)
         }
-        assert set(offered) == {"book_stay", "remember", *STORY_CALL_CAPABILITIES}
+        assert set(offered) == {
+            "book_stay",
+            "remember",
+            *STORY_CALL_CAPABILITIES,
+            *LOOK_UP_CAPABILITIES,
+        }
         assert "origin" in offered["book_stay"].system_supplied
         call = ProposedCall(call_id="c1", name="book_stay", arguments={"date": "2026-10-02"})
         filled = await phases._tools.filled(call)
