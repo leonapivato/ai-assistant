@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
+from ai_assistant.orchestration.story_privacy import SummaryVisibility
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 
 if TYPE_CHECKING:
@@ -222,6 +223,50 @@ async def test_a_short_view_is_the_first_lines_the_newest_notes_and_the_latest_e
     ]
     assert [note.text for note in view.notes] == ["third pending", "second pending"]
     assert [record.id for record in view.episodes] == [address("a-3"), address("a-2")]
+
+
+async def test_short_views_reads_the_named_stories_in_order_once_each() -> None:
+    """ADR-0307 §6:1: planning's short views are read as a candidate's are.
+
+    A story the store does not hold is left out, and one named twice is read once.
+    """
+    stories = _stories()
+    trip = await _story(stories, activation("a-1"))
+    car = await _story(stories, activation("a-2"))
+    await _summarised(stories, trip, "A camping trip.")
+    await _summarised(stories, car)
+    memory = await memory_of(episode("a-1"), episode("a-2"))
+
+    views = await _candidates(stories, memory).short_views(
+        [car, "story:gone", trip, car],
+        audience=BOUNDED,
+        visibility=SummaryVisibility(owner_records=True),
+    )
+
+    assert [view.story_id for view in views] == [car, trip]
+    assert [view.written for view in views] == [True, True]
+    assert [[line.text for line in view.lines] for view in views] == [[], ["A camping trip."]]
+    assert [[record.id for record in view.episodes] for view in views] == [
+        [address("a-2")],
+        [address("a-1")],
+    ]
+
+
+async def test_short_views_follow_the_visibility_they_are_given() -> None:
+    """ADR-0304 §4, ADR-0305 §4: the summary withheld and the notes absent alike."""
+    stories = _stories()
+    trip = await _story(stories, activation("a-1"), activation("a-2"))
+    await _summarised(stories, trip, "A camping trip.")
+    await stories.append_note(trip, "my own words", author=StoryNoteAuthor.OWNER)
+    memory = await memory_of(episode("a-1"), episode("a-2", placement=OWNER_ONLY))
+
+    (view,) = await _candidates(stories, memory).short_views(
+        [trip], audience=UNBOUNDED, visibility=SummaryVisibility(owner_records=False)
+    )
+
+    assert (view.lines, view.notes, view.withheld, view.notes_withheld) == ((), (), True, True)
+    assert view.written
+    assert [record.id for record in view.episodes] == [address("a-1")]
 
 
 async def test_the_latest_episodes_are_the_latest_by_occurrence_not_by_link_order() -> None:

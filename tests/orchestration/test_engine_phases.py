@@ -80,6 +80,13 @@ from ai_assistant.core.types import (
     RoundResponse,
     SemanticMemory,
     StageOutcome,
+    StoryActor,
+    StoryEffectState,
+    StoryMember,
+    StoryMemberKind,
+    StoryNoteAuthor,
+    StorySummaryDraft,
+    StorySummaryLine,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
@@ -97,10 +104,12 @@ from ai_assistant.orchestration.phase_path import (
     PhasePath,
     PhaseTools,
     PhaseWorking,
+    StoryReads,
 )
 from ai_assistant.orchestration.planning import PlannedRound
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls, remembered_record_id
+from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
 from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow, WindowsStage
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
@@ -230,8 +239,12 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     writer: MessageWriter | None = None,
     wrap: Callable[[ChatWriter], MessageWriter] | None = None,
     recall_digest_wait: timedelta = timedelta(seconds=5),
+    stories: FakeStoryStore | None = None,
 ) -> Callable[[Harness], PhasePath]:
-    """The thin path as the composition root builds it, over the harness's own stores."""
+    """The thin path as the composition root builds it, over the harness's own stores.
+
+    ``stories`` wires the story views (ADR-0307 §6:1) over that story store.
+    """
 
     def build(harness: Harness) -> PhasePath:
         tools = PhaseTools(
@@ -282,6 +295,17 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             memory=harness.memory,
             recall_cap=6,
             recall_digest_wait=recall_digest_wait,
+            story_reads=None
+            if stories is None
+            else StoryReads(
+                stories=stories,
+                memory=harness.memory,
+                plans=harness.plans,
+                short_views=StoryCandidates(
+                    stories=stories, memory=harness.memory, limit=5, lines=3, notes=2, episodes=2
+                ),
+                episodes=3,
+            ),
             now=lambda: AT,
         )
 
@@ -1829,6 +1853,185 @@ async def test_the_writers_read_links_nothing_where_the_records_cannot_be_read(
     assert await path.written("c1", [_ACTIVATION], [2]) == {}
 
 
+# --- the story views (ADR-0307 §6:1, §6:3-§6:4) -------------------------------------------
+
+
+async def _story_harness(
+    completer: FakeToolCallingCompleter, *, outside: bool = False
+) -> tuple[Harness, FakeStoryStore, str]:
+    """A test hub with the stories wired, an earlier activation in a story with a summary.
+
+    The earlier episode is in the episode window, so its story is understanding's one
+    candidate, ``S1``, and understanding links the activation into it. The story holds a
+    note written since its summary, and a booking the earlier activation made.
+    """
+    stories = FakeStoryStore(now=lambda: AT)
+    memory = FakeMemoryStore(now=lambda: AT)
+    await memory.add(_past_episode("activation:past"))
+    trip = (
+        await stories.create(
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="past")], actor=StoryActor.OWNER
+        )
+    ).story_id
+    assert trip is not None
+    state = await stories.current_summary(trip)
+    assert state is not None
+    await stories.write_summary(
+        trip,
+        StorySummaryDraft(
+            lines=(StorySummaryLine(text="A camping trip to Riverside."),),
+            took_in_episodes=state.pending_episodes,
+            outside=outside,
+        ),
+        as_of=state.as_of,
+    )
+    await stories.append_note(trip, "Next: check the dog policy.", author=StoryNoteAuthor.OWNER)
+    understanding = FakeModelProvider(
+        reply=json.dumps(
+            {"meaning": "the user asks about the trip", "meaning_ground": "stated"}
+            | {"story_labels": ["S1"]}
+        )
+    )
+    harness = Harness(
+        planner=NoStepPlanner(),
+        understanding=understanding_stage(model=understanding),
+        tools=(_BOOK,),
+        memory=memory,
+        stories=stories,
+        story_candidates=StoryCandidates(
+            stories=stories, memory=memory, limit=5, lines=3, notes=2, episodes=2
+        ),
+        story_links=StoryLinksStage(stories=stories),
+        phases=_phases(completer, stories=stories),
+    )
+    effect = ActivationEffect(
+        id="effect:past",
+        activation_id="past",
+        round="round:past",
+        capability="book",
+        values_digest="0" * 64,
+        decision_id="decision:past",
+        claimed_at=AT,
+    )
+    await harness.plans.claim_activation_effect(effect, match=None)
+    await harness.plans.finish_activation_effect("effect:past", ToolOutcome.SUCCEEDED)
+    return harness, stories, trip
+
+
+async def test_an_activation_in_a_story_is_shown_its_story_and_labels_what_it_saw() -> None:
+    """ADR-0307 §6:1, §5: B4b's path with the activation linked into a story.
+
+    Understanding links the activation into the earlier activation's story; planning is
+    then shown that story's summary, the note newer than it, when it was tidied and the
+    count, where its matter stands with the booking done, and its latest episode, each
+    under a label recorded with the episode.
+    """
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="It is at Riverside."))
+    harness, stories, trip = await _story_harness(completer)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "where is the trip?")
+    episode = await _settled(harness, conversation, seeded=frozenset({"activation:past"}))
+
+    record = episode.processing_record
+    assert record is not None
+    assert (ControllerStage.STORY_LINKS, ControllerRule.STORY_LINKS_UNRECORDED) in _stages(episode)
+    linked = StoryMember(kind=StoryMemberKind.ACTIVATION, id=record.activation_id)
+    assert [one.story_id for one in await stories.stories_of(linked)] == [trip]
+
+    request = json.loads(completer.calls[0].messages[1].content)
+    (shown,) = request["stories"]
+    labels = {one.label: (one.kind, one.id) for one in record.labels}
+    assert labels[shown["label"]] == (LabelKind.STORY, trip)
+    assert shown["summary"] == ["A camping trip to Riverside."]
+    assert shown["last_tidied"] == AT.isoformat()
+    # The note, and this activation, linked since the summary was written.
+    assert shown["changes_since_tidied"] == 2
+    (note,) = shown["notes_since_tidied"]
+    assert note["text"] == "Next: check the dog policy."
+    assert labels[note["label"]][0] is LabelKind.NOTE
+    (done,) = shown["where_it_stands"]["done"]
+    assert done["state"] == "done"
+    assert labels[done["episode"]] == (LabelKind.EPISODE, "activation:past")
+    (latest,) = shown["latest_episodes"]
+    assert latest["label"] == done["episode"]
+    # Nothing of the story was outside content, so the round read none.
+    assert not record.rounds[0].notes_marked
+
+
+async def test_a_marked_story_summary_reaches_the_first_ruling() -> None:
+    """ADR-0303 §3:6, ADR-0306 §4:5-§4:6: a marked summary is outside content read.
+
+    The activation's own episode is clean, and a summary carries no label authorizing
+    could look up, so only the working set says outside content was read: it reaches
+    the first round's ruling.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", "book", date="2026-10-12"),))
+    )
+    harness = _harness(completer)
+    await harness.memory.add(_episode())
+    stories = FakeStoryStore(now=lambda: AT)
+    trip = (
+        await stories.create(
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)],
+            actor=StoryActor.OWNER,
+        )
+    ).story_id
+    assert trip is not None
+    state = await stories.current_summary(trip)
+    assert state is not None
+    await stories.write_summary(
+        trip,
+        StorySummaryDraft(lines=(StorySummaryLine(text="A reply came."),), outside=True),
+        as_of=state.as_of,
+    )
+    path = _phases(completer, stories=stories)(harness)
+    working = _begun(path)
+    given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
+    stages = {one.name: one for one in path.stages()}
+
+    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING):
+        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+
+    request = json.loads(completer.calls[0].messages[1].content)
+    assert request["stories"][0]["summary"] == ["A reply came."]
+    assert working.fetched_outside
+    decided = working.latest.authorization
+    assert decided is not None
+    assert decided.read_outside_content
+
+
+async def test_the_story_views_are_read_again_for_each_round() -> None:
+    """§6:1: each round is shown the stories as they stand when it is planned."""
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(text="one", calls=(_call("c1", "remember", fact="likes lakes"),)),
+        RoundResponse(text="two"),
+    )
+    harness = _harness(completer)
+    await harness.memory.add(_episode())
+    stories = FakeStoryStore(now=lambda: AT)
+    trip = (
+        await stories.create(
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)],
+            actor=StoryActor.OWNER,
+        )
+    ).story_id
+    assert trip is not None
+    path = _phases(completer, stories=stories)(harness)
+    working = _begun(path)
+    given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
+    stages = {one.name: one for one in path.stages()}
+
+    assert (await stages[ControllerStage.PLANNING].run(given)).outcome is StageOutcome.DONE
+    await stories.append_note(trip, "Written meanwhile.", author=StoryNoteAuthor.OWNER)
+    assert (await stages[ControllerStage.PLANNING].run(given)).outcome is StageOutcome.DONE
+
+    first, second = (json.loads(one.messages[1].content)["stories"][0] for one in completer.calls)
+    assert first["notes_since_tidied"] == "none"
+    assert [one["text"] for one in second["notes_since_tidied"]] == ["Written meanwhile."]
+
+
 # --- with the opt-in unset ---------------------------------------------------------------
 
 
@@ -1851,6 +2054,43 @@ async def test_with_the_opt_in_unset_todays_path_answers_unchanged() -> None:
     assert episode.processing_record is not None
     assert episode.processing_record.rounds == ()
     assert await _last_ended(harness, conversation) is ActivationEnding.DONE
+
+
+async def test_with_the_opt_in_unset_the_story_standing_command_lists_what_was_done() -> None:
+    """ADR-0300 §8:1: the owner's story-standing command reads the effect records.
+
+    The one change to today's path: where a matter stands lists what was done, from the
+    plan store the engine holds, unknown first, then not done, then done.
+    """
+    stories = FakeStoryStore(now=lambda: AT)
+    harness = Harness(planner=NoStepPlanner(), stories=stories)
+    await harness.memory.add(_past_episode("activation:past"))
+    trip = (
+        await stories.create(
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="past")], actor=StoryActor.OWNER
+        )
+    ).story_id
+    assert trip is not None
+    for effect_id, outcome in (("e1", ToolOutcome.SUCCEEDED), ("e2", ToolOutcome.FAILED)):
+        effect = ActivationEffect(
+            id=effect_id,
+            activation_id="past",
+            round="round:past",
+            capability="book",
+            values_digest="0" * 64,
+            decision_id=f"decision:{effect_id}",
+            claimed_at=AT,
+        )
+        await harness.plans.claim_activation_effect(effect, match=None)
+        await harness.plans.finish_activation_effect(effect_id, outcome)
+
+    standing = await harness.engine.story_standing(trip)
+
+    assert standing is not None
+    assert [(one.activation_id, one.state) for one in standing.done] == [
+        ("past", StoryEffectState.NOT_DONE),
+        ("past", StoryEffectState.DONE),
+    ]
 
 
 def test_the_phases_are_wired_only_beside_understanding() -> None:
