@@ -120,6 +120,9 @@ _READ_FLAGS: Final = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 #: tuple so the file still parses on an interpreter older than the one it targets.
 _UNPARSABLE: Final = (ValueError, RecursionError)
 
+#: What reading an instant raises where a string is not one, or names no real instant.
+_NO_INSTANT: Final = (ValueError, OverflowError, OSError)
+
 #: What listing a record's directory raises where it does not exist yet.
 _NO_DIRECTORY: Final = (FileNotFoundError, NotADirectoryError)
 
@@ -183,11 +186,16 @@ def instant(value: object) -> float | None:
         return None
     try:
         parsed = datetime.fromisoformat(value)
-    except ValueError:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.timestamp()
+    except _NO_INSTANT:
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.timestamp()
+
+
+def _refuse_constant(name: str) -> object:
+    msg = f"{name} is not JSON"
+    raise ValueError(msg)
 
 
 def parse_line(line: int, raw: bytes) -> Line:
@@ -203,7 +211,9 @@ def parse_line(line: int, raw: bytes) -> Line:
         ``body``, which counts as unreadable.
     """
     try:
-        value = json.loads(raw)
+        # NaN and the infinities are not JSON: a line holding one is unreadable, and
+        # would otherwise reach the page as a body its JSON parser refuses.
+        value = json.loads(raw, parse_constant=_refuse_constant)
     except _UNPARSABLE:
         return None
     if not isinstance(value, dict):
@@ -386,7 +396,9 @@ class Tally:
         stage = body.get("stage")
         if stage == "planning":
             self.rounds += 1
-        if body.get("outcome") in UNFINISHED_OUTCOMES or "failure" in body:
+        # Every hint is type-checked before it is used: a body of an unexpected shape
+        # loses its hint and is still shown whole (ADR-0316 §5:2).
+        if _text(body.get("outcome")) in UNFINISHED_OUTCOMES or "failure" in body:
             self.could_not_finish = True
         if stage == "end":
             rule = _text(body.get("due"))
@@ -659,8 +671,9 @@ class _Timeline:
         if "failure" in body:
             held["failure"] = _failure_text(body.get("failure"))
         texts: list[str] = []
-        calls: list[str] = []
+        calls: list[dict[str, object]] = []
         thinking = False
+        marked = False
         for part in _sequence(_mapping(body.get("response")).get("parts")):
             shown = _mapping(part)
             kind = shown.get("part_kind")
@@ -671,9 +684,12 @@ class _Timeline:
             elif kind == "tool-call":
                 name = _text(shown.get("tool_name")) or "?"
                 if name == ROUND_TOOL:
-                    held["marked"] = _mapping(_arguments(shown.get("args"))).get("mark") is True
+                    # The round's own tool: its `another_round` asks for another round.
+                    arguments = _mapping(_arguments(shown.get("args")))
+                    marked = marked or arguments.get("another_round") is True
                 else:
-                    calls.append(name)
+                    calls.append({"id": _text(shown.get("tool_call_id")), "name": name})
+        held["marked"] = marked
         held["text"] = "".join(texts)
         held["thinking"] = thinking
         held["calls"] = calls
@@ -682,6 +698,7 @@ class _Timeline:
         body = _mapping(entry.body)
         verdicts = [
             {
+                "call_id": _text(_mapping(one).get("call_id")),
                 "name": _text(_mapping(one).get("name")),
                 "verdict": _text(_mapping(one).get("verdict")),
                 "reason": _text(_mapping(one).get("reason")),
@@ -1844,11 +1861,13 @@ SCRIPT: Final = r"""
         box.appendChild(el("div", "round-text" + (r.text ? "" : " none"), r.text || "no text"));
       }
       const chips = el("div", "chips");
+      // A verdict belongs to its call by the provider's call id, never by the tool's
+      // name: one round may call the same tool twice.
       const verdicts = new Map();
-      for (const v of r.verdicts || []) if (v.name) verdicts.set(v.name, v.verdict);
+      for (const v of r.verdicts || []) if (v.call_id) verdicts.set(v.call_id, v.verdict);
       for (const call of r.calls || []) {
-        const verdict = verdicts.get(call);
-        const text = call + (verdict ? " · " + words(verdict) : "");
+        const verdict = call.id ? verdicts.get(call.id) : undefined;
+        const text = call.name + (verdict ? " · " + words(verdict) : "");
         chips.appendChild(el("span", "chip v-" + (verdict || "none"), text));
       }
       if (chips.childNodes.length) box.appendChild(chips);
@@ -1888,7 +1907,11 @@ SCRIPT: Final = r"""
   }
 
   // --- details on click --------------------------------------------------------------
+  let drawn = 0;
   async function openLines(title, lines) {
+    // Each opening is one generation: a load still in flight from an earlier click,
+    // on this activation or another, finds its generation gone and draws nothing.
+    const generation = ++drawn;
     $("drawer-title").textContent = title;
     const body = $("drawer-body");
     clear(body);
@@ -1901,17 +1924,22 @@ SCRIPT: Final = r"""
         const url = "/api/entry?id=" + encodeURIComponent(id)
           + "&line=" + encodeURIComponent(line);
         const entry = await getJson(url);
+        if (generation !== drawn) return;
         if (entry === null) {
           holder.appendChild(el("p", "note", "That entry is no longer in the record."));
         } else {
           renderEntry(holder, entry);
         }
       } catch (error) {
+        if (generation !== drawn) return;
         holder.appendChild(el("p", "note", "Could not load that entry."));
       }
     }
   }
-  function closeDrawer() { $("drawer").hidden = true; }
+  function closeDrawer() {
+    drawn += 1;
+    $("drawer").hidden = true;
+  }
 
   function sec(parent, title) {
     const box = el("div", "sec");
