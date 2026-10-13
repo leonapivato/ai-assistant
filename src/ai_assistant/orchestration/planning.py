@@ -788,7 +788,9 @@ _REPLY: Final = (
     "When you act on what the user asked, this round's message tells them so, even in one "
     "short line, such as that you'll keep something in mind: it may be the only reply they "
     "get, and it still never says how the calls went. Empty text writes no message, so "
-    "leave the text empty only where the user asked nothing of this round.\n"
+    "leave the text empty only where the user asked nothing of this round, or where an "
+    "earlier round of this activation already told them what you are doing and there is "
+    "nothing new.\n"
     "\n"
 )
 
@@ -822,10 +824,12 @@ _ROUNDS: Final = (
     "round made a call other than a tidy-up, whatever its calls brought back, and shows "
     "you what came of them. So a step that has to wait for this round's calls goes in "
     "that round, and you need not ask for it. A round with no calls, or whose only calls "
-    "are tidy-ups, ends the work after its message. In a round that follows your calls, "
-    "write only what the user will want to hear, such as a result they asked for or a "
-    "call that was not done; where there is nothing new for them, write no text, and "
-    "never a line only saying that the earlier work is done."
+    "are tidy-ups, ends the work after its message. A round that follows your calls "
+    "writes only what is new and the user will want to hear, such as a result they asked "
+    "for, a call that was not done or a question; where an earlier message already said "
+    "what you are doing, write no text: never repeat it, never confirm it, and never say "
+    "that the work is done. Leaving the text empty is how you say nothing, since "
+    "whatever you write is sent to the user, so never write that there is nothing to add."
 )
 
 _NOTES_AND_ROUNDS: Final = (
