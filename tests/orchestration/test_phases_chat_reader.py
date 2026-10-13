@@ -15,19 +15,28 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
-from phases_support import PHONE, SETTLE, open_conversation, phases_harness, written
-from test_chat_reader import _DeletedBeforeMarking, _episodes, _FailsSecondMarking, _input_of
+from phases_support import (
+    SETTLE,
+    Gated,
+    answered,
+    episodes,
+    input_of,
+    open_conversation,
+    phases_harness,
+    said,
+    written,
+)
 from test_engine import AT, Harness
 from understanding_support import STATED_PROPOSAL, understanding_stage
 
+from ai_assistant.core.errors import ConversationStoreError
 from ai_assistant.core.types import (
     ActivationEnding,
     MessageAuthor,
     ProcessingStatus,
-    UserMessage,
 )
 from ai_assistant.orchestration.chat import COULDNT_FINISH
 from ai_assistant.testing import (
@@ -39,58 +48,43 @@ from ai_assistant.testing import (
 from ai_assistant.testing.tool_calling import DEFAULT_ROUND_TEXT
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
-
-    from ai_assistant.core.types import Message, OfferedTool, RoundResponse, TranscriptMessage
+    from collections.abc import Sequence
 
 
-class _Gated(FakeToolCallingCompleter):
-    """Planning's default round, answered only once its gate is opened."""
+class _DeletedBeforeMarking(FakeConversationStore):
+    """A store where one message is deleted just as the reader marks its input."""
+
+    def __init__(self, doomed: int) -> None:
+        super().__init__(now=lambda: AT)
+        self._doomed = doomed
+
+    async def take_in(
+        self, conversation_id: str, *, positions: Sequence[int], activation_id: str
+    ) -> tuple[int, ...]:
+        if self._doomed in positions:
+            await self.delete_message(conversation_id, self._doomed)
+        return await super().take_in(
+            conversation_id, positions=positions, activation_id=activation_id
+        )
+
+
+class _FailsSecondMarking(FakeConversationStore):
+    """A store whose second ``take_in`` call fails once, after the first committed."""
 
     def __init__(self) -> None:
-        super().__init__()
-        self.gate = asyncio.Event()
-        self.entered = asyncio.Event()
+        super().__init__(now=lambda: AT)
+        self.calls = 0
 
-    async def respond(
-        self,
-        messages: Sequence[Message],
-        tools: Sequence[OfferedTool],
-        *,
-        model: str | None = None,
-    ) -> RoundResponse:
-        self.entered.set()
-        await self.gate.wait()
-        return await super().respond(messages, tools, model=model)
-
-
-def _said(message_id: str, text: str, *, replies_to: int | None = None) -> UserMessage:
-    return UserMessage(
-        device_id=PHONE.device_id, message_id=message_id, text=text, replies_to=replies_to
-    )
-
-
-async def _until(check: Callable[[], Any], *, what: str) -> None:
-    """Wait for ``check`` to hold, polling the loop; fail rather than hang."""
-    deadline = asyncio.get_running_loop().time() + SETTLE
-    while not await check():
-        if asyncio.get_running_loop().time() > deadline:
-            msg = f"the reader never settled: {what}"
-            raise AssertionError(msg)
-        await asyncio.sleep(0.001)
-
-
-async def _answered(harness: Harness, conversation_id: str, count: int) -> list[TranscriptMessage]:
-    """Wait for ``count`` assistant messages and for the reader to be idle, then read."""
-
-    async def done() -> bool:
-        messages = await written(harness, conversation_id)
-        state = await harness.engine.conversation(conversation_id)
-        assistant = [one for one in messages if one.author is MessageAuthor.ASSISTANT]
-        return len(assistant) >= count and state is not None and not state.state.working
-
-    await _until(done, what=f"{count} assistant message(s)")
-    return await written(harness, conversation_id)
+    async def take_in(
+        self, conversation_id: str, *, positions: Sequence[int], activation_id: str
+    ) -> tuple[int, ...]:
+        self.calls += 1
+        if self.calls == 2:
+            msg = "the store is busy"
+            raise ConversationStoreError(msg)
+        return await super().take_in(
+            conversation_id, positions=positions, activation_id=activation_id
+        )
 
 
 def _idle(store: FakeConversationStore, memory: FakeMemoryStore) -> Harness:
@@ -102,15 +96,15 @@ async def test_a_written_message_is_answered_by_an_assistant_message() -> None:
     """§6:1: the reader takes the message in, and planning writes the reply back."""
     harness = phases_harness()
     conversation = await open_conversation(harness)
-    receipt = await harness.engine.write_message(conversation, message=_said("m-1", "hi"))
+    receipt = await harness.engine.write_message(conversation, message=said("m-1", "hi"))
     assert receipt.position == 1
-    messages = await _answered(harness, conversation, 1)
+    messages = await answered(harness, conversation, 1)
     assert [(one.author, one.text) for one in messages] == [
         (MessageAuthor.USER, "hi"),
         (MessageAuthor.ASSISTANT, DEFAULT_ROUND_TEXT),
     ]
-    (episode,) = await _episodes(harness.memory)
-    assert _input_of(episode) == "hi"
+    (episode,) = await episodes(harness.memory)
+    assert input_of(episode) == "hi"
     # §6:6: marked taken in by the activation the episode records.
     taken = await harness.conversation_store.taken_in(conversation, positions=[1])
     assert taken == {1: episode.id.removeprefix("activation:")}
@@ -120,25 +114,25 @@ async def test_a_repeated_send_is_taken_in_once() -> None:
     """§4:2: the same device's same message id is one message, starting one activation."""
     harness = phases_harness()
     conversation = await open_conversation(harness)
-    await harness.engine.write_message(conversation, message=_said("m-1", "hi"))
-    await harness.engine.write_message(conversation, message=_said("m-1", "hi"))
-    messages = await _answered(harness, conversation, 1)
+    await harness.engine.write_message(conversation, message=said("m-1", "hi"))
+    await harness.engine.write_message(conversation, message=said("m-1", "hi"))
+    messages = await answered(harness, conversation, 1)
     assert [one.author for one in messages] == [MessageAuthor.USER, MessageAuthor.ASSISTANT]
-    assert len(await _episodes(harness.memory)) == 1
+    assert len(await episodes(harness.memory)) == 1
 
 
 async def test_a_backlog_past_one_marking_call_is_still_one_input() -> None:
     """§6:3: every waiting message is taken in together, whatever the store's bound."""
-    completer = _Gated()
+    completer = Gated()
     harness = phases_harness(completer)
     conversation = await open_conversation(harness)
-    await harness.engine.write_message(conversation, message=_said("m-0", "first"))
+    await harness.engine.write_message(conversation, message=said("m-0", "first"))
     await asyncio.wait_for(completer.entered.wait(), SETTLE)
     for n in range(1, 1002):
-        await harness.engine.write_message(conversation, message=_said(f"m-{n}", f"w{n}"))
-    completer.gate.set()
-    await _answered(harness, conversation, 2)
-    inputs = sorted((_input_of(one) for one in await _episodes(harness.memory)), key=len)
+        await harness.engine.write_message(conversation, message=said(f"m-{n}", f"w{n}"))
+    completer.release.set()
+    await answered(harness, conversation, 2)
+    inputs = sorted((input_of(one) for one in await episodes(harness.memory)), key=len)
     assert inputs[0] == "first"
     assert inputs[1].split("\n\n") == [f"w{n}" for n in range(1, 1002)]
 
@@ -146,14 +140,14 @@ async def test_a_backlog_past_one_marking_call_is_still_one_input() -> None:
 async def test_a_reply_written_after_a_waiting_message_is_marked_as_after_it() -> None:
     """§6: the window shows that a message was written before the reply it follows."""
     model = FakeModelProvider(STATED_PROPOSAL)
-    completer = _Gated()
+    completer = Gated()
     harness = phases_harness(completer, understanding=understanding_stage(model=model))
     conversation = await open_conversation(harness)
-    await harness.engine.write_message(conversation, message=_said("m-1", "first"))
+    await harness.engine.write_message(conversation, message=said("m-1", "first"))
     await asyncio.wait_for(completer.entered.wait(), SETTLE)
-    await harness.engine.write_message(conversation, message=_said("m-2", "meanwhile"))
-    completer.gate.set()
-    await _answered(harness, conversation, 2)
+    await harness.engine.write_message(conversation, message=said("m-2", "meanwhile"))
+    completer.release.set()
+    await answered(harness, conversation, 2)
     payload = json.loads(model.calls[-1].messages[1].content)
     assert payload["input"]["text"] == "meanwhile"
     window = payload["channel_window"]
@@ -165,18 +159,18 @@ async def test_a_reply_written_after_a_waiting_message_is_marked_as_after_it() -
 
 async def test_the_state_is_working_until_the_reply_is_written_then_done() -> None:
     """§8:2, §8:3: "working…" names the running activation; then how it ended."""
-    completer = _Gated()
+    completer = Gated()
     harness = phases_harness(completer)
     conversation = await open_conversation(harness)
-    await harness.engine.write_message(conversation, message=_said("m-1", "hi"))
+    await harness.engine.write_message(conversation, message=said("m-1", "hi"))
     await asyncio.wait_for(completer.entered.wait(), SETTLE)
     running = await harness.engine.conversation(conversation)
     assert running is not None
     assert running.state.working
     taken = await harness.conversation_store.taken_in(conversation, positions=[1])
     assert running.state.activation_id == taken[1]
-    completer.gate.set()
-    await _answered(harness, conversation, 1)
+    completer.release.set()
+    await answered(harness, conversation, 1)
     ended = await harness.engine.conversation(conversation)
     assert ended is not None
     assert not ended.state.working
@@ -186,7 +180,7 @@ async def test_the_state_is_working_until_the_reply_is_written_then_done() -> No
 
 async def test_a_shutdown_that_cancels_the_activation_writes_nothing() -> None:
     """§9:2: the activation is interrupted, nothing is written, and the state says so."""
-    completer = _Gated()
+    completer = Gated()
     store = FakeConversationStore(now=lambda: AT)
     memory = FakeMemoryStore(now=lambda: AT)
     harness = phases_harness(
@@ -196,11 +190,11 @@ async def test_a_shutdown_that_cancels_the_activation_writes_nothing() -> None:
         drain_timeout=timedelta(milliseconds=10),
     )
     conversation = await open_conversation(harness)
-    await harness.engine.write_message(conversation, message=_said("m-1", "hi"))
+    await harness.engine.write_message(conversation, message=said("m-1", "hi"))
     await asyncio.wait_for(completer.entered.wait(), SETTLE)
     await harness.engine.aclose()
     assert [one.author for one in await written(harness, conversation)] == [MessageAuthor.USER]
-    (episode,) = await _episodes(memory)
+    (episode,) = await episodes(memory)
     assert episode.processing_record is not None
     assert episode.processing_record.status is ProcessingStatus.INTERRUPTED
     # A later engine reads the ending, and takes nothing in again.
@@ -220,15 +214,15 @@ async def test_a_message_deleted_before_it_is_marked_never_reaches_the_activatio
     memory = FakeMemoryStore(now=lambda: AT)
     before = _idle(store, memory)
     conversation = await open_conversation(before)
-    await before.engine.write_message(conversation, message=_said("m-1", "DELETED ORDER"))
-    await before.engine.write_message(conversation, message=_said("m-2", "kept"))
+    await before.engine.write_message(conversation, message=said("m-1", "DELETED ORDER"))
+    await before.engine.write_message(conversation, message=said("m-2", "kept"))
     await before.engine.aclose()
     completer = FakeToolCallingCompleter()
     after = phases_harness(completer, conversation_store=store, memory=memory)
     await after.engine.start()
-    await _answered(after, conversation, 1)
-    (episode,) = await _episodes(memory)
-    assert _input_of(episode) == "DELETED ORDER\n\nkept"
+    await answered(after, conversation, 1)
+    (episode,) = await episodes(memory)
+    assert input_of(episode) == "DELETED ORDER\n\nkept"
     assert completer.calls
     assert all(
         "DELETED ORDER" not in one.content for call in completer.calls for one in call.messages
@@ -237,20 +231,20 @@ async def test_a_message_deleted_before_it_is_marked_never_reaches_the_activatio
 
 async def test_messages_written_while_one_runs_wait_and_are_taken_in_as_one_input() -> None:
     """§6:2, §6:3: nothing is refused; what waited is one input when the first ends."""
-    completer = _Gated()
+    completer = Gated()
     harness = phases_harness(completer)
     conversation = await open_conversation(harness)
-    await harness.engine.write_message(conversation, message=_said("m-1", "first"))
+    await harness.engine.write_message(conversation, message=said("m-1", "first"))
     await asyncio.wait_for(completer.entered.wait(), SETTLE)
-    second = await harness.engine.write_message(conversation, message=_said("m-2", "second"))
-    third = await harness.engine.write_message(conversation, message=_said("m-3", "third"))
+    second = await harness.engine.write_message(conversation, message=said("m-2", "second"))
+    third = await harness.engine.write_message(conversation, message=said("m-3", "third"))
     assert (second.position, third.position) == (2, 3)
     state = await harness.engine.conversation(conversation)
     assert state is not None
     assert state.state.working
-    assert len(await _episodes(harness.memory)) == 1
-    completer.gate.set()
-    messages = await _answered(harness, conversation, 2)
+    assert len(await episodes(harness.memory)) == 1
+    completer.release.set()
+    messages = await answered(harness, conversation, 2)
     assert [(one.position, one.author) for one in messages] == [
         (1, MessageAuthor.USER),
         (2, MessageAuthor.USER),
@@ -258,7 +252,7 @@ async def test_messages_written_while_one_runs_wait_and_are_taken_in_as_one_inpu
         (4, MessageAuthor.ASSISTANT),
         (5, MessageAuthor.ASSISTANT),
     ]
-    inputs = sorted(_input_of(episode) for episode in await _episodes(harness.memory))
+    inputs = sorted(input_of(episode) for episode in await episodes(harness.memory))
     assert inputs == ["first", "second\n\nthird"]
     taken = await harness.conversation_store.taken_in(conversation, positions=[1, 2, 3])
     assert taken[2] == taken[3] != taken[1]
@@ -276,16 +270,16 @@ async def test_a_marking_that_fails_part_way_ends_as_couldnt_finish() -> None:
     before = _idle(store, memory)
     conversation = await open_conversation(before)
     for n in range(1, 1002):
-        await before.engine.write_message(conversation, message=_said(f"m-{n}", f"w{n}"))
+        await before.engine.write_message(conversation, message=said(f"m-{n}", f"w{n}"))
     await before.engine.aclose()
     after = phases_harness(conversation_store=store, memory=memory)
     await after.engine.start()
-    messages = await _answered(after, conversation, 2)
+    messages = await answered(after, conversation, 2)
     replies = [one.text for one in messages if one.author is MessageAuthor.ASSISTANT]
     assert replies == [COULDNT_FINISH, DEFAULT_ROUND_TEXT]
     taken = await store.taken_in(conversation, positions=[1, 1000, 1001])
     assert taken[1] == taken[1000] != taken[1001]
-    inputs = sorted((_input_of(one) for one in await _episodes(memory)), key=len)
+    inputs = sorted((input_of(one) for one in await episodes(memory)), key=len)
     assert inputs[0] == "w1001"
 
 
@@ -294,12 +288,12 @@ async def test_the_window_is_the_recent_transcript_each_message_keeping_its_auth
     model = FakeModelProvider(STATED_PROPOSAL)
     harness = phases_harness(understanding=understanding_stage(model=model))
     conversation = await open_conversation(harness)
-    await harness.engine.write_message(conversation, message=_said("m-1", "My dentist is Rao."))
-    await _answered(harness, conversation, 1)
+    await harness.engine.write_message(conversation, message=said("m-1", "My dentist is Rao."))
+    await answered(harness, conversation, 1)
     await harness.engine.write_message(
-        conversation, message=_said("m-2", "Who is it?", replies_to=1)
+        conversation, message=said("m-2", "Who is it?", replies_to=1)
     )
-    await _answered(harness, conversation, 2)
+    await answered(harness, conversation, 2)
     payload = json.loads(model.calls[-1].messages[1].content)
     assert payload["input"]["text"] == "Who is it?"
     window = payload["channel_window"]

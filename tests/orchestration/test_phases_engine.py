@@ -17,11 +17,18 @@ from typing import TYPE_CHECKING
 
 import pytest
 from channel_episodes import channel_ids
-from phases_support import SETTLE, chat_turn, open_conversation, phases_harness, say
+from phases_support import (
+    SETTLE,
+    Gated,
+    NeverFinishing,
+    chat_turn,
+    open_conversation,
+    phases_harness,
+    say,
+)
 
 from ai_assistant.core.types import TraceKind, TraceOutcome, TraceRef
 from ai_assistant.orchestration.engine import DrainPhase
-from ai_assistant.testing import FakeToolCallingCompleter
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -29,57 +36,6 @@ if TYPE_CHECKING:
     from test_engine import Harness
 
     from ai_assistant.core.types import Message, OfferedTool, RoundResponse
-
-
-class _Gated(FakeToolCallingCompleter):
-    """Planning's default round, answered once its gate opens."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.entered = asyncio.Event()
-        self.release = asyncio.Event()
-        self.finished = asyncio.Event()
-
-    async def respond(
-        self,
-        messages: Sequence[Message],
-        tools: Sequence[OfferedTool],
-        *,
-        model: str | None = None,
-    ) -> RoundResponse:
-        self.entered.set()
-        await self.release.wait()
-        self.finished.set()
-        return await super().respond(messages, tools, model=model)
-
-
-class _NeverFinishing(FakeToolCallingCompleter):
-    """A planning call that runs until it is cancelled, and honours the cancellation.
-
-    As ``test_engine``'s planner of the same name: ADR-0083 §4's argument rests on every
-    in-flight party honouring cancellation.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.entered = asyncio.Event()
-        self.cancelled = asyncio.Event()
-
-    async def respond(
-        self,
-        messages: Sequence[Message],
-        tools: Sequence[OfferedTool],
-        *,
-        model: str | None = None,
-    ) -> RoundResponse:
-        del messages, tools, model
-        self.entered.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            self.cancelled.set()
-            raise
-        raise AssertionError  # pragma: no cover - the wait above never returns
 
 
 async def _running(harness: Harness, entered: asyncio.Event) -> str:
@@ -95,7 +51,7 @@ async def _running(harness: Harness, entered: asyncio.Event) -> str:
 
 async def test_shutdown_drains_in_flight_work_before_closing() -> None:
     """Closing waits for a running activation to quiesce before it closes resources."""
-    completer = _Gated()
+    completer = Gated()
     closed = asyncio.Event()
     closed_while_inflight = False
 
@@ -120,7 +76,7 @@ async def test_shutdown_drains_in_flight_work_before_closing() -> None:
 
 async def test_cancelling_aclose_still_closes_the_resources() -> None:
     """A cancelled aclose does not leave connections open (§2 ownership)."""
-    completer = _Gated()
+    completer = Gated()
     closed = asyncio.Event()
 
     async def close() -> None:
@@ -146,7 +102,7 @@ async def test_cancelling_aclose_still_closes_the_resources() -> None:
 
 async def test_the_drain_is_unbounded_when_no_budget_is_given() -> None:
     """The pre-ADR-0083 shape, kept as the default (``drain_timeout=None``)."""
-    completer = _NeverFinishing()
+    completer = NeverFinishing()
     harness = phases_harness(completer)
     await _running(harness, completer.entered)
 
@@ -163,7 +119,7 @@ async def test_the_drain_is_unbounded_when_no_budget_is_given() -> None:
 
 async def test_phase_a_ends_and_phase_b_cancels_the_remainder() -> None:
     """The budget is what keeps the graceful path reachable at all (ADR-0083 §4)."""
-    completer = _NeverFinishing()
+    completer = NeverFinishing()
     harness = phases_harness(completer, drain_timeout=timedelta(milliseconds=20))
     await _running(harness, completer.entered)
 
@@ -178,7 +134,7 @@ async def test_nothing_is_closed_until_the_cancelled_work_has_completed() -> Non
     closed = asyncio.Event()
     unwound = asyncio.Event()
 
-    class _SlowToUnwind(_NeverFinishing):
+    class _SlowToUnwind(NeverFinishing):
         async def respond(
             self,
             messages: Sequence[Message],
@@ -210,7 +166,7 @@ async def test_nothing_is_closed_until_the_cancelled_work_has_completed() -> Non
 
 async def test_work_that_finishes_inside_the_budget_is_never_cancelled() -> None:
     """Phase A is a *wait*, not a deadline the drain enforces on healthy work."""
-    completer = _Gated()
+    completer = Gated()
     harness = phases_harness(completer, drain_timeout=timedelta(seconds=30))
     await _running(harness, completer.entered)
 
