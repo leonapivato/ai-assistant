@@ -10,7 +10,6 @@ meets them (§7:3).
 from __future__ import annotations
 
 import ast
-import asyncio
 import hashlib
 import http.client
 import inspect
@@ -18,286 +17,47 @@ import json
 import socket
 import subprocess
 import sys
-import threading
 import time
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from ai_assistant.core.types import DiagnosticEntry, DiagnosticKind, DiagnosticSource
-from ai_assistant.evaluation.diagnostic_record import MIN_FILE_BYTES, FileDiagnosticRecord
-
 sys.path.insert(0, str(Path(__file__).parent))
-from _operator_recipes import SCRIPTS, load
+from _operator_recipes import SCRIPTS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
-viewer = load("activation_viewer")
-
-_SOURCE = SCRIPTS / "activation_viewer.py"
-_PACKAGE = Path(__file__).parents[2] / "src" / "ai_assistant"
-
-#: Raw outside text, as the record holds it: the page must show it as text.
-_HOSTILE = '<script>alert("x")</script><img src=x onerror="alert(1)">'
-
-#: A string that must never reach the viewer's own output.
-_PRIVATE = "the-secret-the-viewer-must-never-print"
-
-_T0 = datetime(2026, 10, 13, 9, 0, 0, tzinfo=UTC)
-
-
-def _at(ms: int) -> datetime:
-    return _T0 + timedelta(milliseconds=ms)
-
-
-def _iso(ms: int) -> str:
-    return _at(ms).isoformat()
-
-
-def _step(stage: str, due: str, start: int, end: int, outcome: str = "done") -> dict[str, Any]:
-    return {
-        "stage": stage,
-        "due": due,
-        "started_at": _iso(start),
-        "ended_at": _iso(end),
-        "outcome": outcome,
-        "step_disposition": None,
-        "route_outcome": None,
-    }
-
-
-def _understanding_request(text: str) -> dict[str, Any]:
-    payload = {"input": {"received_as": "the message the user just sent", "text": text}}
-    return {
-        "messages": [
-            {"role": "system", "content": "instruction", "name": None},
-            {"role": "user", "content": json.dumps(payload), "name": None},
-        ]
-    }
-
-
-def _response(*parts: dict[str, Any]) -> dict[str, Any]:
-    return {"response": {"parts": list(parts), "kind": "response"}, "read_as_round": True}
-
-
-def _text(content: str) -> dict[str, Any]:
-    return {"part_kind": "text", "content": content}
-
-
-def _call(name: str, args: object) -> dict[str, Any]:
-    return {"part_kind": "tool-call", "tool_name": name, "args": args, "tool_call_id": name}
-
-
-#: One activation as ADR-0314 §4's sources write it: two rounds, a call that needs the
-#: user, a message allowed, outside content read, and a digest that failed.
-_ACTIVATION: list[tuple[DiagnosticSource, DiagnosticKind, int, dict[str, Any]]] = [
-    (DiagnosticSource.UNDERSTANDING, DiagnosticKind.GIVEN, 10, _understanding_request(_HOSTILE)),
-    (DiagnosticSource.UNDERSTANDING, DiagnosticKind.RETURNED, 400, {"reply": '{"meaning": "x"}'}),
-    (
-        DiagnosticSource.CONTROLLER,
-        DiagnosticKind.STEP,
-        401,
-        _step("understanding", "not_understood", 5, 401),
-    ),
-    (DiagnosticSource.PLANNING, DiagnosticKind.GIVEN, 420, {"messages": [], "tools": []}),
-    (
-        DiagnosticSource.PLANNING,
-        DiagnosticKind.RETURNED,
-        900,
-        _response(
-            {"part_kind": "thinking", "content": "considering"},
-            _text("Looking that up. " + _PRIVATE),
-            _call("web_search", {"query": "q"}),
-            _call("planning_round", {"notes": [], "mark": True}),
-        ),
-    ),
-    (
-        DiagnosticSource.CONTROLLER,
-        DiagnosticKind.STEP,
-        901,
-        _step("planning", "first_round_due", 410, 901),
-    ),
-    (
-        DiagnosticSource.AUTHORIZING,
-        DiagnosticKind.RETURNED,
-        950,
-        {
-            "round": "round:1",
-            "calls": [
-                {
-                    "call_id": "c1",
-                    "name": "web_search",
-                    "checks": [{"check": "selection", "verdict": "passed", "reason": None}],
-                    "verdict": "needs_you",
-                    "reason": "asks first",
-                }
-            ],
-            "read_outside_content": True,
-            "grounds": [{"ground": "fetched_outside", "record": None}],
-        },
-    ),
-    (
-        DiagnosticSource.CONTROLLER,
-        DiagnosticKind.STEP,
-        951,
-        _step("authorizing", "round_unauthorized", 905, 951),
-    ),
-    (
-        DiagnosticSource.DIGESTING,
-        DiagnosticKind.GIVEN,
-        960,
-        {"result": "r1", "question": "q", "part": 1, "parts": 1, "messages": []},
-    ),
-    (
-        DiagnosticSource.DIGESTING,
-        DiagnosticKind.RETURNED,
-        1200,
-        {
-            "result": "r1",
-            "question": "q",
-            "part": 1,
-            "parts": 1,
-            "failure": {"class": "ModelError", "message": "x"},
-        },
-    ),
-    (
-        DiagnosticSource.DIGESTING,
-        DiagnosticKind.RETURNED,
-        1201,
-        {"result": "r1", "question": "q", "digest": "failed", "reason": "raised"},
-    ),
-    (
-        DiagnosticSource.CONTROLLER,
-        DiagnosticKind.STEP,
-        1202,
-        _step("digesting", "recall_undigested", 955, 1202),
-    ),
-    (DiagnosticSource.PLANNING, DiagnosticKind.GIVEN, 1220, {"messages": [], "tools": []}),
-    (
-        DiagnosticSource.PLANNING,
-        DiagnosticKind.RETURNED,
-        1700,
-        _response(_text("Here is the answer.")),
-    ),
-    (
-        DiagnosticSource.CONTROLLER,
-        DiagnosticKind.STEP,
-        1701,
-        _step("planning", "round_due", 1210, 1701),
-    ),
-    (
-        DiagnosticSource.AUTHORIZING,
-        DiagnosticKind.RETURNED,
-        1750,
-        {
-            "round": "round:2",
-            "calls": [],
-            "message": {"place": "chat", "allowed": True, "reason": None},
-            "read_outside_content": True,
-            "grounds": [],
-        },
-    ),
-    (
-        DiagnosticSource.CONTROLLER,
-        DiagnosticKind.STEP,
-        1751,
-        _step("authorizing", "round_unauthorized", 1705, 1751),
-    ),
-    (
-        DiagnosticSource.CONTROLLER,
-        DiagnosticKind.STEP,
-        1900,
-        _step("acting", "round_authorized", 1755, 1900),
-    ),
-    (
-        DiagnosticSource.CONTROLLER,
-        DiagnosticKind.STEP,
-        1901,
-        _step("end", "nothing_due", 1901, 1901),
-    ),
-]
-
-#: Lines the store cannot write but the viewer must cope with (ADR-0316 §5:3).
-_FOREIGN_LINES = [
-    {
-        "activation_id": "act-1",
-        "source": "planning",
-        "kind": "pondered",
-        "recorded_at": _iso(1950),
-        "body": {"x": 1},
-    },
-    {
-        "activation_id": "act-1",
-        "source": "oracle",
-        "kind": "given",
-        "recorded_at": _iso(1960),
-        "body": {"y": 2},
-    },
-]
-
-
-async def _write(
-    directory: Path,
-    activation_id: str,
-    file_bytes: int,
-    entries: list[tuple[DiagnosticSource, DiagnosticKind, int, dict[str, Any]]],
-) -> None:
-    store = FileDiagnosticRecord(directory=directory, file_bytes=file_bytes)
-    for source, kind, ms, body in entries:
-        await store.write(
-            DiagnosticEntry(
-                activation_id=activation_id,
-                source=source,
-                kind=kind,
-                recorded_at=_at(ms),
-                body=body,
-            )
-        )
+from _activation_record import (
+    ACTIVATION,
+    FOREIGN_LINES,
+    HOSTILE,
+    PRIVATE,
+    at,
+    iso,
+    serving,
+    step,
+    viewer,
+    write_record,
+)
 
 
 @pytest.fixture
 def record(tmp_path: Path) -> Path:
     """A record written by ADR-0314's store, plus the lines it cannot write."""
-    directory = tmp_path / "data" / "diagnostics"
-    directory.parent.mkdir()
-    asyncio.run(_write(directory, "act-1", 8 * 1024 * 1024, _ACTIVATION))
-    with (directory / "act-1.jsonl").open("a", encoding="utf-8") as handle:
-        for line in _FOREIGN_LINES:
-            handle.write(json.dumps(line) + "\n")
-        handle.write("this is not json\n")
-        handle.write(
-            '{"activation_id": "act-1", "source": "planning", "kind": "given"'
-        )  # no newline yet
-    big = "x" * (MIN_FILE_BYTES * 2)
-    truncated = [
-        (
-            DiagnosticSource.UNDERSTANDING,
-            DiagnosticKind.GIVEN,
-            100_000,
-            _understanding_request("hello"),
-        ),
-        (DiagnosticSource.UNDERSTANDING, DiagnosticKind.RETURNED, 100_500, {"reply": big}),
-    ]
-    asyncio.run(_write(directory, "act-2", MIN_FILE_BYTES, truncated))
-    return directory
+    return write_record(tmp_path)
 
 
 @pytest.fixture
 def server(record: Path) -> Iterator[Any]:
     """The viewer bound on loopback at a free port, over ``record``'s data directory."""
-    reports: list[str] = []
-    bound = viewer.ViewerServer(viewer.Record(record.parent), 0, report=reports.append)
-    thread = threading.Thread(target=bound.serve_forever, args=(0.02,), daemon=True)
-    thread.start()
-    try:
+    with serving(record) as bound:
         yield bound
-    finally:
-        bound.shutdown()
-        bound.server_close()
-        thread.join(timeout=5)
+
+
+_SOURCE = SCRIPTS / "activation_viewer.py"
+_PACKAGE = Path(__file__).parents[2] / "src" / "ai_assistant"
 
 
 def _request(
@@ -469,7 +229,7 @@ def test_an_activation_is_named_by_a_listed_id_never_a_path(server: Any, record:
                 "activation_id": "x",
                 "source": "planning",
                 "kind": "given",
-                "recorded_at": _iso(0),
+                "recorded_at": iso(0),
                 "body": {},
             }
         )
@@ -508,30 +268,30 @@ def test_it_reads_the_stores_lines_the_marker_and_what_it_does_not_know(record: 
     assert read is not None
     lines, _version = read
     entries = [one for one in lines if isinstance(one, viewer.Entry)]
-    assert len(entries) == len(_ACTIVATION) + len(_FOREIGN_LINES)
+    assert len(entries) == len(ACTIVATION) + len(FOREIGN_LINES)
     assert entries[0].source == "understanding"
     assert entries[0].kind == "given"
-    assert entries[0].at == _at(10).timestamp()
+    assert entries[0].at == at(10).timestamp()
     assert [(one.source, one.kind) for one in entries[-2:]] == [
         ("planning", "pondered"),
         ("oracle", "given"),
     ]
     # The line that is not JSON is counted; the line with no newline yet is not read.
     assert lines.count(None) == 1
-    assert len(lines) == len(_ACTIVATION) + len(_FOREIGN_LINES) + 1
+    assert len(lines) == len(ACTIVATION) + len(FOREIGN_LINES) + 1
 
     marked = viewer.Record(record).lines("act-2")
     assert marked is not None
     last = marked[0][-1]
     assert isinstance(last, viewer.Truncation)
-    assert last.at == _at(100_500).timestamp()
+    assert last.at == at(100_500).timestamp()
 
 
 def test_the_list_shows_each_activations_flow_newest_first(server: Any) -> None:
     listed = _get_json(server.port, "/api/activations")
     assert [one["id"] for one in listed["activations"]] == ["act-2", "act-1"]
     first = listed["activations"][1]
-    assert first["input"] == _HOSTILE
+    assert first["input"] == HOSTILE
     assert first["ended"] == "nothing_due"
     assert first["rounds"] == 2
     assert first["duration"] == pytest.approx(1901 - 5)
@@ -550,7 +310,7 @@ def test_the_badges_cover_a_refusal_and_a_stage_that_failed() -> None:
     tally = viewer.Tally("a")
     body = {"calls": [{"verdict": "not_done"}], "message": {"allowed": False}}
     tally.feed(viewer.Entry(0, "authorizing", "returned", 1.0, "", body))
-    tally.feed(viewer.Entry(1, "controller", "step", 2.0, "", _step("end", "stage_failed", 2, 2)))
+    tally.feed(viewer.Entry(1, "controller", "step", 2.0, "", step("end", "stage_failed", 2, 2)))
     assert set(tally.badges()) == {"refused", "could_not_finish"}
 
 
@@ -570,8 +330,8 @@ def test_the_timeline_draws_one_lane_per_source_and_planning_by_round(server: An
     items = shown["items"]
     rounds = [one for one in items if one["lane"] == "planning" and one["kind"] == "step"]
     assert [one["label"] for one in rounds] == ["round 1", "round 2"]
-    assert rounds[0]["start"] == pytest.approx(_at(410).timestamp() * 1000)
-    assert rounds[0]["end"] == pytest.approx(_at(901).timestamp() * 1000)
+    assert rounds[0]["start"] == pytest.approx(at(410).timestamp() * 1000)
+    assert rounds[0]["end"] == pytest.approx(at(901).timestamp() * 1000)
     calls = [one for one in items if one["lane"] == "planning" and one["kind"] == "call"]
     assert [one["round"] for one in calls] == [1, 2]
     assert len(calls[0]["lines"]) == 2
@@ -579,11 +339,18 @@ def test_the_timeline_draws_one_lane_per_source_and_planning_by_round(server: An
     assert len(acting) == 1
     failed = [one for one in items if one["lane"] == "digesting" and one["kind"] == "call"]
     assert failed[0]["tone"] == "failed"
-    assert shown["rounds"][0]["text"] == "Looking that up. " + _PRIVATE
-    assert shown["rounds"][0]["calls"] == ["web_search"]
+    assert shown["rounds"][0]["text"] == "Looking that up. " + PRIVATE
+    assert shown["rounds"][0]["calls"] == [
+        {"id": "c1", "name": "web_search"},
+        {"id": "c2", "name": "web_search"},
+    ]
     assert shown["rounds"][0]["marked"] is True
     assert shown["rounds"][0]["thinking"] is True
-    assert shown["rounds"][0]["verdicts"][0]["verdict"] == "needs_you"
+    assert [(one["call_id"], one["verdict"]) for one in shown["rounds"][0]["verdicts"]] == [
+        ("c1", "allowed"),
+        ("c2", "needs_you"),
+    ]
+    assert shown["rounds"][1]["marked"] is False
     assert shown["rounds"][1]["text"] == "Here is the answer."
     assert shown["unreadable"] == 1
 
@@ -601,7 +368,7 @@ def test_a_message_is_marked_allowed_and_never_claimed_written(server: Any) -> N
 
 def test_the_truncation_marker_is_the_files_end(server: Any) -> None:
     shown = _get_json(server.port, "/api/activation?id=act-2")
-    assert shown["truncated"]["at"] == pytest.approx(_at(100_500).timestamp() * 1000)
+    assert shown["truncated"]["at"] == pytest.approx(at(100_500).timestamp() * 1000)
     assert shown["summary"]["badges"] == ["truncated"]
     marker = _get_json(server.port, f"/api/entry?id=act-2&line={shown['truncated']['line']}")
     assert marker["truncated_at"].startswith("2026-10-13T09:01:40.500000")
@@ -611,7 +378,7 @@ def test_a_click_shows_a_body_whole(server: Any) -> None:
     entry = _get_json(server.port, "/api/entry?id=act-1&line=4")
     assert entry["source"] == "planning"
     assert entry["kind"] == "returned"
-    assert entry["body"] == _ACTIVATION[4][3]
+    assert entry["body"] == ACTIVATION[4][3]
     missing, _headers, _body = _request(server.port, "/api/entry?id=act-1&line=999")
     assert missing == 404
 
@@ -628,7 +395,7 @@ def test_it_follows_the_directory_as_it_changes(server: Any, record: Path) -> No
             "activation_id": "act-3",
             "source": "controller",
             "kind": "step",
-            "recorded_at": _iso(200_000),
+            "recorded_at": iso(200_000),
             "body": {},
         }
     )
@@ -663,7 +430,7 @@ def test_entry_text_is_served_as_data_and_rendered_as_text(server: Any) -> None:
     assert headers["X-Content-Type-Options"] == "nosniff"
     # The page holds no entry: everything reaches it through fetch as JSON.
     _status, _headers, page = _request(server.port, "/")
-    assert _HOSTILE.encode() not in page
+    assert HOSTILE.encode() not in page
     # And the script puts every string into the page as text, never as markup.
     for sink in (
         "innerHTML",
@@ -715,7 +482,7 @@ def test_run_from_the_command_line_it_prints_its_address_and_no_entry(record: Pa
         stdout, stderr = process.communicate(timeout=10)
     printed = stdout + stderr
     assert f"http://127.0.0.1:{port}".encode() in printed
-    for content in (_PRIVATE, "act-1", "Looking that up", "hello"):
+    for content in (PRIVATE, "act-1", "Looking that up", "hello"):
         assert content.encode() not in printed
 
 
@@ -725,3 +492,85 @@ def test_help_says_how_to_run_it() -> None:
     )
     for needed in ("ssh -L 8765:127.0.0.1:8765", "--port", "hub's user", "diagnostics"):
         assert needed in result.stdout, needed
+
+
+# --- §5:2: a hint lost, never an activation ------------------------------------------------
+
+#: Values no source writes today, in every place a hint is read.
+_ODD: tuple[object, ...] = ([], {}, 1, None, "text", [{}], {"x": []})
+
+_HINT_KEYS = (
+    "stage",
+    "due",
+    "outcome",
+    "started_at",
+    "ended_at",
+    "failure",
+    "messages",
+    "calls",
+    "message",
+    "read_outside_content",
+    "digest",
+    "response",
+    "result",
+    "question",
+    "part",
+    "run",
+    "grounds",
+)
+
+_SOURCES = ("controller", "understanding", "recall", "planning", "authorizing", "digesting")
+
+
+def _odd_lines() -> list[bytes]:
+    shapes: list[object] = [*_ODD]
+    shapes += [dict.fromkeys(_HINT_KEYS, odd) for odd in _ODD]
+    shapes += [
+        {"response": {"parts": [odd, {"part_kind": "tool-call", "args": odd}]}} for odd in _ODD
+    ]
+    shapes += [{"calls": [odd], "message": odd} for odd in _ODD]
+    lines: list[bytes] = []
+    for number, body in enumerate(shapes):
+        for source in _SOURCES:
+            for kind in ("given", "returned", "step"):
+                line = {
+                    "activation_id": "odd",
+                    "source": source,
+                    "kind": kind,
+                    "recorded_at": iso(number),
+                    "body": body,
+                }
+                lines.append(json.dumps(line).encode())
+    return lines
+
+
+def test_a_body_of_an_unexpected_shape_loses_its_hint_and_nothing_else() -> None:
+    lines = [viewer.parse_line(number, raw) for number, raw in enumerate(_odd_lines())]
+    assert None not in lines
+    tally = viewer.Tally("odd")
+    for line in lines:
+        tally.feed(line)
+    json.dumps(tally.summary(), allow_nan=False)
+    shown = viewer.timeline("odd", lines)
+    json.dumps(shown, allow_nan=False)
+    assert len(shown["entries"]) == len(lines)
+
+
+def test_one_odd_activation_leaves_the_list_and_the_others_whole(server: Any, record: Path) -> None:
+    (record / "odd.jsonl").write_bytes(b"\n".join(_odd_lines()) + b"\n")
+    listed = {one["id"] for one in _get_json(server.port, "/api/activations")["activations"]}
+    assert listed == {"act-1", "act-2", "odd"}
+    assert _get_json(server.port, "/api/activation?id=odd")["id"] == "odd"
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_a_line_holding_a_constant_json_does_not_have_is_unreadable(constant: str) -> None:
+    raw = '{"activation_id": "a", "source": "planning", "kind": "given", '
+    raw += f'"recorded_at": "{iso(0)}", "body": {{"x": {constant}}}}}'
+    assert viewer.parse_line(0, raw.encode()) is None
+
+
+def test_a_string_that_names_no_instant_is_no_instant() -> None:
+    values: tuple[object, ...] = ("", "not a time", "2026-13-40T00:00:00", [], None, 7)
+    for value in values:
+        assert viewer.instant(value) is None
