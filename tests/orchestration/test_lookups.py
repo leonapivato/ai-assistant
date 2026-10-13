@@ -43,6 +43,7 @@ from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
     LOOK_UP_LABEL_ARGUMENTS,
     LOOK_UPS,
+    OLDER_NOTES_PAGE_ARGUMENT,
     READ_STORY,
     READ_STORY_CAPABILITY,
     SEARCH_MEMORY,
@@ -98,11 +99,13 @@ class _Views:
         self.views = views or {}
         self.raises = raises
         self.reads: list[tuple[str, TurnSupply, bool]] = []
+        self.pages: list[int] = []
 
     async def view(
-        self, story_id: str, *, audience: TurnSupply, owner_records: bool
+        self, story_id: str, *, audience: TurnSupply, owner_records: bool, older_page: int = 1
     ) -> PlanningStory | None:
         self.reads.append((story_id, audience, owner_records))
+        self.pages.append(older_page)
         if self.raises is not None:
             raise self.raises
         return self.views.get(story_id)
@@ -154,6 +157,9 @@ def test_the_look_ups_are_offered_with_looking_for_where_outside_text_may_come_b
     assert offered[SEARCH_MEMORY_CAPABILITY]["required"] == ["query", LOOKING_FOR]
     assert offered[FOLLOW_UP_CAPABILITY]["required"] == ["result", LOOKING_FOR]
     assert offered[READ_STORY_CAPABILITY]["required"] == ["story"]
+    # #2893: which page of the story's older notes, optional, a whole number from 1.
+    older = offered[READ_STORY_CAPABILITY]["properties"][OLDER_NOTES_PAGE_ARGUMENT]
+    assert (older["type"], older["minimum"]) == ("integer", 1)
     assert all("deliberate_repeat" not in schema["properties"] for schema in offered.values())
 
 
@@ -330,7 +336,36 @@ async def test_a_story_read_reads_the_view_under_the_scope_and_holds_it_for_the_
     assert answer.outcome is ToolOutcome.SUCCEEDED
     assert answer.output == {"story": "story-1"}
     assert views.reads == [("story-1", UNBOUNDED, False)]
+    assert views.pages == [1]
     assert scope.views == {"d7": view}
+
+
+async def test_a_story_read_asks_for_the_page_of_older_notes_it_names() -> None:
+    """#2893: a read naming a page of the story's older notes reads that page."""
+    views = _Views({"story-1": PlanningStory(story_id="story-1", tidied_at=None, changes=0)})
+    look_ups = LookUps(memory=FakeMemoryStore(), views=views, search_limit=5)
+
+    with look_ups.scope(audience=BOUNDED, owner_records=True):
+        answer = await look_ups.run(_call(READ_STORY, story="story-1", older_notes_page=3))
+
+    assert isinstance(answer, ToolResult)
+    assert answer.outcome is ToolOutcome.SUCCEEDED
+    assert views.pages == [3]
+
+
+@pytest.mark.parametrize("page", [0, -1, True, "2", 1.5])
+async def test_a_story_read_naming_no_page_of_one_or_more_is_not_done(page: object) -> None:
+    views = _Views({"story-1": PlanningStory(story_id="story-1", tidied_at=None, changes=0)})
+    look_ups = LookUps(memory=FakeMemoryStore(), views=views, search_limit=5)
+
+    # The offered schema refuses it first; the runner refuses it again.
+    loose = READ_STORY.model_copy(update={"parameters_schema": {"type": "object"}})
+    with look_ups.scope(audience=BOUNDED, owner_records=True) as scope:
+        answer = await look_ups.run(_call(loose, story="story-1", older_notes_page=page))
+
+    _failed(answer, ToolFailureKind.INVALID_REQUEST)
+    assert views.reads == []
+    assert scope.views == {}
 
 
 async def test_a_story_read_of_a_story_not_held_is_not_done() -> None:

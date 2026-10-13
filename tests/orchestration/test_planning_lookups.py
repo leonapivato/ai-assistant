@@ -8,8 +8,10 @@ by the question it answered.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
-from test_planning import _earlier, _inputs, _remembered, _sent, _stage
+from test_planning import _earlier, _inputs, _instruction, _remembered, _sent, _stage
 from test_planning_stories import _note, _story
 
 from ai_assistant.core.types import (
@@ -19,12 +21,19 @@ from ai_assistant.core.types import (
     ProposedCall,
     RoundResponse,
 )
+from ai_assistant.orchestration.lookups import READ_STORY
 from ai_assistant.orchestration.planning import (
     CallOutcome,
     CallOutcomeKind,
     DigestedEvidence,
     DigestItem,
+    PlanningStories,
 )
+from ai_assistant.orchestration.story_calls import STORY_CALLS
+
+if TYPE_CHECKING:
+    from ai_assistant.core.types import PlanningRound
+    from ai_assistant.orchestration.planning import PlanningStory
 
 
 def _search(call_id: str = "c1") -> ProposedCall:
@@ -170,3 +179,133 @@ def test_a_looked_up_result_is_shown_only_under_its_id_and_as_itself() -> None:
         CallOutcome("r", "c1", CallOutcomeKind.DONE, story=_story())
     with pytest.raises(ValueError, match="looked up"):
         CallOutcome("r", "c1", CallOutcomeKind.DONE, result_id="x", result="raw", story=_story())
+
+
+# --- a story read's older notes (#2893) ------------------------------------------------------
+
+
+def _read(view: PlanningStory) -> tuple[PlanningRound, CallOutcome]:
+    """An earlier round's story read, done, its full view ``view``."""
+    earlier = _earlier(
+        calls=(ProposedCall(call_id="c1", name="read_story", arguments={"story": "S1"}),)
+    )
+    return earlier, CallOutcome(
+        earlier.id, "c1", CallOutcomeKind.DONE, result_id="result:page", story=view
+    )
+
+
+async def test_a_story_reads_older_notes_are_shown_each_under_its_own_n_label() -> None:
+    """#2893: the notes a tidy-up took in, in the order read, newest first, labelled.
+
+    Each is labelled as any note planning is shown is (ADR-0307 §5:1), so a move or a
+    split can name it; the page says how many older ones it does not show, and how to
+    read them.
+    """
+    view = _story(
+        notes=(_note(9, "the dog's vet visit is Friday"),),
+        older=(_note(7, "the car inspection is due"), _note(3, "Dana is driving")),
+        older_page=2,
+        older_more=4,
+    )
+    earlier, outcome = _read(view)
+    stage, completer, _ = _stage()
+
+    planned = await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
+
+    (call,) = _sent(completer)["rounds"][0]["calls"]
+    shown = call["result"]["value"]
+    assert [one["label"] for one in shown["notes_since_tidied"]] == ["N1"]
+    assert [(one["label"], one["text"]) for one in shown["older_notes"]] == [
+        ("N2", "the car inspection is due"),
+        ("N3", "Dana is driving"),
+    ]
+    assert shown["more_older_notes"] == (
+        "4 older not shown: read the story again with older_notes_page 3 for the next page"
+    )
+    labels = {(one.label, one.id) for one in planned.labels if one.kind is LabelKind.NOTE}
+    assert labels == {("N1", "9"), ("N2", "7"), ("N3", "3")}
+    assert not planned.round.notes_marked
+
+
+async def test_a_marked_older_note_is_outside_content_read() -> None:
+    """ADR-0303 §3:6: a marked older note is rendered as a marked note is, and read."""
+    view = _story(older=(_note(3, "the venue wrote back: Saturday", outside=True),))
+    earlier, outcome = _read(view)
+    stage, completer, _ = _stage(RoundResponse(text="ok", notes="Saturday it is"))
+
+    planned = await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
+
+    (call,) = _sent(completer)["rounds"][0]["calls"]
+    (note,) = call["result"]["value"]["older_notes"]
+    assert "outside_content" in note
+    assert planned.round.notes_marked
+
+
+async def test_a_note_shown_in_both_lists_keeps_one_label() -> None:
+    """ADR-0307 §5:1: a note keeps the label it was first shown under, wherever shown."""
+    same = _note(4, "they prefer Saturdays")
+    earlier, outcome = _read(_story(notes=(same,), older=(same,)))
+    stage, completer, _ = _stage()
+
+    await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
+
+    (call,) = _sent(completer)["rounds"][0]["calls"]
+    shown = call["result"]["value"]
+    assert shown["notes_since_tidied"][0]["label"] == shown["older_notes"][0]["label"] == "N1"
+
+
+async def test_a_read_page_with_no_older_note_says_so_and_offers_no_more() -> None:
+    earlier, outcome = _read(_story(older=()))
+    stage, completer, _ = _stage()
+
+    await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
+
+    (call,) = _sent(completer)["rounds"][0]["calls"]
+    shown = call["result"]["value"]
+    assert shown["older_notes"] == "none on this page"
+    assert "more_older_notes" not in shown
+
+
+async def test_where_no_note_may_be_shown_a_read_says_nothing_of_older_notes() -> None:
+    """ADR-0307 §6:4, ADR-0305 §4: absent, with nothing said, as every story note is."""
+    earlier, outcome = _read(_story(notes_withheld=True, older=(), older_more=3))
+    stage, completer, _ = _stage()
+
+    await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
+
+    (call,) = _sent(completer)["rounds"][0]["calls"]
+    shown = call["result"]["value"]
+    assert not {"notes_since_tidied", "older_notes", "more_older_notes"} & set(shown)
+
+
+async def test_the_view_planning_is_given_each_round_shows_no_older_notes() -> None:
+    """#2893: the default view stays the summary and what is newer than it."""
+    stories = PlanningStories(stories=(_story(notes=(_note(4, "they prefer Saturdays"),)),))
+    stage, completer, _ = _stage()
+
+    await stage.plan(_inputs(stories=stories))
+
+    (shown,) = _sent(completer)["stories"]
+    assert set(shown) == {
+        "label",
+        "summary",
+        "last_tidied",
+        "changes_since_tidied",
+        "notes_since_tidied",
+        "episodes_since_tidied",
+        "latest_episodes",
+    }
+
+
+@pytest.mark.parametrize("reads", [True, False], ids=["read_offered", "no_read"])
+async def test_planning_is_told_a_story_read_shows_older_notes_where_it_can_read_one(
+    reads: bool,
+) -> None:
+    """#2893: said beside the story calls, only where a story read is offered too."""
+    stage, completer, _ = _stage()
+
+    await stage.plan(_inputs(capabilities=(*STORY_CALLS, *((READ_STORY,) if reads else ()))))
+
+    instruction = _instruction(completer)
+    assert "Stories are yours to keep" in instruction
+    assert ("read the story to see its older notes too" in instruction) is reads
