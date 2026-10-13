@@ -121,10 +121,23 @@ seam, **the tidy-up apart**: it is started in a task of its own that nothing awa
 neither the next round nor the activation's end (ADR-0307 §7:2), which the engine
 tracks so its shutdown drains it, and whatever came of it, it brings no round (§7:1).
 
-**Left to later lanes:** move, merge, split and group, the full view of a story by
-look-up, planning's other look-ups, the follow-up, an event through the phases, and ADR-0309 §5:10's
-evaluation of the episode's placement over what the activation was given, for which the
-thin path places the episode for the owner alone.
+**Planning's look-ups** (ADR-0307 §6:6, ADR-0308 §6). A memory search, a story's full
+view and the follow-up run through acting's own-records seam, inside a
+:meth:`~ai_assistant.orchestration.lookups.LookUps.scope` this path opens around acting
+for the round, so they read under the pass's audience. A memory search's records whose
+source is not outside are fetched by id before the next round, the audience predicate
+applied again (ADR-0282 §2:4-§2:8), and held under the result's id, every later round
+shown the same records; its outside records are held by acting by id, and its digest
+fetches them by id the same way. A story's full view, read when its call ran, is held
+under the call's result; resting on outside content, it sets ``fetched_outside``, as a
+story view does, and the notes it shows are held with their marks for authorizing. A
+follow-up's result is the result it names, as held, which digesting reads again against
+the follow-up's question.
+
+**Left to later lanes:** pulls (ADR-0292 §13:3), which nothing builds yet; an event
+through the phases; and ADR-0309 §5:10's evaluation of the episode's placement over
+what the activation was given, for which the thin path places the episode for the owner
+alone.
 
 **It logs stage and code-owned reason only** (ADR-0275 §8).
 """
@@ -210,6 +223,11 @@ from ai_assistant.orchestration.controller import (
 )
 from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
+from ai_assistant.orchestration.lookups import (
+    READ_STORY_CAPABILITY,
+    SEARCH_MEMORY_CAPABILITY,
+    searched_ids,
+)
 from ai_assistant.orchestration.outside_content import rests_on_outside_content
 from ai_assistant.orchestration.planning import (
     CallOutcome,
@@ -262,6 +280,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.controller import ControllerStageRun
     from ai_assistant.orchestration.disclosure import TurnSupply
+    from ai_assistant.orchestration.lookups import LookUps
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.story_calls import StoryCalls
     from ai_assistant.orchestration.story_links import ShortView, StoryCandidates
@@ -652,6 +671,31 @@ class StoryReads:
         _log.info("planning_stories", stage="planning", stories=len(views), cited=len(cited))
         return PlanningStories(stories=tuple(views), cited=cited)
 
+    async def view(
+        self, story_id: str, *, audience: TurnSupply, owner_records: bool
+    ) -> PlanningStory | None:
+        """One story's full view, read as the views of the activation's stories are.
+
+        The full view a story read returns (ADR-0307 §6:6, ADR-0300 §10:6), under the
+        same placement (§6:4): the summary and notes by whether a record placed for the
+        owner alone may be shown, the episodes and where the matter stands by the
+        audience predicate.
+
+        Args:
+            story_id: The story.
+            audience: The pass's audience posture, which admits the episodes.
+            owner_records: Whether a record placed for the owner alone may be shown.
+
+        Returns:
+            The view, or ``None`` where the store does not hold the story.
+
+        Raises:
+            StoryStoreError: If the story store cannot be read.
+            PlanningError: If the plan store cannot be read.
+            MemoryStoreError: If the story's episodes cannot be read.
+        """
+        return await self._story(story_id, audience, SummaryVisibility(owner_records=owner_records))
+
     async def _story(
         self, story_id: str, audience: TurnSupply, visibility: SummaryVisibility
     ) -> PlanningStory | None:
@@ -875,6 +919,12 @@ class PhaseWorking:
         self.recall_outside: tuple[str, ...] = ()
         self.recall_digest_fetch: Fetched | None = None
         self.recall_digest_decided = False
+        # What planning looked up for itself (ADR-0307 §6:6), by the result's id: a
+        # memory search's records whose source is not outside, as fetched by id before
+        # the next round (ADR-0282 §2:4), and a story's full view, as its call read it.
+        self.searched: dict[str, tuple[SemanticMemory, ...]] = {}
+        self.search_fetches: list[Fetched] = []
+        self.pages: dict[str, PlanningStory] = {}
         self._rounds: list[_Round] = []
 
     # --- what the rules read (PhaseFacts) ---
@@ -1007,12 +1057,41 @@ class PhaseWorking:
                 return
 
     def outcomes(self) -> tuple[CallOutcome, ...]:
-        """What came of every round's calls, as planning reads them."""
+        """What came of every round's calls, as planning reads them.
+
+        A look-up's result is shown as what it looked up (ADR-0307 §6:6): a memory
+        search's records as fetched, and a story's full view as read.
+        """
         return tuple(
-            outcome
+            self._looked_up(outcome)
             for one in self._rounds
             for outcome in call_outcomes(one.planned, one.authorization, one.acted)
         )
+
+    def _looked_up(self, outcome: CallOutcome) -> CallOutcome:
+        """``outcome``, carrying what its look-up found where it was one."""
+        result_id = outcome.result_id
+        if result_id is None:
+            return outcome
+        page = self.pages.get(result_id)
+        if page is not None:
+            return replace(outcome, result=None, story=page)
+        searched = self.searched.get(result_id)
+        if searched is not None:
+            return replace(outcome, result=None, records=searched)
+        return outcome
+
+    def unfetched_searches(self) -> dict[str, tuple[str, ...]]:
+        """Each done memory search's ids for planning, by result id, not yet fetched."""
+        return {
+            one.result_id: searched_ids(one.output)
+            for acted in self.acted_rounds()
+            for one in acted.calls
+            if one.outcome is ActedOutcome.DONE
+            and one.result_id is not None
+            and one.result_id not in self.searched
+            and str(one.call.call.request.tool.capability) == SEARCH_MEMORY_CAPABILITY
+        }
 
     def planning_rounds(self) -> tuple[PlanningRound, ...]:
         """Every round, as planning recorded it or as it would have been."""
@@ -1175,6 +1254,7 @@ def digested_evidence(digested: Digested, labels: Sequence[PlanningLabel]) -> Di
         result_id=digested.result_id,
         answered=digested.digest.outcome is DigestOutcome.ANSWERED,
         items=tuple(items),
+        question=None if digested.result_id is None else digested.digest.question,
     )
 
 
@@ -1461,6 +1541,7 @@ class PhasePath:
         story_reads: StoryReads | None = None,
         label_arguments: Mapping[str, Mapping[str, LabelKind]] | None = None,
         story_calls: StoryCalls | None = None,
+        look_ups: LookUps | None = None,
         now: Callable[[], datetime] = _utcnow,
         new_effect_id: Callable[[], str] = _new_effect_id,
     ) -> None:
@@ -1499,6 +1580,10 @@ class PhasePath:
                 not hold as the stories stand then, or naming any note on a pass that may
                 not show the owner's records (ADR-0307 §5:3-§5:4, §6:5); ``None`` where no
                 story call is offered.
+            look_ups: The look-ups' runner, the same object acting reaches through its
+                own-records seam, whose scope this path opens around acting so a
+                look-up reads under the pass's audience (ADR-0307 §6:6); ``None``
+                where no look-up is offered.
             now: The clock a step's start and an effect's claim are read from.
             new_effect_id: Mints the *couldn't finish* message's effect record id.
 
@@ -1547,6 +1632,7 @@ class PhasePath:
             name: dict(arguments) for name, arguments in (label_arguments or {}).items()
         }
         self._story_calls = story_calls
+        self._look_ups = look_ups
         self._append: Callable[[], Awaitable[None]] | None = None
         self._spawn: Callable[[Coroutine[None, None, None]], None] = self._spawn_held
         self._closing: Callable[[], bool] = _never
@@ -1791,6 +1877,7 @@ class PhasePath:
             async with asyncio.timeout_at(given.deadline):
                 found = await self._found(given, working)
                 stories = await self._stories(given, working)
+                await self._searched(given, working)
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         if (
@@ -1898,6 +1985,34 @@ class PhasePath:
                 missing=len(working.found.missing),
             )
         return working.found
+
+    async def _searched(self, given: PhasePass, working: PhaseWorking) -> None:
+        """Each memory search's records for planning, fetched by id once (ADR-0307 §6:6).
+
+        The ids a search kept whose source is not outside are fetched in one read before
+        the next round: each record's current version, the audience predicate applied
+        again, and an id with no record or one the predicate now refuses left out
+        (ADR-0282 §2:4-§2:8). What came back is held under the search's result, and
+        every later round is shown the same records; what was fetched and what came
+        back missing is held beside it.
+        """
+        unfetched = working.unfetched_searches()
+        if not unfetched:
+            return
+        ids = tuple(dict.fromkeys(one for kept in unfetched.values() for one in kept))
+        fetched = await fetch_held(
+            self._memory, episode_ids=None, recalled_ids=ids, audience=given.supply
+        )
+        working.search_fetches.append(fetched)
+        _log.info(
+            "stage_fetch",
+            stage="planning",
+            fetched=len(fetched.fetched),
+            missing=len(fetched.missing),
+        )
+        by_id = {one.id: one for one in fetched.recalled if isinstance(one, SemanticMemory)}
+        for result_id, kept in unfetched.items():
+            working.searched[result_id] = tuple(by_id[one] for one in kept if one in by_id)
 
     async def _stories(self, given: PhasePass, working: PhaseWorking) -> PlanningStories | None:
         """What planning is shown of stories this round, read as the stores stand now.
@@ -2092,7 +2207,7 @@ class PhasePath:
         step = working.step(self._now(), self._wait(given))
         try:
             ran, wrote = await asyncio.gather(
-                self._calls(working, decided),
+                self._calls(given, working, decided),
                 self._message(working, latest),
                 return_exceptions=True,
             )
@@ -2105,8 +2220,14 @@ class PhasePath:
             if isinstance(answer, BaseException):
                 raise answer
 
-    async def _calls(self, working: PhaseWorking, decided: RoundAuthorization) -> ActedRound:
+    async def _calls(
+        self, given: PhasePass, working: PhaseWorking, decided: RoundAuthorization
+    ) -> ActedRound:
         """Run the round's allowed calls; its tidy-ups run on their own, unawaited.
+
+        **The look-ups** (ADR-0307 §6:6) run inside a scope opened around acting, so
+        they read under the pass's audience and its owner-only placement. A story's full
+        view a story read read is held under its call's result once acting returns.
 
         **The tidy-up exception** (ADR-0307 §7:2, §8:1). A new round waits for every
         call of the last one but a tidy-up, and neither it nor the activation's end
@@ -2127,9 +2248,41 @@ class PhasePath:
         rest = tuple(one for one in decided.allowed if one.call.decision.id not in started)
         if not rest:
             return ActedRound(round_id=decided.round_id)
-        return await self._acting.act(
-            authorized_round(replace(decided, allowed=rest)), held=working.held
-        )
+        authorized = authorized_round(replace(decided, allowed=rest))
+        if self._look_ups is None:
+            return await self._acting.act(authorized, held=working.held)
+        with self._look_ups.scope(
+            audience=given.supply, owner_records=working.owner_records
+        ) as scope:
+            acted = await self._acting.act(authorized, held=working.held)
+        self._pages(working, acted, scope.views)
+        return acted
+
+    @staticmethod
+    def _pages(
+        working: PhaseWorking, acted: ActedRound, views: Mapping[str, PlanningStory]
+    ) -> None:
+        """Hold each story's full view a done story read read, under its call's result.
+
+        A view resting on outside content, a marked summary or note, an episode resting
+        on outside content or a marked moment, sets ``fetched_outside``, counted as the
+        story views are (ADR-0300 §10:6, ADR-0306 §4:5); every note it shows is held
+        with its mark, which authorizing reads for its ``N`` label.
+        """
+        for one in acted.calls:
+            view = views.get(one.call.call.decision.id)
+            if (
+                view is None
+                or one.outcome is not ActedOutcome.DONE
+                or one.result_id is None
+                or str(one.call.call.request.tool.capability) != READ_STORY_CAPABILITY
+            ):
+                continue
+            working.pages[one.result_id] = view
+            shown = PlanningStories(stories=(view,))
+            working.notes.update((note.note_id, note) for note in _shown_notes(shown))
+            if _stories_external(shown):
+                working.fetched_outside = True
 
     def _start_tidies(
         self,
@@ -2185,14 +2338,58 @@ class PhasePath:
                         DigestedEvidence(result_id=held.result_id, answered=False)
                     )
                     continue
-                group.create_task(self._digested(working, held, question, step.deadline))
+                group.create_task(
+                    self._digested(working, held, question, step.deadline, given.supply)
+                )
 
     async def _digested(
-        self, working: PhaseWorking, held: HeldResult, question: str, deadline: datetime
+        self,
+        working: PhaseWorking,
+        held: HeldResult,
+        question: str,
+        deadline: datetime,
+        audience: TurnSupply,
     ) -> None:
-        digested = await self._digesting.digest_result(
-            held, question=question, labels=working.labels, deadline=deadline
-        )
+        """Digest one held result against ``question``, as it was held (ADR-0308 §6:1-§6:3).
+
+        A result held as it arrived is read as it arrived. One held by the ids of its
+        outside records, a memory search's, is fetched by id inside the digest's
+        deadline, the audience predicate applied again (ADR-0282 §2:4-§2:8); where none
+        comes back to read, nothing is recorded and planning is told it could not read
+        the result.
+        """
+        records = held.records
+        if records is None:
+            digested: Digested | None = await self._digesting.digest_result(
+                held, question=question, labels=working.labels, deadline=deadline
+            )
+        else:
+
+            async def fetch() -> tuple[SemanticMemory, ...]:
+                fetched = await fetch_held(
+                    self._memory, episode_ids=None, recalled_ids=records, audience=audience
+                )
+                working.search_fetches.append(fetched)
+                _log.info(
+                    "stage_fetch",
+                    stage="digesting",
+                    fetched=len(fetched.fetched),
+                    missing=len(fetched.missing),
+                )
+                return tuple(one for one in fetched.recalled if isinstance(one, SemanticMemory))
+
+            digested = await self._digesting.digest_records(
+                fetch,
+                result_id=held.result_id,
+                question=question,
+                labels=working.labels,
+                deadline=deadline,
+            )
+        if digested is None:
+            working.evidence.append(
+                DigestedEvidence(result_id=held.result_id, answered=False, question=question)
+            )
+            return
         working.digests.append(digested.digest)
         working.evidence.append(digested_evidence(digested, working.labels.labels))
 

@@ -97,6 +97,12 @@ from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapabilit
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import CHAT_TURN_BUDGET, ChatWriter
 from ai_assistant.orchestration.informational_events import InformationalEventStage
+from ai_assistant.orchestration.lookups import (
+    LOOK_UP_CAPABILITIES,
+    LOOK_UP_LABEL_ARGUMENTS,
+    LOOK_UPS,
+    LookUps,
+)
 from ai_assistant.orchestration.matters_pass import MattersPass
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, StoryReads
@@ -514,6 +520,11 @@ PHASES_EXCERPT_CHARS: Final = UNDERSTANDING_EXCERPT_CHARS
 #: reads in full: one more than a short view's, and how many changes have come since
 #: says what is not shown.
 PHASES_STORY_EPISODES: Final = STORY_SHORT_VIEW_EPISODES + 1
+
+#: The most remembered facts one memory search planning makes keeps, before they are
+#: routed by source (ADR-0307 §6:6, ADR-0306 §5:16). **Provisional (#2589).** As many as
+#: recall's second run keeps in all, so an asked-for search reaches no fewer than recall.
+PHASES_MEMORY_SEARCH_LIMIT: Final = RECALL_SECOND_RUN_CAP
 
 
 @dataclass(frozen=True, slots=True)
@@ -3225,7 +3236,10 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
     acting's own-records seam by one :class:`StoryCalls` over the one story store,
     memory store and tidy-up, with the arguments that name things by label handed to
     planning (ADR-0307 §5:2), and the same runner checking a move or a split before it
-    is authorized (§5:3-§5:4).
+    is authorized (§5:3-§5:4). **And planning's look-ups** (§6:6): a memory search, a
+    story's full view and the follow-up, in no registry either, each run through the
+    own-records seam by one :class:`LookUps` over the one memory store and the story
+    views' reads.
 
     **The policy is the deployment's thresholds and standing grants, with no goal
     authorizations and no goal quotes** (ADR-0306 §4:11, §6): a second
@@ -3262,10 +3276,33 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
         ),
     )
     story_calls = StoryCalls(stories=seams.stories, memory=seams.memory, tidy_up=seams.tidy_up)
+    # ADR-0307 §6:1: the story views, over the one story store, memory store and plan
+    # store; a short view is read as understanding's are, at its bounds. The same reads
+    # give a story read its full view (§6:6).
+    story_reads = StoryReads(
+        stories=seams.stories,
+        memory=seams.memory,
+        plans=seams.plans,
+        short_views=StoryCandidates(
+            stories=seams.stories,
+            memory=seams.memory,
+            limit=UNDERSTANDING_STORY_CANDIDATES,
+            lines=STORY_SHORT_VIEW_LINES,
+            notes=STORY_SHORT_VIEW_NOTES,
+            episodes=STORY_SHORT_VIEW_EPISODES,
+        ),
+        episodes=PHASES_STORY_EPISODES,
+    )
+    # ADR-0307 §6:6: planning's look-ups, a memory search over the one memory store and
+    # a story's full view through the same story reads, and the follow-up, which acting
+    # runs against the activation's held results (ADR-0308 §6:6).
+    look_ups = LookUps(
+        memory=seams.memory, views=story_reads, search_limit=PHASES_MEMORY_SEARCH_LIMIT
+    )
     tools = PhaseTools(
         registry=seams.registry,
         invoker=seams.registry,
-        own_records=(REMEMBER, *STORY_CALLS),
+        own_records=(REMEMBER, *STORY_CALLS, *LOOK_UPS),
         searcher=seams.searcher,
         search_query=SEARCH_QUERY_ARGUMENT,
         fills=(
@@ -3301,6 +3338,7 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
                 {
                     REMEMBER_CAPABILITY: RememberCalls(writer=seams.writer, now=_utcnow),
                     **dict.fromkeys(STORY_CALL_CAPABILITIES, story_calls),
+                    **dict.fromkeys(LOOK_UP_CAPABILITIES, look_ups),
                 }
             ),
             timeout=PHASES_CALL_DEADLINE,
@@ -3314,11 +3352,14 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
             REMEMBER_CAPABILITY,
             str(BOOKING_ACT.capability),
             *STORY_CALL_CAPABILITIES,
+            *LOOK_UP_CAPABILITIES,
         ),
-        label_arguments=STORY_LABEL_ARGUMENTS,
+        label_arguments={**STORY_LABEL_ARGUMENTS, **LOOK_UP_LABEL_ARGUMENTS},
         # ADR-0307 §5:3-§5:4: the hub's check of a move or a split before authorizing,
         # against the stories as they stand then, by the same runner acting reaches.
         story_calls=story_calls,
+        # The look-ups' runner, whose scope the path opens around acting (§6:6).
+        look_ups=look_ups,
         round_limit=PHASES_ROUND_LIMIT,
         round_wait=PHASES_CALL_DEADLINE,
         excerpt_chars=PHASES_EXCERPT_CHARS,
@@ -3329,22 +3370,7 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
         memory=seams.memory,
         recall_cap=RECALL_SECOND_RUN_CAP,
         recall_digest_wait=PHASES_RECALL_DIGEST_DEADLINE,
-        # ADR-0307 §6:1: the story views, over the one story store, memory store and
-        # plan store; a short view is read as understanding's are, at its bounds.
-        story_reads=StoryReads(
-            stories=seams.stories,
-            memory=seams.memory,
-            plans=seams.plans,
-            short_views=StoryCandidates(
-                stories=seams.stories,
-                memory=seams.memory,
-                limit=UNDERSTANDING_STORY_CANDIDATES,
-                lines=STORY_SHORT_VIEW_LINES,
-                notes=STORY_SHORT_VIEW_NOTES,
-                episodes=STORY_SHORT_VIEW_EPISODES,
-            ),
-            episodes=PHASES_STORY_EPISODES,
-        ),
+        story_reads=story_reads,
         now=_utcnow,
     )
 
