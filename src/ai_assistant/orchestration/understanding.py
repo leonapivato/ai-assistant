@@ -412,12 +412,14 @@ class TranscriptWindow:
             ``messages`` does not already show, ascending — a deleted one as its
             marker (§4:5, §5:8).
         links: The activation each message of ``messages`` and ``replied_to`` links
-            to, by its position, where the reader's bookkeeping records one as having
-            taken it in (ADR-0303 §7:1-§7:3, ADR-0293 §6:6). The reader brings it with
-            the window, so the understanding phase reads no further store to resolve
-            a message. A message missing here links to nothing: an assistant's
-            message, whose writer nothing records yet (ADR-0303 §7's closing
-            paragraph), or one no activation took in.
+            to, by its position (ADR-0303 §7:1-§7:3, ADR-0293 §6:6): for a message an
+            activation took in, the one the reader's bookkeeping records; and where
+            the phases are wired, for an assistant message the phases wrote, the
+            activation its effect record names as having written it (ADR-0306 §5:3).
+            The reader brings it with the window, so the understanding phase reads no
+            further store to resolve a message. A message missing here links to
+            nothing: neither the bookkeeping nor an effect record names an activation
+            for it, as for an assistant message the old path wrote (ADR-0303 §7:5).
     """
 
     conversation: ChannelIdentity
