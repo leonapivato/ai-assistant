@@ -10,6 +10,10 @@ today's path answers as it always has.
 The five cases are the brief's: a quick question in one round, a search digested and
 answered in a second, a remember, a booking that comes back *needs you*, and a stop
 mid-task.
+
+An event ``receive`` admits runs the same table as one activation whose place takes no
+message (ADR-0313 §4:3-§4:5): nothing is written for it, its result says only how it
+ended, and one that cannot finish or is stopped returns that rather than raising.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from channel_receiver_contract import event_input
 from test_activation_state import _admitted
 from test_authorizer import _ACTIVATION, _episode
 from test_engine import AT, Harness, NoStepPlanner
@@ -39,7 +44,9 @@ from ai_assistant.core.errors import (
     ConfigurationError,
     ConversationStoreError,
     MemoryStoreError,
+    ModelError,
     ModelTimeoutError,
+    OversizedValueError,
     PlanningError,
 )
 from ai_assistant.core.types import (
@@ -52,6 +59,9 @@ from ai_assistant.core.types import (
     BeliefBand,
     CapabilityEffect,
     CapabilityResult,
+    ChannelIdentity,
+    ChannelInput,
+    ChannelResult,
     ChatDevice,
     ControllerRule,
     ControllerStage,
@@ -65,6 +75,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     EvidenceItem,
     Idempotency,
+    InformationalEventResult,
     InputOrigin,
     LabelKind,
     MemoryKind,
@@ -98,6 +109,7 @@ from ai_assistant.core.types import (
     StoryNoteAuthor,
     StorySummaryDraft,
     StorySummaryLine,
+    TextChannelPayload,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
@@ -109,6 +121,7 @@ from ai_assistant.orchestration.authorizer import AuthorizingStage, Verdict
 from ai_assistant.orchestration.chat import COULDNT_FINISH, ChatWriter, couldnt_finish
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
+from ai_assistant.orchestration.informational_events import InformationalEventStage
 from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
     LOOK_UP_LABEL_ARGUMENTS,
@@ -118,6 +131,7 @@ from ai_assistant.orchestration.lookups import (
 )
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import (
+    EVENT_DESCRIPTION,
     MessageWriter,
     PhasePath,
     PhaseTools,
@@ -3214,3 +3228,305 @@ async def test_with_the_record_off_an_activation_writes_nothing() -> None:
 
     assert episode.outcome == "Hello!"
     assert harness.engine._diagnostics is None
+
+
+# --- ADR-0313 §4:3-§4:5: an event through the phases --------------------------------------
+
+#: An event's budget, ample for every case that is not about running out of it.
+_EVENT_BUDGET: Final = timedelta(seconds=10)
+
+
+async def _event(
+    harness: Harness,
+    *,
+    timeout: timedelta = _EVENT_BUDGET,  # noqa: ASYNC109 — the event's budget, handed to receive
+) -> tuple[InformationalEventResult, EpisodicMemory]:
+    """Receive the shared contract's event, and read the episode it froze."""
+    result = await harness.engine.receive(event_input(), reply=None, timeout=timeout)
+    return _received(result), await _event_episode(harness, result)
+
+
+def _received(result: ChannelResult) -> InformationalEventResult:
+    assert result.channel == event_input().target
+    assert isinstance(result.result, InformationalEventResult)
+    # §4:4: how it ended, and nothing it wrote.
+    assert set(result.result.model_dump()) == {"kind", "ended"}
+    return result.result
+
+
+async def _event_episode(harness: Harness, result: ChannelResult) -> EpisodicMemory:
+    assert result.capture.state == "recorded"
+    assert result.capture.episode_id is not None
+    episode = await harness.memory.get(result.capture.episode_id)
+    assert isinstance(episode, EpisodicMemory)
+    assert episode.processing_record is not None
+    assert not episode.processing_record.is_open
+    return episode
+
+
+async def _wrote_nothing(harness: Harness, episode: EpisodicMemory) -> None:
+    """ADR-0307 §3:8, ADR-0309 §5:6: no message anywhere, and none claimed."""
+    assert await harness.conversation_store.recent() == []
+    assert episode.outcome is None
+    effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
+    assert [one for one in effects if one.capability is None] == []
+
+
+async def test_an_event_runs_the_phases_in_a_place_that_takes_no_message() -> None:
+    """§4:3: one activation, its place takes no message, and its text is kept, not written."""
+    text = "The thermostat is in eco mode; nothing needs doing."
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(text=text, notes="Eco mode since 18:00.")
+    )
+    harness = _harness(completer)
+
+    result, episode = await _event(harness)
+
+    assert result.ended is ActivationEnding.DONE
+    # Authorizing is handed no message, since the place takes none, so with no call
+    # allowed nothing is due for acting.
+    assert _stages(episode) == [
+        (ControllerStage.WINDOWS, ControllerRule.WINDOWS_UNASSEMBLED),
+        (ControllerStage.UNDERSTANDING, ControllerRule.NOT_UNDERSTOOD),
+        (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
+        (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
+        (ControllerStage.END, ControllerRule.NOTHING_DUE),
+    ]
+    # Planning is told up front that the place takes no message (ADR-0307 §3:8).
+    (asked,) = completer.calls
+    system, request = asked.messages
+    assert "This input came from a place that takes no message." in system.content
+    place = json.loads(request.content)["place"]
+    assert place["takes_message"] is False
+    assert place["description"] == EVENT_DESCRIPTION
+    assert place["input"].startswith("an outside report")
+    # Its text is kept with the episode, its notes beside it, and written nowhere.
+    record = episode.processing_record
+    assert record is not None
+    (planning_round,) = record.rounds
+    assert (planning_round.text, planning_round.notes) == (text, "Eco mode since 18:00.")
+    assert planning_round.notes_marked
+    await _wrote_nothing(harness, episode)
+    assert _classified(episode) == (ProcessingStatus.COMPLETED, ProcessingReason.RETURNED)
+
+
+async def test_an_event_remembers_starts_a_story_and_notes_it() -> None:
+    """ADR-0309 §5:5: an event's planning still remembers and keeps its stories.
+
+    The event is an outside report, so what it would remember is derived from outside
+    material, which the memory policy never commits unasked (ADR-0106 §6): the call is
+    offered, authorized and ruled *needs you*, as on any activation that read outside
+    content, and the next round is told so. The story calls run.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(
+                _call("c1", "remember", statement="The thermostat goes to eco mode at 18:00."),
+                _call("c2", "start_story", notes=["The thermostat's schedule."]),
+            ),
+            another_round=True,
+        ),
+        RoundResponse(
+            calls=(_call("c3", "note_story", story="S1", note="Eco mode at 18:00 again."),)
+        ),
+    )
+    stories = FakeStoryStore(now=lambda: AT)
+    harness = _harness(completer, stories=stories, story_calls=True)
+
+    result, episode = await _event(harness)
+
+    assert result.ended is ActivationEnding.DONE
+    record = episode.processing_record
+    assert record is not None
+    activation = record.activation_id
+    shown = json.loads(completer.calls[1].messages[1].content)["rounds"][0]["calls"]
+    assert [(one["capability"], one["outcome"].split(":")[0]) for one in shown] == [
+        ("remember", "needs the user"),
+        ("start_story", "done"),
+    ]
+    assert "the memory policy asks the user" in shown[0]["outcome"]
+    effects = await harness.plans.activation_effects([activation])
+    assert [(one.capability, one.outcome) for one in effects] == [
+        ("start_story", ToolOutcome.SUCCEEDED)
+    ]
+    story = await _the_story(stories, activation)
+    page = await stories.notes(story)
+    assert page is not None
+    # The event is an outside report, so what planning notes from it is marked
+    # (ADR-0303 §3:1, ADR-0306 §4:5).
+    assert [(one.text, one.author, one.written_during, one.outside) for one in page.notes] == [
+        ("The thermostat's schedule.", StoryNoteAuthor.PLANNING, activation, True),
+        ("Eco mode at 18:00 again.", StoryNoteAuthor.PLANNING, activation, True),
+    ]
+    await _wrote_nothing(harness, episode)
+
+
+async def test_an_event_ended_by_the_round_limit_couldnt_finish() -> None:
+    """§4:5: the round limit ends it, it returns *couldn't finish*, and writes nothing."""
+    refused = RoundResponse(text="Trying.", calls=(_call("c1", "nowhere"),))
+    harness = _harness(FakeToolCallingCompleter.scripted(refused, refused, refused))
+
+    result, episode = await _event(harness)
+
+    assert result.ended is ActivationEnding.COULDNT_FINISH
+    assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.ROUND_LIMIT_REACHED)
+    assert _classified(episode) == (ProcessingStatus.FAILED, ProcessingReason.PROCESSING_FAILED)
+    await _wrote_nothing(harness, episode)
+
+
+async def test_an_event_that_writes_nothing_is_done() -> None:
+    """ADR-0307 §3:8: an event never writes, so writing nothing is no failure to finish."""
+    harness = _harness(FakeToolCallingCompleter.scripted(RoundResponse()))
+
+    result, episode = await _event(harness)
+
+    assert result.ended is ActivationEnding.DONE
+    assert _classified(episode) == (ProcessingStatus.COMPLETED, ProcessingReason.RETURNED)
+    await _wrote_nothing(harness, episode)
+
+
+class _Fails(FakeToolCallingCompleter):
+    """A completer whose round fails: a phase's failure."""
+
+    async def respond(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[OfferedTool],
+        *,
+        model: str | None = None,
+    ) -> RoundResponse:
+        del messages, tools, model
+        msg = "the provider failed"
+        raise ModelError(msg)
+
+
+async def test_an_event_whose_phase_fails_couldnt_finish_and_raises_nothing() -> None:
+    """§4:5: a phase's failure is a result, and the episode keeps why it ended."""
+    harness = _harness(_Fails())
+
+    result, episode = await _event(harness)
+
+    assert result.ended is ActivationEnding.COULDNT_FINISH
+    assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.STAGE_FAILED)
+    assert _classified(episode)[0] is ProcessingStatus.FAILED
+    await _wrote_nothing(harness, episode)
+
+
+async def test_an_events_timeout_is_its_budget_and_running_out_couldnt_finish() -> None:
+    """§4:5: the event's ``timeout`` bounds its activation; planning outlives it."""
+    completer = _GatedCompleter(RoundResponse(text="Too late."), gated=1)
+    harness = _harness(completer)
+
+    result, episode = await _event(harness, timeout=timedelta(milliseconds=300))
+
+    assert completer.entered.is_set()
+    assert result.ended is ActivationEnding.COULDNT_FINISH
+    assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.STAGE_TIMED_OUT)
+    assert _classified(episode) == (ProcessingStatus.FAILED, ProcessingReason.TIMEOUT)
+    await _wrote_nothing(harness, episode)
+
+
+@pytest.mark.parametrize("budget", [timedelta(0), timedelta(seconds=-1)])
+async def test_an_event_with_no_budget_couldnt_finish_before_anything_runs(
+    budget: timedelta,
+) -> None:
+    """§4:5: a budget already spent reaches no stage, and is still a result."""
+    completer = FakeToolCallingCompleter.scripted()
+    harness = _harness(completer)
+
+    result, episode = await _event(harness, timeout=budget)
+
+    assert result.ended is ActivationEnding.COULDNT_FINISH
+    assert completer.calls == []
+    assert _classified(episode) == (ProcessingStatus.FAILED, ProcessingReason.TIMEOUT)
+    record = episode.processing_record
+    assert record is not None
+    assert record.understanding == ()
+    await _wrote_nothing(harness, episode)
+
+
+async def _running_activation(harness: Harness) -> str:
+    """The activation id of the one episode still open, once its admission wrote it."""
+    deadline = asyncio.get_running_loop().time() + _SETTLE
+    while True:
+        for one in await harness.memory.export():
+            if (
+                isinstance(one, EpisodicMemory)
+                and one.processing_record is not None
+                and one.processing_record.is_open
+            ):
+                return one.processing_record.activation_id
+        if asyncio.get_running_loop().time() > deadline:
+            msg = "no activation was admitted"
+            raise AssertionError(msg)
+        await asyncio.sleep(0.001)
+
+
+async def test_a_stopped_event_returns_stopped() -> None:
+    """§4:4, ADR-0295 §3:4: a stop lands after the current round, and is a result."""
+    completer = _GatedCompleter(
+        RoundResponse(
+            calls=(_call("c1", "remember", statement="The thermostat is in eco mode."),),
+            another_round=True,
+        ),
+        RoundResponse(text="Done."),
+        gated=2,
+    )
+    harness = _harness(completer)
+
+    receiving = asyncio.create_task(
+        harness.engine.receive(event_input(), reply=None, timeout=_EVENT_BUDGET)
+    )
+    await asyncio.wait_for(completer.entered.wait(), _SETTLE)
+    stopped = await harness.engine.stop_activation(await _running_activation(harness))
+    completer.gate.set()
+    received = await asyncio.wait_for(receiving, _SETTLE)
+
+    assert stopped is ActivationStop.STOPPED
+    assert _received(received).ended is ActivationEnding.STOPPED
+    episode = await _event_episode(harness, received)
+    assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.STOPPED)
+    assert _classified(episode) == (ProcessingStatus.INTERRUPTED, ProcessingReason.STOPPED)
+    await _wrote_nothing(harness, episode)
+
+
+async def test_with_the_opt_in_unset_todays_event_path_returns_how_it_ended() -> None:
+    """ADR-0313 §6:2: the event-summary stage runs, its result in §4:4's shape."""
+    summary = "The thermostat entered eco mode at 18:00."
+    harness = Harness(
+        planner=NoStepPlanner(),
+        understanding=understanding_stage(),
+        informational_events=InformationalEventStage(FakeModelProvider(reply=summary)),
+    )
+
+    result, episode = await _event(harness)
+
+    assert result.ended is ActivationEnding.DONE
+    ran = {stage for stage, _ in _stages(episode)}
+    assert ControllerStage.EVENT_SUMMARY in ran
+    assert not ran & {ControllerStage.PLANNING, ControllerStage.AUTHORIZING}
+    # The summary is kept with the episode, as before, and not returned.
+    assert episode.outcome == summary
+
+
+async def test_an_events_result_past_the_output_bound_raises_as_every_result_does() -> None:
+    """ADR-0085 §8e: a result too large to return is refused, never answered as a result.
+
+    The result *couldn't finish* would build names the same channel, so it could not be
+    returned either.
+    """
+    harness = Harness(
+        planner=NoStepPlanner(),
+        understanding=understanding_stage(),
+        tools=(_BOOK,),
+        phases=_phases(FakeToolCallingCompleter.scripted(RoundResponse(text="Noted."))),
+        max_payload_bytes=512,
+    )
+    # Arguments inside the bound, and a result past it once its receipt is reserved.
+    supplied = ChannelInput(
+        target=ChannelIdentity(channel_type="informational_event", instance_id="e" * 250),
+        payload=TextChannelPayload(text="x"),
+    )
+
+    with pytest.raises(OversizedValueError, match="the result of receive"):
+        await harness.engine.receive(supplied, reply=None, timeout=_EVENT_BUDGET)
