@@ -1,0 +1,426 @@
+"""What recall, understanding, planning and digesting give the diagnostic record (ADR-0314 §4).
+
+Each source writes from its own module through the sink it is handed, its given entry
+before its model call or search and its returned entry once that returns or fails
+(§4:1); with no sink, nothing is built and the work is unchanged (§2:1). The controller's
+steps are pinned in ``test_controller.py`` and authorizing's entry in
+``test_authorizer.py``; planning's thinking, which the completer writes, in
+``tests/models/test_tool_calling_diagnostics.py``.
+
+Every case binds an activation itself, as the controller does for a pass (§5:4).
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Final
+
+import pytest
+
+from ai_assistant.core.diagnostics import diagnosed_activation, write_diagnostic
+from ai_assistant.core.errors import MemoryStoreError, ModelError
+from ai_assistant.core.types import (
+    ActivationDigest,
+    ChannelIdentity,
+    DiagnosticKind,
+    DiagnosticSource,
+    InputOrigin,
+    MemorySource,
+    Message,
+    OfferedTool,
+    Placement,
+    PlanningLabel,
+    PlanningRound,
+    Provenance,
+    RecallCue,
+    Role,
+    RoundResponse,
+    SemanticMemory,
+)
+from ai_assistant.orchestration.digesting import ActivationLabels, DigestingStage
+from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
+from ai_assistant.orchestration.held_results import HeldResult
+from ai_assistant.orchestration.planning import PlaceWindow, PlanningInputs, PlanningStage
+from ai_assistant.orchestration.recall import RecallStage
+from ai_assistant.orchestration.understanding import ConversationWindow, UnderstandingStage
+from ai_assistant.testing import (
+    FakeDiagnosticSink,
+    FakeMemoryStore,
+    FakeModelProvider,
+    FakeStoryStore,
+    FakeToolCallingCompleter,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+_AT: Final = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
+_ACTIVATION: Final = "3f2b8c4e-1d5a-4e7b-9c0d-2a6f8e1b7c35"
+_AUDIENCE: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
+_CONVERSATION: Final = ChannelIdentity(channel_type="conversation", instance_id="c-1")
+_PROPOSAL: Final = json.dumps({"meaning": "They mean the dentist.", "meaning_ground": "stated"})
+
+
+def _now() -> datetime:
+    return _AT
+
+
+def _body(entry: Any) -> Any:
+    """An entry's body as the file holds it: plain JSON."""
+    return entry.model_dump(mode="json")["body"]
+
+
+def _fact(memory_id: str, fact: str) -> SemanticMemory:
+    return SemanticMemory(
+        id=memory_id,
+        content=fact,
+        fact=fact,
+        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT),
+        placement=Placement(),
+    )
+
+
+# --- recall --------------------------------------------------------------------------------
+
+
+async def _recall_stage(memory: FakeMemoryStore, sink: FakeDiagnosticSink | None) -> RecallStage:
+    return RecallStage(
+        memory=memory,
+        stories=FakeStoryStore(),
+        threshold=0.5,
+        limit=3,
+        budget=timedelta(seconds=2),
+        diagnostics=sink,
+    )
+
+
+async def test_recall_writes_its_run_and_cues_then_each_find_and_what_it_kept() -> None:
+    memory = FakeMemoryStore(now=_now)
+    await memory.add(_fact("m1", "The dentist appointment is on Friday."))
+    await memory.add(_fact("m2", "The garden needs water."))
+    sink = FakeDiagnosticSink()
+    stage = await _recall_stage(memory, sink)
+
+    with diagnosed_activation(_ACTIVATION, clock=_now):
+        recalled = await stage.recall("dentist appointment", audience=_AUDIENCE, deadline=math.inf)
+
+    given, returned = sink.of(DiagnosticSource.RECALL)
+    assert given.kind is DiagnosticKind.GIVEN
+    assert _body(given) == {
+        "run": "first",
+        "cues": [{"text": "dentist appointment", "kinds": ["activation_input"]}],
+    }
+    body = _body(returned)
+    assert body["outcome"] == "found"
+    assert [one["id"] for one in body["kept"]] == [item.id for item in recalled.result.items]
+    assert body["kept"][0]["found_by"] == ["activation_input"]
+    assert {"m1"} <= {one["id"] for one in body["finds"]}
+    find = next(one for one in body["finds"] if one["id"] == "m1")
+    assert (find["band"], find["cue"], find["admitted"]) == (
+        "asserted",
+        "dentist appointment",
+        True,
+    )
+    assert isinstance(find["score"], float)
+
+
+async def test_recall_s_second_run_writes_each_cue_with_its_kinds() -> None:
+    sink = FakeDiagnosticSink()
+    stage = await _recall_stage(FakeMemoryStore(now=_now), sink)
+
+    with diagnosed_activation(_ACTIVATION, clock=_now):
+        await stage.recall_again(
+            "the dentist",
+            ("Friday",),
+            audience=_AUDIENCE,
+            deadline=math.inf,
+            passed_over=frozenset(),
+            cap=3,
+        )
+
+    given = sink.of(DiagnosticSource.RECALL, DiagnosticKind.GIVEN)[0]
+    assert _body(given) == {
+        "run": "second",
+        "cues": [
+            {"text": "the dentist", "kinds": [RecallCue.UNDERSTOOD_MEANING.value]},
+            {"text": "Friday", "kinds": [RecallCue.UNDERSTOOD_PHRASE.value]},
+        ],
+    }
+    assert _body(sink.of(DiagnosticSource.RECALL, DiagnosticKind.RETURNED)[0])["outcome"] == (
+        "nothing_found"
+    )
+
+
+async def test_a_failed_recall_writes_its_failure() -> None:
+    sink = FakeDiagnosticSink()
+    stage = await _recall_stage(FakeMemoryStore(now=_now, failure="down"), sink)
+
+    with diagnosed_activation(_ACTIVATION, clock=_now):
+        await stage.recall("dentist", audience=_AUDIENCE, deadline=math.inf)
+
+    body = _body(sink.of(DiagnosticSource.RECALL, DiagnosticKind.RETURNED)[0])
+    assert body["outcome"] == "failed"
+    assert body["failure"]["class"] == MemoryStoreError.__name__
+
+
+async def test_a_recall_that_raises_writes_its_returned_entry_before_raising() -> None:
+    sink = FakeDiagnosticSink()
+    stage = await _recall_stage(FakeMemoryStore(now=_now), sink)
+
+    with diagnosed_activation(_ACTIVATION, clock=_now), pytest.raises(TimeoutError):
+        await stage.recall("dentist", audience=_AUDIENCE, deadline=0.0)
+
+    body = _body(sink.of(DiagnosticSource.RECALL, DiagnosticKind.RETURNED)[0])
+    assert body["failure"]["class"] == "TimeoutError"
+
+
+# --- understanding -------------------------------------------------------------------------
+
+
+async def _understand(stage: UnderstandingStage) -> None:
+    await stage.understand(
+        "Book the dentist.",
+        channel=_CONVERSATION,
+        window=ConversationWindow(_CONVERSATION, ()),
+        audience=_AUDIENCE,
+        episodes=None,
+        version=1,
+        now=_now,
+        deadline=math.inf,
+    )
+
+
+async def test_understanding_writes_its_rendered_request_and_the_reply() -> None:
+    model = FakeModelProvider(reply=_PROPOSAL)
+    sink = FakeDiagnosticSink()
+    stage = UnderstandingStage(model=model, excerpt_chars=200, diagnostics=sink)
+
+    with diagnosed_activation(_ACTIVATION, clock=_now):
+        await _understand(stage)
+
+    given, returned = sink.of(DiagnosticSource.UNDERSTANDING)
+    sent = model.calls[0].messages
+    assert _body(given) == {"messages": [one.model_dump(mode="json") for one in sent]}
+    assert _body(returned) == {"reply": _PROPOSAL}
+
+
+async def test_understanding_s_repair_is_a_second_given_and_returned_pair() -> None:
+    model = FakeModelProvider.scripted("not json", _PROPOSAL)
+    sink = FakeDiagnosticSink()
+    stage = UnderstandingStage(model=model, excerpt_chars=200, diagnostics=sink)
+
+    with diagnosed_activation(_ACTIVATION, clock=_now):
+        await _understand(stage)
+
+    kinds = [one.kind for one in sink.of(DiagnosticSource.UNDERSTANDING)]
+    assert kinds == [DiagnosticKind.GIVEN, DiagnosticKind.RETURNED] * 2
+    assert _body(sink.of(DiagnosticSource.UNDERSTANDING)[1]) == {"reply": "not json"}
+
+
+async def test_understanding_writes_the_failure_of_its_call() -> None:
+    def down(_: Sequence[Message]) -> str:
+        msg = "the provider is down"
+        raise ModelError(msg)
+
+    sink = FakeDiagnosticSink()
+    stage = UnderstandingStage(
+        model=FakeModelProvider(reply=down), excerpt_chars=200, diagnostics=sink
+    )
+
+    with diagnosed_activation(_ACTIVATION, clock=_now), pytest.raises(ModelError):
+        await _understand(stage)
+
+    failure = _body(sink.of(DiagnosticSource.UNDERSTANDING, DiagnosticKind.RETURNED)[0])["failure"]
+    assert failure["class"] == "ModelError"
+    assert "the provider is down" in failure["message"]
+
+
+# --- planning ------------------------------------------------------------------------------
+
+
+class _Recorder:
+    async def record(
+        self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]
+    ) -> None:
+        del planning_round, labels
+
+
+def _inputs() -> PlanningInputs:
+    return PlanningInputs(
+        activation_id=_ACTIVATION,
+        place=PlaceWindow(takes_message=True, description="the kitchen chat"),
+        capabilities=(),
+        trigger_origin=InputOrigin.USER,
+    )
+
+
+def _planning(completer: Any, sink: FakeDiagnosticSink | None) -> PlanningStage:
+    return PlanningStage(
+        completer=completer, recorder=_Recorder(), excerpt_chars=200, now=_now, diagnostics=sink
+    )
+
+
+async def test_planning_writes_its_rendered_request_and_offered_tools_before_the_round() -> None:
+    completer = FakeToolCallingCompleter(RoundResponse(text="On it."))
+    sink = FakeDiagnosticSink()
+
+    with diagnosed_activation(_ACTIVATION, clock=_now):
+        await _planning(completer, sink).plan(_inputs())
+
+    (given,) = sink.of(DiagnosticSource.PLANNING, DiagnosticKind.GIVEN)
+    sent = completer.last_call
+    assert _body(given) == {
+        "messages": [one.model_dump(mode="json") for one in sent.messages],
+        "tools": [one.model_dump(mode="json") for one in sent.tools],
+    }
+    # A response came back, and the completer is the one that writes it (§5:2); this
+    # fake writes none, and planning does not write one in its place.
+    assert sink.of(DiagnosticSource.PLANNING, DiagnosticKind.RETURNED) == ()
+
+
+async def test_where_no_response_came_back_planning_writes_the_failure() -> None:
+    """§5:2: the completer wrote nothing, so planning's module writes the entry."""
+
+    def down(_messages: Sequence[Message], _tools: Sequence[OfferedTool]) -> RoundResponse:
+        msg = "the provider is down"
+        raise ModelError(msg)
+
+    sink = FakeDiagnosticSink()
+
+    with diagnosed_activation(_ACTIVATION, clock=_now), pytest.raises(ModelError):
+        await _planning(FakeToolCallingCompleter(down), sink).plan(_inputs())
+
+    (returned,) = sink.of(DiagnosticSource.PLANNING, DiagnosticKind.RETURNED)
+    failure = _body(returned)["failure"]
+    assert failure["class"] == "ModelError"
+    assert "the provider is down" in failure["message"]
+
+
+async def test_where_the_completer_wrote_the_response_planning_writes_no_second() -> None:
+    """§5:2: a response that came back and did not read as a round is the completer's."""
+
+    class _Writing:
+        def __init__(self, sink: FakeDiagnosticSink) -> None:
+            self._sink = sink
+
+        async def respond(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[OfferedTool],
+            *,
+            model: str | None = None,
+        ) -> RoundResponse:
+            del messages, tools, model
+            await write_diagnostic(
+                self._sink,
+                DiagnosticSource.PLANNING,
+                DiagnosticKind.RETURNED,
+                lambda: {"response": {"parts": []}, "read_as_round": False},
+            )
+            msg = "not a round"
+            raise ModelError(msg)
+
+    sink = FakeDiagnosticSink()
+
+    with diagnosed_activation(_ACTIVATION, clock=_now), pytest.raises(ModelError):
+        await _planning(_Writing(sink), sink).plan(_inputs())
+
+    (returned,) = sink.of(DiagnosticSource.PLANNING, DiagnosticKind.RETURNED)
+    assert _body(returned)["read_as_round"] is False
+
+
+# --- digesting -----------------------------------------------------------------------------
+
+
+class _DigestRecorder:
+    async def record(self, digest: ActivationDigest, labels: tuple[PlanningLabel, ...]) -> None:
+        del digest, labels
+
+
+class _Provider:
+    def __init__(self, answer: Callable[[Sequence[Message]], str]) -> None:
+        self._answer = answer
+        self.calls: list[tuple[Message, ...]] = []
+
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+        del model
+        self.calls.append(tuple(messages))
+        return Message(role=Role.ASSISTANT, content=self._answer(messages))
+
+
+def _digesting(provider: Any, sink: FakeDiagnosticSink | None) -> DigestingStage:
+    return DigestingStage(
+        provider=provider, recorder=_DigestRecorder(), part_chars=10_000, now=_now, diagnostics=sink
+    )
+
+
+_HELD: Final = HeldResult(
+    result_id="result:1", round_id="r1", decision_id="d1", content="The loop closes on the 15th."
+)
+
+
+async def test_digesting_writes_each_part_s_prompt_its_reply_and_the_items_dropped() -> None:
+    reply = json.dumps(
+        {
+            "evidence": [
+                {"text": "closes on the 15th", "source": "D1"},
+                {"text": "made up", "source": "D9"},
+            ]
+        }
+    )
+    provider = _Provider(lambda _: reply)
+    sink = FakeDiagnosticSink()
+
+    with diagnosed_activation(_ACTIVATION, clock=_now):
+        await _digesting(provider, sink).digest_result(
+            _HELD, question="when", labels=ActivationLabels(), deadline=_AT + timedelta(seconds=30)
+        )
+
+    given, returned = sink.of(DiagnosticSource.DIGESTING)
+    assert _body(given) == {"messages": [one.model_dump(mode="json") for one in provider.calls[0]]}
+    assert _body(returned) == {
+        "reply": reply,
+        "dropped": [{"source": "D9", "text": "made up"}],
+    }
+
+
+async def test_a_failed_digest_writes_the_part_s_reply_and_the_digest_s_reason() -> None:
+    sink = FakeDiagnosticSink()
+
+    with diagnosed_activation(_ACTIVATION, clock=_now):
+        await _digesting(_Provider(lambda _: "not json"), sink).digest_result(
+            _HELD, question="when", labels=ActivationLabels(), deadline=_AT + timedelta(seconds=30)
+        )
+
+    returned = [_body(one) for one in sink.of(DiagnosticSource.DIGESTING, DiagnosticKind.RETURNED)]
+    assert returned == [
+        {"reply": "not json", "dropped": [], "failure": "unparsable"},
+        {"digest": "failed", "reason": "unparsable"},
+    ]
+
+
+# --- with the record off -------------------------------------------------------------------
+
+
+async def test_with_no_sink_every_phase_writes_nothing_and_decides_the_same() -> None:
+    """§2:1: off by default, nothing is built, and nothing changes."""
+    memory = FakeMemoryStore(now=_now)
+    await memory.add(_fact("m1", "The dentist appointment is on Friday."))
+    sink = FakeDiagnosticSink()
+
+    with diagnosed_activation(_ACTIVATION, clock=_now):
+        on = await (await _recall_stage(memory, sink)).recall(
+            "dentist appointment", audience=_AUDIENCE, deadline=math.inf
+        )
+        off = await (await _recall_stage(memory, None)).recall(
+            "dentist appointment", audience=_AUDIENCE, deadline=math.inf
+        )
+        await _understand(
+            UnderstandingStage(model=FakeModelProvider(reply=_PROPOSAL), excerpt_chars=200)
+        )
+        await _planning(FakeToolCallingCompleter(RoundResponse(text="ok")), None).plan(_inputs())
+
+    assert on == off
+    assert {one.source for one in sink.recorded} == {DiagnosticSource.RECALL}

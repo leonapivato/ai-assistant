@@ -15,8 +15,16 @@ from typing import Final
 
 import pytest
 
+from ai_assistant.core.diagnostics import diagnosed_activation_id, write_diagnostic
 from ai_assistant.core.errors import MemoryStoreError, ModelTimeoutError, PlanningError
-from ai_assistant.core.types import ControllerRule, ControllerStage, StageEntry, StageOutcome
+from ai_assistant.core.types import (
+    ControllerRule,
+    ControllerStage,
+    DiagnosticKind,
+    DiagnosticSource,
+    StageEntry,
+    StageOutcome,
+)
 from ai_assistant.orchestration.controller import (
     ACTIVATION_RULES,
     PHASE_RULES,
@@ -28,6 +36,7 @@ from ai_assistant.orchestration.controller import (
     TolerantStage,
     run_recorded,
 )
+from ai_assistant.testing import FakeDiagnosticSink
 
 _AT: Final = datetime(2026, 9, 27, tzinfo=UTC)
 
@@ -1390,3 +1399,125 @@ async def test_a_failed_recall_digest_tolerated_goes_on_to_the_first_round() -> 
         (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE, StageOutcome.DONE),
         (ControllerStage.END, ControllerRule.NOTHING_DUE, StageOutcome.DONE),
     ]
+
+
+# --- ADR-0314 §4, §5:4: the controller's step entries and the activation it binds ---------
+
+_ACTIVATION: Final = "3f2b8c4e-1d5a-4e7b-9c0d-2a6f8e1b7c35"
+
+
+@dataclass
+class _Diagnosing:
+    """A stage that writes one entry of its own, and records what it saw bound."""
+
+    name: ControllerStage
+    decide: str
+    sink: FakeDiagnosticSink
+    seen: list[str | None] = field(default_factory=list)
+
+    async def run(self, state: _Facts) -> StageResult:
+        self.seen.append(diagnosed_activation_id())
+        await write_diagnostic(
+            self.sink, DiagnosticSource.UNDERSTANDING, DiagnosticKind.GIVEN, lambda: {"n": 1}
+        )
+        setattr(state, self.decide, True)
+        return StageResult(StageOutcome.DONE)
+
+
+def _diagnosed(
+    *stages: object, sink: FakeDiagnosticSink | None, activation_id: str | None = _ACTIVATION
+) -> ActivationController[_Facts]:
+    _, now = _clock()
+    return ActivationController(
+        stages=stages,  # type: ignore[arg-type]  # fakes standing for stages
+        clock=now,  # type: ignore[arg-type]  # a plain callable
+        activation_id=activation_id,
+        diagnostics=sink,
+    )
+
+
+async def test_each_entry_the_controller_appends_is_written_as_a_step() -> None:
+    """§4: the rule that answered, the stage, when it started and ended, and how it ended."""
+    sink = FakeDiagnosticSink()
+    record = StageRecord()
+
+    await _diagnosed(
+        _FakeStage(ControllerStage.UNDERSTANDING, "understanding_decided"),
+        _FakeStage(ControllerStage.EVENT_SUMMARY, "event_summarized"),
+        sink=sink,
+    ).run(_Facts(informational_event=True, understanding_wired=True, windows_decided=True), record)
+
+    steps = sink.of(DiagnosticSource.CONTROLLER, DiagnosticKind.STEP)
+    assert [dict(step.body) for step in steps] == [
+        entry.model_dump(mode="json") for entry in record.entries
+    ]
+    assert {step.activation_id for step in steps} == {_ACTIVATION}
+
+
+async def test_every_stage_runs_under_the_activation_the_controller_binds() -> None:
+    """§5:4: a stage's own entries are written for the activation, with no argument."""
+    sink = FakeDiagnosticSink()
+    stage = _Diagnosing(ControllerStage.EVENT_SUMMARY, "event_summarized", sink)
+
+    await _diagnosed(stage, sink=sink).run(_Facts(informational_event=True), StageRecord())
+
+    assert stage.seen == [_ACTIVATION]
+    assert [one.activation_id for one in sink.of(DiagnosticSource.UNDERSTANDING)] == [_ACTIVATION]
+    assert diagnosed_activation_id() is None
+
+
+async def test_a_failed_step_is_written_with_its_failure() -> None:
+    error = PlanningError("the store is down")
+    sink = FakeDiagnosticSink()
+    controller = _diagnosed(
+        _FakeStage(ControllerStage.EVENT_SUMMARY, result=StageResult(StageOutcome.FAILED, error)),
+        sink=sink,
+    )
+
+    with pytest.raises(PlanningError):
+        await controller.run(_Facts(informational_event=True), StageRecord())
+
+    failed, ended = sink.of(DiagnosticSource.CONTROLLER)
+    assert failed.body["outcome"] == "failed"
+    assert failed.body["failure"] == {"class": "PlanningError", "message": "the store is down"}
+    assert (ended.body["stage"], ended.body["due"]) == ("end", "stage_failed")
+
+
+async def test_a_pass_with_no_admitted_activation_or_no_sink_writes_nothing() -> None:
+    """§5:4: nothing is written where none is bound; §2:1: nor where the record is off."""
+    sink = FakeDiagnosticSink()
+    unbound = _Diagnosing(ControllerStage.EVENT_SUMMARY, "event_summarized", sink)
+
+    await _diagnosed(unbound, sink=sink, activation_id=None).run(
+        _Facts(informational_event=True), StageRecord()
+    )
+    await _diagnosed(_FakeStage(ControllerStage.EVENT_SUMMARY, "event_summarized"), sink=None).run(
+        _Facts(informational_event=True), StageRecord()
+    )
+
+    assert unbound.seen == [None]
+    assert sink.recorded == ()
+
+
+async def test_a_cancelled_pass_awaits_no_write_on_its_way_out() -> None:
+    """The interrupted end entry is appended, and nothing is awaited under cancellation."""
+    sink = FakeDiagnosticSink()
+    entered = asyncio.Event()
+
+    async def hang(_: _Facts) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    record = StageRecord()
+    running = asyncio.ensure_future(
+        _diagnosed(Stage(ControllerStage.EVENT_SUMMARY, hang), sink=sink).run(
+            _Facts(informational_event=True), record
+        )
+    )
+    await entered.wait()
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert record.entries[-1].due is ControllerRule.INTERRUPTED
+    assert sink.of(DiagnosticSource.CONTROLLER) == ()

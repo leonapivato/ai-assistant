@@ -162,7 +162,12 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.protocols import EgressBinder, SourceReadTrail, StoryStore
+    from ai_assistant.core.protocols import (
+        DiagnosticSink,
+        EgressBinder,
+        SourceReadTrail,
+        StoryStore,
+    )
     from ai_assistant.core.types import (
         Conversation,
         CurrentContext,
@@ -749,6 +754,9 @@ class Harness:
         # exist. `None` is every other case's deployment: the opt-in unset, and the
         # controller's table unchanged.
         phases: Callable[[Harness], PhasePath] | None = None,
+        # ADR-0314 §4:4's sink, which the controller of every pass writes through.
+        # `None` is every other case's deployment: the diagnostic record off.
+        diagnostics: DiagnosticSink | None = None,
     ) -> None:
         # ADR-0197's knobs. The recorder lives on the *stage* (§9), so a case that wants
         # to read the rows builds its own ``RoutingStage(model=…, recorder=…)`` and keeps
@@ -1075,6 +1083,7 @@ class Harness:
             notification_outbox=notification_outbox,
             chat_reader=chat_reader,
             phases=None if phases is None else phases(self),
+            diagnostics=diagnostics,
         )
 
 

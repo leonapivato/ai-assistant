@@ -13,6 +13,7 @@ network denied.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
@@ -41,10 +42,19 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from tool_calling_completer_contract import SeenTool, ToolCallingCompleterContract, Turn
 from vendor_stacks import RequestRecorder, anthropic_success, openai_success
 
+from ai_assistant.core.diagnostics import diagnosed_activation
 from ai_assistant.core.errors import ModelError, ModelRateLimitError, ModelResponseError
-from ai_assistant.core.types import Message, OfferedTool, Role, RoundResponse
+from ai_assistant.core.types import (
+    DiagnosticKind,
+    DiagnosticSource,
+    Message,
+    OfferedTool,
+    Role,
+    RoundResponse,
+)
 from ai_assistant.models import PydanticAIToolCallingCompleter
 from ai_assistant.models.tool_calling import DEFAULT_THINKING, ROUND_TOOL
+from ai_assistant.testing import FakeDiagnosticSink
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -368,13 +378,14 @@ async def _anthropic_round(
     *,
     thinking: ThinkingLevel = DEFAULT_THINKING,
     settings: AnthropicModelSettings | None = None,
+    diagnostics: FakeDiagnosticSink | None = None,
 ) -> tuple[RoundResponse, dict[str, object]]:
     """One round over Anthropic's real SDK, and the request body it put on the wire."""
     recorder = RequestRecorder(handler)
     with network_denied():
         async with httpx.AsyncClient(transport=httpx.MockTransport(recorder)) as http_client:
             completer = PydanticAIToolCallingCompleter(
-                _anthropic(name, http_client, settings), thinking=thinking
+                _anthropic(name, http_client, settings), thinking=thinking, diagnostics=diagnostics
             )
             response = await completer.respond(_request(), [_tool()])
     return response, recorder.only
@@ -538,3 +549,119 @@ async def test_a_fallback_model_keeps_the_request_it_had(
     assert response == RoundResponse(text="ok")
     assert seen.thinking == [None]
     assert seen.max_tokens == [None]
+
+
+# --- ADR-0314 §5: planning's thinking reaches the diagnostic record, and nothing else ---------
+
+_DIAGNOSED: Final = "3f2b8c4e-1d5a-4e7b-9c0d-2a6f8e1b7c35"
+
+
+def _diagnosed_now() -> datetime:
+    return datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
+
+
+async def test_with_the_record_on_adaptive_thinking_is_asked_for_its_summarised_text() -> None:
+    """§5:1: adaptive thinking omits its text unless the request asks for the summary."""
+    sink = FakeDiagnosticSink()
+    _, body = await _anthropic_round("claude-opus-4-8", anthropic_success, diagnostics=sink)
+    assert body["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert body["max_tokens"] == 4096 + 10000
+
+
+async def test_with_the_record_on_budget_thinking_keeps_the_request_it_had() -> None:
+    """Only where the provider otherwise omits the text is the request changed."""
+    _, body = await _anthropic_round(
+        "claude-haiku-4-5", anthropic_success, diagnostics=FakeDiagnosticSink()
+    )
+    assert body["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+
+
+async def test_with_the_record_on_a_models_own_thinking_setting_is_kept() -> None:
+    settings = AnthropicModelSettings(anthropic_thinking={"type": "adaptive"})
+    _, body = await _anthropic_round(
+        "claude-opus-4-8", anthropic_success, settings=settings, diagnostics=FakeDiagnosticSink()
+    )
+    assert body["thinking"] == {"type": "adaptive"}
+
+
+async def test_with_the_record_on_no_thinking_still_asks_for_none() -> None:
+    _, body = await _anthropic_round(
+        "claude-opus-4-8", anthropic_success, thinking=False, diagnostics=FakeDiagnosticSink()
+    )
+    assert "thinking" not in body
+
+
+def _diagnosing(
+    *parts: ModelResponsePart, finish: str | None = None
+) -> tuple[PydanticAIToolCallingCompleter, FakeDiagnosticSink]:
+    sink = FakeDiagnosticSink()
+
+    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del messages, info
+        return ModelResponse(parts=list(parts), finish_reason=finish)  # type: ignore[arg-type]
+
+    return PydanticAIToolCallingCompleter(FunctionModel(answer), diagnostics=sink), sink
+
+
+async def test_the_completer_writes_the_whole_response_thinking_included() -> None:
+    """§5:2: every part in order; §5:3: the round itself carries no thinking."""
+    completer, sink = _diagnosing(
+        ThinkingPart("They answered, so book it."),
+        TextPart("Booking it now."),
+        ToolCallPart("web_search", {"query": "q"}, tool_call_id="a"),
+    )
+
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now):
+        response = await completer.respond(_request(), [_tool()])
+
+    assert response == RoundResponse(
+        text="Booking it now.", calls=(response.calls[0],), notes=None, another_round=False
+    )
+    (entry,) = sink.recorded
+    assert (entry.activation_id, entry.source, entry.kind) == (
+        _DIAGNOSED,
+        DiagnosticSource.PLANNING,
+        DiagnosticKind.RETURNED,
+    )
+    body = entry.model_dump(mode="json")["body"]
+    assert body["read_as_round"] is True
+    parts = body["response"]["parts"]
+    assert [part["part_kind"] for part in parts] == ["thinking", "text", "tool-call"]
+    assert parts[0]["content"] == "They answered, so book it."
+
+
+async def test_a_response_that_is_no_round_is_written_before_the_completer_raises() -> None:
+    """§5:2: whether or not the response reads as a round."""
+    completer, sink = _diagnosing(ThinkingPart("Weighing it…"), finish="length")
+
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now), pytest.raises(ModelResponseError):
+        await completer.respond(_request(), [_tool()])
+
+    body = sink.recorded[0].model_dump(mode="json")["body"]
+    assert body["read_as_round"] is False
+    assert body["failure"]["class"] == "ModelResponseError"
+    assert body["response"]["parts"][0]["content"] == "Weighing it…"
+
+
+async def test_where_no_response_came_back_the_completer_writes_nothing() -> None:
+    """§5:2: then planning's module writes the entry, with the failure."""
+    sink = FakeDiagnosticSink()
+
+    def refuse(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del messages, info
+        raise ModelHTTPError(status_code=429, model_name="primary")
+
+    completer = PydanticAIToolCallingCompleter(FunctionModel(refuse), diagnostics=sink)
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now), pytest.raises(ModelError):
+        await completer.respond(_request(), [_tool()])
+
+    assert sink.recorded == ()
+
+
+async def test_with_no_activation_bound_the_completer_writes_nothing() -> None:
+    """§5:4: the completer reads the binding, and writes nothing where none is bound."""
+    completer, sink = _diagnosing(TextPart("ok"))
+
+    await completer.respond(_request(), [_tool()])
+
+    assert sink.recorded == ()
