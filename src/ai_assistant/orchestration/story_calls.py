@@ -41,8 +41,11 @@ never compares either (ADR-0306 §2:10), so two identical starts are one start's
 acting's duplicate backstop refuses a second identical start in the matter as already
 done (§5:9). It creates the story with this activation as its member (ADR-0300 §10:3),
 writes its first notes, and, where it names one, links it into the story it sits inside.
-The story it sits inside is checked first, so a start naming one that is not there
-starts nothing.
+Everything it names is checked first, so a start naming a story that is not there
+starts nothing. **A start is not reported not done once its story exists**: where its
+first notes or its place cannot then be written, the runner raises
+:class:`StartUnfinishedError` and acting leaves its effect record unfinished, which the
+backstop counts as done and nobody reports as done (§5:6, §5:11).
 
 **Merged stories are followed, never written** (ADR-0289 §3). A story a call names that
 has been merged since planning was shown it is followed to the story it was merged into,
@@ -98,7 +101,7 @@ from ai_assistant.orchestration.stories import episode_address, unknown_activati
 from ai_assistant.orchestration.story_tidy_up import TidyUpResult
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
     from ai_assistant.core.types import FrozenJson, ToolCall
@@ -125,6 +128,7 @@ __all__ = [
     "TIDY_STORY_CAPABILITY",
     "UNLINK_STORY",
     "UNLINK_STORY_CAPABILITY",
+    "StartUnfinishedError",
     "StoryCalls",
 ]
 
@@ -373,6 +377,18 @@ _TIDIED: Final = frozenset(
 )
 
 
+class StartUnfinishedError(StoryStoreError):
+    """A start created its story, then could not write the rest of what it carries.
+
+    The start happened, so it is neither not done, which would let the duplicate
+    backstop admit an identical start that makes a second story, nor done, which its
+    first notes or its place are not. Raised out of the runner, so acting leaves the
+    effect record it was claimed under unfinished: counted as done by the backstop and
+    never reported as done (ADR-0306 §5:6, §5:11). A ``StoryStoreError``, since what
+    it means is that the store did not take what it had just admitted.
+    """
+
+
 class _NotDone(Exception):  # noqa: N818 — a control-flow signal inside the runner, never raised out
     """A call that cannot be done, with its code-owned kind and operator-facing message."""
 
@@ -447,7 +463,14 @@ class StoryCalls:
         Returns:
             ``succeeded`` with no output where the call was done; ``failed`` where it
             is not a story call, is malformed, names what is not there, or the store
-            refused it or could not be reached.
+            refused it or could not be reached, and nothing was written.
+
+        Raises:
+            StartUnfinishedError: If a start created its story and then could not
+                write all its first notes or place it inside the larger one. Acting
+                then leaves the start's effect record unfinished, which the duplicate
+                backstop counts as done and which is never reported as done
+                (ADR-0306 §5:6, §5:11), so an identical start is not made again.
         """
         capability = str(call.request.tool.capability)
         parameters = call.request.parameters
@@ -466,6 +489,10 @@ class StoryCalls:
                     "not a story call",
                     reason="not_a_story_call",
                 )
+        except StartUnfinishedError:
+            # Raised on, so acting leaves the start's effect record unfinished (§5:6).
+            _log.warning("story_call_unfinished", stage="acting", reason="start_unfinished")
+            raise
         except _NotDone as refused:
             _log.info("story_call_not_done", stage="acting", reason=refused.reason)
             return _not_done(refused.kind, str(refused))
@@ -501,6 +528,25 @@ class StoryCalls:
         if created.story_id is None:
             raise _refused("the story store refused the start")
         started = str(created.story_id)
+        try:
+            await self._started(started, notes, activation, outside=outside, larger=larger)
+        except (_NotDone, StoryStoreError, MemoryStoreError, ValueError) as exc:
+            # The story exists, so the start happened, though not whole: never reported
+            # as not done, which the duplicate backstop would let an identical start
+            # repeat, and never as done (ADR-0306 §5:6, §5:11).
+            msg = "a story was started, but its first notes or its place were not all written"
+            raise StartUnfinishedError(msg) from exc
+
+    async def _started(
+        self,
+        started: str,
+        notes: Sequence[FrozenJson],
+        activation: str,
+        *,
+        outside: bool,
+        larger: str | None,
+    ) -> None:
+        """Write a started story's first notes, then place it inside the larger one."""
         for note in notes:
             written = await self._stories.append_note(
                 started,
@@ -510,7 +556,7 @@ class StoryCalls:
                 outside=outside,
             )
             if written.note is None:
-                raise _refused("the story was started, but a first note was refused")
+                raise _refused("a first note was refused")
         if larger is not None:
             linked = await self._stories.link(
                 larger,
@@ -519,7 +565,7 @@ class StoryCalls:
                 trigger=activation,
             )
             if linked.story_id is None:
-                raise _refused("the story was started, but not placed inside the larger one")
+                raise _refused("the story was not placed inside the larger one")
 
     async def _note(self, parameters: Mapping[str, FrozenJson]) -> None:
         """Write a note by ``planning`` on a story, with its mark (ADR-0303 §9:3)."""
