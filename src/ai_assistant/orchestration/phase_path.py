@@ -159,7 +159,8 @@ round remembers is placed by the supply it was produced over.
 
 **Left to later lanes:** pulls (ADR-0292 §13:3), which nothing builds yet.
 
-**It logs stage and code-owned reason only** (ADR-0275 §8).
+**It logs stage and code-owned reason only** (ADR-0275 §8), and a defect by its class
+and the frames it passed through, never its message (:func:`log_defect`).
 """
 
 from __future__ import annotations
@@ -167,6 +168,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import traceback
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, Protocol
@@ -177,6 +179,7 @@ import structlog
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import (
     ActivationStoppedError,
+    AssistantError,
     ClaimStopped,
     ConversationStoreError,
     ModelTimeoutError,
@@ -322,6 +325,9 @@ __all__ = [
     "authorized_round",
     "call_outcomes",
     "digested_evidence",
+    "failing_stage",
+    "is_defect",
+    "log_defect",
     "place_window",
 ]
 
@@ -1489,6 +1495,71 @@ def _stopped(state: ActivationState | None) -> bool:
     return state is not None and _ended_by(state, ControllerRule.STOPPED)
 
 
+def is_defect(failure: BaseException) -> bool:
+    """Whether ``failure`` is a programming defect rather than an expected ending (#2904).
+
+    An expected failure is one of the project's own errors — a model's, a store's, a
+    refusal, a stop, each an :class:`~ai_assistant.core.errors.AssistantError` — or a
+    timeout, or recall's digest failing, which its stage carries as a tolerated
+    failure. Every other ``Exception``, such as the ``ValueError`` or ``KeyError`` a bug
+    raises, is a defect. A cancellation is neither, and a group is a defect where any
+    exception it holds is one.
+    """
+    if isinstance(failure, BaseExceptionGroup):
+        return any(is_defect(one) for one in failure.exceptions)
+    return isinstance(failure, Exception) and not isinstance(
+        failure, AssistantError | TimeoutError | _RecallDigestFailedError
+    )
+
+
+def failing_stage(state: ActivationState | None) -> ControllerStage | None:
+    """The stage whose failure ended the pass, read off its record, or ``None``.
+
+    The latest entry recorded as failed before an end entry due ``stage_failed``;
+    ``None`` where the pass did not end on a stage's failure, such as one that failed
+    before its first stage ran.
+    """
+    if state is None or not _ended_by(state, ControllerRule.STAGE_FAILED):
+        return None
+    return next(
+        (
+            one.stage
+            for one in reversed(state.stages.entries[:-1])
+            if one.outcome is StageOutcome.FAILED
+        ),
+        None,
+    )
+
+
+def log_defect(
+    event: str, failure: BaseException, *, stage: str, activation_id: str | None
+) -> None:
+    """Log a defect at error level: where it was raised and its class, never its words.
+
+    The line is the one the failure is always logged under, ``event``, raised to error
+    level so a defect is told apart from an expected failure (#2904). It names the
+    stage, the activation and the exception's class, and carries its traceback as the
+    frames it passed through. Not its message, nor any chained exception's: a message
+    can carry what the user or a model said, which no log holds (ADR-0314 §3:2). Nor
+    through ``exc_info``: ``core/logging`` renders a traceback with the raising frames'
+    locals, which hold the activation's own content.
+
+    Args:
+        event: The line's event name.
+        failure: The defect.
+        stage: The stage or the step it was raised in.
+        activation_id: The activation it ended, where one was admitted.
+    """
+    frames = traceback.format_list(traceback.extract_tb(failure.__traceback__))
+    _log.error(
+        event,
+        stage=stage,
+        activation_id=activation_id,
+        error=type(failure).__name__,
+        traceback="".join([*frames, type(failure).__qualname__]),
+    )
+
+
 def _fetched_external(fetched: Fetched | None) -> bool:
     """Whether a record the windows or recall brought rests on outside content (ADR-0223)."""
     return bool(_fetched_outside(fetched))
@@ -1997,7 +2068,8 @@ class PhasePath:
         the activation's messages become the episode's ``outcome``, and the facts the
         freeze derives are set (ADR-0286 §4:2): among them ADR-0204 §2's value, taken
         here once over everything the activation was given or obtained in every round
-        (ADR-0309 §5:10).
+        (ADR-0309 §5:10). A defect it re-raises is not logged here: the engine, which
+        answers every failure, logs it once (:func:`log_defect`, #2904).
 
         Raises:
             Exception: Whatever ``controlled`` raised, once the message is written.
@@ -2045,6 +2117,39 @@ class PhasePath:
                     delivery=None,
                 )
                 state.holds_external(value=external)
+
+    async def unbegun(
+        self, *, activation_id: str, conversation_id: str, state: ActivationState | None
+    ) -> None:
+        """Write *couldn't finish* for a conversation's activation that failed before :meth:`run`.
+
+        What the reader marked is consumed, so an activation that failed after marking
+        writes the fixed message (ADR-0293 §9:1, §10:2) — one that failed before its
+        run began too, such as a marking that failed part way, where :meth:`run` never
+        wrote it. It is written as :meth:`run` writes it, claimed under the activation
+        and listing the effects its records hold, and it becomes the episode's
+        ``outcome``. A stop writes nothing (ADR-0295 §3:3), and a cancellation is not a
+        failure and never reaches here (ADR-0293 §9:2). It never raises but for a
+        cancellation: the activation is already ending on its own error.
+
+        Args:
+            activation_id: The activation that marked the messages.
+            conversation_id: The conversation it marked them in.
+            state: The activation's state, read for its stop mark.
+        """
+        if state is not None and state.stopped:
+            return
+        working = PhaseWorking(
+            activation_id=activation_id,
+            place=PlaceWindow(takes_message=True, description=CHAT_DESCRIPTION),
+            conversation_id=conversation_id,
+            trigger_origin=None,
+            owner_records=False,
+            round_limit=self._round_limit,
+        )
+        await self._couldnt_finish(working)
+        if state is not None:
+            state.response = working.outcome()
 
     # --- the stages ---
 
@@ -2687,8 +2792,16 @@ class PhasePath:
         text = couldnt_finish(effects).text
         try:
             await self._write(working, text, effect_id=self._new_effect_id(), round_id=None)
-        except Exception:  # the pass is ending on its own error, or on the round limit
-            _log.warning("phase_message_unwritten", stage="end", reason="couldnt_finish_failed")
+        except Exception as exc:  # the pass is ending on its own error, or on the round limit
+            if is_defect(exc):
+                log_defect(
+                    "phase_message_unwritten",
+                    exc,
+                    stage="end",
+                    activation_id=working.activation_id,
+                )
+            else:
+                _log.warning("phase_message_unwritten", stage="end", reason="couldnt_finish_failed")
 
     async def _effects(self, working: PhaseWorking) -> tuple[str, ...]:
         """The calls that happened, and those whose outcome is unknown, as listed.
@@ -2699,8 +2812,13 @@ class PhasePath:
         """
         try:
             recorded = await self._plans.activation_effects([working.activation_id])
-        except Exception:  # the store is down: list what this pass's working set knows
-            _log.warning("phase_effects_unread", stage="end", reason="store_failed")
+        except Exception as exc:  # the store is down: list what this pass's working set knows
+            if is_defect(exc):
+                log_defect(
+                    "phase_effects_unread", exc, stage="end", activation_id=working.activation_id
+                )
+            else:
+                _log.warning("phase_effects_unread", stage="end", reason="store_failed")
             return tuple(
                 _listed(one.call.call.request.tool.capability, _ACTED_OUTCOMES[one.outcome])
                 for each in working.acted_rounds()

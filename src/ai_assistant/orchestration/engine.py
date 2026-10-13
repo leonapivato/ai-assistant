@@ -320,6 +320,7 @@ from ai_assistant.orchestration.payloads import (
     positive_page_argument,
     utc_instant,
 )
+from ai_assistant.orchestration.phase_path import failing_stage, is_defect, log_defect
 from ai_assistant.orchestration.reads import StructuredFacts, outbound_statement
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.reconciling import Reconciled, ReconciliationStage, TurnRemainder
@@ -2865,6 +2866,8 @@ def _answered[T](
         and isinstance(failure, Exception)
         and not isinstance(failure, OversizedValueError)
     ):
+        # #2904: answered like any failure, a defect is still told apart in the log.
+        _log_if_defect("event_activation_failed", failure, state=state, step="event")
         stopped = state is not None and state.stopped
         answer = unfinished(
             ActivationEnding.STOPPED if stopped else ActivationEnding.COULDNT_FINISH
@@ -2874,6 +2877,44 @@ def _answered[T](
     if failure is not None:
         raise failure
     return cast("T", value)
+
+
+def _log_if_defect(
+    event: str, failure: BaseException, *, state: ActivationState | None, step: str
+) -> bool:
+    """Log ``failure`` as ``event`` at error level where it is a programming defect (#2904).
+
+    An activation that cannot finish is answered the same whatever ended it (ADR-0313
+    §4:5, ADR-0293 §9:1), so a ``ValueError`` from a bug would read as an expected
+    ending. The rule is :func:`~ai_assistant.orchestration.phase_path.is_defect`'s,
+    with the reader's having marked nothing counted as expected too. The line names
+    the stage whose failure ended the pass, or ``step`` where none did.
+
+    Returns:
+        Whether ``failure`` was a defect, and so was logged.
+    """
+    if isinstance(failure, _NothingTakenInError) or not is_defect(failure):
+        return False
+    failed = failing_stage(state)
+    log_defect(
+        event,
+        failure,
+        stage=step if failed is None else failed.value,
+        activation_id=None if state is None else state.activation_id,
+    )
+    return True
+
+
+def _log_chat_failure(failure: Exception, *, state: ActivationState, marked: bool) -> None:
+    """Log how the reader's activation failed: a defect at error level (#2904).
+
+    Under the line it always was, by whether the activation marked anything: a defect
+    at error level, by its class and frames alone (:func:`_log_if_defect`), and an
+    expected failure at the warning it always was.
+    """
+    event = "chat_activation_failed" if marked else "chat_input_not_taken_in"
+    if not _log_if_defect(event, failure, state=state, step="chat_reader"):
+        _log.warning(event, stage="chat_reader", exc_info=True)
 
 
 async def _kept_if_stopped(
@@ -9872,15 +9913,30 @@ class Engine:
         marked: list[int] = []
 
         async def turn() -> TurnOutcome | None:
-            await reader.take_in(taken, into=marked)
-            if not marked:
-                raise _NothingTakenInError
-            # §6:6: the pass runs on what it took in alone. A message read as waiting
-            # and not marked — deleted, or taken in elsewhere, in between — reaches no
-            # stage. The episode keeps the text the activation was admitted with: an
-            # open episode is only ever extended (ADR-0286 §3:4, §12:2), and what an
-            # episode records is never kept in step with the transcript (ADR-0293 §5:5).
-            return await self._chat_input_turn(taken.narrowed(marked))
+            try:
+                await reader.take_in(taken, into=marked)
+                if not marked:
+                    raise _NothingTakenInError
+                # §6:6: the pass runs on what it took in alone. A message read as
+                # waiting and not marked — deleted, or taken in elsewhere, in between —
+                # reaches no stage. The episode keeps the text the activation was
+                # admitted with: an open episode is only ever extended (ADR-0286 §3:4,
+                # §12:2), and what an episode records is never kept in step with the
+                # transcript (ADR-0293 §5:5).
+                return await self._chat_input_turn(taken.narrowed(marked))
+            except Exception:
+                # §9:1, §10:2: what was marked is consumed, so its failure is written.
+                # Once the phases' run has begun, the controller holding the pass's
+                # working set on the state, the run writes it (ADR-0307 §3:7); a failure
+                # before then, such as a marking that failed part way, is written here,
+                # inside the activation, as the run would have written it (#2900).
+                if marked and state.working is None and self._phases is not None:
+                    await self._phases.unbegun(
+                        activation_id=taken.activation_id,
+                        conversation_id=taken.conversation_id,
+                        state=state,
+                    )
+                raise
 
         deadline = asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()
         task = self._activation_task(
@@ -9902,11 +9958,10 @@ class Engine:
             # meanwhile is taken in by the reader's next look, as after any activation
             # (ADR-0295 §3:6).
             return bool(marked)
-        except Exception:  # every failure of the pass is §10:2's ending
+        except Exception as failure:  # every failure of the pass is §10:2's ending
+            _log_chat_failure(failure, state=state, marked=bool(marked))
             if not marked:
-                _log.warning("chat_input_not_taken_in", stage="chat_reader", exc_info=True)
                 return False
-            _log.warning("chat_activation_failed", stage="chat_reader", exc_info=True)
         await self._adapted(taken, state, outcome)
         return True
 
