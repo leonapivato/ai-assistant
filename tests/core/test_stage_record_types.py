@@ -140,6 +140,8 @@ def test_the_rule_enumeration_carries_the_table_the_guard_and_the_endings() -> N
         "round_due",
         # ADR-0308 §2:9's row for recall's second run.
         "understood_not_recalled",
+        # ADR-0308 §4:5's row for recall's digest.
+        "recall_undigested",
     ]
 
 

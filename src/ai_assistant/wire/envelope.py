@@ -2530,7 +2530,11 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     each carried in that record. A peer at 94 refuses the field as extra, the version
 #:     as unknown and each new member, and a version-8 record does not validate here
 #:     (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 95
+#: 96: ADR-0308 §4:5 and ADR-0309 §3's row 7 give ``ControllerRule`` the member
+#:     ``recall_undigested``, carried in the ``StageEntry`` records of the wire-carried
+#:     ``EpisodicMemory.processing_record``: a peer at 95 refuses the new member
+#:     (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 96
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

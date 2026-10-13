@@ -4050,6 +4050,10 @@ class ControllerRule(StrEnum):
     UNDERSTOOD_NOT_RECALLED = "understood_not_recalled"
     """An understanding is recorded on the pass and there is no second-run decision
     (ADR-0308 §2:9, ADR-0309 §3): ``recall`` is due, its second run."""
+    RECALL_UNDIGESTED = "recall_undigested"
+    """The second-run decision is made, either run kept a memory record whose source is
+    outside, and there is no recall digest (ADR-0308 §4:5, ADR-0309 §3):
+    ``digesting`` is due, for recall's digest."""
 
 
 #: The rules that end a pass rather than make a stage due (ADR-0280 §4, §5).
