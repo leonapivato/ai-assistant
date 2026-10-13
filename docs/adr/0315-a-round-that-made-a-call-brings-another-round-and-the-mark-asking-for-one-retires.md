@@ -1,6 +1,6 @@
 # 315. A round that made a call brings another round, and the mark asking for one retires
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-13
 - Scope: the phases, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): when planning's next round runs. It corrects [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md) §8:1 after planning was measured dropping the later part of its own plan ([#2892](https://github.com/leonapivato/ai-assistant/issues/2892)).
 - Authorization: the owner ruled this decision's content on 2026-10-13. The dispatcher assigned 0315 and authorized ratifying it once its reviews are green.
