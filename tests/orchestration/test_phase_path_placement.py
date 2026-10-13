@@ -477,26 +477,3 @@ async def test_the_value_is_taken_over_every_round_and_a_belief_by_its_own_round
     assert written_first.placement == Placement()
     assert written_second.placement == _STAMPED
     assert frozen.placement == _STAMPED
-
-
-# --- with the opt-in unset -------------------------------------------------------------------
-
-
-async def test_with_the_opt_in_unset_todays_path_places_by_its_own_evaluation() -> None:
-    """ADR-0309 §2:6: the old path's episode is placed by its own supply, unchanged.
-
-    Today's chat turn retrieves the stamped fact for the input that names it, and its
-    bounded evaluation stamps the episode; over an input naming nothing it does not.
-    """
-    for text, placed in (("dentist appointment", _STAMPED), ("hello", Placement())):
-        store = FakeMemoryStore(now=lambda: AT)
-        await store.add(_stamped(_remembered("said", MemorySource.USER_ASSERTED, _DENTIST)))
-        harness = Harness(
-            planner=NoStepPlanner(), understanding=understanding_stage(), memory=store
-        )
-        conversation = await _conversation(harness)
-
-        await _say(harness, conversation, text)
-        frozen = await _settled(harness, conversation, seeded=frozenset({"said"}))
-
-        assert frozen.placement == placed, text

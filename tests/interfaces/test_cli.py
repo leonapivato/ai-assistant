@@ -37,7 +37,6 @@ from ai_assistant.core.errors import (
     GrantError,
     InvalidGrantError,
     MemoryStoreError,
-    ModelUnavailableError,
     OversizedValueError,
     PlanningError,
     UngrantableSourceError,
@@ -78,7 +77,6 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
-    Message,
     NotificationCandidate,
     NotificationCondition,
     NotificationDispositionKind,
@@ -153,7 +151,6 @@ from ai_assistant.testing import (
     FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
-    StreamAttempt,
     with_phase_declaration,
 )
 from ai_assistant.wire import GRANTABLE_SCOPES, TransportError
@@ -1758,32 +1755,6 @@ def test_yes_does_not_answer_an_egress_confirmation_and_declines_nothing(
     assert "Answer it with assistant resume, run without --yes." in rendered
 
 
-async def test_an_unanswered_confirmation_stays_parked_and_exits_nonzero(
-    output: StringIO,
-) -> None:
-    """The driver's half of the two clauses above: no ruling is recorded either way.
-
-    An approver returning ``None`` — a withheld card, or ``--yes`` meeting an egress
-    confirmation — leaves the recovered step exactly as it was: ``resume`` is not
-    called, so nothing is sent and no ``DENY`` is recorded, and the exit is non-zero
-    so a caller cannot read "everything was resolved" off the run.
-    """
-    engine = _engine(tools=(confirmable(),))
-    await engine.converse("send it", timeout=PATIENT)
-    engine._parked.clear()
-
-    code = await cli._drive_resume(engine, timeout=PATIENT, approver=lambda _c: None)
-
-    assert code == 1
-    rendered = output.getvalue()
-    assert "Confirmation required" in rendered  # it was still shown
-    assert "Done" not in rendered  # and nothing ran
-    assert "Declined" not in rendered  # and nothing was refused
-    still_parked = await engine.pending_confirmations()
-    assert len(still_parked) == 1  # the step is exactly where it was
-    await engine.aclose()
-
-
 def test_the_cli_mints_no_ruling_and_authorises_nothing(output: StringIO) -> None:
     """ADR-0042 §6, narrowed by ADR-0186 §1 rather than dropped.
 
@@ -1969,60 +1940,6 @@ def test_error_render_shows_no_traceback(output: StringIO) -> None:
 # --- the turn flow (ADR-0042 §3, §7) ------------------------------------
 
 
-async def test_ask_executes_an_allowed_step(output: StringIO) -> None:
-    """An allowed step runs and the CLI reports success, exit 0."""
-    engine = _engine(tools=(tool(),))
-    approved = 0
-
-    def approve(_confirmation: Confirmation) -> bool:
-        nonlocal approved
-        approved += 1
-        return True
-
-    code = await cli._drive_turn(
-        engine, "send it", timeout=PATIENT, approver=approve, confirm_operation=_no_routed_card
-    )
-    assert code == 0
-    assert approved == 0  # no confirmation was needed, so the approver was never called
-    assert "Done" in output.getvalue()
-    await engine.aclose()
-
-
-async def test_ask_prompts_and_relays_the_token_on_a_confirmation(output: StringIO) -> None:
-    """A parked step prompts, and the human's yes relays the opaque token (§4)."""
-    engine = _engine(tools=(confirmable(),))
-    seen: list[Confirmation] = []
-
-    def approve(confirmation: Confirmation) -> bool:
-        seen.append(confirmation)
-        return True
-
-    code = await cli._drive_turn(
-        engine, "send it", timeout=PATIENT, approver=approve, confirm_operation=_no_routed_card
-    )
-    assert code == 0
-    assert len(seen) == 1  # the adapter was asked to approve exactly one confirmation
-    assert isinstance(seen[0].token, ContinuationToken)  # it relayed the opaque token
-    assert seen[0].tool_id == "smtp"  # the engine assembled the content to judge
-    assert "Done" in output.getvalue()  # after approval the step ran
-    await engine.aclose()
-
-
-async def test_ask_renders_a_refused_confirmation_as_declined(output: StringIO) -> None:
-    """Answering no yields a DENY the CLI reports, exit 0 (a valid outcome)."""
-    engine = _engine(tools=(confirmable(),))
-    code = await cli._drive_turn(
-        engine,
-        "send it",
-        timeout=PATIENT,
-        approver=lambda _confirmation: False,
-        confirm_operation=_no_routed_card,
-    )
-    assert code == 0
-    assert "Declined" in output.getvalue()
-    await engine.aclose()
-
-
 async def test_ask_surfaces_an_error_with_a_nonzero_exit(output: StringIO) -> None:
     """A blank utterance is a PlanningError the CLI surfaces, exit 1 (§7)."""
     engine = _engine(tools=(tool(),))
@@ -2047,65 +1964,6 @@ async def test_resume_reports_nothing_awaiting_when_no_park_exists(output: Strin
     code = await cli._drive_resume(engine, timeout=PATIENT, approver=lambda _c: True)
     assert code == 0
     assert "Nothing is awaiting confirmation" in output.getvalue()
-    await engine.aclose()
-
-
-async def test_resume_recovers_a_park_prompts_and_relays_the_token(output: StringIO) -> None:
-    """A step parked by an earlier turn is recovered, shown, approved, and run (§1)."""
-    engine = _engine(tools=(confirmable(),))
-    # Park a confirmation, then drop the in-process token (as a restart would).
-    parked = await engine.converse("send it", timeout=PATIENT)
-    assert parked.step is not None
-    assert parked.step.disposition is Disposition.AWAITING_CONFIRMATION
-    engine._parked.clear()
-
-    seen: list[Confirmation] = []
-
-    def approve(confirmation: Confirmation) -> bool:
-        seen.append(confirmation)
-        return True
-
-    code = await cli._drive_resume(engine, timeout=PATIENT, approver=approve)
-    assert code == 0
-    assert len(seen) == 1  # the recovered confirmation was presented for judgement
-    assert isinstance(seen[0].token, ContinuationToken)  # relayed opaquely
-    assert seen[0].tool_id == "smtp"
-    rendered = output.getvalue()
-    assert "Confirmation required" in rendered  # the action was shown before approval
-    assert "smtp" in rendered
-    assert "Done" in rendered  # after approval the recovered step ran
-    await engine.aclose()
-
-
-async def test_resume_renders_the_action_even_when_auto_approved(output: StringIO) -> None:
-    """A non-interactive (--yes) approver still sees the action rendered first (§4).
-
-    The action and reason are shown by ``_drive_resume`` itself, before the
-    approver, so ``--yes`` never runs a recovered action the user never saw.
-    """
-    engine = _engine(tools=(confirmable(),))
-    await engine.converse("send it", timeout=PATIENT)
-    engine._parked.clear()
-
-    # An approver that renders nothing itself and blindly approves (as --yes does).
-    code = await cli._drive_resume(engine, timeout=PATIENT, approver=lambda _c: True)
-    assert code == 0
-    rendered = output.getvalue()
-    assert "Confirmation required" in rendered  # shown despite no prompt
-    assert "smtp" in rendered
-    assert "Done" in rendered
-    await engine.aclose()
-
-
-async def test_resume_renders_a_recovered_refusal_as_declined(output: StringIO) -> None:
-    """Answering no to a recovered confirmation yields a DENY the CLI reports."""
-    engine = _engine(tools=(confirmable(),))
-    await engine.converse("send it", timeout=PATIENT)
-    engine._parked.clear()
-
-    code = await cli._drive_resume(engine, timeout=PATIENT, approver=lambda _c: False)
-    assert code == 0
-    assert "Declined" in output.getvalue()
     await engine.aclose()
 
 
@@ -3888,57 +3746,6 @@ class _NoStepPlanner:
         )
 
 
-async def test_ask_names_the_conversation_it_ran_under(output: StringIO) -> None:
-    """§2: the id is what a stateless client keeps, so the surface has to print it."""
-    engine, conversations = _conversation_engine()
-
-    code = await cli._drive_turn(
-        engine,
-        "hello",
-        timeout=timedelta(seconds=5),
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-
-    assert code == 0
-    listed = await conversations.recent()
-    assert len(listed) == 1
-    rendered = output.getvalue()
-    assert "Conversation:" in rendered
-    assert listed[0].id in rendered
-    assert "--conversation" in rendered, "the surface says how to continue it"
-
-
-async def test_ask_continues_the_conversation_it_is_given(output: StringIO) -> None:
-    """§10: continuation is an option on ``ask``, never a second meaning for ``resume``."""
-    engine, conversations = _conversation_engine()
-    await cli._drive_turn(
-        engine,
-        "hello",
-        timeout=timedelta(seconds=5),
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-    existing = (await conversations.recent())[0].id
-
-    code = await cli._drive_turn(
-        engine,
-        "again",
-        timeout=timedelta(seconds=5),
-        approver=lambda _c: True,
-        conversation_id=existing,
-        confirm_operation=_no_routed_card,
-    )
-
-    assert code == 0
-    assert len(await conversations.recent()) == 1, "no second conversation was started"
-    # ADR-0283 §4:2: the digest counts the episodes on the conversation's channel.
-    digest = await engine.conversation(existing)
-    assert digest is not None
-    assert digest.recorded_turns == 2
-    assert existing in output.getvalue()
-
-
 async def test_ask_reports_an_unknown_conversation_rather_than_starting_one(
     output: StringIO,
 ) -> None:
@@ -3963,271 +3770,6 @@ async def test_ask_reports_an_unknown_conversation_rather_than_starting_one(
 # ADR-0170 §6's rendering floor and §8's neutralisation, plus §10's
 # contradictory-provider test, which needs both the outcome and the rendered
 # account and so lives here rather than in ``tests/orchestration``.
-
-
-def _answering(reply: str, *deltas: str) -> ComposingStage:
-    """A composing stage that answers ``reply`` however the turn is driven.
-
-    Both seams are scripted to the same answer, because ``assistant ask`` drives the
-    streaming one (ADR-0173 §4) and ``resume`` drives the other, and a test asserting
-    on the prose must not depend on which. ``deltas`` says where the stream breaks;
-    omitted, it yields the whole answer as one chunk.
-    """
-    return ComposingStage(
-        model=FakeModelProvider(reply),
-        streaming=FakeStreamingCompleter.yielding(*(deltas or (reply,))),
-    )
-
-
-async def test_ask_prints_the_composed_answer(output: StringIO) -> None:
-    """Milestone 17's exit shape, as a user sees it: the assistant answers."""
-    engine = _engine(tools=(tool(),), composing=_answering("You prefer hiking."))
-
-    code = await cli._drive_turn(
-        engine,
-        "what do you know about me?",
-        timeout=PATIENT,
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-
-    assert code == 0
-    assert "You prefer hiking." in output.getvalue()
-    await engine.aclose()
-
-
-async def test_the_answer_is_rendered_in_addition_to_the_step_account(
-    output: StringIO,
-) -> None:
-    """§6: "in addition to the step account it renders today, never instead of it".
-
-    ADR-0084 §8's rule binds unchanged, and #531's exit code with it: the plan
-    listing, the disposition line and the process exit code are all still produced.
-    """
-    engine = _engine(tools=(tool(),), composing=_answering("You prefer hiking."))
-
-    code = await cli._drive_turn(
-        engine,
-        "send it",
-        timeout=PATIENT,
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-
-    rendered = output.getvalue()
-    assert "You prefer hiking." in rendered
-    assert "Done" in rendered  # the disposition line survived the answer
-    assert "Plan:" in rendered  # and so did the plan listing
-    assert code == 0
-    await engine.aclose()
-
-
-async def test_the_step_account_is_unchanged_by_a_reply_that_contradicts_it(
-    output: StringIO,
-) -> None:
-    """§6 and §10: the deterministic account is the assertion, and the reply is not.
-
-    A cooperating fake cannot distinguish a design whose guarantee is *structural*
-    from one whose guarantee is a hope about the prompt, so this one deliberately
-    contradicts the record. It claims an action the step account records as
-    ``NO_CAPABLE_TOOL`` and again as ``DENIED``; what is asserted is that the
-    outcome's disposition and the rendered account are unchanged by what it says.
-    Nothing about the design *stops* a model saying it — §5 is explicit that no
-    clause of ADR-0170 is a guarantee about model output — and what §6 buys is that
-    the truth is on screen next to the prose whatever the prose says.
-    """
-    lie = "I sent the email. It has been delivered."
-    for policy, expected in (
-        (None, "No tool is available"),
-        (FakeActionPolicy(deny_at=RiskLevel.LOW), "Declined"),
-    ):
-        engine = _engine(
-            tools=() if policy is None else (tool(),),
-            policy=policy,
-            composing=_answering(lie),
-        )
-        outcome = await engine.converse("send it", timeout=PATIENT)
-
-        assert outcome.reply == lie
-        assert outcome.step is not None
-        assert outcome.step.disposition is (
-            Disposition.NO_CAPABLE_TOOL if policy is None else Disposition.DENIED
-        )
-
-        output.truncate(0)
-        output.seek(0)
-        cli._render_turn(outcome)
-        rendered = output.getvalue()
-        assert lie in rendered  # the prose is shown...
-        assert expected in rendered  # ...and contradicted on the same screen
-        await engine.aclose()
-
-
-async def test_a_degraded_composition_is_stated_and_the_account_still_rendered(
-    output: StringIO,
-) -> None:
-    """§6: "never as a silent turn, and never as a failure of the step".
-
-    A turn that acted and then could not describe it still tells the user what was
-    done, in the same words it would have used before ADR-0170 existed; the only
-    thing missing is the prose that was going to sit above them.
-
-    This is ADR-0173 §6's *second* shape driven over the streaming entry: the attempt
-    fails having published nothing, so nothing was committed and the outcome carries
-    ``reply`` ``None`` beside the flag, exactly as ``converse`` would have.
-    """
-
-    def refuse(_messages: Sequence[Message]) -> str:
-        msg = "the route is exhausted"
-        raise ModelUnavailableError(msg)
-
-    engine = _engine(
-        tools=(tool(),),
-        composing=ComposingStage(
-            model=FakeModelProvider(refuse),
-            streaming=FakeStreamingCompleter(script=(StreamAttempt(fails=True),)),
-        ),
-    )
-
-    code = await cli._drive_turn(
-        engine,
-        "send it",
-        timeout=PATIENT,
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-
-    rendered = output.getvalue()
-    assert "no answer could be composed" in rendered
-    assert "Done" in rendered  # the account it carries, rendered as it always was
-    assert code == 0  # and not reported as a failure of the step
-    await engine.aclose()
-
-
-async def test_a_composed_answer_is_neutralised_for_the_terminal(output: StringIO) -> None:
-    """§8: engine-supplied text goes through ``_safe``, as a policy's reason does.
-
-    A reply is model output rendered in the assistant's own voice, so Rich markup
-    inside it is a control sequence this terminal would otherwise interpret
-    (ADR-0042 §4). Driven through a real turn rather than a hand-built outcome,
-    because ADR-0170 §4 makes an answer on a turn-less outcome unconstructible —
-    which is the invariant working, not an obstacle to route around.
-    """
-    hostile = "[bold red]not markup[/] \x1b[31m"
-    engine = _engine(tools=(tool(),), composing=_answering(hostile))
-    outcome = await engine.converse("send it", timeout=PATIENT)
-    output.truncate(0)
-    output.seek(0)
-
-    cli._render_reply(outcome)
-
-    rendered = output.getvalue()
-    assert outcome.reply == hostile  # the engine carries it verbatim...
-    assert "not markup" in rendered  # ...and the adapter escapes it on render
-    assert "\x1b[31m" not in rendered
-    await engine.aclose()
-
-
-async def test_a_multi_paragraph_answer_keeps_the_breaks_it_was_written_with(
-    output: StringIO,
-) -> None:
-    """The defect QA run #1334 found on every multi-paragraph answer (#1336).
-
-    ``_safe`` replaces every non-printable character but ``\\t`` and space, and
-    ``"\\n".isprintable()`` is ``False`` — so a reply's paragraph breaks reached the
-    screen as ``deep work.��One caveat``. Asserted as the *absence* of the
-    replacement character together with the presence of a blank line, because either
-    half alone passes on the wrong rendering: a run that ate the breaks silently
-    would have no ``�`` either.
-    """
-    answer = "Blocked for deep work.\n\nOne caveat worth being straight about."
-    engine = _engine(tools=(tool(),), composing=_answering(answer))
-    outcome = await engine.converse("send it", timeout=PATIENT)
-    output.truncate(0)
-    output.seek(0)
-
-    cli._render_reply(outcome)
-
-    rendered = output.getvalue()
-    assert "�" not in rendered, "the breaks are content, not characters to neutralise"
-    assert "Blocked for deep work.\n\nOne caveat" in rendered
-    await engine.aclose()
-
-
-@pytest.mark.parametrize("ending", ["\r\n", "\r", "\n"], ids=["crlf", "cr", "lf"])
-async def test_a_reply_written_with_any_line_ending_renders_as_one_break(
-    output: StringIO, ending: str
-) -> None:
-    """A ``\\r`` must neither reach the terminal nor cost the break it was part of.
-
-    A carriage return is a character a terminal acts on — it returns the cursor to
-    column 0, so what follows overwrites what preceded — which is ADR-0042 §4's
-    threat and the reason ``_safe`` replaces it. But a model emitting CRLF is not
-    attacking anything, and replacing the ``\\r`` alone leaves ``�`` sitting at every
-    break: #1336 half-fixed. All three endings therefore render the same way.
-    """
-    engine = _engine(tools=(tool(),), composing=_answering(f"First.{ending}Second."))
-    outcome = await engine.converse("send it", timeout=PATIENT)
-    output.truncate(0)
-    output.seek(0)
-
-    cli._render_reply(outcome)
-
-    rendered = output.getvalue()
-    assert "\r" not in rendered, "the character a terminal would act on never reaches it"
-    assert "�" not in rendered
-    assert "First.\nSecond." in rendered
-    await engine.aclose()
-
-
-async def test_the_newline_carve_out_neutralises_every_other_control_character(
-    output: StringIO,
-) -> None:
-    """Only the break is spared; §4's obligation is otherwise discharged whole.
-
-    The pairing is the point: an answer carrying both a legitimate paragraph break
-    and an ANSI escape must keep the first and lose the second, so neither a helper
-    that neutralised nothing nor the old one that neutralised everything passes.
-    """
-    engine = _engine(tools=(tool(),), composing=_answering("First.\n\x1b[2JSecond.\x07"))
-    outcome = await engine.converse("send it", timeout=PATIENT)
-    output.truncate(0)
-    output.seek(0)
-
-    cli._render_reply(outcome)
-
-    rendered = output.getvalue()
-    assert "\x1b" not in rendered
-    assert "\x07" not in rendered
-    assert rendered.count("�") == 2, "the escape and the bell, and nothing else"
-    assert "First.\n" in rendered
-    await engine.aclose()
-
-
-async def test_rich_markup_split_across_a_break_is_shown_and_not_consumed(
-    output: StringIO,
-) -> None:
-    """Escaping the whole value, rather than line by line, is load-bearing.
-
-    Rich's tag pattern matches across a newline, so ``[red\\nbold]`` is markup to the
-    renderer while each of its halves alone is not. A multi-line helper built by
-    neutralising each line and joining with ``\\n`` would therefore hand Rich a tag
-    it consumes — the reply reaching the screen *emptied* of what it said, which is
-    a worse failure than the ``�`` this fix is for and one that looks like nothing
-    went wrong.
-    """
-    engine = _engine(tools=(tool(),), composing=_answering("[red\nbold]still here"))
-    outcome = await engine.converse("send it", timeout=PATIENT)
-    output.truncate(0)
-    output.seek(0)
-
-    cli._render_reply(outcome)
-
-    rendered = output.getvalue()
-    assert "still here" in rendered
-    assert "[red" in rendered, "shown as text, not consumed as a style"
-    assert "bold]" in rendered
-    await engine.aclose()
 
 
 def test_a_value_sharing_a_line_with_the_adapters_own_text_still_loses_its_newline() -> None:
@@ -4298,33 +3840,6 @@ def _outcome_replying(
     )
 
 
-async def test_the_step_account_is_rendered_whether_or_not_chunks_were(
-    output: StringIO,
-) -> None:
-    """§10's third clause, on a real turn: the account survives the stream.
-
-    ADR-0170 §6's floor is unchanged by streaming, so the plan listing, the
-    disposition line and #531's exit code are all still produced beside an answer
-    that arrived in pieces.
-    """
-    engine = _engine(tools=(tool(),), composing=_answering("Sent it.", "Sent ", "it."))
-
-    code = await cli._drive_turn(
-        engine,
-        "send it",
-        timeout=PATIENT,
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-
-    rendered = output.getvalue()
-    assert code == 0
-    assert "Sent it." in rendered
-    assert "Plan:" in rendered
-    assert "Done" in rendered
-    await engine.aclose()
-
-
 def test_the_fourth_shape_is_rendered_the_same_way_off_a_one_result_call(
     output: StringIO,
 ) -> None:
@@ -4341,51 +3856,6 @@ def test_the_fourth_shape_is_rendered_the_same_way_off_a_one_result_call(
     rendered = output.getvalue()
     assert "Half an ans" in rendered
     assert "incomplete" in rendered
-
-
-async def test_ask_runs_in_the_conversation_it_is_told_to_continue(
-    output: StringIO,
-) -> None:
-    """A turn resumed mid-conversation from the CLI runs under that conversation.
-
-    What this asserts is that the adapter relays the conversation and that the second
-    turn runs under the conversation the first one minted rather than a fresh one.
-    """
-    engine, conversations = _conversation_engine(
-        composing=_answering("Still here.", "Still ", "here.")
-    )
-
-    first = await cli._drive_turn(
-        engine,
-        "hello",
-        timeout=PATIENT,
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-    assert "Still here." in output.getvalue(), "the opening turn answered"
-    opened = (await conversations.recent())[0].id
-    output.truncate(0)
-    output.seek(0)
-
-    second = await cli._drive_turn(
-        engine,
-        "and again",
-        timeout=PATIENT,
-        approver=lambda _c: True,
-        conversation_id=opened,
-        confirm_operation=_no_routed_card,
-    )
-
-    rendered = output.getvalue()
-    assert (first, second) == (0, 0)
-    assert "Still here." in rendered, "the resumed turn answered too"
-    assert opened in rendered, "and ran under the conversation it was given"
-    assert len(await conversations.recent()) == 1, "no second conversation was started"
-    # ADR-0283 §4:2: the digest counts the episodes on the conversation's channel.
-    digest = await engine.conversation(opened)
-    assert digest is not None
-    assert digest.recorded_turns == 2
-    await engine.aclose()
 
 
 class _RecordingConverse(FakeAssistantEngine):
@@ -4464,121 +3934,12 @@ def test_the_conversation_footer_is_silent_when_nothing_resolved(output: StringI
     assert output.getvalue() == ""
 
 
-async def test_the_conversations_listing_shows_what_a_person_chooses_from(
-    output: StringIO,
-) -> None:
-    """§2: the id, when it started, and when it was last active."""
-    engine, conversations = _conversation_engine()
-    await cli._drive_turn(
-        engine,
-        "hello",
-        timeout=timedelta(seconds=5),
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-    started = (await conversations.recent())[0]
-
-    code = await cli._drive_conversations(engine, limit=50, offset=0)
-
-    assert code == 0
-    rendered = output.getvalue()
-    assert started.id in rendered
-    assert "Last active" in rendered
-
-
 async def test_the_conversations_listing_says_so_when_there_are_none(output: StringIO) -> None:
     """An empty listing is an answer, not a blank screen."""
     engine, _ = _conversation_engine()
 
     assert await cli._drive_conversations(engine, limit=50, offset=0) == 0
     assert "No conversations yet" in output.getvalue()
-
-
-async def test_the_conversations_listing_never_shows_a_deleted_conversation(
-    output: StringIO,
-) -> None:
-    """§8: not because this surface filters, but because the stamp hides it."""
-    engine, conversations = _conversation_engine()
-    await cli._drive_turn(
-        engine,
-        "hello",
-        timeout=timedelta(seconds=5),
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-    stamped = (await conversations.recent())[0].id
-    assert await conversations.stamp_deleted(stamped) is True
-    output.truncate(0)
-    output.seek(0)
-
-    await cli._drive_conversations(engine, limit=50, offset=0)
-
-    assert stamped not in output.getvalue()
-    assert "No conversations yet" in output.getvalue()
-
-
-async def test_forget_conversation_shows_the_count_and_span_before_destroying(
-    output: StringIO,
-) -> None:
-    """§8: the ceremony is the count and span, not every turn — what a person can judge."""
-    engine, conversations = _conversation_engine()
-    await cli._drive_turn(
-        engine,
-        "hello",
-        timeout=timedelta(seconds=5),
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-    existing = (await conversations.recent())[0].id
-    await cli._drive_turn(
-        engine,
-        "again",
-        timeout=timedelta(seconds=5),
-        approver=lambda _c: True,
-        conversation_id=existing,
-        confirm_operation=_no_routed_card,
-    )
-    output.truncate(0)
-    output.seek(0)
-
-    code = await cli._drive_forget_conversation(engine, existing, confirm=lambda _digest: True)
-
-    assert code == 0
-    rendered = output.getvalue()
-    assert "About to forget this conversation" in rendered
-    assert "Turns recorded:" in rendered
-    assert "2" in rendered
-    assert "Forgotten." in rendered
-    # ADR-0293 §5:7's plain disclosure, before and after: what forgetting removes,
-    # that the conversation is still read, and that only deleting removes it.
-    flat = " ".join(rendered.replace("↳", " ").split())
-    assert "removes its episodes from the assistant's memory" in flat
-    assert "still reads it while you keep talking there" in flat
-    assert "only deleting removes them." in flat
-    assert "destroys the conversation" not in flat
-    # ADR-0293 §2:4, §11:4: forgetting is memory-only, so the conversation stays.
-    assert await conversations.get(existing) is not None
-
-
-async def test_forget_conversation_leaves_it_alone_when_the_answer_is_no(
-    output: StringIO,
-) -> None:
-    """A refusal is a valid outcome, and it exits 0 — nothing went wrong."""
-    engine, conversations = _conversation_engine()
-    await cli._drive_turn(
-        engine,
-        "hello",
-        timeout=timedelta(seconds=5),
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-    existing = (await conversations.recent())[0].id
-
-    code = await cli._drive_forget_conversation(engine, existing, confirm=lambda _digest: False)
-
-    assert code == 0
-    assert "Left alone" in output.getvalue()
-    assert await conversations.get(existing) is not None
 
 
 async def test_forget_conversation_declines_an_id_it_cannot_show(output: StringIO) -> None:

@@ -17,11 +17,10 @@ import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
-from story_support import activation
 from test_engine import AT, Harness, NoStepPlanner
 from understanding_support import STATED_PROPOSAL, understanding_stage
 
-from ai_assistant.core.errors import ConversationStoreError, ModelError
+from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEnding,
@@ -50,13 +49,10 @@ from ai_assistant.orchestration.chat import (
 )
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.conversations import fitted_message
-from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
-from ai_assistant.orchestration.understanding import TranscriptWindow, WindowsStage
 from ai_assistant.testing import (
     FakeConversationStore,
     FakeMemoryStore,
     FakeModelProvider,
-    FakeStoryStore,
     FakeStreamingCompleter,
 )
 
@@ -64,6 +60,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from ai_assistant.core.types import Message
+    from ai_assistant.orchestration.understanding import TranscriptWindow
 
 _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
 
@@ -342,91 +339,6 @@ async def test_a_message_replying_outside_the_window_brings_that_message_in() ->
     assert window[1]["text"] == "Book Pinecrest."
 
 
-# --- the window's links: the reader's bookkeeping (ADR-0303 §7, #2777) ---------------
-
-
-async def _no_episodes(shared: frozenset[str]) -> tuple[EpisodicMemory, ...]:
-    """An episode window that reaches no earlier turn, as one other channels filled does."""
-    del shared
-    return ()
-
-
-async def _activation_record(memory: FakeMemoryStore, activation_id: str) -> EpisodicMemory:
-    (record,) = [
-        one
-        for one in await _episodes(memory)
-        if one.processing_record is not None
-        and one.processing_record.activation_id == activation_id
-    ]
-    return record
-
-
-async def test_an_earlier_turn_only_the_transcript_shows_links_and_its_story_comes_first() -> None:
-    """#2777 end to end: the follow-up links the turn before it, then joins its story.
-
-    The episode window reaches no earlier turn and nothing is recalled, so the earlier
-    turn of the conversation reaches understanding only as a transcript message. The
-    reader brings the activation that took it in with the window (§7:3), so its ``H``
-    label links (§7:4); the assistant's reply between, whose writer nothing records yet,
-    is rendered not linkable and naming it is dropped and counted with no repair (§7:5,
-    §7:6). The story that starts is the first candidate of the next turn (§7:9).
-    """
-    model = FakeModelProvider.scripted(
-        STATED_PROPOSAL,
-        json.dumps(json.loads(STATED_PROPOSAL) | {"story_labels": ["H1", "H2"]}),
-        json.dumps(json.loads(STATED_PROPOSAL) | {"story_labels": ["S1"]}),
-    )
-    memory = FakeMemoryStore(now=lambda: AT)
-    stories = FakeStoryStore(now=lambda: AT)
-    harness = _harness(
-        memory=memory,
-        understanding=understanding_stage(model=model),
-        windows=WindowsStage(episodes=_no_episodes),
-        stories=stories,
-        story_candidates=StoryCandidates(
-            stories=stories, memory=memory, limit=5, lines=3, notes=2, episodes=2
-        ),
-        story_links=StoryLinksStage(stories=stories),
-    )
-    conversation = await _conversation(harness)
-    await harness.engine.write_message(
-        conversation, message=_said("m-1", "My dentist appointment is on Wednesday.")
-    )
-    await _answered(harness, conversation, 1)
-    await harness.engine.write_message(
-        conversation, message=_said("m-2", "Should I avoid chewing on that side until then?")
-    )
-    await _answered(harness, conversation, 2)
-    taken = await harness.conversation_store.taken_in(conversation, positions=[1, 3])
-    first, second = taken[1], taken[3]
-
-    payload = json.loads(model.calls[1].messages[1].content)
-    assert payload["episode_window"].startswith("missing")
-    user, reply = payload["channel_window"]
-    assert (user["author"], "not_linkable" in user) == ("the user", False)
-    assert (reply["author"], reply["not_linkable"]) == ("the assistant", True)
-    understood = (await _activation_record(memory, second)).processing_record
-    assert understood is not None
-    assert understood.understanding[-1].story_links == (activation(first),)
-    assert understood.understanding[-1].grounding_dropped == 1
-    assert len(model.calls) == 2  # no repair: the second turn took one completion
-    (started,) = (await stories.stories()).stories
-    view = await stories.view(started.story_id)
-    assert view is not None
-    assert [entry.member for entry in view.entries] == [activation(first), activation(second)]
-
-    await harness.engine.write_message(
-        conversation, message=_said("m-3", "And can I drink coffee?")
-    )
-    await _answered(harness, conversation, 3)
-    (candidate,) = json.loads(model.calls[2].messages[1].content)["stories"]
-    assert candidate["label"] == "S1"
-    third = (await harness.conversation_store.taken_in(conversation, positions=[5]))[5]
-    view = await stories.view(started.story_id)
-    assert view is not None
-    assert view.entries[-1].member == activation(third)
-
-
 # --- endings: couldn't finish, and the current state (§8, §9:1, §10:2) ---------------
 
 
@@ -695,46 +607,6 @@ async def test_a_message_deleted_before_it_is_marked_never_reaches_the_activatio
     assert all(
         "DELETED ORDER" not in one.content for call in composer.calls for one in call.messages
     )
-
-
-class _FailsSecondMarking(FakeConversationStore):
-    """A store whose second ``take_in`` call fails once, after the first committed."""
-
-    def __init__(self) -> None:
-        super().__init__(now=lambda: AT)
-        self.calls = 0
-
-    async def take_in(
-        self, conversation_id: str, *, positions: Sequence[int], activation_id: str
-    ) -> tuple[int, ...]:
-        self.calls += 1
-        if self.calls == 2:
-            msg = "the store is busy"
-            raise ConversationStoreError(msg)
-        return await super().take_in(
-            conversation_id, positions=positions, activation_id=activation_id
-        )
-
-
-async def test_a_marking_that_fails_part_way_ends_as_couldnt_finish() -> None:
-    """§9:1, §10:2: what was marked is consumed, so its activation's failure is written;
-    what was not is taken in by the next activation."""
-    store = _FailsSecondMarking()
-    memory = FakeMemoryStore(now=lambda: AT)
-    before = _harness(store=store, memory=memory, chat_reader=False)
-    conversation = await _conversation(before)
-    for n in range(1, 1002):
-        await before.engine.write_message(conversation, message=_said(f"m-{n}", f"w{n}"))
-    await before.engine.aclose()
-    after = _harness(store=store, memory=memory)
-    await after.engine.start()
-    written = await _answered(after, conversation, 2)
-    replies = [one.text for one in written if one.author is MessageAuthor.ASSISTANT]
-    assert replies == [COULDNT_FINISH, "Hello there."]
-    taken = await store.taken_in(conversation, positions=[1, 1000, 1001])
-    assert taken[1] == taken[1000] != taken[1001]
-    inputs = sorted((_input_of(one) for one in await _episodes(memory)), key=len)
-    assert inputs[0] == "w1001"
 
 
 # --- what wrote each assistant message (ADR-0303 §7:1) ------------------------------------

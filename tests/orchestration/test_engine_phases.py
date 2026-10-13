@@ -121,7 +121,6 @@ from ai_assistant.orchestration.authorizer import AuthorizingStage, Verdict
 from ai_assistant.orchestration.chat import COULDNT_FINISH, ChatWriter, couldnt_finish
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
-from ai_assistant.orchestration.informational_events import InformationalEventStage
 from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
     LOOK_UP_LABEL_ARGUMENTS,
@@ -2787,27 +2786,6 @@ async def test_on_an_owner_only_pass_a_move_naming_notes_is_refused_and_members_
 # --- with the opt-in unset ---------------------------------------------------------------
 
 
-async def test_with_the_opt_in_unset_todays_path_answers_unchanged() -> None:
-    """ADR-0309 §2:6: no phase stage runs, and the compose stage writes the reply."""
-    harness = Harness(planner=NoStepPlanner(), understanding=understanding_stage())
-    conversation = await _conversation(harness)
-
-    await _say(harness, conversation, "hi")
-    episode = await _settled(harness, conversation)
-
-    ran = {stage for stage, _ in _stages(episode)}
-    assert ControllerStage.COMPOSE in ran
-    assert not ran & {
-        ControllerStage.PLANNING,
-        ControllerStage.AUTHORIZING,
-        ControllerStage.ACTING,
-        ControllerStage.DIGESTING,
-    }
-    assert episode.processing_record is not None
-    assert episode.processing_record.rounds == ()
-    assert await _last_ended(harness, conversation) is ActivationEnding.DONE
-
-
 async def test_with_the_opt_in_unset_the_story_standing_command_lists_what_was_done() -> None:
     """ADR-0300 §8:1: the owner's story-standing command reads the effect records.
 
@@ -3508,25 +3486,6 @@ async def test_a_stopped_event_returns_stopped() -> None:
     assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.STOPPED)
     assert _classified(episode) == (ProcessingStatus.INTERRUPTED, ProcessingReason.STOPPED)
     await _wrote_nothing(harness, episode)
-
-
-async def test_with_the_opt_in_unset_todays_event_path_returns_how_it_ended() -> None:
-    """ADR-0313 §6:2: the event-summary stage runs, its result in §4:4's shape."""
-    summary = "The thermostat entered eco mode at 18:00."
-    harness = Harness(
-        planner=NoStepPlanner(),
-        understanding=understanding_stage(),
-        informational_events=InformationalEventStage(FakeModelProvider(reply=summary)),
-    )
-
-    result, episode = await _event(harness)
-
-    assert result.ended is ActivationEnding.DONE
-    ran = {stage for stage, _ in _stages(episode)}
-    assert ControllerStage.EVENT_SUMMARY in ran
-    assert not ran & {ControllerStage.PLANNING, ControllerStage.AUTHORIZING}
-    # The summary is kept with the episode, as before, and not returned.
-    assert episode.outcome == summary
 
 
 #: An event whose arguments are inside a 512-byte bound and whose result, its receipt

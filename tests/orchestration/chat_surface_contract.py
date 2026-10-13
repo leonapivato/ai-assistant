@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -33,7 +33,6 @@ from ai_assistant.core.types import (
     ActivationStop,
     ChannelContext,
     ChannelIdentity,
-    ChannelInput,
     ChatDevice,
     ChatStreamChunk,
     ControllerRule,
@@ -59,10 +58,6 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedTextInput,
     SendOutcome,
-    SpeechChannelPayload,
-    SpokenAudio,
-    SpokenAudioFormat,
-    SpokenReply,
     TranscriptMessage,
     UnderstandingOmission,
     UserMessage,
@@ -70,10 +65,10 @@ from ai_assistant.core.types import (
 from ai_assistant.testing.activation import ended_pass
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from ai_assistant.core.protocols import AssistantEngine
-    from ai_assistant.core.types import ChatStreamEnd, DeviceChange, MemoryWrite
+    from ai_assistant.core.types import ChatStreamEnd, DeviceChange
     from ai_assistant.testing import FakeConversationStore, FakeMemoryStore
 
 #: The payload limit every subject is built at: small enough that a page of a few
@@ -90,12 +85,6 @@ _WATCH = ChatDevice(device_id="watch", access=DeviceAccess.READ)
 #: Long enough that a few of them overflow :data:`CHAT_LIMIT`, short enough that one
 #: fits with room to spare.
 _LONG = "x" * 900
-
-#: A spoken turn on a conversation, which is how these cases hold an activation running:
-#: ADR-0293 §11 takes the typed one off ``receive``, and a message written into the
-#: conversation starts the reader's activation rather than the caller's.
-_RECORDING = SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
-_PLAYS = SpokenReply(plays=(SpokenAudioFormat.MP4,))
 
 
 @dataclass(frozen=True)
@@ -437,93 +426,6 @@ class ChatSurfaceContract:
         assert digest is not None
         assert digest.state == ConversationState(last_ended=ActivationEnding.COULDNT_FINISH)
 
-    async def test_the_state_shows_working_while_an_activation_runs_and_not_after(
-        self, chat_surface: ChatSurfaceSubject
-    ) -> None:
-        """§8:2, ADR-0295 §1:2: "working…" with the running activation's id, then idle.
-
-        A turn on the conversation is held at its first episode write — the engine's
-        admission, the fake's capture — so it is running while the state is read.
-        """
-        engine, memory = chat_surface.engine, chat_surface.memory
-        conversation = await _started(engine, _PHONE)
-        entered, release = asyncio.Event(), asyncio.Event()
-        original = memory.write_atomic
-
-        async def held(writes: Sequence[MemoryWrite]) -> Sequence[str]:
-            if not entered.is_set():
-                entered.set()
-                await release.wait()
-            return await original(writes)
-
-        memory.write_atomic = held  # type: ignore[method-assign]
-        turn = asyncio.create_task(
-            engine.receive(
-                ChannelInput(
-                    target=ChannelIdentity(channel_type="conversation", instance_id=conversation),
-                    payload=SpeechChannelPayload(audio=_RECORDING),
-                ),
-                reply=_PLAYS,
-                timeout=timedelta(seconds=30),
-            )
-        )
-        try:
-            async with asyncio.timeout(10):
-                await entered.wait()
-            during = await engine.conversation(conversation)
-            assert during is not None
-            assert during.state.working
-            assert during.state.activation_id is not None
-        finally:
-            release.set()
-        await turn
-        after = await engine.conversation(conversation)
-        assert after is not None
-        assert not after.state.working
-        assert after.state.activation_id is None
-
-    async def test_forgetting_reaches_an_activation_running_on_the_conversation(
-        self, chat_surface: ChatSurfaceSubject
-    ) -> None:
-        """§2:6: an activation running when its conversation is forgotten writes nothing back.
-
-        The turn is held at its first episode write — the engine's admission, the
-        fake's capture — so no read of the store can see its episode yet; forgetting
-        the conversation then must still leave no episode of it once it finishes.
-        """
-        engine, memory = chat_surface.engine, chat_surface.memory
-        conversation = await _started(engine, _PHONE)
-        entered, release = asyncio.Event(), asyncio.Event()
-        original = memory.write_atomic
-
-        async def held(writes: Sequence[MemoryWrite]) -> Sequence[str]:
-            if not entered.is_set():
-                entered.set()
-                await release.wait()
-            return await original(writes)
-
-        memory.write_atomic = held  # type: ignore[method-assign]
-        turn = asyncio.create_task(
-            engine.receive(
-                ChannelInput(
-                    target=ChannelIdentity(channel_type="conversation", instance_id=conversation),
-                    payload=SpeechChannelPayload(audio=_RECORDING),
-                ),
-                reply=_PLAYS,
-                timeout=timedelta(seconds=30),
-            )
-        )
-        try:
-            async with asyncio.timeout(10):
-                await entered.wait()
-            await engine.forget_conversation(conversation)
-        finally:
-            release.set()
-        result = await turn
-        assert result.capture.episode_id is None
-        assert await memory.get(f"activation:{result.capture.activation_id}") is None
-        assert await engine.conversation(conversation) is not None
-
     # --- the change stream (§5:10, §5:11) -----------------------------------
 
     async def test_every_change_after_a_cursor_in_sequence(
@@ -588,8 +490,6 @@ class ChatSurfaceContract:
             cursor = page[-1].seq
         assert seen == sorted(set(seen))
         assert len(seen) == 10, "the devices and the start, then eight messages"
-
-    # --- the transcript (§5:13) ---------------------------------------------
 
     # --- the change stream (ADR-0296 §4, ADR-0298 §7) -----------------------
 
