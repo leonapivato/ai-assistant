@@ -1,0 +1,336 @@
+"""Recall wired into the engine, on the phase path (ADR-0281, ADR-0309 §2:6).
+
+``test_engine_recall`` drives these cases through today's table, which the switch lane
+retires. Each case here is one of them run with the phases wired: the windows, recall
+and understanding run before planning exactly as they do today, so what recall decides,
+what it records and what understanding is shown stay pinned once the switch lands.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any
+
+from phases_support import chat_turn, event, phases_harness, written
+from structlog.testing import capture_logs
+from test_engine import AT
+from test_engine_recall import (
+    _BOOKED,
+    _BUDGET,
+    _DONE,
+    _PERMIT,
+    _R,
+    _S,
+    _TURN,
+    _entries,
+    _forgetting,
+    _no_episodes,
+    _record,
+    _seeded,
+    _shown,
+    _Slow,
+    _trail_report,
+)
+from understanding_support import (
+    ON_DEVICE_RECALL_THRESHOLD,
+    STATED_PROPOSAL,
+    recall_stage,
+    understanding_stage,
+)
+
+from ai_assistant.core.types import (
+    ActivationEnding,
+    EpisodicMemory,
+    InformationalEventResult,
+    MemorySource,
+    Provenance,
+    RecallOutcome,
+    SemanticMemory,
+    StageOutcome,
+)
+from ai_assistant.memory import SqliteMemoryStore
+from ai_assistant.models.fastembed_embedder import FastEmbedEmbedder
+from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
+from ai_assistant.orchestration.recall import RecallStage
+from ai_assistant.orchestration.understanding import WindowsStage
+from ai_assistant.testing import (
+    FakeMemoryStore,
+    FakeModelProvider,
+    FakeStoryStore,
+    FakeTraceSink,
+)
+from ai_assistant.testing.tool_calling import DEFAULT_ROUND_TEXT
+
+if TYPE_CHECKING:
+    from test_engine import Harness
+
+    from ai_assistant.core.types import EpisodeProcessingRecord
+
+
+def _harness(
+    memory: FakeMemoryStore | None = None,
+    *,
+    recall: RecallStage | None = None,
+    understanding_model: FakeModelProvider | None = None,
+    **knobs: Any,
+) -> Harness:
+    memory = memory or FakeMemoryStore(now=lambda: AT)
+    return phases_harness(
+        memory=memory,
+        understanding=understanding_stage(
+            model=understanding_model or FakeModelProvider(STATED_PROPOSAL)
+        ),
+        recall=recall or recall_stage(memory),
+        **knobs,
+    )
+
+
+def _processing(episode: EpisodicMemory) -> EpisodeProcessingRecord:
+    assert episode.processing_record is not None
+    return episode.processing_record
+
+
+#: An understanding model whose reply is no proposal, so understanding fails.
+def _unusable() -> FakeModelProvider:
+    return FakeModelProvider("not a proposal")
+
+
+# --- what recall decides, and what understanding is shown ---------------------------------
+
+
+async def test_a_found_recall_is_recorded_and_shown_to_understanding() -> None:
+    model = FakeModelProvider(STATED_PROPOSAL)
+    harness = _harness(await _seeded(_BOOKED), understanding_model=model)
+    await chat_turn(harness, _TURN)
+    record = await _record(harness)
+    assert _entries(record)[:4] == [
+        (_S.BEGIN_CONVERSATION, _R.CONVERSATION_UNRESOLVED, _DONE),
+        (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, _DONE),
+        (_S.RECALL, _R.NOT_RECALLED, _DONE),
+        (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE),
+    ]
+    assert record.recall is not None
+    assert record.recall.outcome is RecallOutcome.FOUND
+    assert [item.id for item in record.recall.items] == ["fact-booked"]
+    (shown,) = _shown(model)
+    assert shown["label"] == "M1"
+    assert shown["fact"] == _BOOKED.fact
+
+
+async def test_a_recall_that_found_nothing_is_recorded_and_said() -> None:
+    model = FakeModelProvider(STATED_PROPOSAL)
+    harness = _harness(understanding_model=model)
+    await chat_turn(harness, _TURN)
+    record = await _record(harness)
+    assert record.recall is not None
+    assert (record.recall.outcome, record.recall.items) == (RecallOutcome.NOTHING_FOUND, ())
+    assert _shown(model) == "missing: nothing was recalled for this input"
+
+
+async def test_a_turn_with_recall_unwired_renders_no_recalled_section() -> None:
+    model = FakeModelProvider(STATED_PROPOSAL)
+    harness = phases_harness(
+        memory=FakeMemoryStore(now=lambda: AT), understanding=understanding_stage(model=model)
+    )
+    await chat_turn(harness, _TURN)
+    record = await _record(harness)
+    assert record.recall is None
+    assert _S.RECALL not in [entry.stage for entry in record.stages]
+    assert "recalled" not in json.loads(model.calls[0].messages[1].content)
+
+
+# --- §5: failure-tolerant --------------------------------------------------------------------
+
+
+async def test_a_store_failure_is_tolerated_and_understanding_runs() -> None:
+    model = FakeModelProvider(STATED_PROPOSAL)
+    failing = FakeMemoryStore(now=lambda: AT, failure="down")
+    harness = _harness(recall=recall_stage(failing), understanding_model=model)
+    conversation, _ = await chat_turn(harness, _TURN)
+    record = await _record(harness)
+    assert _entries(record)[1:4] == [
+        (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, _DONE),
+        (_S.RECALL, _R.NOT_RECALLED, StageOutcome.FAILED),
+        (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE),
+    ]
+    assert _entries(record)[-1] == (_S.END, _R.NOTHING_DUE, _DONE)
+    assert record.recall is not None
+    assert record.recall.outcome is RecallOutcome.FAILED
+    assert _shown(model) == "missing: recall failed, so no memories are shown"
+    # The activation still answered.
+    assert [one.text for one in await written(harness, conversation)][-1] == DEFAULT_ROUND_TEXT
+
+
+async def test_recalls_own_budget_running_out_is_tolerated_and_understanding_runs() -> None:
+    recall = RecallStage(
+        memory=_Slow(),
+        stories=FakeStoryStore(),
+        threshold=0.5,
+        limit=3,
+        budget=timedelta(milliseconds=20),
+    )
+    harness = _harness(recall=recall)
+    await chat_turn(harness, _TURN)
+    record = await _record(harness)
+    assert _entries(record)[1:4] == [
+        (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, _DONE),
+        (_S.RECALL, _R.NOT_RECALLED, StageOutcome.TIMED_OUT),
+        (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE),
+    ]
+    assert record.recall is not None
+    assert record.recall.outcome is RecallOutcome.TIMED_OUT
+
+
+# --- events: the audience, and what is captured ----------------------------------------------
+
+
+async def test_an_event_recalls_under_a_bounded_audience() -> None:
+    text = "The thermostat entered eco mode at 18:00."
+    episode = EpisodicMemory(
+        id="episode-eco",
+        content=text,
+        occurred_at=AT,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
+    )
+    harness = _harness(await _seeded(episode), windows=WindowsStage(episodes=_no_episodes))
+    _, captured = await event(harness)
+    record = _processing(captured)
+    assert _entries(record)[:3] == [
+        (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, _DONE),
+        (_S.RECALL, _R.NOT_RECALLED, _DONE),
+        (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE),
+    ]
+    assert record.recall is not None
+    assert [item.id for item in record.recall.items] == ["episode-eco"]
+
+
+async def test_an_understood_event_is_captured_with_its_meaning_as_content() -> None:
+    _, captured = await event(_harness())
+    assert captured.content == json.loads(STATED_PROPOSAL)["meaning"]
+    assert "thermostat" not in captured.content
+
+
+async def test_an_event_captured_without_an_understanding_is_its_status_line() -> None:
+    """ADR-0284 §7:1: no understanding, so a line of its status — and no outside words.
+
+    The phases are wired only beside understanding, so an event captured without one is
+    an event whose understanding failed: it could not finish, and its episode says so.
+    """
+    result, captured = await event(_harness(understanding_model=_unusable()))
+    assert isinstance(result.result, InformationalEventResult)
+    assert result.result.ended is ActivationEnding.COULDNT_FINISH
+    record = _processing(captured)
+    assert record.understanding == ()
+    assert record.status is not None
+    assert record.reason is not None
+    assert captured.content == f"status {record.status.value}, reason {record.reason.value}"
+    assert "thermostat" not in captured.content
+
+
+async def test_an_understood_event_is_found_by_a_later_activation_that_shares_its_matter() -> None:
+    """ADR-0281 §3's acceptance test: embedded on its meaning, an event is recallable by
+    what it was about; one captured without an understanding is not."""
+    store = SqliteMemoryStore(
+        path=":memory:", embedder=FastEmbedEmbedder(), traces_sink=FakeTraceSink(), now=lambda: AT
+    )
+    try:
+        meaning = "The north trail at Pine Flat is closed for repairs."
+        understood = phases_harness(
+            memory=store,
+            understanding=understanding_stage(
+                model=FakeModelProvider(
+                    json.dumps({"meaning": meaning, "meaning_ground": "stated"})
+                ),
+            ),
+        )
+        await event(understood, _trail_report())
+        unread = phases_harness(
+            memory=store,
+            understanding=understanding_stage(model=_unusable()),
+        )
+        await event(unread, _trail_report())
+        captured = {
+            episode.processing_record.understanding[-1].meaning
+            if episode.processing_record.understanding
+            else None: episode.id
+            for episode in await store.export()
+            if isinstance(episode, EpisodicMemory) and episode.processing_record is not None
+        }
+        recall = RecallStage(
+            memory=store,
+            stories=FakeStoryStore(),
+            threshold=ON_DEVICE_RECALL_THRESHOLD,
+            limit=3,
+            budget=_BUDGET,
+        )
+        later = await recall.recall(
+            "Is the north trail at Pine Flat open again?",
+            audience=BoundedAudienceSupply(speakable_attested_sources=frozenset()),
+            deadline=asyncio.get_running_loop().time() + 30,
+        )
+        found = [item.id for item in later.result.items]
+        assert captured[meaning] in found
+        assert captured[None] not in found
+    finally:
+        store.close()
+
+
+# --- understanding fetches what recall kept (ADR-0282 §5) ---------------------------------
+
+
+async def test_a_recalled_record_forgotten_before_understanding_is_not_rendered() -> None:
+    """ADR-0282 §5: understanding renders what its fetch returned, never recall's copy;
+    the rest keep their order and labels, and the missing id is recorded."""
+    model = FakeModelProvider(STATED_PROPOSAL)
+    harness = _harness(await _forgetting("fact-booked"), understanding_model=model)
+    with capture_logs() as logs:
+        await chat_turn(harness, _TURN)
+    record = await _record(harness)
+    assert record.recall is not None
+    assert {item.id for item in record.recall.items} == {"fact-booked", "fact-permit"}
+    (shown,) = _shown(model)
+    assert (shown["label"], shown["fact"]) == ("M1", _PERMIT.fact)
+    # Understanding's fetch is the first; planning fetches what recall kept after it.
+    (fetch, *_) = [log for log in logs if log["event"] == "stage_fetch"]
+    assert (fetch["fetched"], fetch["missing"]) == (2, 1)
+
+
+async def test_everything_recalled_forgotten_before_understanding_is_said() -> None:
+    model = FakeModelProvider(STATED_PROPOSAL)
+    harness = _harness(await _forgetting("fact-booked", "fact-permit"), understanding_model=model)
+    await chat_turn(harness, _TURN)
+    record = await _record(harness)
+    assert record.recall is not None
+    assert record.recall.outcome is RecallOutcome.FOUND
+    assert _shown(model) == "missing: what was recalled is no longer in memory"
+
+
+# --- recall searches past the windows (ADR-0282 §4) --------------------------------------
+
+
+async def test_an_episode_the_window_holds_is_not_recalled() -> None:
+    """The event's episode window holds the stored episode, so recall passes over it and
+    keeps the belief below it; the episode renders in the window alone."""
+    text = "The thermostat entered eco mode at 18:00."
+    episode = EpisodicMemory(
+        id="episode-eco",
+        content=text,
+        occurred_at=AT,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
+    )
+    fact = SemanticMemory(
+        id="fact-eco",
+        content=text,
+        fact=text,
+        provenance=Provenance(source=MemorySource.INFERRED, confidence=0.8, last_updated=AT),
+    )
+    model = FakeModelProvider(STATED_PROPOSAL)
+    harness = _harness(await _seeded(episode, fact), understanding_model=model)
+    _, captured = await event(harness)
+    record = _processing(captured)
+    assert record.recall is not None
+    assert [item.id for item in record.recall.items] == ["fact-eco"]
+    (shown,) = _shown(model)
+    assert (shown["label"], shown["fact"]) == ("M1", text)
