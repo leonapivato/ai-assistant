@@ -742,7 +742,8 @@ _LABELS: Final = (
 
 _CALLS: Final = (
     "Every call of a round runs at the same time. A call that needs another call's result "
-    "or success goes in a later round, and no call refers to another call's output. You "
+    "or success goes in a later round, and no call refers to another call's output. When "
+    "you leave a call for a later round, ask for another round in this response. You "
     "propose calls and never permit them: whether each runs is decided by rule after you. "
     "Do what the user asked, and never substitute something else for it. Where a tool asks "
     "what you are looking for, say what you need from its result.\n"
@@ -814,6 +815,16 @@ _NO_MESSAGE: Final = (
     "\n"
 )
 
+#: #2892: a call done with no result brings no round (ADR-0307 §8:1), so work planned for
+#: a later round is done only where this response asks for that round.
+_LATER: Final = (
+    "A call that is done and brings no result, such as a note on a story or remembering "
+    "something, brings no round. So when you leave any part of what the user asked for a "
+    "later round, ask for another round in this response: deciding to do it later is not "
+    "asking, and without the ask the work ends after this round and that part is never "
+    "done. Either way, the text says what you will do, never that it is done."
+)
+
 _NOTES_AND_ROUNDS: Final = (
     "Episode notes are free text for your own later rounds and for later activations: "
     "what you worked out, what you are waiting on, what to check. They are part of your "
@@ -821,8 +832,8 @@ _NOTES_AND_ROUNDS: Final = (
     "\n"
     "Another round runs once every call of this round has finished, when a call brought a "
     "result, was not done, came back unknown, needed the user or was refused, or when you "
-    "ask for one. A round with no calls ends the work after its message, even if you ask "
-    "for another."
+    "ask for one. " + _LATER + " A round with no calls ends the work after its message, "
+    "even if you ask for another."
 )
 
 

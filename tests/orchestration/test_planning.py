@@ -429,6 +429,36 @@ async def test_the_instruction_makes_the_message_the_assistants_own_words_to_the
     assert "never how you are working it out" in instruction
 
 
+@pytest.mark.parametrize("takes_message", [True, False], ids=["message", "no-message"])
+async def test_work_left_for_a_later_round_is_instructed_to_ask_for_it(
+    takes_message: bool,
+) -> None:
+    """#2892: a call done with no result brings no round (ADR-0307 §8:1)."""
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(place=PlaceWindow(takes_message=takes_message)))
+    instruction = _instruction(completer)
+    assert (
+        "A call that is done and brings no result, such as a note on a story or remembering "
+        "something, brings no round."
+    ) in instruction
+    assert (
+        "when you leave any part of what the user asked for a later round, ask for another "
+        "round in this response: deciding to do it later is not asking"
+    ) in instruction
+    assert "without the ask the work ends after this round and that part is never done" in (
+        instruction
+    )
+    assert "Either way, the text says what you will do, never that it is done." in instruction
+    assert (
+        "A call that needs another call's result or success goes in a later round, and no "
+        "call refers to another call's output. When you leave a call for a later round, ask "
+        "for another round in this response."
+    ) in instruction
+    assert instruction.endswith(
+        "A round with no calls ends the work after its message, even if you ask for another."
+    )
+
+
 async def test_a_round_that_acts_on_the_request_is_instructed_to_reply() -> None:
     """#2864: a call that brings no result brings no later round, so the reply is now."""
     stage, completer, _ = _stage()
