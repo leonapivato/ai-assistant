@@ -1,6 +1,6 @@
 # 123. A backup is the cold data directory, encrypted to a passphrase the operator holds off the machine
 
-- Status: Partially superseded by ADR-0299 (§3:2's exclusions, in the addition alone: `admin.sock`)
+- Status: Partially superseded by ADR-0299 (§3:2's exclusions, in the addition alone: `admin.sock`) and ADR-0314 (§3:1's exclusions, in the addition alone: the diagnostic record's directory; §3:4's exact match, for that directory alone, every file beneath which is excluded)
 - Date: 2026-08-09
 - **Decides no `core` surface.** No Protocol in `core/protocols.py` changes and no
   type, enum member or constant is added to `core/types.py` (§10). Golden rule 5
@@ -16,6 +16,14 @@
   from `wire/address.py` under §3:3, and §3:3–§3:6 and every other clause stand. This
   replacement takes effect on ratification of ADR-0299. This reciprocal header record
   accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is
+  preserved.
+- Partially superseded: 2026-10-13 by ADR-0314 — one scope. §3:1's exclusions, in the
+  addition alone: the backup also excludes the diagnostic record's directory, and §3:4's
+  exact match, for that directory alone: every file beneath it is excluded, since the
+  record is one file per activation (ADR-0314 §7:5). Its path comes from the composition
+  root under §3:3, and every other clause stands. This replacement takes effect on
+  ratification of ADR-0314. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
   preserved.
 
 ## Context
