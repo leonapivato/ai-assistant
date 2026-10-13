@@ -158,6 +158,9 @@ class ActivationState:
     #: ADR-0281 §6: recall's decision, held once the stage ends and written with the
     #: stage's append (ADR-0286 §3). ``None`` where recall made no decision on the pass.
     recall: ActivationRecall | None = None
+    #: ADR-0308 §2, §7: recall's second decision, made on what understanding found, held
+    #: once that run ends and written with its stage's append, as the first's is.
+    recall_second_run: ActivationRecall | None = None
     #: ADR-0307 §2:3-§2:4, §5:7: the planning rounds and the labels they and the
     #: digests assigned, and ADR-0308 §5:2's digests, each added as its recorder is
     #: called and written with the append that follows (ADR-0286 §3).
@@ -358,6 +361,7 @@ class ActivationState:
             understanding_elided=self.understanding_elided,
             stages=stages,
             recall=self.recall,
+            recall_second_run=self.recall_second_run,
             stages_elided=stages_elided,
             rounds=self.rounds,
             labels=self.labels,
@@ -369,7 +373,7 @@ class ActivationState:
 
         It carries what the pass has recorded into the record's own fields — the
         trigger as it stands, the links, the understanding versions, the recall
-        result and the stage entries ended so far, each under its bound — and no
+        results and the stage entries ended so far, each under its bound — and no
         status, reason, end time, omission or end entry. ``response_degraded`` and
         ``output_degraded`` stay unset here: the freezing write sets them, and an
         unset field may take a value then (§3:3).
@@ -392,6 +396,7 @@ class ActivationState:
             understanding_elided=self.understanding_elided,
             stages=stages,
             recall=self.recall,
+            recall_second_run=self.recall_second_run,
             stages_elided=stages_elided,
             rounds=self.rounds,
             labels=self.labels,

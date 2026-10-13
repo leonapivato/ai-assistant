@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
@@ -26,11 +26,13 @@ from test_activation_state import _admitted
 from test_authorizer import _ACTIVATION, _episode
 from test_engine import AT, Harness, NoStepPlanner
 from test_loop_search import _ACCOUNT, _CONFIGURED_SEARCH
-from understanding_support import understanding_stage
+from test_planning import _episode as _past_episode
+from understanding_support import recall_stage, understanding_stage
 
 from ai_assistant.core.errors import (
     ConfigurationError,
     ConversationStoreError,
+    MemoryStoreError,
     ModelTimeoutError,
     PlanningError,
 )
@@ -38,7 +40,10 @@ from ai_assistant.core.types import (
     ActivationDigest,
     ActivationEffect,
     ActivationEnding,
+    ActivationRecall,
     ActivationStop,
+    Attestation,
+    BeliefBand,
     CapabilityEffect,
     CapabilityResult,
     ChatDevice,
@@ -53,16 +58,25 @@ from ai_assistant.core.types import (
     Idempotency,
     InputOrigin,
     LabelKind,
+    MemoryKind,
+    MemorySource,
     MessageAuthor,
     NewMessage,
     PermissionOutcome,
     PermissionRuling,
+    PlanningRound,
     ProcessingReason,
     ProcessingStatus,
     ProposedCall,
+    Provenance,
+    RecallCue,
+    RecalledItem,
+    RecallOutcome,
+    RecallProvenance,
     Reversibility,
     RiskLevel,
     RoundResponse,
+    SemanticMemory,
     StageOutcome,
     ToolCost,
     ToolDefinition,
@@ -74,6 +88,7 @@ from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapabilit
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import COULDNT_FINISH, ChatWriter, couldnt_finish
 from ai_assistant.orchestration.conversations import conversation_channel
+from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import (
     MessageWriter,
@@ -81,12 +96,14 @@ from ai_assistant.orchestration.phase_path import (
     PhaseTools,
     PhaseWorking,
 )
+from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls, remembered_record_id
-from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow
+from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow, WindowsStage
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
     FakeEgressBinder,
     FakeMemoryPolicy,
+    FakeMemoryStore,
     FakeMemoryWriter,
     FakeModelProvider,
     FakeRecipientGrantStore,
@@ -102,11 +119,14 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ActionRequest,
         ActivationUnderstanding,
+        MemorySearchResult,
         Message,
         MessageReceipt,
         OfferedTool,
         PermissionDecision,
     )
+    from ai_assistant.orchestration.disclosure import TurnSupply
+    from ai_assistant.orchestration.understanding import Windows
 
 _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
 
@@ -255,6 +275,8 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             round_wait=timedelta(seconds=5),
             excerpt_chars=2000,
             part_chars=4000,
+            memory=harness.memory,
+            recall_cap=6,
             now=lambda: AT,
         )
 
@@ -286,8 +308,13 @@ async def _messages(harness: Harness, conversation: str) -> list[TranscriptMessa
     return [one for one in page.entries if isinstance(one, TranscriptMessage)]
 
 
-async def _settled(harness: Harness, conversation: str) -> EpisodicMemory:
-    """Wait for the activation to end and its episode to freeze, then read it."""
+async def _settled(
+    harness: Harness, conversation: str, *, seeded: frozenset[str] = frozenset()
+) -> EpisodicMemory:
+    """Wait for the activation to end and its episode to freeze, then read it.
+
+    ``seeded`` names the frozen episodes a case stored beforehand, which are not it.
+    """
     deadline = asyncio.get_running_loop().time() + _SETTLE
     while True:
         state = await harness.engine.conversation(conversation)
@@ -295,6 +322,7 @@ async def _settled(harness: Harness, conversation: str) -> EpisodicMemory:
             one
             for one in await harness.memory.export()
             if isinstance(one, EpisodicMemory)
+            and one.id not in seeded
             and one.processing_record is not None
             and not one.processing_record.is_open
         ]
@@ -868,7 +896,191 @@ async def test_an_activation_whose_every_message_the_place_refused_reads_couldnt
     assert await _last_ended(harness, conversation) is ActivationEnding.COULDNT_FINISH
 
 
+# --- ADR-0308 §2-§3: recall's second run, and what planning is shown of its finds ----------
+
+#: What understanding makes of "when?": a reading that names what the input did not.
+_DENTIST: Final = "dentist appointment Elm Street"
+
+
+async def _no_episode_window(_: frozenset[str]) -> tuple[EpisodicMemory, ...]:
+    """An episode selector that selects nothing, so recall alone brings an episode."""
+    return ()
+
+
+class _DownForTheReading(FakeMemoryStore):
+    """A store whose search fails for understanding's reading, and answers otherwise."""
+
+    async def search(self, query: str, **kwargs: Any) -> MemorySearchResult:
+        if query == _DENTIST:
+            msg = "the store is down"
+            raise MemoryStoreError(msg)
+        return await super().search(query, **kwargs)
+
+
+def _remembered(memory_id: str, source: MemorySource, fact: str) -> SemanticMemory:
+    return SemanticMemory(
+        id=memory_id,
+        content=fact,
+        fact=fact,
+        provenance=Provenance(
+            source=source,
+            confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.8,
+            last_updated=AT,
+            attestation=(
+                Attestation(reported_by="mail", reported_at=AT)
+                if source is MemorySource.EXTERNAL
+                else None
+            ),
+        ),
+    )
+
+
+async def _recalling_harness(
+    completer: FakeToolCallingCompleter, memory: FakeMemoryStore | None = None
+) -> tuple[Harness, FakeModelProvider]:
+    """A test hub with recall wired, its store holding what the second run finds."""
+    store = memory if memory is not None else FakeMemoryStore(now=lambda: AT)
+    noted = PlanningRound(
+        id="round:past", recorded_at=AT, text="Booked it for Friday.", notes="they prefer mornings"
+    )
+    past = _past_episode("activation:past", rounds=(noted,)).model_copy(
+        update={"content": f"{_DENTIST} booked for Friday"}
+    )
+    for record in (
+        past,
+        _remembered("said", MemorySource.USER_ASSERTED, f"{_DENTIST} with Dr Rao"),
+        _remembered("reported", MemorySource.EXTERNAL, f"{_DENTIST} moved to 3pm"),
+    ):
+        await store.add(record)
+    understanding = FakeModelProvider(
+        reply=json.dumps({"meaning": _DENTIST, "meaning_ground": "stated"})
+    )
+    harness = Harness(
+        planner=NoStepPlanner(),
+        understanding=understanding_stage(model=understanding),
+        tools=(_BOOK,),
+        memory=store,
+        windows=WindowsStage(episodes=_no_episode_window),
+        recall=recall_stage(store),
+        phases=_phases(completer),
+    )
+    return harness, understanding
+
+
+async def test_a_found_episode_reaches_planning_after_recall_runs_again() -> None:
+    """ADR-0308 §2, §3, ADR-0309 §3's row 6: B4b's path with recall's second run.
+
+    The input names nothing recall's first run finds; understanding's reading does, so
+    the second run, once understanding has recorded, finds the past episode and two
+    remembered facts. Planning is shown the episode by its records and the user's fact,
+    never the fact a source reported; understanding ran once and was shown none of it.
+    """
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="It is on Friday."))
+    harness, understanding = await _recalling_harness(completer)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "when?")
+    episode = await _settled(harness, conversation, seeded=frozenset({"activation:past"}))
+
+    assert _stages(episode) == [
+        (ControllerStage.BEGIN_CONVERSATION, ControllerRule.CONVERSATION_UNRESOLVED),
+        (ControllerStage.WINDOWS, ControllerRule.WINDOWS_UNASSEMBLED),
+        (ControllerStage.RECALL, ControllerRule.NOT_RECALLED),
+        (ControllerStage.UNDERSTANDING, ControllerRule.NOT_UNDERSTOOD),
+        (ControllerStage.RECALL, ControllerRule.UNDERSTOOD_NOT_RECALLED),
+        (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
+        (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
+        (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED),
+        (ControllerStage.END, ControllerRule.NOTHING_DUE),
+    ]
+    record = episode.processing_record
+    assert record is not None
+    assert record.recall is not None
+    assert record.recall.outcome is RecallOutcome.NOTHING_FOUND
+    second = record.recall_second_run
+    assert second is not None
+    assert second.outcome is RecallOutcome.FOUND
+    assert second.cues == (RecallCue.UNDERSTOOD_MEANING,)
+    assert {item.id for item in second.items} == {"activation:past", "said", "reported"}
+
+    # Understanding ran once, and nothing the second run found reached it (§2:8).
+    assert len(understanding.calls) == 1
+    shown_to_understanding = " ".join(one.content for one in understanding.calls[0].messages)
+    assert "Dr Rao" not in shown_to_understanding
+    assert "Booked it for Friday." not in shown_to_understanding
+
+    # Planning was shown the episode by its records and the user's fact, and never the
+    # fact a source reported (§3:1, §3:3).
+    request = completer.calls[0].messages[1].content
+    # In band order: the user's fact is asserted, the episode observed.
+    found_fact, found_episode = json.loads(request)["recalled"]
+    assert found_episode["label"] == "E1"
+    assert found_episode["rounds"] == [
+        {"message": "Booked it for Friday.", "notes": "they prefer mornings"}
+    ]
+    assert found_fact["label"] == "M1"
+    assert found_fact["fact"] == f"{_DENTIST} with Dr Rao"
+    assert "moved to 3pm" not in request
+    labels = {(one.label, one.id) for one in record.labels}
+    assert {("E1", "activation:past"), ("M1", "said")} <= labels
+    assert "reported" not in {one.id for one in record.labels}
+
+
+async def test_a_failed_second_run_is_recorded_and_planning_goes_on() -> None:
+    """ADR-0308 §2:7: failure-tolerant, recorded, and planning runs without its finds."""
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="I could not check."))
+    harness, _ = await _recalling_harness(completer, _DownForTheReading(now=lambda: AT))
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "when?")
+    episode = await _settled(harness, conversation, seeded=frozenset({"activation:past"}))
+
+    record = episode.processing_record
+    assert record is not None
+    assert record.recall_second_run is not None
+    assert record.recall_second_run.outcome is RecallOutcome.FAILED
+    assert _stages(episode)[4:6] == [
+        (ControllerStage.RECALL, ControllerRule.UNDERSTOOD_NOT_RECALLED),
+        (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
+    ]
+    assert json.loads(completer.calls[0].messages[1].content)["recalled"] == []
+    assert _said(await _messages(harness, conversation))[-1] == (
+        MessageAuthor.ASSISTANT,
+        "I could not check.",
+    )
+
+
+async def test_what_the_first_run_kept_is_passed_over_and_both_runs_reach_planning() -> None:
+    """ADR-0308 §2:3, §3: the second run keeps nothing the first kept; planning sees both."""
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Dr Rao, on Friday."))
+    harness, understanding = await _recalling_harness(completer)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "Rao")
+    episode = await _settled(harness, conversation, seeded=frozenset({"activation:past"}))
+
+    record = episode.processing_record
+    assert record is not None
+    assert record.recall is not None
+    assert [item.id for item in record.recall.items] == ["said"]
+    assert record.recall_second_run is not None
+    assert {item.id for item in record.recall_second_run.items} == {
+        "activation:past",
+        "reported",
+    }
+    # Understanding was shown the first run's find, and only that (ADR-0281 §7).
+    shown_to_understanding = " ".join(one.content for one in understanding.calls[0].messages)
+    assert "Dr Rao" in shown_to_understanding
+    assert "Booked it for Friday." not in shown_to_understanding
+    recalled = json.loads(completer.calls[0].messages[1].content)["recalled"]
+    assert [one["label"] for one in recalled] == ["M1", "E1"]
+    assert recalled[0]["fact"] == f"{_DENTIST} with Dr Rao"
+
+
 # --- one stage, apart from the controller ------------------------------------------------
+
+
+_BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 
 
 @dataclass(frozen=True)
@@ -879,6 +1091,9 @@ class _Given:
     phases: PhaseWorking
     understanding: ActivationUnderstanding | None = None
     understanding_fetch: Fetched | None = None
+    supply: TurnSupply = field(default_factory=lambda: _BOUNDED)
+    windows: Windows | None = None
+    recalled: Recalled | None = None
 
 
 def _begun(path: PhasePath) -> PhaseWorking:
@@ -938,6 +1153,94 @@ async def test_a_fetched_record_resting_on_outside_content_reaches_the_first_rul
     decided = working.latest.authorization
     assert decided is not None
     assert decided.read_outside_content
+
+
+def _found(*episode_ids: str) -> Recalled:
+    """A first-run decision keeping ``episode_ids``, as recall records one."""
+    items = tuple(
+        RecalledItem(
+            kind=MemoryKind.EPISODIC,
+            id=one,
+            excerpt="an earlier episode",
+            provenance=RecallProvenance.USER,
+            standing=BeliefBand.DERIVED,
+            rests_on_recorded_external_content=False,
+            found_by=(RecallCue.ACTIVATION_INPUT,),
+        )
+        for one in episode_ids
+    )
+    return Recalled(
+        ActivationRecall(
+            outcome=RecallOutcome.FOUND, cues=(RecallCue.ACTIVATION_INPUT,), items=items
+        ),
+        scores=tuple(0.9 for _ in items),
+    )
+
+
+async def test_a_found_episode_with_marked_notes_counts_as_the_episode_windows_do() -> None:
+    """ADR-0303 §3:6, ADR-0306 §4:5: what the activation read includes what recall found.
+
+    The found episode is clean but for a note it marked, so only planning being shown
+    it, under its label, says outside content was read; authorizing counts it from the
+    label, as it counts an episode-window episode, and the round's notes are marked.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", "book", date="2026-10-12"),), notes="a note")
+    )
+    harness = _harness(completer)
+    await harness.memory.add(_episode())
+    marked = PlanningRound(
+        id="round:found", recorded_at=AT, notes="from a report", notes_marked=True
+    )
+    await harness.memory.add(_past_episode("activation:found", rounds=(marked,)))
+    path = _phases(completer)(harness)
+    working = _begun(path)
+    given = _Given(
+        deadline=asyncio.get_running_loop().time() + _SETTLE,
+        phases=working,
+        recalled=_found("activation:found"),
+    )
+    stages = {one.name: one for one in path.stages()}
+
+    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING):
+        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+
+    assert not working.fetched_outside
+    assert working.latest.planned.round.notes_marked
+    decided = working.latest.authorization
+    assert decided is not None
+    assert decided.read_outside_content
+    assert working.found is not None
+    assert working.found.fetched == ("activation:found",)
+
+
+async def test_planning_fetches_what_recall_found_once_for_every_round() -> None:
+    """ADR-0282 §2:4-§2:7: one read before the first round, held for the rest."""
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(text="one"), RoundResponse(text="two")
+    )
+    harness = _harness(completer)
+    await harness.memory.add(_past_episode("activation:found"))
+    path = _phases(completer)(harness)
+    working = _begun(path)
+    given = _Given(
+        deadline=asyncio.get_running_loop().time() + _SETTLE,
+        phases=working,
+        recalled=_found("activation:found", "activation:gone"),
+    )
+    (planning,) = [one for one in path.stages() if one.name is ControllerStage.PLANNING]
+
+    assert (await planning.run(given)).outcome is StageOutcome.DONE
+    held = working.found
+    await harness.memory.delete("activation:found")
+    assert (await planning.run(given)).outcome is StageOutcome.DONE
+
+    assert working.found is held
+    assert held is not None
+    assert held.missing == ("activation:gone",)
+    for call in completer.calls:
+        (shown,) = json.loads(call.messages[1].content)["recalled"]
+        assert shown["label"] == "E1"
 
 
 async def test_a_digest_the_state_holds_marks_the_episode_though_the_working_set_lacks_it() -> None:

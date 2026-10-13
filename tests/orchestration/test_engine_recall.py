@@ -184,6 +184,9 @@ async def test_a_found_recall_is_recorded_and_shown_to_understanding() -> None:
     assert record.recall is not None
     assert record.recall.outcome is RecallOutcome.FOUND
     assert [item.id for item in record.recall.items] == ["fact-booked"]
+    # ADR-0309 §2:6: today's table runs recall once; the second run is the phases'.
+    assert record.recall_second_run is None
+    assert [entry.stage for entry in record.stages].count(_S.RECALL) == 1
     (shown,) = _shown(model)
     assert shown["label"] == "M1"
     assert shown["fact"] == _BOOKED.fact
