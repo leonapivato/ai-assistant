@@ -11,12 +11,13 @@ opt-in unset, today's path places its episode by its own evaluation, unchanged.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from story_support import activation, address, episode
 from test_activation_state import _admitted
 from test_authorizer import _ACTIVATION
+from test_authorizer import _episode as _own_episode
 from test_engine import AT, Harness, NoStepPlanner
 from test_engine_phases import (
     _BOUNDED,
@@ -39,7 +40,9 @@ from test_engine_phases import (
 )
 from understanding_support import understanding_stage
 
+from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
+    ActivationEffect,
     ActivationRecall,
     BeliefBand,
     ControllerStage,
@@ -378,6 +381,57 @@ async def test_a_stamped_episode_a_storys_full_view_shows_is_held_for_the_freeze
 
     (view,) = working.pages.values()
     assert [one.id for one in view.latest] == [address("past")]
+    assert working.supplied.withheld(_BOUNDED)
+
+
+async def test_a_story_reads_view_is_held_though_a_call_beside_it_fails_the_round() -> None:
+    """What a call returned is obtained, whatever became of the round's other calls.
+
+    The story read returns its view; the remember beside it cannot be claimed, so acting
+    ends the round on that error. The episodes the read returned are still held.
+    """
+    stories = FakeStoryStore(now=lambda: AT)
+    memory = FakeMemoryStore(now=lambda: AT)
+    await memory.add(_own_episode())
+    await memory.add(episode("past", placement=_STAMPED))
+    created = await stories.create([activation("past")], actor=StoryActor.OWNER)
+    assert created.story_id is not None
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(
+                _call("c1", "read_story", story="S1"),
+                _call("c2", "remember", statement="The trip is on."),
+            )
+        ),
+    )
+    harness = Harness(planner=NoStepPlanner(), understanding=understanding_stage(), memory=memory)
+    claim = harness.plans.claim_activation_effect
+
+    async def unclaimable(effect: ActivationEffect, /, **kwargs: Any) -> Any:
+        if effect.capability == "remember":
+            msg = "the plan store could not record the claim"
+            raise PlanningError(msg)
+        return await claim(effect, **kwargs)
+
+    setattr(harness.plans, "claim_activation_effect", unclaimable)  # noqa: B010 — one method replaced on the instance
+    path = _phases(completer, stories=stories, look_ups=True)(harness)
+    working = path.begin(
+        activation_id=_ACTIVATION,
+        window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
+        conversation_id="c1",
+        trigger_origin=InputOrigin.USER,
+        owner_records=True,
+        labels=(PlanningLabel(label="S1", kind=LabelKind.STORY, id=created.story_id),),
+    )
+    given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
+    stages = {one.name: one for one in path.stages()}
+    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING):
+        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+
+    acted = await stages[ControllerStage.ACTING].run(given)
+
+    assert acted.outcome is StageOutcome.FAILED
+    assert working.pages == {}
     assert working.supplied.withheld(_BOUNDED)
 
 
