@@ -753,3 +753,82 @@ async def test_a_reply_that_does_not_parse_fails_recalls_digest() -> None:
 
     assert digested.failure == "unparsable"
     assert digested.digest.evidence == ()
+
+
+# --- ADR-0308 §6:2: a result of the assistant's own records, held by id ------------------------
+
+
+async def test_a_result_held_by_id_is_fetched_and_read_under_its_r_label() -> None:
+    """§4:15, §6:2: the digest names the result by its R label, each item its M label.
+
+    A memory search's outside records are fetched by id and read as recall's are, each
+    attributed by the hub, against the call's *looking for*.
+    """
+    provider = _Provider(lambda _: _reply(("moved to three", "D2")))
+    stage, recorder = _stage(provider)
+    fetch, fetched = _fetching()
+
+    digested = await stage.digest_records(
+        fetch,
+        result_id="result:7",
+        question=_QUESTION,
+        labels=ActivationLabels(),
+        deadline=_DEADLINE,
+    )
+
+    assert digested is not None
+    assert fetched == [1]
+    ((messages, _),) = provider.calls
+    document = _document(messages)
+    assert document["question"] == _QUESTION
+    assert [one["label"] for one in document["records"]] == ["D1", "D2"]
+    assert all(one["from"].startswith("outside content") for one in document["records"])
+    assert digested.result_id == "result:7"
+    assert digested.digest == ActivationDigest(
+        result="R1",
+        question=_QUESTION,
+        outcome=DigestOutcome.ANSWERED,
+        evidence=(EvidenceItem(text="moved to three", source="M1"),),
+        recorded_at=_AT,
+    )
+    assert digested.labels == (
+        PlanningLabel(label="R1", kind=LabelKind.RESULT, id="result:7"),
+        PlanningLabel(label="M1", kind=LabelKind.MEMORY, id="second-run"),
+    )
+    assert recorder.recorded == [(digested.digest, digested.labels)]
+
+
+async def test_a_result_held_by_id_with_nothing_to_read_records_nothing() -> None:
+    """ADR-0282 §2:6: its records are gone, so no call is made and nothing recorded."""
+    provider = _Provider(lambda _: _reply())
+    stage, recorder = _stage(provider)
+
+    digested = await stage.digest_records(
+        _fetching(())[0],
+        result_id="result:7",
+        question=_QUESTION,
+        labels=ActivationLabels(),
+        deadline=_DEADLINE,
+    )
+
+    assert digested is None
+    assert (provider.calls, recorder.recorded) == ([], [])
+
+
+async def test_a_result_held_by_id_whose_fetch_fails_is_a_failed_digest_naming_it() -> None:
+    """§4:11-§4:13: recorded failed, under the result's R label, with no evidence."""
+    provider = _Provider(lambda _: _reply())
+    stage, _ = _stage(provider)
+
+    digested = await stage.digest_records(
+        _fetching(raises=MemoryStoreError("down"))[0],
+        result_id="result:7",
+        question=_QUESTION,
+        labels=ActivationLabels(),
+        deadline=_DEADLINE,
+    )
+
+    assert digested is not None
+    assert digested.failure == "unread"
+    assert (digested.digest.result, digested.digest.outcome) == ("R1", DigestOutcome.FAILED)
+    assert provider.calls == []

@@ -99,7 +99,14 @@ from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapabilit
 from ai_assistant.orchestration.authorizer import AuthorizingStage, Verdict
 from ai_assistant.orchestration.chat import COULDNT_FINISH, ChatWriter, couldnt_finish
 from ai_assistant.orchestration.conversations import conversation_channel
-from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
+from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
+from ai_assistant.orchestration.lookups import (
+    LOOK_UP_CAPABILITIES,
+    LOOK_UP_LABEL_ARGUMENTS,
+    LOOK_UPS,
+    LookUps,
+    searched_ids,
+)
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import (
     MessageWriter,
@@ -252,6 +259,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     capabilities: Sequence[str] = _CAPABILITIES,
     tidy_up: Callable[[Harness], StoryTidyUp] | None = None,
     story_calls: bool = False,
+    look_ups: bool = False,
 ) -> Callable[[Harness], PhasePath]:
     """The thin path as the composition root builds it, over the harness's own stores.
 
@@ -259,6 +267,8 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     ``capabilities`` names the capabilities planning is offered. ``story_calls`` offers
     planning's story calls too, over that store and the harness's memory store, with
     the tidy-up ``tidy_up`` builds, as the composition root wires them (ADR-0300 §10).
+    ``look_ups`` offers planning's look-ups (ADR-0307 §6:6), over the harness's memory
+    store and the story views' reads, as the composition root wires them.
     """
 
     def build(harness: Harness) -> PhasePath:
@@ -271,10 +281,28 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             if story_calls and stories is not None
             else None
         )
+        reads = (
+            None
+            if stories is None
+            else StoryReads(
+                stories=stories,
+                memory=harness.memory,
+                plans=harness.plans,
+                short_views=StoryCandidates(
+                    stories=stories, memory=harness.memory, limit=5, lines=3, notes=2, episodes=2
+                ),
+                episodes=3,
+            )
+        )
+        looking = LookUps(memory=harness.memory, views=reads, search_limit=5) if look_ups else None
         tools = PhaseTools(
             registry=harness.invoker,
             invoker=harness.invoker,
-            own_records=(REMEMBER, *(STORY_CALLS if calls is not None else ())),
+            own_records=(
+                REMEMBER,
+                *(STORY_CALLS if calls is not None else ()),
+                *(LOOK_UPS if looking is not None else ()),
+            ),
             searcher=searcher,
             search_query="query",
         )
@@ -314,6 +342,11 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                             if calls is not None
                             else {}
                         ),
+                        **(
+                            dict.fromkeys(LOOK_UP_CAPABILITIES, looking)
+                            if looking is not None
+                            else {}
+                        ),
                     }
                 ),
                 timeout=timedelta(seconds=5),
@@ -325,9 +358,14 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             capabilities=(
                 *capabilities,
                 *(STORY_CALL_CAPABILITIES if calls is not None else ()),
+                *(LOOK_UP_CAPABILITIES if looking is not None else ()),
             ),
-            label_arguments=STORY_LABEL_ARGUMENTS if calls is not None else None,
+            label_arguments={
+                **(STORY_LABEL_ARGUMENTS if calls is not None else {}),
+                **(LOOK_UP_LABEL_ARGUMENTS if looking is not None else {}),
+            },
             story_calls=calls,
+            look_ups=looking,
             round_limit=3,
             round_wait=timedelta(seconds=5),
             excerpt_chars=2000,
@@ -335,17 +373,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             memory=harness.memory,
             recall_cap=6,
             recall_digest_wait=recall_digest_wait,
-            story_reads=None
-            if stories is None
-            else StoryReads(
-                stories=stories,
-                memory=harness.memory,
-                plans=harness.plans,
-                short_views=StoryCandidates(
-                    stories=stories, memory=harness.memory, limit=5, lines=3, notes=2, episodes=2
-                ),
-                episodes=3,
-            ),
+            story_reads=reads,
             now=lambda: AT,
         )
 
@@ -2763,6 +2791,335 @@ async def test_with_the_opt_in_unset_the_story_standing_command_lists_what_was_d
         ("past", StoryEffectState.NOT_DONE),
         ("past", StoryEffectState.DONE),
     ]
+
+
+# --- planning's look-ups (ADR-0307 §6:6, ADR-0308 §6) -----------------------------------------
+
+#: A digest reading a memory search's one outside record, by the label local to the call.
+_SEARCH_DIGESTED: Final = json.dumps(
+    {"evidence": [{"text": "The appointment moved to three.", "source": "D1"}]}
+)
+_UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
+
+
+async def _searching_harness(
+    completer: FakeToolCallingCompleter,
+    *records: SemanticMemory,
+    digests: FakeModelProvider | None = None,
+) -> Harness:
+    """A test hub offering the look-ups, its memory holding ``records``."""
+    store = FakeMemoryStore(now=lambda: AT)
+    for record in records:
+        await store.add(record)
+    return Harness(
+        planner=NoStepPlanner(),
+        understanding=understanding_stage(),
+        tools=(_BOOK,),
+        memory=store,
+        phases=_phases(
+            completer,
+            digests=digests if digests is not None else FakeModelProvider(reply=_SEARCH_DIGESTED),
+            look_ups=True,
+        ),
+    )
+
+
+_SAID: Final = _remembered("said", MemorySource.USER_ASSERTED, f"{_DENTIST} with Dr Rao")
+_REPORTED: Final = _remembered("reported", MemorySource.EXTERNAL, f"{_DENTIST} moved to 3pm")
+
+
+async def test_a_memory_search_and_a_follow_up_reach_planning_by_label_and_digest() -> None:
+    """ADR-0307 §6:6, ADR-0308 §6:2, §6:6-§6:7, end to end.
+
+    Planning searches its memory: the user's fact comes back under its own M label, and
+    the fact a source reported is held by id and read by a digest answering the call's
+    *looking for*, never shown. It then follows up on that result by its R label with a
+    new question: the result as held is read again against it, under the same label,
+    and the answer is written from both digests.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            text="Let me check.",
+            calls=(_call("c1", "search_memory", query="dentist", looking_for="when it is"),),
+        ),
+        RoundResponse(calls=(_call("c2", "follow_up", result="R1", looking_for="what moved"),)),
+        RoundResponse(text="It is at three, with Dr Rao."),
+    )
+    digests = FakeModelProvider(reply=_SEARCH_DIGESTED)
+    harness = await _searching_harness(completer, _SAID, _REPORTED, digests=digests)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "when is the dentist?")
+    episode = await _settled(harness, conversation, seeded=frozenset({"said", "reported"}))
+
+    assert _said(await _messages(harness, conversation))[1:] == [
+        (MessageAuthor.ASSISTANT, "Let me check."),
+        (MessageAuthor.ASSISTANT, "It is at three, with Dr Rao."),
+    ]
+    # Both look-ups ran acting with digesting beside it; the third round ended it.
+    assert _stages(episode)[3:] == [
+        (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
+        (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
+        (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED),
+        (ControllerStage.DIGESTING, ControllerRule.ROUND_AUTHORIZED),
+        (ControllerStage.PLANNING, ControllerRule.ROUND_DUE),
+        (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
+        (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED),
+        (ControllerStage.DIGESTING, ControllerRule.ROUND_AUTHORIZED),
+        (ControllerStage.PLANNING, ControllerRule.ROUND_DUE),
+        (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
+        (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED),
+        (ControllerStage.END, ControllerRule.NOTHING_DUE),
+    ]
+
+    # Two digests of the one held result, each reading the outside fact fetched by id,
+    # each answering its own question (§4:3, §6:7).
+    asked = [json.loads(call.messages[-1].content) for call in digests.calls]
+    assert [one["question"] for one in asked] == ["when it is", "what moved"]
+    for one in asked:
+        assert [(row["label"], row["text"]) for row in one["records"]] == [
+            ("D1", f"{_DENTIST} moved to 3pm")
+        ]
+    record = episode.processing_record
+    assert record is not None
+    assert [(one.result, one.question, one.outcome) for one in record.digests] == [
+        ("R1", "when it is", DigestOutcome.ANSWERED),
+        ("R1", "what moved", DigestOutcome.ANSWERED),
+    ]
+    assert all(
+        one.evidence == (EvidenceItem(text="The appointment moved to three.", source="M1"),)
+        for one in record.digests
+    )
+    labels = {one.label: (one.kind, one.id) for one in record.labels}
+    assert labels["M1"] == (LabelKind.MEMORY, "reported")
+    assert labels["M2"] == (LabelKind.MEMORY, "said")
+    assert labels["R1"][0] is LabelKind.RESULT
+
+    # The second round: the user's fact under its own label, the outside one only as
+    # evidence, never its text (ADR-0307 §9:2).
+    second = completer.calls[1].messages[1].content
+    (search,) = json.loads(second)["rounds"][0]["calls"]
+    assert search["result"]["label"] == "R1"
+    value = search["result"]["value"]
+    assert [(one["label"], one["fact"]) for one in value["remembered"]] == [
+        ("M2", f"{_DENTIST} with Dr Rao")
+    ]
+    assert value["resting_on_outside_content"] == "read for you by a digest, under evidence"
+    assert "moved to 3pm" not in second
+    (evidence,) = json.loads(second)["evidence"]
+    assert (evidence["digest_of"], evidence["looking_for"]) == ("R1", "when it is")
+
+    # The third: the follow-up's result is the result it named, under the same label,
+    # and its digest is told apart by its question.
+    third = json.loads(completer.calls[2].messages[1].content)
+    (follow_up,) = third["rounds"][1]["calls"]
+    assert follow_up["result"] == {
+        "label": "R1",
+        "value": "read for you by a digest, under evidence",
+    }
+    assert [(one["digest_of"], one["looking_for"]) for one in third["evidence"]] == [
+        ("R1", "when it is"),
+        ("R1", "what moved"),
+    ]
+    # Read digested evidence, so the episode rests on outside content (§5:4).
+    assert episode.provenance.derived_from_external
+
+
+async def test_a_follow_up_naming_a_result_with_nothing_held_comes_back_not_done() -> None:
+    """ADR-0308 §6:7: a search that found nothing outside holds nothing to ask again."""
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            text="Let me check.",
+            calls=(_call("c1", "search_memory", query="dentist", looking_for="when it is"),),
+        ),
+        RoundResponse(calls=(_call("c2", "follow_up", result="R1", looking_for="what moved"),)),
+        RoundResponse(text="It is with Dr Rao."),
+    )
+    digests = FakeModelProvider(reply=_SEARCH_DIGESTED)
+    harness = await _searching_harness(completer, _SAID, digests=digests)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "when is the dentist?")
+    episode = await _settled(harness, conversation, seeded=frozenset({"said"}))
+
+    third = json.loads(completer.calls[2].messages[1].content)
+    (follow_up,) = third["rounds"][1]["calls"]
+    assert follow_up["outcome"].startswith("not done")
+    assert "nothing is held" in follow_up["outcome"]
+    assert "result" not in follow_up
+    assert digests.calls == []
+    record = episode.processing_record
+    assert record is not None
+    assert record.digests == ()
+
+
+async def test_a_search_applies_the_audience_predicate_at_the_search_and_at_the_fetch() -> None:
+    """ADR-0282 §2:8: an id enters only once admitted, and each fetch applies it again.
+
+    On an unbounded audience, a fact about someone else and a fact from a source it may
+    not hear are not kept by the search; a fact that became about someone else before
+    planning's fetch is refused there, recorded missing and shown to no round.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(_call("c1", "search_memory", query="dentist", looking_for="when it is"),)
+        ),
+        RoundResponse(text="ok"),
+    )
+    later = _remembered("later", MemorySource.USER_ASSERTED, f"{_DENTIST} reminder")
+    harness = await _searching_harness(completer)
+    for record in (
+        _SAID,
+        _REPORTED,
+        later,
+        _SAID.model_copy(update={"id": "about-sam", "about_person": "Sam"}),
+    ):
+        await harness.memory.add(record)
+    path = _phases(completer, look_ups=True)(harness)
+    working = path.begin(
+        activation_id=_ACTIVATION,
+        window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
+        conversation_id="c1",
+        trigger_origin=InputOrigin.USER,
+        owner_records=False,
+    )
+    given = _Given(
+        deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working, supply=_UNBOUNDED
+    )
+    stages = {one.name: one for one in path.stages()}
+    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING, ControllerStage.ACTING):
+        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+
+    # At the search: neither the fact about Sam nor the one a source reported is kept,
+    # shown or held.
+    (acted,) = working.acted_rounds()
+    (one,) = acted.calls
+    assert sorted(searched_ids(one.output)) == ["later", "said"]
+    assert len(working.held) == 0
+
+    # At the fetch: the fact now about someone else is refused, and recorded missing.
+    await harness.memory.add(later.model_copy(update={"about_person": "Sam"}))
+    assert (await stages[ControllerStage.PLANNING].run(given)).outcome is StageOutcome.DONE
+    assert one.result_id is not None
+    assert [record.id for record in working.searched[one.result_id]] == ["said"]
+    (fetched,) = working.search_fetches
+    assert fetched.missing == ("later",)
+    request = completer.calls[1].messages[1].content
+    assert "reminder" not in request
+
+
+async def _page_read(
+    *, outside: bool, owner_records: bool = True, supply: TurnSupply = _BOUNDED
+) -> tuple[PhaseWorking, _Given, dict[ControllerStage, Any], FakeToolCallingCompleter, str]:
+    """A pass shown story ``S1`` by an earlier round, planning reading its full view.
+
+    The story holds a note planning wrote, marked where ``outside``. The activation's own
+    episode is clean, so only what the read shows can say outside content was read.
+    """
+    stories = FakeStoryStore(now=lambda: AT)
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", "read_story", story="S1"),)),
+        RoundResponse(text="Saturday.", notes="the venue answered"),
+    )
+    harness = _harness(completer)
+    await harness.memory.add(_episode())
+    await harness.memory.add(_past_episode("activation:past"))
+    trip = (
+        await stories.create(
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="past")], actor=StoryActor.OWNER
+        )
+    ).story_id
+    assert trip is not None
+    await stories.append_note(
+        trip,
+        "The venue says Saturday.",
+        author=StoryNoteAuthor.PLANNING,
+        written_during="past",
+        outside=outside,
+    )
+    path = _phases(completer, stories=stories, look_ups=True)(harness)
+    working = path.begin(
+        activation_id=_ACTIVATION,
+        window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
+        conversation_id="c1",
+        trigger_origin=InputOrigin.USER,
+        owner_records=owner_records,
+        labels=(PlanningLabel(label="S1", kind=LabelKind.STORY, id=trip),),
+    )
+    given = _Given(
+        deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working, supply=supply
+    )
+    stages: dict[ControllerStage, Any] = {one.name: one for one in path.stages()}
+    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING, ControllerStage.ACTING):
+        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+    return working, given, stages, completer, trip
+
+
+@pytest.mark.parametrize("outside", [True, False], ids=["marked", "unmarked"])
+async def test_a_storys_full_view_is_read_and_its_marks_counted(outside: bool) -> None:
+    """ADR-0300 §10:6, ADR-0307 §6:6: a story read's view, its marked line read.
+
+    The view is read under the pass's audience when the call runs and held under the
+    call's result; the next round is shown it under that result's label, and its marked
+    note marks the round's notes and reaches the ruling, through the note's held mark.
+    """
+    working, given, stages, completer, trip = await _page_read(outside=outside)
+
+    (view,) = working.pages.values()
+    assert view.story_id == trip
+    (note,) = view.notes
+    assert working.notes[note.note_id] == note
+    assert working.fetched_outside is outside
+
+    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING):
+        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+    request = json.loads(completer.calls[1].messages[1].content)
+    (read,) = request["rounds"][0]["calls"]
+    assert read["result"]["label"] == "R1"
+    shown = read["result"]["value"]
+    assert shown["label"] == "S1"
+    (line,) = shown["notes_since_tidied"]
+    assert line["text"] == "The venue says Saturday."
+    assert ("outside_content" in line) is outside
+    assert working.latest.planned.round.notes_marked is outside
+    decided = working.latest.authorization
+    assert decided is not None
+    assert decided.read_outside_content is outside
+
+
+async def test_a_storys_full_view_follows_the_owner_only_placement() -> None:
+    """ADR-0307 §6:4: on a pass that may not show the owner's records, no note is shown."""
+    working, given, stages, completer, _ = await _page_read(
+        outside=True, owner_records=False, supply=_UNBOUNDED
+    )
+
+    (view,) = working.pages.values()
+    assert view.notes == ()
+    assert view.notes_withheld
+    assert working.notes == {}
+    assert (await stages[ControllerStage.PLANNING].run(given)).outcome is StageOutcome.DONE
+    request = json.loads(completer.calls[1].messages[1].content)
+    shown = request["rounds"][0]["calls"][0]["result"]["value"]
+    assert "notes_since_tidied" not in shown
+    assert "The venue says Saturday." not in completer.calls[1].messages[1].content
+
+
+async def test_a_story_read_naming_a_story_never_shown_is_refused_whole() -> None:
+    """ADR-0307 §5:3: a label planning was never shown runs nothing."""
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", "read_story", story="S9"),)),
+        RoundResponse(text="ok"),
+    )
+    harness = _harness(completer, stories=FakeStoryStore(now=lambda: AT), look_ups=True)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "what about the trip?")
+    await _settled(harness, conversation)
+
+    request = json.loads(completer.calls[1].messages[1].content)
+    (read,) = request["rounds"][0]["calls"]
+    assert read["outcome"].startswith("refused")
+    assert "S9" in read["outcome"]
 
 
 def test_the_phases_are_wired_only_beside_understanding() -> None:
