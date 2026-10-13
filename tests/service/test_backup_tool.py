@@ -192,19 +192,22 @@ def test_an_excluded_paths_sidecars_are_excluded_with_it(settings: Settings) -> 
     assert {f"{ADMIN_SOCKET_FILENAME}{suffix}" for suffix in backup.SIDECAR_SUFFIXES} <= excluded
 
 
-def test_the_exclusions_are_exactly_the_four_names_and_their_sidecars(settings: Settings) -> None:
-    """ADR-0123 §3 as ADR-0299 §1 amends it: four names, and nothing else rides in.
+def test_the_exclusions_are_exactly_the_four_names_their_sidecars_and_the_record(
+    settings: Settings,
+) -> None:
+    """ADR-0123 §3 as ADR-0299 §1 and ADR-0314 §7:5 amend it, and nothing else rides in.
 
-    Adding ``admin.sock`` must widen the set by that name and its sidecars alone.
-    An exclusion is a file the backup silently leaves behind, so an entry here that
-    no decision names is a durability loss nobody sees — the reason ADR-0299 refused
-    excluding sockets by file type rather than by name.
+    Adding ``admin.sock`` must widen the set by that name and its sidecars alone, and
+    the diagnostic record by its directory alone. An exclusion is a file the backup
+    silently leaves behind, so an entry here that no decision names is a durability
+    loss nobody sees — the reason ADR-0299 refused excluding sockets by file type
+    rather than by name.
     """
     names = {"traces.db", LOCK_FILENAME, SOCKET_FILENAME, ADMIN_SOCKET_FILENAME}
 
     assert backup._excluded_paths(settings) == names | {
         f"{name}{suffix}" for name in names for suffix in backup.SIDECAR_SUFFIXES
-    }
+    } | {"diagnostics"}
 
 
 def test_the_control_sockets_name_comes_from_the_wire_address_module(
@@ -242,6 +245,36 @@ def test_the_trace_stores_path_comes_from_the_composition_root(
 
     assert "renamed-traces.db" in backup._excluded_paths(settings)
     assert "traces.db" not in backup._excluded_paths(settings)
+
+
+def test_the_diagnostic_record_and_everything_beneath_it_are_excluded(
+    settings: Settings, data_dir: Path, out_dir: Path, keyphrase_file: Path, tmp_path: Path
+) -> None:
+    """ADR-0314 §7:5: no file of the record, at any depth, reaches an artifact."""
+    record = data_dir / "diagnostics"
+    (record / "nested").mkdir(parents=True, mode=0o700)
+    (record / "3f2b8c4e-1d5a-4e7b-9c0d-2a6f8e1b7c35.jsonl").write_text('{"body": {}}\n')
+    (record / "nested" / "stray.jsonl").write_text("{}\n")
+
+    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_OK
+
+    staging = tmp_path / "check"
+    staging.mkdir(mode=0o700)
+    assert set(_contents(out_dir / "a.age", staging)) == {"memory.db", "notes.txt"}
+
+
+def test_the_diagnostic_records_path_comes_from_the_composition_root(
+    settings: Settings, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§7:5: "Its path comes from the composition root, where the store is created"."""
+    monkeypatch.setattr(
+        backup,
+        "diagnostic_record_directory",
+        lambda _loaded: data_dir / "elsewhere" / "record",
+    )
+
+    assert "elsewhere/record" in backup._excluded_paths(settings)
+    assert "diagnostics" not in backup._excluded_paths(settings)
 
 
 def test_a_symbolic_link_in_the_data_directory_refuses_the_backup(

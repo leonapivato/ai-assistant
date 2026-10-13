@@ -57,6 +57,12 @@ the failure tolerance are the first run's (§2:6-§2:7).
 
 **It logs stage and code-owned reason only** — no input, no memory content and no
 exception content (ADR-0275 §8).
+
+**What it gives the diagnostic record** (ADR-0314 §4), through the sink the composition
+root hands it where the record is on: before its searches, which run it is and its cues;
+once they return or fail, each find — its id, its score, the band and the cue whose
+search returned it, and whether the audience admitted it — and which were kept, with
+the decision's outcome and the failure where there was one.
 """
 
 from __future__ import annotations
@@ -68,12 +74,15 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from ai_assistant.core.diagnostics import failure_body, write_diagnostic
 from ai_assistant.core.errors import MemoryStoreError, StoryStoreError
 from ai_assistant.core.types import (
     RECALLED_ITEMS_MAX,
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
     ActivationRecall,
     BeliefBand,
+    DiagnosticKind,
+    DiagnosticSource,
     EpisodicMemory,
     InputOrigin,
     MemoryKind,
@@ -97,10 +106,11 @@ from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_privacy import activation_of
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Container, Sequence
+    from collections.abc import Awaitable, Callable, Container, Mapping, Sequence
     from datetime import timedelta
 
-    from ai_assistant.core.protocols import MemoryStore, StoryStore
+    from ai_assistant.core.protocols import DiagnosticSink, MemoryStore, StoryStore
+    from ai_assistant.core.types import MemoryRecord
     from ai_assistant.orchestration.disclosure import TurnSupply
 
 __all__ = ["RecallStage", "Recalled", "RecalledRecord"]
@@ -170,7 +180,7 @@ class Recalled:
 class RecallStage:
     """Search long-term memory with the activation's input (ADR-0281 §3, §4, §5)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — two stores, three composition-root values and the diagnostic sink
         self,
         *,
         memory: MemoryStore,
@@ -178,6 +188,7 @@ class RecallStage:
         threshold: float,
         limit: int,
         budget: timedelta,
+        diagnostics: DiagnosticSink | None = None,
     ) -> None:
         """Wire the stage to its stores, and to the values the composition root sets.
 
@@ -190,6 +201,8 @@ class RecallStage:
             limit: ``RECALL_ITEM_LIMIT``: how many records recall keeps at most.
             budget: ``RECALL_BUDGET``: recall's own budget, before the pass's
                 deadline caps it (§5).
+            diagnostics: The diagnostic record's write seam (ADR-0314 §4:4), or
+                ``None`` where the record is off.
 
         Raises:
             ValueError: If ``threshold`` is not finite, ``limit`` is below 1 or above
@@ -209,6 +222,7 @@ class RecallStage:
         self._threshold = threshold
         self._limit = limit
         self._budget = budget.total_seconds()
+        self._diagnostics = diagnostics
 
     async def recall(
         self,
@@ -237,12 +251,14 @@ class RecallStage:
             TimeoutError: If the pass's deadline had already passed, so no search is
                 started. That is the pass's deadline, not recall's budget (§5).
         """
+        finds = _Finds(noting=self._diagnostics is not None)
+        await self._given("first", {text: list(_CUES)})
 
         async def kept() -> tuple[_Kept, ...]:
-            found = await self._search(text, audience, shown)
+            found = await self._search(text, audience, shown, finds)
             return tuple(_Kept(record, _CUES, score) for record, _, score in found)
 
-        return await self._decided(kept, cues=_CUES, deadline=deadline)
+        return await self._decided(kept, cues=_CUES, deadline=deadline, finds=finds)
 
     async def recall_again(  # noqa: PLR0913 — the two kinds of cue, the audience, the deadline, what is passed over and the cap
         self,
@@ -292,16 +308,85 @@ class RecallStage:
             kind for kind in _SECOND_RUN_CUES if any(kind in kinds for kinds in cues.values())
         )
 
+        finds = _Finds(noting=self._diagnostics is not None)
+        await self._given("second", cues)
+
         async def kept() -> tuple[_Kept, ...]:
             found = [
-                (tuple(kinds), await self._search(text, audience, passed_over))
+                (tuple(kinds), await self._search(text, audience, passed_over, finds))
                 for text, kinds in cues.items()
             ]
             return _capped(found, cap)
 
-        return await self._decided(kept, cues=searched, deadline=deadline)
+        return await self._decided(kept, cues=searched, deadline=deadline, finds=finds)
+
+    async def _given(self, run: str, cues: Mapping[str, Sequence[RecallCue]]) -> None:
+        """Write which run this is and its cues, before its searches (ADR-0314 §4)."""
+        await write_diagnostic(
+            self._diagnostics,
+            DiagnosticSource.RECALL,
+            DiagnosticKind.GIVEN,
+            lambda: {
+                "run": run,
+                "cues": [
+                    {"text": text, "kinds": [kind.value for kind in kinds]}
+                    for text, kinds in cues.items()
+                ],
+            },
+        )
+
+    async def _returned(
+        self, finds: _Finds, decided: Recalled | None, error: Exception | None = None
+    ) -> None:
+        """Write each find and which were kept, once the searches returned or failed."""
+
+        def body() -> dict[str, object]:
+            returned: dict[str, object] = {"finds": list(finds.found)}
+            if decided is not None:
+                returned["outcome"] = decided.result.outcome.value
+                scores: Sequence[float | None] = decided.scores or (None,) * len(
+                    decided.result.items
+                )
+                returned["kept"] = [
+                    {
+                        "id": item.id,
+                        "score": _score(score),
+                        "found_by": [kind.value for kind in item.found_by],
+                    }
+                    for item, score in zip(decided.result.items, scores, strict=True)
+                ]
+            failed = error if error is not None else (None if decided is None else decided.error)
+            if failed is not None:
+                returned["failure"] = failure_body(failed)
+            return returned
+
+        await write_diagnostic(
+            self._diagnostics, DiagnosticSource.RECALL, DiagnosticKind.RETURNED, body
+        )
 
     async def _decided(
+        self,
+        kept_by: Callable[[], Awaitable[tuple[_Kept, ...]]],
+        *,
+        cues: tuple[RecallCue, ...],
+        deadline: float,
+        finds: _Finds,
+    ) -> Recalled:
+        """Run one recall, and write what it returned or how it failed (ADR-0314 §4).
+
+        Raises:
+            TimeoutError: If the pass's deadline had already passed, so no search is
+                started. That is the pass's deadline, not recall's budget (§5).
+        """
+        try:
+            decided = await self._deciding(kept_by, cues=cues, deadline=deadline)
+        except Exception as exc:
+            await self._returned(finds, None, exc)
+            raise
+        await self._returned(finds, decided)
+        return decided
+
+    async def _deciding(
         self,
         kept_by: Callable[[], Awaitable[tuple[_Kept, ...]]],
         *,
@@ -347,13 +432,14 @@ class RecallStage:
         return Recalled(_decision(RecallOutcome.FOUND, items, cues=cues), scores=scores)
 
     async def _search(
-        self, text: str, audience: TurnSupply, shown: frozenset[str]
+        self, text: str, audience: TurnSupply, shown: frozenset[str], finds: _Finds
     ) -> tuple[tuple[RecalledRecord, BeliefBand, float], ...]:
         """§3's band-scoped searches, kept in band order until the limit is filled.
 
         A record the windows hold is passed over before it is judged, so it takes no
         slot, and each search asks for as many more as it may pass over (ADR-0282 §4).
-        Each kept record comes with the band whose search kept it and its score.
+        Each kept record comes with the band whose search kept it and its score. Every
+        record a search returns is noted in ``finds`` for the diagnostic record.
         """
         limit = self._limit + len(shown)
         kinds = (
@@ -364,7 +450,9 @@ class RecallStage:
         kept: dict[str, tuple[RecalledRecord, BeliefBand, float]] = {}
         for band in _BANDS:
             found = await self._memory.search(text, limit=limit, kinds=kinds, bands=(band,))
-            for record in admitted_to_understanding(audience, found.records):
+            admitted = admitted_to_understanding(audience, found.records)
+            finds.note(text, band, found.records, admitted)
+            for record in admitted:
                 if not isinstance(record, EpisodicMemory | SemanticMemory):
                     continue
                 if record.id in shown:
@@ -398,6 +486,44 @@ class RecallStage:
             return ()
         member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
         return tuple(header.story_id for header in await self._stories.stories_of(member))
+
+
+class _Finds:
+    """What one recall's searches returned, noted for the diagnostic record (§4).
+
+    Notes nothing where the record is off, so no entry's body is built (ADR-0314 §2:1).
+    """
+
+    def __init__(self, *, noting: bool) -> None:
+        self._noting = noting
+        self.found: list[dict[str, object]] = []
+
+    def note(
+        self,
+        cue: str,
+        band: BeliefBand,
+        records: Sequence[MemoryRecord],
+        admitted: Sequence[MemoryRecord],
+    ) -> None:
+        """Note each record one search returned, in the store's order."""
+        if not self._noting:
+            return
+        let_in = {record.id for record in admitted}
+        self.found.extend(
+            {
+                "id": record.id,
+                "score": _score(record.score),
+                "band": band.value,
+                "cue": cue,
+                "admitted": record.id in let_in,
+            }
+            for record in records
+        )
+
+
+def _score(score: float | None) -> float | None:
+    """A score as JSON holds it: a non-finite one is no score."""
+    return score if score is not None and math.isfinite(score) else None
 
 
 @dataclass(frozen=True, slots=True)

@@ -15,9 +15,11 @@ the turn loop and the drive into stages of their own.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, Protocol
 
+from ai_assistant.core.diagnostics import diagnosed_activation, failure_body, write_diagnostic
 from ai_assistant.core.errors import (
     ChannelProcessingTimeoutError,
     ModelTimeoutError,
@@ -26,15 +28,18 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     ControllerRule,
     ControllerStage,
+    DiagnosticKind,
+    DiagnosticSource,
     StageEntry,
     StageOutcome,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
     from datetime import datetime
 
     from ai_assistant.core.clock import Clock
+    from ai_assistant.core.protocols import DiagnosticSink
     from ai_assistant.core.types import Disposition, RouteOutcome
 
 #: The classified timeouts a stage can end in (§5). Each is already the row
@@ -827,7 +832,7 @@ async def run_recorded[T](  # noqa: PLR0913 — where to record, which stage and
 class ActivationController[P: PassFacts]:
     """Run a pass's stages by §4's rules and record every choice (ADR-0280 §3)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — the stages, the clock, the rules, the two hooks and the activation its record is written for
         self,
         *,
         stages: Sequence[ControllerStageRun[P]],
@@ -835,6 +840,8 @@ class ActivationController[P: PassFacts]:
         rules: Sequence[Rule] = ACTIVATION_RULES,
         appended: Callable[[], Awaitable[None]] | None = None,
         stopped: Callable[[], bool] | None = None,
+        activation_id: str | None = None,
+        diagnostics: DiagnosticSink | None = None,
     ) -> None:
         """Hold the stages, the clock, the rule table and what follows each entry.
 
@@ -846,6 +853,12 @@ class ActivationController[P: PassFacts]:
         ``stopped`` reads the activation's stop mark (ADR-0297 §3, §4), the one thing
         the controller reads besides the pass's state; a pass with no activation to
         stop leaves it ``None``, and is never marked.
+
+        ``activation_id`` is the admitted activation this pass runs, which the run
+        binds for every stage as the activation diagnostic entries are written for
+        (ADR-0314 §5:4); ``None`` for a pass no channel admitted, which binds nothing.
+        ``diagnostics`` is the sink the controller writes its step entries through
+        (§4), ``None`` where the record is off.
         """
         self._stages: Mapping[ControllerStage, ControllerStageRun[P]] = {
             stage.name: stage for stage in stages
@@ -854,6 +867,8 @@ class ActivationController[P: PassFacts]:
         self._rules = tuple(rules)
         self._appended = appended
         self._stopped = stopped
+        self._activation_id = activation_id
+        self._diagnostics = diagnostics
 
     def _marked(self) -> bool:
         return self._stopped is not None and self._stopped()
@@ -921,7 +936,7 @@ class ActivationController[P: PassFacts]:
             raise
         return ran, alongside
 
-    async def run(self, state: P, record: StageRecord) -> None:  # noqa: C901 — §3's one step, with ADR-0297 §4's two readings of the stop mark and ADR-0309 §3:3's step of two stages in it
+    async def run(self, state: P, record: StageRecord) -> None:
         """Run the pass to its end entry.
 
         Ends with the rule that ended it; with ``stage_repeated`` where the first
@@ -949,11 +964,48 @@ class ActivationController[P: PassFacts]:
         ended the pass. No task is cancelled, and a cancellation that reaches a marked
         pass still propagates, its end entry still the stop's.
 
+        **The run binds the activation its diagnostic entries are written for**
+        (ADR-0314 §5:4), around every stage, and writes one step entry for each entry it
+        appends, the end entry included (§4): the rule that answered, the stage it ran,
+        when the step started and ended, and how it ended. A pass that is cancelled
+        writes no end entry: nothing is awaited on the way out of a cancellation.
+
         Raises:
             Exception: The error a stage that failed or timed out carried, on a pass
                 whose stop mark was not set when its result was in hand.
         """
+        with self._diagnosed():
+            await self._run(state, record)
+
+    @contextlib.contextmanager
+    def _diagnosed(self) -> Iterator[None]:
+        """Bind this pass's activation for its run, where one was admitted (§5:4)."""
+        if self._activation_id is None:
+            yield
+            return
+        with diagnosed_activation(self._activation_id, clock=self._clock):
+            yield
+
+    async def _stepped(self, entry: StageEntry, error: Exception | None = None) -> None:
+        """Write one step entry, as the stage record holds it (ADR-0314 §4)."""
+
+        def body() -> dict[str, object]:
+            step: dict[str, object] = entry.model_dump(mode="json")
+            if error is not None:
+                step["failure"] = failure_body(error)
+            return step
+
+        await write_diagnostic(
+            self._diagnostics, DiagnosticSource.CONTROLLER, DiagnosticKind.STEP, body
+        )
+
+    async def _ended(self, record: StageRecord) -> None:
+        """Write the end entry the record just took."""
+        await self._stepped(record.entries[-1])
+
+    async def _run(self, state: P, record: StageRecord) -> None:  # noqa: C901, PLR0912 — §3's one step, with ADR-0297 §4's two readings of the stop mark and ADR-0309 §3:3's step of two stages in it
         ran: set[tuple[ControllerStage, object]] = set()
+        cancelled = False
         try:
             while True:
                 if self._marked():
@@ -962,12 +1014,14 @@ class ActivationController[P: PassFacts]:
                 stage = rule.makes_due
                 if stage is ControllerStage.END:
                     record.end(rule.name, self._clock())
+                    await self._ended(record)
                     return
                 scope = None if rule.per is None else rule.per(state)
                 beside = self._beside(rule, state)
                 keys = [(stage, scope)] + ([] if beside is None else [(beside, scope)])
                 if any(key in ran for key in keys):
                     record.end(ControllerRule.STAGE_REPEATED, self._clock())
+                    await self._ended(record)
                     return
                 runner = self._runner(rule, stage)
                 alongside = None if beside is None else self._runner(rule, beside)
@@ -980,17 +1034,17 @@ class ActivationController[P: PassFacts]:
                     ran_first, ran_beside = await self._side_by_side(state, runner, alongside)
                     steps = [(stage, ran_first), (alongside.name, ran_beside)]
                 for name, (result, ended_at) in steps:
-                    record.append(
-                        StageEntry(
-                            stage=name,
-                            due=rule.name,
-                            started_at=started_at,
-                            ended_at=ended_at,
-                            outcome=result.outcome,
-                            step_disposition=result.verdict.step_disposition,
-                            route_outcome=result.verdict.route_outcome,
-                        )
+                    entry = StageEntry(
+                        stage=name,
+                        due=rule.name,
+                        started_at=started_at,
+                        ended_at=ended_at,
+                        outcome=result.outcome,
+                        step_disposition=result.verdict.step_disposition,
+                        route_outcome=result.verdict.route_outcome,
                     )
+                    record.append(entry)
+                    await self._stepped(entry, result.error)
                 if self._appended is not None:
                     await self._appended()
                 if self._marked():
@@ -1012,14 +1066,20 @@ class ActivationController[P: PassFacts]:
                     else ControllerRule.STAGE_FAILED,
                     self._clock(),
                 )
+                await self._ended(record)
                 assert ending.error is not None  # noqa: S101 — a stage that did not end done carries its error
                 raise ending.error
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
             if not record.ended:
                 record.end(
                     ControllerRule.STOPPED if self._marked() else ControllerRule.INTERRUPTED,
                     self._clock(),
                 )
+                if not cancelled:
+                    await self._ended(record)
 
 
 class _CancelledBeside(Exception):  # noqa: N818 — names what happened to the stage, and is never raised

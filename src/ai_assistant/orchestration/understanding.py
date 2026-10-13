@@ -98,6 +98,7 @@ import structlog
 from pydantic import ValidationError
 
 from ai_assistant.core.channel_validation import input_origin
+from ai_assistant.core.diagnostics import write_diagnostic, write_failure
 from ai_assistant.core.episode_encoding import (
     ROUTE_OUTCOME_PHRASES,
     STEP_DISPOSITION_PHRASES,
@@ -109,6 +110,8 @@ from ai_assistant.core.types import (
     ActivationUnderstanding,
     BeliefBand,
     DeletedMessage,
+    DiagnosticKind,
+    DiagnosticSource,
     EpisodicMemory,
     InputOrigin,
     Message,
@@ -134,7 +137,7 @@ from ai_assistant.orchestration.story_privacy import activation_of
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from ai_assistant.core.protocols import MemoryStore, ModelProvider
+    from ai_assistant.core.protocols import DiagnosticSink, MemoryStore, ModelProvider
     from ai_assistant.core.types import (
         ActivationRecall,
         ChannelContext,
@@ -697,7 +700,13 @@ class _Brief:
 class UnderstandingStage:
     """Produce one activation's understanding from its input and two windows (ADR-0276)."""
 
-    def __init__(self, *, model: ModelProvider, excerpt_chars: int) -> None:
+    def __init__(
+        self,
+        *,
+        model: ModelProvider,
+        excerpt_chars: int,
+        diagnostics: DiagnosticSink | None = None,
+    ) -> None:
         """Wire the stage to the model seam and the excerpt bound.
 
         The stage reads no store: the episode window's records are handed to it, as
@@ -709,6 +718,9 @@ class UnderstandingStage:
                 no ``model=`` override, for ``RoutingStage``'s reason.
             excerpt_chars: ``UNDERSTANDING_EXCERPT_CHARS``: the bound each episode's
                 input and response are cut to, the cut disclosed (§4).
+            diagnostics: The diagnostic record's write seam (ADR-0314 §4:4): each
+                completion's rendered request before it, and its reply or its failure
+                after; ``None`` where the record is off.
 
         Raises:
             ValueError: If ``excerpt_chars`` is below 1.
@@ -718,6 +730,7 @@ class UnderstandingStage:
             raise ValueError(msg)
         self._model = model
         self._excerpt_chars = excerpt_chars
+        self._diagnostics = diagnostics
 
     async def understand(  # noqa: PLR0913 — the input, its channel, its window, the audience, whether it takes episodes, the two facts orchestration mints, and what recall found
         self,
@@ -782,12 +795,12 @@ class UnderstandingStage:
             stories=stories,
         )
         _within(deadline)
-        first = await self._model.complete(brief.messages)
+        first = await self._completed(brief.messages)
         proposal, problem = self._validated(first.content, brief)
         if problem is not None:
             _within(deadline)
             _log.info("understanding_repair", stage="understanding", reason=problem.reason)
-            second = await self._model.complete(
+            second = await self._completed(
                 (
                     *brief.messages,
                     Message(role=Role.ASSISTANT, content=first.content),
@@ -803,6 +816,31 @@ class UnderstandingStage:
         return _resolved(
             proposal, brief.labels, brief.story_members, version=version, recorded_at=now()
         )
+
+    async def _completed(self, messages: Sequence[Message]) -> Message:
+        """One completion, its rendered request and its reply written to the record.
+
+        The given entry is written before the call and the returned one once it returns
+        or fails (ADR-0314 §4:1); the failure is re-raised unchanged.
+        """
+        await write_diagnostic(
+            self._diagnostics,
+            DiagnosticSource.UNDERSTANDING,
+            DiagnosticKind.GIVEN,
+            lambda: {"messages": [one.model_dump(mode="json") for one in messages]},
+        )
+        try:
+            reply = await self._model.complete(messages)
+        except Exception as exc:
+            await write_failure(self._diagnostics, DiagnosticSource.UNDERSTANDING, exc)
+            raise
+        await write_diagnostic(
+            self._diagnostics,
+            DiagnosticSource.UNDERSTANDING,
+            DiagnosticKind.RETURNED,
+            lambda: {"reply": reply.content},
+        )
+        return reply
 
     def _brief(  # noqa: PLR0913 — the input, its channel, its window, the audience, the window's episodes, what recall found and the candidate stories
         self,

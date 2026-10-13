@@ -184,6 +184,21 @@ async def write_diagnostic(
         _dropped(run.activation_id, source, exc)
 
 
+async def write_failure(
+    sink: DiagnosticSink | None, source: DiagnosticSource, error: BaseException
+) -> None:
+    """Write ``source``'s returned entry as the failure its call ended in.
+
+    Args:
+        sink: The emitter's sink, or ``None`` where the record is off.
+        source: Which source writes.
+        error: How the call failed.
+    """
+    await write_diagnostic(
+        sink, source, DiagnosticKind.RETURNED, lambda: {"failure": failure_body(error)}
+    )
+
+
 def _dropped(activation_id: str, source: DiagnosticSource, error: Exception) -> None:
     """Log an entry that was not written, by activation, source and class alone (§2:4)."""
     _log.warning(
@@ -201,4 +216,5 @@ __all__ = [
     "failure_body",
     "returned_written",
     "write_diagnostic",
+    "write_failure",
 ]

@@ -9,7 +9,8 @@ mechanisms."
 
 **What it copies is a directory, not a set of stores** (§1). Every regular file
 under ``Settings.data_dir``, at any depth, byte for byte, except the four §3
-excludes (ADR-0299 §1 added the control socket). It opens no store and carries no
+excludes (ADR-0299 §1 added the control socket) and the diagnostic record's
+directory with everything beneath it (ADR-0314 §7:5). It opens no store and carries no
 list of stores, and that is the point rather than a simplification: "the count in
 the most authoritative document about the data directory is already wrong by two,
 and nothing detected it. A backup that carried its own list of stores would have
@@ -50,7 +51,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant import __version__
-from ai_assistant.app import build_measure_reader
+from ai_assistant.app import build_measure_reader, diagnostic_record_directory
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import AssistantError, ConfigurationError
 from ai_assistant.service import artifact, datadir, passphrase
@@ -469,6 +470,14 @@ def _excluded_paths(settings: Settings) -> frozenset[str]:
         # artifact." Redundant with §2's directory-wide refusal, and kept because
         # the clause it protects is absolute.
         excluded.update(f"{name}{suffix}" for suffix in SIDECAR_SUFFIXES)
+    # ADR-0314 §7:5, superseding §3:4's exact match for this one path: the
+    # diagnostic record's directory, whose path the composition root states because
+    # that is where the record is created. An excluded name is skipped where the walk
+    # meets it, a directory included, so nothing beneath it is reached: a backup
+    # outlives the window that is the record's forgetting.
+    diagnostics = diagnostic_record_directory(settings)
+    if diagnostics.is_relative_to(data_dir):
+        excluded.add(diagnostics.relative_to(data_dir).as_posix())
     return frozenset(excluded)
 
 

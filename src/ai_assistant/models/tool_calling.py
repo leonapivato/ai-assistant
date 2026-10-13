@@ -33,6 +33,18 @@ model is never refused for a ceiling at or below its budget. A response cut at i
 ceiling is not a round: its message may stop mid-sentence and whatever followed the cut
 is lost, so it is refused as unreadable rather than returned.
 
+**The diagnostic record keeps the thinking** (ADR-0314 §5), and nothing else does.
+Where the composition root hands the completer a
+:class:`~ai_assistant.core.protocols.DiagnosticSink` — the record is on — a round on a
+model with Anthropic's adaptive thinking asks for the thinking's summarised text, which
+that thinking otherwise omits, and the completer writes planning's returned entry from
+the provider's whole response, every part in order, thinking included, whether or not
+it reads as a round, before it returns or raises. The entry is written for the
+activation :mod:`ai_assistant.core.diagnostics` carries, and nothing is written where
+none is bound. The thinking still reaches nothing else: :class:`RoundResponse`, the
+episode and the next round never carry it (§5:3). Where the record is off, the request
+is as it is without this.
+
 **Nothing here retries or re-routes**, as nothing in the streaming sibling does:
 ``RoutingProvider`` and ``RetryingProvider`` wrap ``ModelProvider`` completions, and a
 round's resilience is the caller's to decide.
@@ -42,11 +54,11 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 from pydantic import ValidationError
 from pydantic_ai.direct import model_request
-from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.messages import ModelMessagesTypeAdapter, ToolCallPart
 from pydantic_ai.models import ModelRequestParameters, infer_model
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.wrapper import WrapperModel
@@ -54,8 +66,16 @@ from pydantic_ai.profiles.anthropic import ANTHROPIC_THINKING_BUDGET_MAP
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition as NativeTool
 
+from ai_assistant.core.diagnostics import failure_body, write_diagnostic
 from ai_assistant.core.errors import ModelError, ModelResponseError
-from ai_assistant.core.types import OfferedTool, ProposedCall, Role, RoundResponse
+from ai_assistant.core.types import (
+    DiagnosticKind,
+    DiagnosticSource,
+    OfferedTool,
+    ProposedCall,
+    Role,
+    RoundResponse,
+)
 from ai_assistant.models.provider import _classify, _to_model_messages
 
 if TYPE_CHECKING:
@@ -65,6 +85,7 @@ if TYPE_CHECKING:
     from pydantic_ai.messages import ModelResponse
     from pydantic_ai.settings import ThinkingLevel
 
+    from ai_assistant.core.protocols import DiagnosticSink
     from ai_assistant.core.types import Message
 
 #: The reserved tool the notes and the mark ride (ADR-0307 §2:7). No capability takes
@@ -75,6 +96,11 @@ ROUND_TOOL: Final = "planning_round"
 #: default effort. On a model with adaptive thinking that is the model's own judgement of
 #: how much each round needs, and no effort setting narrows the message it writes.
 DEFAULT_THINKING: Final[ThinkingLevel] = True
+
+#: How a round asks Anthropic's adaptive thinking for its text where the diagnostic record
+#: keeps it (ADR-0314 §5:1): adaptive thinking omits the text unless the request asks for
+#: the summarised display.
+_SUMMARISED_ADAPTIVE: Final[Mapping[str, str]] = {"type": "adaptive", "display": "summarized"}
 
 #: The output a round's message and calls had before it could think: pydantic-ai's
 #: Anthropic default ceiling. Thinking is given its room on top of this, never out of it.
@@ -115,7 +141,11 @@ class PydanticAIToolCallingCompleter:
     """
 
     def __init__(
-        self, default_model: models.Model | str, *, thinking: ThinkingLevel = DEFAULT_THINKING
+        self,
+        default_model: models.Model | str,
+        *,
+        thinking: ThinkingLevel = DEFAULT_THINKING,
+        diagnostics: DiagnosticSink | None = None,
     ) -> None:
         """Initialise the completer.
 
@@ -127,9 +157,13 @@ class PydanticAIToolCallingCompleter:
             thinking: The thinking every round asks for, as pydantic-ai's unified
                 setting: ``True`` for the provider's default effort, an effort level,
                 or ``False`` to ask for none. A model without thinking ignores it.
+            diagnostics: The diagnostic record's write seam, where the record is on
+                (ADR-0314 §5:1); ``None`` otherwise, and then the request and the
+                round are as they are without it.
         """
         self._default_model = default_model
         self._thinking: ThinkingLevel = thinking
+        self._diagnostics = diagnostics
 
     async def respond(
         self,
@@ -184,17 +218,47 @@ class PydanticAIToolCallingCompleter:
             response = await model_request(
                 chosen,
                 history,
-                model_settings=_settings(self._thinking, chosen),
+                model_settings=_settings(
+                    self._thinking, chosen, summarised=self._diagnostics is not None
+                ),
                 model_request_parameters=parameters,
             )
         except Exception as exc:
             # Broad on purpose: `_classify` is the taxonomy, and its default for an
             # unrecognised failure is the conservative bare `ModelError` (ADR-0063).
             raise _classify(exc) from exc
-        return _round(response)
+        try:
+            read = _round(response)
+        except ModelResponseError as exc:
+            await self._returned(response, exc)
+            raise
+        await self._returned(response, None)
+        return read
+
+    async def _returned(self, response: ModelResponse, failure: ModelResponseError | None) -> None:
+        """Write planning's returned entry from the provider's whole response (§5:2).
+
+        Every part in order, thinking included, as pydantic-ai serialises the response;
+        and where it did not read as a round, why not.
+        """
+
+        def body() -> dict[str, object]:
+            returned: dict[str, object] = {
+                "response": ModelMessagesTypeAdapter.dump_python([response], mode="json")[0],
+                "read_as_round": failure is None,
+            }
+            if failure is not None:
+                returned["failure"] = failure_body(failure)
+            return returned
+
+        await write_diagnostic(
+            self._diagnostics, DiagnosticSource.PLANNING, DiagnosticKind.RETURNED, body
+        )
 
 
-def _settings(thinking: ThinkingLevel, model: models.Model) -> ModelSettings | None:
+def _settings(
+    thinking: ThinkingLevel, model: models.Model, *, summarised: bool = False
+) -> ModelSettings | None:
     """A round's model settings: the thinking it asks for, and room for it.
 
     A budget-based Anthropic model is given a budget and refuses a ceiling that does
@@ -211,6 +275,11 @@ def _settings(thinking: ThinkingLevel, model: models.Model) -> ModelSettings | N
     model it holds in turn, and one ceiling cannot fit models whose budgets and
     allowances differ, so it is asked for no thinking. Nothing in this project builds
     one; the round's resilience is the caller's (see the module docstring).
+
+    Where ``summarised`` — the diagnostic record is on — and the thinking is asked for
+    of a model with Anthropic's adaptive thinking whose own settings do not configure
+    it, the request asks for the thinking's summarised text (ADR-0314 §5:1). The key is
+    Anthropic's own, so any other model ignores it.
     """
     inner = model
     while isinstance(inner, WrapperModel):
@@ -218,9 +287,26 @@ def _settings(thinking: ThinkingLevel, model: models.Model) -> ModelSettings | N
     if isinstance(inner, FallbackModel):
         return None
     ceiling = None if thinking is False else _ceiling(thinking, inner)
-    if ceiling is None:
-        return ModelSettings(thinking=thinking)
-    return ModelSettings(thinking=thinking, max_tokens=ceiling)
+    settings = (
+        ModelSettings(thinking=thinking)
+        if ceiling is None
+        else ModelSettings(thinking=thinking, max_tokens=ceiling)
+    )
+    if summarised and thinking is not False and _adaptive_unconfigured(inner):
+        # Anthropic's own settings key, which ``ModelSettings`` does not declare and
+        # every other model ignores.
+        widened: dict[str, object] = {**settings, "anthropic_thinking": dict(_SUMMARISED_ADAPTIVE)}
+        return cast("ModelSettings", widened)
+    return settings
+
+
+def _adaptive_unconfigured(model: models.Model) -> bool:
+    """Whether ``model`` thinks adaptively and its own settings leave that to the request."""
+    configured: Mapping[str, object] = model.settings or {}
+    return (
+        bool(model.profile.get("anthropic_supports_adaptive_thinking", False))
+        and "anthropic_thinking" not in configured
+    )
 
 
 def _ceiling(thinking: ThinkingLevel, model: models.Model) -> int | None:

@@ -376,6 +376,8 @@ if TYPE_CHECKING:
         AuditTrail,
         AuthorizationResolution,
         DeferralStore,
+        DiagnosticRetention,
+        DiagnosticSink,
         GoalAssociator,
         MemoryStore,
         NotificationPolicy,
@@ -693,6 +695,10 @@ class PurgeReport:
     #: ``None`` rather than ``0`` for :attr:`traces`' reason: "not wired" and
     #: "found nothing" are different facts about a run.
     notifications: int | None = None
+    #: Diagnostic-record files past their window deleted (ADR-0314 §7:2), or ``None``
+    #: where no record is wired and the sweep was therefore **not run**, for
+    #: :attr:`notifications`' reason.
+    diagnostics: int | None = None
 
 
 def _uuid() -> str:
@@ -747,6 +753,19 @@ def _check_positive_int(value: int, *, name: str) -> None:
         raise TypeError(msg)
     if value < 1:
         msg = f"{name} must be positive, got {value}"
+        raise ValueError(msg)
+
+
+def _check_diagnostic_sweep(
+    retention: DiagnosticRetention | None, window: timedelta | None
+) -> None:
+    """Refuse a diagnostic sweep given its seam without its window, or the reverse.
+
+    Raises:
+        ValueError: If exactly one of the two is given (ADR-0314 §7:2).
+    """
+    if (retention is None) != (window is None):
+        msg = "the diagnostic record's sweep takes its seam and its window together"
         raise ValueError(msg)
 
 
@@ -848,6 +867,8 @@ def _purged(report: PurgeReport) -> Observation:
         metrics["traces"] = report.traces
     if report.notifications is not None:
         metrics["notifications"] = report.notifications
+    if report.diagnostics is not None:
+        metrics["diagnostics"] = report.diagnostics
     return Observation(metrics=metrics)
 
 
@@ -3153,6 +3174,9 @@ class Engine:
         chat_reader: bool = True,
         chat_turn_budget: timedelta = CHAT_TURN_BUDGET,
         phases: PhasePath | None = None,
+        diagnostics: DiagnosticSink | None = None,
+        diagnostic_retention: DiagnosticRetention | None = None,
+        diagnostic_window: timedelta | None = None,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -3733,6 +3757,18 @@ class Engine:
                 starts runs :data:`~ai_assistant.orchestration.controller.PHASE_RULES`
                 over its stages, and the phases write its messages; ``None``, the
                 default, is every other deployment's, whose table runs unchanged.
+            diagnostics: The diagnostic record's write seam (ADR-0314 §4:4), which
+                the controller of every pass writes its step entries through; ``None``
+                where ``Settings.diagnostic_record`` is false. The engine itself writes
+                nothing through it: it hands it on to each pass's controller, with the
+                activation the pass runs.
+            diagnostic_retention: The diagnostic record's deletion seam, swept in
+                :meth:`_purge_expired` beside the trace store whatever
+                ``diagnostic_record`` says (ADR-0314 §7:2-§7:3). Given together with
+                ``diagnostic_window``; ``None`` for both, the default, sweeps no record,
+                which is a directly built engine's and never the composition root's.
+            diagnostic_window: ``Settings.diagnostic_retention``, the window the sweep
+                measures back from the engine's clock (§7:1).
 
         Raises:
             TypeError: If ``max_outstanding_confirmations``,
@@ -3748,8 +3784,10 @@ class Engine:
                 return a rendering of any length while reporting health, and one
                 built with it as the contract limit would measure every argument and
                 every result against a ceiling nothing can exceed.
-            ValueError: If any of the three is not positive.
+            ValueError: If any of the three is not positive, or only one of
+                ``diagnostic_retention`` and ``diagnostic_window`` is given.
         """
+        _check_diagnostic_sweep(diagnostic_retention, diagnostic_window)
         _check_positive_int(max_outstanding_confirmations, name="max_outstanding_confirmations")
         # ADR-0200 §6's ceiling, guarded on the same terms and for a sharper reason.
         # ``Settings`` refuses a non-integer or a non-positive value at load, but this
@@ -3779,6 +3817,9 @@ class Engine:
         self._deferrals = deferrals
         self._traces = traces
         self._trace_retention = trace_retention
+        self._diagnostics = diagnostics
+        self._diagnostic_retention = diagnostic_retention
+        self._diagnostic_window = diagnostic_window
         self._clock = checked_clock(now, owner="Engine")
         # The one emitter, built here rather than injected: ADR-0119 §8 puts the
         # envelope at `_tracked`, so its lifetime is this engine's and nothing
@@ -4402,7 +4443,23 @@ class Engine:
             else await self._traces.purge_before(_horizon(self._now(), self._trace_retention))
         )
         held = None if self._notifications is None else await self._notifications.purge()
-        return PurgeReport(records=records, questions=questions, traces=traces, notifications=held)
+        # ADR-0314 §7:2-§7:3: the diagnostic record's window, swept here beside the
+        # trace store and whatever `diagnostic_record` says now, so a file written
+        # while it was on is still deleted after it is turned off.
+        diagnostics = (
+            None
+            if self._diagnostic_retention is None or self._diagnostic_window is None
+            else await self._diagnostic_retention.purge_before(
+                _horizon(self._now(), self._diagnostic_window)
+            )
+        )
+        return PurgeReport(
+            records=records,
+            questions=questions,
+            traces=traces,
+            notifications=held,
+            diagnostics=diagnostics,
+        )
 
     def _now(self) -> datetime:
         """The guarded clock's reading, as the error of the sweep that read it.
@@ -12755,6 +12812,10 @@ class Engine:
             rules=rules,
             appended=self._episode_appended,
             stopped=None if state is None else (lambda: state.stopped),
+            # ADR-0314 §4:4, §5:4: the controller binds the admitted activation for
+            # its run and writes its steps through the composition root's sink.
+            activation_id=None if state is None else state.activation_id,
+            diagnostics=self._diagnostics,
         ).run(working, record)
         if state is not None and state.stopped:
             # ADR-0297 §4: the controller left its loop on the stop and appended the

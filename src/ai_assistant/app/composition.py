@@ -17,6 +17,7 @@ knows it, beside the ``TraceSink`` the stamp writes through.
 
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -36,7 +37,7 @@ from ai_assistant.core.types import (
     DestinationProtocol,
     SecretScope,
 )
-from ai_assistant.evaluation import MeasureReader, SqliteTraceStore
+from ai_assistant.evaluation import FileDiagnosticRecord, MeasureReader, SqliteTraceStore
 from ai_assistant.learning import RuleBasedFeedbackProcessor
 from ai_assistant.memory import (
     DefaultMemoryPolicy,
@@ -174,6 +175,7 @@ if TYPE_CHECKING:
         AuditTrail,
         ConnectionPurger,
         ConversationStore,
+        DiagnosticSink,
         EgressBinder,
         Embedder,
         MemoryStore,
@@ -491,6 +493,14 @@ PHASES_CALL_DEADLINE: Final = timedelta(seconds=30)
 #: reads (ADR-0308 §4:9). **Provisional (#2589).** A search's three bounded results
 #: fit in one part.
 PHASES_DIGEST_PART_CHARS: Final = 12_000
+
+#: ``DIAGNOSTIC_FILE_BYTES``: the most one activation's diagnostic file holds (ADR-0314
+#: §6:3). A busy activation is far below it; the cap stops one runaway activation from
+#: filling the disk, and the window bounds the rest.
+DIAGNOSTIC_FILE_BYTES: Final = 8 * 1024 * 1024
+
+#: The diagnostic record's directory under the data directory (ADR-0314 §6:1).
+DIAGNOSTIC_DIRECTORY: Final = "diagnostics"
 
 #: ``RECALL_SECOND_RUN_CAP``: how many records recall's second run keeps in all, across
 #: understanding's meaning and phrases, each of which keeps up to ``RECALL_ITEM_LIMIT``
@@ -977,6 +987,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     # whose factory produces the very ``~/.ai-assistant`` this module resolved
     # privately before, so nothing moves for a deployment that configures nothing.
     directory = data_dir if data_dir is not None else settings.data_dir
+    # ADR-0314 §7:4: the record's window is its forgetting, so a hub with no sweep
+    # refuses to start while it would write one or holds one, before any store opens.
+    record_directory = diagnostic_record_directory(settings, data_dir=directory)
+    refuse_an_unswept_diagnostic_record(settings, record_directory)
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -1021,6 +1035,16 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # nothing else.
         traces = SqliteTraceStore(path=directory / "traces.db")
         opened.append(traces.close)
+        # ADR-0314's diagnostic record: one object, handed out narrowed and never
+        # whole (§3:3). The engine's sweep takes it as a ``DiagnosticRetention``
+        # whatever ``diagnostic_record`` says (§7:3); each emitter takes it as a
+        # ``DiagnosticSink`` only where the record is on, and ``None`` otherwise
+        # (§4:4). It opens nothing until its first write, so a deployment with the
+        # record off never gains its directory.
+        diagnostic_record = FileDiagnosticRecord(
+            directory=record_directory, file_bytes=DIAGNOSTIC_FILE_BYTES
+        )
+        diagnostics = diagnostic_record if settings.diagnostic_record else None
         # ADR-0119 §8's ``RETRIEVAL`` emitter is *inside* this store, because what
         # the trace reports about a read is observable only here: the ``limit``
         # asked for, the ``fetch_k`` the KNN was actually given after the clamp, the
@@ -2328,6 +2352,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                     booking_configured=booking is not None,
                     grants=recipient_grants,
                     max_payload_bytes=settings.hub_max_frame_bytes - ENVELOPE_RESERVE_BYTES,
+                    diagnostics=diagnostics,
                     tidy_up=tidy_up,
                 ),
             )
@@ -2424,6 +2449,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             understanding=UnderstandingStage(
                 model=model,
                 excerpt_chars=UNDERSTANDING_EXCERPT_CHARS,
+                diagnostics=diagnostics,
             ),
             understanding_version_limit=UNDERSTANDING_VERSION_LIMIT,
             # ADR-0282's windows stage, holding the initial episode selector over the
@@ -2442,6 +2468,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 threshold=RECALL_THRESHOLDS[settings.embedder],
                 limit=RECALL_ITEM_LIMIT,
                 budget=RECALL_BUDGET,
+                diagnostics=diagnostics,
             ),
             stage_record_limit=STAGE_RECORD_LIMIT,
             # ADR-0244's parked-read operations, built above: the **same object** the
@@ -2555,6 +2582,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # and the sweep does not run; the default is 365 days, longer than any
             # measurement window, and there is no count or size cap to configure.
             trace_retention=settings.trace_retention,
+            # ADR-0314 §4:4, §7:2: the controller's step entries go through the sink,
+            # where the record is on; the sweep takes the record and its window always.
+            diagnostics=diagnostics,
+            diagnostic_retention=diagnostic_record,
+            diagnostic_window=settings.diagnostic_retention,
             # The capture/lifecycle stage, holding *both* durable stores — the same
             # `memory` again, so a captured turn is retrievable and destroyable
             # through the surfaces the user already has (ADR-0074 §9). Its
@@ -3221,6 +3253,7 @@ class _PhaseSeams:
     forecast_configured: bool
     booking_configured: bool
     tidy_up: StoryTidyUp
+    diagnostics: DiagnosticSink | None = None
 
 
 def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
@@ -3312,7 +3345,9 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
         ),
     )
     return PhasePath(
-        completer=PydanticAIToolCallingCompleter(settings.default_model),
+        completer=PydanticAIToolCallingCompleter(
+            settings.default_model, diagnostics=seams.diagnostics
+        ),
         provider=seams.model,
         authorizing=AuthorizingStage(
             registry=tools,
@@ -3330,6 +3365,7 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
                 frozenset({FORECAST_READ_ID}) if seams.forecast_configured else frozenset()
             ),
             now=_utcnow,
+            diagnostics=seams.diagnostics,
         ),
         acting=ActingStage(
             plans=seams.plans,
@@ -3372,7 +3408,79 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
         recall_digest_wait=PHASES_RECALL_DIGEST_DEADLINE,
         story_reads=story_reads,
         now=_utcnow,
+        diagnostics=seams.diagnostics,
     )
+
+
+def diagnostic_record_directory(settings: Settings, *, data_dir: Path | None = None) -> Path:
+    """Where this deployment's diagnostic record is (ADR-0314 §6:1).
+
+    The composition root's statement of the path, because it is where the record is
+    created: the backup reads its exclusion from here (§7:5, ADR-0123 §3:3), as it
+    reads the trace store's from :func:`build_measure_reader`.
+
+    Args:
+        settings: Loaded application settings — ``data_dir`` locates the record.
+        data_dir: Overrides ``settings.data_dir`` when given, as :func:`build_engine`'s
+            keyword does.
+
+    Returns:
+        ``<data_dir>/diagnostics``.
+    """
+    directory = data_dir if data_dir is not None else settings.data_dir
+    return directory / DIAGNOSTIC_DIRECTORY
+
+
+def refuse_an_unswept_diagnostic_record(settings: Settings, record_directory: Path) -> None:
+    """Refuse a start whose diagnostic record nothing would sweep (ADR-0314 §7:4).
+
+    Where ``retention_purge_interval`` is disabled, nothing deletes the record's
+    files, so the window that is the record's forgetting would not run. The hub then
+    refuses to start while ``diagnostic_record`` is true or the directory holds a
+    file. It reads the directory's listing and no entry.
+
+    Args:
+        settings: Loaded application settings.
+        record_directory: The record's directory, from
+            :func:`diagnostic_record_directory`.
+
+    Raises:
+        ConfigurationError: Naming the directory, where the start is refused.
+    """
+    if settings.retention_purge_interval is not None:
+        return
+    if settings.diagnostic_record:
+        msg = (
+            f"the diagnostic record is on, and the retention purge job that deletes its "
+            f"files under {record_directory} after diagnostic_retention is disabled; "
+            f"enable retention_purge_interval or turn diagnostic_record off"
+        )
+        raise ConfigurationError(msg)
+    if _holds_a_file(record_directory):
+        msg = (
+            f"the diagnostic record's directory {record_directory} holds files, and the "
+            f"retention purge job that deletes them is disabled; enable "
+            f"retention_purge_interval, or remove them"
+        )
+        raise ConfigurationError(msg)
+
+
+def _holds_a_file(directory: Path) -> bool:
+    """Whether ``directory``'s listing names anything that is not a directory.
+
+    Raises:
+        ConfigurationError: If the directory exists and cannot be listed.
+    """
+    try:
+        with os.scandir(directory) as listing:
+            return any(not entry.is_dir(follow_symlinks=False) for entry in listing)
+    except FileNotFoundError:
+        return False
+    except NotADirectoryError:
+        return True
+    except OSError as exc:
+        msg = f"could not list the diagnostic record's directory {directory}: {exc}"
+        raise ConfigurationError(msg) from exc
 
 
 def _build_model_provider(settings: Settings, specs: Sequence[str]) -> RoutingProvider:
