@@ -66,7 +66,6 @@ from ai_assistant.core.types import (
     DigestOutcome,
     EgressBinding,
     EpisodicMemory,
-    InputOrigin,
     LabelKind,
     MemoryDecisionKind,
     PermissionDecision,
@@ -74,13 +73,14 @@ from ai_assistant.core.types import (
     PlanningLabel,
     PlanningRound,
     ProposedCall,
-    RecordedChannelTrigger,
     SpanCoverage,
     StoryMember,
     StoryMemberKind,
+    StoryNote,
     ToolCall,
     rests_on_recorded_external_content,
 )
+from ai_assistant.orchestration.outside_content import from_outside, is_outside_episode
 from ai_assistant.orchestration.remembering import (
     EPISODE_ARGUMENT,
     OUTSIDE_CONTENT_ARGUMENT,
@@ -109,7 +109,6 @@ if TYPE_CHECKING:
         ToolRegistry,
     )
     from ai_assistant.core.types import (
-        EpisodeProcessingRecord,
         FrozenJson,
         PermissionRuling,
         ToolDefinition,
@@ -216,12 +215,16 @@ class WorkingRecord:
         fetched_outside: Whether a record the activation read before planning, its
             windows' or recall's, rests on outside content (ADR-0181 §4, ADR-0223),
             which neither its episode nor its labels need carry.
+        notes: The story notes planning was shown, as the stories held them, whose
+            marks (ADR-0303 §3:1) say whether each ``N`` label is outside content
+            read. A note's mark never changes once it is written.
     """
 
     rounds: tuple[PlanningRound, ...] = ()
     labels: tuple[PlanningLabel, ...] = ()
     digests: tuple[ActivationDigest, ...] = ()
     fetched_outside: bool = False
+    notes: tuple[StoryNote, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,26 +373,15 @@ def gets_effect_record(tool: ToolDefinition) -> bool:
     return tool.effect is CapabilityEffect.WORLD or not tool.safe_to_repeat
 
 
-def _outside_trigger(processing: EpisodeProcessingRecord) -> bool:
-    """Whether an episode's trigger came from outside (ADR-0284 §2:1)."""
-    trigger = processing.trigger
-    return isinstance(trigger, RecordedChannelTrigger) and trigger.origin is InputOrigin.OUTSIDE
+def _note_is_marked(label_id: str, notes: Sequence[StoryNote]) -> bool:
+    """Whether a story note planning was shown under ``label_id`` is marked (ADR-0303 §3:1).
 
-
-def _shown_episode_is_marked(record: EpisodicMemory) -> bool:
-    """Whether another episode, shown to planning, is shown resting on outside content.
-
-    Planning is shown such an episode as outside content where its provenance rests on
-    recorded external content (ADR-0106 §1), where its input came from outside, whose
-    understood meaning it is still shown (ADR-0303 §3:2), or where its rounds carry a
-    marked note (ADR-0307 §4:3).
+    Read from the notes the working set holds as shown. A note it does not hold, such as
+    one an earlier pass labelled, has a mark this stage cannot read, so it counts,
+    failing closed.
     """
-    if rests_on_recorded_external_content(record.provenance):
-        return True
-    processing = record.processing_record
-    return processing is not None and (
-        _outside_trigger(processing) or any(one.notes_marked for one in processing.rounds)
-    )
+    held = [one.outside for one in notes if str(one.note_id) == label_id]
+    return not held or any(held)
 
 
 async def read_outside_content(
@@ -412,11 +404,12 @@ async def read_outside_content(
     - a digest answered, with or without items (ADR-0308 §5:4);
     - a round's notes are marked, which the hub does where the activation had read
       outside content when they were written (ADR-0307 §4:3, ADR-0303 §3:1);
-    - planning was shown a story's note (an ``N`` label), whose mark this stage does not
-      read, so it counts, failing closed;
-    - or planning was shown an episode (an ``E`` label) shown as resting on outside
-      content (:func:`_shown_episode_is_marked`), or one that can no longer be read,
-      which fails closed too.
+    - planning was shown a marked story note (an ``N`` label), read from
+      ``working.notes``, or one whose mark the working set does not hold, which fails
+      closed;
+    - or planning was shown an outside episode (an ``E`` label, ADR-0303 §3:2, as
+      :func:`~ai_assistant.orchestration.outside_content.is_outside_episode` decides
+      it), or one that can no longer be read, which fails closed too.
 
     Where the activation's own episode cannot be read, or carries no processing record,
     nothing says it has not read outside content, so it has.
@@ -445,10 +438,12 @@ async def read_outside_content(
     labels = (*processing.labels, *working.labels)
     if (
         rests_on_recorded_external_content(record.provenance)
-        or _outside_trigger(processing)
+        or from_outside(record)
         or any(one.outcome is DigestOutcome.ANSWERED for one in digests)
         or any(one.notes_marked for one in rounds)
-        or any(one.kind is LabelKind.NOTE for one in labels)
+        or any(
+            one.kind is LabelKind.NOTE and _note_is_marked(one.id, working.notes) for one in labels
+        )
     ):
         return True
     shown = sorted({one.id for one in labels if one.kind is LabelKind.EPISODE} - {own})
@@ -457,7 +452,7 @@ async def read_outside_content(
     found = await memory.get_many(shown)
     for episode_id in shown:
         other = found.get(episode_id)
-        if not isinstance(other, EpisodicMemory) or _shown_episode_is_marked(other):
+        if not isinstance(other, EpisodicMemory) or is_outside_episode(other):
             return True
     return False
 
@@ -489,6 +484,7 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
                 ActivationDigest.model_validate(one.model_dump()) for one in working.digests
             ),
             fetched_outside=bool(working.fetched_outside),
+            notes=tuple(StoryNote.model_validate(one.model_dump()) for one in working.notes),
         ),
         calls=tuple(
             CallToAuthorize(
@@ -640,6 +636,7 @@ class AuthorizingStage:
                 held.labels,
                 held.digests,
                 fetched_outside=held.fetched_outside,
+                notes=held.notes,
             ),
         )
         state = _Round(activation_id=snapshot.activation_id, read_outside=read_outside)
