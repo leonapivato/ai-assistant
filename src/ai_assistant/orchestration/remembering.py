@@ -29,6 +29,16 @@ tainted derived proposal is then never committed unconfirmed (ADR-0106 §6), so 
 activation that read outside content ``MemoryPolicy`` asks or rejects, and authorizing
 turns that into *needs you* or *not done* (ADR-0306 §4:3, §4:8 to §4:9).
 
+**The written belief's placement is set by rule too** (ADR-0217 §3:12, ADR-0204 §2,
+§5:2). The statement is produced by planning over what the activation had been given
+when it planned the round, so where ADR-0204 §2's disjunction over that supply is
+``True`` the belief is written reach ``OWNER`` with setter ``DERIVED``, and otherwise
+with the default. The runner reads that value off the activation's state, where the
+phases' glue sets it before each round is planned (ADR-0309 §5:10); a call run where no
+activation is current has no supply and is written with the default. ``MemoryPolicy``
+reads no placement, so the proposal authorizing rules on, which carries the default,
+is ruled exactly as the one written.
+
 **The writer rules again.** ``MemoryWriter.ingest`` finds the proposal's conflicts and
 asks its own policy over them (ADR-0028). A ruling there that writes nothing, an ask or a
 reject, is a call not done, and nothing is written: ADR-0306 §4:3's *memory it rules to
@@ -55,6 +65,9 @@ from ai_assistant.core.types import (
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     Provenance,
     Reversibility,
     RiskLevel,
@@ -66,6 +79,7 @@ from ai_assistant.core.types import (
     ToolOutcome,
     ToolResult,
 )
+from ai_assistant.orchestration.activation_state import active_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -184,7 +198,12 @@ def remembered_record_id(effect_id: str, /) -> str:
 
 
 def remembered_proposal(
-    parameters: Mapping[str, FrozenJson], /, *, record_id: str, at: datetime
+    parameters: Mapping[str, FrozenJson],
+    /,
+    *,
+    record_id: str,
+    at: datetime,
+    placement: Placement | None = None,
 ) -> MemoryUpdateProposal:
     """The proposal one remember call makes, with its provenance set by rule.
 
@@ -192,6 +211,8 @@ def remembered_proposal(
         parameters: The call's arguments, the hub-filled ones included.
         record_id: The id the belief is written at (:func:`remembered_record_id`).
         at: Transaction time: when the belief is proposed (ADR-0045 §3).
+        placement: Who may receive the belief, as the runner sets it by rule
+            (ADR-0217 §3:12); the default where ``None``.
 
     Returns:
         The proposal: one ``SemanticMemory`` stating ``statement``, ``INFERRED`` at
@@ -220,7 +241,13 @@ def remembered_proposal(
         last_updated=at,
         derived_from_external=outside,
     )
-    record = SemanticMemory(id=record_id, content=statement, fact=statement, provenance=provenance)
+    record = SemanticMemory(
+        id=record_id,
+        content=statement,
+        fact=statement,
+        provenance=provenance,
+        placement=Placement() if placement is None else placement,
+    )
     return MemoryUpdateProposal(proposed=record, rationale=_RATIONALE)
 
 
@@ -241,6 +268,19 @@ _WRITTEN: Final = frozenset(
 
 def _not_done(kind: ToolFailureKind, message: str) -> ToolResult:
     return ToolResult(outcome=ToolOutcome.FAILED, failure=ToolFailure(kind=kind, message=message))
+
+
+def _placement(at: datetime) -> Placement:
+    """The belief's placement: ADR-0204 §2's value over its producing round's supply.
+
+    Reach ``OWNER`` with setter ``DERIVED``, stamped ``at``, where the current
+    activation's latest round was planned over a supply that value is ``True`` of
+    (ADR-0217 §3:12); the default otherwise, and where no activation is current.
+    """
+    state = active_state()
+    if state is None or not state.planned_over_withheld:
+        return Placement()
+    return Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=at)
 
 
 class RememberCalls:
@@ -283,7 +323,10 @@ class RememberCalls:
         at = self._now()
         try:
             proposal = remembered_proposal(
-                call.request.parameters, record_id=remembered_record_id(effect_id), at=at
+                call.request.parameters,
+                record_id=remembered_record_id(effect_id),
+                at=at,
+                placement=_placement(at),
             )
         except ValueError:
             _log.info("remember_not_done", stage="acting", reason="malformed")

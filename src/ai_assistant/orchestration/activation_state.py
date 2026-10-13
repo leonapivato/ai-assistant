@@ -188,6 +188,12 @@ class ActivationState:
     #: its own supply (§3:2) or retained from a parked turn (§3:3). ``None`` until
     #: then. ADR-0286 §4:3 carries the latest value into every append after that.
     derived_from_external: bool | None = None
+    #: ADR-0204 §2's disjunction over what the phases' planning had been given when it
+    #: planned the latest round (ADR-0309 §5:10, ADR-0217 §3:12), set before each round
+    #: is planned. A belief that round's calls remember is produced over that supply,
+    #: so it is placed by it. ``False`` until a round is planned, and on every pass the
+    #: phases do not plan.
+    planned_over_withheld: bool = False
     #: The writer's account of this activation's episode, from its admission write.
     capture: EpisodeProgress | None = field(default=None, repr=False)
     #: ADR-0297 §3: the stop mark, set by :meth:`stop` and never cleared. The
