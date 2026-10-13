@@ -1,6 +1,6 @@
 # 316. An activation viewer outside the package shows the diagnostic record to the owner on the server
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-13
 - Scope: the phases, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): an owner-run program that shows each activation's flow from [ADR-0314](0314-a-diagnostic-record-keeps-what-each-phase-was-given-and-returned-and-nothing-reads-it-back.md)'s diagnostic record, so the owner can watch activations being processed.
 - Authorization: the owner asked for it on 2026-10-13 and ruled its substance: flow first, decisions and content one click away, and separate from the hub. The dispatcher chose where it runs (on the server, on loopback, over an SSH tunnel), assigned 0316, and authorized ratifying it once its reviews are green.
