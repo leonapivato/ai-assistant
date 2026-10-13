@@ -30,7 +30,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
     UserPromptPart,
 )
-from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles import ModelProfile
@@ -351,20 +351,28 @@ async def test_a_round_that_only_thought_and_called_writes_no_text() -> None:
     assert [call.name for call in response.calls] == ["web_search"]
 
 
-def _anthropic(name: str, http_client: httpx.AsyncClient) -> Model:
+def _anthropic(
+    name: str, http_client: httpx.AsyncClient, settings: AnthropicModelSettings | None = None
+) -> Model:
     client = AsyncAnthropic(api_key=_DUMMY_KEY, http_client=http_client, max_retries=0)
-    return AnthropicModel(name, provider=AnthropicProvider(anthropic_client=client))
+    return AnthropicModel(
+        name, provider=AnthropicProvider(anthropic_client=client), settings=settings
+    )
 
 
 async def _anthropic_round(
-    name: str, handler: Handler, *, thinking: ThinkingLevel = DEFAULT_THINKING
+    name: str,
+    handler: Handler,
+    *,
+    thinking: ThinkingLevel = DEFAULT_THINKING,
+    settings: AnthropicModelSettings | None = None,
 ) -> tuple[RoundResponse, dict[str, object]]:
     """One round over Anthropic's real SDK, and the request body it put on the wire."""
     recorder = RequestRecorder(handler)
     with network_denied():
         async with httpx.AsyncClient(transport=httpx.MockTransport(recorder)) as http_client:
             completer = PydanticAIToolCallingCompleter(
-                _anthropic(name, http_client), thinking=thinking
+                _anthropic(name, http_client, settings), thinking=thinking
             )
             response = await completer.respond(_request(), [_tool()])
     return response, recorder.only
@@ -379,6 +387,31 @@ async def test_an_adaptive_anthropic_model_is_asked_to_think_adaptively() -> Non
 
 async def test_a_budget_anthropic_model_is_given_a_ceiling_above_its_budget() -> None:
     _, body = await _anthropic_round("claude-haiku-4-5", anthropic_success)
+    assert body["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+    assert body["max_tokens"] == 4096 + 10000
+
+
+async def test_a_models_own_thinking_budget_is_given_room_on_top() -> None:
+    settings = AnthropicModelSettings(
+        anthropic_thinking={"type": "enabled", "budget_tokens": 12000}
+    )
+    _, body = await _anthropic_round("claude-haiku-4-5", anthropic_success, settings=settings)
+    assert body["thinking"] == {"type": "enabled", "budget_tokens": 12000}
+    assert body["max_tokens"] == 4096 + 12000
+
+
+async def test_a_models_own_larger_ceiling_is_kept() -> None:
+    settings = AnthropicModelSettings(
+        max_tokens=20000, anthropic_thinking={"type": "enabled", "budget_tokens": 12000}
+    )
+    _, body = await _anthropic_round("claude-haiku-4-5", anthropic_success, settings=settings)
+    assert body["thinking"] == {"type": "enabled", "budget_tokens": 12000}
+    assert body["max_tokens"] == 20000
+
+
+async def test_a_models_own_smaller_ceiling_is_widened_for_the_thinking() -> None:
+    settings = AnthropicModelSettings(max_tokens=1000)
+    _, body = await _anthropic_round("claude-haiku-4-5", anthropic_success, settings=settings)
     assert body["thinking"] == {"type": "enabled", "budget_tokens": 10000}
     assert body["max_tokens"] == 4096 + 10000
 
@@ -438,3 +471,43 @@ async def test_an_openai_model_without_thinking_keeps_the_request_it_had() -> No
     assert "reasoning_effort" not in body
     assert "max_tokens" not in body
     assert "max_completion_tokens" not in body
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        pytest.param([ThinkingPart("Still weighing which campground…")], id="only-thinking"),
+        pytest.param(
+            [ThinkingPart("Booking it."), TextPart("I'll book Watchman for the night of")],
+            id="text-cut",
+        ),
+    ],
+)
+async def test_a_response_cut_at_its_ceiling_is_a_response_error(
+    parts: list[ModelResponsePart],
+) -> None:
+    world = _ModelWorld(script=lambda: ModelResponse(parts=parts, finish_reason="length"))
+    with pytest.raises(ModelResponseError):
+        await world.completer.respond(_request(), [_tool()])
+
+
+def _thinking_cut_at_the_ceiling(request: httpx.Request) -> httpx.Response:
+    del request
+    return httpx.Response(
+        200,
+        json={
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [{"type": "thinking", "thinking": "Weighing it…", "signature": "sig"}],
+            "stop_reason": "max_tokens",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 14096},
+        },
+    )
+
+
+async def test_an_anthropic_response_whose_thinking_took_the_ceiling_is_a_response_error() -> None:
+    with pytest.raises(ModelResponseError):
+        await _anthropic_round("claude-opus-4-8", _thinking_cut_at_the_ceiling)

@@ -27,8 +27,11 @@ thinking part is none of a round's four parts (§2:1): it is dropped here, never
 recorded or replayed, and the next round is asked afresh without it (§2:6). A provider
 may count thinking against the response's output ceiling, as Anthropic's does, so where
 the model takes the setting the ceiling is widened by the thinking budget pydantic-ai
-gives the level on a budget-based Anthropic model: the thinking never takes the room the
-message had, and a budget-based model is never refused for a ceiling at or below it.
+gives the level on a budget-based Anthropic model, or by the budget the model's own
+settings give it: the thinking never takes the room the message had, and a budget-based
+model is never refused for a ceiling at or below its budget. A response cut at its
+ceiling is not a round: its message may stop mid-sentence and whatever followed the cut
+is lost, so it is refused as unreadable rather than returned.
 
 **Nothing here retries or re-routes**, as nothing in the streaming sibling does:
 ``RoutingProvider`` and ``RetryingProvider`` wrap ``ModelProvider`` completions, and a
@@ -38,6 +41,7 @@ round's resilience is the caller's to decide.
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import ValidationError
@@ -57,7 +61,6 @@ if TYPE_CHECKING:
 
     from pydantic_ai import models
     from pydantic_ai.messages import ModelResponse
-    from pydantic_ai.profiles import ModelProfile
     from pydantic_ai.settings import ThinkingLevel
 
     from ai_assistant.core.types import Message
@@ -153,8 +156,8 @@ class PydanticAIToolCallingCompleter:
                 is empty, ends on a ``Role.ASSISTANT`` turn or carries a ``Role.TOOL``
                 turn, or if two tools share a name or one takes :data:`ROUND_TOOL`'s.
                 A provider failure is narrowed to the most specific subclass, and a
-                response that cannot be read as a round is a
-                :class:`~ai_assistant.core.errors.ModelResponseError`.
+                response that cannot be read as a round, or was cut at its output
+                ceiling, is a :class:`~ai_assistant.core.errors.ModelResponseError`.
         """
         if not messages:
             msg = "respond() requires at least one message"
@@ -179,7 +182,7 @@ class PydanticAIToolCallingCompleter:
             response = await model_request(
                 chosen,
                 history,
-                model_settings=_settings(self._thinking, chosen.profile),
+                model_settings=_settings(self._thinking, chosen),
                 model_request_parameters=parameters,
             )
         except Exception as exc:
@@ -189,24 +192,36 @@ class PydanticAIToolCallingCompleter:
         return _round(response)
 
 
-def _settings(thinking: ThinkingLevel, profile: ModelProfile) -> ModelSettings:
+def _settings(thinking: ThinkingLevel, model: models.Model) -> ModelSettings:
     """A round's model settings: the thinking it asks for, and room for it.
 
-    A budget-based Anthropic model is given the level's budget and refuses a ceiling
-    that does not exceed it; an adaptive one spends its thinking out of the same
-    ceiling. So where thinking is asked for and the model takes the setting, as
-    pydantic-ai decides that from its profile, the ceiling is the message's own plus
-    that budget. Anywhere else the ceiling is left as it was: a model without thinking
-    keeps the request it had.
+    A budget-based Anthropic model is given a budget and refuses a ceiling that does
+    not exceed it; an adaptive one spends its thinking out of the same ceiling. So where
+    thinking is asked for and the model takes the setting, as pydantic-ai decides that
+    from its profile, the ceiling is the message's own plus the budget in effect: the
+    one the model's own settings give Anthropic's thinking, which pydantic-ai lets take
+    precedence, or else the one the level maps to. A larger ceiling the model's own
+    settings already allow is kept. Anywhere else the ceiling is left as it was: a model
+    without thinking keeps the request it had.
     """
+    profile = model.profile
     takes_it = profile.get("supports_thinking", False) or profile.get(
         "thinking_always_enabled", False
     )
     if thinking is False or not takes_it:
         return ModelSettings(thinking=thinking)
-    return ModelSettings(
-        thinking=thinking, max_tokens=_MESSAGE_TOKENS + ANTHROPIC_THINKING_BUDGET_MAP[thinking]
-    )
+    configured: Mapping[str, object] = model.settings or {}
+    budget = ANTHROPIC_THINKING_BUDGET_MAP[thinking]
+    provider_thinking = configured.get("anthropic_thinking")
+    if isinstance(provider_thinking, Mapping):
+        configured_budget = provider_thinking.get("budget_tokens")
+        if isinstance(configured_budget, int):
+            budget = configured_budget
+    ceiling = _MESSAGE_TOKENS + budget
+    allowed = configured.get("max_tokens")
+    if isinstance(allowed, int):
+        ceiling = max(ceiling, allowed)
+    return ModelSettings(thinking=thinking, max_tokens=ceiling)
 
 
 def _native(tool: OfferedTool) -> NativeTool:
@@ -231,9 +246,13 @@ def _round(response: ModelResponse) -> RoundResponse:
     dropped.
 
     Raises:
-        ModelResponseError: If a call's arguments are not a JSON object, the reserved
-            tool's arguments are not of its shape, or the parts do not make a round.
+        ModelResponseError: If the response was cut at its output ceiling, a call's
+            arguments are not a JSON object, the reserved tool's arguments are not of
+            its shape, or the parts do not make a round.
     """
+    if response.finish_reason == "length":
+        msg = "the model's response was cut at its output ceiling, so it is not a whole round"
+        raise ModelResponseError(msg)
     calls: list[ProposedCall] = []
     notes: list[str] = []
     another_round = False
