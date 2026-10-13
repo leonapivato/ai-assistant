@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage, ModelResponsePart
     from pydantic_ai.models import Model
     from pydantic_ai.settings import ThinkingLevel
+    from pydantic_ai.tools import ToolDefinition as NativeTool
     from vendor_stacks import Handler
 
     from ai_assistant.core.protocols import ToolCallingCompleter
@@ -642,8 +643,44 @@ async def test_the_completer_writes_the_whole_response_thinking_included() -> No
     assert parts[0]["content"] == "They answered, so book it."
 
 
+async def test_the_returned_entry_shows_every_tool_the_provider_was_offered() -> None:
+    """#2894: the reserved tool and its description reach the record, after the capabilities.
+
+    Each tool is kept as planning's given entry keeps an offered one, so the two read alike.
+    """
+    sink = FakeDiagnosticSink()
+    received: list[list[NativeTool]] = []
+
+    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del messages
+        received.append(list(info.function_tools))
+        return ModelResponse(parts=[TextPart("ok")])
+
+    completer = PydanticAIToolCallingCompleter(FunctionModel(answer), diagnostics=sink)
+    offered = [_tool("web_search"), _tool("book_stay")]
+
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now):
+        await completer.respond(_request(), offered)
+
+    body = sink.recorded[0].model_dump(mode="json")["body"]
+    (sent,) = received
+    assert body["offered_tools"] == [
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters_json_schema,
+        }
+        for tool in sent
+    ]
+    assert body["offered_tools"][:2] == [tool.model_dump(mode="json") for tool in offered]
+    (reserved,) = body["offered_tools"][2:]
+    assert reserved["name"] == ROUND_TOOL
+    assert "runs nothing" in reserved["description"]
+    assert set(reserved["parameters"]["properties"]) == {"notes"}
+
+
 async def test_a_response_that_is_no_round_is_written_before_the_completer_raises() -> None:
-    """§5:2: whether or not the response reads as a round."""
+    """§5:2: whether or not the response reads as a round, the tools offered included."""
     completer, sink = _diagnosing(ThinkingPart("Weighing it…"), finish="length")
 
     with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now), pytest.raises(ModelResponseError):
@@ -653,6 +690,7 @@ async def test_a_response_that_is_no_round_is_written_before_the_completer_raise
     assert body["read_as_round"] is False
     assert body["failure"]["class"] == "ModelResponseError"
     assert body["response"]["parts"][0]["content"] == "Weighing it…"
+    assert [tool["name"] for tool in body["offered_tools"]] == ["web_search", ROUND_TOOL]
 
 
 async def test_where_no_response_came_back_the_completer_writes_nothing() -> None:
