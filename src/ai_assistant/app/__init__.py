@@ -55,6 +55,7 @@ from ai_assistant.app.composition import (
     build_measure_reader,
     build_reembedder,
     build_store_health_reader,
+    diagnostic_record_directory,
     ensure_model_credentials,
 )
 
@@ -70,5 +71,6 @@ __all__ = [
     "build_measure_reader",
     "build_reembedder",
     "build_store_health_reader",
+    "diagnostic_record_directory",
     "ensure_model_credentials",
 ]

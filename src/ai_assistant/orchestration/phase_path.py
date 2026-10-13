@@ -267,6 +267,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
 
     from ai_assistant.core.protocols import (
+        DiagnosticSink,
         MemoryStore,
         ModelProvider,
         PlanStore,
@@ -1652,6 +1653,7 @@ class PhasePath:
         look_ups: LookUps | None = None,
         now: Callable[[], datetime] = _utcnow,
         new_effect_id: Callable[[], str] = _new_effect_id,
+        diagnostics: DiagnosticSink | None = None,
     ) -> None:
         """Wire the path.
 
@@ -1694,6 +1696,9 @@ class PhasePath:
                 where no look-up is offered.
             now: The clock a step's start and an effect's claim are read from.
             new_effect_id: Mints the *couldn't finish* message's effect record id.
+            diagnostics: The diagnostic record's write seam, handed on to planning
+                and digesting, which this path builds (ADR-0314 §4:4); ``None`` where
+                the record is off. The path itself writes no entry (§4:2).
 
         Raises:
             ValueError: If ``round_limit`` is below 1, ``round_wait`` or
@@ -1719,9 +1724,14 @@ class PhasePath:
             excerpt_chars=excerpt_chars,
             model=planning_model,
             now=now,
+            diagnostics=diagnostics,
         )
         self._digesting = DigestingStage(
-            provider=provider, recorder=_DigestRecorder(self), part_chars=part_chars, now=now
+            provider=provider,
+            recorder=_DigestRecorder(self),
+            part_chars=part_chars,
+            now=now,
+            diagnostics=diagnostics,
         )
         self._authorizing = authorizing
         self._acting = acting

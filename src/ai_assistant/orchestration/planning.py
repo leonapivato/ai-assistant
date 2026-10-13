@@ -87,6 +87,7 @@ from uuid import uuid4
 import structlog
 
 from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.diagnostics import returned_written, write_diagnostic, write_failure
 from ai_assistant.core.episode_encoding import (
     ROUTE_OUTCOME_PHRASES,
     STEP_DISPOSITION_PHRASES,
@@ -95,6 +96,8 @@ from ai_assistant.core.episode_encoding import (
 from ai_assistant.core.types import (
     BeliefBand,
     CapabilityResult,
+    DiagnosticKind,
+    DiagnosticSource,
     EpisodicMemory,
     InputOrigin,
     LabelKind,
@@ -121,13 +124,14 @@ from ai_assistant.orchestration.story_calls import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from ai_assistant.core.protocols import ToolCallingCompleter
+    from ai_assistant.core.protocols import DiagnosticSink, ToolCallingCompleter
     from ai_assistant.core.types import (
         ActivationUnderstanding,
         EpisodeProjection,
         FrozenJsonValue,
         ProjectedRound,
         ProjectedText,
+        RoundResponse,
         SemanticMemory,
         StoryNote,
         StoryStanding,
@@ -1545,7 +1549,7 @@ def _new_round_id() -> str:
 class PlanningStage:
     """Run one planning round and record it with the episode (ADR-0307)."""
 
-    def __init__(  # noqa: PLR0913 — the model seam, the writer seam, the bound, the model override and the two sources a round's record reads
+    def __init__(  # noqa: PLR0913 — the model seam, the writer seam, the bound, the model override, the two sources a round's record reads and the diagnostic sink
         self,
         *,
         completer: ToolCallingCompleter,
@@ -1554,6 +1558,7 @@ class PlanningStage:
         model: str | None = None,
         now: Callable[[], datetime] = _utcnow,
         new_id: Callable[[], str] = _new_round_id,
+        diagnostics: DiagnosticSink | None = None,
     ) -> None:
         """Wire the stage to its seams.
 
@@ -1564,6 +1569,10 @@ class PlanningStage:
             model: Optional ``"provider:model"`` override for planning's rounds.
             now: The clock the current time and ``recorded_at`` are read from.
             new_id: Mints a round's id.
+            diagnostics: The diagnostic record's write seam (ADR-0314 §4:4): the
+                rendered request and the offered tools before each round, and the
+                returned entry where no response came back (§5:2); ``None`` where the
+                record is off.
 
         Raises:
             ValueError: If ``excerpt_chars`` is below 1.
@@ -1577,6 +1586,7 @@ class PlanningStage:
         self._model = model
         self._now = checked_clock(now, owner="PlanningStage")
         self._new_id = new_id
+        self._diagnostics = diagnostics
 
     async def plan(self, inputs: PlanningInputs) -> PlannedRound:
         """Run one round over ``inputs``: ask, record, then judge its calls.
@@ -1605,7 +1615,7 @@ class PlanningStage:
             ),
             Message(role=Role.USER, content=rendered),
         )
-        response = await self._completer.respond(messages, offered, model=self._model)
+        response = await self._responded(messages, offered)
         read_outside = (
             inputs.outside_content_read
             or inputs.trigger_origin is InputOrigin.OUTSIDE
@@ -1641,6 +1651,33 @@ class PlanningStage:
                 else None
             ),
         )
+
+    async def _responded(
+        self, messages: Sequence[Message], offered: Sequence[OfferedTool]
+    ) -> RoundResponse:
+        """Ask the round, its request written to the record first (ADR-0314 §4, §5).
+
+        The completer writes planning's returned entry from the provider's response,
+        whether or not it reads as a round (§5:2). Where it wrote none because no
+        response came back, this module writes it, with the failure; the failure is
+        re-raised unchanged.
+        """
+        await write_diagnostic(
+            self._diagnostics,
+            DiagnosticSource.PLANNING,
+            DiagnosticKind.GIVEN,
+            lambda: {
+                "messages": [one.model_dump(mode="json") for one in messages],
+                "tools": [tool.model_dump(mode="json") for tool in offered],
+            },
+        )
+        written = returned_written(DiagnosticSource.PLANNING)
+        try:
+            return await self._completer.respond(messages, offered, model=self._model)
+        except Exception as exc:
+            if returned_written(DiagnosticSource.PLANNING) == written:
+                await write_failure(self._diagnostics, DiagnosticSource.PLANNING, exc)
+            raise
 
     async def _record(
         self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]

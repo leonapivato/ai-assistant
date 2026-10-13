@@ -60,6 +60,11 @@ that fails is a capture failure: it is logged and holds nothing back.
 
 **It logs stage and code-owned reason only**, never the question, the records or the
 reply (ADR-0275 §8).
+
+**What it gives the diagnostic record** (ADR-0314 §4), through the sink the composition
+root hands it where the record is on: each part's rendered prompt before its call, and
+once the call returns or fails, its reply, the items dropped because their source is not
+one of the call's labels, or the failure; and where a digest fails, the reason it failed.
 """
 
 from __future__ import annotations
@@ -75,9 +80,12 @@ import structlog
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.diagnostics import write_diagnostic, write_failure
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     ActivationDigest,
+    DiagnosticKind,
+    DiagnosticSource,
     DigestOutcome,
     EvidenceItem,
     LabelKind,
@@ -91,7 +99,7 @@ from ai_assistant.core.types import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
 
-    from ai_assistant.core.protocols import ModelProvider
+    from ai_assistant.core.protocols import DiagnosticSink, ModelProvider
     from ai_assistant.core.types import SemanticMemory
     from ai_assistant.orchestration.held_results import HeldResult
 
@@ -433,6 +441,7 @@ class DigestingStage:
         recorder: DigestRecorder,
         part_chars: int,
         now: Callable[[], datetime] = _utcnow,
+        diagnostics: DiagnosticSink | None = None,
     ) -> None:
         """Wire the stage to its seams, and to the part size the composition root sets.
 
@@ -442,6 +451,8 @@ class DigestingStage:
             part_chars: ``DIGEST_PART_CHARS``, the most characters of records one call
                 reads (§4:9); its value is #2589's.
             now: The clock the deadline and ``recorded_at`` are read against.
+            diagnostics: The diagnostic record's write seam (ADR-0314 §4:4), or
+                ``None`` where the record is off.
 
         Raises:
             ValueError: If ``part_chars`` is not an integer of at least 1.
@@ -453,6 +464,7 @@ class DigestingStage:
         self._recorder = recorder
         self._part_chars = part_chars
         self._now = checked_clock(now, owner="DigestingStage")
+        self._diagnostics = diagnostics
 
     async def digest_result(
         self,
@@ -618,6 +630,13 @@ class DigestingStage:
         failure: DigestFailure | None = None
         if isinstance(kept, str):
             failure = kept
+            # ADR-0314 §4: the failure's reason, where the digest failed.
+            await write_diagnostic(
+                self._diagnostics,
+                DiagnosticSource.DIGESTING,
+                DiagnosticKind.RETURNED,
+                lambda: {"digest": "failed", "reason": failure},
+            )
             digest = ActivationDigest(
                 result=result_label,
                 question=question,
@@ -714,28 +733,59 @@ class DigestingStage:
         )
         if self._now() >= deadline:
             raise _PartFailed("deadline")
+        await write_diagnostic(
+            self._diagnostics,
+            DiagnosticSource.DIGESTING,
+            DiagnosticKind.GIVEN,
+            lambda: {"messages": [one.model_dump(mode="json") for one in messages]},
+        )
         try:
             reply = await self._provider.complete(messages)
         except asyncio.CancelledError:
             task = asyncio.current_task()
             if task is not None and task.cancelling():
                 raise  # the digest, or its group, was cancelled: let it unwind
+            await self._part_failed(asyncio.CancelledError())
             raise _PartFailed("raised") from None
         except Exception as exc:  # §4:11: a call that raises fails the digest, whatever it raised
+            await self._part_failed(exc)
             raise _PartFailed("raised") from exc
         proposed = _parsed(reply.content)
         if proposed is None:
+            await self._part_returned(reply.content, dropped=(), parsed=False)
             raise _PartFailed("unparsable")
         local = {name: record for record, name in names.items()}
         kept: list[_Kept] = []
+        dropped: list[dict[str, str]] = []
         for item in proposed.evidence:
             record = local.get(item.source)
             if record is None:
                 # §4:14: an item naming a source the call did not show is dropped.
                 _log.info("digest_item_dropped", stage="digesting", reason="unknown_label")
+                dropped.append({"source": item.source, "text": item.text})
                 continue
             kept.append(_Kept(text=item.text, record=record))
+        await self._part_returned(reply.content, dropped=tuple(dropped), parsed=True)
         return kept
+
+    async def _part_failed(self, error: BaseException) -> None:
+        """Write a part's returned entry as the failure its call ended in (§4)."""
+        await write_failure(self._diagnostics, DiagnosticSource.DIGESTING, error)
+
+    async def _part_returned(
+        self, reply: str, *, dropped: tuple[dict[str, str], ...], parsed: bool
+    ) -> None:
+        """Write a part's reply and the items dropped from it (ADR-0314 §4)."""
+
+        def body() -> dict[str, object]:
+            returned: dict[str, object] = {"reply": reply, "dropped": list(dropped)}
+            if not parsed:
+                returned["failure"] = "unparsable"
+            return returned
+
+        await write_diagnostic(
+            self._diagnostics, DiagnosticSource.DIGESTING, DiagnosticKind.RETURNED, body
+        )
 
     async def _record(self, digest: ActivationDigest, labels: tuple[PlanningLabel, ...]) -> bool:
         """Append the digest; a failure is a capture failure that holds nothing back (§5:2)."""

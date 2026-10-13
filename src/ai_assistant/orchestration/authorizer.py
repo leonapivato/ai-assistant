@@ -42,6 +42,13 @@ activation's stories are read from the story store as they stand now, and handed
 
 **It logs stage and code-owned reason only**, never arguments or rulings' text (ADR-0275
 §8).
+
+**What it gives the diagnostic record** (ADR-0314 §4), through the sink the composition
+root hands it where the record is on: once the round is checked, or the checking fails,
+for each call the verdict of each check it reached and that check's reason, the
+message's verdict, and whether the activation had read outside content, with each
+ground of ADR-0306 §4:5 that held and the record it rests on, as
+:func:`read_outside_content` gives them.
 """
 
 from __future__ import annotations
@@ -56,13 +63,21 @@ import structlog
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import checked_clock
-from ai_assistant.core.errors import AuditError, EgressBindingError, StoryStoreError
+from ai_assistant.core.diagnostics import failure_body, write_diagnostic
+from ai_assistant.core.errors import (
+    AuditError,
+    EgressBindingError,
+    MemoryStoreError,
+    StoryStoreError,
+)
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     ActionRequest,
     ActivationDigest,
     CapabilityEffect,
     CarriedProvenance,
+    DiagnosticKind,
+    DiagnosticSource,
     DigestOutcome,
     EgressBinding,
     EpisodicMemory,
@@ -102,6 +117,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
         ActionPolicy,
         AuditTrail,
+        DiagnosticSink,
         EgressBinder,
         MemoryPolicy,
         MemoryStore,
@@ -120,6 +136,7 @@ __all__ = [
     "CallToAuthorize",
     "CallVerdict",
     "MessageVerdict",
+    "OutsideGround",
     "RoundAuthorization",
     "RoundMessage",
     "RoundToAuthorize",
@@ -373,6 +390,33 @@ def gets_effect_record(tool: ToolDefinition) -> bool:
     return tool.effect is CapabilityEffect.WORLD or not tool.safe_to_repeat
 
 
+@dataclass(frozen=True, slots=True)
+class OutsideGround:
+    """One ground of ADR-0306 §4:5 that held, and the record it rests on (ADR-0314 §4).
+
+    Attributes:
+        ground: Which ground, as a code-owned word.
+        record: The record it rests on: an episode's or a round's id, a digest's result
+            label, a note's id; ``None`` where the working set holds no record for it,
+            as for a fetched record it only holds as a fact.
+    """
+
+    ground: str
+    record: str | None = None
+
+
+#: The grounds, as :func:`read_outside_content` names them.
+_FETCHED_OUTSIDE: Final = "fetched_outside"
+_OWN_EPISODE_UNREAD: Final = "own_episode_unread"
+_EPISODE_MARKED: Final = "episode_marked"
+_TRIGGER_OUTSIDE: Final = "trigger_outside"
+_DIGEST_ANSWERED: Final = "digest_answered"
+_NOTES_MARKED: Final = "notes_marked"
+_NOTE_SHOWN_MARKED: Final = "note_shown_marked"
+_EPISODE_SHOWN_UNREAD: Final = "episode_shown_unread"
+_OUTSIDE_EPISODE_SHOWN: Final = "outside_episode_shown"
+
+
 def _note_is_marked(label_id: str, notes: Sequence[StoryNote]) -> bool:
     """Whether a story note planning was shown under ``label_id`` is marked (ADR-0303 §3:1).
 
@@ -384,11 +428,12 @@ def _note_is_marked(label_id: str, notes: Sequence[StoryNote]) -> bool:
     return not held or any(held)
 
 
-async def read_outside_content(
+async def read_outside_content(  # noqa: C901, PLR0911, PLR0912 — §4:5's grounds, in order, each able to end the read
     memory: MemoryStore,
     activation_id: str,
     *,
     working: WorkingRecord,
+    grounds: list[OutsideGround] | None = None,
 ) -> bool:
     """Whether the activation's record says it has read outside content (ADR-0306 §4:5).
 
@@ -414,47 +459,83 @@ async def read_outside_content(
     Where the activation's own episode cannot be read, or carries no processing record,
     nothing says it has not read outside content, so it has.
 
+    **The grounds that held** (ADR-0314 §4). Where ``grounds`` is handed in, every
+    ground is gone through rather than the first that holds, and each that held is
+    appended with the record it rests on, for the diagnostic record. The answer is the
+    same either way: a read that fails once a ground already held ends the going
+    through, since the answer is already yes, and costs only the grounds after it.
+
     Args:
         memory: The memory store the episodes are read from.
         activation_id: The activation.
         working: What the working set holds of the activation's record.
+        grounds: Where given, collects every ground that held, in order.
 
     Returns:
         Whether the activation has read outside content.
 
     Raises:
-        MemoryStoreError: If the memory store cannot be read.
+        MemoryStoreError: If the memory store cannot be read before any ground held.
     """
-    if working.fetched_outside:
+    every = grounds is not None
+    held: list[OutsideGround] = [] if grounds is None else grounds
+
+    def found(ground: str, record: str | None = None) -> bool:
+        """Note ``ground``; whether to stop here, which is unless every ground is asked."""
+        held.append(OutsideGround(ground, record))
+        return not every
+
+    if working.fetched_outside and found(_FETCHED_OUTSIDE):
         return True
     own = episode_address(activation_id)
-    record = await memory.get(own)
+    try:
+        record = await memory.get(own)
+    except MemoryStoreError:
+        if every and held:
+            return True
+        raise
     if not isinstance(record, EpisodicMemory) or record.processing_record is None:
         _log.info("authorizing_record_unread", stage="authorizing", reason="no_episode")
+        found(_OWN_EPISODE_UNREAD, own)
         return True
     processing = record.processing_record
     rounds = (*processing.rounds, *working.rounds)
     digests = (*processing.digests, *working.digests)
     labels = (*processing.labels, *working.labels)
-    if (
-        rests_on_recorded_external_content(record.provenance)
-        or from_outside(record)
-        or any(one.outcome is DigestOutcome.ANSWERED for one in digests)
-        or any(one.notes_marked for one in rounds)
-        or any(
-            one.kind is LabelKind.NOTE and _note_is_marked(one.id, working.notes) for one in labels
-        )
-    ):
+    if rests_on_recorded_external_content(record.provenance) and found(_EPISODE_MARKED, own):
         return True
+    if from_outside(record) and found(_TRIGGER_OUTSIDE, own):
+        return True
+    for digest in digests:
+        if digest.outcome is DigestOutcome.ANSWERED and found(_DIGEST_ANSWERED, digest.result):
+            return True
+    for planned in rounds:
+        if planned.notes_marked and found(_NOTES_MARKED, planned.id):
+            return True
+    for label in labels:
+        if (
+            label.kind is LabelKind.NOTE
+            and _note_is_marked(label.id, working.notes)
+            and found(_NOTE_SHOWN_MARKED, label.id)
+        ):
+            return True
     shown = sorted({one.id for one in labels if one.kind is LabelKind.EPISODE} - {own})
     if not shown:
-        return False
-    found = await memory.get_many(shown)
-    for episode_id in shown:
-        other = found.get(episode_id)
-        if not isinstance(other, EpisodicMemory) or is_outside_episode(other):
+        return bool(held)
+    try:
+        episodes = await memory.get_many(shown)
+    except MemoryStoreError:
+        if every and held:
             return True
-    return False
+        raise
+    for episode_id in shown:
+        other = episodes.get(episode_id)
+        if not isinstance(other, EpisodicMemory):
+            if found(_EPISODE_SHOWN_UNREAD, episode_id):
+                return True
+        elif is_outside_episode(other) and found(_OUTSIDE_EPISODE_SHOWN, episode_id):
+            return True
+    return bool(held)
 
 
 def _declared(tool: ToolDefinition) -> tuple[object, ...]:
@@ -522,12 +603,25 @@ class _Ruled:
 
 @dataclass
 class _Round:
-    """The facts every call of one round is checked against."""
+    """The facts every call of one round is checked against.
+
+    ``checks`` holds, by call id, each check a call reached, for the diagnostic record
+    (ADR-0314 §4); ``None`` where the record is off, so nothing is noted.
+    """
 
     activation_id: str
     read_outside: bool
     verdicts: list[CallVerdict] = field(default_factory=list)
     allowed: list[AllowedCall] = field(default_factory=list)
+    checks: dict[str, list[dict[str, object]]] | None = None
+
+    def note(self, call: ProposedCall, check: str, verdict: str, reason: str | None) -> None:
+        """Note one check ``call`` reached, its verdict and its reason."""
+        if self.checks is None:
+            return
+        self.checks.setdefault(call.call_id, []).append(
+            {"check": check, "verdict": verdict, "reason": reason}
+        )
 
 
 # --- the stage ---------------------------------------------------------------------------
@@ -569,6 +663,7 @@ class AuthorizingStage:
         now: Callable[[], datetime] = _utcnow,
         new_decision_id: Callable[[], str] = _new_decision_id,
         new_effect_id: Callable[[], str] = _new_effect_id,
+        diagnostics: DiagnosticSink | None = None,
     ) -> None:
         """Wire the stage to its seams.
 
@@ -590,6 +685,8 @@ class AuthorizingStage:
             now: The clock a decision's ``decided_at`` is read from.
             new_decision_id: Mints a decision's id.
             new_effect_id: Mints an effect record's id, before the ruling.
+            diagnostics: The diagnostic record's write seam (ADR-0314 §4:4), or
+                ``None`` where the record is off.
         """
         self._registry = registry
         self._policy = policy
@@ -604,6 +701,7 @@ class AuthorizingStage:
         self._now = checked_clock(now, owner="AuthorizingStage")
         self._new_decision_id = new_decision_id
         self._new_effect_id = new_effect_id
+        self._diagnostics = diagnostics
 
     async def authorize(self, given: RoundToAuthorize) -> RoundAuthorization:
         """Check every call of ``given`` in the round's order, and its message.
@@ -627,6 +725,31 @@ class AuthorizingStage:
                 the refusals handled here. Nothing has run.
         """
         snapshot = _detached_round(given)
+        noting = self._diagnostics is not None
+        grounds: list[OutsideGround] | None = [] if noting else None
+        progress: list[_Round] = []
+        try:
+            decided = await self._authorized(snapshot, grounds, noting=noting, progress=progress)
+        except Exception as exc:
+            reached = progress[0] if progress else None
+            await self._returned(snapshot, grounds, None, state=reached, failure=exc)
+            raise
+        await self._returned(snapshot, grounds, decided, state=progress[0])
+        return decided
+
+    async def _authorized(
+        self,
+        snapshot: RoundToAuthorize,
+        grounds: list[OutsideGround] | None,
+        *,
+        noting: bool,
+        progress: list[_Round],
+    ) -> RoundAuthorization:
+        """Check every call of the detached round, and its message.
+
+        The round's state joins ``progress`` once it exists, so a failure part-way is
+        written with the checks it reached.
+        """
         held = snapshot.working
         read_outside = await read_outside_content(
             self._memory,
@@ -638,8 +761,14 @@ class AuthorizingStage:
                 fetched_outside=held.fetched_outside,
                 notes=held.notes,
             ),
+            grounds=grounds,
         )
-        state = _Round(activation_id=snapshot.activation_id, read_outside=read_outside)
+        state = _Round(
+            activation_id=snapshot.activation_id,
+            read_outside=read_outside,
+            checks={} if noting else None,
+        )
+        progress.append(state)
         for one in snapshot.calls:
             await self._check(one, state)
         stories: tuple[str, ...] = ()
@@ -655,16 +784,69 @@ class AuthorizingStage:
             read_outside_content=read_outside,
         )
 
+    async def _returned(
+        self,
+        snapshot: RoundToAuthorize,
+        grounds: list[OutsideGround] | None,
+        decided: RoundAuthorization | None,
+        *,
+        state: _Round | None = None,
+        failure: Exception | None = None,
+    ) -> None:
+        """Write what authorizing made of the round, or how far it got (ADR-0314 §4)."""
+
+        def body() -> dict[str, object]:
+            checks = {} if state is None or state.checks is None else state.checks
+            verdicts = {} if decided is None else {one.call_id: one for one in decided.verdicts}
+            calls: list[dict[str, object]] = []
+            for one in snapshot.calls:
+                call_id = one.call.call_id
+                verdict = verdicts.get(call_id)
+                calls.append(
+                    {
+                        "call_id": call_id,
+                        "name": one.call.name,
+                        "checks": checks.get(call_id, []),
+                        "verdict": None if verdict is None else verdict.verdict.value,
+                        "reason": None if verdict is None else verdict.reason,
+                    }
+                )
+            returned: dict[str, object] = {"round": snapshot.round.id, "calls": calls}
+            message = None if decided is None else decided.message
+            if message is not None:
+                returned["message"] = {
+                    "place": message.place,
+                    "allowed": message.allowed,
+                    "reason": message.reason,
+                }
+            if state is not None:
+                returned["read_outside_content"] = state.read_outside
+            returned["grounds"] = [
+                {"ground": one.ground, "record": one.record} for one in grounds or ()
+            ]
+            if failure is not None:
+                returned["failure"] = failure_body(failure)
+            return returned
+
+        await write_diagnostic(
+            self._diagnostics, DiagnosticSource.AUTHORIZING, DiagnosticKind.RETURNED, body
+        )
+
     async def _check(self, one: CallToAuthorize, state: _Round) -> None:
         """Select, rule, record, and apply the checks after the policy, for one call."""
         selected = await self._selected(one.call, state)
         if isinstance(selected, CallVerdict):
+            state.note(one.call, "selection", selected.verdict.value, selected.reason)
             state.verdicts.append(selected)
             return
+        state.note(one.call, "selection", "passed", None)
         ruled = await self._ruled(one.call, selected, state)
         if isinstance(ruled, CallVerdict):
+            state.note(one.call, "request", ruled.verdict.value, ruled.reason)
             state.verdicts.append(ruled)
             return
+        ruling = ruled.decision.ruling
+        state.note(one.call, "policy", ruling.outcome.value, ruling.reason)
         verdict = await self._after_the_policy(one.call, ruled, state)
         state.verdicts.append(verdict)
         if verdict.verdict is Verdict.ALLOWED:
@@ -812,15 +994,20 @@ class AuthorizingStage:
         binding = ruled.request.egress_binding
         carried = isinstance(binding, EgressBinding) and binding.planned_with_external_content
         if tool.leaves_hub and state.read_outside and not carried:
+            state.note(call, "stand_in", Verdict.NEEDS_YOU.value, _STAND_IN)
             return verdict(Verdict.NEEDS_YOU, _STAND_IN)
+        if tool.leaves_hub:
+            state.note(call, "stand_in", "passed", None)
         if tool.capability == REMEMBER_CAPABILITY:
-            remembered = await self._remembering(ruled)
+            remembered = await self._remembering(ruled, call, state)
             if remembered is not None:
                 kind, reason = remembered
                 return verdict(kind, reason)
         return verdict(Verdict.ALLOWED)
 
-    async def _remembering(self, ruled: _Ruled) -> tuple[Verdict, str] | None:
+    async def _remembering(
+        self, ruled: _Ruled, call: ProposedCall, state: _Round
+    ) -> tuple[Verdict, str] | None:
         """``MemoryPolicy``'s ruling on what the call would write, where it stops it (§4:3).
 
         Ruled over the proposal alone. Its conflicts are the writer's to find, and the
@@ -828,6 +1015,7 @@ class AuthorizingStage:
         reject.
         """
         if ruled.effect_id is None:
+            state.note(call, "memory_policy", Verdict.NOT_DONE.value, _UNCLAIMED_MEMORY)
             return Verdict.NOT_DONE, _UNCLAIMED_MEMORY
         try:
             proposal = remembered_proposal(
@@ -836,8 +1024,10 @@ class AuthorizingStage:
                 at=ruled.decision.decided_at,
             )
         except ValueError:
+            state.note(call, "memory_policy", Verdict.NOT_DONE.value, _MALFORMED)
             return Verdict.NOT_DONE, _MALFORMED
         ruling = await self._memory_policy.decide(proposal, conflicts=(), relations=None)
+        state.note(call, "memory_policy", ruling.kind.value, ruling.reason)
         if ruling.kind is MemoryDecisionKind.ASK_USER:
             return Verdict.NEEDS_YOU, _MEMORY_ASK
         if ruling.kind is MemoryDecisionKind.REJECT:
