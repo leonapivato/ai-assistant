@@ -643,6 +643,17 @@ _NEEDS_YOU: Final = (
     "say or do would let it run, and never describe a way to approve it. "
 )
 
+#: #2864: a call that brings no result brings no later round, and an activation that
+#: writes nothing reads *couldn't finish* (ADR-0293 §9:1), so a round that acts on the
+#: request says so itself; empty text still writes no message (§3:2).
+_REPLY: Final = (
+    "When you act on what the user asked, this round's message tells them so, even in one "
+    "short line, such as that you'll keep something in mind: it may be the only reply they "
+    "get, and it still never says how the calls went. Empty text writes no message, so "
+    "leave the text empty only where the user asked nothing of this round.\n"
+    "\n"
+)
+
 _MESSAGE: Final = (
     _VOICE
     + _WHOLE_MESSAGE
@@ -653,9 +664,8 @@ _MESSAGE: Final = (
     "than they show. Always report a call that was not done or whose outcome is unknown, "
     "and report an unknown outcome as unknown. "
     + _NEEDS_YOU
-    + "A question to the user is an ordinary message. Write no text where you have nothing "
-    "to say: empty text writes no message.\n"
-    "\n"
+    + "A question to the user is an ordinary message.\n"
+    "\n" + _REPLY
 )
 
 #: §3:8: where the place takes no message, planning is told so up front.
