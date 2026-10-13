@@ -71,6 +71,7 @@ class _Facts:
 class _Phases:
     """A constructed phase working set: every decision a plain field (``PhaseFacts``)."""
 
+    recalled_again: bool = False
     rounds: int = 0
     round_limit: int = 3
     latest_round: str | None = None
@@ -895,13 +896,14 @@ def _phase_due(phases: _Phases, facts: _Facts = _PHASE_PASS) -> Rule:
 
 
 def test_the_phase_table_keeps_the_first_rows_and_adds_the_rounds_in_order() -> None:
-    """§3's rows the thin path has: rows 6 and 7 are recall's second run's, a later lane's."""
+    """§3's rows the phases have: row 7, recall's digest, is a later lane's."""
     assert [rule.name for rule in PHASE_RULES] == [
         ControllerRule.CONVERSATION_UNRESOLVED,
         ControllerRule.WINDOWS_UNASSEMBLED,
         ControllerRule.NOT_RECALLED,
         ControllerRule.NOT_UNDERSTOOD,
         ControllerRule.STORY_LINKS_UNRECORDED,
+        ControllerRule.UNDERSTOOD_NOT_RECALLED,
         ControllerRule.FIRST_ROUND_DUE,
         ControllerRule.ROUND_UNAUTHORIZED,
         ControllerRule.ROUND_AUTHORIZED,
@@ -912,6 +914,37 @@ def test_the_phase_table_keeps_the_first_rows_and_adds_the_rounds_in_order() -> 
     kept = {rule.name for rule in PHASE_RULES}
     assert ControllerRule.UNPLANNED not in kept
     assert ControllerRule.ROUTE_UNCHECKED not in kept
+
+
+def test_todays_table_is_unchanged_where_the_phases_are_not_wired() -> None:
+    """ADR-0309 §2:6: the second run's row is the phases' table's alone."""
+    assert ControllerRule.UNDERSTOOD_NOT_RECALLED not in {rule.name for rule in ACTIVATION_RULES}
+    assert [rule.name for rule in ACTIVATION_RULES][3:6] == [
+        ControllerRule.WINDOWS_UNASSEMBLED,
+        ControllerRule.NOT_RECALLED,
+        ControllerRule.NOT_UNDERSTOOD,
+    ]
+
+
+def test_recall_runs_again_once_understanding_has_recorded_and_before_the_first_round() -> None:
+    """ADR-0308 §2:9, §3's row 6: after the story links, before ``first_round_due``."""
+    facts = replace(_PHASE_PASS, recall_wired=True, recall_decided=True)
+    rule = _phase_due(_Phases(), facts)
+    assert (rule.name, rule.makes_due) == (
+        ControllerRule.UNDERSTOOD_NOT_RECALLED,
+        ControllerStage.RECALL,
+    )
+    linking = replace(facts, story_links_wired=True)
+    assert _phase_due(_Phases(), linking).name is ControllerRule.STORY_LINKS_UNRECORDED
+    assert _phase_due(_Phases(recalled_again=True), facts).name is ControllerRule.FIRST_ROUND_DUE
+
+
+def test_recall_does_not_run_again_where_it_is_not_wired_or_nothing_is_recorded() -> None:
+    assert _phase_due(_Phases()).name is ControllerRule.FIRST_ROUND_DUE
+    unrecorded = replace(
+        _PHASE_PASS, recall_wired=True, recall_decided=True, understanding_recorded=False
+    )
+    assert _phase_due(_Phases(), unrecorded).name is ControllerRule.NOTHING_DUE
 
 
 def test_a_phase_rule_on_a_pass_the_phases_do_not_plan_is_a_defect() -> None:
@@ -1013,6 +1046,24 @@ def test_the_next_round_is_due_only_once_every_call_has_finished_and_something_c
 
 
 @dataclass
+class _Recalling:
+    """A recall stage over ``_Facts``: the first run decides, then the second, as scripted."""
+
+    name: ControllerStage = ControllerStage.RECALL
+    second_decides: bool = True
+    runs: int = 0
+
+    async def run(self, state: _Facts) -> StageResult:
+        self.runs += 1
+        assert state.phases is not None
+        if not state.recall_decided:
+            state.recall_decided = True
+        elif self.second_decides:
+            state.phases.recalled_again = True
+        return StageResult(StageOutcome.DONE)
+
+
+@dataclass
 class _PhaseStage:
     """A phase stage over ``_Phases``: it applies its decisions, then ends as scripted."""
 
@@ -1039,7 +1090,7 @@ class _PhaseStage:
         return self.result
 
 
-def _phase_controller(*stages: _PhaseStage) -> ActivationController[_Facts]:
+def _phase_controller(*stages: _PhaseStage | _Recalling) -> ActivationController[_Facts]:
     _, now = _clock()
     return ActivationController(
         stages=stages,
@@ -1195,3 +1246,35 @@ async def test_planning_due_again_for_a_round_it_already_followed_is_guarded() -
     await _phase_controller(stuck).run(replace(_PHASE_PASS, phases=_Phases()), record)
     assert stuck.runs == 2
     assert record.entries[-1].due is ControllerRule.STAGE_REPEATED
+
+
+async def test_recall_runs_twice_on_a_pass_the_second_under_its_own_row() -> None:
+    """ADR-0308 §2:9-§2:10: first before understanding, then once it has recorded."""
+    recall = _Recalling()
+    record = StageRecord()
+    await _phase_controller(
+        recall, _PhaseStage(ControllerStage.PLANNING, {"rounds": 1, "latest_round": "r1"})
+    ).run(replace(_PHASE_PASS, recall_wired=True, phases=_Phases()), record)
+    assert recall.runs == 2
+    assert _shape(record) == [
+        (ControllerStage.RECALL, ControllerRule.NOT_RECALLED, StageOutcome.DONE),
+        (ControllerStage.RECALL, ControllerRule.UNDERSTOOD_NOT_RECALLED, StageOutcome.DONE),
+        (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE, StageOutcome.DONE),
+        (ControllerStage.END, ControllerRule.NOTHING_DUE, StageOutcome.DONE),
+    ]
+
+
+async def test_a_pass_that_would_run_recall_a_third_time_is_guarded() -> None:
+    """ADR-0308 §2:10: ADR-0280 §4:6's guard ends it, recall having run twice."""
+    recall = _Recalling(second_decides=False)
+    planning = _PhaseStage(ControllerStage.PLANNING)
+    record = StageRecord()
+    await _phase_controller(recall, planning).run(
+        replace(_PHASE_PASS, recall_wired=True, phases=_Phases()), record
+    )
+    assert (recall.runs, planning.runs) == (2, 0)
+    assert [entry.due for entry in record.entries] == [
+        ControllerRule.NOT_RECALLED,
+        ControllerRule.UNDERSTOOD_NOT_RECALLED,
+        ControllerRule.STAGE_REPEATED,
+    ]

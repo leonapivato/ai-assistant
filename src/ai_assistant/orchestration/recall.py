@@ -42,6 +42,19 @@ pass's deadline. A ``MemoryStoreError``, and a ``StoryStoreError`` the same way
 returned with its error rather than raised, so the pass goes on to understanding. Any
 other error escapes. The controller that applies §5's continuation is step 3's.
 
+**The second run** (ADR-0308 §2). :meth:`RecallStage.recall_again` is the same stage
+run again once understanding has recorded, for planning alone. Its cues are the latest
+understanding's ``meaning`` and the ``phrase`` of each of its ``references``, each
+distinct text searched on its own with the band searches above (§2:2). Each cue keeps
+records under the same threshold and per-cue limit, passing over what the windows hold
+and every record the first run kept, each search asking for the limit plus the number
+passed over (§2:3). The cues' records are then kept up to a cap on the total, in band
+order: every cue's ``ASSERTED`` records first, then ``ATTESTED``, then ``DERIVED``, and
+within a band the meaning's before each phrase's, in the order understanding recorded
+them. A record more than one cue kept is kept once, its ``found_by`` naming each kind of
+cue that kept it (§2:4). The audience rule, the stories of what it keeps, the budget and
+the failure tolerance are the first run's (§2:6-§2:7).
+
 **It logs stage and code-owned reason only** — no input, no memory content and no
 exception content (ADR-0275 §8).
 """
@@ -84,7 +97,7 @@ from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_privacy import activation_of
 
 if TYPE_CHECKING:
-    from collections.abc import Container
+    from collections.abc import Awaitable, Callable, Container, Sequence
     from datetime import timedelta
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
@@ -97,8 +110,11 @@ _log = structlog.get_logger(__name__)
 #: ADR-0072 §5's consumer-side precedence, the order the bands are searched in (§3).
 _BANDS: Final = (BeliefBand.ASSERTED, BeliefBand.ATTESTED, BeliefBand.DERIVED)
 
-#: The one cue recall searches with today (§3).
+#: The first run's one cue (§3).
 _CUES: Final = (RecallCue.ACTIVATION_INPUT,)
+
+#: The second run's kinds of cue, in the order ``found_by`` names them (ADR-0308 §2:2).
+_SECOND_RUN_CUES: Final = (RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_PHRASE)
 
 type RecalledRecord = EpisodicMemory | SemanticMemory
 
@@ -221,6 +237,83 @@ class RecallStage:
             TimeoutError: If the pass's deadline had already passed, so no search is
                 started. That is the pass's deadline, not recall's budget (§5).
         """
+
+        async def kept() -> tuple[_Kept, ...]:
+            found = await self._search(text, audience, shown)
+            return tuple(_Kept(record, _CUES, score) for record, _, score in found)
+
+        return await self._decided(kept, cues=_CUES, deadline=deadline)
+
+    async def recall_again(  # noqa: PLR0913 — the two kinds of cue, the audience, the deadline, what is passed over and the cap
+        self,
+        meaning: str,
+        phrases: Sequence[str],
+        *,
+        audience: TurnSupply,
+        deadline: float,
+        passed_over: frozenset[str],
+        cap: int,
+    ) -> Recalled:
+        """The second run: search with what understanding found (ADR-0308 §2).
+
+        Args:
+            meaning: The latest understanding's ``meaning``.
+            phrases: The ``phrase`` of each of its ``references``, in the order
+                understanding recorded them, whether or not each resolved.
+            audience: The pass's audience posture, as for the first run (§2:6).
+            deadline: The pass's deadline on the running loop's clock, which caps
+                recall's budget, computed as the first run's is (§2:7).
+            passed_over: The stored ids none of which is kept: what the windows hold
+                and every record the first run kept (§2:3).
+            cap: ``RECALL_SECOND_RUN_CAP``: how many records the run keeps in all
+                (§2:4-§2:5).
+
+        Returns:
+            The decision, with the kept items, each found by the kinds of cue that
+            kept it, and their scores: a record more than one cue kept carries the
+            highest of its scores.
+
+        Raises:
+            ValueError: If ``cap`` is below 1 or above ``RECALLED_ITEMS_MAX``.
+            TimeoutError: If the pass's deadline had already passed, so no search is
+                started.
+        """
+        if not 1 <= cap <= RECALLED_ITEMS_MAX:
+            msg = "the second run's cap must be between 1 and RECALLED_ITEMS_MAX (ADR-0308 §2:5)"
+            raise ValueError(msg)
+        # Each distinct text is one cue, searched once; a text both the meaning and a
+        # phrase is found by both kinds, at the meaning's place in the order (§2:2).
+        cues: dict[str, list[RecallCue]] = {meaning: [RecallCue.UNDERSTOOD_MEANING]}
+        for phrase in phrases:
+            kinds = cues.setdefault(phrase, [])
+            if RecallCue.UNDERSTOOD_PHRASE not in kinds:
+                kinds.append(RecallCue.UNDERSTOOD_PHRASE)
+        searched = tuple(
+            kind for kind in _SECOND_RUN_CUES if any(kind in kinds for kinds in cues.values())
+        )
+
+        async def kept() -> tuple[_Kept, ...]:
+            found = [
+                (tuple(kinds), await self._search(text, audience, passed_over))
+                for text, kinds in cues.items()
+            ]
+            return _capped(found, cap)
+
+        return await self._decided(kept, cues=searched, deadline=deadline)
+
+    async def _decided(
+        self,
+        kept_by: Callable[[], Awaitable[tuple[_Kept, ...]]],
+        *,
+        cues: tuple[RecallCue, ...],
+        deadline: float,
+    ) -> Recalled:
+        """Run one recall's searches and story lookups under its budget, and decide (§5).
+
+        Raises:
+            TimeoutError: If the pass's deadline had already passed, so no search is
+                started. That is the pass's deadline, not recall's budget (§5).
+        """
         loop = asyncio.get_running_loop()
         now = loop.time()
         if deadline <= now:
@@ -229,35 +322,38 @@ class RecallStage:
         budget = asyncio.timeout_at(min(now + self._budget, deadline))
         try:
             async with budget:
-                kept = await self._search(text, audience, shown)
-                stories = [await self._stories_of(record) for record in kept]
+                kept = await kept_by()
+                stories = [await self._stories_of(one.record) for one in kept]
         except MemoryStoreError as error:
             _log.warning("recall_failed", stage="recall", reason="memory_store_error")
-            return Recalled(_decision(RecallOutcome.FAILED), error=error)
+            return Recalled(_decision(RecallOutcome.FAILED, cues=cues), error=error)
         except StoryStoreError as error:
             # ADR-0300 §7:3: handled as a MemoryStoreError is.
             _log.warning("recall_failed", stage="recall", reason="story_store_error")
-            return Recalled(_decision(RecallOutcome.FAILED), error=error)
+            return Recalled(_decision(RecallOutcome.FAILED, cues=cues), error=error)
         except TimeoutError as error:
             if not budget.expired():
                 # Not recall's budget: an error the stage does not handle (§5).
                 raise
             _log.warning("recall_failed", stage="recall", reason="budget_spent")
-            return Recalled(_decision(RecallOutcome.TIMED_OUT), error=error)
+            return Recalled(_decision(RecallOutcome.TIMED_OUT, cues=cues), error=error)
         if not kept:
-            return Recalled(_decision(RecallOutcome.NOTHING_FOUND))
-        items = tuple(_item(record, of) for record, of in zip(kept, stories, strict=True))
-        # Kept only with a score (§3), so each has one.
-        scores = tuple(record.score for record in kept if record.score is not None)
-        return Recalled(_decision(RecallOutcome.FOUND, items), scores=scores)
+            return Recalled(_decision(RecallOutcome.NOTHING_FOUND, cues=cues))
+        items = tuple(
+            _item(one.record, of, found_by=one.found_by)
+            for one, of in zip(kept, stories, strict=True)
+        )
+        scores = tuple(one.score for one in kept)
+        return Recalled(_decision(RecallOutcome.FOUND, items, cues=cues), scores=scores)
 
     async def _search(
         self, text: str, audience: TurnSupply, shown: frozenset[str]
-    ) -> tuple[RecalledRecord, ...]:
+    ) -> tuple[tuple[RecalledRecord, BeliefBand, float], ...]:
         """§3's band-scoped searches, kept in band order until the limit is filled.
 
         A record the windows hold is passed over before it is judged, so it takes no
         slot, and each search asks for as many more as it may pass over (ADR-0282 §4).
+        Each kept record comes with the band whose search kept it and its score.
         """
         limit = self._limit + len(shown)
         kinds = (
@@ -265,7 +361,7 @@ class RecallStage:
             if isinstance(audience, UnboundedAudienceSupply)
             else (MemoryKind.EPISODIC, MemoryKind.SEMANTIC)
         )
-        kept: dict[str, RecalledRecord] = {}
+        kept: dict[str, tuple[RecalledRecord, BeliefBand, float]] = {}
         for band in _BANDS:
             found = await self._memory.search(text, limit=limit, kinds=kinds, bands=(band,))
             for record in admitted_to_understanding(audience, found.records):
@@ -274,13 +370,14 @@ class RecallStage:
                 if record.id in shown:
                     continue
                 # Affirmatively at or above: a NaN score is not, and no score is not.
-                if record.score is None or not record.score >= self._threshold:
+                score = record.score
+                if score is None or not score >= self._threshold:
                     continue
                 # A record rewritten into a later band between the searches is kept
                 # once, where it was first admitted.
                 if record.id in kept:
                     continue
-                kept[record.id] = record
+                kept[record.id] = (record, band, score)
                 if len(kept) == self._limit:
                     return tuple(kept.values())
         return tuple(kept.values())
@@ -303,11 +400,65 @@ class RecallStage:
         return tuple(header.story_id for header in await self._stories.stories_of(member))
 
 
-def _decision(outcome: RecallOutcome, items: tuple[RecalledItem, ...] = ()) -> ActivationRecall:
-    return ActivationRecall(outcome=outcome, cues=_CUES, items=items)
+@dataclass(frozen=True, slots=True)
+class _Kept:
+    """One record a run keeps: the kinds of cue that kept it, and its search score."""
+
+    record: RecalledRecord
+    found_by: tuple[RecallCue, ...]
+    score: float
 
 
-def _item(record: RecalledRecord, stories: tuple[str, ...]) -> RecalledItem:
+def _capped(
+    found: Sequence[
+        tuple[tuple[RecallCue, ...], tuple[tuple[RecalledRecord, BeliefBand, float], ...]]
+    ],
+    cap: int,
+) -> tuple[_Kept, ...]:
+    """The second run's records, kept up to ``cap`` in band order (ADR-0308 §2:4).
+
+    ``found`` is each cue's kept records, in cue order: the meaning's first, then each
+    phrase's in the order understanding recorded them. Every cue's ``ASSERTED`` records
+    come first, then ``ATTESTED``, then ``DERIVED``, and within a band the cues in that
+    order, each cue's records in the order its search kept them. A record more than one
+    cue kept is kept once, where it first falls, its ``found_by`` naming each kind of
+    cue that kept it, in :class:`~ai_assistant.core.types.RecallCue`'s order, and its
+    score the highest any of them gave it.
+    """
+    kinds: dict[str, set[RecallCue]] = {}
+    scores: dict[str, float] = {}
+    for by, records in found:
+        for record, _, score in records:
+            kinds.setdefault(record.id, set()).update(by)
+            scores[record.id] = max(score, scores.get(record.id, score))
+    ordered: dict[str, RecalledRecord] = {}
+    for band in _BANDS:
+        for _, records in found:
+            for record, kept_in, _ in records:
+                if kept_in is band and record.id not in ordered:
+                    ordered[record.id] = record
+    return tuple(
+        _Kept(
+            record,
+            tuple(kind for kind in _SECOND_RUN_CUES if kind in kinds[record.id]),
+            scores[record.id],
+        )
+        for record in tuple(ordered.values())[:cap]
+    )
+
+
+def _decision(
+    outcome: RecallOutcome,
+    items: tuple[RecalledItem, ...] = (),
+    *,
+    cues: tuple[RecallCue, ...] = _CUES,
+) -> ActivationRecall:
+    return ActivationRecall(outcome=outcome, cues=cues, items=items)
+
+
+def _item(
+    record: RecalledRecord, stories: tuple[str, ...], *, found_by: tuple[RecallCue, ...] = _CUES
+) -> RecalledItem:
     """One kept record as the processing record carries it (§6, ADR-0300 §7:2)."""
     provenance = record.provenance
     return RecalledItem(
@@ -318,7 +469,7 @@ def _item(record: RecalledRecord, stories: tuple[str, ...]) -> RecalledItem:
         standing=band_of(provenance.source),
         rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
         attestation=provenance.attestation,
-        found_by=_CUES,
+        found_by=found_by,
         stories=stories,
     )
 

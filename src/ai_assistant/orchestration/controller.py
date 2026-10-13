@@ -193,6 +193,10 @@ class PhaseFacts(Protocol):
     """
 
     @property
+    def recalled_again(self) -> bool:
+        """Recall's second run made its decision, a failed one included (ADR-0308 §2)."""
+
+    @property
     def rounds(self) -> int:
         """How many planning rounds the pass has run."""
 
@@ -405,18 +409,38 @@ def _another_round_called_for(facts: PassFacts) -> bool:
     )
 
 
-#: ADR-0309 §3's table, for the rows the thin path has: rows 6 and 7,
-#: ``understood_not_recalled`` and ``recall_undigested``, are recall's second run's, a
-#: later lane's, so ``first_round_due`` follows ``story_links_unrecorded``. The old
-#: path's rows are absent. The composition root hands it to the controller only where
-#: the opt-in is set, and :data:`ACTIVATION_RULES` runs unchanged otherwise (§2:6).
+def _second_run(_: PassFacts) -> object:
+    """The loop guard's scope for recall's second run (ADR-0308 §2:10).
+
+    The first run is due under ``not_recalled``, unscoped, and the second under
+    ``understood_not_recalled``, scoped here: recall runs at most once under each, so at
+    most twice on a pass, and ADR-0280 §4:6's guard ends a pass that would run it a
+    third time under either.
+    """
+    return ControllerRule.UNDERSTOOD_NOT_RECALLED
+
+
+#: ADR-0309 §3's table, for the rows the phases have so far: row 7,
+#: ``recall_undigested``, is recall's digest's, a later lane's, so ``first_round_due``
+#: follows ``understood_not_recalled``. The old path's rows are absent. The composition
+#: root hands it to the controller only where the opt-in is set, and
+#: :data:`ACTIVATION_RULES` runs unchanged otherwise (§2:6).
 PHASE_RULES: Final[tuple[Rule, ...]] = (
     _rule(ControllerRule.CONVERSATION_UNRESOLVED),
     _rule(ControllerRule.WINDOWS_UNASSEMBLED),
     _rule(ControllerRule.NOT_RECALLED),
     _rule(ControllerRule.NOT_UNDERSTOOD),
     _rule(ControllerRule.STORY_LINKS_UNRECORDED),
-    # ADR-0307 §8:6: planning's first round runs once understanding has recorded.
+    # ADR-0308 §2:9: recall runs again once an understanding is recorded, where it is
+    # wired, as the first run is (ADR-0281 §2:3).
+    Rule(
+        ControllerRule.UNDERSTOOD_NOT_RECALLED,
+        lambda f: f.recall_wired and f.understanding_recorded and not _phases(f).recalled_again,
+        ControllerStage.RECALL,
+        per=_second_run,
+    ),
+    # ADR-0307 §8:6: planning's first round runs once understanding has recorded and
+    # recall's second run has finished, which the row above settles first.
     Rule(
         ControllerRule.FIRST_ROUND_DUE,
         lambda f: f.understanding_recorded and _phases(f).rounds == 0,

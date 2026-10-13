@@ -480,6 +480,13 @@ PHASES_CALL_DEADLINE: Final = timedelta(seconds=30)
 #: fit in one part.
 PHASES_DIGEST_PART_CHARS: Final = 12_000
 
+#: ``RECALL_SECOND_RUN_CAP``: how many records recall's second run keeps in all, across
+#: understanding's meaning and phrases, each of which keeps up to ``RECALL_ITEM_LIMIT``
+#: (ADR-0308 §2:4-§2:5). Not above ``RECALLED_ITEMS_MAX``, which the recall stage and
+#: the phase path check. **Provisional (#2589).** Two cues' worth at the per-cue limit:
+#: the meaning and one named thing found whole, and a longer reading cut in band order.
+RECALL_SECOND_RUN_CAP: Final = 2 * RECALL_ITEM_LIMIT
+
 #: The budget one activation the chat's reader starts is given where the thin path
 #: runs, in place of ``CHAT_TURN_BUDGET``: several rounds, each a model call, a
 #: search and a digest, do not fit the one-reply minute. **Provisional (#2589).**
@@ -3271,6 +3278,11 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
         round_wait=PHASES_CALL_DEADLINE,
         excerpt_chars=PHASES_EXCERPT_CHARS,
         part_chars=PHASES_DIGEST_PART_CHARS,
+        # ADR-0308 §3: planning fetches recall's kept records from the one memory store
+        # recall searched; the second run itself is the engine's recall stage, handed
+        # over with its first run (§2:1).
+        memory=seams.memory,
+        recall_cap=RECALL_SECOND_RUN_CAP,
         now=_utcnow,
     )
 

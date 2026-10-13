@@ -22,9 +22,10 @@ from ai_assistant.app.composition import (
     PHASES_CALL_DEADLINE,
     PHASES_ROUND_LIMIT,
     PHASES_TURN_BUDGET,
+    RECALL_SECOND_RUN_CAP,
 )
 from ai_assistant.core.config import EmbedderKind, Settings
-from ai_assistant.core.types import ProposedCall
+from ai_assistant.core.types import RECALLED_ITEMS_MAX, ProposedCall
 from ai_assistant.orchestration.chat import CHAT_TURN_BUDGET
 from ai_assistant.orchestration.phase_path import PhasePath
 
@@ -69,6 +70,11 @@ async def test_the_opt_in_wires_the_path_over_the_roots_own_stores(tmp_path: Pat
         assert authorizing._policy._quotes is None  # type: ignore[attr-defined]
         assert phases._round_limit == PHASES_ROUND_LIMIT
         assert phases._round_wait == PHASES_CALL_DEADLINE
+        # ADR-0308 §2:5, §3: the second run's provisional cap, and the one memory store
+        # recall searched, which planning fetches its finds from.
+        assert phases._recall_cap == RECALL_SECOND_RUN_CAP
+        assert 1 <= RECALL_SECOND_RUN_CAP <= RECALLED_ITEMS_MAX
+        assert phases._memory is engine._memory
         assert engine._chat_turn_budget == PHASES_TURN_BUDGET
         # ADR-0309 §4:2: remembering is offered; the search and the booking are not
         # configured here, so neither is.

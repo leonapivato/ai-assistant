@@ -38,7 +38,7 @@ from __future__ import annotations
 import ast
 import tempfile
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -167,6 +167,7 @@ from ai_assistant.orchestration.authorizer import (
     WorkingRecord,
 )
 from ai_assistant.orchestration.digesting import ActivationLabels, DigestingStage
+from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, PhaseWorking
@@ -598,6 +599,9 @@ async def _planning_stage(now: Clock) -> None:
     ).plan(PlanningInputs(activation_id="act-1", place=PlaceWindow(takes_message=True)))
 
 
+_BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
+
+
 @dataclass
 class _PhasePass:
     """A pass the phases plan, as a phase stage reads it: its deadline far off."""
@@ -606,6 +610,9 @@ class _PhasePass:
     deadline: float = 1e18
     understanding: None = None
     understanding_fetch: None = None
+    supply: BoundedAudienceSupply = field(default_factory=lambda: _BOUNDED)
+    windows: None = None
+    recalled: None = None
 
 
 async def _phase_path(now: Clock) -> None:
@@ -633,6 +640,8 @@ async def _phase_path(now: Clock) -> None:
         round_wait=timedelta(seconds=5),
         excerpt_chars=50,
         part_chars=50,
+        memory=FakeMemoryStore(),
+        recall_cap=1,
         now=now,
     )
     working = PhaseWorking(

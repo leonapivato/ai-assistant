@@ -68,10 +68,25 @@ selection beside the deployment's registry, and routes a search call to the
 account's: planning is offered the search without it, and the hub fills it from the
 searcher's own proposal (``WebSearcher.request``).
 
-**Left to later lanes:** recall's second run and its digest (rows 6 and 7), the story
-views and story calls, planning's look-ups, the follow-up, an event through the phases,
-and ADR-0309 §5:10's evaluation of the episode's placement over what the activation was
-given, for which the thin path places the episode for the owner alone.
+**Recall's second run** (ADR-0308 §2, ADR-0309 §3's row 6). The controller runs one
+stage per name, so :meth:`PhasePath.recall_stage` hands it one ``recall`` stage: the
+engine's first run where the pass has no recall decision, and the second run, on the
+latest understanding's meaning and phrases, where it has one. The rows decide which is
+due. The second run's decision is held in :class:`PhaseWorking` and carried on the
+activation's state, and understanding never reads it (§2:8).
+
+**What planning is shown of what recall found** (ADR-0308 §3). Before its first round,
+planning fetches both runs' kept ids in one read, the audience predicate applied again
+(ADR-0282 §2:4-§2:8), and holds what came back. A found episode is shown by its records
+under its label with the labels of the stories it is in; a found memory record is shown
+only where its source is not outside (ADR-0306 §5:16). Every outside memory record is
+withheld: it reaches planning only as recall's digest's evidence, which is a later
+lane's.
+
+**Left to later lanes:** recall's digest (row 7), the story views and story calls,
+planning's look-ups, the follow-up, an event through the phases, and ADR-0309 §5:10's
+evaluation of the episode's placement over what the activation was given, for which the
+thin path places the episode for the owner alone.
 
 **It logs stage and code-owned reason only** (ADR-0275 §8).
 """
@@ -94,20 +109,25 @@ from ai_assistant.core.errors import (
     ModelTimeoutError,
 )
 from ai_assistant.core.types import (
+    RECALLED_ITEMS_MAX,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEffect,
+    ActivationRecall,
     CapabilityEffect,
     CapabilityResult,
     ControllerRule,
     ControllerStage,
     DigestOutcome,
+    EpisodicMemory,
     InputOrigin,
     MessageAuthor,
     Modality,
     NewMessage,
     PlanningLabel,
     ProposedCall,
+    RecallOutcome,
     SendOutcome,
+    StageOutcome,
     ToolFailure,
     ToolFailureKind,
     ToolOutcome,
@@ -134,7 +154,7 @@ from ai_assistant.orchestration.authorizer import (
     WorkingRecord,
 )
 from ai_assistant.orchestration.chat import couldnt_finish
-from ai_assistant.orchestration.controller import Stage
+from ai_assistant.orchestration.controller import Stage, StageResult, TolerantStage
 from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.planning import (
@@ -149,12 +169,15 @@ from ai_assistant.orchestration.planning import (
     PlanningInputs,
     PlanningStage,
 )
+from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.stories import episode_address
+from ai_assistant.orchestration.understanding import fetch_held
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import (
+        MemoryStore,
         ModelProvider,
         PlanStore,
         ToolCallingCompleter,
@@ -174,7 +197,9 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.controller import ControllerStageRun
-    from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow
+    from ai_assistant.orchestration.disclosure import TurnSupply
+    from ai_assistant.orchestration.recall import RecallStage
+    from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow, Windows
 
 __all__ = [
     "CHAT_DESCRIPTION",
@@ -202,6 +227,15 @@ CHAT_DESCRIPTION: Final = (
 _PLANNING_EXPIRED: Final = "the activation's deadline passed before the next round"
 _AUTHORIZING_EXPIRED: Final = "the activation's deadline passed before the round was checked"
 _ACTING_EXPIRED: Final = "the activation's deadline passed before the round's calls ran"
+_RECALL_EXPIRED: Final = "the activation's deadline passed during recall's second run"
+#: What a recall decision makes of its stage's entry (ADR-0281 §5), for the second run
+#: as for the first (ADR-0308 §2:7).
+_RECALL_STAGE_OUTCOMES: Final = {
+    RecallOutcome.FOUND: StageOutcome.DONE,
+    RecallOutcome.NOTHING_FOUND: StageOutcome.DONE,
+    RecallOutcome.FAILED: StageOutcome.FAILED,
+    RecallOutcome.TIMED_OUT: StageOutcome.TIMED_OUT,
+}
 #: What acting decided, as the durable record would have it, for a call that may have
 #: happened.
 _ACTED_OUTCOMES: Final = {
@@ -236,7 +270,8 @@ class MessageWriter(Protocol):
 class PhasePass(Protocol):
     """What a phase stage reads of the pass's working set (ADR-0280 §3).
 
-    The engine's working set satisfies it: the pass's deadline, the understanding the
+    The engine's working set satisfies it: the pass's deadline and audience posture,
+    the windows stage's decision, recall's first decision, the understanding the
     understanding stage recorded, what that phase fetched for the windows, and the
     phases' own part, :class:`PhaseWorking`.
     """
@@ -244,6 +279,18 @@ class PhasePass(Protocol):
     @property
     def deadline(self) -> float:
         """The pass's deadline, on the running loop's clock."""
+
+    @property
+    def supply(self) -> TurnSupply:
+        """The pass's audience posture, which recall and every fetch filter by."""
+
+    @property
+    def windows(self) -> Windows | None:
+        """The windows stage's decision, where it made one (ADR-0282 §3)."""
+
+    @property
+    def recalled(self) -> Recalled | None:
+        """Recall's first decision, where it made one (ADR-0281 §6)."""
 
     @property
     def understanding(self) -> ActivationUnderstanding | None:
@@ -477,9 +524,10 @@ class PhaseWorking:
     """The phases' part of one activation's working set (ADR-0280 §3, ADR-0309 §3:2).
 
     Structurally :class:`~ai_assistant.orchestration.controller.PhaseFacts`, which the
-    phase rules read. It holds each round's decisions, the activation's labels, its
-    digests and the evidence they gave, its held results (acting's part of the working
-    episode, never saved), and the messages it wrote.
+    phase rules read. It holds recall's second decision and what planning fetched of
+    both runs' records, each round's decisions, the activation's labels, its digests and
+    the evidence they gave, its held results (acting's part of the working episode,
+    never saved), and the messages it wrote.
     """
 
     def __init__(  # noqa: PLR0913 — the activation, its place, its trigger's origin, its audience, its round limit and its recorded labels
@@ -526,9 +574,18 @@ class PhaseWorking:
         # Set once a record the windows or recall brought is seen resting on outside
         # content, before the first round is planned (ADR-0181 §4, ADR-0223).
         self.fetched_outside = False
+        # Recall's second decision, once that run ends (ADR-0308 §2), and the records
+        # either run kept as planning fetched them before its first round (§3).
+        self.second_recall: Recalled | None = None
+        self.found: Fetched | None = None
         self._rounds: list[_Round] = []
 
     # --- what the rules read (PhaseFacts) ---
+
+    @property
+    def recalled_again(self) -> bool:
+        """Recall's second run made its decision, a failed one included (ADR-0308 §2)."""
+        return self.second_recall is not None
 
     @property
     def rounds(self) -> int:
@@ -950,6 +1007,54 @@ def _fetched_external(fetched: Fetched | None) -> bool:
     return any(rests_on_recorded_external_content(one.provenance) for one in records)
 
 
+def _found_external(found: Fetched) -> bool:
+    """Whether a found episode planning is shown rests on outside content (ADR-0223).
+
+    Counted as the episode window's are. A found memory record whose source is outside
+    is never shown to planning (ADR-0308 §3:3), and one whose source is not outside
+    rests on none, so only an episode can count.
+    """
+    return any(
+        isinstance(one, EpisodicMemory) and rests_on_recorded_external_content(one.provenance)
+        for one in found.recalled
+    )
+
+
+def _recalled_stories(*decisions: Recalled | None) -> dict[str, tuple[str, ...]]:
+    """The stories each found episode is in, as its run recorded them (ADR-0300 §7:2)."""
+    return {
+        item.id: tuple(item.stories)
+        for decision in decisions
+        if decision is not None
+        for item in decision.result.items
+        if item.stories
+    }
+
+
+@dataclass(frozen=True)
+class _RecallRuns[P: PhasePass]:
+    """One ``recall`` stage over both runs, the rows deciding which is due (ADR-0308 §2).
+
+    ``not_recalled`` makes recall due while the pass has no first decision, and
+    ``understood_not_recalled`` once it has one, so the first run runs where there is
+    none and the second otherwise. Each run records its own decision before it returns.
+    """
+
+    first: ControllerStageRun[P]
+    again: ControllerStageRun[PhasePass]
+
+    @property
+    def name(self) -> ControllerStage:
+        """Recall, under either row."""
+        return ControllerStage.RECALL
+
+    async def run(self, state: P) -> StageResult:
+        """Run the first run where the pass has no recall decision, else the second."""
+        if state.recalled is None:
+            return await self.first.run(state)
+        return await self.again.run(state)
+
+
 class PhasePath:
     """The thin path's stages, and what one activation's rounds need around them.
 
@@ -975,6 +1080,8 @@ class PhasePath:
         round_wait: timedelta,
         excerpt_chars: int,
         part_chars: int,
+        memory: MemoryStore,
+        recall_cap: int,
         planning_model: str | None = None,
         now: Callable[[], datetime] = _utcnow,
         new_effect_id: Callable[[], str] = _new_effect_id,
@@ -995,18 +1102,26 @@ class PhasePath:
                 digests at most: the call's deadline that bounds the wait (§8:2).
             excerpt_chars: The bound planning cuts another episode's texts to.
             part_chars: ``DIGEST_PART_CHARS`` (ADR-0308 §4:9).
+            memory: The memory store planning fetches recall's kept records from
+                (ADR-0282 §2:4).
+            recall_cap: ``RECALL_SECOND_RUN_CAP``: how many records recall's second
+                run keeps in all (ADR-0308 §2:4-§2:5).
             planning_model: Optional ``"provider:model"`` override for planning.
             now: The clock a step's start and an effect's claim are read from.
             new_effect_id: Mints the *couldn't finish* message's effect record id.
 
         Raises:
-            ValueError: If ``round_limit`` is below 1 or ``round_wait`` not positive.
+            ValueError: If ``round_limit`` is below 1, ``round_wait`` not positive, or
+                ``recall_cap`` below 1 or above ``RECALLED_ITEMS_MAX``.
         """
         if round_limit < 1:
             msg = "the round limit is at least one round (ADR-0307 §8:4)"
             raise ValueError(msg)
         if round_wait <= timedelta(0):
             msg = "a round's wait is positive (ADR-0307 §8:2)"
+            raise ValueError(msg)
+        if not 1 <= recall_cap <= RECALLED_ITEMS_MAX:
+            msg = "the second run's cap is between 1 and RECALLED_ITEMS_MAX (ADR-0308 §2:5)"
             raise ValueError(msg)
         self._now = checked_clock(now, owner="PhasePath")
         self._planning = PlanningStage(
@@ -1028,6 +1143,8 @@ class PhasePath:
         self._round_limit = round_limit
         self._round_wait = round_wait
         self._new_effect_id = new_effect_id
+        self._memory = memory
+        self._recall_cap = recall_cap
         self._append: Callable[[], Awaitable[None]] | None = None
 
     def attach(self, append: Callable[[], Awaitable[None]]) -> None:
@@ -1124,6 +1241,35 @@ class PhasePath:
             Stage(ControllerStage.DIGESTING, self._digest),
         )
 
+    def recall_stage[P: PhasePass](
+        self, first: ControllerStageRun[P], recall: RecallStage | None
+    ) -> ControllerStageRun[P]:
+        """The one ``recall`` stage the controller runs on a phases pass (ADR-0308 §2).
+
+        The controller runs one stage per name, and recall runs twice on a pass: the
+        first run, before understanding, is the engine's own ``first``; the second, once
+        understanding has recorded, is run here over the same ``recall`` stage (§2:1).
+        Which is due is the rules': ``not_recalled`` answers only while the pass has no
+        first decision and ``understood_not_recalled`` only once it has one, so the
+        stage runs the first where there is none and the second otherwise.
+
+        Args:
+            first: The engine's first run, exactly as it runs on today's path.
+            recall: The recall stage the engine holds, or ``None`` where none is wired;
+                the second run's row then never answers.
+
+        Returns:
+            The stage the controller runs under both rows.
+        """
+
+        async def again(given: PhasePass) -> StageResult:
+            return await self._recall_again(given, recall)
+
+        return _RecallRuns(
+            first=first,
+            again=TolerantStage(ControllerStage.RECALL, again, expired=_expired(_RECALL_EXPIRED)),
+        )
+
     async def run(
         self,
         given: PhasePass,
@@ -1197,7 +1343,12 @@ class PhasePath:
         """One planning round, over everything the thin path gives it (ADR-0307 §6)."""
         working = _working(given)
         fetched = given.understanding_fetch
-        if _fetched_external(fetched):
+        try:
+            async with asyncio.timeout_at(given.deadline):
+                found = await self._found(given, working)
+        except TimeoutError:
+            raise ModelTimeoutError(_PLANNING_EXPIRED) from None
+        if _fetched_external(fetched) or _found_external(found):
             # Carried into planning's notes and authorizing's rulings from the first
             # round, not only into the frozen episode (ADR-0181 §4, ADR-0306 §4:6).
             working.fetched_outside = True
@@ -1207,6 +1358,8 @@ class PhasePath:
             understanding=given.understanding,
             trigger_origin=working.trigger_origin,
             episodes=() if fetched is None or fetched.episodes is None else fetched.episodes,
+            recalled=found.recalled,
+            recalled_stories=_recalled_stories(given.recalled, working.second_recall),
             owner_records=working.owner_records,
             rounds=working.planning_rounds(),
             labels=working.labels.labels,
@@ -1221,6 +1374,81 @@ class PhasePath:
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         working.planned(planned)
+
+    async def _found(self, given: PhasePass, working: PhaseWorking) -> Fetched:
+        """Both recall runs' kept records, fetched once, before the first round (§3).
+
+        Planning needs the records recall chose, so it fetches their ids itself in one
+        read: each record's current version, the audience predicate applied again, and
+        an open episode, an id with no record and one the predicate now refuses left
+        out (ADR-0282 §2:4-§2:8). What was fetched and what came back missing is held
+        in the working set, and every later round is shown the same records.
+        """
+        if working.found is None:
+            ids = tuple(
+                dict.fromkeys(
+                    item.id
+                    for decision in (given.recalled, working.second_recall)
+                    if decision is not None
+                    for item in decision.result.items
+                )
+            )
+            working.found = await fetch_held(
+                self._memory, episode_ids=None, recalled_ids=ids, audience=given.supply
+            )
+            _log.info(
+                "stage_fetch",
+                stage="planning",
+                fetched=len(working.found.fetched),
+                missing=len(working.found.missing),
+            )
+        return working.found
+
+    async def _recall_again(self, given: PhasePass, recall: RecallStage | None) -> StageResult:
+        """Recall's second run, on what understanding found (ADR-0308 §2).
+
+        Its cues are the latest understanding's meaning and the phrase of each of its
+        references (§2:2), and it passes over what the windows hold and every record the
+        first run kept (§2:3). The decision is held in the working set and carried on
+        the activation's state before the stage returns, so the row that made it due
+        does not answer again; understanding never reads it (§2:8). A ``failed`` or
+        ``timed_out`` decision is returned ``tolerated`` with its error, and planning
+        goes on without it while the pass's deadline holds (§2:7). Past the deadline,
+        whatever the run returned is the expiry, as for the first run.
+
+        Raises:
+            RuntimeError: If no recall stage is wired, or there is no recorded
+                understanding or no window decision, which the rows make impossible.
+        """
+        working = _working(given)
+        understanding = given.understanding
+        windows = given.windows
+        if recall is None or understanding is None or windows is None:
+            msg = "recall's second run follows a recorded understanding (ADR-0308 §2:1)"
+            raise RuntimeError(msg)
+        first = given.recalled
+        kept = () if first is None else tuple(item.id for item in first.result.items)
+        recalled = await recall.recall_again(
+            understanding.meaning,
+            tuple(one.phrase for one in understanding.references),
+            audience=given.supply,
+            deadline=given.deadline,
+            passed_over=windows.shared | frozenset(windows.episode_ids or ()) | frozenset(kept),
+            cap=self._recall_cap,
+        )
+        late = _expired(_RECALL_EXPIRED)(given)
+        if late is not None:
+            recalled = Recalled(
+                ActivationRecall(outcome=RecallOutcome.TIMED_OUT, cues=recalled.result.cues),
+                error=late,
+            )
+        working.second_recall = recalled
+        if (state := active_state()) is not None:
+            state.recall_second_run = recalled.result
+        outcome = _RECALL_STAGE_OUTCOMES[recalled.result.outcome]
+        if outcome is StageOutcome.DONE:
+            return StageResult(StageOutcome.DONE)
+        return StageResult(outcome, recalled.error, tolerated=True)
 
     async def _authorize(self, given: PhasePass) -> None:
         """Check the latest round's calls by rule, and its message by its place."""

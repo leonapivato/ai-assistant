@@ -10151,7 +10151,8 @@ class Engine:
         The turn's working set is the one :meth:`_chat_turn` assembles, holding the
         phases' part beside it, and the controller runs ADR-0309 §3's table over the
         stages before planning — the conversation, the windows, recall, understanding
-        and the story links, each exactly as today — and the four phase stages. No
+        and the story links, each exactly as today, then recall's second run (ADR-0308
+        §2) — and the four phase stages. No
         routing, goal, turn loop, drive or compose stage runs, and no ``TurnOutcome``
         is built: the phases write the activation's messages as it runs, and the path
         carries what the episode freezes with.
@@ -10197,7 +10198,12 @@ class Engine:
         stages: list[ControllerStageRun[_TurnPass]] = [
             Stage(ControllerStage.BEGIN_CONVERSATION, self._begin_conversation_stage),
             Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),
-            TolerantStage(ControllerStage.RECALL, self._recall_stage, expired=_recall_expired),
+            # ADR-0308 §2: recall runs twice on a phases pass, its second run over the
+            # same stage once understanding has recorded, which the path runs.
+            phases.recall_stage(
+                TolerantStage(ControllerStage.RECALL, self._recall_stage, expired=_recall_expired),
+                self._recall,
+            ),
             Stage(ControllerStage.UNDERSTANDING, self._understanding_stage, expired=_turn_expired),
             TolerantStage(
                 ControllerStage.STORY_LINKS, self._story_links_stage, expired=_story_links_expired

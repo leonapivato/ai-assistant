@@ -16,6 +16,7 @@ from structlog.testing import capture_logs
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
     ActivationUnderstanding,
+    Attestation,
     CapabilityEffect,
     CapabilityResult,
     ChannelContext,
@@ -44,6 +45,7 @@ from ai_assistant.core.types import (
     RiskLevel,
     Role,
     RoundResponse,
+    SemanticMemory,
     StageEntry,
     StageOutcome,
     StoryMember,
@@ -319,6 +321,7 @@ async def test_the_request_is_asked_afresh_as_two_messages() -> None:
         "understanding",
         "place_window",
         "episode_window",
+        "recalled",
         "capabilities",
         "rounds",
         "evidence",
@@ -838,6 +841,32 @@ async def test_an_outside_episodes_input_is_never_shown() -> None:
             False,
             id="marked-notes-withheld-are-not-read",
         ),
+        pytest.param(
+            {
+                "owner_records": True,
+                "recalled": (
+                    _episode(
+                        "activation:found",
+                        rounds=(_earlier(notes="from a report", notes_marked=True),),
+                    ),
+                ),
+            },
+            True,
+            id="a-found-episodes-marked-notes",
+        ),
+        pytest.param(
+            {
+                "owner_records": False,
+                "recalled": (
+                    _episode(
+                        "activation:found",
+                        rounds=(_earlier(text="hi", notes="from a report", notes_marked=True),),
+                    ),
+                ),
+            },
+            False,
+            id="a-found-episodes-marked-notes-withheld",
+        ),
     ],
 )
 async def test_notes_are_marked_by_what_the_activation_has_read(
@@ -852,6 +881,121 @@ async def test_a_round_with_no_notes_marks_none() -> None:
     stage, _, _ = _stage(RoundResponse(text="hi"))
     planned = await stage.plan(_inputs(trigger_origin=InputOrigin.OUTSIDE))
     assert planned.round.notes_marked is False
+
+
+# --- ADR-0308 §3: what recall found ---------------------------------------------------------
+
+
+def _remembered(memory_id: str, source: MemorySource, fact: str) -> SemanticMemory:
+    return SemanticMemory(
+        id=memory_id,
+        content=fact,
+        fact=fact,
+        provenance=Provenance(
+            source=source,
+            confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.8,
+            last_updated=_AT,
+            attestation=(
+                Attestation(reported_by="mail", reported_at=_AT)
+                if source is MemorySource.EXTERNAL
+                else None
+            ),
+        ),
+    )
+
+
+async def test_a_found_episode_is_shown_by_its_records_with_its_stories_labels() -> None:
+    """§3:1-§3:2: an E label, its meaning, messages and notes, and its stories by label."""
+    noted = _earlier(text="Booked the Italian place.", notes="they like the window table")
+    found = _episode("activation:found", rounds=(noted,))
+    stage, completer, _ = _stage()
+    planned = await stage.plan(
+        _inputs(
+            recalled=(found,),
+            recalled_stories={"activation:found": ("story-1", "story-2")},
+            owner_records=True,
+        )
+    )
+    (shown,) = _sent(completer)["recalled"]
+    assert shown["label"] == "E1"
+    assert shown["in_stories"] == ["S1", "S2"]
+    assert shown["input"] == "the words they wrote"
+    assert shown["rounds"] == [
+        {"message": "Booked the Italian place.", "notes": "they like the window table"}
+    ]
+    assert [(one.label, one.kind, one.id) for one in planned.labels] == [
+        ("E1", LabelKind.EPISODE, "activation:found"),
+        ("S1", LabelKind.STORY, "story-1"),
+        ("S2", LabelKind.STORY, "story-2"),
+    ]
+
+
+async def test_a_found_outside_episode_is_never_shown_by_its_raw_input() -> None:
+    """§3:1: ``project_episode`` with no outside input admitted."""
+    found = _episode("activation:report", origin=InputOrigin.OUTSIDE)
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(recalled=(found,)))
+    (shown,) = _sent(completer)["recalled"]
+    assert shown["input"] == "an outside report, not shown"
+    assert "the words they wrote" not in completer.last_call.messages[1].content
+
+
+async def test_a_found_episodes_notes_follow_the_audience() -> None:
+    noted = _earlier(text="Booked.", notes="they like the window table")
+    found = _episode("activation:found", rounds=(noted,))
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(recalled=(found,), owner_records=False))
+    assert _sent(completer)["recalled"][0]["rounds"] == [{"message": "Booked."}]
+
+
+async def test_a_found_memory_record_is_shown_only_where_its_source_is_not_outside() -> None:
+    """§3:3, ADR-0306 §5:16: an outside record is withheld, and takes no label."""
+    said = _remembered("m-said", MemorySource.USER_ASSERTED, "The dentist is Dr Rao.")
+    worked = _remembered("m-worked", MemorySource.INFERRED, "Appointments are on Fridays.")
+    reported = _remembered("m-mail", MemorySource.EXTERNAL, "Your appointment moved to 3pm.")
+    stage, completer, _ = _stage()
+    planned = await stage.plan(_inputs(recalled=(said, reported, worked)))
+    assert _sent(completer)["recalled"] == [
+        {
+            "label": "M1",
+            "item": "a remembered fact: something the user said",
+            "last_updated": _AT.isoformat(),
+            "fact": "The dentist is Dr Rao.",
+        },
+        {
+            "label": "M2",
+            "item": "a remembered fact: something the assistant worked out",
+            "last_updated": _AT.isoformat(),
+            "fact": "Appointments are on Fridays.",
+        },
+    ]
+    assert "Your appointment moved" not in completer.last_call.messages[1].content
+    assert "m-mail" not in {one.id for one in planned.labels}
+
+
+async def test_a_found_episode_the_episode_window_shows_is_not_shown_again() -> None:
+    episode = _episode("activation:both")
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(episodes=(episode,), recalled=(episode,)))
+    sent = _sent(completer)
+    assert [one["label"] for one in sent["episode_window"]] == ["E1"]
+    assert sent["recalled"] == []
+
+
+async def test_a_found_label_may_be_named_by_a_call() -> None:
+    """ADR-0307 §5:1: a found record is shown, so its label names it."""
+    found = _episode("activation:found")
+    stage, _, _ = _stage(
+        RoundResponse(calls=(_call("c1", "web_search", query="E1", looking_for="hours"),))
+    )
+    planned = await stage.plan(
+        _inputs(
+            recalled=(found,),
+            label_arguments={"web_search": {"query": LabelKind.EPISODE}},
+        )
+    )
+    (call,) = planned.calls
+    assert call.call.arguments["query"] == "activation:found"
 
 
 # --- judging the calls ----------------------------------------------------------------------------
