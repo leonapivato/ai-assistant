@@ -1,6 +1,6 @@
 """Fresh-state memory format boundary for ADR-0275 §12.
 
-Advanced by ADRs 0276, 0280, 0281, 0283, 0284, 0286, 0307 and 0308.
+Advanced by ADRs 0276, 0280, 0281, 0283, 0284, 0286, 0307, 0308 and 0315.
 """
 
 from __future__ import annotations
@@ -35,8 +35,10 @@ from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 #: schema_version 8 for the digests, which a version-7 record does not validate as, so
 #: the marker advances to 9 on the same terms (ADR-0308 §7:3). ADR-0308 §7 advances the
 #: record to schema_version 9 for recall's second run, which a version-8 record does not
-#: validate as, so the marker advances to 10 on the same terms.
-EPISODE_RECORD_FORMAT: Final[int] = 10
+#: validate as, so the marker advances to 10 on the same terms. ADR-0315 §5 advances the
+#: record to schema_version 10, whose rounds lose the mark asking for another round, which
+#: a version-9 record does not validate as, so the marker advances to 11 on the same terms.
+EPISODE_RECORD_FORMAT: Final[int] = 11
 
 
 def check_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool:

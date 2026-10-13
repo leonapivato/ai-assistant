@@ -9,6 +9,7 @@ The round's request and response shapes (``OfferedTool``, ``ProposedCall``,
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
@@ -49,6 +50,9 @@ from ai_assistant.core.types import (
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _LATER = _NOW + timedelta(seconds=30)
 _OWNER_ONLY = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_NOW)
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
 
 
 def _call(call_id: str = "c1", name: str = "web_search") -> ProposedCall:
@@ -131,8 +135,22 @@ def test_a_proposed_calls_arguments_are_frozen_json() -> None:
         call.arguments["tags"] = ()  # type: ignore[index]  # the point: it is frozen
 
 
-def test_a_round_response_defaults_to_no_text_calls_notes_or_mark() -> None:
-    assert RoundResponse() == RoundResponse(text="", calls=(), notes=None, another_round=False)
+def test_a_round_response_defaults_to_no_text_calls_or_notes() -> None:
+    assert RoundResponse() == RoundResponse(text="", calls=(), notes=None)
+
+
+@pytest.mark.parametrize(
+    ("model", "base"),
+    [(RoundResponse, {}), (PlanningRound, {"id": "r1", "recorded_at": _NOW})],
+    ids=["response", "recorded"],
+)
+def test_no_round_carries_a_mark_asking_for_another(
+    model: type[BaseModel], base: dict[str, object]
+) -> None:
+    """ADR-0315 §3, §5: the mark retires; a response or a record carrying it is refused."""
+    assert "another_round" not in model.model_fields
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        model.model_validate({**base, "another_round": True})
 
 
 def test_a_round_response_refuses_two_calls_under_one_id() -> None:
@@ -183,9 +201,9 @@ def test_a_labels_id_is_kept_exactly_as_held(id_: str) -> None:
 # --- a recorded round ---------------------------------------------------------------
 
 
-def test_a_round_keeps_its_four_parts_and_its_mark() -> None:
-    one = _round(text="On it.", calls=(_call(),), notes="n", another_round=True, notes_marked=True)
-    assert (one.text, one.notes, one.another_round, one.notes_marked) == ("On it.", "n", True, True)
+def test_a_round_keeps_its_three_parts() -> None:
+    one = _round(text="On it.", calls=(_call(),), notes="n", notes_marked=True)
+    assert (one.text, one.notes, one.notes_marked) == ("On it.", "n", True)
     assert one.calls == (_call(),)
 
 

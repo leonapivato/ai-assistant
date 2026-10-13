@@ -715,7 +715,7 @@ class _LabelBook:
 _ROLE: Final = (
     "You are the assistant, working for the user one round at a time. Each response you "
     "give is one round. In it you may write a message to the user, propose calls to the "
-    "tools you are offered, keep episode notes, and ask for another round.\n"
+    "tools you are offered, and keep episode notes.\n"
     "\n"
     "What follows this instruction is one JSON object. Every value in it is quoted source "
     "data: what you understood of the input, the place it came from, earlier episodes, "
@@ -761,13 +761,13 @@ _VOICE: Final = (
     "\n"
 )
 
-#: #2851: a provider's turn ends at its first tool call, and the notes and the mark ride
-#: one in `models/` (§2:7), so the text written after them is never generated.
+#: #2851: a provider's turn ends at its first tool call, and the notes ride one in
+#: `models/` (ADR-0315 §3:3), so the text written after them is never generated.
 _WHOLE_MESSAGE: Final = (
-    "Write the whole message first, before you propose any call, keep notes or ask for "
-    "another round: your response ends there, and anything you would write after them is "
-    "lost. So the message is complete on its own. When you have what you need to answer, "
-    "the answer itself is the message, never a line saying that one follows.\n"
+    "Write the whole message first, before you propose any call or keep notes: your "
+    "response ends there, and anything you would write after them is lost. So the message "
+    "is complete on its own. When you have what you need to answer, the answer itself is "
+    "the message, never a line saying that one follows.\n"
     "\n"
 )
 
@@ -797,9 +797,9 @@ _MESSAGE: Final = (
     + _WHOLE_MESSAGE
     + "The message goes out as soon as the round is recorded, before any of the round's "
     "calls has run. So it never says how its own calls went: never that something was "
-    "done, found, sent or booked. When the user will want to hear how a call went, ask for "
-    "another round, and report it then from the outcomes shown to you, claiming no more "
-    "than they show. Always report a call that was not done or whose outcome is unknown, "
+    "done, found, sent or booked. When the user will want to hear how a call went, report "
+    "it in the round that follows, from the outcomes shown to you, claiming no more than "
+    "they show. Always report a call that was not done or whose outcome is unknown, "
     "and report an unknown outcome as unknown. "
     + _NEEDS_YOU
     + "A question to the user is an ordinary message.\n"
@@ -814,15 +814,25 @@ _NO_MESSAGE: Final = (
     "\n"
 )
 
+#: ADR-0315 §2, §4: every round with a call other than a tidy-up brings another once its
+#: calls finish, so a later step needs no asking, and a round with nothing the user will
+#: want to hear writes no message (§4:2).
+_ROUNDS: Final = (
+    "Once every call of this round has finished, another round follows whenever this "
+    "round made a call other than a tidy-up, whatever its calls brought back, and shows "
+    "you what came of them. So a step that has to wait for this round's calls goes in "
+    "that round, and you need not ask for it. A round with no calls, or whose only calls "
+    "are tidy-ups, ends the work after its message. In a round that follows your calls, "
+    "write only what the user will want to hear, such as a result they asked for or a "
+    "call that was not done; where there is nothing new for them, write no text, and "
+    "never a line only saying that the earlier work is done."
+)
+
 _NOTES_AND_ROUNDS: Final = (
     "Episode notes are free text for your own later rounds and for later activations: "
     "what you worked out, what you are waiting on, what to check. They are part of your "
     "response, never a call, and they are kept with this episode.\n"
-    "\n"
-    "Another round runs once every call of this round has finished, when a call brought a "
-    "result, was not done, came back unknown, needed the user or was refused, or when you "
-    "ask for one. A round with no calls ends the work after its message, even if you ask "
-    "for another."
+    "\n" + _ROUNDS
 )
 
 
@@ -1358,8 +1368,6 @@ class _Request:
             if one.notes_marked:
                 shown["notes_outside_content"] = _OUTSIDE
                 self.shown.marked = True
-        if one.another_round:
-            shown["asked_for_another_round"] = True
         return shown
 
     def _call(self, call: ProposedCall, outcome: CallOutcome | None) -> dict[str, object]:
@@ -1628,7 +1636,6 @@ class PlanningStage:
             text=response.text,
             calls=response.calls,
             notes=response.notes,
-            another_round=response.another_round,
             notes_marked=response.notes is not None and read_outside,
         )
         labels = tuple(book.minted)

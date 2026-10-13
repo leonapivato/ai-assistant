@@ -88,12 +88,11 @@ class _Phases:
     latest_round: str | None = None
     latest_has_calls: bool = False
     latest_has_text: bool = False
-    latest_marked: bool = False
     latest_authorized: bool = False
     latest_allows: bool = False
     latest_acted: bool = False
     latest_digests_due: bool = False
-    latest_brought_something: bool = False
+    latest_calls_beyond_tidy_ups: bool = False
 
 
 def _due(facts: _Facts) -> Rule:
@@ -988,9 +987,9 @@ def test_a_round_with_a_call_or_text_is_authorized_first(latest: _Phases) -> Non
     )
 
 
-def test_a_round_with_neither_a_call_nor_text_ends_the_pass_whatever_its_mark() -> None:
-    """ADR-0307 §8:3: no progress ends the activation after its message."""
-    latest = _Phases(rounds=1, latest_round="r1", latest_marked=True)
+def test_a_round_with_neither_a_call_nor_text_ends_the_pass() -> None:
+    """ADR-0315 §2:3: no progress ends the activation after its message."""
+    latest = _Phases(rounds=1, latest_round="r1")
     assert _phase_due(latest).name is ControllerRule.NOTHING_DUE
 
 
@@ -1018,41 +1017,47 @@ _FINISHED: Final = _Phases(
     rounds=1,
     latest_round="r",
     latest_has_calls=True,
+    latest_calls_beyond_tidy_ups=True,
     latest_authorized=True,
     latest_allows=True,
     latest_acted=True,
 )
 
+#: A round whose only calls are tidy-ups, every one of them finished.
+_TIDIED: Final = replace(_FINISHED, latest_calls_beyond_tidy_ups=False)
+
 
 @pytest.mark.parametrize(
     ("latest", "due"),
     [
-        # A call brought something, so another round runs (ADR-0307 §8:1).
-        (replace(_FINISHED, latest_brought_something=True), ControllerRule.ROUND_DUE),
-        # Nothing was allowed, so nothing ran: every call has finished, needing the user.
-        (
-            replace(
-                _FINISHED, latest_allows=False, latest_acted=False, latest_brought_something=True
-            ),
-            ControllerRule.ROUND_DUE,
-        ),
-        # The round was marked.
-        (replace(_FINISHED, latest_marked=True), ControllerRule.ROUND_DUE),
-        # Every call done with nothing brought, unmarked: the activation ends.
-        (_FINISHED, ControllerRule.NOTHING_DUE),
-        # A round past the limit ends the pass instead of running (§3).
-        (
-            replace(_FINISHED, rounds=3, latest_brought_something=True),
-            ControllerRule.ROUND_LIMIT_REACHED,
-        ),
+        # A call other than a tidy-up, finished: another round runs, whatever it brought
+        # back, a call done with nothing brought included (ADR-0315 §2:1).
+        (_FINISHED, ControllerRule.ROUND_DUE),
+        # Nothing was allowed, so nothing ran: every call has finished, refused or
+        # needing the user, and another round runs.
+        (replace(_FINISHED, latest_allows=False, latest_acted=False), ControllerRule.ROUND_DUE),
+        # Only tidy-ups: the activation ends after the round's message (§2:2).
+        (_TIDIED, ControllerRule.NOTHING_DUE),
+        # Only tidy-ups, refused: a refused tidy-up brings no round either (§2:2).
+        (replace(_TIDIED, latest_allows=False, latest_acted=False), ControllerRule.NOTHING_DUE),
+        # A round past the limit ends the pass instead of running (§2:4).
+        (replace(_FINISHED, rounds=3), ControllerRule.ROUND_LIMIT_REACHED),
+        # A tidy-up-only round at the limit ends as nothing due, not as the limit.
+        (replace(_TIDIED, rounds=3), ControllerRule.NOTHING_DUE),
         # Calls still running: neither another round nor the end.
-        (
-            replace(_FINISHED, latest_acted=False, latest_brought_something=True),
-            ControllerRule.ROUND_AUTHORIZED,
-        ),
+        (replace(_FINISHED, latest_acted=False), ControllerRule.ROUND_AUTHORIZED),
+    ],
+    ids=[
+        "finished",
+        "nothing-allowed",
+        "tidy-ups-only",
+        "tidy-ups-refused",
+        "past-the-limit",
+        "tidy-ups-at-the-limit",
+        "still-running",
     ],
 )
-def test_the_next_round_is_due_only_once_every_call_has_finished_and_something_calls_for_it(
+def test_the_next_round_is_due_once_every_call_other_than_a_tidy_up_has_finished(
     latest: _Phases, due: ControllerRule
 ) -> None:
     assert _phase_due(latest).name is due
@@ -1229,7 +1234,11 @@ async def test_planning_runs_once_per_round_until_the_round_limit_ends_the_pass(
     """§3:5, ADR-0307 §11: the guard is scoped to the latest round, not to the pass."""
     planning = _NextRound(
         ControllerStage.PLANNING,
-        {"latest_has_calls": True, "latest_authorized": True, "latest_brought_something": True},
+        {
+            "latest_has_calls": True,
+            "latest_calls_beyond_tidy_ups": True,
+            "latest_authorized": True,
+        },
     )
     record = StageRecord()
     await _phase_controller(planning).run(
@@ -1252,7 +1261,7 @@ async def test_planning_due_again_for_a_round_it_already_followed_is_guarded() -
             "latest_round": "r1",
             "latest_has_calls": True,
             "latest_authorized": True,
-            "latest_brought_something": True,
+            "latest_calls_beyond_tidy_ups": True,
         },
     )
     record = StageRecord()

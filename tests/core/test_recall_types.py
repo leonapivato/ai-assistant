@@ -256,7 +256,7 @@ def test_a_recall_is_bounded_by_the_types_ceiling() -> None:
 def test_the_record_defaults_to_no_recall_at_the_current_schema_version() -> None:
     record = _record()
     assert record.recall is None
-    assert record.schema_version == 9
+    assert record.schema_version == 10
 
 
 def test_a_schema_3_record_is_refused() -> None:

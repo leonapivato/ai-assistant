@@ -25,10 +25,10 @@ failure or its deadline is, and the engine reads which from the state.
 **What one round is** (ADR-0307 §2, ADR-0309 §3). Planning asks the model once and
 records the round; authorizing checks every call by rule and the message by its place;
 acting runs the allowed calls and writes the message, with digesting beside it reading
-each held result as acting holds it (§3:3); and the next round is due where a call
-brought something or the round was marked (ADR-0307 §8:1). Each is one controller step,
-and each decision is held here, in :class:`PhaseWorking`, present once its stage has run
-whatever came of it (ADR-0280 §3:6).
+each held result as acting holds it (§3:3); and the next round is due where the round
+made a call other than a tidy-up, once its calls have finished (ADR-0315 §2:1). Each is
+one controller step, and each decision is held here, in :class:`PhaseWorking`, present
+once its stage has run whatever came of it (ADR-0280 §3:6).
 
 **The conversions** (the brief's item 3). Planning's recorded round becomes
 authorizing's :class:`~ai_assistant.orchestration.authorizer.RoundToAuthorize`, and
@@ -1058,11 +1058,6 @@ class PhaseWorking:
         return bool(self._rounds) and bool(self._rounds[-1].planned.round.text.strip())
 
     @property
-    def latest_marked(self) -> bool:
-        """The latest round asked for another round."""
-        return bool(self._rounds) and self._rounds[-1].planned.round.another_round
-
-    @property
     def latest_authorized(self) -> bool:
         """There is an authorizing decision for the latest round."""
         return bool(self._rounds) and self._rounds[-1].authorization is not None
@@ -1090,22 +1085,14 @@ class PhaseWorking:
         )
 
     @property
-    def latest_brought_something(self) -> bool:
-        """A call of the latest round brought a result or was not done (ADR-0307 §8:1).
+    def latest_calls_beyond_tidy_ups(self) -> bool:
+        """The latest round proposed a call other than a tidy-up (ADR-0315 §2:1).
 
-        A tidy-up never brings a round, even when it fails or is refused (§7:1), so
-        whatever came of one is passed over here.
+        Refused calls count, as every call but a tidy-up brings a round whatever came of
+        it; a tidy-up never brings one, even when it fails or is refused (§2:2).
         """
-        if not self._rounds:
-            return False
-        latest = self._rounds[-1]
-        tidies = {
-            one.call_id for one in latest.planned.round.calls if one.name == TIDY_STORY_CAPABILITY
-        }
-        return any(
-            one.kind is not CallOutcomeKind.DONE or one.result_id is not None
-            for one in call_outcomes(latest.planned, latest.authorization, latest.acted)
-            if one.call_id not in tidies
+        return bool(self._rounds) and any(
+            one.name != TIDY_STORY_CAPABILITY for one in self._rounds[-1].planned.round.calls
         )
 
     # --- what the stages read and write ---

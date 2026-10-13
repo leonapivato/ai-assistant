@@ -802,10 +802,10 @@ class ToolCallingCompleter(Protocol):
     added to ``ModelProvider`` or ``Message``, this Protocol does not inherit from
     either, and an object may implement both.
 
-    **One response, four parts** (ADR-0307 §2:1): its text, its calls, its episode
-    notes and a mark asking for another round. How the provider's native shape
-    carries the notes and the mark is the implementation's (§2:7); at this seam they
-    are parts of :class:`~ai_assistant.core.types.RoundResponse` and never calls.
+    **One response, three parts** (ADR-0315 §3:1): its text, its calls and its episode
+    notes. How the provider's native shape carries the notes is the implementation's
+    (§3:3); at this seam they are a part of :class:`~ai_assistant.core.types.RoundResponse`
+    and never a call. No part asks for another round (§3:4).
 
     **Each round is asked afresh** (§2:6). The conversation handed in is rendered
     text, and no earlier tool exchange is replayed in the provider's native form, so
@@ -840,8 +840,8 @@ class ToolCallingCompleter(Protocol):
         concatenation of the text the model wrote, possibly empty; its ``calls`` are
         every call the model proposed, in the order the provider returned them, each
         with the provider's id, the name the model gave and its arguments as a JSON
-        object; ``notes`` is ``None`` where the model wrote none; and
-        ``another_round`` is ``False`` unless the model marked it.
+        object; and ``notes`` is ``None`` where the model wrote none. Nothing in the
+        response asks for another round (ADR-0315 §3:4).
 
         Args:
             messages: The round's rendered request, oldest first. Non-empty, not

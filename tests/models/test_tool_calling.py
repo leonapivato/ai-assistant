@@ -95,10 +95,8 @@ def _native(response: RoundResponse) -> ModelResponse:
         ToolCallPart(call.name, call.model_dump()["arguments"], tool_call_id=call.call_id)
         for call in response.calls
     )
-    if response.notes is not None or response.another_round:
-        arguments: dict[str, Any] = {"another_round": response.another_round}
-        if response.notes is not None:
-            arguments["notes"] = response.notes
+    if response.notes is not None:
+        arguments: dict[str, Any] = {"notes": response.notes}
         parts.append(ToolCallPart(ROUND_TOOL, arguments, tool_call_id="round"))
     return ModelResponse(parts=parts)
 
@@ -189,14 +187,31 @@ async def test_a_capability_taking_the_reserved_name_is_refused_before_the_model
     assert world.attempts == 0
 
 
-async def test_several_round_tool_calls_join_their_notes_and_any_mark_holds() -> None:
+async def test_several_round_tool_calls_join_their_notes() -> None:
     world = _scripted(
         ToolCallPart(ROUND_TOOL, {"notes": "first"}, tool_call_id="a"),
-        ToolCallPart(ROUND_TOOL, {"notes": "second", "another_round": True}, tool_call_id="b"),
-        ToolCallPart(ROUND_TOOL, {"another_round": False}, tool_call_id="c"),
+        ToolCallPart(ROUND_TOOL, {"notes": "second"}, tool_call_id="b"),
+        ToolCallPart(ROUND_TOOL, {}, tool_call_id="c"),
     )
     response = await world.completer.respond(_request(), [])
-    assert response == RoundResponse(notes="first\n\nsecond", another_round=True)
+    assert response == RoundResponse(notes="first\n\nsecond")
+
+
+async def test_the_round_tool_offers_the_notes_alone() -> None:
+    """ADR-0315 §3:3: the reserved tool carries the notes, and no mark."""
+    seen: list[dict[str, Any]] = []
+
+    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del messages
+        seen.extend(
+            tool.parameters_json_schema for tool in info.function_tools if tool.name == ROUND_TOOL
+        )
+        return ModelResponse(parts=[TextPart("ok")])
+
+    await PydanticAIToolCallingCompleter(FunctionModel(answer)).respond(_request(), [])
+    (schema,) = seen
+    assert set(schema["properties"]) == {"notes"}
+    assert schema["additionalProperties"] is False
 
 
 async def test_blank_notes_are_no_notes() -> None:
@@ -228,8 +243,8 @@ async def test_a_call_named_for_a_tool_not_offered_is_returned_as_proposed() -> 
         pytest.param(ToolCallPart("web_search", "[1, 2]", tool_call_id="a"), id="not-object"),
         pytest.param(ToolCallPart(ROUND_TOOL, {"notes": 3}, tool_call_id="a"), id="notes-not-text"),
         pytest.param(
-            ToolCallPart(ROUND_TOOL, {"another_round": "yes"}, tool_call_id="a"),
-            id="mark-not-boolean",
+            ToolCallPart(ROUND_TOOL, {"notes": "n", "another_round": True}, tool_call_id="a"),
+            id="retired-mark",
         ),
         pytest.param(ToolCallPart(ROUND_TOOL, {"other": 1}, tool_call_id="a"), id="extra-key"),
         pytest.param(TextPart("\ud800"), id="unencodable-text"),
@@ -344,13 +359,12 @@ async def test_thinking_parts_are_dropped_and_the_text_is_the_text_parts_alone()
         TextPart("I'll book Watchman for the night of November 14."),
         ThinkingPart("", id="redacted_thinking", signature="opaque"),
         ToolCallPart("web_search", {"query": "q"}, tool_call_id="a"),
-        ToolCallPart(ROUND_TOOL, {"notes": "booking", "another_round": True}, tool_call_id="b"),
+        ToolCallPart(ROUND_TOOL, {"notes": "booking"}, tool_call_id="b"),
     )
     response = await world.completer.respond(_request(), [_tool()])
     assert response.text == "I'll book Watchman for the night of November 14."
     assert [call.call_id for call in response.calls] == ["a"]
     assert response.notes == "booking"
-    assert response.another_round
 
 
 async def test_a_round_that_only_thought_and_called_writes_no_text() -> None:
@@ -614,9 +628,7 @@ async def test_the_completer_writes_the_whole_response_thinking_included() -> No
     with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now):
         response = await completer.respond(_request(), [_tool()])
 
-    assert response == RoundResponse(
-        text="Booking it now.", calls=(response.calls[0],), notes=None, another_round=False
-    )
+    assert response == RoundResponse(text="Booking it now.", calls=(response.calls[0],), notes=None)
     (entry,) = sink.recorded
     assert (entry.activation_id, entry.source, entry.kind) == (
         _DIAGNOSED,

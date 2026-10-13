@@ -2542,7 +2542,12 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``ended``, an ``ActivationEnding``, which ``receive``'s ``ChannelResult`` carries
 #:     for an event: a peer at 97 refuses ``ended`` as extra and requires ``summary``,
 #:     and a result carrying ``summary`` does not validate here (§6:4, ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 98
+#: 99: ADR-0315 §5 takes ``another_round`` off ``PlanningRound``, carried in the
+#:     wire-carried ``EpisodicMemory.processing_record``, and moves that record's
+#:     ``schema_version`` to ``Literal[10]``: a peer at 98 refuses the version as
+#:     unknown, and a version-9 record, whose rounds carry the mark, does not validate
+#:     here (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 99
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client
