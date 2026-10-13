@@ -42,6 +42,8 @@ from ai_assistant.orchestration.acting import (
     ActingStage,
     AuthorizedCall,
     AuthorizedRound,
+    HeldByIds,
+    NamedResult,
     ResultRoute,
     gets_effect_record,
     values_digest,
@@ -51,6 +53,8 @@ from ai_assistant.testing import FakePlanStore
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from ai_assistant.orchestration.acting import OwnRecordsAnswer
 
 _AT: Final = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 
@@ -692,6 +696,152 @@ async def test_an_own_records_result_that_may_carry_outside_text_is_held_whole()
 
     assert (acted.calls[0].route, acted.calls[0].output) == (ResultRoute.DIGEST, None)
     assert held.get("result:1") is not None
+
+
+# --- a read of the assistant's own records, and the follow-up (ADR-0308 §6:2, §6:6-§6:7) ---
+
+
+class _Answers:
+    """An ``OwnRecordsCalls`` stub answering every call with ``answer``."""
+
+    def __init__(self, answer: OwnRecordsAnswer) -> None:
+        self.answer = answer
+        self.calls: list[ToolCall] = []
+
+    async def run(self, call: ToolCall) -> OwnRecordsAnswer:
+        self.calls.append(call)
+        return self.answer
+
+
+def _read(*, decision: str = "d1", result: CapabilityResult | None = None) -> AuthorizedCall:
+    """A read of the assistant's own records, safe to repeat, that may carry outside text."""
+    return _authorized(
+        "remember",
+        decision=decision,
+        parameters={"query": "dentist"},
+        safe_to_repeat=True,
+        idempotency=Idempotency.NATURAL,
+        result=result or CapabilityResult.MAY_CARRY_OUTSIDE_TEXT,
+    )
+
+
+def _acting(answer: OwnRecordsAnswer) -> ActingStage:
+    return ActingStage(
+        plans=FakePlanStore(now=_now),
+        invoker=_Invoker(),
+        own_records=_Answers(answer),
+        timeout=timedelta(seconds=5),
+        now=_now,
+        new_result_id=_ids(),
+    )
+
+
+async def test_a_read_of_own_records_holds_its_outside_records_by_id() -> None:
+    """ADR-0306 §5:16, ADR-0308 §6:2: what goes to planning, and the outside ids held.
+
+    The result takes one minted id; the records whose source is outside are held by id
+    under it, never their contents, and the holder is told of it for its digest.
+    """
+    told: list[HeldResult] = []
+    held = HeldResults(on_hold=told.append)
+    answer = HeldByIds(output={"records": ["said"]}, outside=("reported", "mailed"))
+
+    acted = await _acting(answer).act(held=held, authorized=_round(_read()))
+
+    (one,) = acted.calls
+    assert (one.outcome, one.route, one.result_id) == (
+        ActedOutcome.DONE,
+        ResultRoute.DIGEST,
+        "result:1",
+    )
+    assert one.output == {"records": ("said",)}
+    expected = HeldResult(
+        result_id="result:1",
+        round_id="r1",
+        decision_id="d1",
+        content=None,
+        records=("reported", "mailed"),
+    )
+    assert held.get("result:1") == expected
+    assert told == [expected]
+
+
+async def test_a_read_of_own_records_with_no_outside_record_goes_to_planning() -> None:
+    """Nothing outside: nothing is held, and the whole answer goes to planning."""
+    held = HeldResults()
+
+    acted = await _acting(HeldByIds(output={"records": ["said"]})).act(
+        held=held, authorized=_round(_read())
+    )
+
+    (one,) = acted.calls
+    assert (one.route, one.result_id, one.output) == (
+        ResultRoute.PLANNING,
+        "result:1",
+        {"records": ("said",)},
+    )
+    assert len(held) == 0
+
+
+async def test_a_read_declared_to_carry_no_outside_text_holds_nothing() -> None:
+    """Only a result declared to carry outside text is held by id (§5:14)."""
+    held = HeldResults()
+    answer = HeldByIds(output={"story": "s1"}, outside=("reported",))
+
+    acted = await _acting(answer).act(
+        held=held, authorized=_round(_read(result=CapabilityResult.NO_OUTSIDE_TEXT))
+    )
+
+    (one,) = acted.calls
+    assert (one.route, one.output) == (ResultRoute.PLANNING, {"story": "s1"})
+    assert len(held) == 0
+
+
+async def test_a_follow_up_offers_the_result_it_names_again_as_held() -> None:
+    """ADR-0308 §6:6-§6:7: the named result, as held, under the follow-up's decision.
+
+    No id is minted and nothing is held again; the holder is told of the held result
+    under the follow-up's round and decision, so its digest answers the new question.
+    """
+    told: list[HeldResult] = []
+    held = HeldResults(on_hold=told.append)
+    first = HeldResult(result_id="result:9", round_id="r0", decision_id="d0", content="page")
+    held.hold(first)
+    told.clear()
+
+    acted = await _acting(NamedResult(result_id="result:9")).act(
+        held=held, authorized=_round(_read())
+    )
+
+    (one,) = acted.calls
+    assert (one.outcome, one.route, one.result_id, one.output) == (
+        ActedOutcome.DONE,
+        ResultRoute.DIGEST,
+        "result:9",
+        None,
+    )
+    assert told == [
+        HeldResult(result_id="result:9", round_id="r1", decision_id="d1", content="page")
+    ]
+    assert len(held) == 1
+    assert held.get("result:9") == first
+
+
+async def test_a_follow_up_naming_a_result_with_nothing_held_is_not_done() -> None:
+    """§6:7: not done, with the reason, and nothing offered to a digest."""
+    told: list[HeldResult] = []
+    held = HeldResults(on_hold=told.append)
+
+    acted = await _acting(NamedResult(result_id="result:9")).act(
+        held=held, authorized=_round(_read())
+    )
+
+    (one,) = acted.calls
+    assert one.outcome is ActedOutcome.NOT_DONE
+    assert one.reason is not None
+    assert "nothing is held" in one.reason
+    assert (one.route, one.result_id) == (None, None)
+    assert told == []
 
 
 def test_two_calls_of_a_round_never_share_a_decision() -> None:
