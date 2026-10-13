@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 
+from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     MAX_STORY_PAGE,
     STORY_STANDING_RECENT,
+    ActivationEffect,
     ActivationUnderstanding,
     ChannelContext,
     ChannelIdentity,
@@ -27,11 +29,15 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedTextInput,
     StoryActor,
+    StoryEffectState,
     StoryMember,
     StoryMemberKind,
     StoryRelated,
     StoryRelation,
+    StoryStanding,
     StoryStandingEarlier,
+    StoryStandingEffect,
+    ToolOutcome,
     UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
@@ -39,11 +45,11 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
 from ai_assistant.orchestration.story_standing import OWNER_READER, story_standing
-from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
+from ai_assistant.testing import FakeMemoryStore, FakePlanStore, FakeStoryStore
 from ai_assistant.testing.activation import ended_pass
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.types import StoryHeader, StoryViewPage
 
@@ -450,3 +456,139 @@ async def test_story_standing_a_story_moved_around_it_between_reads_is_listed_on
     assert standing.related == (
         StoryRelated(relation=StoryRelation.PART_OF, story_id=inner, member_count=2),
     )
+
+
+# --- what was done (ADR-0300 §8:1, ADR-0306 §6) ------------------------------------
+
+
+async def _effect(  # noqa: PLR0913 — one keyword per part of the record a case varies
+    plans: FakePlanStore,
+    effect_id: str,
+    activation_id: str,
+    *,
+    at: datetime,
+    outcome: ToolOutcome | None,
+    message: bool = False,
+) -> None:
+    """Claim one effect record for ``activation_id`` and, where given, finish it."""
+    if message:
+        effect = ActivationEffect(
+            id=effect_id,
+            activation_id=activation_id,
+            round="round:1",
+            place="conversation:c1",
+            claimed_at=at,
+        )
+    else:
+        effect = ActivationEffect(
+            id=effect_id,
+            activation_id=activation_id,
+            round="round:1",
+            capability="book",
+            values_digest="0" * 64,
+            decision_id=f"decision:{effect_id}",
+            claimed_at=at,
+        )
+    await plans.claim_activation_effect(effect, match=None)
+    if outcome is not None:
+        position = 0 if message and outcome is ToolOutcome.SUCCEEDED else None
+        await plans.finish_activation_effect(effect_id, outcome, position=position)
+
+
+async def test_story_standing_what_was_done_is_unknown_first_then_not_done_then_done() -> None:
+    """ADR-0300 §8:1: each call's record, by state, the most recent first within each.
+
+    A record still carrying no outcome is unknown, never done (ADR-0306 §5:5), and a
+    message's record is not listed.
+    """
+    world = _World()
+    await world.episodes(_episode("a"), _episode("b", at=_AT + timedelta(days=1)))
+    story = await world.story(_activation("a"), _activation("b"))
+    plans = FakePlanStore(now=lambda: _NOW)
+    day = timedelta(days=1)
+    await _effect(plans, "e1", "a", at=_AT, outcome=ToolOutcome.SUCCEEDED)
+    await _effect(plans, "e2", "a", at=_AT + day, outcome=ToolOutcome.INDETERMINATE)
+    await _effect(plans, "e3", "b", at=_AT + 2 * day, outcome=ToolOutcome.FAILED)
+    await _effect(plans, "e4", "b", at=_AT + 3 * day, outcome=ToolOutcome.SUCCEEDED)
+    await _effect(plans, "e5", "b", at=_AT + 4 * day, outcome=None)
+    await _effect(plans, "m1", "b", at=_AT + 5 * day, outcome=ToolOutcome.SUCCEEDED, message=True)
+
+    standing = await story_standing(
+        world.stories, world.memory, story, reader=OWNER_READER, plans=plans
+    )
+
+    assert standing is not None
+    assert standing.done == (
+        StoryStandingEffect(activation_id="b", state=StoryEffectState.UNKNOWN, at=_AT + 4 * day),
+        StoryStandingEffect(activation_id="a", state=StoryEffectState.UNKNOWN, at=_AT + day),
+        StoryStandingEffect(activation_id="b", state=StoryEffectState.NOT_DONE, at=_AT + 2 * day),
+        StoryStandingEffect(activation_id="b", state=StoryEffectState.DONE, at=_AT + 3 * day),
+        StoryStandingEffect(activation_id="a", state=StoryEffectState.DONE, at=_AT),
+    )
+
+
+async def test_story_standing_lists_only_what_its_reader_is_shown_was_done() -> None:
+    """ADR-0307 §6:4: where the matter stands comes only from what the audience admits.
+
+    A model-facing reader is told nothing of an episode it may not be shown, an open
+    one included; the owner is told of every live episode's.
+    """
+    world = _World()
+    await world.episodes(
+        _episode("shared"),
+        _episode("owner-only", owner_only=True),
+        _episode("running", open_=True),
+    )
+    story = await world.story(
+        _activation("shared"), _activation("owner-only"), _activation("running")
+    )
+    plans = FakePlanStore(now=lambda: _NOW)
+    for activation in ("shared", "owner-only", "running", "not-a-member"):
+        await _effect(plans, f"e-{activation}", activation, at=_AT, outcome=ToolOutcome.SUCCEEDED)
+
+    def done_by(standing: StoryStanding | None) -> set[str]:
+        assert standing is not None
+        return {effect.activation_id for effect in standing.done}
+
+    unbounded = await story_standing(
+        world.stories, world.memory, story, reader=_UNBOUNDED, plans=plans
+    )
+    bounded = await story_standing(world.stories, world.memory, story, reader=_BOUNDED, plans=plans)
+    owner = await story_standing(
+        world.stories, world.memory, story, reader=OWNER_READER, plans=plans
+    )
+
+    assert done_by(unbounded) == {"shared"}
+    assert done_by(bounded) == {"shared", "owner-only"}
+    assert done_by(owner) == {"shared", "owner-only", "running"}
+
+
+async def test_story_standing_with_no_plan_store_lists_nothing_done() -> None:
+    world = _World()
+    await world.episodes(_episode("a"))
+    story = await world.story(_activation("a"))
+
+    standing = await story_standing(world.stories, world.memory, story, reader=OWNER_READER)
+
+    assert standing is not None
+    assert standing.done == ()
+
+
+async def test_story_standing_an_unreadable_plan_store_is_the_reads_error() -> None:
+    world = _World()
+    await world.episodes(_episode("a"))
+    story = await world.story(_activation("a"))
+
+    with pytest.raises(PlanningError):
+        await story_standing(
+            world.stories, world.memory, story, reader=OWNER_READER, plans=_DownPlans()
+        )
+
+
+class _DownPlans(FakePlanStore):
+    """A plan store whose effect records cannot be read."""
+
+    async def activation_effects(self, activation_ids: Sequence[str], /) -> tuple[Any, ...]:
+        del activation_ids
+        msg = "the plan store is down"
+        raise PlanningError(msg)
