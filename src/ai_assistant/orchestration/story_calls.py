@@ -223,10 +223,6 @@ MEMBER_EPISODE_ARGUMENT: Final = "member_episode"
 #: bounds one call rather than the page; several matters are several starts.
 START_NOTES_MAX: Final = 8
 
-#: How many merges a named story is followed through before the call gives up. A
-#: chain this long is a store that contradicts itself, not a matter reorganised.
-_MERGES_FOLLOWED: Final = 32
-
 _EPISODE_PREFIX: Final = episode_address("")
 
 _NOTE_SCHEMA: Final[dict[str, FrozenJson]] = {
@@ -1033,9 +1029,17 @@ class StoryCalls:
             )
 
     async def _current(self, story_id: str) -> str:
-        """The story ``story_id`` names as it stands now, followed through its merges."""
+        """The story ``story_id`` names as it stands now, followed through its merges.
+
+        Followed to the story that is not merged, however many merges that takes: the
+        store bounds no chain. A merged story is never a merge target (ADR-0289 §3), so
+        a story met twice is the store contradicting itself, raised as its failure
+        rather than followed for ever, as ``story_links`` stops on a target named twice.
+        """
         current = story_id
-        for _ in range(_MERGES_FOLLOWED):
+        followed: set[str] = set()
+        while current not in followed:
+            followed.add(current)
             header = await self._stories.header(current)
             if header is None:
                 raise _NotDone(

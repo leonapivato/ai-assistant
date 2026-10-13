@@ -13,12 +13,14 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
+    MAX_STORY_PAGE,
     ActionRequest,
     CapabilityEffect,
     CapabilityResult,
@@ -36,6 +38,7 @@ from ai_assistant.core.types import (
     RoundResponse,
     StoryActor,
     StoryChange,
+    StoryHeader,
     StoryMember,
     StoryMemberKind,
     StoryNoteAuthor,
@@ -489,6 +492,68 @@ async def test_a_note_on_a_story_not_there_is_not_done() -> None:
     assert result.outcome is ToolOutcome.FAILED
     assert result.failure is not None
     assert result.failure.kind is ToolFailureKind.INVALID_REQUEST
+
+
+#: Longer than the 32 merges a named story was once followed through (#2880).
+_LONG_CHAIN: Final = 40
+
+
+async def test_a_note_follows_a_chain_of_merges_however_long_to_the_story_standing() -> None:
+    """ADR-0289 §3: the store bounds no chain, so neither does following one."""
+    stories, memory = await _stores()
+    chain = [await _story(stories) for _ in range(_LONG_CHAIN + 1)]
+    for absorbed, into in pairwise(chain):
+        await stories.merge(absorbed, into, actor=StoryActor.OWNER)
+    calls = StoryCalls(stories=stories, memory=memory)
+
+    result = await calls.run(_call(NOTE_STORY, {STORY_ARGUMENT: chain[0], NOTE_ARGUMENT: "noted"}))
+
+    assert result.outcome is ToolOutcome.SUCCEEDED
+    assert [one.text for one in await _notes(stories, chain[-1])] == ["noted"]
+
+
+class _MergedInALoop:
+    """A story store whose two stories each name the other as merged into: a contradiction.
+
+    The store never makes one (ADR-0289 §3), so the canonical fake cannot hold it and is
+    wrapped. Its header reads are counted, and fail the test well before a loop followed
+    for ever would.
+    """
+
+    _LOOP: Final = {"story:a": "story:b", "story:b": "story:a"}
+
+    def __init__(self) -> None:
+        self.inner = FakeStoryStore(now=_now)
+        self.headers_read = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    async def header(self, story_id: str) -> StoryHeader | None:
+        self.headers_read += 1
+        assert self.headers_read <= _LONG_CHAIN, "a loop of merges was followed for ever"
+        onward = self._LOOP.get(story_id)
+        if onward is None:
+            return await self.inner.header(story_id)
+        return StoryHeader(story_id=story_id, created_at=_AT, merged_into=onward)
+
+
+async def test_a_loop_of_merges_is_the_store_s_failure_and_writes_nothing() -> None:
+    """#2880: a story met twice is not followed again; the call fails as the store failing."""
+    stories = _MergedInALoop()
+    memory = FakeMemoryStore(now=_now)
+    calls = StoryCalls(stories=cast("StoryStore", stories), memory=memory)
+
+    result = await calls.run(_call(NOTE_STORY, {STORY_ARGUMENT: "story:a", NOTE_ARGUMENT: "noted"}))
+    reason = await calls.refusal(_carrying("move_story", "story:a", ["1"]), owner_records=True)
+
+    assert result.outcome is ToolOutcome.FAILED
+    assert result.failure is not None
+    assert result.failure.kind is ToolFailureKind.INTERNAL
+    assert result.failure.message == "the story store could not be written"
+    # The hub's check fails closed on it, as on any store it cannot read (ADR-0307 §5:4).
+    assert reason == "the stories could not be read, so the notes named could not be checked"
+    assert await stories.inner.notes("story:a") is None
 
 
 # --- link and unlink -----------------------------------------------------------------------
@@ -1124,6 +1189,58 @@ async def test_the_hub_refuses_a_move_or_a_split_naming_a_note_not_held(name: st
 
     assert refused == "N2 is not on the story it would leave, so nothing was moved"
     assert passed is None
+
+
+class _PagesCounted:
+    """A story store whose note pages are counted; the canonical fake is final, so wrapped."""
+
+    def __init__(self) -> None:
+        self.inner = FakeStoryStore(now=_now)
+        self.pages_read = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    async def notes(self, story_id: str, **kwargs: Any) -> Any:
+        self.pages_read += 1
+        return await self.inner.notes(story_id, **kwargs)
+
+
+async def _past_one_page() -> tuple[_PagesCounted, StoryCalls, str, list[int]]:
+    """A story holding one note more than a page of the hub's check reads."""
+    stories = _PagesCounted()
+    memory = FakeMemoryStore(now=_now)
+    trip = await _story(stories.inner)
+    held = [await _noted(stories.inner, trip, f"Note {n}.") for n in range(MAX_STORY_PAGE + 1)]
+    return stories, StoryCalls(stories=cast("StoryStore", stories), memory=memory), trip, held
+
+
+@pytest.mark.parametrize("name", ["move_story", "split_story"])
+async def test_the_hub_accepts_a_note_held_on_the_second_page(name: str) -> None:
+    """#2882: the check reads the story's notes page by page, past the first."""
+    stories, calls, trip, held = await _past_one_page()
+
+    reason = await calls.refusal(_carrying(name, trip, [str(held[-1])]), owner_records=True)
+
+    assert reason is None
+    assert stories.pages_read == 2  # one page more than a page holds
+
+
+@pytest.mark.parametrize("name", ["move_story", "split_story"])
+async def test_the_hub_refuses_held_and_missing_notes_after_reading_every_page(name: str) -> None:
+    """#2882: the held note on the second page is found; the missing one is named."""
+    stories, calls, trip, held = await _past_one_page()
+    missing = held[-1] + 1
+    labels = {str(held[-1]): "N101", str(held[0]): "N1", str(missing): "N102"}
+
+    reason = await calls.refusal(
+        _carrying(name, trip, [str(held[-1]), str(held[0]), str(missing)]),
+        owner_records=True,
+        labels=labels,
+    )
+
+    assert reason == "N102 is not on the story it would leave, so nothing was moved"
+    assert stories.pages_read == 2  # one page more than a page holds
 
 
 async def test_the_hub_checks_the_story_a_merged_one_went_into() -> None:
