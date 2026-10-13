@@ -224,6 +224,7 @@ from ai_assistant.orchestration.planning import (
     PlanningStage,
     PlanningStories,
     PlanningStory,
+    RefusedCall,
 )
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.stories import episode_address
@@ -262,6 +263,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.controller import ControllerStageRun
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.recall import RecallStage
+    from ai_assistant.orchestration.story_calls import StoryCalls
     from ai_assistant.orchestration.story_links import ShortView, StoryCandidates
     from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow, Windows
 
@@ -1458,6 +1460,7 @@ class PhasePath:
         planning_model: str | None = None,
         story_reads: StoryReads | None = None,
         label_arguments: Mapping[str, Mapping[str, LabelKind]] | None = None,
+        story_calls: StoryCalls | None = None,
         now: Callable[[], datetime] = _utcnow,
         new_effect_id: Callable[[], str] = _new_effect_id,
     ) -> None:
@@ -1491,6 +1494,11 @@ class PhasePath:
                 things by label and what kind of thing each names, such as the story
                 calls' (ADR-0307 §5:2); planning maps them to ids, and refuses whole a
                 call naming a label it was never shown (§5:3).
+            story_calls: The story calls' runner, whose check refuses whole, before
+                authorizing, a move or a split naming a note the story it moves from does
+                not hold as the stories stand then, or naming any note on a pass that may
+                not show the owner's records (ADR-0307 §5:3-§5:4, §6:5); ``None`` where no
+                story call is offered.
             now: The clock a step's start and an effect's claim are read from.
             new_effect_id: Mints the *couldn't finish* message's effect record id.
 
@@ -1538,6 +1546,7 @@ class PhasePath:
         self._label_arguments: dict[str, Mapping[str, LabelKind]] = {
             name: dict(arguments) for name, arguments in (label_arguments or {}).items()
         }
+        self._story_calls = story_calls
         self._append: Callable[[], Awaitable[None]] | None = None
         self._spawn: Callable[[Coroutine[None, None, None]], None] = self._spawn_held
         self._closing: Callable[[], bool] = _never
@@ -1815,9 +1824,51 @@ class PhasePath:
         try:
             async with asyncio.timeout_at(given.deadline):
                 planned = await self._planning.plan(inputs)
+                planned = await self._notes_checked(planned, working)
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         working.planned(planned)
+
+    async def _notes_checked(self, planned: PlannedRound, working: PhaseWorking) -> PlannedRound:
+        """Refuse whole, before authorizing, a move or a split naming a note not held.
+
+        ADR-0307 §5:3-§5:4, §6:5: checked against the stories as they stand now, after
+        planning's own check mapped the call's labels to ids. A refused call runs
+        nothing, and brings a round as every refused call does; the reason names the
+        note by the label planning was shown it under. The store checks again inside
+        its transaction, so a note moved away after this still refuses the call.
+        """
+        if self._story_calls is None or not planned.calls:
+            return planned
+        notes = {
+            one.id: one.label
+            for one in (*working.labels.labels, *planned.labels)
+            if one.kind is LabelKind.NOTE
+        }
+        kept = []
+        refused = []
+        for one in planned.calls:
+            reason = await self._story_calls.refusal(
+                one.call, owner_records=working.owner_records, labels=notes
+            )
+            if reason is None:
+                kept.append(one)
+            else:
+                _log.info("planning_call_refused", stage="planning", reason="not_held")
+                refused.append(RefusedCall(one.call, reason))
+        if not refused:
+            return planned
+        order = {call.call_id: index for index, call in enumerate(planned.round.calls)}
+        return replace(
+            planned,
+            calls=tuple(kept),
+            refused=tuple(
+                sorted(
+                    (*planned.refused, *refused),
+                    key=lambda one: order.get(one.call.call_id, len(order)),
+                )
+            ),
+        )
 
     async def _found(self, given: PhasePass, working: PhaseWorking) -> Fetched:
         """Both recall runs' kept records, fetched once, before the first round (§3).

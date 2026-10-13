@@ -66,6 +66,7 @@ from ai_assistant.core.types import (
     NewMessage,
     PermissionOutcome,
     PermissionRuling,
+    PlanningLabel,
     PlanningRound,
     ProcessingReason,
     ProcessingStatus,
@@ -81,6 +82,7 @@ from ai_assistant.core.types import (
     SemanticMemory,
     StageOutcome,
     StoryActor,
+    StoryChange,
     StoryEffectState,
     StoryMember,
     StoryMemberKind,
@@ -325,6 +327,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                 *(STORY_CALL_CAPABILITIES if calls is not None else ()),
             ),
             label_arguments=STORY_LABEL_ARGUMENTS if calls is not None else None,
+            story_calls=calls,
             round_limit=3,
             round_wait=timedelta(seconds=5),
             excerpt_chars=2000,
@@ -2542,6 +2545,163 @@ async def test_on_a_pass_that_may_not_show_the_owners_records_planning_still_wri
     page = await stories.notes(story)
     assert page is not None
     assert [one.text for one in page.notes] == ["A camping trip to Riverside."]
+
+
+async def test_a_note_is_moved_between_stories_by_its_label_end_to_end() -> None:
+    """ADR-0303 §9:1, §9:4, ADR-0307 §5:5: a move carries the note named by its N label.
+
+    The first round starts a story with two first notes, the second starts another, and
+    the third moves the second note of the first story onto the other, naming the stories
+    by ``S`` label and the note by the ``N`` label it was shown under.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            text="I'll keep track of the trip.",
+            calls=(
+                _call(
+                    "c1",
+                    "start_story",
+                    notes=["A camping trip to Riverside.", "The dog's paperwork is open."],
+                ),
+            ),
+            another_round=True,
+        ),
+        RoundResponse(
+            calls=(_call("c2", "start_story", notes=["The dog's vet visit."]),),
+            another_round=True,
+        ),
+        RoundResponse(calls=(_call("c3", "move_story", story="S1", to="S2", notes=["N2"]),)),
+    )
+    stories = FakeStoryStore(now=lambda: AT)
+    harness = _harness(completer, stories=stories, story_calls=True)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "help me plan a camping trip to Riverside")
+    episode = await _settled(harness, conversation)
+
+    record = episode.processing_record
+    assert record is not None
+    member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=record.activation_id)
+    texts: dict[str, list[str]] = {}
+    for header in await stories.stories_of(member):
+        page = await stories.notes(str(header.story_id))
+        assert page is not None
+        texts[str(header.story_id)] = [one.text for one in page.notes]
+    assert sorted(texts.values()) == [
+        ["A camping trip to Riverside."],
+        ["The dog's paperwork is open.", "The dog's vet visit."],
+    ]
+    (trip,) = [story for story, notes in texts.items() if "A camping trip" in notes[0]]
+    log = await stories.log(trip)
+    assert log is not None
+    (moved_out,) = [line for line in log.lines if line.change is StoryChange.NOTE_MOVED_OUT]
+    assert (moved_out.actor, moved_out.trigger) == (StoryActor.PLANNING, record.activation_id)
+    (labelled,) = [one for one in record.labels if one.label == "N2"]
+    assert labelled.kind is LabelKind.NOTE
+
+
+async def _labelled_stories(
+    stories: FakeStoryStore,
+) -> tuple[str, str, int, int, tuple[PlanningLabel, ...]]:
+    """Two stories holding this activation, a note on each, and their recorded labels."""
+    own = StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)
+    other = StoryMember(kind=StoryMemberKind.ACTIVATION, id="act-other")
+    made = [await stories.create([own, other], actor=StoryActor.OWNER) for _ in range(2)]
+    trip, dog = (str(one.story_id) for one in made)
+    notes = [
+        await stories.append_note(story, text, author=StoryNoteAuthor.OWNER)
+        for story, text in ((trip, "On the trip."), (dog, "On the dog."))
+    ]
+    on_trip, on_dog = (int(one.note.note_id) for one in notes if one.note is not None)
+    labels = (
+        PlanningLabel(label="S1", kind=LabelKind.STORY, id=trip),
+        PlanningLabel(label="S2", kind=LabelKind.STORY, id=dog),
+        PlanningLabel(label="N1", kind=LabelKind.NOTE, id=str(on_trip)),
+        PlanningLabel(label="N2", kind=LabelKind.NOTE, id=str(on_dog)),
+        PlanningLabel(label="E1", kind=LabelKind.EPISODE, id="activation:act-other"),
+    )
+    return trip, dog, on_trip, on_dog, labels
+
+
+async def _stages_over(
+    completer: FakeToolCallingCompleter, stories: FakeStoryStore, *, owner_records: bool
+) -> tuple[PhaseWorking, dict[ControllerStage, Any]]:
+    harness = _harness(completer)
+    await harness.memory.add(_episode())
+    await harness.memory.add(_episode("activation:act-other"))
+    path = _phases(completer, stories=stories, story_calls=True)(harness)
+    *_, labels = await _labelled_stories(stories)
+    working = path.begin(
+        activation_id=_ACTIVATION,
+        window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
+        conversation_id="c1",
+        trigger_origin=InputOrigin.USER,
+        owner_records=owner_records,
+        labels=labels,
+    )
+    return working, {one.name: one for one in path.stages()}
+
+
+async def test_the_hub_refuses_a_move_naming_a_note_not_held_before_authorizing() -> None:
+    """ADR-0307 §5:3-§5:4: refused whole with the reason, as the stories stand then."""
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(
+                _call("c1", "move_story", story="S1", to="S2", notes=["N1", "N2"]),
+                _call("c2", "move_story", story="S1", to="S2", episodes=["E1"]),
+            )
+        )
+    )
+    stories = FakeStoryStore(now=lambda: AT)
+    working, stages = await _stages_over(completer, stories, owner_records=True)
+    given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
+
+    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING, ControllerStage.ACTING):
+        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+
+    planned = working.latest.planned
+    assert [one.call.call_id for one in planned.calls] == ["c2"]
+    (refused,) = planned.refused
+    assert refused.call.call_id == "c1"
+    assert refused.reason == "N2 is not on the story it would leave, so nothing was moved"
+    trip, dog = (
+        str(one.story_id)
+        for one in await stories.stories_of(
+            StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)
+        )
+    )
+    # Nothing of the refused call ran; the members-only move beside it did.
+    for story in (trip, dog):
+        page = await stories.notes(story)
+        assert page is not None
+        assert len(page.notes) == 1
+    holders = await stories.stories_of(StoryMember(kind=StoryMemberKind.ACTIVATION, id="act-other"))
+    assert len(holders) == 1
+
+
+async def test_on_an_owner_only_pass_a_move_naming_notes_is_refused_and_members_move() -> None:
+    """ADR-0307 §6:5: a move or a split carries members only there; refused, not stripped."""
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(
+                _call("c1", "move_story", story="S1", to="S2", notes=["N1"]),
+                _call("c2", "split_story", story="S1", episodes=["E1"]),
+            )
+        )
+    )
+    stories = FakeStoryStore(now=lambda: AT)
+    working, stages = await _stages_over(completer, stories, owner_records=False)
+    given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
+
+    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING, ControllerStage.ACTING):
+        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+
+    planned = working.latest.planned
+    (refused,) = planned.refused
+    assert refused.call.call_id == "c1"
+    assert refused.reason.startswith("on this pass a move or a split carries members only")
+    holders = await stories.stories_of(StoryMember(kind=StoryMemberKind.ACTIVATION, id="act-other"))
+    assert len(holders) == 2  # the split took it into a story of its own
 
 
 # --- with the opt-in unset ---------------------------------------------------------------
