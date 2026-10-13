@@ -18,17 +18,27 @@ from typing import TYPE_CHECKING
 import pytest
 from channel_episodes import channel_ids
 from phases_support import (
+    PHONE,
     SETTLE,
     Gated,
     NeverFinishing,
+    answered,
     chat_turn,
     open_conversation,
     phases_harness,
     say,
 )
 
-from ai_assistant.core.types import TraceKind, TraceOutcome, TraceRef
+from ai_assistant.core.device_context import current_requesting_device, serving_device
+from ai_assistant.core.types import (
+    HUB_REQUESTING_DEVICE,
+    RequestingDevice,
+    TraceKind,
+    TraceOutcome,
+    TraceRef,
+)
 from ai_assistant.orchestration.engine import DrainPhase
+from ai_assistant.testing import FakeToolCallingCompleter
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -291,3 +301,36 @@ async def test_a_completed_activation_emits_one_trace_through_the_sink() -> None
     assert trace.outcome is TraceOutcome.OK
     assert trace.refs[TraceRef.CORRELATION]
     assert harness.traces.recorded == ()
+
+
+# --- the requesting device (ADR-0298 §2:6) ------------------------------------------------
+
+
+class _Witness(FakeToolCallingCompleter):
+    """Planning's default round, recording the requesting device it ran under."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: list[RequestingDevice] = []
+
+    async def respond(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[OfferedTool],
+        *,
+        model: str | None = None,
+    ) -> RoundResponse:
+        self.seen.append(current_requesting_device())
+        return await super().respond(messages, tools, model=model)
+
+
+async def test_the_activation_a_message_starts_does_not_run_as_its_device() -> None:
+    """§2:6: the reader's activation runs with the requesting device unset."""
+    witness = _Witness()
+    harness = phases_harness(witness)
+    conversation = await open_conversation(harness)
+    with serving_device(RequestingDevice(device_id=PHONE.device_id)):
+        await say(harness, conversation, "hi")
+    await answered(harness, conversation, 1)
+    assert witness.seen
+    assert all(one == HUB_REQUESTING_DEVICE for one in witness.seen)
