@@ -3509,24 +3509,38 @@ async def test_with_the_opt_in_unset_todays_event_path_returns_how_it_ended() ->
     assert episode.outcome == summary
 
 
-async def test_an_events_result_past_the_output_bound_raises_as_every_result_does() -> None:
-    """ADR-0085 §8e: a result too large to return is refused, never answered as a result.
+#: An event whose arguments are inside a 512-byte bound and whose result, its receipt
+#: reserved, is past it: the channel's identity is in both.
+_LONG_EVENT: Final = ChannelInput(
+    target=ChannelIdentity(channel_type="informational_event", instance_id="e" * 250),
+    payload=TextChannelPayload(text="x"),
+)
 
-    The result *couldn't finish* would build names the same channel, so it could not be
-    returned either.
+
+@pytest.mark.parametrize(
+    ("completer", "budget"),
+    [
+        (FakeToolCallingCompleter.scripted(RoundResponse(text="Noted.")), _EVENT_BUDGET),
+        (_Fails(), _EVENT_BUDGET),
+        (FakeToolCallingCompleter.scripted(), timedelta(0)),
+    ],
+    ids=["done", "a_phase_failed", "no_budget"],
+)
+async def test_an_events_result_past_the_output_bound_raises_as_every_result_does(
+    completer: FakeToolCallingCompleter, budget: timedelta
+) -> None:
+    """ADR-0085 §8c: every result is held to the bound, the one built for an end included.
+
+    A result *couldn't finish* builds in place of a failure is measured with its receipt
+    as a returned one is, and one too large raises rather than being returned.
     """
     harness = Harness(
         planner=NoStepPlanner(),
         understanding=understanding_stage(),
         tools=(_BOOK,),
-        phases=_phases(FakeToolCallingCompleter.scripted(RoundResponse(text="Noted."))),
+        phases=_phases(completer),
         max_payload_bytes=512,
-    )
-    # Arguments inside the bound, and a result past it once its receipt is reserved.
-    supplied = ChannelInput(
-        target=ChannelIdentity(channel_type="informational_event", instance_id="e" * 250),
-        payload=TextChannelPayload(text="x"),
     )
 
     with pytest.raises(OversizedValueError, match="the result of receive"):
-        await harness.engine.receive(supplied, reply=None, timeout=_EVENT_BUDGET)
+        await harness.engine.receive(_LONG_EVENT, reply=None, timeout=budget)

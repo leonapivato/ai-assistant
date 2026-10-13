@@ -2820,6 +2820,7 @@ def _answered[T](
     *,
     state: ActivationState | None,
     unfinished: Callable[[ActivationEnding], T] | None,
+    check: Callable[[T], None],
 ) -> T:
     """What a call awaiting an activation is answered with, once it has frozen.
 
@@ -2828,13 +2829,16 @@ def _answered[T](
     ``unfinished`` builds, reading *stopped* where the stop mark is set and *couldn't
     finish* otherwise.
 
-    **Except the output bound's refusal.** A result too large for the payload limit is
-    refused as every result is (ADR-0085 §8e), and the one ``unfinished`` builds names
-    the same channel, so it could not be returned either: an ``OversizedValueError``
-    raises, as it does on every other path.
+    **The result it builds is held to the output bound** (ADR-0085 §8c) by ``check``,
+    the call's own measure with its capture receipt reserved: the freeze measures only
+    a value the work returned, and this one is built after it. One too large raises
+    ``OversizedValueError`` in its place, as every result the bound refuses does; and a
+    failure that already is the output bound's refusal raises as itself, since the
+    result built in its place would name the same channel.
 
     Raises:
         BaseException: ``failure``, where it is not answered with a result.
+        OversizedValueError: If the result built in its place is too large to return.
     """
     if (
         unfinished is not None
@@ -2842,7 +2846,11 @@ def _answered[T](
         and not isinstance(failure, OversizedValueError)
     ):
         stopped = state is not None and state.stopped
-        return unfinished(ActivationEnding.STOPPED if stopped else ActivationEnding.COULDNT_FINISH)
+        answer = unfinished(
+            ActivationEnding.STOPPED if stopped else ActivationEnding.COULDNT_FINISH
+        )
+        check(answer)
+        return answer
     if failure is not None:
         raise failure
     return cast("T", value)
@@ -10520,7 +10528,10 @@ class Engine:
                         # `story_tidy_up_interim`.
                         self._start_interim_tidy_ups(state)
                 failure = _stopped_failure(state, failure)
-                return _answered(value, failure, state=state, unfinished=unfinished), report
+                answer = _answered(
+                    value, failure, state=state, unfinished=unfinished, check=check_output
+                )
+                return answer, report
             finally:
                 self._running[:] = [one for one in self._running if one is not scope]
                 self._count_end(scope)
