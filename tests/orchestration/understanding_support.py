@@ -33,7 +33,7 @@ FAKE_RECALL_THRESHOLD: Final = 0.5
 
 #: The root's threshold for the vendored on-device embedder, restated for the suite that
 #: recalls over it; ``tests/app`` pins that the root wires this same one.
-ON_DEVICE_RECALL_THRESHOLD: Final = 0.65
+ON_DEVICE_RECALL_THRESHOLD: Final = 0.58
 
 #: The smallest well-formed proposal: a meaning grounded in the input alone.
 STATED_PROPOSAL: Final = json.dumps(
