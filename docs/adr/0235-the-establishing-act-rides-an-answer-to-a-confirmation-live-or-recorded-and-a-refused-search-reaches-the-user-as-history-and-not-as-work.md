@@ -1,6 +1,6 @@
 # 235. The establishing act rides an answer to a confirmation, live or recorded, and a refused search reaches the user as history and not as work
 
-- Status: Partially superseded by ADR-0242 (§8's first clause, and nothing else in this ADR: the message that a search was refused is no longer the `grantable_decisions` listing alone — §6 of the superseding ADR puts a statement that a lookup did not happen in the reply, composed by the model from a closed-vocabulary member, and its §9 puts a statement of the act that would enable it beside the reply on the surface; §8's second clause binds entire, so this is not a notification and no lane mints one, and §8's third clause binds entire, so neither the reply nor the statement beside it says that the turn would have answered differently, that a reply was incomplete, that a search would have succeeded, or that anything is owed; §§1-7 and §§9-14 are untouched, and §9's browser deferral and voice withholding are inherited rather than moved) and ADR-0244 (§3's seven-condition closure in that count alone and §8's first clause in its nowhere-else limb alone: an eighth condition is added — the decision's id is not named by a `ParkedRead` whose disposition is `OPEN`, `APPROVED` or `DENIED` — the seven binding verbatim and in their order, because a parked read carries neither `step_id` nor `execution_id` and its answer is nonetheless the resuming one, which is what §3's third clause separated the populations by; and the question itself is now offered on a surface as a `Confirmation` the user may answer, beside the listing and the reply. §8's second and third clauses bind entire — this is not a notification, and nothing rendered says the turn would have answered differently, that a reply was incomplete, that a search would have succeeded, or that anything is owed — and §1, §2, §4–§7 and §§9–14 are untouched, §9's browser deferral and voice withholding staying with this act)
+- Status: Partially superseded by ADR-0242 (§8's first clause, and nothing else in this ADR: the message that a search was refused is no longer the `grantable_decisions` listing alone — §6 of the superseding ADR puts a statement that a lookup did not happen in the reply, composed by the model from a closed-vocabulary member, and its §9 puts a statement of the act that would enable it beside the reply on the surface; §8's second clause binds entire, so this is not a notification and no lane mints one, and §8's third clause binds entire, so neither the reply nor the statement beside it says that the turn would have answered differently, that a reply was incomplete, that a search would have succeeded, or that anything is owed; §§1-7 and §§9-14 are untouched, and §9's browser deferral and voice withholding are inherited rather than moved) and ADR-0244 (§3's seven-condition closure in that count alone and §8's first clause in its nowhere-else limb alone: an eighth condition is added — the decision's id is not named by a `ParkedRead` whose disposition is `OPEN`, `APPROVED` or `DENIED` — the seven binding verbatim and in their order, because a parked read carries neither `step_id` nor `execution_id` and its answer is nonetheless the resuming one, which is what §3's third clause separated the populations by; and the question itself is now offered on a surface as a `Confirmation` the user may answer, beside the listing and the reply. §8's second and third clauses bind entire — this is not a notification, and nothing rendered says the turn would have answered differently, that a reply was incomplete, that a search would have succeeded, or that anything is owed — and §1, §2, §4–§7 and §§9–14 are untouched, §9's browser deferral and voice withholding staying with this act) and ADR-0313 (§3, whole; §9:1's `assistant remember-recipients`)
 - Date: 2026-09-04
 - Decides: the establishing surface ADR-0193 §13 defers — which surfaces offer the
   act, where the act's `answer` comes from on each population it rides, what a
@@ -112,6 +112,17 @@
   and revocation vocabulary, and §§9–14 all stand entire. §9's browser deferral and voice
   withholding are untouched for **this** act; ADR-0244 §13 admits the browser for the parked
   read it decides, and says so in its own text rather than by reading this section wider.
+- Partially superseded: 2026-10-12 by ADR-0313 — two scopes. §3, whole: the
+  establishing act on a recorded `CONFIRM`, `establish_recipient_grant`, and the
+  listing that offers it, `grantable_decisions`, leave the engine surface
+  (ADR-0313 §5:1), as ADR-0309 §5:9 retires the act; the authority milestone redoes
+  it. §9:1's `assistant remember-recipients` leaves with them. The listing and
+  revocation of recipient grants stand.
+  The old path keeps the replaced clauses until the lane that changes that member
+  or type merges (ADR-0313 §1:3).
+  This replacement takes effect on ratification of ADR-0313. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

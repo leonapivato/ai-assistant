@@ -1,6 +1,6 @@
 # 309. The phases are built beside the old path, and one cutover switches the controller over, deletes the old path and goes live in one deploy
 
-- Status: Partially superseded by ADR-0312 (§2:2's module naming: it names the phases, not their modules' file names)
+- Status: Partially superseded by ADR-0312 (§2:2's module naming: it names the phases, not their modules' file names) and ADR-0313 (§5:1's list, in classing `grantable_decisions` and `establish_recipient_grant` as reworked)
 - Date: 2026-10-11
 - Scope: the phases after understanding ([#2723](https://github.com/leonapivato/ai-assistant/pull/2723)), milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)), the last of their four decisions: how the phases are built, the controller's table they run on, the lanes that build them, what retires, and the one cutover that takes them live. ADR-0306 decided capabilities, authorizing and acting, ADR-0307 planning, and ADR-0308 recall's second run and digesting.
 - Dependency: [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md) and [ADR-0308](0308-recall-runs-again-on-what-understanding-found-and-outside-content-reaches-planning-only-as-a-digests-evidence.md), all Accepted and merged at `edd58306`, each of which waits on this decision before any lane implements it.
@@ -51,6 +51,14 @@
   replacement takes effect on ratification of ADR-0312. This reciprocal header record
   accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the
   ratified body below are preserved.
+- Partially superseded: 2026-10-12 by ADR-0313 — one scope. §5:1's list, in
+  classing `grantable_decisions` and `establish_recipient_grant` as reworked: they
+  retire, since the act §5:9 retires is the whole of the one and the reason for the
+  other (ADR-0313 §5:1). Every other clause stands, §5:11 included, which ADR-0313
+  answers.
+  This replacement takes effect on ratification of ADR-0313. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 
