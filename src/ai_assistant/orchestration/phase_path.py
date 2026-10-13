@@ -134,10 +134,18 @@ story view does, and the notes it shows are held with their marks for authorizin
 follow-up's result is the result it names, as held, which digesting reads again against
 the follow-up's question.
 
-**Left to later lanes:** pulls (ADR-0292 §13:3), which nothing builds yet; an event
-through the phases; and ADR-0309 §5:10's evaluation of the episode's placement over
-what the activation was given, for which the thin path places the episode for the owner
-alone.
+**The episode's placement** (ADR-0309 §5:10, ADR-0204 §2, ADR-0217 §3:12). The working
+set holds a :class:`~ai_assistant.orchestration.supplied_records.SuppliedRecords`, handed
+every memory record the activation is given or obtains as it arrives: the windows'
+records, what either recall run kept, what a call returned, a digest's records included,
+and what a story view shows. The value is taken once, at the freeze, over every round,
+the windows' records left out on a pass of unbounded audience, and the episode is placed
+for the owner alone where it is ``True``. Before each round is planned the value over
+what planning has been given so far is set on the activation's state, so a belief that
+round remembers is placed by the supply it was produced over.
+
+**Left to later lanes:** pulls (ADR-0292 §13:3), which nothing builds yet; and an event
+through the phases.
 
 **It logs stage and code-owned reason only** (ADR-0275 §8).
 """
@@ -250,7 +258,8 @@ from ai_assistant.orchestration.story_calls import TIDY_STORY_CAPABILITY
 from ai_assistant.orchestration.story_links import admitted_episodes
 from ai_assistant.orchestration.story_privacy import SummaryVisibility
 from ai_assistant.orchestration.story_standing import story_standing
-from ai_assistant.orchestration.understanding import fetch_held
+from ai_assistant.orchestration.supplied_records import SuppliedRecords
+from ai_assistant.orchestration.understanding import ConversationWindow, fetch_held
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -269,6 +278,7 @@ if TYPE_CHECKING:
         ActivationDigest,
         ActivationUnderstanding,
         FrozenJson,
+        MemoryRecord,
         MessageReceipt,
         PlanningRound,
         SearchOutcome,
@@ -821,6 +831,22 @@ def _shown_notes(given: PlanningStories) -> tuple[StoryNote, ...]:
     )
 
 
+def _story_records(given: PlanningStories) -> tuple[EpisodicMemory, ...]:
+    """Every episode a story view planning is shown carries (ADR-0309 §5:10).
+
+    A story's newer and latest episodes, and those of each short view beside it, each
+    already admitted by the audience predicate when it was read.
+    """
+    shorts: list[ShortView] = [
+        *given.cited,
+        *(one for story in given.stories for one in story.inherited),
+    ]
+    return (
+        *(record for story in given.stories for record in (*story.newer, *story.latest)),
+        *(record for one in shorts for record in one.episodes),
+    )
+
+
 # --- the working set ---------------------------------------------------------------------
 
 
@@ -908,6 +934,9 @@ class PhaseWorking:
         # The story notes planning has been shown, by id, whose marks authorizing reads
         # for their labels (ADR-0303 §3:1, ADR-0306 §4:5).
         self.notes: dict[int, StoryNote] = {}
+        # Every memory record the activation is given or obtains, as it arrives, which
+        # the episode's placement is taken over at the freeze (ADR-0309 §5:10).
+        self.supplied = SuppliedRecords()
         # Recall's second decision, once that run ends (ADR-0308 §2), and the records
         # either run kept as planning fetched them before its first round (§3).
         self.second_recall: Recalled | None = None
@@ -1422,6 +1451,36 @@ def _fetched_external(fetched: Fetched | None) -> bool:
     )
 
 
+def _window_records(given: PhasePass) -> tuple[MemoryRecord, ...]:
+    """The stored records the pass's windows gave the activation (ADR-0276 §3-§4).
+
+    A conversation window's tail records, where the channel window is one, and the
+    episode window's records as the understanding phase fetched them. The chat's
+    transcript window holds messages, not stored records, so it gives none.
+    """
+    windows = given.windows
+    channel = (
+        windows.channel.records
+        if windows is not None and isinstance(windows.channel, ConversationWindow)
+        else ()
+    )
+    fetched = given.understanding_fetch
+    episodes = () if fetched is None or fetched.episodes is None else fetched.episodes
+    return (*channel, *episodes)
+
+
+def _hold_given(given: PhasePass, working: PhaseWorking) -> None:
+    """Hold what the stages before planning gave the activation (ADR-0309 §5:10).
+
+    The windows' records, and the first recall run's kept records as the understanding
+    phase fetched them. Held again on each call, which holds each record once.
+    """
+    working.supplied.windows(_window_records(given))
+    fetched = given.understanding_fetch
+    if fetched is not None:
+        working.supplied.obtained(fetched.recalled)
+
+
 def _found_external(found: Fetched) -> bool:
     """Whether a found episode planning is shown rests on outside content (ADR-0223).
 
@@ -1816,7 +1875,9 @@ class PhasePath:
         state is marked unfinished, so the episode freezes ``failed`` and the current
         state reads *couldn't finish*, not done (ADR-0293 §8:3). However it ended,
         the activation's messages become the episode's ``outcome``, and the facts the
-        freeze derives are set (ADR-0286 §4:2).
+        freeze derives are set (ADR-0286 §4:2): among them ADR-0204 §2's value, taken
+        here once over everything the activation was given or obtained in every round
+        (ADR-0309 §5:10).
 
         Raises:
             Exception: Whatever ``controlled`` raised, once the message is written.
@@ -1850,11 +1911,12 @@ class PhasePath:
                     or any(one.outcome is DigestOutcome.ANSWERED for one in state.digests)
                 )
                 state.response = working.outcome()
-                # The thin path places its episode for the owner alone, the safe
-                # direction, until ADR-0309 §5:10's evaluation is built.
+                # ADR-0309 §5:10: taken once, here, over every round. The windows are
+                # held again in case no round was planned to hold them.
+                _hold_given(given, working)
                 state.facts = CaptureFacts(
                     modality=Modality.TEXT,
-                    supplied_withheld=True,
+                    supplied_withheld=working.supplied.withheld(given.supply),
                     derived_from_external=external,
                     parked=None,
                     delivery=None,
@@ -1894,6 +1956,12 @@ class PhasePath:
             working.fetched_outside = True
         if stories is not None:
             working.notes.update((one.note_id, one) for one in _shown_notes(stories))
+            working.supplied.obtained(_story_records(stories))
+        _hold_given(given, working)
+        if (state := active_state()) is not None:
+            # ADR-0217 §3:12: a belief this round remembers is produced over what
+            # planning has been given so far, so it is placed by that supply.
+            state.planned_over_withheld = working.supplied.withheld(given.supply)
         inputs = PlanningInputs(
             activation_id=working.activation_id,
             place=working.place,
@@ -1982,6 +2050,7 @@ class PhasePath:
             working.found = await fetch_held(
                 self._memory, episode_ids=None, recalled_ids=ids, audience=given.supply
             )
+            working.supplied.obtained(working.found.recalled)
             _log.info(
                 "stage_fetch",
                 stage="planning",
@@ -2008,6 +2077,7 @@ class PhasePath:
             self._memory, episode_ids=None, recalled_ids=ids, audience=given.supply
         )
         working.search_fetches.append(fetched)
+        working.supplied.obtained(fetched.recalled)
         _log.info(
             "stage_fetch",
             stage="planning",
@@ -2111,6 +2181,7 @@ class PhasePath:
                 self._memory, episode_ids=None, recalled_ids=ids, audience=given.supply
             )
             working.recall_digest_fetch = fetched
+            working.supplied.obtained(fetched.recalled)
             _log.info(
                 "stage_fetch",
                 stage="digesting",
@@ -2285,6 +2356,7 @@ class PhasePath:
             working.pages[one.result_id] = view
             shown = PlanningStories(stories=(view,))
             working.notes.update((note.note_id, note) for note in _shown_notes(shown))
+            working.supplied.obtained(_story_records(shown))
             if _stories_external(shown):
                 working.fetched_outside = True
 
@@ -2374,6 +2446,7 @@ class PhasePath:
                     self._memory, episode_ids=None, recalled_ids=records, audience=audience
                 )
                 working.search_fetches.append(fetched)
+                working.supplied.obtained(fetched.recalled)
                 _log.info(
                     "stage_fetch",
                     stage="digesting",
