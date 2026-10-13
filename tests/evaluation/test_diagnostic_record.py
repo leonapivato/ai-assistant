@@ -385,3 +385,80 @@ async def test_a_symbolic_link_in_the_directorys_place_is_neither_written_nor_sw
         await record.purge_before(DEFAULT_RECORDED_AT)
 
     assert sorted(one.name for one in elsewhere.iterdir()) == ["keep.txt"]
+
+
+def _uncuttable(monkeypatch: pytest.MonkeyPatch, *, times: int) -> None:
+    """Make the next ``times`` cuts fail as the storage does."""
+    original = store_module._truncate
+    left = {"n": times}
+
+    def truncate(descriptor: int, size: int) -> None:
+        if left["n"] > 0:
+            left["n"] -= 1
+            raise OSError(5, "Input/output error")
+        original(descriptor, size)
+
+    monkeypatch.setattr(store_module, "_truncate", truncate)
+
+
+async def test_a_torn_tail_whose_cut_failed_is_cut_before_the_next_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§6:2: where the rollback fails too, nothing joins the torn line once storage recovers."""
+    record = FileDiagnosticRecord(directory=tmp_path / "diagnostics", file_bytes=_BOUND)
+    await record.write(diagnostic_entry(body={"n": 1}))
+    path = tmp_path / "diagnostics" / f"{DEFAULT_DIAGNOSED_ACTIVATION}.jsonl"
+    _torn(monkeypatch, after=9)
+    _uncuttable(monkeypatch, times=1)
+
+    await record.write(diagnostic_entry(body={"n": 2}))
+    await record.write(diagnostic_entry(body={"n": 3}))
+
+    assert [one["body"]["n"] for one in _lines(path)] == [1, 3]
+
+
+async def test_a_torn_tail_that_still_cannot_be_cut_takes_no_further_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = FileDiagnosticRecord(directory=tmp_path / "diagnostics", file_bytes=_BOUND)
+    await record.write(diagnostic_entry(body={"n": 1}))
+    path = tmp_path / "diagnostics" / f"{DEFAULT_DIAGNOSED_ACTIVATION}.jsonl"
+    _torn(monkeypatch, after=9)
+    _uncuttable(monkeypatch, times=2)
+
+    await record.write(diagnostic_entry(body={"n": 2}))
+    torn = path.read_bytes()
+    with structlog.testing.capture_logs() as captured:
+        await record.write(diagnostic_entry(body={"n": 3}))
+
+    assert path.read_bytes() == torn
+    assert [one["event"] for one in captured] == [DIAGNOSTIC_NOT_WRITTEN]
+    await record.write(diagnostic_entry(body={"n": 4}))
+    assert [one["body"]["n"] for one in _lines(path)] == [1, 4]
+
+
+def _open_descriptors() -> int:
+    return len(list(Path("/proc/self/fd").iterdir()))
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc to count descriptors")
+async def test_a_directory_that_cannot_be_narrowed_leaks_no_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that fails at the directory still closes what it opened (§2:4)."""
+    directory = tmp_path / "diagnostics"
+    directory.mkdir(mode=0o755)
+    directory.chmod(0o755)
+    record = FileDiagnosticRecord(directory=directory, file_bytes=_BOUND)
+
+    def refuse(descriptor: int, mode: int) -> None:
+        del descriptor, mode
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "fchmod", refuse)
+    before = _open_descriptors()
+
+    for _ in range(5):
+        await record.write(diagnostic_entry())
+
+    assert _open_descriptors() == before
