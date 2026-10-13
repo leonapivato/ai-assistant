@@ -24,7 +24,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import count
-from typing import TYPE_CHECKING, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 import pytest
 from assistant_engine_contract import (
@@ -513,6 +513,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     stories: StoryStore | None = None,
     chat_reader: bool = True,
     conversation_store: FakeConversationStore | None = None,
+    phases: Mapping[str, Any] | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -566,6 +567,12 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
 
     ``conversation_store`` is the chat space, a knob so the reader obligations can hold
     the reader's marking on the store the engine's chat space is.
+
+    ``phases`` are the keyword knobs ``phases_support.phase_path`` takes — its planning
+    double, policy and offered capabilities — for a case that drives a call through the
+    phases' acting over this subject's invoker. Given, the path also holds this
+    subject's egress binder, as the composition root's does; ``None`` builds the path
+    every shared case runs on, unchanged.
 
     ``max_outstanding_confirmations`` is the ceiling ADR-0198 §4 reuses as the bound on
     the retained settled records. A knob for :attr:`AssistantEngineContract.tiny_engine`'s
@@ -753,6 +760,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
                 plans=store,
                 trail=audit,
                 conversations=conversation_store,
+                **({} if phases is None else {"binder": binder, **phases}),
             )
             if chat_reader
             else None
