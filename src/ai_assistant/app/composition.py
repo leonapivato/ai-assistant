@@ -154,7 +154,7 @@ from ai_assistant.tools import (
     build_web_search_integration,
     egress_registrations,
 )
-from ai_assistant.tools.booking import BOOKING_ACT
+from ai_assistant.tools.booking import BOOKING_ACT, BOOKING_AVAILABILITY
 from ai_assistant.tools.booking import ORIGIN_ARGUMENT as BOOKING_ORIGIN_ARGUMENT
 from ai_assistant.tools.connection_store import SqliteConnectionStore
 from ai_assistant.tools.destinations import DestinationCanonicalisationError
@@ -3276,8 +3276,8 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
     route, which the stand-in keeps (ADR-0306 §4:4).
 
     **A connected account's destination is the hub's** (ADR-0306 §2:10): the search's
-    is its searcher's proposal, and the booking act's ``origin`` is the configured
-    endpoint, so planning is offered neither.
+    is its searcher's proposal, and the booking provider's two capabilities take the
+    configured endpoint as their ``origin``, so planning is offered none of them.
     """
     policy = ThresholdActionPolicy(
         confirm_at_risk=settings.confirm_at_risk,
@@ -3322,8 +3322,14 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
         own_records=(REMEMBER, *STORY_CALLS, *LOOK_UPS),
         searcher=seams.searcher,
         search_query=SEARCH_QUERY_ARGUMENT,
+        # Both of the simulated provider's capabilities are offered (ADR-0309 §4:2), and
+        # both name the configured endpoint as their ``origin``: the hub's to fill and
+        # never planning's to write (ADR-0306 §2:10).
         fills=(
-            {str(BOOKING_ACT.capability): {BOOKING_ORIGIN_ARGUMENT: settings.booking_endpoint}}
+            {
+                str(capability): {BOOKING_ORIGIN_ARGUMENT: settings.booking_endpoint}
+                for capability in (BOOKING_AVAILABILITY.capability, BOOKING_ACT.capability)
+            }
             if seams.booking_configured and settings.booking_endpoint is not None
             else None
         ),

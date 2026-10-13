@@ -192,10 +192,13 @@ async def test_a_configured_booking_act_is_offered_with_its_endpoint_filled(
             *STORY_CALL_CAPABILITIES,
             *LOOK_UP_CAPABILITIES,
         }
-        assert "origin" in offered["book_stay"].system_supplied
-        call = ProposedCall(call_id="c1", name="book_stay", arguments={"date": "2026-10-02"})
-        filled = await phases._tools.filled(call)
-        assert filled.arguments == {"date": "2026-10-02", "origin": endpoint}
+        # Both of the provider's capabilities name the configured endpoint, which the hub
+        # fills and planning is never offered (ADR-0306 §2:10).
+        for name in ("booking_availability", "book_stay"):
+            assert "origin" in offered[name].system_supplied, name
+            call = ProposedCall(call_id="c1", name=name, arguments={"date": "2026-10-02"})
+            filled = await phases._tools.filled(call)
+            assert filled.arguments == {"date": "2026-10-02", "origin": endpoint}, name
     finally:
         await engine.aclose()
 
