@@ -332,7 +332,9 @@ def _describe(failure: BaseException, seen: set[int] | None = None) -> list[str]
     and any frame's locals — each can carry what the user or a model said. A
     group's members are listed under it, indented, each with its own frames and
     chain, so a failure in a task group's child keeps its class and where it was
-    raised.
+    raised. Each exception is expanded once: one met again — a member two groups
+    share — is named by its class alone, so groups that share members cannot
+    multiply into a rendering exponential in their nesting.
     """
     seen = set() if seen is None else seen
     lines: list[str] = []
@@ -343,6 +345,9 @@ def _describe(failure: BaseException, seen: set[int] | None = None) -> list[str]
             held = one.exceptions
             for number, member in enumerate(held, start=1):
                 lines.append(f"+ {number}/{len(held)}\n")
+                if id(member) in seen:
+                    lines.append(f"| {_class_name(member)}, shown above\n")
+                    continue
                 lines.extend(
                     f"| {line}"
                     for line in "".join(_describe(member, seen)).splitlines(keepends=True)
