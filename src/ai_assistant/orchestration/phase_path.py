@@ -2001,7 +2001,6 @@ class PhasePath:
             working.fetched_outside = True
         if stories is not None:
             working.notes.update((one.note_id, one) for one in _shown_notes(stories))
-            working.supplied.obtained(_story_records(stories))
         _hold_given(given, working)
         if (state := active_state()) is not None:
             # ADR-0217 §3:12: a belief this round remembers is produced over what
@@ -2141,12 +2140,15 @@ class PhasePath:
         """
         if self._story_reads is None:
             return None
-        return await self._story_reads.read(
+        read = await self._story_reads.read(
             working.activation_id,
             understanding=given.understanding,
             audience=given.supply,
             owner_records=working.owner_records,
         )
+        # Held as they are read, whatever becomes of the round (ADR-0309 §5:10).
+        working.supplied.obtained(_story_records(read))
+        return read
 
     async def _recall_again(self, given: PhasePass, recall: RecallStage | None) -> StageResult:
         """Recall's second run, on what understanding found (ADR-0308 §2).
