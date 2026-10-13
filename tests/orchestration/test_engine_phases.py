@@ -109,7 +109,14 @@ from ai_assistant.orchestration.phase_path import (
 from ai_assistant.orchestration.planning import PlannedRound
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls, remembered_record_id
+from ai_assistant.orchestration.story_calls import (
+    STORY_CALL_CAPABILITIES,
+    STORY_CALLS,
+    STORY_LABEL_ARGUMENTS,
+    StoryCalls,
+)
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
+from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
 from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow, WindowsStage
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
@@ -241,18 +248,31 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     recall_digest_wait: timedelta = timedelta(seconds=5),
     stories: FakeStoryStore | None = None,
     capabilities: Sequence[str] = _CAPABILITIES,
+    tidy_up: Callable[[Harness], StoryTidyUp] | None = None,
+    story_calls: bool = False,
 ) -> Callable[[Harness], PhasePath]:
     """The thin path as the composition root builds it, over the harness's own stores.
 
     ``stories`` wires the story views (ADR-0307 §6:1) over that story store, and
-    ``capabilities`` names the capabilities planning is offered.
+    ``capabilities`` names the capabilities planning is offered. ``story_calls`` offers
+    planning's story calls too, over that store and the harness's memory store, with
+    the tidy-up ``tidy_up`` builds, as the composition root wires them (ADR-0300 §10).
     """
 
     def build(harness: Harness) -> PhasePath:
+        calls = (
+            StoryCalls(
+                stories=stories,
+                memory=harness.memory,
+                tidy_up=None if tidy_up is None else tidy_up(harness),
+            )
+            if story_calls and stories is not None
+            else None
+        )
         tools = PhaseTools(
             registry=harness.invoker,
             invoker=harness.invoker,
-            own_records=(REMEMBER,),
+            own_records=(REMEMBER, *(STORY_CALLS if calls is not None else ())),
             searcher=searcher,
             search_query="query",
         )
@@ -271,7 +291,11 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                 policy=policy if policy is not None else _Policy(),
                 memory_policy=FakeMemoryPolicy(),
                 trail=harness.trail,
-                stories=FakeStoryStore(now=lambda: AT),
+                stories=(
+                    stories
+                    if calls is not None and stories is not None
+                    else FakeStoryStore(now=lambda: AT)
+                ),
                 memory=harness.memory,
                 binder=binder,
                 registered_search=registered_search,
@@ -281,7 +305,14 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                 plans=harness.plans,
                 invoker=tools,
                 own_records=OwnRecordsByCapability(
-                    {"remember": RememberCalls(writer=memory_writer, now=lambda: AT)}
+                    {
+                        "remember": RememberCalls(writer=memory_writer, now=lambda: AT),
+                        **(
+                            dict.fromkeys(STORY_CALL_CAPABILITIES, calls)
+                            if calls is not None
+                            else {}
+                        ),
+                    }
                 ),
                 timeout=timedelta(seconds=5),
                 now=lambda: AT,
@@ -289,7 +320,11 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             tools=tools,
             plans=harness.plans,
             writer=place if writer is None else writer,
-            capabilities=tuple(capabilities),
+            capabilities=(
+                *capabilities,
+                *(STORY_CALL_CAPABILITIES if calls is not None else ()),
+            ),
+            label_arguments=STORY_LABEL_ARGUMENTS if calls is not None else None,
             round_limit=3,
             round_wait=timedelta(seconds=5),
             excerpt_chars=2000,
@@ -2250,6 +2285,263 @@ async def test_an_outside_episode_recall_found_marks_the_rounds_notes() -> None:
     assert decided is not None
     assert decided.read_outside_content
     assert [one.verdict for one in decided.verdicts] == [Verdict.NEEDS_YOU] * 2
+
+
+# --- planning's story calls that write (ADR-0300 §10, ADR-0303 §9) ---------------------
+
+
+class _GatedTidyUp(FakeModelProvider):
+    """A tidy-up's provider whose one completion answers only once its gate opens."""
+
+    def __init__(self) -> None:
+        super().__init__(reply=json.dumps({"lines": ["A camping trip to Riverside."]}))
+        self.gate = asyncio.Event()
+        self.entered = asyncio.Event()
+
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+        self.entered.set()
+        await self.gate.wait()
+        return await super().complete(messages, model=model)
+
+
+def _tidy_up(
+    stories: FakeStoryStore, provider: FakeModelProvider
+) -> Callable[[Harness], StoryTidyUp]:
+    def build(harness: Harness) -> StoryTidyUp:
+        return StoryTidyUp(
+            model=provider,
+            stories=stories,
+            memory=harness.memory,
+            excerpt_chars=200,
+            other_stories=0,
+            decisions=0,
+            budget=timedelta(seconds=_SETTLE),
+            threshold=0.0,
+        )
+
+    return build
+
+
+async def _the_story(stories: FakeStoryStore, activation_id: str) -> str:
+    """The one story ``activation_id`` belongs to."""
+    member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation_id)
+    (header,) = await stories.stories_of(member)
+    return str(header.story_id)
+
+
+_STARTED: Final = RoundResponse(
+    text="I'll keep track of the trip.",
+    calls=(_call("c1", "start_story", notes=["A camping trip to Riverside."]),),
+    another_round=True,
+)
+
+
+async def test_a_story_is_started_and_then_noted_end_to_end() -> None:
+    """ADR-0300 §10:2-§10:3, ADR-0303 §9:3: a start, then a note on it by its label.
+
+    The start holds this activation and its first note, under an effect record since it
+    is not safe to repeat (ADR-0306 §5:3); the next round is shown the new story under
+    ``S1`` and notes on it, and the note is planning's, written during this activation
+    and unmarked, since nothing it read was outside content.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        _STARTED,
+        RoundResponse(
+            calls=(
+                _call("c2", "note_story", story="S1", note="Waiting on the campground's reply."),
+            )
+        ),
+    )
+    stories = FakeStoryStore(now=lambda: AT)
+    harness = _harness(completer, stories=stories, story_calls=True)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "help me plan a camping trip to Riverside")
+    episode = await _settled(harness, conversation)
+
+    record = episode.processing_record
+    assert record is not None
+    activation = record.activation_id
+    story = await _the_story(stories, activation)
+    page = await stories.notes(story)
+    assert page is not None
+    assert [(one.text, one.author, one.written_during, one.outside) for one in page.notes] == [
+        ("A camping trip to Riverside.", StoryNoteAuthor.PLANNING, activation, False),
+        ("Waiting on the campground's reply.", StoryNoteAuthor.PLANNING, activation, False),
+    ]
+    # The second round was shown the new story under the label it then named.
+    (shown,) = json.loads(completer.calls[1].messages[1].content)["stories"]
+    assert shown["label"] == "S1"
+    assert [one["text"] for one in shown["notes_since_tidied"]] == ["A camping trip to Riverside."]
+    assert (LabelKind.STORY, story) in {(one.kind, one.id) for one in record.labels}
+    # The start is claimed under an effect record; the note, safe to repeat, is not.
+    effects = await harness.plans.activation_effects([activation])
+    assert [(one.capability, one.outcome) for one in effects if one.capability] == [
+        ("start_story", ToolOutcome.SUCCEEDED)
+    ]
+    assert _stages(episode)[-4:] == [
+        (ControllerStage.PLANNING, ControllerRule.ROUND_DUE),
+        (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
+        (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED),
+        (ControllerStage.END, ControllerRule.NOTHING_DUE),
+    ]
+    assert _said(await _messages(harness, conversation))[1:] == [
+        (MessageAuthor.ASSISTANT, "I'll keep track of the trip.")
+    ]
+
+
+async def test_a_tidy_up_brings_no_round_and_nothing_waits_for_it() -> None:
+    """ADR-0307 §7, §8:1, ADR-0306 §3:3: neither a next round nor the activation's end
+    waits for a tidy-up, and it runs to its end after the activation has ended.
+
+    The second round's only call tidies the story just started, and asks for no round,
+    so the activation ends after it while the tidy-up's completion is still held. Once
+    released, the tidy-up writes the story's version log, and the episode records none
+    of it (§7:1).
+    """
+    provider = _GatedTidyUp()
+    completer = FakeToolCallingCompleter.scripted(
+        _STARTED, RoundResponse(calls=(_call("c2", "tidy_story", story="S1"),))
+    )
+    stories = FakeStoryStore(now=lambda: AT)
+    harness = _harness(
+        completer, stories=stories, story_calls=True, tidy_up=_tidy_up(stories, provider)
+    )
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "help me plan a camping trip to Riverside")
+    episode = await _settled(harness, conversation)
+    await asyncio.wait_for(provider.entered.wait(), _SETTLE)
+
+    record = episode.processing_record
+    assert record is not None
+    story = await _the_story(stories, record.activation_id)
+    # Ended with the tidy-up still out: two rounds, and no third.
+    assert len(completer.calls) == 2
+    assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.NOTHING_DUE)
+    assert not provider.gate.is_set()
+    held = await stories.current_summary(story)
+    assert held is not None
+    assert held.summary is None
+
+    provider.gate.set()
+    deadline = asyncio.get_running_loop().time() + _SETTLE
+    while (state := await stories.current_summary(story)) is None or state.summary is None:
+        assert asyncio.get_running_loop().time() < deadline, "the tidy-up never ran to its end"
+        await asyncio.sleep(0.001)
+    assert [line.text for line in state.summary.lines] == ["A camping trip to Riverside."]
+    versions = await stories.summary_versions(story)
+    assert versions is not None
+    assert len(versions.versions) == 1
+    # Its outcome is the story's, not the episode's: no acting record of it, no effect.
+    effects = await harness.plans.activation_effects([record.activation_id])
+    assert {one.capability for one in effects if one.capability} == {"start_story"}
+
+
+@pytest.mark.parametrize(
+    ("name", "brings"),
+    [
+        pytest.param("tidy_story", False, id="a-tidy-up-brings-none"),
+        pytest.param("note_story", True, id="any-other-refused-call-brings-one"),
+    ],
+)
+async def test_a_refused_tidy_up_still_brings_no_round(name: str, *, brings: bool) -> None:
+    """ADR-0307 §7:1 over §5:3: a tidy-up never brings a round, even refused whole.
+
+    A label planning was never shown refuses the call whole, before authorizing; a
+    refused note brings a round to say so, and a refused tidy-up does not.
+    """
+    arguments: dict[str, Any] = {"story": "S9"}
+    if name == "note_story":
+        arguments["note"] = "noted"
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", name, **arguments),))
+    )
+    harness = _harness(completer)
+    await harness.memory.add(_episode())
+    stories = FakeStoryStore(now=lambda: AT)
+    path = _phases(completer, stories=stories, story_calls=True)(harness)
+    working = _begun(path)
+    given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
+    stages = {one.name: one for one in path.stages()}
+
+    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING):
+        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+
+    (refused,) = working.latest.planned.refused
+    assert refused.reason == "'S9' names nothing you were shown"
+    assert working.latest_has_calls
+    assert working.latest_brought_something is brings
+
+
+@pytest.mark.parametrize("origin", [InputOrigin.USER, InputOrigin.OUTSIDE])
+async def test_a_note_is_marked_where_the_activation_read_outside_content(
+    origin: InputOrigin,
+) -> None:
+    """ADR-0300 §4:2, ADR-0303 §3:1, §9:3: by the hub's record of what was read.
+
+    The activation's trigger came from outside, which its record says (ADR-0306 §4:5),
+    so authorizing fills the note's mark from it; the note's own words decide nothing.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", "note_story", story="S1", note="The reply said Sunday."),))
+    )
+    harness = _harness(completer)
+    await harness.memory.add(_episode(origin=origin))
+    stories = FakeStoryStore(now=lambda: AT)
+    trip = (
+        await stories.create(
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)], actor=StoryActor.OWNER
+        )
+    ).story_id
+    assert trip is not None
+    path = _phases(completer, stories=stories, story_calls=True)(harness)
+    working = path.begin(
+        activation_id=_ACTIVATION,
+        window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
+        conversation_id="c1",
+        trigger_origin=origin,
+        owner_records=True,
+    )
+    given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
+    stages = {one.name: one for one in path.stages()}
+
+    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING, ControllerStage.ACTING):
+        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+
+    page = await stories.notes(trip)
+    assert page is not None
+    (note,) = page.notes
+    assert note.text == "The reply said Sunday."
+    assert note.outside is (origin is InputOrigin.OUTSIDE)
+
+
+async def test_on_a_pass_that_may_not_show_the_owners_records_planning_still_writes() -> None:
+    """ADR-0307 §6:5: planning can still write notes and change stories on such a pass."""
+    completer = FakeToolCallingCompleter.scripted(_STARTED)
+    harness = _harness(completer)
+    await harness.memory.add(_episode())
+    stories = FakeStoryStore(now=lambda: AT)
+    path = _phases(completer, stories=stories, story_calls=True)(harness)
+    working = path.begin(
+        activation_id=_ACTIVATION,
+        window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
+        conversation_id="c1",
+        trigger_origin=InputOrigin.USER,
+        owner_records=False,
+    )
+    given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
+    stages = {one.name: one for one in path.stages()}
+
+    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING, ControllerStage.ACTING):
+        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+
+    offered = {one.name for one in completer.calls[0].tools}
+    assert set(STORY_CALL_CAPABILITIES) <= offered
+    story = await _the_story(stories, _ACTIVATION)
+    page = await stories.notes(story)
+    assert page is not None
+    assert [one.text for one in page.notes] == ["A camping trip to Riverside."]
 
 
 # --- with the opt-in unset ---------------------------------------------------------------
