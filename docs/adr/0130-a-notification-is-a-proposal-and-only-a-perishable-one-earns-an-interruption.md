@@ -32,12 +32,12 @@
   ADR-0215 repairs rather than narrows. §2's refusal of delivery state on the
   candidate is kept expressly (ADR-0215 §5), and is why ADR-0215 adds a predicate
   over the record's existing stamps rather than a `delivered` state.
-- Partially superseded: 2026-10-12 by ADR-0313 — one scope. §2:1's optional `Goal`
+- Partially superseded: 2026-10-13 by ADR-0313 — one scope. §2:1's optional `Goal`
   reference: the goal model retires at the cutover (ADR-0309 §5), and
   `NotificationCandidate` loses `goal_id` with it (ADR-0313 §5:4). Every other
   clause stands.
-  The old path keeps the replaced clauses until the lane that changes that member
-  or type merges (ADR-0313 §1:3).
+  The old path keeps the replaced clauses until the lane that changes that member,
+  type or surface merges (ADR-0313 §1:3).
   This replacement takes effect on ratification of ADR-0313. This reciprocal header
   record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.

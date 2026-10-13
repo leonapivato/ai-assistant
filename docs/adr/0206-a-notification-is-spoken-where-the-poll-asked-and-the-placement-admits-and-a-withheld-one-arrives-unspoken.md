@@ -1,7 +1,18 @@
 # 206. A notification is spoken where the poll asked and the placement admits, and a withheld one arrives unspoken
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0313 (§2:2–§2:3, the gateway's formats; §8:12–§8:15, the page's playback)
 - Date: 2026-08-28
+- Partially superseded: 2026-10-13 by ADR-0313 — two scopes. §2:2–§2:3: the
+  gateway's `plays` is empty, so its poll asks for no rendering and the hub renders
+  none for it (ADR-0313 §3:6). §8:12–§8:15: the page plays no spoken notification,
+  since its playback retires with push-to-talk (ADR-0313 §3:5); `spoken` is `null`
+  on every value the gateway writes. The hub's rendering, every other clause, and
+  a poll that names formats stand.
+  The old path keeps the replaced clauses until the lane that changes that member,
+  type or surface merges (ADR-0313 §1:3).
+  This replacement takes effect on ratification of ADR-0313. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 
