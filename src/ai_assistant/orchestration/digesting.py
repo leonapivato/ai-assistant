@@ -5,8 +5,9 @@ One orchestration-local phase module (ADR-0309 §2:2), of the kind
 ``ModelProvider``, a seam onto the episode writer, the part size the composition root
 sets and a clock, and it is **not a Protocol**. Each :meth:`DigestingStage.digest_result`
 digests one result acting held (ADR-0308 §6:1) against the question the call was asked
-with, and records the digest with the episode. No controller rule runs it yet
-(ADR-0309 §2:6).
+with, and :meth:`DigestingStage.digest_recall` digests recall's outside memory records
+against the latest understanding's meaning (§4:4); each records its digest with the
+episode.
 
 **One digest, no tools** (§4:1, §4:10). A result's outside records are read together in
 one plain completion, ``ModelProvider.complete`` with no ``model=`` override, and the
@@ -30,20 +31,28 @@ or the deadline bounding it passes first; a failed digest records no evidence, a
 planning is told it could not read the result. The stage is failure-tolerant: it
 returns the failure rather than raising it. Planning is never given the raw content.
 
+**Recall's digest** (§4:4). Recall's outside memory records, from both runs, go into
+one digest once the second run has decided. The digest fetches them by id under
+ADR-0282 §2:4-§2:8 through the fetch it is handed, inside its deadline, and reads each
+record's fact; a fetch that raises ``MemoryStoreError`` fails the digest, as a call
+that raises does. Where no record comes back to read, no call is made and no digest is
+recorded: there is nothing to answer from, and an answered digest would say the
+activation had read outside content it never read (§5:4).
+
 **Labels** (§4:15, ADR-0307 §5:1). A kept item's source is recorded under the planning
 label of the record its local label named: the result's R label, for a result held as
-it arrived, which is one record. The digest names its result by that label too. Each
+it arrived, which is one record, and a memory record's own M label, for recall's digest.
+A result's digest names its result by its R label too, and recall's names none. Each
 label is taken from the activation's :class:`ActivationLabels` as the digest is
-recorded, and the labels it assigns are recorded with it.
+recorded, and the labels it assigns are recorded with it; a record no item names takes
+no label.
 
 **Recorded through a seam** (§5:2). The digest is appended through
 :class:`DigestRecorder` before :meth:`DigestingStage.digest_result` returns. An append
 that fails is a capture failure: it is logged and holds nothing back.
 
-**Left to later lanes:** recall's digest, which fetches recall's outside memory records
-by id and answers the latest understanding's meaning (§4:4 to §4:6); a result of the
-assistant's own records held by the ids of its outside records (§6:2); the follow-up
-(§6:6 to §6:7); and the step that runs digests beside acting (ADR-0309 §3:3).
+**Left to later lanes:** a result of the assistant's own records held by the ids of its
+outside records (§6:2), and the follow-up (§6:6 to §6:7).
 
 **It logs stage and code-owned reason only**, never the question, the records or the
 reply (ADR-0275 §8).
@@ -56,12 +65,13 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 import structlog
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     ActivationDigest,
     DigestOutcome,
@@ -75,13 +85,15 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Sequence
 
     from ai_assistant.core.protocols import ModelProvider
+    from ai_assistant.core.types import SemanticMemory
     from ai_assistant.orchestration.held_results import HeldResult
 
 __all__ = [
     "ActivationLabels",
+    "DigestFailure",
     "DigestRecorder",
     "Digested",
     "DigestingStage",
@@ -178,21 +190,29 @@ class ActivationLabels:
 # --- the decision and the recorder -------------------------------------------------------
 
 
+#: Why a digest failed, in code-owned words (ADR-0308 §4:11): the deadline passed first,
+#: a call raised, a reply did not parse, or recall's records could not be fetched.
+type DigestFailure = Literal["deadline", "raised", "unparsable", "unread"]
+
+
 @dataclass(frozen=True, slots=True)
 class Digested:
     """The digesting stage's decision for one digest.
 
     Attributes:
-        result_id: The id of the result digested, as acting minted it.
+        result_id: The id of the result digested, as acting minted it, or ``None`` for
+            recall's digest (ADR-0308 §4:4).
         digest: The digest, as recorded or as it would have been.
         labels: The labels this digest assigned, in order.
         recorded: Whether the episode writer's append of it returned.
+        failure: Why it failed, or ``None`` where it answered.
     """
 
-    result_id: str
+    result_id: str | None
     digest: ActivationDigest
     labels: tuple[PlanningLabel, ...]
     recorded: bool
+    failure: DigestFailure | None = None
 
 
 class DigestRecorder(Protocol):
@@ -245,6 +265,19 @@ _OUTSIDE_FROM: Final = (
     "outside content: someone other than the user or the assistant wrote it, and the "
     "assistant received it from a source"
 )
+
+#: A remembered fact recall found, whose source is outside (ADR-0306 §5:16): attributed
+#: by its record's provenance, as every other record is, and never by its text.
+_REMEMBERED_FROM: Final = (
+    "outside content: a fact the assistant remembers that rests on what a source "
+    "reported, never on what the user said"
+)
+
+#: Each kind of record a digest reads, and how the hub attributes it (§4:7).
+_FROM: Final[Mapping[LabelKind, str]] = {
+    LabelKind.RESULT: _OUTSIDE_FROM,
+    LabelKind.MEMORY: _REMEMBERED_FROM,
+}
 
 
 # --- the records and their parts ---------------------------------------------------------
@@ -338,16 +371,16 @@ class _PartFailed(Exception):  # noqa: N818 — a control-flow signal inside one
     escapes the stage as itself.
     """
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: DigestFailure) -> None:
         super().__init__(reason)
-        self.reason = reason
+        self.reason: DigestFailure = reason
 
 
 #: The reason a failed digest is logged under, where its parts failed for several.
-_REASON_ORDER: Final = ("deadline", "raised", "unparsable")
+_REASON_ORDER: Final[tuple[DigestFailure, ...]] = ("deadline", "raised", "unparsable")
 
 
-def _failure_reason(failures: Sequence[_PartFailed]) -> str:
+def _failure_reason(failures: Sequence[_PartFailed]) -> DigestFailure:
     """The code-owned reason a failed digest is logged under, by :data:`_REASON_ORDER`."""
     reasons = {one.reason for one in failures}
     return next(reason for reason in _REASON_ORDER if reason in reasons)
@@ -449,6 +482,79 @@ class DigestingStage:
         result_id = str(held.result_id)
         record = _Record(kind=LabelKind.RESULT, thing=result_id, text=_as_text(held.content))
         kept = await self._read(question, [record], deadline)
+        return await self._recorded(question, kept, labels, result_id=result_id)
+
+    async def digest_recall(
+        self,
+        fetch: Callable[[], Awaitable[Sequence[SemanticMemory]]],
+        *,
+        question: str,
+        labels: ActivationLabels,
+        deadline: datetime,
+    ) -> Digested | None:
+        """Digest recall's outside memory records against ``question``, and record it (§4:4).
+
+        One digest over every record ``fetch`` returns, both runs' together, each read
+        by its fact and named by the record's own M label. Never raises for a failure
+        §4:11 names, nor where the fetch raises ``MemoryStoreError``: each makes a
+        failed digest, recorded and returned with no evidence.
+
+        Args:
+            fetch: Fetches the records by id under ADR-0282 §2:4-§2:8, the audience
+                predicate applied again, and returns those to read, in recall's order.
+                Awaited inside the deadline.
+            question: The latest understanding's ``meaning``.
+            labels: The activation's labels, which the digest takes its labels from.
+            deadline: The instant bounding the digest, its fetch included.
+
+        Returns:
+            The digest, the labels it assigned, and whether it was recorded; or ``None``
+            where the fetch returned no record to read, so no call was made and nothing
+            was recorded.
+
+        Raises:
+            ValueError: If ``question`` is blank or not encodable text, which a recorded
+                understanding's meaning never is.
+        """
+        question = _QUESTION.validate_python(question)
+        fetched = await self._fetched(fetch, deadline)
+        if isinstance(fetched, str):
+            return await self._recorded(question, fetched, labels, result_id=None)
+        records = [_Record(kind=LabelKind.MEMORY, thing=one.id, text=one.fact) for one in fetched]
+        if not records:
+            _log.info("digest_skipped", stage="digesting", reason="nothing_fetched")
+            return None
+        kept = await self._read(question, records, deadline)
+        return await self._recorded(question, kept, labels, result_id=None)
+
+    async def _fetched(
+        self, fetch: Callable[[], Awaitable[Sequence[SemanticMemory]]], deadline: datetime
+    ) -> Sequence[SemanticMemory] | DigestFailure:
+        """Recall's records, fetched inside the deadline, or why they could not be."""
+        remaining = (deadline - self._now()).total_seconds()
+        if remaining <= 0:
+            _log.info("digest_failed", stage="digesting", reason="deadline")
+            return "deadline"
+        try:
+            async with asyncio.timeout(remaining):
+                return await fetch()
+        except TimeoutError:
+            _log.info("digest_failed", stage="digesting", reason="deadline")
+            return "deadline"
+        except MemoryStoreError:
+            # The records could not be read, so nothing answers from them (§4:13).
+            _log.info("digest_failed", stage="digesting", reason="unread")
+            return "unread"
+
+    async def _recorded(
+        self,
+        question: str,
+        kept: list[_Kept] | DigestFailure,
+        labels: ActivationLabels,
+        *,
+        result_id: str | None,
+    ) -> Digested:
+        """The digest of what was ``kept``, or a failed one, recorded with its labels."""
         taken: list[PlanningLabel] = []
 
         def label(kind: LabelKind, thing: str) -> str:
@@ -458,9 +564,12 @@ class DigestingStage:
             return one.label
 
         # §4:15: labels are taken as the digest is recorded, synchronously, after the
-        # calls; the result's own R label first, since the digest names it.
-        result_label = label(LabelKind.RESULT, result_id)
-        if kept is None:
+        # calls; a result's own R label first, since the digest names it. Recall's
+        # digest names no result.
+        result_label = None if result_id is None else label(LabelKind.RESULT, result_id)
+        failure: DigestFailure | None = None
+        if isinstance(kept, str):
+            failure = kept
             digest = ActivationDigest(
                 result=result_label,
                 question=question,
@@ -479,14 +588,20 @@ class DigestingStage:
                 recorded_at=self._now(),
             )
         recorded = await self._record(digest, tuple(taken))
-        return Digested(result_id=result_id, digest=digest, labels=tuple(taken), recorded=recorded)
+        return Digested(
+            result_id=result_id,
+            digest=digest,
+            labels=tuple(taken),
+            recorded=recorded,
+            failure=failure,
+        )
 
     async def _read(
         self, question: str, records: Sequence[_Record], deadline: datetime
-    ) -> list[_Kept] | None:
-        """Read ``records`` in parts, in parallel; their kept items in part order, or ``None``.
+    ) -> list[_Kept] | DigestFailure:
+        """Read ``records`` in parts, in parallel; their kept items in part order, or why not.
 
-        ``None`` is a failed digest (§4:11): a part's call raised, its reply did not
+        A reason is a failed digest (§4:11): a part's call raised, its reply did not
         parse, or the deadline passed before every part answered.
         """
         parts = _parts(records, self._part_chars)
@@ -495,14 +610,14 @@ class DigestingStage:
         remaining = (deadline - self._now()).total_seconds()
         if remaining <= 0:
             _log.info("digest_failed", stage="digesting", reason="deadline")
-            return None
+            return "deadline"
         escaped: Exception | None = None
         try:
             async with asyncio.timeout(remaining):
                 return await self._every_part(question, parts, deadline)
         except TimeoutError:
             _log.info("digest_failed", stage="digesting", reason="deadline")
-            return None
+            return "deadline"
         except ExceptionGroup as group:
             failed, other = group.split(_PartFailed)
             if other is None and failed is not None:
@@ -510,7 +625,7 @@ class DigestingStage:
                     [one for one in failed.exceptions if isinstance(one, _PartFailed)]
                 )
                 _log.info("digest_failed", stage="digesting", reason=reason)
-                return None
+                return reason
             # Not one of §4:11's failures, such as a clock reading the stage cannot
             # use: it escapes as itself, outside the handler, so its own cause stands.
             escaped = (other or group).exceptions[0]
@@ -536,7 +651,11 @@ class DigestingStage:
         shown: list[dict[str, object]] = []
         for piece in part:
             name = names.setdefault(piece.record, f"{_LOCAL_PREFIX}{len(names) + 1}")
-            one: dict[str, object] = {"label": name, "from": _OUTSIDE_FROM, "text": piece.text}
+            one: dict[str, object] = {
+                "label": name,
+                "from": _FROM[piece.record.kind],
+                "text": piece.text,
+            }
             if piece.of > 1:
                 one["part"] = f"{piece.number} of {piece.of}"
             shown.append(one)
