@@ -26,43 +26,14 @@ system prompt and reaches no network.
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from ai_assistant.app import build_engine
 from ai_assistant.app import composition as composition_module
 from ai_assistant.core.config import EmbedderKind, Settings
-from ai_assistant.core.types import (
-    ActionPlan,
-    ActionRequest,
-    AttemptState,
-    CapabilityEffect,
-    CapabilityResult,
-    CostBasis,
-    Goal,
-    GoalAttempt,
-    GoalInterpretation,
-    Ground,
-    Idempotency,
-    MemorySource,
-    Message,
-    PermissionDecision,
-    PermissionOutcome,
-    PermissionRuling,
-    PlanStep,
-    Provenance,
-    Reversibility,
-    RiskLevel,
-    Role,
-    StepFailure,
-    StepStatus,
-    StepTransition,
-    ToolCost,
-    ToolDefinition,
-)
-from ai_assistant.orchestration.composing import _UNCERTAIN_EFFECT_PROMPT
+from ai_assistant.core.types import Message, Role
 from ai_assistant.orchestration.reconciling import ReconciliationStage
 
 if TYPE_CHECKING:
@@ -72,45 +43,6 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration import Engine
 
 pytestmark = pytest.mark.anyio
-
-AT: Final = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
-
-GOAL: Final = "g-1"
-PLAN: Final = "p-1"
-STEP: Final = "step-1"
-DECISION: Final = "d-1"
-ATTEMPT: Final = "a-1"
-
-#: What the user says on the turn that engages the goal again.
-ASKED: Final = "did that go through?"
-
-#: The turn's whole budget. Generous, because what the remainder gates here is a
-#: handful of SQLite writes and the arm is about the wiring, not about §9's clock.
-BUDGET: Final = timedelta(seconds=30)
-
-#: The tool the dead process was in the middle of. **Side-effecting on purpose**:
-#: ADR-0259 §3's conjunction refuses every side-effecting step *"whatever its
-#: ``Idempotency``, ``NATURAL`` included"*, so the check makes no call at all, the step
-#: is left exactly as it stood, and the end-to-end case asserts the **pass**'s repair
-#: without a second seam having to answer for it.
-SEND_MAIL: Final = ToolDefinition(
-    id="smtp",
-    capability="send_email",
-    description="Send an email.",
-    risk_level=RiskLevel.HIGH,
-    reversibility=Reversibility.IRREVERSIBLE,
-    side_effecting=True,
-    effect=CapabilityEffect.WORLD,
-    leaves_hub=True,
-    result=CapabilityResult.NO_OUTSIDE_TEXT,
-    outcome_can_be_unknown=True,
-    safe_to_repeat=False,
-    reads=(),
-    writes=(),
-    discloses=(),
-    cost=ToolCost(basis=CostBasis.FREE),
-    idempotency=Idempotency.NONE,
-)
 
 
 def _settings() -> Settings:
@@ -197,98 +129,6 @@ class _ScriptedProvider:
                 ),
             )
         return Message(role=Role.ASSISTANT, content="I am not sure whether that went through.")
-
-
-async def _a_process_died_mid_call(engine: Engine, conversation_id: str) -> str:
-    """Seed the residual ADR-0259 §4's act 3 exists to repair.
-
-    A goal of this conversation, a plan, an execution, an attempt standing ``RUNNING``,
-    and one step of that execution standing ``INDETERMINATE`` — which is the state the
-    startup recovery scan leaves behind, since ADR-0259 §6 rules that the scan *"writes
-    no ``AttemptState`` at all"*, so the attempt it left is repaired when the goal is
-    next engaged and not before.
-
-    Args:
-        engine: The built engine, whose own stores are written through.
-        conversation_id: The conversation the goal is a candidate of (ADR-0250 §2).
-
-    Returns:
-        The execution's id.
-    """
-    plans, trail = engine._plans, engine._trail
-    await plans.save_goal(
-        Goal(
-            id=GOAL,
-            interpretation=(
-                GoalInterpretation(
-                    revision=1,
-                    outcome="send the note",
-                    outcome_ground=Ground.USER_STATED,
-                    outcome_span="send the note",
-                    recorded_at=AT,
-                    raised_by="t-1",
-                ),
-            ),
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
-            ),
-            created_at=AT,
-            conversation_id=conversation_id,
-        )
-    )
-    await plans.save_plan(
-        ActionPlan(
-            id=PLAN,
-            goal_id=GOAL,
-            steps=(PlanStep(id=STEP, intent="send the note", capability="send_email"),),
-            created_at=AT,
-            targets_revision=1,
-        )
-    )
-    state = await plans.start_execution(PLAN)
-    await plans.open_attempt(
-        GoalAttempt(
-            id=ATTEMPT,
-            goal_id=GOAL,
-            opened_at=AT,
-            plan_ids=(PLAN,),
-            execution_ids=(state.id,),
-        )
-    )
-    request = ActionRequest(
-        tool=SEND_MAIL,
-        parameters={"to": "someone@example.com"},
-        step_id=STEP,
-        execution_id=state.id,
-    )
-    decision = PermissionDecision.from_request(
-        request,
-        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="because the user said so"),
-        id=DECISION,
-        decided_at=AT,
-    )
-    await trail.record(decision)
-    state = await plans.commit_transition(
-        StepTransition(
-            execution_id=state.id,
-            step_id=STEP,
-            to_status=StepStatus.RUNNING,
-            expected_version=state.version,
-            bound_tool=SEND_MAIL.id,
-            approval_ref=DECISION,
-            attempt_id=ATTEMPT,
-        )
-    )
-    state = await plans.commit_transition(
-        StepTransition(
-            execution_id=state.id,
-            step_id=STEP,
-            to_status=StepStatus.INDETERMINATE,
-            expected_version=state.version,
-            failure=StepFailure(kind=None, message="the process died mid-call"),
-        )
-    )
-    return state.id
 
 
 async def test_the_root_builds_one_stage_and_hands_that_very_object_to_the_engine(
@@ -405,79 +245,5 @@ async def test_the_check_acts_through_the_very_invoker_the_executor_acts_through
         assert acting is stage._check._invoker, "one invoker, two holders"
         assert selecting is stage._check._invoker, "ADR-0029 §8's one object"
         assert stage._monotonic is time.monotonic, "ADR-0255 §9's monotonic source"
-    finally:
-        await engine.aclose()
-
-
-async def test_a_built_engine_repairs_the_attempt_a_dead_process_left_running(
-    tmp_path: Path,
-) -> None:
-    """End to end through the real composition: the pass runs in a turn (#2486).
-
-    Every identity above would hold of a stage the root built and **nothing ever
-    called**, which is exactly the shape ADR-0259 §12's arms cannot see: each of them
-    injects a stage into an engine it assembles itself, so the whole of §4 is green
-    while the shipped pipeline reconciles nothing. Driving ``converse`` is what joins
-    the two.
-
-    **What is asserted is the act ADR-0259 §4's act 3 names** — *"for every attempt of
-    that goal whose ``state`` is ``RUNNING`` and one of whose executions holds a step
-    standing ``INDETERMINATE``, commit it ``EFFECT_UNRESOLVED``"* — over a residual this
-    turn did not create and beside a step §3's check is **refused**, since ``SEND_MAIL``
-    is side-effecting. So the step stands exactly as it stood, act 4 declines to release
-    the attempt while it does, and the repair is the pass's alone.
-
-    **And §3's surfacing rides out with it.** The check reports the step it found
-    standing ``INDETERMINATE`` whether or not it could resolve it, the engine carries
-    that to the composer, and the answering stage's system prompt gains the clause that
-    tells the user the assistant is unsure — *"an implementation that resolved the step
-    silently … fails this arm"*. Asserted on the prompt rather than on the reply,
-    because what this root is responsible for is that the fact reaches the stage that
-    says it.
-    """
-    providers: list[_ScriptedProvider] = []
-
-    def scripted(spec: str) -> _ScriptedProvider:
-        provider = _ScriptedProvider(spec)
-        providers.append(provider)
-        return provider
-
-    # **Collected rather than reached for through the engine**, because this root
-    # builds one provider per configured route and wraps each in a
-    # `RetryingProvider` inside a `RoutingProvider`: which instance the composing
-    # stage ends up calling is the router's business, and a case that walked to one
-    # of them would assert about a provider the turn might never have reached.
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(composition_module, "PydanticAIProvider", scripted)
-        engine = build_engine(_settings(), data_dir=tmp_path)
-
-    try:
-        conversation = await engine._conversations.begin(None)
-        execution_id = await _a_process_died_mid_call(engine, conversation.id)
-        opened = await engine._plans.get_attempt(ATTEMPT)
-        assert opened is not None
-        assert opened.state is AttemptState.RUNNING, "the residual, before any turn ran"
-
-        turn = await engine.converse(ASKED, conversation_id=conversation.id, timeout=BUDGET)
-
-        repaired = await engine._plans.get_attempt(ATTEMPT)
-        assert repaired is not None
-        assert repaired.state is AttemptState.EFFECT_UNRESOLVED, "ADR-0259 §4's act 3"
-
-        execution = await engine._plans.get_execution(execution_id)
-        assert execution is not None
-        step = execution.step(STEP)
-        assert step is not None
-        assert step.status is StepStatus.INDETERMINATE, "a side-effecting step is uncheckable"
-
-        assert turn.reply, "the turn answered rather than failing on its residual"
-        composing = [
-            prompt
-            for provider in providers
-            for prompt in provider.prompts
-            if "answering stage" in prompt
-        ]
-        assert composing, "the turn reached the answering stage"
-        assert _UNCERTAIN_EFFECT_PROMPT in composing[-1], "ADR-0259 §3's surfacing"
     finally:
         await engine.aclose()

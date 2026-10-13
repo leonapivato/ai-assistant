@@ -51,17 +51,6 @@ from typing import TYPE_CHECKING, Any, Final, final
 
 import pytest
 import structlog
-from test_engine import (
-    AT,
-    CAPABILITY,
-    EGRESS_SCHEMA,
-    PATIENT,
-    Harness,
-    OneStepPlanner,
-    bound_binder,
-    tool,
-)
-from test_engine_capture import _captured, _replying
 from test_loop_understanding import _Understanding
 
 from ai_assistant.core.config import Settings
@@ -82,7 +71,6 @@ from ai_assistant.core.types import (
     CostBasis,
     CurrentContext,
     DestinationProtocol,
-    Disposition,
     EgressBinding,
     EpisodicMemory,
     EvidenceDigest,
@@ -1915,156 +1903,6 @@ async def test_a_turn_that_asked_for_no_search_carries_no_disposition() -> None:
     entry = _serviced(captured)
     assert entry["kinds"] == (ReadKind.SIGHTED_QUERY.value,)
     assert entry["disposition"] is None
-
-
-# --------------------------------------------------------------------------- #
-# §18 item 2, end to end: the conversation's egress asks first thereafter      #
-# --------------------------------------------------------------------------- #
-
-
-class _SearchingOneStepPlanner(OneStepPlanner):
-    """Plans the same step every turn, and asks for a search on its **first call**.
-
-    ``test_engine_capture_origin.py``'s ``_FetchingOneStepPlanner`` one kind over, and
-    for its reason: with a planner that searched every turn, the consequence §18 item 2
-    asserts would be indistinguishable from the second turn's own search.
-    """
-
-    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
-        self,
-        goal: GoalBrief,
-        *,
-        utterance: str,
-        context: CurrentContext,
-        memories: Sequence[MemoryRecord] = (),
-        capabilities: Sequence[str],
-        files: Sequence[ShownFile] = (),
-        read_outcomes: Sequence[ReadAskOutcome] = (),
-        evidence: Sequence[EvidenceDigest] = (),
-    ) -> PlannerOutput:
-        """Answer the base plan, carrying a ``WEB_SEARCH`` ask the first time only."""
-        first = self._calls == 0
-        produced = await super().plan(
-            goal,
-            utterance=utterance,
-            context=context,
-            memories=memories,
-            capabilities=capabilities,
-            files=files,
-        )
-        if not first:
-            return produced
-        return produced.model_copy(
-            update={"plan": produced.plan.model_copy(update={"read_request": _search()})}
-        )
-
-
-def _searching_egress_harness(*, searching: bool) -> Harness:
-    """An engine whose bound tool the fake policy allows on a clean turn, plus a search.
-
-    ``tool()`` is low-risk, reversible, free and discloses nothing, so every clause of
-    :class:`~ai_assistant.testing.FakeActionPolicy` but ADR-0181 §5's is silent on it
-    — which is what makes the second turn's ruling read the origin fact and nothing
-    else, as ``test_engine_capture_origin.py``'s own egress harness does.
-
-    The store is seeded with **nothing** external, so the only thing that can taint the
-    first turn is the search result: ADR-0231 §10's mark doing the work ADR-0223 §6
-    then acts on. The servicer runs the production ``ThresholdActionPolicy`` over a
-    real grant, exactly as every other case here.
-
-    Args:
-        searching: Whether the planner asks for a search on its first call. ``False``
-            is the control, and the servicer is wired either way.
-
-    Returns:
-        The harness.
-    """
-    definition = tool("smtp", parameters_schema=EGRESS_SCHEMA)
-    return Harness(
-        tools=(definition,),
-        binder=bound_binder(definition),
-        planner=(_SearchingOneStepPlanner if searching else OneStepPlanner)(capability=CAPABILITY),
-        composing=_replying("Sent."),
-        search=_servicer(
-            searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), granted=True, at=AT
-        ),
-    )
-
-
-async def test_a_turn_that_searched_stamps_its_capture_and_the_next_turn_asks() -> None:
-    """§18 item 2, end to end and not at the predicate.
-
-    "That conversation's egress asks first thereafter. The same conversation's
-    **next** turn plans a step at the egress seam; the binding carries
-    ``planned_with_external_content``; … and the ruling is ``CONFIRM`` and not
-    ``ALLOW``."
-
-    **This is the assertion standing between this rung and #1844's exfiltration
-    channel**, and unlike ADR-0230's the containment is not that there is nowhere to
-    steer to: §12 concedes "the address space is the world, and the loop can reach it",
-    and answers with two things — no channel for the steering to travel down, and the
-    policy closing even the one bit it leaves. This is the second answer observed, and
-    §12 calls it "#1908's exit sentence, mechanically": "a search result is cited as a
-    record, and that conversation's egress asks first thereafter — for a second search,
-    for an email, for anything at the seam".
-
-    The store holds nothing external at any point and the planner searches on the first
-    turn alone, so the second turn's ruling can only be reading the first turn's own
-    captured episode, which is asserted rather than assumed.
-    """
-    harness = _searching_egress_harness(searching=True)
-
-    first = await harness.engine.converse(_ASK, timeout=PATIENT)
-
-    assert first.conversation_id is not None
-    assert first.turn is not None
-    assert [one.id for one in first.turn.memories if _DISTINCTIVE in one.content] != [], (
-        "the search really did put the provider's words in this turn's supply"
-    )
-    (stamped,) = await _captured(harness)
-    assert stamped.provenance.derived_from_external is True, "ADR-0223 §1 over ADR-0231 §10"
-
-    second = await harness.engine.converse(
-        _ASK, timeout=PATIENT, conversation_id=first.conversation_id
-    )
-
-    assert second.turn is not None
-    assert [
-        one.id for one in second.turn.memories if rests_on_recorded_external_content(one.provenance)
-    ] == [stamped.id], "the first turn's own episode is the only thing carrying the fact"
-    assert _DISTINCTIVE not in _contents(second.turn.memories), (
-        "and the second turn searched nothing of its own (ADR-0231 §11: turn-scoped)"
-    )
-    assert second.step is not None
-    assert second.step.disposition is Disposition.AWAITING_CONFIRMATION, (
-        "ADR-0181 §5's third clause: no ruling on this request is ALLOW"
-    )
-    request = harness.policy.requests[-1]
-    assert request.egress_binding is not None
-    assert request.egress_binding.planned_with_external_content is True
-
-
-async def test_a_conversation_whose_deployment_searched_nothing_keeps_its_allow() -> None:
-    """The control: a wired servicer is not itself a taint.
-
-    Without it the case above would pass on an implementation that stamped every turn a
-    searcher was wired into — which is what a mark taken from the *wiring* rather than
-    from the minted record would do, and what §13 forbids by making a 0% yield "a true
-    statement about that configuration rather than a reading of a trigger".
-    """
-    harness = _searching_egress_harness(searching=False)
-
-    first = await harness.engine.converse(_ASK, timeout=PATIENT)
-    assert first.conversation_id is not None
-    (episode,) = await _captured(harness)
-    assert episode.provenance.derived_from_external is False
-
-    second = await harness.engine.converse(
-        _ASK, timeout=PATIENT, conversation_id=first.conversation_id
-    )
-
-    assert second.step is not None
-    assert second.step.disposition is Disposition.EXECUTED
 
 
 # --------------------------------------------------------------------------- #

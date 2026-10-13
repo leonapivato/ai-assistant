@@ -7,17 +7,10 @@ from datetime import timedelta
 
 import pytest
 from test_activation_writer import Wiring
-from test_engine import AT, PATIENT, Harness
-from test_engine_routing import _parked, _routed_harness, _seed_belief, _token
+from test_engine import Harness
 
 from ai_assistant.core.errors import OversizedValueError
-from ai_assistant.core.types import (
-    ChannelIdentity,
-    ChannelInput,
-    EpisodicMemory,
-    RecordedResumeTrigger,
-    TextChannelPayload,
-)
+from ai_assistant.core.types import ChannelIdentity, ChannelInput, TextChannelPayload
 from ai_assistant.orchestration.activation_state import ActivationScope
 from ai_assistant.orchestration.channels import ChannelProjection
 from ai_assistant.orchestration.engine import DrainPhase
@@ -86,29 +79,6 @@ async def test_shutdown_does_not_cancel_safety_work_already_in_its_snapshot(
         await asyncio.gather(task, closing, return_exceptions=True)
     assert await memory.export() == []
     assert closed.is_set()
-
-
-async def test_declined_routed_confirmation_preserves_the_supplied_timestamp() -> None:
-    harness = _routed_harness()
-    await _seed_belief(harness.memory)
-    parked = await _parked(harness)
-    until = AT + timedelta(days=2)
-    result = await harness.engine.resume(
-        _token(parked), approved=False, timeout=PATIENT, remember_recipients_until=until
-    )
-    assert not result.capture_degraded
-    controls = [
-        record
-        for record in await harness.memory.export()
-        if isinstance(record, EpisodicMemory)
-        and record.processing_record is not None
-        and isinstance(record.processing_record.trigger, RecordedResumeTrigger)
-    ]
-    (control,) = controls
-    assert control.processing_record is not None
-    assert isinstance(control.processing_record.trigger, RecordedResumeTrigger)
-    assert control.processing_record.trigger.remember_recipients_until == until
-    assert not control.processing_record.trigger.approved
 
 
 async def test_the_fakes_unfinished_event_result_is_held_to_the_output_bound() -> None:

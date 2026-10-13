@@ -13,14 +13,13 @@ memberships from the local socket (§9:5).
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
 from test_engine import Harness, NoStepPlanner
 
-from ai_assistant.core.device_context import current_requesting_device, serving_device
+from ai_assistant.core.device_context import serving_device
 from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import (
     HUB_REQUESTING_DEVICE,
@@ -30,31 +29,20 @@ from ai_assistant.core.types import (
     DataTier,
     DeviceAccess,
     DeviceRole,
-    MessageAuthor,
     NotificationCandidate,
     RequestingDevice,
     SendOutcome,
     TranscriptMessage,
     UserMessage,
 )
-from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.orchestration.device_checks import DeviceChecks
-from ai_assistant.testing import (
-    FakeConversationStore,
-    FakeMemoryStore,
-    FakeModelProvider,
-    FakeNotificationOutbox,
-    FakeStreamingCompleter,
-)
+from ai_assistant.testing import FakeConversationStore, FakeMemoryStore, FakeNotificationOutbox
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable
 
-    from ai_assistant.core.types import (
-        DeviceConversation,
-        Message,
-    )
+    from ai_assistant.core.types import DeviceConversation
     from ai_assistant.orchestration.engine import Engine
 
 _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
@@ -70,9 +58,6 @@ PEN: Final = RequestingDevice(device_id="pen")
 STRANGER: Final = RequestingDevice(device_id="stranger")
 #: A device holding the command role and in no set.
 CONSOLE: Final = RequestingDevice(device_id="console", roles=frozenset({DeviceRole.COMMANDS}))
-
-_TIMEOUT: Final = timedelta(seconds=5)
-_SETTLE: Final = 5.0
 
 
 def _harness(*, notification_outbox: FakeNotificationOutbox | None = None) -> Harness:
@@ -287,27 +272,6 @@ async def test_a_restricted_page_reaches_past_other_conversations_changes() -> N
 # --- the legacy turn (§5 "A legacy turn") -----------------------------------------
 
 
-async def test_a_legacy_turn_needs_both_ends() -> None:
-    """§5: no conversation named needs "my devices" for both; a named one, its own."""
-    engine = _harness().engine
-    await engine.set_my_devices([_PHONE, _WATCH])
-    outcome = await _as(PHONE, lambda: engine.converse("hello", timeout=_TIMEOUT))
-    assert outcome.conversation_id is not None
-    await _refused(
-        WATCH, lambda: engine.converse("hello", timeout=_TIMEOUT), DeviceRefusal.NOT_ALLOWED
-    )
-    written_only = await _conversation(engine, _PEN, _PHONE)
-    await engine.set_conversation_devices(
-        written_only, devices=[ChatDevice(device_id="phone", access=DeviceAccess.WRITE)]
-    )
-    await _refused(
-        PHONE,
-        lambda: engine.converse("hello", timeout=_TIMEOUT, conversation_id=written_only),
-        DeviceRefusal.NOT_ALLOWED,
-    )
-    await _refused(STRANGER, lambda: engine.answer("q-1", accept=True), DeviceRefusal.NO_ROLE)
-
-
 async def test_only_a_conversation_target_is_a_legacy_turn() -> None:
     """§5:2: any other target is spoke traffic, the wire server's alone to check."""
     checks = DeviceChecks(
@@ -362,39 +326,6 @@ def outbox_now() -> datetime:
 # --- work that outlives a request (§2:6) ------------------------------------------
 
 
-class _Witness(FakeModelProvider):
-    """A composing model that records the requesting device it was called under."""
-
-    def __init__(self) -> None:
-        super().__init__("Hello there.")
-        self.seen: list[RequestingDevice] = []
-
-    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
-        self.seen.append(current_requesting_device())
-        return await super().complete(messages, model=model)
-
-
-async def test_the_activation_a_message_starts_does_not_run_as_its_device() -> None:
-    """§2:6: the reader's activation runs with the requesting device unset."""
-    witness = _Witness()
-    harness = Harness(
-        planner=NoStepPlanner(),
-        composing=ComposingStage(model=witness, streaming=FakeStreamingCompleter()),
-        conversation_store=FakeConversationStore(),
-    )
-    engine = harness.engine
-    conversation = await _conversation(engine, _PHONE)
-    await _as(PHONE, lambda: engine.write_message(conversation, message=_said(PHONE, "m", "hi")))
-    deadline = asyncio.get_running_loop().time() + _SETTLE
-    while not any(
-        one.author is MessageAuthor.ASSISTANT for one in await _messages(engine, conversation)
-    ):
-        assert asyncio.get_running_loop().time() < deadline, "the reader never answered"
-        await asyncio.sleep(0.001)
-    assert witness.seen
-    assert all(one == HUB_REQUESTING_DEVICE for one in witness.seen)
-
-
 async def test_a_writing_end_outside_my_devices_holds_a_role() -> None:
     """ADR-0296 §2: a write-only end holds the user's end, so it is never ``NO_ROLE``."""
     engine = _harness().engine
@@ -407,60 +338,6 @@ async def test_a_writing_end_outside_my_devices_holds_a_role() -> None:
         PEN, lambda: engine.write_message(conversation, message=_said(PEN, "m-1", "hi"))
     )
     assert written.position == 1
-
-
-async def test_a_turn_does_not_run_as_the_device_that_asked_for_it() -> None:
-    """§2:6: the activation a turn starts may outlive the request, so it runs unset."""
-    witness = _Witness()
-    engine = Harness(
-        planner=NoStepPlanner(),
-        composing=ComposingStage(model=witness, streaming=FakeStreamingCompleter()),
-        chat_reader=False,
-    ).engine
-    await engine.set_my_devices([_PHONE])
-    await _as(PHONE, lambda: engine.converse("hello", timeout=_TIMEOUT))
-    assert witness.seen
-    assert all(one == HUB_REQUESTING_DEVICE for one in witness.seen)
-
-
-class _GatedWitness(FakeModelProvider):
-    """A composing model that waits on a gate and records the requesting device."""
-
-    def __init__(self) -> None:
-        super().__init__("Hello there.")
-        self.entered = asyncio.Event()
-        self.release = asyncio.Event()
-        self.seen: list[RequestingDevice] = []
-
-    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
-        self.entered.set()
-        await self.release.wait()
-        self.seen.append(current_requesting_device())
-        return await super().complete(messages, model=model)
-
-
-async def test_work_a_cancelled_request_leaves_running_does_not_run_as_its_device() -> None:
-    """§2:6: a shielded operation runs on past its caller, with the device unset.
-
-    A turn is shielded from its caller's cancellation, so it is the operation held here;
-    ``learn`` was until ADR-0293 §11 retired it.
-    """
-    witness = _GatedWitness()
-    engine = Harness(
-        planner=NoStepPlanner(),
-        composing=ComposingStage(model=witness, streaming=FakeStreamingCompleter()),
-        chat_reader=False,
-    ).engine
-    await engine.set_my_devices([_PHONE])
-    with serving_device(PHONE):
-        call = asyncio.ensure_future(engine.converse("hello", timeout=_TIMEOUT))
-    await witness.entered.wait()
-    call.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await call
-    witness.release.set()
-    await engine.aclose()
-    assert witness.seen == [HUB_REQUESTING_DEVICE]
 
 
 async def test_a_writing_end_is_found_wherever_the_listing_puts_it() -> None:

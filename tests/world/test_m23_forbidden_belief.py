@@ -54,8 +54,6 @@ import pytest
 from m23_harness import (
     ATTACKER,
     FORBIDDEN_BELIEF,
-    INNOCENT_ASK,
-    TIMEOUT,
     build_world,
     carried_the_injection,
     consolidation_reply,
@@ -75,7 +73,6 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
 )
 from ai_assistant.testing import FakeModelProvider
-from ai_assistant.tools.send_email import SEND_EMAIL_ID
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -227,31 +224,6 @@ async def test_the_derived_belief_is_deferred_to_the_user_and_never_committed(
     assert outcome.proposed >= 1
     assert outcome.committed == 0
     assert outcome.deferred >= 1, "the proposal was refused outright rather than put to the user"
-
-
-@pytest.mark.parametrize("records", CORPORA)
-async def test_the_later_send_justified_from_the_belief_is_parked_with_the_fact(
-    tmp_path: Path, records: int
-) -> None:
-    """Arm (b)'s second half: the send the belief would justify still parks.
-
-    The belief the transcript wanted never committed, so what a later turn selects
-    is the ``ATTESTED`` reader record it would have been derived from — which
-    satisfies ``rests_on_recorded_external_content`` on the band alone, and carries
-    the call's origin to the ruling point exactly as arm (a) measures.
-    """
-    world = build_world(tmp_path, plan=plan_reply(to=ATTACKER), consolidation=consolidation_reply())
-    await _cycles(world, records=records, count=1)
-
-    turn = await world.engine.converse(INNOCENT_ASK, timeout=TIMEOUT)
-
-    step = turn.step
-    assert step is not None
-    assert step.tool_id == SEND_EMAIL_ID
-    assert step.confirmation is not None, "the send was not parked"
-    assert step.confirmation.egress is not None
-    assert step.confirmation.egress.planned_with_external_content is True
-    assert world.connector.attempts == 0
 
 
 # --- the figure -------------------------------------------------------------

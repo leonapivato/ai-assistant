@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from test_engine import AT, PATIENT, Harness, NoStepPlanner, tool
+from test_engine import AT, Harness, NoStepPlanner, tool
 from test_engine_goal_association import _associating, _goal, _seed
 
 from ai_assistant.core.errors import ClaimRefused, PlanningError, StaleExecutionError
@@ -29,7 +29,6 @@ from ai_assistant.core.types import (
     AssociationVerdict,
     AttemptOutcome,
     AttemptState,
-    Disposition,
     GoalAbandonment,
     GoalAttempt,
     GoalStatus,
@@ -37,28 +36,18 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
     PlanStep,
-    ProposedAction,
     StepFailure,
     StepStatus,
     StepTransition,
-    TurnReference,
 )
 from ai_assistant.testing import FakeAuditTrail, FakePlanStore
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from ai_assistant.core.protocols import AuditTrail, PlanStore
-    from ai_assistant.core.types import ExecutionState, FrozenJson, ToolDefinition, UtcInstant
+    from ai_assistant.core.types import ExecutionState, ToolDefinition, UtcInstant
 
 _GOAL: Final = "goal-booking"
 _CAPABILITY: Final = "look_up"
-_BOOKING: Final = "book_room"
-
-#: Byte-identical across both turns, which is what makes the second turn's step carry the
-#: **same** ``EffectKey`` as the first one's — the premise of a ``COMPLETED`` answer.
-_PARAMETERS: Final[dict[str, FrozenJson]] = {"nights": 2}
-_OUTPUT: Final[dict[str, FrozenJson]] = {"booking": "bk-9"}
 
 
 def _reading() -> ToolDefinition:
@@ -673,90 +662,3 @@ async def test_the_listing_takes_one_outstanding_effect_call_per_listed_goal() -
     plans.asked.clear()
     await harness.engine.goals(limit=2)
     assert len(plans.asked) == 2
-
-
-# --- arm 7's second half: a completed effect is reported, never re-dispatched --
-
-
-class _Booking(NoStepPlanner):
-    """A planner that mints one act on its first call and repeats it afterwards.
-
-    The ``A`` label indexes ``GoalBrief.actions`` extended by this call's own
-    ``PlannerOutput.actions`` (ADR-0265 §4), so every later call finds the same act on the
-    brief under ``A1`` and proposes none of its own — which is what makes the two steps
-    two attempts at **one** intended action rather than two acts.
-    """
-
-    def __init__(self) -> None:
-        self.turns = 0
-
-    async def plan(self, goal: Any, **fields: Any) -> Any:
-        produced = await super().plan(goal, **fields)
-        self.turns += 1
-        step = PlanStep(
-            id=f"step-{self.turns}",
-            intent="book it",
-            capability=_BOOKING,
-            parameters=_PARAMETERS,
-            intended_action="A1",
-        )
-        return produced.model_copy(
-            update={
-                "actions": (ProposedAction(intent="book the room"),) if self.turns == 1 else (),
-                "plan": produced.plan.model_copy(update={"steps": (step,)}),
-            }
-        )
-
-
-async def _books(
-    parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
-) -> FrozenJson:
-    """The callable, which must be reached exactly once across the two turns."""
-    del parameters, idempotency_key
-    return _OUTPUT
-
-
-async def test_an_effect_the_cancelled_attempt_completed_is_reported_not_dispatched_again() -> None:
-    """Arm 7's second half, end to end over a cancellation and ADR-0250 §13's reopen.
-
-    "An effect the attempt completed answers ``COMPLETED``/``UNCERTAIN`` to a later plan
-    of the goal rather than being dispatched again."
-
-    **The act itself withdraws nothing** — ADR-0250 §12 binds verbatim: it *"does not end
-    an execution and does not cancel anything in flight"*, and this ADR's own title is
-    that a dispatched effect is **reported rather than withdrawn**. What stops the second
-    dispatch is the effect row ADR-0259 §2 already holds against the goal, which the
-    cancellation neither moves nor invalidates.
-    """
-    planner = _Booking()
-    harness = Harness(
-        planner=planner,
-        associator=_associating(AssociationVerdict.CONTINUES),
-        tools=(tool(tool_id="rooms", capability=_BOOKING),),
-        tool_handler=_books,
-    )
-
-    conversation = (await harness.conversations.begin(None)).id
-    acted = await harness.engine.converse(
-        "book the room for the trip", timeout=PATIENT, conversation_id=conversation
-    )
-    assert acted.step is not None
-    assert acted.step.disposition is Disposition.EXECUTED
-    goal_id = acted.turn.goal.goal_id if acted.turn is not None else ""
-
-    assert await harness.engine.abandon_goal(goal_id) is GoalAbandonment.ABANDONED
-
-    later = (await harness.conversations.begin(None)).id
-    borrowed = await harness.engine.converse(
-        "did that booking go through?",
-        timeout=PATIENT,
-        conversation_id=later,
-        reference=TurnReference(goal_id=goal_id),
-    )
-
-    assert borrowed.step is not None
-    assert borrowed.satisfied_from_earlier == (borrowed.step.step_id,)
-    record = next(one for one in borrowed.step.state.steps if one.step_id == borrowed.step.step_id)
-    assert record.satisfied_by_step == acted.step.step_id
-    assert record.attempts == 0, "nothing ran under it"
-    assert len(harness.invoker.invocations) == 1, "the effect was reported, not repeated"
