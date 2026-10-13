@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 
-from ai_assistant.core.errors import AuditError
+from ai_assistant.core.diagnostics import diagnosed_activation
+from ai_assistant.core.errors import AuditError, MemoryStoreError
 from ai_assistant.core.types import (
     ActivationDigest,
     CapabilityEffect,
@@ -20,6 +21,8 @@ from ai_assistant.core.types import (
     ChannelContext,
     CostBasis,
     DataTier,
+    DiagnosticKind,
+    DiagnosticSource,
     DigestOutcome,
     EgressBinding,
     EpisodeProcessingRecord,
@@ -65,6 +68,7 @@ from ai_assistant.orchestration.acting import (
 from ai_assistant.orchestration.authorizer import (
     AuthorizingStage,
     CallToAuthorize,
+    OutsideGround,
     RoundAuthorization,
     RoundMessage,
     RoundToAuthorize,
@@ -84,6 +88,7 @@ from ai_assistant.orchestration.remembering import (
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
+    FakeDiagnosticSink,
     FakeEgressBinder,
     FakeMemoryPolicy,
     FakeMemoryStore,
@@ -242,7 +247,7 @@ class _Ids:
 class _Hub:
     """The stage and every fake it reads, wired once per test."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one keyword per fake a case replaces, and the diagnostic sink
         self,
         *tools: ToolDefinition,
         policy: FakeActionPolicy | None = None,
@@ -250,6 +255,7 @@ class _Hub:
         binder: FakeEgressBinder | None = None,
         trail: FakeAuditTrail | None = None,
         episode: EpisodicMemory | None = None,
+        diagnostics: FakeDiagnosticSink | None = None,
     ) -> None:
         self.registry = FakeToolRegistry(tools or (_tool("lookup"), _tool("book"), REMEMBER))
         self.policy = policy or FakeActionPolicy()
@@ -269,6 +275,7 @@ class _Hub:
             now=_now,
             new_decision_id=_Ids("decision"),
             new_effect_id=_Ids("effect"),
+            diagnostics=diagnostics,
         )
 
     async def authorize(self, given: RoundToAuthorize) -> RoundAuthorization:
@@ -900,3 +907,156 @@ class _NoInvoker:
     async def invoke(self, call: ToolCall, *, timeout: timedelta) -> ToolResult:  # noqa: ASYNC109 — the seam's own signature
         del call, timeout
         raise AssertionError
+
+
+# --- ADR-0314 §4: what authorizing gives the diagnostic record ------------------------------
+
+_DIAGNOSED: Final = "3f2b8c4e-1d5a-4e7b-9c0d-2a6f8e1b7c35"
+
+
+def _diagnosed_clock() -> datetime:
+    return _AT
+
+
+async def test_each_call_is_written_with_every_check_it_reached() -> None:
+    """§4: each check's verdict and reason, the message's verdict, and what was read."""
+    sink = FakeDiagnosticSink()
+    hub = _Hub(policy=FakeActionPolicy(deny_at=RiskLevel.HIGH), diagnostics=sink)
+    hub.registry.register(
+        _tool("book", id="book-risky", capability="book_risky", risk_level=RiskLevel.HIGH)
+    )
+    given = _round(
+        _call("c1", "lookup", q="trains"),
+        _call("c2", "book_risky", q="suite"),
+        _call("c3", "missing"),
+        message=RoundMessage("On it.", _PLACE),
+    )
+
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_clock):
+        decided = await hub.authorize(given)
+
+    (entry,) = sink.of(DiagnosticSource.AUTHORIZING, DiagnosticKind.RETURNED)
+    body = entry.model_dump(mode="json")["body"]
+    calls = {one["call_id"]: one for one in body["calls"]}
+    assert [one["check"] for one in calls["c1"]["checks"]] == ["selection", "policy", "stand_in"]
+    assert calls["c1"]["verdict"] == "allowed"
+    policy = calls["c2"]["checks"][-1]
+    assert (policy["check"], policy["verdict"]) == ("policy", "deny")
+    assert isinstance(policy["reason"], str)
+    assert (calls["c2"]["verdict"], calls["c2"]["reason"]) == (
+        "not_done",
+        decided.verdicts[1].reason,
+    )
+    assert calls["c3"]["checks"] == [
+        {"check": "selection", "verdict": "not_done", "reason": decided.verdicts[2].reason}
+    ]
+    assert body["message"] == {"place": _PLACE, "allowed": True, "reason": None}
+    assert body["read_outside_content"] is False
+    assert body["grounds"] == []
+
+
+async def test_the_stand_in_and_every_ground_that_held_are_written() -> None:
+    """§4: whether the activation had read outside content, each ground and its record."""
+    sink = FakeDiagnosticSink()
+    episode = _episode(
+        origin=InputOrigin.OUTSIDE,
+        digests=(_digest(DigestOutcome.ANSWERED, "the 9:10"),),
+        rounds=(_marked_round("round:0"),),
+    )
+    hub = _Hub(episode=episode, diagnostics=sink)
+
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_clock):
+        decided = await hub.authorize(_round(_call("c1", "lookup", q="trains")))
+
+    (entry,) = sink.of(DiagnosticSource.AUTHORIZING)
+    body = entry.model_dump(mode="json")["body"]
+    assert decided.read_outside_content is True
+    assert body["grounds"] == [
+        {"ground": "trigger_outside", "record": _EPISODE},
+        {"ground": "digest_answered", "record": "R1"},
+        {"ground": "notes_marked", "record": "round:0"},
+    ]
+    (call,) = body["calls"]
+    assert call["checks"][-1] == {
+        "check": "stand_in",
+        "verdict": "needs_you",
+        "reason": decided.verdicts[0].reason,
+    }
+
+
+async def test_a_round_whose_checking_fails_is_written_as_far_as_it_got() -> None:
+    """§4: the returned entry is written once checking returns or fails."""
+    sink = FakeDiagnosticSink()
+    hub = _Hub(trail=_ForgetfulTrail(now=_now), diagnostics=sink)
+
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_clock), pytest.raises(AuditError):
+        await hub.authorize(_round(_call("c1", "lookup", q="x")))
+
+    (entry,) = sink.of(DiagnosticSource.AUTHORIZING)
+    body = entry.model_dump(mode="json")["body"]
+    assert body["failure"]["class"] == "AuditError"
+    (call,) = body["calls"]
+    assert call["checks"] == [{"check": "selection", "verdict": "passed", "reason": None}]
+    assert call["verdict"] is None
+
+
+async def test_with_the_record_off_nothing_is_written_and_nothing_changes() -> None:
+    """§2:1: the same decision, and no entry."""
+    sink = FakeDiagnosticSink()
+    hub = _Hub()
+
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_clock):
+        decided = await hub.authorize(_round(_call("c1", "lookup", q="trains")))
+
+    assert decided.verdicts[0].verdict is Verdict.ALLOWED
+    assert sink.recorded == ()
+
+
+async def test_without_grounds_asked_the_read_stops_at_the_first_that_holds() -> None:
+    """The answer alone: no further read is made once one ground held."""
+    memory = _Unreadable(now=_now)
+
+    assert await read_outside_content(
+        memory, _ACTIVATION, working=WorkingRecord(fetched_outside=True)
+    )
+
+
+async def test_asked_for_its_grounds_a_failed_read_after_one_held_keeps_the_answer() -> None:
+    """§2:4: going through every ground never changes the answer, or raises for it."""
+    grounds: list[OutsideGround] = []
+
+    read = await read_outside_content(
+        _Unreadable(now=_now),
+        _ACTIVATION,
+        working=WorkingRecord(fetched_outside=True),
+        grounds=grounds,
+    )
+
+    assert read is True
+    assert grounds == [OutsideGround("fetched_outside")]
+
+
+async def test_asked_for_its_grounds_a_failed_read_before_any_held_still_raises() -> None:
+    with pytest.raises(MemoryStoreError):
+        await read_outside_content(
+            _Unreadable(now=_now), _ACTIVATION, working=WorkingRecord(), grounds=[]
+        )
+
+
+async def test_an_unreadable_shown_episode_is_a_ground_with_its_id() -> None:
+    memory = FakeMemoryStore(now=_now)
+    shown = PlanningLabel(label="E1", kind=LabelKind.EPISODE, id="activation:other")
+    await memory.add(_episode(labels=(shown,)))
+    grounds: list[OutsideGround] = []
+
+    assert await read_outside_content(memory, _ACTIVATION, working=WorkingRecord(), grounds=grounds)
+    assert grounds == [OutsideGround("episode_shown_unread", "activation:other")]
+
+
+class _Unreadable(FakeMemoryStore):
+    """A memory store whose every read fails."""
+
+    async def get(self, memory_id: str) -> None:
+        del memory_id
+        msg = "the store is down"
+        raise MemoryStoreError(msg)

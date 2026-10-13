@@ -28,7 +28,12 @@ from test_engine import AT, Harness, NoStepPlanner
 from test_loop_search import _ACCOUNT, _CONFIGURED_SEARCH
 from test_planning import _episode as _past_episode
 from test_planning import _understanding
-from understanding_support import recall_stage, understanding_stage
+from understanding_support import (
+    EXCERPT_CHARS,
+    STATED_PROPOSAL,
+    recall_stage,
+    understanding_stage,
+)
 
 from ai_assistant.core.errors import (
     ConfigurationError,
@@ -53,6 +58,8 @@ from ai_assistant.core.types import (
     CostBasis,
     DataTier,
     DeviceAccess,
+    DiagnosticKind,
+    DiagnosticSource,
     DigestOutcome,
     EgressBinding,
     EpisodicMemory,
@@ -128,9 +135,15 @@ from ai_assistant.orchestration.story_calls import (
 )
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
 from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
-from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow, WindowsStage
+from ai_assistant.orchestration.understanding import (
+    Fetched,
+    TranscriptWindow,
+    UnderstandingStage,
+    WindowsStage,
+)
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
+    FakeDiagnosticSink,
     FakeEgressBinder,
     FakeMemoryPolicy,
     FakeMemoryStore,
@@ -263,6 +276,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     tidy_up: Callable[[Harness], StoryTidyUp] | None = None,
     story_calls: bool = False,
     look_ups: bool = False,
+    diagnostics: FakeDiagnosticSink | None = None,
 ) -> Callable[[Harness], PhasePath]:
     """The thin path as the composition root builds it, over the harness's own stores.
 
@@ -333,6 +347,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                 binder=binder,
                 registered_search=registered_search,
                 now=lambda: AT,
+                diagnostics=diagnostics,
             ),
             acting=ActingStage(
                 plans=harness.plans,
@@ -378,6 +393,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             recall_digest_wait=recall_digest_wait,
             story_reads=reads,
             now=lambda: AT,
+            diagnostics=diagnostics,
         )
 
     return build
@@ -3132,3 +3148,69 @@ async def test_a_story_read_naming_a_story_never_shown_is_refused_whole() -> Non
 def test_the_phases_are_wired_only_beside_understanding() -> None:
     with pytest.raises(ConfigurationError, match="only beside both"):
         Harness(planner=NoStepPlanner(), phases=_phases(FakeToolCallingCompleter()))
+
+
+# --- ADR-0314: the diagnostic record of one activation, end to end ------------------------
+
+
+async def test_with_the_record_on_each_source_writes_for_the_one_activation() -> None:
+    """§4: the controller's steps and each phase's entries, under the activation's id.
+
+    The completer is a fake, which writes no response, so planning's returned entry is
+    the real completer's to write and is pinned in ``tests/models``. The glue and
+    acting write none (§4:2-§4:3).
+    """
+    sink = FakeDiagnosticSink()
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            text="Noted.", calls=(_call("c1", "remember", statement="The user likes tea."),)
+        )
+    )
+    harness = Harness(
+        planner=NoStepPlanner(),
+        understanding=UnderstandingStage(
+            model=FakeModelProvider(reply=STATED_PROPOSAL),
+            excerpt_chars=EXCERPT_CHARS,
+            diagnostics=sink,
+        ),
+        tools=(_BOOK,),
+        phases=_phases(completer, diagnostics=sink),
+        diagnostics=sink,
+    )
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "remember I like tea")
+    episode = await _settled(harness, conversation)
+
+    activation = episode.id.removeprefix("activation:")
+    assert {one.activation_id for one in sink.recorded} == {activation}
+    assert {one.source for one in sink.recorded} == {
+        DiagnosticSource.CONTROLLER,
+        DiagnosticSource.UNDERSTANDING,
+        DiagnosticSource.PLANNING,
+        DiagnosticSource.AUTHORIZING,
+    }
+    steps = sink.of(DiagnosticSource.CONTROLLER, DiagnosticKind.STEP)
+    assert [(one.body["stage"], one.body["due"]) for one in steps] == [
+        (stage.value, rule.value) for stage, rule in _stages(episode)
+    ]
+    assert [one.kind for one in sink.of(DiagnosticSource.UNDERSTANDING)] == [
+        DiagnosticKind.GIVEN,
+        DiagnosticKind.RETURNED,
+    ]
+    assert [one.kind for one in sink.of(DiagnosticSource.PLANNING)] == [DiagnosticKind.GIVEN]
+    (authorized,) = sink.of(DiagnosticSource.AUTHORIZING)
+    assert authorized.model_dump(mode="json")["body"]["calls"][0]["name"] == "remember"
+
+
+async def test_with_the_record_off_an_activation_writes_nothing() -> None:
+    """§2:1: no sink anywhere, and the same activation runs."""
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Hello!"))
+    harness = _harness(completer)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "hi")
+    episode = await _settled(harness, conversation)
+
+    assert episode.outcome == "Hello!"
+    assert harness.engine._diagnostics is None

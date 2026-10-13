@@ -2848,6 +2848,10 @@ async def test_a_configured_but_missing_source_fails_at_run_time_and_not_at_buil
 #: that same operation" — on ADR-0078 §10 item 8's reasoning rather than a new
 #: one, so ``purge_before`` is guarded exactly as the first two names are.
 #:
+#: **The diagnostic record's sweep is the second ``purge_before`` in that body**
+#: (ADR-0314 §7:2), and it adds no tuple here because it shares the trace sweep's
+#: line of this set; :func:`test_the_one_sweep_calls_both_retention_seams` counts it.
+#:
 #: Two entries are the canonical fakes **implementing** the seam, not scheduling a
 #: sweep: ``ai_assistant.testing`` is test-only and the composition root never
 #: imports it, so neither is reachable from a deployment. They are listed rather
@@ -2972,6 +2976,33 @@ def test_only_the_scheduler_s_own_path_sweeps_either_store() -> None:
         "calling both stores. A new entry here is a second sweeper; a missing one is "
         "a sweep that stopped happening."
     )
+
+
+def test_the_one_sweep_calls_both_retention_seams() -> None:
+    """ADR-0314 §7:2: the record's sweep beside the trace store's, in the one sweep.
+
+    The set above holds one ``purge_before`` line for ``Engine._purge_expired``,
+    which the trace sweep alone already satisfies; this counts the calls, so the
+    diagnostic record's sweep is guarded rather than assumed.
+    """
+    source = (
+        Path(ai_assistant.__file__).resolve().parent / "orchestration" / "engine.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    body = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_purge_expired"
+    )
+    receivers = sorted(
+        ast.unparse(node.func.value)
+        for node in ast.walk(body)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "purge_before"
+    )
+
+    assert receivers == ["self._diagnostic_retention", "self._traces"]
 
 
 def test_the_sweep_guard_still_catches_a_sweeper_added_somewhere_else(tmp_path: Path) -> None:
