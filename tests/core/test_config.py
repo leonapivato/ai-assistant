@@ -1399,6 +1399,10 @@ def test_every_duration_setting_is_discovered() -> None:
         # purge, which is the instrument switched off by misconfiguration rather
         # than by a decision.
         "trace_retention",
+        # ADR-0314 §7:1's window, acknowledged here so the parametrised guards
+        # below refuse a zero, negative or ``bool`` one at load. It admits no
+        # disable sentinel: the record has no spelling for keep forever.
+        "diagnostic_retention",
         # ADR-0140 §12's durations, less the ingestion interval ADR-0294 §5
         # retires. The window is the model's third duration bounded *above*, and it
         # is the one bounded **open** at the bottom: ``calendar_window_past`` may be
