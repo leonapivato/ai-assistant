@@ -22,15 +22,17 @@ Each declares the assistant's own records as its effect, as reading a story does
 safe to repeat, and writes nothing.
 
 **The memory search** (ADR-0306 §3:4, §5:14-§5:16, ADR-0308 §6:2). It searches the
-remembered facts, the semantic records, for its query, and keeps what the pass's
-audience admits (``admitted_to_understanding``, ADR-0282 §2:8), as recall's band searches
-do (ADR-0281 §4). It routes what it kept record by record by each record's stored
-source: the ids of the records whose source is not outside go to planning, which fetches
-them by id, the audience predicate applied again, and shows each under its ``M`` label;
-the ids of the records whose source is outside are held by acting under the result's id
-(:class:`~ai_assistant.orchestration.acting.HeldByIds`), and reach planning only through
-a digest answering the call's *looking for*, which fetches them by id, the predicate
-applied again (ADR-0282 §2:4-§2:8). No raw outside text reaches planning.
+remembered facts, the semantic records, for its query, each band on its own and its
+limit filled ``ASSERTED`` first, then ``ATTESTED``, then ``DERIVED`` (ADR-0072 §5), and
+keeps what the pass's audience admits (``admitted_to_understanding``, ADR-0282 §2:8), as
+recall's band searches do (ADR-0281 §3:2, §4). It routes what it kept record by record
+by each record's stored source: the ids of the records whose source is not outside go to
+planning, which fetches them by id, the audience predicate applied again, and shows each
+under its ``M`` label; the ids of the records whose source is outside are held by acting
+under the result's id (:class:`~ai_assistant.orchestration.acting.HeldByIds`), and reach
+planning only through a digest answering the call's *looking for*, which fetches them by
+id, the predicate applied again (ADR-0282 §2:4-§2:8). No raw outside text reaches
+planning.
 
 **The full view of a story** (ADR-0300 §10:5-§10:7, ADR-0307 §5:2). Planning names a
 story it has been shown by its ``S`` label, which planning's own check maps to the id.
@@ -69,6 +71,7 @@ import structlog
 
 from ai_assistant.core.errors import MemoryStoreError, PlanningError, StoryStoreError
 from ai_assistant.core.types import (
+    BeliefBand,
     CapabilityEffect,
     CapabilityResult,
     CostBasis,
@@ -144,6 +147,9 @@ RECORDS_KEY: Final = "records"
 _STORY_KEY: Final = "story"
 
 _NOT_IN_SCOPE: Final = "a look-up reads under the pass's audience, and none was given"
+
+#: ADR-0072 §5's consumer-side precedence, the order the bands are searched in.
+_BANDS: Final = (BeliefBand.ASSERTED, BeliefBand.ATTESTED, BeliefBand.DERIVED)
 
 
 def _declared(
@@ -412,19 +418,10 @@ class LookUps:
             _log.warning("look_up_not_done", stage="acting", reason="no_scope")
             return _not_done(ToolFailureKind.INTERNAL, _NOT_IN_SCOPE)
         try:
-            found = await self._memory.search(
-                query, limit=self._search_limit, kinds=(MemoryKind.SEMANTIC,)
-            )
+            admitted = await self._banded(query, scope.audience)
         except MemoryStoreError:
             _log.warning("look_up_not_done", stage="acting", reason="search_failed")
             return _not_done(ToolFailureKind.UNAVAILABLE, "memory could not be searched")
-        # ADR-0282 §2:8: an id enters the working episode only once the audience
-        # predicate has admitted its record; each fetch applies it again.
-        admitted = [
-            record
-            for record in admitted_to_understanding(scope.audience, found.records)
-            if isinstance(record, SemanticMemory)
-        ]
         shown = [
             record.id
             for record in admitted
@@ -438,6 +435,35 @@ class LookUps:
         _log.info("look_up_searched", stage="acting", shown=len(shown), held=len(outside))
         output: dict[str, FrozenJson] = {RECORDS_KEY: list(shown)}
         return HeldByIds(output=output, outside=outside)
+
+    async def _banded(self, query: str, audience: TurnSupply) -> list[SemanticMemory]:
+        """The facts kept: each band searched on its own, kept in precedence order.
+
+        ADR-0072 §5: a band-neutral top-k lets a flood of derived beliefs displace an
+        assertion below the cut, so each band is searched on its own, ``ASSERTED``,
+        then ``ATTESTED``, then ``DERIVED``, and the limit is filled in that order, as
+        recall's band searches fill theirs (ADR-0281 §3:2). ADR-0282 §2:8: a record is
+        kept only once the audience predicate has admitted it; each fetch applies it
+        again.
+
+        Raises:
+            MemoryStoreError: If the store cannot be searched.
+        """
+        kept: dict[str, SemanticMemory] = {}
+        for band in _BANDS:
+            if len(kept) >= self._search_limit:
+                break
+            found = await self._memory.search(
+                query, limit=self._search_limit, kinds=(MemoryKind.SEMANTIC,), bands=(band,)
+            )
+            for record in admitted_to_understanding(audience, found.records):
+                if len(kept) >= self._search_limit:
+                    break
+                # A record rewritten into a later band between the searches is kept
+                # once, where it was first admitted.
+                if isinstance(record, SemanticMemory) and record.id not in kept:
+                    kept[record.id] = record
+        return list(kept.values())
 
     async def _read(self, story_id: object, decision_id: str) -> ToolResult:
         """Read one story's full view under the scope, and hold it for the glue."""

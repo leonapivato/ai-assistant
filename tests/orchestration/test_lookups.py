@@ -17,6 +17,7 @@ from ai_assistant.core.errors import MemoryStoreError, PlanningError, StoryStore
 from ai_assistant.core.types import (
     ActionRequest,
     Attestation,
+    BeliefBand,
     CapabilityEffect,
     CapabilityResult,
     LabelKind,
@@ -234,17 +235,47 @@ class _Searched(FakeMemoryStore):
         return await super().search(query, **kwargs)
 
 
-async def test_a_search_asks_for_remembered_facts_alone_up_to_its_limit() -> None:
+async def test_a_search_asks_for_remembered_facts_alone_each_band_on_its_own() -> None:
+    """ADR-0072 §5: each band read on its own, in precedence order, up to the limit."""
     store = _Searched()
     look_ups = LookUps(memory=store, views=None, search_limit=4)
 
     with look_ups.scope(audience=BOUNDED, owner_records=True):
         await look_ups.run(_call(SEARCH_MEMORY, query="dentist"))
 
-    (search,) = store.searches
-    assert search["query"] == "dentist"
-    assert search["limit"] == 4
-    assert [kind.value for kind in search["kinds"]] == ["semantic"]
+    assert [search["query"] for search in store.searches] == ["dentist"] * 3
+    assert all(search["limit"] == 4 for search in store.searches)
+    assert all([kind.value for kind in one["kinds"]] == ["semantic"] for one in store.searches)
+    assert [tuple(one["bands"]) for one in store.searches] == [
+        (BeliefBand.ASSERTED,),
+        (BeliefBand.ATTESTED,),
+        (BeliefBand.DERIVED,),
+    ]
+
+
+async def test_inferences_never_displace_an_assertion_below_the_limit() -> None:
+    """ADR-0072 §5: precedence is by band, so a closer inference cannot cut the user's word.
+
+    At a limit of one, the user's own fact is kept over an inference that matches the
+    query more closely, and the later bands are not searched once the limit is filled.
+    """
+    inferred = SemanticMemory(
+        id="inferred",
+        content="dentist appointment probably with Dr Lee",
+        fact="dentist appointment probably with Dr Lee",
+        provenance=Provenance(source=MemorySource.INFERRED, confidence=0.4, last_updated=_AT),
+    )
+    store = _Searched()
+    for record in (inferred, _fact("said", "my dentist is Dr Rao")):
+        await store.add(record)
+    look_ups = LookUps(memory=store, views=None, search_limit=1)
+
+    with look_ups.scope(audience=BOUNDED, owner_records=True):
+        answer = await look_ups.run(_call(SEARCH_MEMORY, query="dentist appointment"))
+
+    assert isinstance(answer, HeldByIds)
+    assert searched_ids(answer.output) == ("said",)
+    assert [tuple(one["bands"]) for one in store.searches] == [(BeliefBand.ASSERTED,)]
 
 
 class _Down(FakeMemoryStore):
