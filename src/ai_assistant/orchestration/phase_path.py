@@ -1515,20 +1515,29 @@ def is_defect(failure: BaseException) -> bool:
 def failing_stage(state: ActivationState | None) -> ControllerStage | None:
     """The stage whose failure ended the pass, read off its record, or ``None``.
 
-    The latest entry recorded as failed before an end entry due ``stage_failed``;
-    ``None`` where the pass did not end on a stage's failure, such as one that failed
-    before its first stage ran.
+    Read as the controller chose it (ADR-0280 §5, ADR-0309 §3:3-§3:4): the step just
+    before an end entry due ``stage_failed`` is its last entry, with the one run
+    beside it where there was one, the two sharing their rule and their start, the
+    first's entry ahead of the second's. Its first entry not ``done`` ended the pass: a
+    stage that failed beside another is recorded ``failed`` too, once cancelled, but it
+    is never what ended it. ``None`` where the pass did not end on a stage's failure,
+    such as one that failed before its first stage ran.
     """
     if state is None or not _ended_by(state, ControllerRule.STAGE_FAILED):
         return None
-    return next(
-        (
-            one.stage
-            for one in reversed(state.stages.entries[:-1])
-            if one.outcome is StageOutcome.FAILED
-        ),
-        None,
-    )
+    ran = state.stages.entries[:-1]
+    if not ran:
+        return None
+    last = ran[-1]
+    step = [
+        one
+        for one in ran[-2:]
+        if one is last
+        or (
+            one.stage is not last.stage and (one.due, one.started_at) == (last.due, last.started_at)
+        )
+    ]
+    return next((one.stage for one in step if one.outcome is not StageOutcome.DONE), None)
 
 
 def log_defect(
@@ -1550,14 +1559,39 @@ def log_defect(
         stage: The stage or the step it was raised in.
         activation_id: The activation it ended, where one was admitted.
     """
-    frames = traceback.format_list(traceback.extract_tb(failure.__traceback__))
     _log.error(
         event,
         stage=stage,
         activation_id=activation_id,
-        error=type(failure).__name__,
-        traceback="".join([*frames, type(failure).__qualname__]),
+        error=_named(failure),
+        traceback="".join(_frames(failure)),
     )
+
+
+def _named(failure: BaseException) -> str:
+    """``failure``'s class, and a group's, with the classes it holds: never a message."""
+    if isinstance(failure, BaseExceptionGroup):
+        held = ", ".join(_named(one) for one in failure.exceptions)
+        return f"{type(failure).__name__}({held})"
+    return type(failure).__name__
+
+
+def _frames(failure: BaseException) -> list[str]:
+    """``failure``'s traceback as its frames and class, a group's with each it holds.
+
+    Each frame is its file, line, function and source line; no message and no local
+    is read. An exception a group holds is listed under it, indented, so a defect in a
+    task group's child keeps its own class and the frames it was raised in.
+    """
+    lines = [
+        *traceback.format_list(traceback.extract_tb(failure.__traceback__)),
+        f"{type(failure).__qualname__}\n",
+    ]
+    if isinstance(failure, BaseExceptionGroup):
+        for number, one in enumerate(failure.exceptions, start=1):
+            lines.append(f"+ {number}/{len(failure.exceptions)}\n")
+            lines.extend(f"| {line}" for line in "".join(_frames(one)).splitlines(keepends=True))
+    return lines
 
 
 def _fetched_external(fetched: Fetched | None) -> bool:
@@ -2147,9 +2181,13 @@ class PhasePath:
             owner_records=False,
             round_limit=self._round_limit,
         )
-        await self._couldnt_finish(working)
-        if state is not None:
-            state.response = working.outcome()
+        try:
+            await self._couldnt_finish(working)
+        finally:
+            # Whatever cancels the write, a message the place took is what the episode
+            # records it sent (ADR-0284 §4:1), as :meth:`run` keeps it.
+            if state is not None:
+                state.response = working.outcome()
 
     # --- the stages ---
 
