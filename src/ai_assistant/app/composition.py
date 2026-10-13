@@ -487,6 +487,12 @@ PHASES_DIGEST_PART_CHARS: Final = 12_000
 #: the meaning and one named thing found whole, and a longer reading cut in band order.
 RECALL_SECOND_RUN_CAP: Final = 2 * RECALL_ITEM_LIMIT
 
+#: The deadline bounding recall's digest, its fetch of recall's outside memory records
+#: included, cut to what the activation has left (ADR-0308 §4:4; §4:11 names only a
+#: result's digest's deadline). **Provisional (#2589).** A call's deadline, as a
+#: result's digest is bounded by: a few remembered facts are one part, one call.
+PHASES_RECALL_DIGEST_DEADLINE: Final = PHASES_CALL_DEADLINE
+
 #: The budget one activation the chat's reader starts is given where the thin path
 #: runs, in place of ``CHAT_TURN_BUDGET``: several rounds, each a model call, a
 #: search and a digest, do not fit the one-reply minute. **Provisional (#2589).**
@@ -3278,11 +3284,12 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
         round_wait=PHASES_CALL_DEADLINE,
         excerpt_chars=PHASES_EXCERPT_CHARS,
         part_chars=PHASES_DIGEST_PART_CHARS,
-        # ADR-0308 §3: planning fetches recall's kept records from the one memory store
-        # recall searched; the second run itself is the engine's recall stage, handed
-        # over with its first run (§2:1).
+        # ADR-0308 §3, §4:4: planning and recall's digest fetch recall's kept records
+        # from the one memory store recall searched; the second run itself is the
+        # engine's recall stage, handed over with its first run (§2:1).
         memory=seams.memory,
         recall_cap=RECALL_SECOND_RUN_CAP,
+        recall_digest_wait=PHASES_RECALL_DIGEST_DEADLINE,
         now=_utcnow,
     )
 

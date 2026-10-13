@@ -27,6 +27,7 @@ from test_authorizer import _ACTIVATION, _episode
 from test_engine import AT, Harness, NoStepPlanner
 from test_loop_search import _ACCOUNT, _CONFIGURED_SEARCH
 from test_planning import _episode as _past_episode
+from test_planning import _understanding
 from understanding_support import recall_stage, understanding_stage
 
 from ai_assistant.core.errors import (
@@ -97,6 +98,7 @@ from ai_assistant.orchestration.phase_path import (
     PhaseTools,
     PhaseWorking,
 )
+from ai_assistant.orchestration.planning import PlannedRound
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls, remembered_record_id
 from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow, WindowsStage
@@ -227,6 +229,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     registered_search: frozenset[str] = frozenset(),
     writer: MessageWriter | None = None,
     wrap: Callable[[ChatWriter], MessageWriter] | None = None,
+    recall_digest_wait: timedelta = timedelta(seconds=5),
 ) -> Callable[[Harness], PhasePath]:
     """The thin path as the composition root builds it, over the harness's own stores."""
 
@@ -278,6 +281,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             part_chars=4000,
             memory=harness.memory,
             recall_cap=6,
+            recall_digest_wait=recall_digest_wait,
             now=lambda: AT,
         )
 
@@ -936,10 +940,22 @@ def _remembered(memory_id: str, source: MemorySource, fact: str) -> SemanticMemo
     )
 
 
+#: A digest that found nothing answering its question: an answer, with no evidence.
+_NOTHING_DIGESTED: Final = json.dumps({"evidence": []})
+
+
 async def _recalling_harness(
-    completer: FakeToolCallingCompleter, memory: FakeMemoryStore | None = None
+    completer: FakeToolCallingCompleter,
+    memory: FakeMemoryStore | None = None,
+    *,
+    digests: FakeModelProvider | None = None,
+    extra: Sequence[SemanticMemory] = (),
 ) -> tuple[Harness, FakeModelProvider]:
-    """A test hub with recall wired, its store holding what the second run finds."""
+    """A test hub with recall wired, its store holding what the second run finds.
+
+    ``digests`` answers recall's digest of the outside fact the second run finds, and of
+    any outside fact in ``extra``; by default it finds nothing answering.
+    """
     store = memory if memory is not None else FakeMemoryStore(now=lambda: AT)
     noted = PlanningRound(
         id="round:past", recorded_at=AT, text="Booked it for Friday.", notes="they prefer mornings"
@@ -947,11 +963,13 @@ async def _recalling_harness(
     past = _past_episode("activation:past", rounds=(noted,)).model_copy(
         update={"content": f"{_DENTIST} booked for Friday"}
     )
-    for record in (
+    records: tuple[EpisodicMemory | SemanticMemory, ...] = (
         past,
         _remembered("said", MemorySource.USER_ASSERTED, f"{_DENTIST} with Dr Rao"),
         _remembered("reported", MemorySource.EXTERNAL, f"{_DENTIST} moved to 3pm"),
-    ):
+        *extra,
+    )
+    for record in records:
         await store.add(record)
     understanding = FakeModelProvider(
         reply=json.dumps({"meaning": _DENTIST, "meaning_ground": "stated"})
@@ -963,7 +981,10 @@ async def _recalling_harness(
         memory=store,
         windows=WindowsStage(episodes=_no_episode_window),
         recall=recall_stage(store),
-        phases=_phases(completer),
+        phases=_phases(
+            completer,
+            digests=digests if digests is not None else FakeModelProvider(reply=_NOTHING_DIGESTED),
+        ),
     )
     return harness, understanding
 
@@ -989,6 +1010,8 @@ async def test_a_found_episode_reaches_planning_after_recall_runs_again() -> Non
         (ControllerStage.RECALL, ControllerRule.NOT_RECALLED),
         (ControllerStage.UNDERSTANDING, ControllerRule.NOT_UNDERSTOOD),
         (ControllerStage.RECALL, ControllerRule.UNDERSTOOD_NOT_RECALLED),
+        # The fact a source reported goes to recall's digest (ADR-0308 §4:4).
+        (ControllerStage.DIGESTING, ControllerRule.RECALL_UNDIGESTED),
         (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
         (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
         (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED),
@@ -1078,6 +1101,148 @@ async def test_what_the_first_run_kept_is_passed_over_and_both_runs_reach_planni
     assert recalled[0]["fact"] == f"{_DENTIST} with Dr Rao"
 
 
+# --- ADR-0308 §4:4-§4:6, ADR-0309 §3's row 7: recall's digest -------------------------------
+
+#: A fact a source reported that the input's own words find: the first run keeps it.
+_RAO_CALLED: Final = _remembered("rao-call", MemorySource.EXTERNAL, "Rao office: bring a referral")
+#: What recall's digest answers, by the local label of the second run's reported fact,
+#: and an item naming a label the call never showed.
+_RECALL_DIGESTED: Final = json.dumps(
+    {
+        "evidence": [
+            {"text": "The appointment is at three now.", "source": "D2"},
+            {"text": "Made up.", "source": "D7"},
+        ]
+    }
+)
+
+
+async def test_both_runs_outside_records_go_into_one_digest_answering_the_meaning() -> None:
+    """ADR-0308 §4:4-§4:6, §4:15, §5: one digest, before the first round, read as evidence.
+
+    The input's words keep the user's fact and one a source reported; understanding's
+    reading keeps the past episode and another reported fact. Both reported facts go into
+    one digest answering the meaning, after the second run and before planning, which is
+    shown its evidence under the record's own label and never the facts themselves.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(text="Dr Rao, at three.", notes="the time moved")
+    )
+    digests = FakeModelProvider(reply=_RECALL_DIGESTED)
+    harness, understanding = await _recalling_harness(
+        completer, digests=digests, extra=(_RAO_CALLED,)
+    )
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "Rao")
+    episode = await _settled(harness, conversation, seeded=frozenset({"activation:past"}))
+
+    # Row 7 after the second run's row, once, and the first round waits for it (§4:6).
+    assert _stages(episode)[4:7] == [
+        (ControllerStage.RECALL, ControllerRule.UNDERSTOOD_NOT_RECALLED),
+        (ControllerStage.DIGESTING, ControllerRule.RECALL_UNDIGESTED),
+        (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
+    ]
+    assert [stage for stage, _ in _stages(episode)].count(ControllerStage.DIGESTING) == 1
+    record = episode.processing_record
+    assert record is not None
+    assert record.recall is not None
+    assert [item.id for item in record.recall.items] == ["said", "rao-call"]
+
+    # One call over both runs' outside records, the first run's first, answering the
+    # meaning (§4:4), each attributed by the hub as outside content (§4:7).
+    (call,) = digests.calls
+    document = json.loads(call.messages[-1].content)
+    assert document["question"] == _DENTIST
+    assert [(one["label"], one["text"]) for one in document["records"]] == [
+        ("D1", "Rao office: bring a referral"),
+        ("D2", f"{_DENTIST} moved to 3pm"),
+    ]
+    assert all(one["from"].startswith("outside content") for one in document["records"])
+
+    # Recorded as recall's digest; the item naming D7 is dropped (§4:14), and the kept
+    # item's source is the record's own label (§4:15), taken as the item was recorded.
+    assert record.digests == (
+        ActivationDigest(
+            result=None,
+            question=_DENTIST,
+            outcome=DigestOutcome.ANSWERED,
+            evidence=(EvidenceItem(text="The appointment is at three now.", source="M1"),),
+            recorded_at=AT,
+        ),
+    )
+    labels = {one.id: one.label for one in record.labels}
+    assert labels["reported"] == "M1"
+    assert "rao-call" not in labels
+
+    # Planning is shown the evidence as outside content under that label, and neither
+    # reported fact (§3:3, §4:13, §5:5).
+    request = completer.calls[0].messages[1].content
+    (shown,) = json.loads(request)["evidence"]
+    assert shown["digest_of"] == "the outside memories recall found"
+    (item,) = shown["digest"]["evidence"]
+    assert (item["text"], item["source"]) == ("The appointment is at three now.", "M1")
+    assert "outside_content" in item
+    assert "moved to 3pm" not in request
+    assert "referral" not in request
+    assert [one["label"] for one in json.loads(request)["recalled"]] == ["M2", "E1"]
+
+    # Reading it counts as having read digested evidence (§5:4): the round's notes are
+    # marked, and the episode rests on outside content.
+    (planning_round,) = record.rounds
+    assert planning_round.notes_marked
+    assert episode.provenance.derived_from_external
+    assert len(understanding.calls) == 1
+
+
+async def test_a_failed_recall_digest_tells_planning_it_could_not_read_and_shows_nothing() -> None:
+    """ADR-0308 §4:11-§4:13: recorded with no evidence, tolerated, and planning goes on."""
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="It is on Friday."))
+    digests = FakeModelProvider(reply="not json")
+    harness, _ = await _recalling_harness(completer, digests=digests)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "when?")
+    episode = await _settled(harness, conversation, seeded=frozenset({"activation:past"}))
+
+    record = episode.processing_record
+    assert record is not None
+    (digest,) = record.digests
+    assert (digest.result, digest.outcome, digest.evidence) == (None, DigestOutcome.FAILED, ())
+    digesting = [one for one in record.stages if one.stage is ControllerStage.DIGESTING]
+    assert [(one.due, one.outcome) for one in digesting] == [
+        (ControllerRule.RECALL_UNDIGESTED, StageOutcome.FAILED)
+    ]
+    request = completer.calls[0].messages[1].content
+    (shown,) = json.loads(request)["evidence"]
+    assert shown["digest_of"] == "the outside memories recall found"
+    assert shown["digest"].startswith("could not be read")
+    assert "moved to 3pm" not in request
+    assert "reported" not in {one.id for one in record.labels}
+    assert _said(await _messages(harness, conversation))[-1] == (
+        MessageAuthor.ASSISTANT,
+        "It is on Friday.",
+    )
+
+
+async def test_no_recall_digest_is_due_where_neither_run_kept_an_outside_record() -> None:
+    """§4:5: row 7 answers only where a run kept a memory record whose source is outside."""
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Dr Rao."))
+    digests = FakeModelProvider(reply=_RECALL_DIGESTED)
+    store = FakeMemoryStore(now=lambda: AT)
+    harness, _ = await _recalling_harness(completer, store, digests=digests)
+    await store.delete("reported")
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "when?")
+    episode = await _settled(harness, conversation, seeded=frozenset({"activation:past"}))
+
+    assert ControllerStage.DIGESTING not in {stage for stage, _ in _stages(episode)}
+    assert digests.calls == []
+    assert episode.processing_record is not None
+    assert episode.processing_record.digests == ()
+
+
 # --- one stage, apart from the controller ------------------------------------------------
 
 
@@ -1154,6 +1319,170 @@ async def test_a_fetched_record_resting_on_outside_content_reaches_the_first_rul
     decided = working.latest.authorization
     assert decided is not None
     assert decided.read_outside_content
+
+
+class _SlowProvider(FakeModelProvider):
+    """A digest provider that answers only after ``delay`` seconds."""
+
+    def __init__(self, delay: float) -> None:
+        super().__init__(reply=_NOTHING_DIGESTED)
+        self._delay = delay
+
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+        await asyncio.sleep(self._delay)
+        return await super().complete(messages, model=model)
+
+
+class _FetchFails(FakeMemoryStore):
+    """A store whose fetch by id fails."""
+
+    async def get_many(self, ids: Sequence[str]) -> dict[str, Any]:
+        del ids
+        msg = "the store is down"
+        raise MemoryStoreError(msg)
+
+
+@dataclass(frozen=True)
+class _RecallDigest:
+    """Recall's digest due on its own: the second run decided, one outside fact kept."""
+
+    working: PhaseWorking
+    given: _Given
+    digesting: Any
+    memory: FakeMemoryStore
+
+
+async def _recall_digest(
+    *,
+    store: FakeMemoryStore | None = None,
+    digests: FakeModelProvider | None = None,
+    wait: timedelta = timedelta(seconds=5),
+) -> _RecallDigest:
+    completer = FakeToolCallingCompleter()
+    memory = store if store is not None else FakeMemoryStore(now=lambda: AT)
+    await memory.add(_remembered("reported", MemorySource.EXTERNAL, f"{_DENTIST} moved to 3pm"))
+    harness = Harness(
+        planner=NoStepPlanner(),
+        understanding=understanding_stage(),
+        tools=(_BOOK,),
+        memory=memory,
+    )
+    path = _phases(completer, digests=digests, recall_digest_wait=wait)(harness)
+    working = _begun(path)
+    working.second_recall = _found("activation:past")
+    working.recall_outside = ("reported",)
+    given = _Given(
+        deadline=asyncio.get_running_loop().time() + _SETTLE,
+        phases=working,
+        understanding=_understanding(meaning=_DENTIST),
+    )
+    (digesting,) = [one for one in path.stages() if one.name is ControllerStage.DIGESTING]
+    return _RecallDigest(working=working, given=given, digesting=digesting, memory=memory)
+
+
+async def test_recall_digest_reads_the_held_ids_and_is_decided_once() -> None:
+    """ADR-0308 §4:4, ADR-0282 §2:7: fetched by id, what came back held, and decided."""
+    digests = FakeModelProvider(reply=_RECALL_DIGESTED.replace("D2", "D1"))
+    case = await _recall_digest(digests=digests)
+    working = case.working
+
+    result = await case.digesting.run(case.given)
+
+    assert result.outcome is StageOutcome.DONE
+    assert working.recall_digested
+    assert working.recall_digest_fetch is not None
+    assert working.recall_digest_fetch.fetched == ("reported",)
+    (digest,) = working.digests
+    assert digest.result is None
+    assert digest.evidence == (EvidenceItem(text="The appointment is at three now.", source="M1"),)
+    (evidence,) = working.evidence
+    assert evidence.result_id is None
+    assert [(one.source_kind, one.source_id) for one in evidence.items] == [
+        (LabelKind.MEMORY, "reported")
+    ]
+    # Reading it counts as having read digested evidence (§5:4), which authorizing's
+    # working record carries as its digests.
+    assert working.read_outside_content
+
+
+async def test_a_recall_digest_whose_records_are_gone_reads_nothing_and_records_nothing() -> None:
+    """ADR-0282 §2:6: an id with no record is not an error, and no call is made for none."""
+    digests = FakeModelProvider(reply=_RECALL_DIGESTED)
+    case = await _recall_digest(digests=digests)
+    working = case.working
+    working.recall_outside = ("forgotten",)
+
+    result = await case.digesting.run(case.given)
+
+    assert result.outcome is StageOutcome.DONE
+    assert working.recall_digested
+    assert working.recall_digest_fetch is not None
+    assert working.recall_digest_fetch.missing == ("forgotten",)
+    assert (working.digests, working.evidence, digests.calls) == ([], [], [])
+    assert not working.read_outside_content
+
+
+async def test_a_recall_record_no_longer_outside_is_not_digested() -> None:
+    """§3:3: a record whose current version is not outside is shown by its fact instead."""
+    digests = FakeModelProvider(reply=_RECALL_DIGESTED)
+    case = await _recall_digest(digests=digests)
+    await case.memory.add(_remembered("said", MemorySource.USER_ASSERTED, "the user's own"))
+    case.working.recall_outside = ("said",)
+
+    result = await case.digesting.run(case.given)
+
+    assert result.outcome is StageOutcome.DONE
+    assert case.working.recall_digested
+    assert (case.working.digests, digests.calls) == ([], [])
+
+
+async def test_a_recall_digest_whose_fetch_fails_is_recorded_failed_and_tolerated() -> None:
+    """§4:12-§4:13: the records could not be read, so planning is told so and goes on."""
+    digests = FakeModelProvider(reply=_RECALL_DIGESTED)
+    case = await _recall_digest(store=_FetchFails(now=lambda: AT), digests=digests)
+    working = case.working
+
+    result = await case.digesting.run(case.given)
+
+    assert (result.outcome, result.tolerated) == (StageOutcome.FAILED, True)
+    assert working.recall_digested
+    (digest,) = working.digests
+    assert (digest.result, digest.outcome, digest.evidence) == (None, DigestOutcome.FAILED, ())
+    (evidence,) = working.evidence
+    assert (evidence.result_id, evidence.answered, evidence.items) == (None, False, ())
+    assert digests.calls == []
+    assert not working.read_outside_content
+
+
+async def test_a_recall_digest_past_its_deadline_is_recorded_failed_and_timed_out() -> None:
+    """§4:11: the deadline bounding recall's digest passing first fails it, tolerated."""
+    case = await _recall_digest(
+        digests=_SlowProvider(delay=_SETTLE), wait=timedelta(milliseconds=50)
+    )
+
+    result = await case.digesting.run(case.given)
+
+    assert (result.outcome, result.tolerated) == (StageOutcome.TIMED_OUT, True)
+    assert isinstance(result.error, ModelTimeoutError)
+    (digest,) = case.working.digests
+    assert digest.outcome is DigestOutcome.FAILED
+    assert case.working.recall_digested
+
+
+async def test_once_recall_digest_is_decided_digesting_reads_the_rounds_results() -> None:
+    """ADR-0309 §3:3: the one digesting stage runs a round's digests once recall's is done."""
+    case = await _recall_digest()
+    case.working.recall_digest_decided = True
+    case.working.planned(
+        PlannedRound(round=PlanningRound(id="r1", recorded_at=AT), labels=(), recorded=True)
+    )
+    case.working.step(AT, timedelta(seconds=5)).held.put_nowait(None)
+
+    result = await case.digesting.run(case.given)
+
+    assert result.outcome is StageOutcome.DONE
+    assert case.working.digests == []
+    assert case.working.recall_digest_fetch is None
 
 
 def _found(*episode_ids: str) -> Recalled:

@@ -197,6 +197,14 @@ class PhaseFacts(Protocol):
         """Recall's second run made its decision, a failed one included (ADR-0308 §2)."""
 
     @property
+    def recall_kept_outside(self) -> bool:
+        """Either recall run kept a memory record whose source is outside (ADR-0308 §4:5)."""
+
+    @property
+    def recall_digested(self) -> bool:
+        """The digesting stage decided recall's digest, a failed one included (§4:4)."""
+
+    @property
     def rounds(self) -> int:
         """How many planning rounds the pass has run."""
 
@@ -420,11 +428,29 @@ def _second_run(_: PassFacts) -> object:
     return ControllerRule.UNDERSTOOD_NOT_RECALLED
 
 
-#: ADR-0309 §3's table, for the rows the phases have so far: row 7,
-#: ``recall_undigested``, is recall's digest's, a later lane's, so ``first_round_due``
-#: follows ``understood_not_recalled``. The old path's rows are absent. The composition
-#: root hands it to the controller only where the opt-in is set, and
-#: :data:`ACTIVATION_RULES` runs unchanged otherwise (§2:6).
+def recall_digest_due(phases: PhaseFacts) -> bool:
+    """ADR-0308 §4:5: recall's digest is due.
+
+    The second-run decision is made, either run kept a memory record whose source is
+    outside, and there is no recall digest. The phase path's one ``digesting`` stage
+    reads it too, to run recall's digest rather than a round's.
+    """
+    return phases.recalled_again and phases.recall_kept_outside and not phases.recall_digested
+
+
+def _recall_digest(_: PassFacts) -> object:
+    """The loop guard's scope for recall's digest (ADR-0309 §3:5).
+
+    Digesting runs once for recall's digest, under ``recall_undigested``, and once per
+    round beside acting, scoped by the round; ADR-0280 §4:6's guard ends a pass that
+    would run recall's digest again.
+    """
+    return ControllerRule.RECALL_UNDIGESTED
+
+
+#: ADR-0309 §3's table, for the rows the phases have so far. The old path's rows are
+#: absent. The composition root hands it to the controller only where the opt-in is
+#: set, and :data:`ACTIVATION_RULES` runs unchanged otherwise (§2:6).
 PHASE_RULES: Final[tuple[Rule, ...]] = (
     _rule(ControllerRule.CONVERSATION_UNRESOLVED),
     _rule(ControllerRule.WINDOWS_UNASSEMBLED),
@@ -439,8 +465,17 @@ PHASE_RULES: Final[tuple[Rule, ...]] = (
         ControllerStage.RECALL,
         per=_second_run,
     ),
+    # ADR-0308 §4:5: recall's outside memory records, from both runs, go into one
+    # digest once the second run has decided.
+    Rule(
+        ControllerRule.RECALL_UNDIGESTED,
+        lambda f: recall_digest_due(_phases(f)),
+        ControllerStage.DIGESTING,
+        per=_recall_digest,
+    ),
     # ADR-0307 §8:6: planning's first round runs once understanding has recorded and
-    # recall's second run has finished, which the row above settles first.
+    # recall's second run has finished, its digest recorded where one is due (ADR-0308
+    # §4:6), which the two rows above settle first.
     Rule(
         ControllerRule.FIRST_ROUND_DUE,
         lambda f: f.understanding_recorded and _phases(f).rounds == 0,
