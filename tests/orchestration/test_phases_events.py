@@ -122,14 +122,22 @@ async def test_a_caller_cancellation_propagates_after_cleanup_and_ends_interrupt
 
 
 async def test_the_deadline_cancels_and_awaits_the_model_calls_cleanup() -> None:
-    """The event's budget runs out mid-call: it could not finish, once the call cleaned up."""
+    """The event's budget runs out mid-call: it could not finish, once the call cleaned up.
+
+    The budget is long enough for the stages before planning to finish over the fakes
+    however loaded the machine is, and the planning call never answers, so the deadline
+    passes while that call is held. The call is checked as reached before it is checked
+    as cleaned up.
+    """
     completer = _Controlled()
     harness = phases_harness(completer)
-    result = await harness.engine.receive(
-        event_input(), reply=None, timeout=timedelta(milliseconds=10)
+    receiving = asyncio.ensure_future(
+        harness.engine.receive(event_input(), reply=None, timeout=timedelta(seconds=1))
     )
+    await asyncio.wait_for(completer.entered.wait(), SETTLE)
+    assert not completer.cleaned.is_set()
+    result = await asyncio.wait_for(receiving, SETTLE)
     assert _ended(result) is ActivationEnding.COULDNT_FINISH
-    assert completer.entered.is_set()
     assert completer.cleaned.is_set()
 
 
