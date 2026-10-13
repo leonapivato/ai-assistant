@@ -1439,7 +1439,11 @@ class FakeAssistantEngine:
             ended = (
                 ActivationEnding.STOPPED if activation.stopped else ActivationEnding.COULDNT_FINISH
             )
-            return captured_result(_event_result(target, ended), report, episode_id=None)
+            answer = _event_result(target, ended)
+            # Held to the output bound with its receipt reserved, as a returned result is
+            # (ADR-0085 §8c): it is built after the dispatch's own check.
+            self._check_channel_result(answer, projection)
+            return captured_result(answer, report, episode_id=None)
         if failure is not None:
             raise failure
         if activation.output_failure is not None:

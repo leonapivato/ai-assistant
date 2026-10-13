@@ -111,6 +111,20 @@ async def test_declined_routed_confirmation_preserves_the_supplied_timestamp() -
     assert not control.processing_record.trigger.approved
 
 
+async def test_the_fakes_unfinished_event_result_is_held_to_the_output_bound() -> None:
+    """ADR-0085 §8c: the *couldn't finish* result built for an end is measured too."""
+    engine = FakeAssistantEngine(max_payload_bytes=512)
+    with pytest.raises(OversizedValueError, match="the result of receive"):
+        await engine.receive(
+            ChannelInput(
+                target=ChannelIdentity(channel_type="informational_event", instance_id="e" * 250),
+                payload=TextChannelPayload(text="x"),
+            ),
+            reply=None,
+            timeout=timedelta(0),
+        )
+
+
 async def test_fake_metadata_failure_does_not_bypass_the_event_output_bound() -> None:
     """The fake measures an event's result against the bound with no capture to reserve.
 
