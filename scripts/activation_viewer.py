@@ -487,6 +487,7 @@ class _Timeline:
     entries: list[Entry] = field(default_factory=list)
     items: list[dict[str, object]] = field(default_factory=list)
     round_starts: list[float] = field(default_factory=list)
+    spans: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
     rounds: dict[int, dict[str, object]] = field(default_factory=dict)
 
     def round_of(self, at: float) -> int | None:
@@ -496,17 +497,18 @@ class _Timeline:
     def build(self) -> None:
         self.entries = [one for one in self.lines if isinstance(one, Entry)]
         self._bound_rounds()
-        given: dict[tuple[str, object], list[Entry]] = {}
+        given: dict[tuple[str, object, int | None], list[Entry]] = {}
         for entry in self.entries:
             if entry.source == "controller" and entry.kind == "step":
                 self._step(entry)
             elif entry.source in KNOWN_SOURCES and entry.kind == "given":
-                given.setdefault((entry.source, _pairing(entry)), []).append(entry)
+                given.setdefault(self._pair_key(entry), []).append(entry)
             elif entry.source in KNOWN_SOURCES and entry.kind == "returned":
-                # The latest request still waiting is this one's: a request whose
+                # A response pairs only with a request inside the same step of its
+                # stage, and with the latest still waiting there: a request whose
                 # returned entry was never written (ADR-0314 §2:4) stays unanswered
-                # rather than taking a later round's response.
-                waiting = given.get((entry.source, _pairing(entry)))
+                # rather than taking another step's or round's response.
+                waiting = given.get(self._pair_key(entry))
                 self._returned(entry, waiting.pop() if waiting else None)
             else:
                 self._point(entry, entry.kind, f"{entry.source} {entry.kind}", "unknown")
@@ -517,30 +519,43 @@ class _Timeline:
             if isinstance(line, Truncation):
                 self._truncation(line)
 
-    def _bound_rounds(self) -> None:
-        """Where each planning round begins: its step's start, or its request's instant.
+    def _step_of(self, stage: str, at: float) -> int | None:
+        """Which recorded step of ``stage`` holds ``at``, by its place among them."""
+        for number, (start, end) in enumerate(self.spans.get(stage, ())):
+            if start <= at <= end:
+                return number
+        return None
 
-        The k-th planning step and the k-th planning request are round k. A step's entry
-        is written when the step ends, so a round still running is bounded by its
-        request alone; an entry belongs to the last round begun at or before it.
+    def _pair_key(self, entry: Entry) -> tuple[str, object, int | None]:
+        return (entry.source, _pairing(entry), self._step_of(entry.source, entry.at))
+
+    def _bound_rounds(self) -> None:
+        """Where each planning round begins, from the steps and requests recorded.
+
+        A recorded planning step is a round, from its start to its end, and holds the
+        requests and responses written inside it. A planning request no step holds
+        begins a round of its own: its step is still running, or its entry was never
+        written (ADR-0314 §2:4). An entry belongs to the last round begun at or before
+        it, so one missing entry costs its own round and never renumbers another.
         """
-        steps: list[float] = []
         for one in self.entries:
             body = _mapping(one.body)
-            if (
-                one.source == "controller"
-                and one.kind == "step"
-                and body.get("stage") == "planning"
-            ):
-                started = instant(body.get("started_at"))
-                steps.append(one.at if started is None else started)
-        requests = [
-            one.at for one in self.entries if one.source == "planning" and one.kind == "given"
+            if one.source != "controller" or one.kind != "step":
+                continue
+            stage = _text(body.get("stage"))
+            started, ended = instant(body.get("started_at")), instant(body.get("ended_at"))
+            if stage is not None and started is not None and ended is not None:
+                self.spans.setdefault(stage, []).append((started, ended))
+        for spans in self.spans.values():
+            spans.sort()
+        bounds = [start for start, _end in self.spans.get("planning", ())]
+        bounds += [
+            one.at
+            for one in self.entries
+            if one.source == "planning"
+            and one.kind == "given"
+            and self._step_of("planning", one.at) is None
         ]
-        bounds: list[float] = []
-        for number in range(max(len(steps), len(requests))):
-            known = [held[number] for held in (steps, requests) if number < len(held)]
-            bounds.append(min(known))
         self.round_starts = sorted(bounds)
         for number in range(1, len(bounds) + 1):
             self.rounds[number] = {"round": number, "calls": [], "verdicts": []}
@@ -1544,7 +1559,7 @@ SCRIPT: Final = r"""
   const OPEN_FOR_MS = 120000;
   const state = {
     listVersion: null, list: [], present: true, now: null, selected: null,
-    detailVersion: null, detail: null, listBusy: false, detailBusy: false,
+    detailVersion: null, detail: null, drawnOpen: false, listBusy: false, detailBusy: false,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -1698,8 +1713,12 @@ SCRIPT: Final = r"""
         state.detail = data;
         state.detailVersion = data.version;
         renderDetail();
-      } else if (state.detail && isOpen(state.detail.summary)) {
-        renderTimeline();
+      } else if (state.detail) {
+        // An activation that stops writing stops being "running" with no new byte in
+        // its file: redraw everything that says so once it lapses.
+        const open = isOpen(state.detail.summary);
+        if (open !== state.drawnOpen) renderDetail();
+        else if (open) renderTimeline();
       }
     } catch (error) {
       lost();
@@ -1735,6 +1754,7 @@ SCRIPT: Final = r"""
     const badges = $("d-badges");
     clear(badges);
     badgesFor(s, badges);
+    state.drawnOpen = isOpen(s);
     renderTimeline();
     renderRounds();
     renderEntries();

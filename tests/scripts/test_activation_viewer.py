@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -616,3 +617,53 @@ def test_a_request_whose_response_was_never_written_keeps_no_later_response() ->
     ]
     assert "returned" not in shown["rounds"][0]
     assert shown["rounds"][1]["returned"] == 2
+
+
+def _planning_step(line: int, start: float, end: float) -> Any:
+    def stamp(seconds: float) -> str:
+        return datetime.fromtimestamp(seconds, UTC).isoformat()
+
+    body = {"stage": "planning", "due": "round_due", "outcome": "done"}
+    body |= {"started_at": stamp(start), "ended_at": stamp(end)}
+    return viewer.Entry(line, "controller", "step", end, "", body)
+
+
+def _rounds_of(shown: Any) -> list[tuple[str, object, object]]:
+    return [
+        (one["kind"], one["round"], one["lines"])
+        for one in shown["items"]
+        if one["lane"] == "planning"
+    ]
+
+
+def test_a_round_whose_step_was_never_written_takes_no_other_rounds_number() -> None:
+    lines = [
+        viewer.Entry(0, "planning", "given", 1.0, "", {}),
+        viewer.Entry(1, "planning", "returned", 2.0, "", {}),
+        # Round 1's step entry was never written; round 2's was.
+        viewer.Entry(2, "planning", "given", 5.0, "", {}),
+        viewer.Entry(3, "planning", "returned", 6.0, "", {}),
+        _planning_step(4, 4.0, 7.0),
+    ]
+    shown = viewer.timeline("a", lines)
+    assert sorted(_rounds_of(shown), key=str) == sorted(
+        [("call", 1, [0, 1]), ("call", 2, [2, 3]), ("step", 2, [4])], key=str
+    )
+    assert shown["rounds"][1]["step"]["line"] == 4
+    assert "step" not in shown["rounds"][0]
+
+
+def test_a_response_never_crosses_into_another_rounds_step() -> None:
+    lines = [
+        viewer.Entry(0, "planning", "given", 1.0, "", {}),
+        # Round 1's response and round 2's request were never written.
+        _planning_step(1, 0.5, 3.0),
+        viewer.Entry(2, "planning", "returned", 6.0, "", {}),
+        _planning_step(3, 4.0, 7.0),
+    ]
+    shown = viewer.timeline("a", lines)
+    assert sorted(_rounds_of(shown), key=str) == sorted(
+        [("call", 1, [0]), ("step", 1, [1]), ("returned", 2, [2]), ("step", 2, [3])], key=str
+    )
+    pending = next(one for one in shown["items"] if one["kind"] == "call")
+    assert pending["tone"] == "pending"
