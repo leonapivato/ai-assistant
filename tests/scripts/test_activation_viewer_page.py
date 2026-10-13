@@ -20,7 +20,7 @@ import pytest
 from playwright.async_api import expect
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _activation_record import HOSTILE, serving, write_record
+from _activation_record import HOSTILE, at, iso, serving, viewer, write_record
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -161,3 +161,29 @@ async def test_a_change_of_activation_takes_the_old_details_down_at_once(
         await expect(page.locator("#detail-empty")).to_have_text("Loading…")
         released.set()
         await expect(page.locator("#d-input")).to_have_text("hello", timeout=_SHOWN)
+
+
+async def test_an_activation_that_stops_writing_stops_reading_as_running(
+    server: Any, record: Path, gateway_browser: Browser, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    line = {
+        "activation_id": "quiet",
+        "source": "planning",
+        "kind": "given",
+        "recorded_at": iso(0),
+        "body": {},
+    }
+    (record / "quiet.jsonl").write_text(json.dumps(line) + "\n")
+    written = at(0).timestamp() * 1000
+    clock = [written + 1_000]
+    monkeypatch.setattr(viewer, "_now", lambda: clock[0])
+    async with _page(gateway_browser) as page:
+        await _open(page, server.port, "quiet")
+        await expect(page.locator("#d-badges")).to_contain_text("running", timeout=_SHOWN)
+        # No byte more is written; only the time passes.
+        clock[0] = written + 600_000
+        await expect(page.locator("#d-badges")).not_to_contain_text("running", timeout=_SHOWN)
+        await expect(page.locator("#d-meta")).to_contain_text("no end recorded")
+        title = await page.locator(".tl-lane .bar.call").first.get_attribute("title")
+        assert title is not None
+        assert "no returned entry was recorded" in title
