@@ -116,6 +116,13 @@ SECURITY_HEADERS: Final = (
 
 _READ_FLAGS: Final = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 
+#: What reading a line's JSON raises where it is not JSON, or nests too deep. Held as a
+#: tuple so the file still parses on an interpreter older than the one it targets.
+_UNPARSABLE: Final = (ValueError, RecursionError)
+
+#: What listing a record's directory raises where it does not exist yet.
+_NO_DIRECTORY: Final = (FileNotFoundError, NotADirectoryError)
+
 type Json = object
 """A value decoded from JSON: what an entry's body is."""
 
@@ -197,7 +204,7 @@ def parse_line(line: int, raw: bytes) -> Line:
     """
     try:
         value = json.loads(raw)
-    except ValueError, RecursionError:
+    except _UNPARSABLE:
         return None
     if not isinstance(value, dict):
         return None
@@ -293,7 +300,7 @@ def input_of(body: object) -> str | None:
             continue
         try:
             document = json.loads(content)
-        except ValueError, RecursionError:
+        except _UNPARSABLE:
             return None
         received = _mapping(document).get("input")
         if isinstance(received, str):
@@ -759,7 +766,7 @@ def _arguments(value: object) -> object:
     if isinstance(value, str):
         try:
             return json.loads(value)
-        except ValueError, RecursionError:
+        except _UNPARSABLE:
             return None
     return value
 
@@ -838,7 +845,7 @@ class Record:
                 for one in entries:
                     if one.name.endswith(SUFFIX) and one.is_file(follow_symlinks=False):
                         found[one.name[: -len(SUFFIX)]] = directory / one.name
-        except FileNotFoundError, NotADirectoryError:
+        except _NO_DIRECTORY:
             return {}
         return found
 
@@ -1062,6 +1069,11 @@ class ViewerHandler(BaseHTTPRequestHandler):
     def _script(self, _query: Mapping[str, str]) -> None:
         self._send(HTTPStatus.OK, SCRIPT.encode("utf-8"), "text/javascript")
 
+    def _no_icon(self, _query: Mapping[str, str]) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _activations(self, query: Mapping[str, str]) -> None:
         listed = self.server.record.activations()
         if query.get("v") == listed["version"]:
@@ -1102,6 +1114,7 @@ _ROUTES: Final[dict[str, Callable[[ViewerHandler, Mapping[str, str]], None]]] = 
     "/api/activations": ViewerHandler._activations,
     "/api/activation": ViewerHandler._activation,
     "/api/entry": ViewerHandler._entry,
+    "/favicon.ico": ViewerHandler._no_icon,
 }
 
 
@@ -1547,7 +1560,7 @@ SCRIPT: Final = r"""
   function endingText(summary) {
     if (summary.ended) return ending(summary.ended);
     if (summary.badges && summary.badges.includes("truncated")) return "truncated";
-    return isOpen(summary) ? "running" : "no end recorded";
+    return isOpen(summary) ? "" : "no end recorded";
   }
 
   async function getJson(url) {
@@ -1674,7 +1687,7 @@ SCRIPT: Final = r"""
     clear(meta);
     const pairs = [
       ["started", clock(s.start, true)], ["took", duration(s.duration)], ["rounds", s.rounds],
-      ["ended", endingText(s)], ["entries", s.entries],
+      ["ended", endingText(s) || "not yet"], ["entries", s.entries],
     ];
     for (const [k, v] of pairs) {
       const span = el("span", null, k + " ");
@@ -1757,8 +1770,10 @@ SCRIPT: Final = r"""
     const itemEnd = item.end === null ? end : item.end;
     let node;
     if (item.type === "span") {
-      node = el("div", "bar " + item.kind + " " + tone, item.label);
-      node.style.width = Math.max(0, pos(itemEnd) - pos(item.start)) + "%";
+      const width = Math.max(0, pos(itemEnd) - pos(item.start));
+      // A label is drawn only where the bar has room for it; the title always has it.
+      node = el("div", "bar " + item.kind + " " + tone, width >= 6 ? item.label : null);
+      node.style.width = width + "%";
     } else {
       node = el("div", "pt k-" + item.kind + " " + tone);
     }
@@ -2111,6 +2126,10 @@ SCRIPT: Final = r"""
     $("back").addEventListener("click", () => {
       document.body.classList.remove("show-detail");
       closeDrawer();
+    });
+    window.addEventListener("hashchange", () => {
+      const chosen = fromHash();
+      if (chosen && chosen !== state.selected) select(chosen);
     });
     const initial = fromHash();
     if (initial) select(initial);

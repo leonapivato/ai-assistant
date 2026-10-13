@@ -430,7 +430,16 @@ def test_it_answers_get_alone(server: Any, method: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "path", ["/", "/app.js", "/app.css", "/api/activations", "/api/activation?id=act-1", "/nowhere"]
+    "path",
+    [
+        "/",
+        "/app.js",
+        "/app.css",
+        "/favicon.ico",
+        "/api/activations",
+        "/api/activation?id=act-1",
+        "/nowhere",
+    ],
 )
 def test_every_response_carries_no_store_and_a_self_only_policy(server: Any, path: str) -> None:
     _status, headers, _body = _request(server.port, path)
