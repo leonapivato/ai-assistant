@@ -21,7 +21,7 @@ def test_the_roots_recall_values_are_the_ones_the_suites_restate() -> None:
     that build an engine without the root; this is where the two are held equal."""
     assert RECALL_ITEM_LIMIT == 3
     assert timedelta(seconds=2) == RECALL_BUDGET
-    assert RECALL_THRESHOLDS[EmbedderKind.ON_DEVICE] == 0.65
+    assert RECALL_THRESHOLDS[EmbedderKind.ON_DEVICE] == 0.58
 
 
 def test_every_embedder_has_a_recall_threshold() -> None:
