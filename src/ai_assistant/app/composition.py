@@ -3220,10 +3220,12 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
     deployment configured the provider whole (ADR-0273 §1) — a test hub alone. The
     search and remembering are in no registry, so :class:`PhaseTools` adds both
     declarations beside the registry's for authorizing's selection. **And planning's
-    story calls that write** (ADR-0300 §10, ADR-0303 §9): start, note, link, unlink
-    and tidy-up, in no registry either, each run through acting's own-records seam by
-    one :class:`StoryCalls` over the one story store, memory store and tidy-up, with
-    the arguments that name things by label handed to planning (ADR-0307 §5:2).
+    story calls that write** (ADR-0300 §10, ADR-0303 §9): start, note, link, unlink,
+    tidy-up, move, merge, split and group, in no registry either, each run through
+    acting's own-records seam by one :class:`StoryCalls` over the one story store,
+    memory store and tidy-up, with the arguments that name things by label handed to
+    planning (ADR-0307 §5:2), and the same runner checking a move or a split before it
+    is authorized (§5:3-§5:4).
 
     **The policy is the deployment's thresholds and standing grants, with no goal
     authorizations and no goal quotes** (ADR-0306 §4:11, §6): a second
@@ -3314,6 +3316,9 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
             *STORY_CALL_CAPABILITIES,
         ),
         label_arguments=STORY_LABEL_ARGUMENTS,
+        # ADR-0307 §5:3-§5:4: the hub's check of a move or a split before authorizing,
+        # against the stories as they stand then, by the same runner acting reaches.
+        story_calls=story_calls,
         round_limit=PHASES_ROUND_LIMIT,
         round_wait=PHASES_CALL_DEADLINE,
         excerpt_chars=PHASES_EXCERPT_CHARS,

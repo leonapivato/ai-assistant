@@ -797,7 +797,8 @@ _NOTES_AND_ROUNDS: Final = (
 )
 
 
-#: ADR-0300 §10, ADR-0303 §9, ADR-0307 §7: the story calls, where they are offered.
+#: ADR-0300 §10, ADR-0303 §9, ADR-0307 §5:3-§5:5, §7: the story calls, where they are
+#: offered.
 _STORY_CALLS: Final = (
     "Stories are yours to keep, through the story calls. Start one when the user takes up "
     "a matter that will come up again, with its first notes. Note on a story what its "
@@ -806,7 +807,12 @@ _STORY_CALLS: Final = (
     "never reach a story. Link or unlink an activation or a story where it does or does "
     "not belong to that matter. Tidy a story's summary when many changes have come since "
     "it was last tidied: a tidy-up runs on its own, never brings another round, and how it "
-    "went is not shown to you.\n"
+    "went is not shown to you. Reorganise stories when the matters they hold are not "
+    "the ones they keep: move activations or notes to the story they belong to, merge "
+    "two stories that are one matter, split off what is a matter apart, or group stories "
+    "under a larger one. A move or a split carries only the notes you name by their N "
+    "labels, each on the story it leaves; one naming a note that story does not hold is "
+    "refused whole.\n"
     "\n"
 )
 

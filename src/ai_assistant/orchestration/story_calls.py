@@ -1,7 +1,8 @@
-"""Planning's story calls that write: start, note, link, unlink and tidy-up.
+"""Planning's story calls that write, from a start to a grouping.
 
-ADR-0300 §10:2-§10:6, ADR-0303 §9:1-§9:3, ADR-0306 §3. Planning chooses each of these
-calls, authorizing checks it by rule, and acting runs it (ADR-0300 §10:5). Each is an
+Start, note, link, unlink, tidy-up, move, merge, split and group: ADR-0300 §10:2-§10:6,
+ADR-0303 §9:1-§9:4, ADR-0306 §3, ADR-0307 §5. Planning chooses each of these calls,
+authorizing checks it by rule, and acting runs it (ADR-0300 §10:5). Each is an
 **inside action** (ADR-0292 §12:1): its effect is the assistant's own records, it never
 leaves the hub, it returns nothing and its outcome is never unknown. Acting reaches the
 runner, :class:`StoryCalls`, through its own-records seam and never through
@@ -9,8 +10,9 @@ runner, :class:`StoryCalls`, through its own-records seam and never through
 
 **Three parts, one module**, as :mod:`~ai_assistant.orchestration.remembering` is: the
 declarations (:data:`STORY_CALLS`), which of their arguments name things by label
-(:data:`STORY_LABEL_ARGUMENTS`), and the runner. The other story calls ADR-0303 §9:1
-names (move, merge, split and group) and the read of a story's page are later lanes'.
+(:data:`STORY_LABEL_ARGUMENTS`), and the runner, which also makes the hub's check of a
+move or a split before it is authorized (:meth:`StoryCalls.refusal`). The read of a
+story's page is a later lane's.
 
 | Call | Takes | Safe to repeat |
 | --- | --- | --- |
@@ -19,12 +21,29 @@ names (move, merge, split and group) and the read of a story's page are later la
 | :data:`LINK_STORY` | a story, and this activation, an activation or a story | Yes |
 | :data:`UNLINK_STORY` | a story, and this activation, an activation or a story it holds | Yes |
 | :data:`TIDY_STORY` | a story | Yes |
+| :data:`MOVE_STORY` | the story moved from, the story moved to, episodes, notes | Yes |
+| :data:`MERGE_STORY` | the story absorbed, and the story it joins | Yes |
+| :data:`SPLIT_STORY` | the story, the episodes and stories that leave, notes | Yes |
+| :data:`GROUP_STORY` | the stories grouped; optionally the larger story's first notes | No |
 
 **Stories are named by label** (ADR-0307 §5). Planning writes an ``S`` label where a
 call names a story and an ``E`` label where it names another activation, by its
 episode; planning's own check maps each to the id it names before authorizing, and
 refuses whole a call naming a label it was never shown (§5:3), so the runner is handed
 ids. A link or an unlink naming neither a story nor an episode names this activation.
+The notes a move or a split carries are named by the ``N`` labels planning's story view
+renders (ADR-0303 §9:4, ADR-0307 §5:5), each the note's id as text.
+
+**A move or a split naming a note not held is refused whole, twice over** (ADR-0307
+§5:3-§5:4). Before authorizing, :meth:`StoryCalls.refusal` checks each note it names
+against the story it moves from as the stories stand then, and the phases' glue refuses
+the call with the reason, so it runs nothing and brings a round. Then the store refuses
+such a call again inside its own transaction (``note_not_held``), since the call's actor
+is ``planning``, so a note moved away between the two, by another call of the round or by
+the matters pass, still refuses the whole call. **On a pass that may not show a record
+placed for the owner alone, a move or a split carries members only** (§6:5): the same
+check refuses one naming notes, with the reason, and planning may make it again without
+them.
 
 **What the hub fills** (ADR-0254 §3, ADR-0306 §2:10). Under the names remembering gives
 them, so authorizing fills them as it fills remembering's: ``episode``, the address of
@@ -49,7 +68,17 @@ backstop counts as done and nobody reports as done (§5:6, §5:11).
 
 **Merged stories are followed, never written** (ADR-0289 §3). A story a call names that
 has been merged since planning was shown it is followed to the story it was merged into,
-whose members and notes it now holds.
+whose members and notes it now holds; a member story a split or a group names is followed
+too. **The story a merge absorbs is the exception**: it is named as it is, so a merge
+repeated after the first, or naming a story merged elsewhere since, is refused by the
+store as ``merged_story`` and changes nothing (ADR-0303 §9's table), rather than merging
+whatever that story went into.
+
+**A group starts a story, as a start does** (ADR-0303 §9). It is not safe to repeat, so
+acting's backstop refuses a second identical grouping as already done; it creates the
+larger story holding the stories named, then writes its first notes, and once that story
+exists it is never reported not done (:class:`StartUnfinishedError`). A split starts one
+too, in the store's one transaction, so nothing of it can be left half written.
 
 **The tidy-up** (ADR-0307 §7, ADR-0300 §10:4) runs :class:`~ai_assistant.orchestration.
 story_tidy_up.StoryTidyUp` on the story, and its outcome is what that operation wrote to
@@ -61,9 +90,9 @@ on its own and does not await it (ADR-0306 §3:3, ADR-0307 §7:2).
 and this activation as its trigger (ADR-0300 §3:15), and every note by the author
 ``planning``, recording the activation it was written during (ADR-0303 §4:7, §9:3).
 
-**Members only applies elsewhere.** On a pass that may not show a record placed for the
-owner alone, planning can still write notes and change stories (ADR-0307 §6:5); the
-members-only rule binds a move or a split, which are not these calls.
+**Planning still writes on an owner-only pass.** On a pass that may not show a record
+placed for the owner alone, planning can still write notes and change stories (ADR-0307
+§6:5); only a move or a split is held to members alone there, as above.
 
 **It logs stage and code-owned reason only**, never a note or a story (ADR-0275 §8).
 """
@@ -76,6 +105,7 @@ import structlog
 
 from ai_assistant.core.errors import MemoryStoreError, StoryStoreError
 from ai_assistant.core.types import (
+    MAX_STORY_PAGE,
     STORY_NOTE_MAX_CHARS,
     CapabilityEffect,
     CapabilityResult,
@@ -104,28 +134,40 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
-    from ai_assistant.core.types import FrozenJson, ToolCall
+    from ai_assistant.core.types import FrozenJson, ProposedCall, StoryOutcome, ToolCall
     from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
 
 __all__ = [
+    "EPISODES_ARGUMENT",
+    "GROUP_STORY",
+    "GROUP_STORY_CAPABILITY",
     "INSIDE_ARGUMENT",
+    "INTO_ARGUMENT",
     "LINK_STORY",
     "LINK_STORY_CAPABILITY",
     "MEMBER_EPISODE_ARGUMENT",
     "MEMBER_STORY_ARGUMENT",
+    "MERGE_STORY",
+    "MERGE_STORY_CAPABILITY",
+    "MOVE_STORY",
+    "MOVE_STORY_CAPABILITY",
     "NOTES_ARGUMENT",
     "NOTE_ARGUMENT",
     "NOTE_STORY",
     "NOTE_STORY_CAPABILITY",
+    "SPLIT_STORY",
+    "SPLIT_STORY_CAPABILITY",
     "START_NOTES_MAX",
     "START_STORY",
     "START_STORY_CAPABILITY",
+    "STORIES_ARGUMENT",
     "STORY_ARGUMENT",
     "STORY_CALLS",
     "STORY_CALL_CAPABILITIES",
     "STORY_LABEL_ARGUMENTS",
     "TIDY_STORY",
     "TIDY_STORY_CAPABILITY",
+    "TO_ARGUMENT",
     "UNLINK_STORY",
     "UNLINK_STORY_CAPABILITY",
     "StartUnfinishedError",
@@ -140,6 +182,10 @@ NOTE_STORY_CAPABILITY: Final = "note_story"
 LINK_STORY_CAPABILITY: Final = "link_story"
 UNLINK_STORY_CAPABILITY: Final = "unlink_story"
 TIDY_STORY_CAPABILITY: Final = "tidy_story"
+MOVE_STORY_CAPABILITY: Final = "move_story"
+MERGE_STORY_CAPABILITY: Final = "merge_stories"
+SPLIT_STORY_CAPABILITY: Final = "split_story"
+GROUP_STORY_CAPABILITY: Final = "group_stories"
 
 #: The argument naming the story a call writes to, by its ``S`` label.
 STORY_ARGUMENT: Final = "story"
@@ -147,8 +193,22 @@ STORY_ARGUMENT: Final = "story"
 #: A note call's note.
 NOTE_ARGUMENT: Final = "note"
 
-#: A start call's first notes.
+#: A start's or a group's first notes, as text; the notes a move or a split carries,
+#: by their ``N`` labels.
 NOTES_ARGUMENT: Final = "notes"
+
+#: The story a move goes to, by its ``S`` label.
+TO_ARGUMENT: Final = "to"
+
+#: The story a merge joins, by its ``S`` label.
+INTO_ARGUMENT: Final = "into"
+
+#: The activations a move or a split carries, by their episodes' ``E`` labels.
+EPISODES_ARGUMENT: Final = "episodes"
+
+#: The member stories a split carries, or the stories a group puts under a new one, by
+#: their ``S`` labels.
+STORIES_ARGUMENT: Final = "stories"
 
 #: The story a start sits inside, by its ``S`` label.
 INSIDE_ARGUMENT: Final = "inside"
@@ -180,6 +240,25 @@ _STORY_SCHEMA: Final[dict[str, FrozenJson]] = {
     "minLength": 1,
     "description": "The story, by the S label you were shown it under.",
 }
+
+
+def _labels(description: str, *, min_items: int = 0) -> dict[str, FrozenJson]:
+    """An argument naming several things by their labels."""
+    schema: dict[str, FrozenJson] = {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1},
+        "uniqueItems": True,
+        "description": description,
+    }
+    if min_items:
+        schema["minItems"] = min_items
+    return schema
+
+
+_CARRIED_NOTES: Final = _labels(
+    "The story's notes that go with it, by their N labels; each must be on the story it "
+    "leaves. Name none to leave every note where it is."
+)
 
 
 def _declared(  # noqa: PLR0913 — one keyword per property a story call varies
@@ -341,8 +420,101 @@ TIDY_STORY: Final = _declared(
 """Tidy a story's page (ADR-0300 §10:4, ADR-0307 §7): planning's choice, never added by
 rule."""
 
+MOVE_STORY: Final = _declared(
+    MOVE_STORY_CAPABILITY,
+    (
+        "Move activations, notes, or both, from one story to another, where they belong to "
+        "the other matter."
+    ),
+    properties={
+        STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The story they leave, by its S label."},
+        TO_ARGUMENT: {**_STORY_SCHEMA, "description": "The story they go to, by its S label."},
+        EPISODES_ARGUMENT: _labels("The activations that go, by their episodes' E labels."),
+        NOTES_ARGUMENT: _CARRIED_NOTES,
+        EPISODE_ARGUMENT: _EPISODE_FILLED,
+    },
+    required=(STORY_ARGUMENT, TO_ARGUMENT, EPISODE_ARGUMENT),
+    system_supplied=(EPISODE_ARGUMENT,),
+    safe_to_repeat=True,
+    idempotency=Idempotency.NATURAL,
+)
+"""Move members (ADR-0303 §9:1): a repeat names members the first story no longer holds
+and is refused, changing nothing."""
+
+MERGE_STORY: Final = _declared(
+    MERGE_STORY_CAPABILITY,
+    (
+        "Merge one story into another when they are one matter: its activations, stories "
+        "and every note join the other."
+    ),
+    properties={
+        STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The story absorbed, by its S label."},
+        INTO_ARGUMENT: {**_STORY_SCHEMA, "description": "The story it joins, by its S label."},
+        EPISODE_ARGUMENT: _EPISODE_FILLED,
+    },
+    required=(STORY_ARGUMENT, INTO_ARGUMENT, EPISODE_ARGUMENT),
+    system_supplied=(EPISODE_ARGUMENT,),
+    safe_to_repeat=True,
+    idempotency=Idempotency.NATURAL,
+)
+"""Merge stories (ADR-0303 §9:1): a repeat names a merged story and is refused, changing
+nothing."""
+
+SPLIT_STORY: Final = _declared(
+    SPLIT_STORY_CAPABILITY,
+    (
+        "Split activations or stories off a story into a new story of their own, where they "
+        "are a matter apart."
+    ),
+    properties={
+        STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The story split, by its S label."},
+        EPISODES_ARGUMENT: _labels("The activations that leave, by their episodes' E labels."),
+        STORIES_ARGUMENT: _labels("The stories it holds that leave, by their S labels."),
+        NOTES_ARGUMENT: _CARRIED_NOTES,
+        EPISODE_ARGUMENT: _EPISODE_FILLED,
+    },
+    required=(STORY_ARGUMENT, EPISODE_ARGUMENT),
+    system_supplied=(EPISODE_ARGUMENT,),
+    safe_to_repeat=True,
+    idempotency=Idempotency.NATURAL,
+)
+"""Split a story (ADR-0303 §9:1): a repeat names members the story no longer holds and is
+refused, changing nothing."""
+
+GROUP_STORY: Final = _declared(
+    GROUP_STORY_CAPABILITY,
+    "Group stories under a new, larger story, where they are parts of one bigger matter.",
+    properties={
+        STORIES_ARGUMENT: _labels("The stories grouped, by their S labels.", min_items=1),
+        NOTES_ARGUMENT: {
+            "type": "array",
+            "items": _NOTE_SCHEMA,
+            "maxItems": START_NOTES_MAX,
+            "description": "The larger story's first notes, if any: what the bigger matter is.",
+        },
+        EPISODE_ARGUMENT: _EPISODE_FILLED,
+        OUTSIDE_CONTENT_ARGUMENT: _MARK_FILLED,
+    },
+    required=(STORIES_ARGUMENT, EPISODE_ARGUMENT, OUTSIDE_CONTENT_ARGUMENT),
+    system_supplied=(EPISODE_ARGUMENT, OUTSIDE_CONTENT_ARGUMENT),
+    safe_to_repeat=False,
+    idempotency=Idempotency.NONE,
+)
+"""Group stories under a larger one (ADR-0303 §9:1): not safe to repeat, so a second
+identical grouping is refused as already done (ADR-0306 §3:1, §5:9)."""
+
 #: Every story call this module declares, in the order planning is offered them.
-STORY_CALLS: Final = (START_STORY, NOTE_STORY, LINK_STORY, UNLINK_STORY, TIDY_STORY)
+STORY_CALLS: Final = (
+    START_STORY,
+    NOTE_STORY,
+    LINK_STORY,
+    UNLINK_STORY,
+    TIDY_STORY,
+    MOVE_STORY,
+    MERGE_STORY,
+    SPLIT_STORY,
+    GROUP_STORY,
+)
 
 #: The capabilities, by name.
 STORY_CALL_CAPABILITIES: Final = tuple(str(one.capability) for one in STORY_CALLS)
@@ -363,7 +535,28 @@ STORY_LABEL_ARGUMENTS: Final[Mapping[str, Mapping[str, LabelKind]]] = {
         MEMBER_EPISODE_ARGUMENT: LabelKind.EPISODE,
     },
     TIDY_STORY_CAPABILITY: {STORY_ARGUMENT: LabelKind.STORY},
+    MOVE_STORY_CAPABILITY: {
+        STORY_ARGUMENT: LabelKind.STORY,
+        TO_ARGUMENT: LabelKind.STORY,
+        EPISODES_ARGUMENT: LabelKind.EPISODE,
+        NOTES_ARGUMENT: LabelKind.NOTE,
+    },
+    MERGE_STORY_CAPABILITY: {STORY_ARGUMENT: LabelKind.STORY, INTO_ARGUMENT: LabelKind.STORY},
+    SPLIT_STORY_CAPABILITY: {
+        STORY_ARGUMENT: LabelKind.STORY,
+        EPISODES_ARGUMENT: LabelKind.EPISODE,
+        STORIES_ARGUMENT: LabelKind.STORY,
+        NOTES_ARGUMENT: LabelKind.NOTE,
+    },
+    GROUP_STORY_CAPABILITY: {STORIES_ARGUMENT: LabelKind.STORY},
 }
+
+#: The calls that carry notes from one story to another, which the hub checks before
+#: authorizing (ADR-0307 §5:3).
+_CARRYING: Final = frozenset({MOVE_STORY_CAPABILITY, SPLIT_STORY_CAPABILITY})
+
+#: How many notes one page of the hub's not-held check reads.
+_NOTES_PAGE: Final = MAX_STORY_PAGE
 
 #: The tidy-up's results under which the call is done: it wrote, or had nothing it
 #: may fold in yet, or a run already on the story takes in what is pending (§5:10).
@@ -378,7 +571,7 @@ _TIDIED: Final = frozenset(
 
 
 class StartUnfinishedError(StoryStoreError):
-    """A start created its story, then could not write the rest of what it carries.
+    """A start or a group created its story, then could not write the rest it carries.
 
     The start happened, so it is neither not done, which would let the duplicate
     backstop admit an identical start that makes a second story, nor done, which its
@@ -466,29 +659,15 @@ class StoryCalls:
             refused it or could not be reached, and nothing was written.
 
         Raises:
-            StartUnfinishedError: If a start created its story and then could not
-                write all its first notes or place it inside the larger one. Acting
-                then leaves the start's effect record unfinished, which the duplicate
-                backstop counts as done and which is never reported as done
-                (ADR-0306 §5:6, §5:11), so an identical start is not made again.
+            StartUnfinishedError: If a start or a group created its story and then
+                could not write all its first notes, or a start could not place it
+                inside the larger one. Acting then leaves the call's effect record
+                unfinished, which the duplicate backstop counts as done and which is
+                never reported as done (ADR-0306 §5:6, §5:11), so an identical call
+                is not made again.
         """
-        capability = str(call.request.tool.capability)
-        parameters = call.request.parameters
         try:
-            if capability == START_STORY_CAPABILITY:
-                await self._start(call)
-            elif capability == NOTE_STORY_CAPABILITY:
-                await self._note(parameters)
-            elif capability in {LINK_STORY_CAPABILITY, UNLINK_STORY_CAPABILITY}:
-                await self._membership(parameters, link=capability == LINK_STORY_CAPABILITY)
-            elif capability == TIDY_STORY_CAPABILITY:
-                await self._tidy(parameters)
-            else:
-                raise _NotDone(
-                    ToolFailureKind.INVALID_REQUEST,
-                    "not a story call",
-                    reason="not_a_story_call",
-                )
+            await self._dispatch(call)
         except StartUnfinishedError:
             # Raised on, so acting leaves the start's effect record unfinished (§5:6).
             _log.warning("story_call_unfinished", stage="acting", reason="start_unfinished")
@@ -504,6 +683,27 @@ class StoryCalls:
             _log.info("story_call_not_done", stage="acting", reason="malformed")
             return _not_done(ToolFailureKind.INVALID_REQUEST, "the call's arguments are malformed")
         return ToolResult(outcome=ToolOutcome.SUCCEEDED)
+
+    async def _dispatch(self, call: ToolCall) -> None:
+        """Run the call its capability names; a capability no story call has is not done."""
+        capability = str(call.request.tool.capability)
+        parameters = call.request.parameters
+        if capability == START_STORY_CAPABILITY:
+            await self._start(call)
+        elif capability == NOTE_STORY_CAPABILITY:
+            await self._note(parameters)
+        elif capability in {LINK_STORY_CAPABILITY, UNLINK_STORY_CAPABILITY}:
+            await self._membership(parameters, link=capability == LINK_STORY_CAPABILITY)
+        elif capability == TIDY_STORY_CAPABILITY:
+            await self._tidy(parameters)
+        elif capability in _REORGANISING:
+            await self._reorganise(capability, parameters)
+        elif capability == GROUP_STORY_CAPABILITY:
+            await self._group(parameters)
+        else:
+            raise _NotDone(
+                ToolFailureKind.INVALID_REQUEST, "not a story call", reason="not_a_story_call"
+            )
 
     # --- the calls ---
 
@@ -618,6 +818,174 @@ class StoryCalls:
                 reason=f"tidy_up_{outcome.result.value}",
             )
 
+    async def _reorganise(self, capability: str, parameters: Mapping[str, FrozenJson]) -> None:
+        """Move, merge or split, as the store does each in one transaction (ADR-0303 §9:1)."""
+        activation = self._activation(parameters)
+        if capability == MERGE_STORY_CAPABILITY:
+            outcome = await self._merge(parameters, activation)
+        elif capability == MOVE_STORY_CAPABILITY:
+            outcome = await self._move(parameters, activation)
+        else:
+            outcome = await self._split(parameters, activation)
+        if outcome.story_id is None:
+            raise _store_refused(outcome)
+
+    async def _merge(self, parameters: Mapping[str, FrozenJson], activation: str) -> StoryOutcome:
+        """Merge one story into another; every note goes with it (ADR-0303 §6:3).
+
+        The story absorbed is named as it is, never followed: one merged since is refused
+        as merged, so a repeat changes nothing (ADR-0303 §9's table).
+        """
+        absorbed = _text(parameters, STORY_ARGUMENT)
+        into = await self._current(_text(parameters, INTO_ARGUMENT))
+        return await self._stories.merge(
+            absorbed, into, actor=StoryActor.PLANNING, trigger=activation
+        )
+
+    async def _move(self, parameters: Mapping[str, FrozenJson], activation: str) -> StoryOutcome:
+        """Move activation members, notes, or both, to another story (ADR-0303 §6)."""
+        source = await self._current(_text(parameters, STORY_ARGUMENT))
+        target = await self._current(_text(parameters, TO_ARGUMENT))
+        episodes = _episode_members(parameters)
+        notes = _note_ids(parameters)
+        if not episodes and not notes:
+            raise _malformed("a move names the episodes or the notes that go")
+        if target == source:
+            raise _NotDone(
+                ToolFailureKind.INVALID_REQUEST,
+                "a move goes from one story to another; these are one story now",
+                reason="same_story",
+            )
+        return await self._stories.move(
+            source, target, episodes, actor=StoryActor.PLANNING, trigger=activation, notes=notes
+        )
+
+    async def _split(self, parameters: Mapping[str, FrozenJson], activation: str) -> StoryOutcome:
+        """Split members off a story into a new one, with the notes named (ADR-0303 §6)."""
+        source = await self._current(_text(parameters, STORY_ARGUMENT))
+        members = [*_episode_members(parameters), *await self._story_members(parameters)]
+        notes = _note_ids(parameters)
+        if not members:
+            raise _malformed("a split names the episodes or the stories that leave")
+        return await self._stories.split(
+            source, members, actor=StoryActor.PLANNING, trigger=activation, notes=notes
+        )
+
+    async def _group(self, parameters: Mapping[str, FrozenJson]) -> None:
+        """Group stories under a new larger one, then write its first notes (ADR-0303 §9:1).
+
+        Everything is checked first, so a group naming a story not there makes nothing;
+        once the larger story exists, a first note not written leaves the call
+        unfinished, never not done, as a start does (ADR-0306 §5:6, §5:11).
+        """
+        notes = parameters.get(NOTES_ARGUMENT) or ()
+        if (
+            not isinstance(notes, tuple | list)
+            or len(notes) > START_NOTES_MAX
+            or not all(isinstance(one, str) and one.strip() for one in notes)
+        ):
+            raise _malformed("a group's first notes are each non-blank text")
+        activation = self._activation(parameters)
+        outside = self._mark(parameters)
+        grouped = await self._story_members(parameters)
+        if not grouped:
+            raise _malformed("a group names the stories it groups")
+        created = await self._stories.create(grouped, actor=StoryActor.PLANNING, trigger=activation)
+        if created.story_id is None:
+            raise _store_refused(created)
+        try:
+            for note in notes:
+                written = await self._stories.append_note(
+                    str(created.story_id),
+                    str(note),
+                    author=StoryNoteAuthor.PLANNING,
+                    written_during=activation,
+                    outside=outside,
+                )
+                if written.note is None:
+                    raise _refused("a first note was refused")
+        except (_NotDone, StoryStoreError, MemoryStoreError, ValueError) as exc:
+            msg = "stories were grouped, but the larger story's first notes were not all written"
+            raise StartUnfinishedError(msg) from exc
+
+    async def _story_members(self, parameters: Mapping[str, FrozenJson]) -> list[StoryMember]:
+        """The stories a split or a group names, each followed through its merges, once."""
+        named = _ids(parameters, STORIES_ARGUMENT)
+        current = [await self._current(one) for one in named]
+        return [StoryMember(kind=StoryMemberKind.STORY, id=one) for one in dict.fromkeys(current)]
+
+    # --- the hub's check before authorizing ---
+
+    async def refusal(
+        self,
+        call: ProposedCall,
+        *,
+        owner_records: bool,
+        labels: Mapping[str, str] | None = None,
+    ) -> str | None:
+        """Why a move or a split must be refused whole before it is authorized, if it must.
+
+        ADR-0307 §5:3-§5:4, §6:5. Made on the call as planning's own check left it, its
+        labels ids, against the stories as they stand now: a move or a split naming a
+        note the story it moves from does not hold is refused, and so is one naming any
+        note on a pass that may not show a record placed for the owner alone, where it
+        carries members only. Where the stories cannot be read, it is refused too: the
+        check fails closed. Every other call, and a move or a split naming no note,
+        passes; what else is wrong with it is the runner's to find.
+
+        Args:
+            call: The call, its labels already ids.
+            owner_records: Whether this pass may show a record placed for the owner
+                alone.
+            labels: Each note's label, by its id as text, so the reason names the note
+                as planning was shown it.
+
+        Returns:
+            The reason, in code-owned words planning is shown, or ``None``.
+        """
+        if call.name not in _CARRYING:
+            return None
+        try:
+            return await self._checked(call, owner_records=owner_records, labels=labels or {})
+        except _NotDone as refused:
+            return str(refused)
+        except StoryStoreError:
+            _log.warning("story_call_unchecked", stage="planning", reason="store_failed")
+            return "the stories could not be read, so the notes named could not be checked"
+
+    async def _checked(
+        self, call: ProposedCall, *, owner_records: bool, labels: Mapping[str, str]
+    ) -> str | None:
+        """:meth:`refusal`'s reason, raising what it could not decide."""
+        named = _note_ids(call.arguments)
+        if not named:
+            return None
+        if not owner_records:
+            return (
+                "on this pass a move or a split carries members only: name no notes, "
+                "and every note stays where it is"
+            )
+        source = await self._current(_text(call.arguments, STORY_ARGUMENT))
+        missing = await self._not_held(source, named)
+        if not missing:
+            return None
+        shown = labels.get(str(missing[0]), "a note named")
+        return f"{shown} is not on the story it would leave, so nothing was moved"
+
+    async def _not_held(self, story_id: str, named: Sequence[int]) -> list[int]:
+        """The notes of ``named`` that ``story_id`` does not hold now, in the order named."""
+        wanted = set(named)
+        cursor: int | None = None
+        while wanted:
+            page = await self._stories.notes(story_id, cursor=cursor, limit=_NOTES_PAGE)
+            if page is None:
+                break
+            wanted -= {one.note_id for one in page.notes}
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+        return [one for one in dict.fromkeys(named) if one in wanted]
+
     # --- the parts ---
 
     @staticmethod
@@ -684,3 +1052,56 @@ class StoryCalls:
 
 def _refused(message: str) -> _NotDone:
     return _NotDone(ToolFailureKind.REFUSED, message, reason="store_refused")
+
+
+#: The calls :meth:`StoryCalls._reorganise` runs.
+_REORGANISING: Final = frozenset(
+    {MOVE_STORY_CAPABILITY, MERGE_STORY_CAPABILITY, SPLIT_STORY_CAPABILITY}
+)
+
+
+def _store_refused(outcome: StoryOutcome) -> _NotDone:
+    """The store's refusal, named by its code-owned reason (ADR-0289 §3)."""
+    reason = "refused" if outcome.refusal is None else outcome.refusal.reason.value
+    return _NotDone(
+        ToolFailureKind.REFUSED,
+        f"the story store refused it: {reason}",
+        reason=f"store_{reason}",
+    )
+
+
+def _ids(parameters: Mapping[str, FrozenJson], name: str) -> list[str]:
+    """The ids a list argument names, none where it is absent."""
+    value = parameters.get(name)
+    if value is None:
+        return []
+    if not isinstance(value, tuple | list) or not all(
+        isinstance(one, str) and one.strip() for one in value
+    ):
+        raise _malformed(f"a story call's {name!r} is a list of labels")
+    return [str(one) for one in value]
+
+
+def _episode_members(parameters: Mapping[str, FrozenJson]) -> list[StoryMember]:
+    """The activations a move or a split names by their episodes, once each."""
+    members: list[StoryMember] = []
+    for episode in dict.fromkeys(_ids(parameters, EPISODES_ARGUMENT)):
+        activation = _activation_of_episode(episode)
+        if activation is None:
+            raise _NotDone(
+                ToolFailureKind.INVALID_REQUEST,
+                "the episode named is no activation's, and a story holds only activations",
+                reason="not_an_activation",
+            )
+        members.append(StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation))
+    return members
+
+
+def _note_ids(parameters: Mapping[str, FrozenJson]) -> list[int]:
+    """The notes a move or a split names, each a note's id as its ``N`` label names it."""
+    ids: list[int] = []
+    for one in _ids(parameters, NOTES_ARGUMENT):
+        if not one.isdigit() or int(one) < 1:
+            raise _malformed("a note is named by the N label it was shown under")
+        ids.append(int(one))
+    return ids

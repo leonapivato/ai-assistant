@@ -99,6 +99,9 @@ async def test_the_opt_in_wires_the_path_over_the_roots_own_stores(tmp_path: Pat
         interim = engine._interim_tidy_up
         assert interim is not None
         assert story_calls._tidy_up is interim._tidy_up
+        # The same runner makes the hub's check of a move or a split before authorizing
+        # (ADR-0307 §5:3-§5:4).
+        assert phases._story_calls is story_calls
         # The engine handed the path its tracked spawn, so shutdown drains a tidy-up.
         assert phases._spawn == engine._spawn_read
     finally:
