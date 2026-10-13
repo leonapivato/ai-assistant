@@ -67,7 +67,6 @@ from ai_assistant.core.diagnostics import failure_body, write_diagnostic
 from ai_assistant.core.errors import (
     AuditError,
     EgressBindingError,
-    MemoryStoreError,
     StoryStoreError,
 )
 from ai_assistant.core.types import (
@@ -475,7 +474,8 @@ async def read_outside_content(  # noqa: C901, PLR0911, PLR0912 — §4:5's grou
         Whether the activation has read outside content.
 
     Raises:
-        MemoryStoreError: If the memory store cannot be read before any ground held.
+        MemoryStoreError: If the memory store cannot be read before any ground held;
+            once one has, a failed read only ends the going through.
     """
     every = grounds is not None
     held: list[OutsideGround] = [] if grounds is None else grounds
@@ -490,7 +490,10 @@ async def read_outside_content(  # noqa: C901, PLR0911, PLR0912 — §4:5's grou
     own = episode_address(activation_id)
     try:
         record = await memory.get(own)
-    except MemoryStoreError:
+    except Exception:
+        # A read the answer no longer needs: once a ground holds it is yes, so going
+        # through every ground for the record never raises where the answer alone
+        # would not have read at all (ADR-0314 §2:4).
         if every and held:
             return True
         raise
@@ -524,8 +527,8 @@ async def read_outside_content(  # noqa: C901, PLR0911, PLR0912 — §4:5's grou
         return bool(held)
     try:
         episodes = await memory.get_many(shown)
-    except MemoryStoreError:
-        if every and held:
+    except Exception:
+        if every and held:  # as above: the answer is already yes
             return True
         raise
     for episode_id in shown:
