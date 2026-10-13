@@ -267,6 +267,14 @@ def _episode(
     )
 
 
+def _external(record: EpisodicMemory) -> EpisodicMemory:
+    """``record``, its provenance resting on recorded external content (ADR-0106 §1)."""
+    provenance = Provenance(
+        source=MemorySource.OBSERVED, confidence=0.5, last_updated=_AT, derived_from_external=True
+    )
+    return record.model_copy(update={"provenance": provenance})
+
+
 def _earlier(round_id: str = "round:earlier", **fields: Any) -> PlanningRound:
     values: dict[str, Any] = {"id": round_id, "recorded_at": _AT}
     values.update(fields)
@@ -869,6 +877,33 @@ async def test_an_outside_episodes_input_is_never_shown() -> None:
             },
             False,
             id="a-found-episodes-marked-notes-withheld",
+        ),
+        # #2876: an episode whose input came from outside is shown by its understood
+        # meaning, so it is read (ADR-0303 §3:2), whatever the audience, wherever shown.
+        pytest.param(
+            {"episodes": (_episode("activation:report", origin=InputOrigin.OUTSIDE),)},
+            True,
+            id="an-outside-episode-in-the-window",
+        ),
+        pytest.param(
+            {
+                "owner_records": False,
+                "recalled": (_episode("activation:report", origin=InputOrigin.OUTSIDE),),
+            },
+            True,
+            id="an-outside-episode-recall-found",
+        ),
+        # An episode shown marked by its provenance is read where planning shows it,
+        # not only through what the glue fetched (ADR-0106 §1).
+        pytest.param(
+            {"episodes": (_external(_episode("activation:report")),)},
+            True,
+            id="an-episode-in-the-window-resting-on-outside-content",
+        ),
+        pytest.param(
+            {"recalled": (_external(_episode("activation:report")),)},
+            True,
+            id="a-found-episode-resting-on-outside-content",
         ),
     ],
 )

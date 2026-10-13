@@ -94,7 +94,7 @@ from ai_assistant.core.types import (
     UserMessage,
 )
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
-from ai_assistant.orchestration.authorizer import AuthorizingStage
+from ai_assistant.orchestration.authorizer import AuthorizingStage, Verdict
 from ai_assistant.orchestration.chat import COULDNT_FINISH, ChatWriter, couldnt_finish
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
@@ -240,10 +240,12 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     wrap: Callable[[ChatWriter], MessageWriter] | None = None,
     recall_digest_wait: timedelta = timedelta(seconds=5),
     stories: FakeStoryStore | None = None,
+    capabilities: Sequence[str] = _CAPABILITIES,
 ) -> Callable[[Harness], PhasePath]:
     """The thin path as the composition root builds it, over the harness's own stores.
 
-    ``stories`` wires the story views (ADR-0307 §6:1) over that story store.
+    ``stories`` wires the story views (ADR-0307 §6:1) over that story store, and
+    ``capabilities`` names the capabilities planning is offered.
     """
 
     def build(harness: Harness) -> PhasePath:
@@ -287,7 +289,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             tools=tools,
             plans=harness.plans,
             writer=place if writer is None else writer,
-            capabilities=_CAPABILITIES,
+            capabilities=tuple(capabilities),
             round_limit=3,
             round_wait=timedelta(seconds=5),
             excerpt_chars=2000,
@@ -2068,6 +2070,186 @@ async def test_the_story_views_are_read_again_for_each_round() -> None:
     first, second = (json.loads(one.messages[1].content)["stories"][0] for one in completer.calls)
     assert first["notes_since_tidied"] == "none"
     assert [one["text"] for one in second["notes_since_tidied"]] == ["Written meanwhile."]
+
+
+# --- what counts as outside content read, under the real policy (#2875, #2876) ----------
+
+#: A read that leaves the hub and changes nothing, which the real policy allows where the
+#: activation has read no outside content, and which the stand-in otherwise sends to the
+#: user (ADR-0306 §4:4).
+_LOOKUP: Final = ToolDefinition(
+    id="lookup",
+    capability="lookup",
+    description="Look up the weather for a place.",
+    risk_level=RiskLevel.LOW,
+    reversibility=Reversibility.REVERSIBLE,
+    side_effecting=False,
+    reads=(),
+    writes=(),
+    discloses=(),
+    cost=ToolCost(basis=CostBasis.FREE),
+    idempotency=Idempotency.NATURAL,
+    effect=CapabilityEffect.NONE,
+    leaves_hub=True,
+    result=CapabilityResult.NO_OUTSIDE_TEXT,
+    outcome_can_be_unknown=False,
+    safe_to_repeat=True,
+    parameters_schema={
+        "type": "object",
+        "properties": {"place": {"type": "string"}},
+        "required": ["place"],
+        "additionalProperties": False,
+    },
+)
+
+
+def _real_policy() -> ThresholdActionPolicy:
+    """The deployment's own policy, as B4b's end-to-end case builds it."""
+    return ThresholdActionPolicy(
+        grants=FakeRecipientGrantStore(now=lambda: AT), configured_search=_CONFIGURED_SEARCH
+    )
+
+
+async def _planned_and_authorized(
+    completer: FakeToolCallingCompleter,
+    *,
+    memory: FakeMemoryStore,
+    stories: FakeStoryStore | None = None,
+    understanding_fetch: Fetched | None = None,
+    recalled: Recalled | None = None,
+) -> PhaseWorking:
+    """One round planned and authorized under the real policy, the lookup offered."""
+    harness = Harness(
+        planner=NoStepPlanner(),
+        understanding=understanding_stage(),
+        tools=(_BOOK, _LOOKUP),
+        memory=memory,
+    )
+    await memory.add(_episode())
+    path = _phases(
+        completer,
+        policy=_real_policy(),
+        stories=stories,
+        capabilities=(*_CAPABILITIES, "lookup"),
+    )(harness)
+    working = _begun(path)
+    given = _Given(
+        deadline=asyncio.get_running_loop().time() + _SETTLE,
+        phases=working,
+        understanding_fetch=understanding_fetch,
+        recalled=recalled,
+    )
+    stages = {one.name: one for one in path.stages()}
+    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING):
+        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+    return working
+
+
+def _look_and_remember() -> FakeToolCallingCompleter:
+    return FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(
+                _call("c1", "lookup", place="Riverside"),
+                _call("c2", "remember", statement="The user prefers the morning."),
+            ),
+            notes="checking the weather",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("note", "verdict"),
+    [
+        pytest.param(None, Verdict.ALLOWED, id="no-note"),
+        pytest.param(StoryNoteAuthor.OWNER, Verdict.ALLOWED, id="the-owners-unmarked-note"),
+        pytest.param(StoryNoteAuthor.PLANNING, Verdict.NEEDS_YOU, id="a-marked-note"),
+    ],
+)
+async def test_a_story_note_counts_as_outside_content_by_its_mark(
+    note: StoryNoteAuthor | None, verdict: Verdict
+) -> None:
+    """#2875, ADR-0306 §4:5, ADR-0303 §3:1: a marked note is read; the owner's is not.
+
+    An activation shown only the owner's note has a call that leaves the hub and a
+    remember allowed exactly as without the note, and remembers the statement
+    unmarked (ADR-0106 §1); one shown a marked note has both come back *needs you*.
+    """
+    stories = FakeStoryStore(now=lambda: AT)
+    trip = (
+        await stories.create(
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)],
+            actor=StoryActor.OWNER,
+        )
+    ).story_id
+    assert trip is not None
+    if note is StoryNoteAuthor.OWNER:
+        await stories.append_note(trip, "I prefer the morning.", author=note)
+    elif note is StoryNoteAuthor.PLANNING:
+        await stories.append_note(
+            trip, "The email said it moved.", author=note, written_during="past", outside=True
+        )
+    completer = _look_and_remember()
+
+    working = await _planned_and_authorized(
+        completer, memory=FakeMemoryStore(now=lambda: AT), stories=stories
+    )
+
+    shown = json.loads(completer.calls[0].messages[1].content)["stories"][0]
+    if note is not None:
+        # Shown under its label, which authorizing reads the mark of.
+        (shown_note,) = shown["notes_since_tidied"]
+        assert shown_note["label"] == "N1"
+    decided = working.latest.authorization
+    assert decided is not None
+    assert [one.verdict for one in decided.verdicts] == [verdict, verdict]
+    marked = verdict is Verdict.NEEDS_YOU
+    assert decided.read_outside_content is marked
+    assert working.latest.planned.round.notes_marked is marked
+    if not marked:
+        (_, remembered) = decided.allowed
+        assert remembered.call.request.parameters["rests_on_outside_content"] is False
+
+
+def _from_outside(episode_id: str) -> EpisodicMemory:
+    """A frozen episode whose input came from outside, its provenance unmarked (#2876)."""
+    record = _past_episode(episode_id, origin=InputOrigin.OUTSIDE)
+    assert not record.provenance.derived_from_external
+    return record
+
+
+async def test_an_outside_episode_in_the_episode_window_marks_the_rounds_notes() -> None:
+    """#2876, ADR-0303 §3:2, ADR-0307 §4:3: the notes are marked, and authorizing agrees."""
+    report = _from_outside("activation:report")
+    working = await _planned_and_authorized(
+        _look_and_remember(),
+        memory=FakeMemoryStore(now=lambda: AT),
+        understanding_fetch=Fetched(episodes=(report,), recalled=(), fetched=(), missing=()),
+    )
+
+    assert working.fetched_outside
+    assert working.latest.planned.round.notes_marked
+    decided = working.latest.authorization
+    assert decided is not None
+    assert decided.read_outside_content
+    assert [one.verdict for one in decided.verdicts] == [Verdict.NEEDS_YOU] * 2
+
+
+async def test_an_outside_episode_recall_found_marks_the_rounds_notes() -> None:
+    """#2876: recall's found episodes are counted as the episode window's are."""
+    memory = FakeMemoryStore(now=lambda: AT)
+    await memory.add(_from_outside("activation:report"))
+    working = await _planned_and_authorized(
+        _look_and_remember(), memory=memory, recalled=_found("activation:report")
+    )
+
+    assert working.found is not None
+    assert working.found.fetched == ("activation:report",)
+    assert working.fetched_outside
+    assert working.latest.planned.round.notes_marked
+    decided = working.latest.authorization
+    assert decided is not None
+    assert decided.read_outside_content
+    assert [one.verdict for one in decided.verdicts] == [Verdict.NEEDS_YOU] * 2
 
 
 # --- with the opt-in unset ---------------------------------------------------------------
