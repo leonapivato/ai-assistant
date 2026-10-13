@@ -131,7 +131,12 @@ def test_the_recall_enumerations_carry_exactly_the_members_the_adr_lists() -> No
         "failed",
         "timed_out",
     ]
-    assert [member.value for member in RecallCue] == ["activation_input"]
+    # ADR-0308 §7: the second run's two kinds of cue, added and never renamed.
+    assert [member.value for member in RecallCue] == [
+        "activation_input",
+        "understood_meaning",
+        "understood_phrase",
+    ]
     assert [member.value for member in RecallProvenance] == ["user", "outside"]
 
 
@@ -251,7 +256,7 @@ def test_a_recall_is_bounded_by_the_types_ceiling() -> None:
 def test_the_record_defaults_to_no_recall_at_the_current_schema_version() -> None:
     record = _record()
     assert record.recall is None
-    assert record.schema_version == 8
+    assert record.schema_version == 9
 
 
 def test_a_schema_3_record_is_refused() -> None:
@@ -276,6 +281,45 @@ def test_the_record_carries_a_recall_result() -> None:
 def test_a_record_round_trips_with_its_recall() -> None:
     record = _record(recall=_recall(outcome=RecallOutcome.NOTHING_FOUND, items=()))
     assert EpisodeProcessingRecord.model_validate_json(record.model_dump_json()) == record
+
+
+# --- ADR-0308 §7: the second run's record ----------------------------------------------
+
+
+def _second_run(**overrides: object) -> ActivationRecall:
+    fields: dict[str, object] = {
+        "cues": (RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_PHRASE),
+        "items": (_item(found_by=(RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_PHRASE)),),
+    }
+    fields.update(overrides)
+    return _recall(**fields)
+
+
+def test_the_record_defaults_to_no_second_run() -> None:
+    assert _record().recall_second_run is None
+
+
+def test_the_record_carries_the_second_run_beside_the_first() -> None:
+    first, second = _recall(), _second_run()
+    record = _record(recall=first, recall_second_run=second)
+    assert (record.recall, record.recall_second_run) == (first, second)
+
+
+def test_a_resume_carries_no_second_run() -> None:
+    with pytest.raises(ValidationError, match="carries no recall result"):
+        _record(trigger=_RESUME, recall_second_run=_second_run())
+
+
+def test_a_record_round_trips_with_its_second_run() -> None:
+    record = _record(recall=_recall(), recall_second_run=_second_run())
+    assert EpisodeProcessingRecord.model_validate_json(record.model_dump_json()) == record
+
+
+def test_a_second_run_that_failed_carries_its_cues_and_no_items() -> None:
+    failed = _second_run(outcome=RecallOutcome.FAILED, items=())
+    assert _record(recall_second_run=failed).recall_second_run == failed
+    with pytest.raises(ValidationError):
+        _second_run(outcome=RecallOutcome.FAILED)
 
 
 # --- §7: the memory referent ----------------------------------------------------------

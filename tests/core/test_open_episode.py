@@ -309,6 +309,14 @@ def test_the_freezing_revision_may_record_the_omission() -> None:
                 )
             },
         ),
+        (
+            {},
+            {
+                "recall_second_run": ActivationRecall(
+                    outcome=RecallOutcome.NOTHING_FOUND, cues=(RecallCue.UNDERSTOOD_MEANING,)
+                )
+            },
+        ),
         ({}, {"response_degraded": True}),
         ({}, {"output_degraded": True}),
         ({}, {"understanding": (_understanding(1),)}),
@@ -418,6 +426,26 @@ def test_an_episode_without_a_processing_record_neither_extends_nor_is_extended(
                     outcome=RecallOutcome.FAILED, cues=(RecallCue.ACTIVATION_INPUT,)
                 )
             },
+        ),
+        (
+            {
+                "recall_second_run": ActivationRecall(
+                    outcome=RecallOutcome.NOTHING_FOUND, cues=(RecallCue.UNDERSTOOD_MEANING,)
+                )
+            },
+            {
+                "recall_second_run": ActivationRecall(
+                    outcome=RecallOutcome.FAILED, cues=(RecallCue.UNDERSTOOD_MEANING,)
+                )
+            },
+        ),
+        (
+            {
+                "recall_second_run": ActivationRecall(
+                    outcome=RecallOutcome.NOTHING_FOUND, cues=(RecallCue.UNDERSTOOD_MEANING,)
+                )
+            },
+            {"recall_second_run": None},
         ),
         ({}, {"started_at": _LATER}),
         ({}, {"trigger": RecordedResumeTrigger(channel=None, approved=True)}),

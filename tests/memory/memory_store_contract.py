@@ -1520,7 +1520,7 @@ class MemoryStoreContract:
         got = await store.get("understood")
         assert isinstance(got, EpisodicMemory)
         assert got.processing_record is not None
-        assert got.processing_record.schema_version == 8
+        assert got.processing_record.schema_version == 9
         assert got.processing_record.understanding == (version,)
         assert got.processing_record.understanding[0].meaning_referents[0].id == " "
         assert got.processing_record.understanding_omitted is None
@@ -6596,6 +6596,35 @@ class MemoryStoreContract:
         with pytest.raises(MemoryStoreError):
             await _replace(store, _revised(twice, processing={"digests": (edited, failed)}), door)
         assert _unstamped_or_none(await store.get("episode")) == twice
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    async def test_the_guard_admits_the_second_recall_taking_its_value(
+        self, store: MemoryStore, door: str
+    ) -> None:
+        """ADR-0308 §7: recall's second run takes its value once, beside the first's.
+
+        A second-run decision once recorded is kept: a revision replacing it is refused,
+        and the stored episode keeps the decision as it was recorded.
+        """
+        first = ActivationRecall(
+            outcome=RecallOutcome.NOTHING_FOUND, cues=(RecallCue.ACTIVATION_INPUT,)
+        )
+        second = ActivationRecall(
+            outcome=RecallOutcome.NOTHING_FOUND,
+            cues=(RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_PHRASE),
+        )
+        opened = _revised(_open_episode("episode"), processing={"recall": first})
+        await store.add(opened)
+        recorded = _revised(opened, processing={"recall_second_run": second})
+        await _replace(store, recorded, door)
+        assert _unstamped_or_none(await store.get("episode")) == recorded
+
+        failed = second.model_copy(update={"outcome": RecallOutcome.FAILED})
+        with pytest.raises(MemoryStoreError):
+            await _replace(
+                store, _revised(recorded, processing={"recall_second_run": failed}), door
+            )
+        assert _unstamped_or_none(await store.get("episode")) == recorded
 
     @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
     async def test_the_guard_admits_a_placement_only_change_to_a_frozen_episode(

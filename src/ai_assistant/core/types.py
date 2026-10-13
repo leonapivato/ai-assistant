@@ -4047,6 +4047,9 @@ class ControllerRule(StrEnum):
     """Every call of the latest round has finished, and one brought a result, was not
     done, came back unknown, needed the user or was refused, or the round was marked
     (ADR-0307 §8:1): ``planning`` is due."""
+    UNDERSTOOD_NOT_RECALLED = "understood_not_recalled"
+    """An understanding is recorded on the pass and there is no second-run decision
+    (ADR-0308 §2:9, ADR-0309 §3): ``recall`` is due, its second run."""
 
 
 #: The rules that end a pass rather than make a stage due (ADR-0280 §4, §5).
@@ -4141,12 +4144,17 @@ class RecallOutcome(StrEnum):
 class RecallCue(StrEnum):
     """What recall searched with (ADR-0281 §3, §6).
 
-    Closed, **added to and never renamed**. One member today; later sources, such
-    as recall cued by understanding and candidate stories, add members rather than
-    reshape the record.
+    Closed, **added to and never renamed**. The first run's one cue, and the second
+    run's two kinds (ADR-0308 §2:2, §7); later sources, such as candidate stories, add
+    members rather than reshape the record.
     """
 
     ACTIVATION_INPUT = "activation_input"
+    UNDERSTOOD_MEANING = "understood_meaning"
+    """Recall's second run, cued by the latest understanding's ``meaning`` (ADR-0308 §2:2)."""
+    UNDERSTOOD_PHRASE = "understood_phrase"
+    """Recall's second run, cued by the ``phrase`` of one of the latest understanding's
+    ``references``, resolved or not (ADR-0308 §2:2)."""
 
 
 class RecallProvenance(StrEnum):
@@ -4511,10 +4519,14 @@ class EpisodeProcessingRecord(BaseModel):
     named once, in the order they were assigned (ADR-0307 §2:3, §5:7). ``digests`` are
     the activation's digests, in the order they were recorded (ADR-0308 §5:2). All
     three are appended to as the episode is extended and default to empty.
+
+    ``recall_second_run`` is recall's second decision, made on what understanding
+    found (ADR-0308 §2, §7), held beside the first's ``recall``. It is ``None`` where
+    no second run was decided, and on a resume always, as ``recall`` is.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    schema_version: Literal[8] = 8
+    schema_version: Literal[9] = 9
     activation_id: Identifier
     started_at: UtcInstant
     ended_at: UtcInstant | None = None
@@ -4533,6 +4545,7 @@ class EpisodeProcessingRecord(BaseModel):
     rounds: tuple[PlanningRound, ...] = ()
     labels: tuple[PlanningLabel, ...] = ()
     digests: tuple[ActivationDigest, ...] = ()
+    recall_second_run: ActivationRecall | None = None
 
     @property
     def is_open(self) -> bool:
@@ -4604,7 +4617,10 @@ class EpisodeProcessingRecord(BaseModel):
     @model_validator(mode="after")
     def _no_recall_on_a_resume(self) -> Self:
         # ADR-0281 §6: a resume keeps its legacy path, and recall makes no decision on it.
-        if isinstance(self.trigger, RecordedResumeTrigger) and self.recall is not None:
+        # ADR-0308 §7: nor a second run's.
+        if isinstance(self.trigger, RecordedResumeTrigger) and (
+            self.recall is not None or self.recall_second_run is not None
+        ):
             msg = "a resume's processing record carries no recall result"
             raise ValueError(msg)
         return self
