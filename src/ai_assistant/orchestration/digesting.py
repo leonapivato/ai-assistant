@@ -80,7 +80,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import checked_clock
-from ai_assistant.core.diagnostics import write_diagnostic, write_failure
+from ai_assistant.core.diagnostics import failure_body, write_diagnostic
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     ActivationDigest,
@@ -431,6 +431,11 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _digest_of(result_id: str | None, question: str) -> dict[str, object]:
+    """Which digest a diagnostic entry belongs to: its result, or none for recall's."""
+    return {"result": result_id, "question": question}
+
+
 class DigestingStage:
     """Digest one held result into marked evidence, recorded with the episode (ADR-0308 §4)."""
 
@@ -497,7 +502,7 @@ class DigestingStage:
         question = _QUESTION.validate_python(question)
         result_id = str(held.result_id)
         record = _Record(kind=LabelKind.RESULT, thing=result_id, text=_as_text(held.content))
-        kept = await self._read(question, [record], deadline)
+        kept = await self._read(question, [record], deadline, result_id=result_id)
         return await self._recorded(question, kept, labels, result_id=result_id)
 
     async def digest_recall(
@@ -584,7 +589,7 @@ class DigestingStage:
         if not records:
             _log.info("digest_skipped", stage="digesting", reason="nothing_fetched")
             return None
-        kept = await self._read(question, records, deadline)
+        kept = await self._read(question, records, deadline, result_id=result)
         return await self._recorded(question, kept, labels, result_id=result)
 
     async def _fetched(
@@ -635,7 +640,11 @@ class DigestingStage:
                 self._diagnostics,
                 DiagnosticSource.DIGESTING,
                 DiagnosticKind.RETURNED,
-                lambda: {"digest": "failed", "reason": failure},
+                lambda: {
+                    **_digest_of(result_id, question),
+                    "digest": "failed",
+                    "reason": failure,
+                },
             )
             digest = ActivationDigest(
                 result=result_label,
@@ -664,12 +673,18 @@ class DigestingStage:
         )
 
     async def _read(
-        self, question: str, records: Sequence[_Record], deadline: datetime
+        self,
+        question: str,
+        records: Sequence[_Record],
+        deadline: datetime,
+        *,
+        result_id: str | None,
     ) -> list[_Kept] | DigestFailure:
         """Read ``records`` in parts, in parallel; their kept items in part order, or why not.
 
         A reason is a failed digest (§4:11): a part's call raised, its reply did not
-        parse, or the deadline passed before every part answered.
+        parse, or the deadline passed before every part answered. ``result_id`` names
+        the digest in the diagnostic record, which the parts' entries carry.
         """
         parts = _parts(records, self._part_chars)
         # The budget is read after the parts are cut, so their cutting is inside it,
@@ -681,7 +696,7 @@ class DigestingStage:
         escaped: Exception | None = None
         try:
             async with asyncio.timeout(remaining):
-                return await self._every_part(question, parts, deadline)
+                return await self._every_part(question, parts, deadline, result_id)
         except TimeoutError:
             _log.info("digest_failed", stage="digesting", reason="deadline")
             return "deadline"
@@ -699,15 +714,44 @@ class DigestingStage:
         raise escaped
 
     async def _every_part(
-        self, question: str, parts: Sequence[Sequence[_Piece]], deadline: datetime
+        self,
+        question: str,
+        parts: Sequence[Sequence[_Piece]],
+        deadline: datetime,
+        result_id: str | None,
     ) -> list[_Kept]:
         """Every part's call, in parallel; the first to fail cancels the rest (§4:9)."""
         async with asyncio.TaskGroup() as group:
-            tasks = [group.create_task(self._part(question, part, deadline)) for part in parts]
+            tasks = [
+                group.create_task(
+                    self._part(
+                        question,
+                        part,
+                        deadline,
+                        about={
+                            **_digest_of(result_id, question),
+                            "part": number,
+                            "parts": len(parts),
+                        },
+                    )
+                )
+                for number, part in enumerate(parts, start=1)
+            ]
         return [one for task in tasks for one in task.result()]
 
-    async def _part(self, question: str, part: Sequence[_Piece], deadline: datetime) -> list[_Kept]:
+    async def _part(
+        self,
+        question: str,
+        part: Sequence[_Piece],
+        deadline: datetime,
+        *,
+        about: Mapping[str, object],
+    ) -> list[_Kept]:
         """One part's call: its records under local labels, and the items it kept.
+
+        ``about`` names the digest and the part in each diagnostic entry the part
+        writes, so parts that run in parallel, each with labels from ``D1``, are told
+        apart (ADR-0314 §4).
 
         Raises:
             _PartFailed: If the deadline has passed before the call is made; the call
@@ -737,7 +781,7 @@ class DigestingStage:
             self._diagnostics,
             DiagnosticSource.DIGESTING,
             DiagnosticKind.GIVEN,
-            lambda: {"messages": [one.model_dump(mode="json") for one in messages]},
+            lambda: {**about, "messages": [one.model_dump(mode="json") for one in messages]},
         )
         try:
             reply = await self._provider.complete(messages)
@@ -745,14 +789,14 @@ class DigestingStage:
             task = asyncio.current_task()
             if task is not None and task.cancelling():
                 raise  # the digest, or its group, was cancelled: let it unwind
-            await self._part_failed(asyncio.CancelledError())
+            await self._part_failed(asyncio.CancelledError(), about)
             raise _PartFailed("raised") from None
         except Exception as exc:  # §4:11: a call that raises fails the digest, whatever it raised
-            await self._part_failed(exc)
+            await self._part_failed(exc, about)
             raise _PartFailed("raised") from exc
         proposed = _parsed(reply.content)
         if proposed is None:
-            await self._part_returned(reply.content, dropped=(), parsed=False)
+            await self._part_returned(reply.content, about, dropped=(), parsed=False)
             raise _PartFailed("unparsable")
         local = {name: record for record, name in names.items()}
         kept: list[_Kept] = []
@@ -765,20 +809,30 @@ class DigestingStage:
                 dropped.append({"source": item.source, "text": item.text})
                 continue
             kept.append(_Kept(text=item.text, record=record))
-        await self._part_returned(reply.content, dropped=tuple(dropped), parsed=True)
+        await self._part_returned(reply.content, about, dropped=tuple(dropped), parsed=True)
         return kept
 
-    async def _part_failed(self, error: BaseException) -> None:
+    async def _part_failed(self, error: BaseException, about: Mapping[str, object]) -> None:
         """Write a part's returned entry as the failure its call ended in (§4)."""
-        await write_failure(self._diagnostics, DiagnosticSource.DIGESTING, error)
+        await write_diagnostic(
+            self._diagnostics,
+            DiagnosticSource.DIGESTING,
+            DiagnosticKind.RETURNED,
+            lambda: {**about, "failure": failure_body(error)},
+        )
 
     async def _part_returned(
-        self, reply: str, *, dropped: tuple[dict[str, str], ...], parsed: bool
+        self,
+        reply: str,
+        about: Mapping[str, object],
+        *,
+        dropped: tuple[dict[str, str], ...],
+        parsed: bool,
     ) -> None:
         """Write a part's reply and the items dropped from it (ADR-0314 §4)."""
 
         def body() -> dict[str, object]:
-            returned: dict[str, object] = {"reply": reply, "dropped": list(dropped)}
+            returned: dict[str, object] = {**about, "reply": reply, "dropped": list(dropped)}
             if not parsed:
                 returned["failure"] = "unparsable"
             return returned

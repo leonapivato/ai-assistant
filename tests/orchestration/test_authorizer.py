@@ -996,7 +996,10 @@ async def test_a_round_whose_checking_fails_is_written_as_far_as_it_got() -> Non
     body = entry.model_dump(mode="json")["body"]
     assert body["failure"]["class"] == "AuditError"
     (call,) = body["calls"]
-    assert call["checks"] == [{"check": "selection", "verdict": "passed", "reason": None}]
+    assert [(one["check"], one["verdict"]) for one in call["checks"]] == [
+        ("selection", "passed"),
+        ("policy", "allow"),
+    ]
     assert call["verdict"] is None
 
 

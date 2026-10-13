@@ -23,8 +23,10 @@ import structlog
 from diagnostic_contracts import DiagnosticRetentionContract, DiagnosticSinkContract
 
 from ai_assistant.core.diagnostics import DIAGNOSTIC_NOT_WRITTEN
+from ai_assistant.core.errors import DiagnosticRecordError
 from ai_assistant.core.types import DiagnosticEntry, DiagnosticKind, DiagnosticSource
 from ai_assistant.evaluation import FileDiagnosticRecord
+from ai_assistant.evaluation import diagnostic_record as store_module
 from ai_assistant.evaluation.diagnostic_record import MIN_FILE_BYTES, SUFFIX
 from ai_assistant.testing import diagnostic_entry
 from ai_assistant.testing.cancellation import (
@@ -314,3 +316,72 @@ async def test_a_swept_activation_may_be_written_again(tmp_path: Path) -> None:
     await record.write(diagnostic_entry(body={"n": 1}))
 
     assert len(_entries(directory, DEFAULT_DIAGNOSED_ACTIVATION)) == 1
+
+
+def _torn(monkeypatch: pytest.MonkeyPatch, *, after: int) -> None:
+    """Make the next append write ``after`` bytes and then find the disk full."""
+    original = store_module._write
+    state = {"armed": True}
+
+    def write(descriptor: int, data: memoryview) -> int:
+        if not state["armed"]:
+            return original(descriptor, data)
+        state["armed"] = False
+        original(descriptor, data[:after])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(store_module, "_write", write)
+
+
+async def test_an_append_that_fails_part_way_is_cut_back_and_the_next_line_lands_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§6:2: each line lands whole; a torn one never joins the next."""
+    record = FileDiagnosticRecord(directory=tmp_path / "diagnostics", file_bytes=_BOUND)
+    await record.write(diagnostic_entry(body={"n": 1}))
+    path = tmp_path / "diagnostics" / f"{DEFAULT_DIAGNOSED_ACTIVATION}.jsonl"
+    before = path.read_bytes()
+    _torn(monkeypatch, after=7)
+
+    with structlog.testing.capture_logs() as captured:
+        await record.write(diagnostic_entry(body={"n": 2}))
+    assert path.read_bytes() == before
+    await record.write(diagnostic_entry(body={"n": 3}))
+
+    assert [one["body"]["n"] for one in _lines(path)] == [1, 3]
+    assert [one["event"] for one in captured] == [DIAGNOSTIC_NOT_WRITTEN]
+
+
+async def test_a_truncation_marker_that_fails_part_way_is_cut_back_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = FileDiagnosticRecord(directory=tmp_path / "diagnostics", file_bytes=MIN_FILE_BYTES)
+    await record.write(diagnostic_entry(body={"n": 1}))
+    path = tmp_path / "diagnostics" / f"{DEFAULT_DIAGNOSED_ACTIVATION}.jsonl"
+    before = path.read_bytes()
+    _torn(monkeypatch, after=5)
+
+    await record.write(diagnostic_entry(body={"text": "x" * MIN_FILE_BYTES}))
+
+    assert path.read_bytes() == before
+
+
+async def test_a_symbolic_link_in_the_directorys_place_is_neither_written_nor_swept(
+    tmp_path: Path,
+) -> None:
+    """§2:3, §7:2: the record's files are reached through the directory it verified."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    bystander = elsewhere / "keep.txt"
+    bystander.write_text("not the record's", encoding="utf-8")
+    old = (DEFAULT_RECORDED_AT - timedelta(days=400)).timestamp()
+    os.utime(bystander, (old, old))
+    directory = tmp_path / "diagnostics"
+    directory.symlink_to(elsewhere, target_is_directory=True)
+    record = FileDiagnosticRecord(directory=directory, file_bytes=_BOUND)
+
+    await record.write(diagnostic_entry())
+    with pytest.raises(DiagnosticRecordError):
+        await record.purge_before(DEFAULT_RECORDED_AT)
+
+    assert sorted(one.name for one in elsewhere.iterdir()) == ["keep.txt"]

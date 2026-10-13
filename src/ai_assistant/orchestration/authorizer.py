@@ -848,8 +848,6 @@ class AuthorizingStage:
             state.note(one.call, "request", ruled.verdict.value, ruled.reason)
             state.verdicts.append(ruled)
             return
-        ruling = ruled.decision.ruling
-        state.note(one.call, "policy", ruling.outcome.value, ruling.reason)
         verdict = await self._after_the_policy(one.call, ruled, state)
         state.verdicts.append(verdict)
         if verdict.verdict is Verdict.ALLOWED:
@@ -949,6 +947,9 @@ class AuthorizingStage:
             return _not_done(call, _MALFORMED)
         effect_id = self._new_effect_id() if gets_effect_record(request.tool) else None
         ruling = await self._policy.decide(_detached_request(request))
+        # Noted as the policy answers, so a check reached is in the record even where
+        # appending its ruling to the trail then fails (ADR-0314 §4).
+        state.note(call, "policy", ruling.outcome.value, ruling.reason)
         decision = await self._recorded(request, ruling, effect_id)
         return _Ruled(request=request, decision=decision, effect_id=effect_id)
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
 from pathlib import Path
 from typing import Final
 
@@ -70,13 +71,18 @@ def test_the_store_opens_no_file_for_reading() -> None:
 
     assert not (named & {"O_RDONLY", "O_RDWR"})
     assert not (calls & reads - {"open"}), calls & reads
-    # The one ``open`` is ``os.open``, write-only and appending.
-    assert [
-        ast.unparse(node.func)
+    # Every ``open`` is ``os.open``, with one of two sets of flags: a file's, which are
+    # write-only and appending, and the directory's, which open its listing alone.
+    opened = [
+        node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "open"
-    ] == ["os.open"]
-    assert "os.O_WRONLY" in inspect.getsource(store_module)
+    ]
+    assert [ast.unparse(node.func) for node in opened] == ["os.open"] * len(opened)
+    assert {ast.unparse(node.args[1]) for node in opened} == {"_OPEN_FLAGS", "_DIRECTORY_FLAGS"}
+    assert store_module._OPEN_FLAGS & os.O_ACCMODE == os.O_WRONLY
+    assert store_module._OPEN_FLAGS & os.O_APPEND
+    assert store_module._DIRECTORY_FLAGS & os.O_DIRECTORY
 
 
 def _naming(*names: str) -> set[str]:
