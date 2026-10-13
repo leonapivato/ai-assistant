@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -38,9 +39,15 @@ _SHOWN: Final = 10_000
 
 
 @pytest.fixture
-def server(tmp_path: Path) -> Iterator[Any]:
-    """The viewer on loopback over a record written by ADR-0314's store."""
-    with serving(write_record(tmp_path)) as bound:
+def record(tmp_path: Path) -> Path:
+    """A record written by ADR-0314's store."""
+    return write_record(tmp_path)
+
+
+@pytest.fixture
+def server(record: Path) -> Iterator[Any]:
+    """The viewer on loopback over ``record``."""
+    with serving(record) as bound:
         yield bound
 
 
@@ -110,3 +117,47 @@ async def test_a_drawer_shows_only_what_the_last_click_asked_for(
         shown = await headings.all_text_contents()
         assert all(not one.startswith("planning") for one in shown), shown
         await expect(page.locator("#drawer-title")).not_to_contain_text("planning")
+
+
+async def test_a_span_of_a_century_draws_a_handful_of_ticks(
+    server: Any, record: Path, gateway_browser: Browser
+) -> None:
+    lines: list[dict[str, object]] = [
+        {
+            "activation_id": "wide",
+            "source": "planning",
+            "kind": "given",
+            "recorded_at": when,
+            "body": {},
+        }
+        for when in ("1900-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00")
+    ]
+    (record / "wide.jsonl").write_text("".join(json.dumps(one) + "\n" for one in lines))
+    async with _page(gateway_browser) as page:
+        await _open(page, server.port, "wide")
+        await expect(page.locator(".tl-lane").first).to_be_visible(timeout=_SHOWN)
+        assert 2 <= await page.locator(".tick").count() <= 8
+        lanes = await page.locator(".tl-lane").count()
+        assert await page.locator(".grid").count() <= 8 * lanes
+
+
+async def test_a_change_of_activation_takes_the_old_details_down_at_once(
+    server: Any, gateway_browser: Browser
+) -> None:
+    released = asyncio.Event()
+
+    async def hold_act_2(route: Route) -> None:
+        if "id=act-2" in route.request.url:
+            await released.wait()
+        await route.continue_()
+
+    async with _page(gateway_browser) as page:
+        await page.route("**/api/activation?*", hold_act_2)
+        await _open(page, server.port, "act-1")
+        await expect(page.locator(".round")).to_have_count(2, timeout=_SHOWN)
+        await page.evaluate("location.hash = 'act-2'")
+        # While act-2's details are still loading, nothing of act-1's is on show.
+        await expect(page.locator("#detail-body")).to_be_hidden()
+        await expect(page.locator("#detail-empty")).to_have_text("Loading…")
+        released.set()
+        await expect(page.locator("#d-input")).to_have_text("hello", timeout=_SHOWN)
