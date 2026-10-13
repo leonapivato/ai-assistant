@@ -30,7 +30,9 @@ from ai_assistant.core.types import (
     DigestOutcome,
     EvidenceItem,
     InputOrigin,
+    LabelKind,
     MemoryKind,
+    PlanningLabel,
     ProposedCall,
     RecallCue,
     RecalledItem,
@@ -91,8 +93,13 @@ def _path(
     harness: Harness,
     sink: FakeDiagnosticSink,
     stories: FakeStoryStore | None = None,
+    *,
+    look_ups: bool = False,
 ) -> PhasePath:
-    """The thin path over the harness's own stores, writing the diagnostic record."""
+    """The thin path over the harness's own stores, writing the diagnostic record.
+
+    ``look_ups`` offers planning's look-ups, a story read among them (ADR-0307 §6:6).
+    """
     return phase_path(
         completer,
         invoker=harness.invoker,
@@ -101,17 +108,19 @@ def _path(
         trail=harness.trail,
         conversations=harness.conversation_store,
         stories=stories,
+        look_ups=look_ups,
         diagnostics=sink,
     )
 
 
-def _begun(path: PhasePath) -> PhaseWorking:
+def _begun(path: PhasePath, labels: tuple[PlanningLabel, ...] = ()) -> PhaseWorking:
     return path.begin(
         activation_id=_ACTIVATION,
         window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
         conversation_id="c1",
         trigger_origin=InputOrigin.USER,
         owner_records=True,
+        labels=labels,
     )
 
 
@@ -278,6 +287,69 @@ async def test_a_story_view_names_its_summary_note_and_moment_once_each_every_ro
         {"ground": "outside_episode_shown", "record": "activation:report"},
     ]
     assert _grounds(sink) == [each_once, each_once]
+
+
+async def test_a_story_read_names_the_marked_note_its_view_shows_once() -> None:
+    """#2922: a story's full view, read by a story read, names what it rests on.
+
+    The story is none of the activation's own and no referent of understanding's, so
+    planning is shown no view of it before it reads one: only the read can say outside
+    content was read. Its full view shows a marked note, which the next authorizing
+    entry names once, by its id, as the story views' notes are named.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(ProposedCall(call_id="c1", name="read_story", arguments={"story": "S1"}),)
+        ),
+        RoundResponse(calls=(_book(),), notes="the venue answered"),
+    )
+    harness = phases_harness(completer)
+    await harness.memory.add(_episode())
+    await harness.memory.add(_past_episode("activation:past"))
+    stories = FakeStoryStore(now=lambda: _AT)
+    trip = (
+        await stories.create(
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="past")], actor=StoryActor.OWNER
+        )
+    ).story_id
+    assert trip is not None
+    written = await stories.append_note(
+        trip,
+        "The venue says Saturday.",
+        author=StoryNoteAuthor.PLANNING,
+        written_during="past",
+        outside=True,
+    )
+    note = written.note
+    assert note is not None
+    sink = FakeDiagnosticSink()
+    path = _path(completer, harness, sink, stories, look_ups=True)
+    working = _begun(path, (PlanningLabel(label="S1", kind=LabelKind.STORY, id=trip),))
+    given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
+
+    await _rounds(
+        path,
+        given,
+        ControllerStage.PLANNING,
+        ControllerStage.AUTHORIZING,
+        ControllerStage.ACTING,
+        ControllerStage.PLANNING,
+        ControllerStage.AUTHORIZING,
+    )
+
+    (view,) = working.pages.values()
+    assert view.story_id == trip
+    (_, marked) = working.planning_rounds()
+    # Before the read, nothing outside; after it, the note, named once by its id.
+    assert _grounds(sink) == [
+        [],
+        [
+            {"ground": "fetched_outside", "record": str(note.note_id)},
+            {"ground": "notes_marked", "record": marked.id},
+            {"ground": "note_shown_marked", "record": str(note.note_id)},
+        ],
+    ]
+    assert list(working.fetched_outside_from) == [str(note.note_id)]
 
 
 async def test_a_digest_the_episode_and_the_working_set_both_hold_is_one_ground() -> None:
