@@ -70,7 +70,7 @@ from enum import StrEnum
 from functools import partial
 from itertools import count
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypeVar, cast
 
 import structlog
 
@@ -135,7 +135,6 @@ from ai_assistant.core.types import (
     ContinuationToken,
     ControllerRule,
     ControllerStage,
-    ConversationInputOptions,
     ConversationSummary,
     CoverageUnrecordedBinding,
     Disposition,
@@ -163,7 +162,6 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Modality,
-    NewConversation,
     NotificationDelivery,
     OperationConfirmation,
     OriginUnrecordedBinding,
@@ -193,7 +191,6 @@ from ai_assistant.core.types import (
     SpeechChannelPayload,
     SpeechFailure,
     SpokenAudioFormat,
-    SpokenChannelResult,
     SpokenDelivery,
     SpokenDeliveryState,
     SpokenRendering,
@@ -209,7 +206,6 @@ from ai_assistant.core.types import (
     StoryNoteId,
     StoryOutcome,
     TextChannelPayload,
-    TextChannelResult,
     TraceOutcome,
     TurnOutcome,
     TurnReference,
@@ -251,9 +247,6 @@ from ai_assistant.orchestration.channels import (
     ChannelProjection,
     ResolvedChannelInput,
     captured_result,
-    conversation_target,
-    spoken_result,
-    text_result,
 )
 from ai_assistant.orchestration.chat import (
     CHAT_TURN_BUDGET,
@@ -268,7 +261,6 @@ from ai_assistant.orchestration.controller import (
     ACTIVATION_RULES,
     DEFAULT_STAGE_RECORD_LIMIT,
     NO_VERDICT,
-    PHASE_RULES,
     ActivationController,
     ControllerStageRun,
     PassFacts,
@@ -482,7 +474,6 @@ if TYPE_CHECKING:
         StoryCandidates,
         StoryLinksStage,
     )
-    from ai_assistant.orchestration.story_tidy_up_interim import InterimTidyUp
     from ai_assistant.orchestration.understanding import (
         Fetched,
         UnderstandingStage,
@@ -2586,6 +2577,23 @@ def _windows_expired(working: _ActivationPass) -> Exception | None:
     return ModelTimeoutError(_WINDOWS_EXPIRED)
 
 
+def _retired(member: str) -> NoReturn:
+    """Refuse a member of the old path, which the cutover retired (ADR-0309 §2:6, §5:1).
+
+    Every activation runs through the phases, and the controller's one table has no row
+    for the old path's turn, so a member that would start one is refused before any
+    admission, store write or model call: never a half-run activation.
+
+    Raises:
+        ConfigurationError: Always.
+    """
+    msg = (
+        f"{member} retired at the cutover: every activation runs through the phases, so "
+        "write a message into a conversation instead (ADR-0309 §2:6, §5:1)"
+    )
+    raise ConfigurationError(msg)
+
+
 def _wired_phases(  # noqa: PLR0913 — the path, the two wirings it needs beside it, and the three seams it is handed
     phases: PhasePath | None,
     *,
@@ -2595,18 +2603,30 @@ def _wired_phases(  # noqa: PLR0913 — the path, the two wirings it needs besid
     spawn: Callable[[Coroutine[None, None, None]], None],
     closing: Callable[[], bool],
 ) -> PhasePath | None:
-    """The phases' thin path, wired only beside understanding and the chat's reader.
+    """The phases, wired beside understanding and the chat's reader.
 
     Planning's first round runs once understanding has recorded (ADR-0307 §8:6), and
-    the thin path plans the input the chat's reader takes in (ADR-0309 §2:6), and an
-    event ``receive`` admits (ADR-0313 §4:3). Its
-    recorders extend the episode through ``append``, and a tidy-up call nobody waits
-    on starts through ``spawn`` unless ``closing`` says shutdown has begun (§7:2).
+    the phases plan every activation: the input the chat's reader takes in, and an
+    event ``receive`` admits (ADR-0309 §2:6, ADR-0313 §4:3). Their recorders extend the
+    episode through ``append``, and a tidy-up call nobody waits on starts through
+    ``spawn`` unless ``closing`` says shutdown has begun (§7:2).
+
+    An engine built without them runs no activation: no reader, and an event refused
+    at admission. That is a suite holding the medium alone, or a surface no activation
+    reaches.
 
     Raises:
-        ConfigurationError: If the path is given without understanding or the reader.
+        ConfigurationError: If the path is given without understanding or the reader,
+            or the reader is on without the path, which every activation it starts
+            runs through.
     """
     if phases is None:
+        if chat_reader:
+            msg = (
+                "the chat's reader runs every activation through the phases, so it is "
+                "wired only beside them (ADR-0309 §2:6)"
+            )
+            raise ConfigurationError(msg)
         return None
     if not understanding or not chat_reader:
         msg = (
@@ -3210,7 +3230,6 @@ class Engine:
         story_summary_notes: int = DEFAULT_STORY_SUMMARY_VIEW_NOTES,
         story_candidates: StoryCandidates | None = None,
         story_links: StoryLinksStage | None = None,
-        interim_tidy_up: InterimTidyUp | None = None,
         matters_pass: MattersPass | None = None,
         authorization_operations: AuthorizationOperations | None = None,
         authorizations: AuthorizationResolution | None = None,
@@ -3617,11 +3636,6 @@ class Engine:
             story_links: ADR-0300 §6's story-links stage, which records the latest
                 recorded understanding's links in the story store — or ``None``, and
                 then the ``story_links_unrecorded`` rule never answers.
-            interim_tidy_up: ADR-0300 §5's interim run, test-hub scaffolding removed
-                at the cutover (:mod:`~ai_assistant.orchestration.story_tidy_up_interim`):
-                once the activation's episode is frozen, a tidy-up is started, and not
-                awaited, for each story the story-links stage linked it into (ADR-0303
-                §5:9) — or ``None``, and then none is. Only beside ``story_links``.
             matters_pass: ADR-0300 §9:3's matters pass, which
                 :meth:`decide_story_flags` runs — or ``None``, and then that operation
                 refuses. Only beside ``stories``, the store it reads and writes.
@@ -3809,12 +3823,13 @@ class Engine:
             chat_turn_budget: The budget each activation the reader starts is given
                 (:data:`~ai_assistant.orchestration.chat.CHAT_TURN_BUDGET`); the
                 reader has no caller to hand it one (ADR-0029 §4).
-            phases: The phases' thin path, which the composition root builds only
-                where ``Settings.phases_thin_path`` is set, on a test hub alone
-                (ADR-0309 §2:6). Where it is given, each activation the chat's reader
-                starts runs :data:`~ai_assistant.orchestration.controller.PHASE_RULES`
-                over its stages, and the phases write its messages; ``None``, the
-                default, is every other deployment's, whose table runs unchanged.
+            phases: The phases, which the composition root always builds (ADR-0309
+                §2:6). Every activation — each the chat's reader starts and each event
+                ``receive`` admits — runs the controller's one table,
+                :data:`~ai_assistant.orchestration.controller.ACTIVATION_RULES`, over
+                its stages, and the phases write its messages. ``None`` runs no
+                activation, so it is refused beside the reader and an event is refused
+                at admission.
             diagnostics: The diagnostic record's write seam (ADR-0314 §4:4), which
                 the controller of every pass writes its step entries through; ``None``
                 where ``Settings.diagnostic_record`` is false. The engine itself writes
@@ -4029,14 +4044,6 @@ class Engine:
         self._story_candidates = story_candidates
         self._story_links = story_links
         self._story_summary_notes = _story_summary_bound(story_summary_notes)
-        if interim_tidy_up is not None and story_links is None:
-            msg = (
-                "the interim tidy-up runs after the story-links stage, so it is wired "
-                "only beside it (ADR-0300 §5)"
-            )
-            raise ConfigurationError(msg)
-        # ADR-0300 §5's interim run: test-hub scaffolding, removed at the cutover.
-        self._interim_tidy_up = interim_tidy_up
         self._matters_pass = matters_pass
         if stage_record_limit < 2:  # noqa: PLR2004 — the first entry and the end entry
             msg = "a stage record keeps its first entry and its end entry (ADR-0280 §6)"
@@ -4164,8 +4171,8 @@ class Engine:
             if chat_reader
             else None
         )
-        # ADR-0309 §2:6: the phases' thin path, handed over only where a test hub set
-        # the opt-in. Its stages follow understanding, so it is wired only beside it.
+        # ADR-0309 §2:6: the phases, which plan every activation. Their stages follow
+        # understanding, so they are wired only beside it, and the reader only beside them.
         self._phases = _wired_phases(
             phases,
             understanding=understanding is not None,
@@ -4742,17 +4749,14 @@ class Engine:
     ) -> ChannelResult:
         """Receive one channel input under its declared policy (ADR-0274 §4).
 
-        The text conversational combination is refused here (ADR-0293 §11): a typed
-        message is written into a conversation, and :meth:`converse` is the one
-        entry that still runs a typed turn.
+        Every conversational combination is refused here: a typed message is written
+        into a conversation (ADR-0293 §11), and spoken conversation retired at the
+        cutover (ADR-0313 §3:1). An event is what ``receive`` takes.
 
-        **An event returns how its activation ended** (ADR-0313 §4:4). Where the phases
-        are wired, on a test hub (ADR-0309 §2:6), it runs through them as one activation
-        whose place takes no message, its ``timeout`` the activation's budget, and one
-        that cannot finish or is stopped returns its result rather than raising (§4:3,
-        §4:5). Elsewhere today's event-summary stage runs, its result in the same
-        shape, and its failures still raise as before until the cutover deletes it
-        (§6:2).
+        **An event returns how its activation ended** (ADR-0313 §4:4). It runs through
+        the phases as one activation whose place takes no message, its ``timeout`` the
+        activation's budget, and one that cannot finish or is stopped returns its result
+        rather than raising (§4:3, §4:5).
         """
         return await self._receive(
             input, reply=reply, timeout=timeout, projection=ChannelProjection("receive")
@@ -4775,13 +4779,21 @@ class Engine:
                 max_bytes=self._max_payload_bytes,
                 subject="the arguments to receive()",
             )
-        if isinstance(accepted.payload, SpeechChannelPayload):
-            transcriber, _ = self._speech_seams()
-            self._check_recording(accepted.payload.audio, transcriber=transcriber)
         event = isinstance(accepted.target, ChannelIdentity) and (
             accepted.target.channel_type == "informational_event"
         )
-        if event and self._informational_events is None and self._phases is None:
+        if not event:
+            # ADR-0313 §3:1: spoken conversation retired at the cutover, as the text
+            # conversational combination did before it (ADR-0293 §11); a conversation's
+            # input is a message written into it, which the chat's reader takes in.
+            msg = (
+                "unsupported channel input and reply combination: spoken conversation "
+                "retired at the cutover (ADR-0313 §3:1)"
+            )
+            raise ValueError(msg)
+        if self._phases is None:
+            # ADR-0309 §2:6, ADR-0313 §4:3: an event runs through the phases, and the
+            # event-summary stage runs no more.
             raise ConfigurationError("informational event processing is not wired")
         device = current_requesting_device()
         if not device.is_hub:
@@ -4849,77 +4861,20 @@ class Engine:
         projection: ChannelProjection,
         deadline: float,
     ) -> ChannelResult:
+        """Run an admitted event through the phases (ADR-0313 §4:3).
+
+        Admission refuses every other combination (ADR-0313 §3:1, ADR-0293 §11), so an
+        event is all that reaches here; its budget is ``deadline``, read at admission.
+        """
+        del reply, timeout
         target = input.target
-        selected = None if isinstance(target, NewConversation) else target.instance_id
-        options = input.conversation or ConversationInputOptions()
-        if isinstance(target, ChannelIdentity) and target.channel_type == "informational_event":
-            assert isinstance(input.payload, TextChannelPayload)  # noqa: S101 — narrowed by validated channel dispatch
-            resolved = ResolvedChannelInput(
-                target, input.payload.text, input.payload.modality, input.context
-            )
-            if self._phases is not None:
-                return await self._phases_event(resolved, deadline=deadline, projection=projection)
-            assert self._informational_events is not None  # noqa: S101 — refused at admission where neither is wired
-            event = _EventPass(
-                input=resolved,
-                deadline=deadline,
-                # ADR-0276 §4: an informational-event pass is of bounded audience.
-                supply=BoundedAudienceSupply(
-                    speakable_attested_sources=self._speakable_attested_sources
-                ),
-                understanding_wired=self._understanding is not None,
-                recall_wired=self._recall is not None,
-                story_links_wired=self._story_links is not None,
-            )
-            # ADR-0280 §4: the windows, recall, understanding, the story links, then the
-            # event summary, by the rules: today's path, where the phases are not wired.
-            await self._controlled(
-                event,
-                (
-                    Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),
-                    TolerantStage(
-                        ControllerStage.RECALL, self._recall_stage, expired=_recall_expired
-                    ),
-                    Stage(
-                        ControllerStage.UNDERSTANDING,
-                        self._event_understanding_stage,
-                        expired=_event_expired,
-                    ),
-                    TolerantStage(
-                        ControllerStage.STORY_LINKS,
-                        self._story_links_stage,
-                        expired=_story_links_expired,
-                    ),
-                    Stage(ControllerStage.EVENT_SUMMARY, self._event_summary_stage),
-                ),
-            )
-            assert event.result is not None  # noqa: S101 — the controller ends an event only once it is summarized, or raises
-            self._checked(projection.terminal(event.result), projection.method)
-            return event.result
-        if isinstance(input.payload, SpeechChannelPayload):
-            assert isinstance(reply, SpokenReply)  # noqa: S101 — narrowed by validated channel dispatch
-            transcriber, synthesizer = self._speech_seams()
-            spoken = await self._converse_spoken(
-                input.payload.audio,
-                plays=reply.plays,
-                timeout=timeout,
-                conversation_id=selected,
-                delivery=options.delivery,
-                transcriber=transcriber,
-                synthesizer=synthesizer,
-                context=input.context,
-                projection=projection,
-            )
-            return spoken_result(spoken)
-        outcome = await self._converse(
-            input.payload.text,
-            timeout=timeout,
-            conversation_id=selected,
-            reference=options.reference,
-            context=input.context,
+        assert isinstance(target, ChannelIdentity)  # noqa: S101 — admission refuses every other target
+        assert target.channel_type == "informational_event"  # noqa: S101 — as above
+        assert isinstance(input.payload, TextChannelPayload)  # noqa: S101 — narrowed by validated channel dispatch
+        resolved = ResolvedChannelInput(
+            target, input.payload.text, input.payload.modality, input.context
         )
-        self._checked(projection.text(outcome), projection.method)
-        return text_result(outcome)
+        return await self._phases_event(resolved, deadline=deadline, projection=projection)
 
     async def converse(
         self,
@@ -4931,93 +4886,17 @@ class Engine:
     ) -> TurnOutcome:
         """Run one turn and drive the step it produces (ADR-0042 §3, ADR-0074 §2).
 
-        The adapter passes the user's raw utterance — unrewritten; intent is the
-        engine's, not the adapter's (ADR-0042 §3). The turn is planned, then its
-        **first** step is driven through :class:`StepRunner`; a multi-step plan
-        has only that step driven today, the rest awaiting the plan-driving stage
-        (module docstring).
-
-        **Every turn runs under a conversation, and the outcome reports which**
-        (ADR-0074 §2). Passing no id starts one; passing one continues it. The
-        conversation is resolved **before** the turn's work, so its id exists
-        independently of whether the turn succeeds and so a continuation is not
-        racing the reclaim that would drop an idle conversation. A turn that fails
-        outright therefore leaves an empty conversation, which is harmless and
-        reclaimable. The conversation's recent turns are then handed to the planner
-        ahead of the relevance-retrieved beliefs (§5), and the exchange is captured
-        as one ``EpisodicMemory`` once the outcome exists (§3).
-
-        Args:
-            utterance: What the user said, passed through untouched.
-            timeout: The **per-attempt** budget (ADR-0029 §4, ADR-0042 §3),
-                keyword-only and required — the contract has no spelling for
-                "forever". Threaded to the executor for the one authorised call a
-                driven step makes. It is *not* an overall wall-clock deadline for a
-                multi-step request; that is a follow-on decided with the
-                plan-driving stage (ADR-0042 §3).
-            conversation_id: The conversation to continue, or ``None`` to start a
-                fresh one. Untrusted input from an adapter: an id the store does
-                not know is **refused, not silently started**, because silently
-                starting one turns a typo or a stale copy-paste into "my
-                conversation vanished" and lands the user's continuation somewhere
-                they cannot find (ADR-0074 §1).
-            reference: What this turn is answering, or which goal it is about
-                (ADR-0250 §11). **Accepted and not yet resolved**: ADR-0250 §19's M1
-                lands the contract "at unchanged behaviour" and rules in terms that
-                "no reference is resolved" in it, so a turn carrying one runs exactly
-                as a turn carrying none and :attr:`TurnOutcome.reference` stays
-                ``None``. M3 is the lane that resolves it. It is validated and
-                measured here, so a client cannot reach the wire's payload bound by
-                passing one.
-
-        Returns:
-            The turn's result and the disposition of the step it drove — including
-            a parked confirmation to render and relay (ADR-0042 §4) — plus the
-            conversation it ran under, whether recording it degraded, and the
-            composed answer (ADR-0170 §3). ``step`` is ``None`` when the plan had no
-            step. ``reply`` carries prose on every shape but a park, where what the
-            user must answer is the confirmation, and a pass whose composition
-            failed, which sets ``reply_degraded`` instead (ADR-0170 §4). The
-            adapter renders the answer **in addition to** the step account, never
-            instead of it: where the two disagree the step account is correct by
-            construction (ADR-0170 §6).
+        **Retired at the cutover** (ADR-0309 §2:6, §5:1). Every activation
+        runs through the phases and nothing runs the old path's turn, so this member
+        refuses before any work. The engine-surface deletion lane removes it.
 
         Raises:
-            RuntimeError: If the engine is shutting down (:meth:`aclose` has been
-                entered), so no new work is accepted.
-            UnknownConversationError: If ``conversation_id`` names no conversation
-                this store holds, or names one the user deleted.
-            PlanningError: If the utterance is blank, a transition is rejected, or
-                a clock reading is non-conforming — as the stages raise.
-            ContextError: If context assembly failed outright.
-            AuditError: If the trail would not accept or hand back a decision.
-            ToolBindingError: If an authorised call fails its own revalidation.
+            RuntimeError: If shutdown has begun.
+            ConfigurationError: Otherwise, always.
         """
+        del utterance, timeout, conversation_id, reference
         self._reject_if_closing()
-        selected = (
-            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
-        )
-        check_arguments(
-            "converse",
-            max_bytes=self._max_payload_bytes,
-            utterance=utterance,
-            timeout=timeout,
-            conversation_id=selected,
-            reference=reference,
-        )
-        result = await self._receive(
-            ChannelInput(
-                target=conversation_target(selected),
-                payload=TextChannelPayload(text=utterance),
-                conversation=ConversationInputOptions(reference=reference),
-            ),
-            reply=WholeTextReply(),
-            timeout=timeout,
-            projection=ChannelProjection("converse"),
-            typed_turn=True,
-        )
-        assert isinstance(result.result, TextChannelResult)  # noqa: S101 — narrowed by validated channel dispatch
-        return result.result.outcome
+        _retired("converse")
 
     async def converse_spoken(
         self,
@@ -5030,115 +4909,17 @@ class Engine:
     ) -> SpokenTurn:
         """Run one turn from a recording and speak its answer (ADR-0200 §3, ADR-0205 §1).
 
-        **The whole composition is here** (ADR-0200 §2): transcribe, decide whether
-        anything was said, run the ordinary turn with its answer composed for a
-        channel of unbounded audience, pick a format, render. No adapter performs any
-        part of it and none calls either speech Protocol at all.
-
-        **Every refusal below is local and comes before transcription**, which is
-        I/O — so a malformed ``conversation_id``, an empty ``plays``, a recording in
-        a container the transcriber cannot decode and a recording over ADR-0200 §6's
-        bound are each settled before a seam is called and before there is any
-        transcript to be blank. Base64 decoding is not I/O, which is what lets the
-        size check sit here rather than after the seam (ADR-0200 §6).
-
-        **A recording that carried no words is not an error** (ADR-0200 §4). Where
-        the transcript is blank — empty, or whitespace only — no turn runs, no
-        episode is captured, no conversation is created, and the result is four
-        members saying so.
-
-        **A turn that parks on a confirmation is spoken, not silent** (ADR-0207 §1).
-        On both of §1's shapes — a step the permission gate parked and a confirm-owed
-        route the routing stage parked — no answer is composed and ``outcome.reply``
-        stays ``None``, and what is rendered is the one fixed sentence §2 fixes,
-        synthesised by this same stage under the same bounds and the same degradation
-        ladder as an answer. Silence on a push-to-talk surface is indistinguishable
-        from a hub that is down (#1699). The park itself is unchanged: the same
-        confirmation is minted and carried on the same result, and the order in which
-        a caller presents the card and the audio is the caller's own.
-
-        Args:
-            utterance: The recording.
-            plays: What the caller can render, in **preference order**. Required,
-                non-empty, and read as a codec capability rather than as a claim
-                about who can hear (ADR-0200 §3): nothing on the disclosure path
-                reads it.
-            timeout: The budget for the whole call — transcription, the turn and
-                synthesis together — threaded to each stage.
-            conversation_id: The conversation to continue, or ``None``.
-            delivery: What a device played of an **earlier** turn of this
-                conversation, naming that turn by the ``episode_id`` a previous call
-                disclosed (ADR-0205 §1). Recorded before anything else this call
-                does; discarded where the conversation carries no turn under that
-                id, or where that turn is already stamped.
-
-        Returns:
-            The transcript, the turn it drove, the rendering of its answer — or of
-            ADR-0207 §2's sentence where the turn parked — whether speaking it
-            degraded, and the id of the episode recording the turn.
+        **Retired at the cutover** (ADR-0309 §2:6, §5:1, ADR-0313 §3:1). Every activation
+        runs through the phases and nothing runs the old path's turn, so this member
+        refuses before any work. The engine-surface deletion lane removes it.
 
         Raises:
-            RuntimeError: If the engine is shutting down, exactly as
-                :meth:`converse` refuses.
-            ConfigurationError: If this engine was built with no speech seams. **A
-                property of this object's wiring rather than of the contract**, in
-                the shape :meth:`notice_upcoming_events` refuses an unconfigured source and
-                for the reason ``AssistantEngine``'s own docstring gives for a
-                shutting-down engine's ``RuntimeError``: it is not a declared
-                failure of the promoted method, and an implementation that has
-                speech never raises it. Deliberately **not**
-                :class:`~ai_assistant.core.errors.TranscriptionFailedError`, which
-                would report a deployment fact as a seam failure and invite a retry
-                that cannot succeed.
-            ValueError: If ``conversation_id`` is blank, ``plays`` is empty, the
-                transcriber's ``formats`` does not name the recording's
-                ``media_type``, a ``delivery`` was supplied beside a
-                ``conversation_id`` of ``None``, or a supplied ``delivery`` carries a
-                state of ``UNKNOWN`` — each refused locally, before any I/O
-                (ADR-0205 §1, §2).
-            OversizedValueError: If the recording's decoded length exceeds
-                ``max_spoken_audio_bytes``, refused locally and before any I/O; or if
-                the result breaches ADR-0085 §8c even with no rendering in it.
-            TranscriptionFailedError: If transcription failed, carrying this
-                project's own classification and raised ``from None``.
-            UnknownConversationError: If ``conversation_id`` names no conversation
-                this store holds — and only where a turn actually ran.
+            RuntimeError: If shutdown has begun.
+            ConfigurationError: Otherwise, always.
         """
+        del utterance, plays, timeout, conversation_id, delivery
         self._reject_if_closing()
-        transcriber, _ = self._speech_seams()
-        selected = (
-            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
-        )
-        if not plays:
-            msg = (
-                "plays must name at least one format the caller can render; an empty "
-                "preference order is a call that could not be answered whatever the "
-                "synthesizer produces (ADR-0200 §3)"
-            )
-            raise ValueError(msg)
-        self._check_report(delivery, conversation_id=selected)
-        check_arguments(
-            "converse_spoken",
-            max_bytes=self._max_payload_bytes,
-            utterance=utterance,
-            plays=plays,
-            timeout=timeout,
-            conversation_id=selected,
-            delivery=delivery,
-        )
-        self._check_recording(utterance, transcriber=transcriber)
-        result = await self._receive(
-            ChannelInput(
-                target=conversation_target(selected),
-                payload=SpeechChannelPayload(audio=utterance),
-                conversation=ConversationInputOptions(delivery=delivery),
-            ),
-            reply=SpokenReply(plays=plays),
-            timeout=timeout,
-            projection=ChannelProjection("converse_spoken"),
-        )
-        assert isinstance(result.result, SpokenChannelResult)  # noqa: S101 — narrowed by validated channel dispatch
-        return result.result.outcome
+        _retired("converse_spoken")
 
     @staticmethod
     def _check_report(
@@ -5747,143 +5528,17 @@ class Engine:
     ) -> TurnOutcome:
         """Answer a parked confirmation and continue its step (ADR-0042 §3, §4).
 
-        The adapter relays the opaque ``token`` and the human's yes/no; it does
-        **not** author the outcome. ``ActionPolicy.resolve`` — inside
-        `permissions`, reached through the engine — is what turns ``approved`` into
-        an ``ALLOW`` or ``DENY``, and only ``approved=False → DENY`` is guaranteed:
-        ``approved=True`` may still be refused by the policy (ADR-0042 §4). The
-        adapter conveys consent; the policy rules; the engine records and executes.
-
-        **A token whose binding this engine has already settled and still retains is
-        answered rather than refused** (ADR-0198 §§1-3). Such a call **restates** the
-        recorded answer: it returns an outcome describing the settled binding, it
-        consults no policy and drives no runner, and its own ``approved`` is not
-        consulted at all — a park is answered once (ADR-0044 §2b), so a second answer
-        is never honourable whatever it says, and the engine states what was decided
-        rather than refusing to say. That is what lets a surface whose first answer's
-        fate is unknown ask "did it land?" and be told (#1621); before it, the second
-        call met ``UnknownContinuationError``, whose ratified remedy — enumerate and
-        re-mint — is the one remedy a replay cannot use, since ADR-0052 §1 step 2
-        never lists a settled binding. Retention is bounded by
-        ``max_outstanding_confirmations``, holds no slot at that ceiling, has no
-        lifetime, is never enumerated and never persisted (§4).
-
-        **This takes no conversation id, and that is a decision** (ADR-0074 §9 item
-        5). It recovers the parked turn's conversation from the binding the parking
-        turn durably recorded, because a resume that *accepted* an id could be
-        handed the wrong one, and one that defaulted to starting a conversation
-        would file every recovered resolution under a brand-new conversation,
-        orphaned from the exchange that asked the question. The resume path cannot
-        be told which conversation it is in: the adapter relays an opaque token and
-        nothing else, and after a restart that token is reconstructed from durable
-        state with no live turn behind it.
-
-        A resumption is captured as **its own episode** in the conversation that
-        parked — a park is an answer, and the unit is what the user saw. If nothing
-        resolves, the resumption is simply not captured and the degradation is
-        reported: recording it under a conversation invented for the purpose would
-        assert a conversation the user never had.
-
-        Args:
-            token: The opaque continuation the parking :meth:`converse` returned.
-                Its contents are the engine's; the adapter never inspects them.
-            approved: The human's answer. ``True`` conveys consent, which the
-                policy may still refuse; ``False`` is a decision that yields
-                ``DENY``.
-            timeout: The per-attempt budget, as :meth:`converse`.
-            remember_recipients_until: The instant the user asked this call's
-                recipients be remembered until, supplied **in the same act** as the
-                answer (ADR-0193 §2, ADR-0235 §1). ``None`` — the default and the
-                ordinary outcome — is a user who approved a call and asked for
-                nothing standing. Honoured only beside ``approved=True`` and only on
-                a resolving ``ALLOW``; what became of it is on the outcome's
-                ``recipient_grant`` and is never read off a later listing.
-
-        Returns:
-            The resumed turn: the parked turn's own result, the step's resolved
-            disposition (``EXECUTED`` or ``DENIED``), and the answer composed for
-            it. A resume driven from a **recovered** park composes nothing —
-            ``turn`` is ``None`` there, so context and memories were never persisted
-            and there is nothing to compose from, which ADR-0170 §4 makes a ``None``
-            ``reply`` with ``reply_degraded`` ``False``. A **restatement** is that
-            same shape and carries it for its own reason (ADR-0198 §2): ``turn``
-            ``None``, ``routed`` ``None``, ``reply`` ``None`` and ``reply_degraded``
-            ``False``, beside a ``step`` carrying the settled binding's disposition,
-            step id and tool id, and its execution state **re-read now** rather than
-            snapshotted at settlement.
+        **Retired at the cutover** (ADR-0309 §2:6, §5:1). Every activation
+        runs through the phases and nothing runs the old path's turn, so this member
+        refuses before any work. The engine-surface deletion lane removes it.
 
         Raises:
-            RuntimeError: If the engine is shutting down.
-            PlanningError: If ``token`` names neither a parked step this engine holds
-                nor an answer it still retains — a token from a previous process, one
-                reconciled away under ADR-0052 §2, or one whose settled record has
-                aged out of ADR-0198 §4's bound. Its lifetime is process-scoped
-                (ADR-0042 §4; the Revisit-if clause ties durable resume to #242).
-                Also where the plan store no longer holds the execution a settled
-                record names, which is an outcome this engine cannot read and so may
-                not state (ADR-0198 §2).
-            PermissionDeniedError: If the recorded decision is not a ``CONFIRM``
-                about this parked step (``StepRunner`` refuses it).
-            UngrantableActError: If ``remember_recipients_until`` was supplied beside
-                ``approved=True`` and the act may not ride this confirmation, or the
-                instant is not strictly after the one the answer would carry. Raised
-                before any ruling is sought, so nothing is recorded, nothing is
-                executed, and the step stays parked and answerable (ADR-0235 §1, §2,
-                §6).
-            AuditError, ToolBindingError: As the stages raise.
+            RuntimeError: If shutdown has begun.
+            ConfigurationError: Otherwise, always.
         """
+        del token, approved, timeout, remember_recipients_until
         self._reject_if_closing()
-        # **Validated locally and before any I/O** (ADR-0085 §9). ``UtcInstant`` is a
-        # pydantic annotation, which a wire request is checked against before dispatch
-        # and an in-process call is not — so without this the two implementations
-        # refuse different values, and a naive instant reaches an ordering comparison
-        # as a bare ``TypeError`` rather than as a controlled refusal.
-        until = (
-            None
-            if remember_recipients_until is None
-            else utc_instant(remember_recipients_until, name="remember_recipients_until")
-        )
-        check_arguments(
-            "resume",
-            max_bytes=self._max_payload_bytes,
-            token=token,
-            approved=approved,
-            timeout=timeout,
-            remember_recipients_until=until,
-        )
-        scope = ActivationScope()
-
-        async def resolve() -> TurnOutcome:
-            result = await self._resume(
-                token, approved=approved, timeout=timeout, remember_recipients_until=until
-            )
-            if scope.state is not None:
-                scope.state.observe_result(result)
-            return self._checked(result, "resume")
-
-        task = self._activation_task(
-            scope,
-            resolve,
-            seam="resume",
-            check_output=lambda result: check_payload(
-                result.model_copy(update={"capture_degraded": False}),
-                max_bytes=self._max_payload_bytes,
-                subject="the result of resume()",
-            ),
-        )
-        result, report = await asyncio.shield(task)
-        if report is not None and report.state != "recorded":
-            result = result.model_copy(update={"capture_degraded": True})
-        if scope.state is not None and scope.state.stopped:
-            # ADR-0297 §4: the control activation was stopped — the pass has ended, so
-            # the mark can no longer move — and its outcome is the fourth reply-less
-            # shape whenever the mark was set, a mark set after the outcome was built
-            # included: no reply, never degraded, and every other member as the resume
-            # established it.
-            result = result.model_copy(
-                update={"stopped": True, "reply": None, "reply_degraded": False}
-            )
-        return result
+        _retired("resume")
 
     async def _admit_control(  # noqa: PLR0913 — existing resolution facts, never authority
         self,
@@ -10276,11 +9931,9 @@ class Engine:
             _log.warning("chat_message_unwritten", stage="chat_writer", exc_info=True)
 
     async def _chat_input_turn(self, taken: ChatInput) -> TurnOutcome | None:
-        """The reader's input as a turn: the phases' where they are wired, else today's."""
-        if self._phases is not None:
-            await self._phases_turn(taken)
-            return None
-        return await self._chat_turn(taken)
+        """The reader's input, planned by the phases (ADR-0309 §2:6)."""
+        await self._phases_turn(taken)
+        return None
 
     async def _chat_turn(self, taken: ChatInput) -> TurnOutcome:
         """The reader's input as one typed turn, composed whole, over its window."""
@@ -10300,7 +9953,7 @@ class Engine:
         )
 
     async def _phases_turn(self, taken: ChatInput) -> None:
-        """The reader's input planned by the phases, on a test hub (ADR-0309 §2:6, §3).
+        """The reader's input planned by the phases (ADR-0309 §2:6, §3).
 
         The turn's working set is the one :meth:`_chat_turn` assembles, holding the
         phases' part beside it, and the controller runs ADR-0309 §3's table over the
@@ -10312,7 +9965,7 @@ class Engine:
         carries what the episode freezes with.
         """
         phases = self._phases
-        assert phases is not None  # noqa: S101 — the reader calls this only where they are wired
+        assert phases is not None  # noqa: S101 — the reader is wired only beside them
         state = active_state()
         trigger = None if state is None else state.trigger
         timeout = self._chat_turn_budget
@@ -10366,7 +10019,7 @@ class Engine:
         ]
         await phases.run(
             working,
-            lambda: self._controlled(working, stages, rules=PHASE_RULES),
+            lambda: self._controlled(working, stages),
             state=state,
         )
 
@@ -10377,7 +10030,7 @@ class Engine:
         deadline: float,
         projection: ChannelProjection,
     ) -> ChannelResult:
-        """An event run through the phases, on a test hub (ADR-0313 §4:3-§4:5).
+        """An event run through the phases (ADR-0313 §4:3-§4:5).
 
         One activation whose place takes no message (ADR-0307 §3:8): the windows,
         recall, understanding and the story links run exactly as on today's event path,
@@ -10394,7 +10047,7 @@ class Engine:
             frozen (§4:5).
         """
         phases = self._phases
-        assert phases is not None  # noqa: S101 — dispatched here only where they are wired
+        assert phases is not None  # noqa: S101 — an event is refused at admission without them
         state = active_state()
         trigger = None if state is None else state.trigger
         activation_id = None if state is None else state.activation_id
@@ -10438,7 +10091,7 @@ class Engine:
         ]
         await phases.run(
             event,
-            lambda: self._controlled(event, stages, rules=PHASE_RULES),
+            lambda: self._controlled(event, stages),
             state=state,
         )
         unfinished = state is not None and state.unfinished
@@ -10521,12 +10174,6 @@ class Engine:
                             raise
                     except Exception:
                         capture_loss("terminal", "failed")
-                    finally:
-                        # ADR-0303 §5:9's interim run, at the freeze, a cancellation
-                        # that lands once the freeze is confirmed included: test-hub
-                        # scaffolding, removed at the cutover with
-                        # `story_tidy_up_interim`.
-                        self._start_interim_tidy_ups(state)
                 failure = _stopped_failure(state, failure)
                 answer = _answered(
                     value, failure, state=state, unfinished=unfinished, check=check_output
@@ -13245,42 +12892,6 @@ class Engine:
         if decision.outcome is StageOutcome.DONE:
             return StageResult(StageOutcome.DONE)
         return StageResult(decision.outcome, decision.error, tolerated=True)
-
-    def _start_interim_tidy_ups(self, state: ActivationState) -> None:
-        """ADR-0300 §5's interim run: start each tidy-up the pass's links call for, unawaited.
-
-        Test-hub scaffolding, removed at the cutover with
-        :mod:`~ai_assistant.orchestration.story_tidy_up_interim`. Called once the
-        activation is finalized, and starting runs only where its episode's freeze is
-        confirmed: the run starts when the episode of an activation the story-links
-        stage linked into a story is frozen, not when the link is written (ADR-0303
-        §5:9), so the episode that linked the story is one the run can read. A pass
-        whose story-links stage made no decision, and one whose episode was not frozen,
-        starts none. Each run is a task of its own in a fresh context, as a chat read is
-        (:meth:`_spawn_read`), so it carries neither the activation's state nor its
-        correlation scope, and is tracked so :meth:`aclose` drains it (ADR-0042 §2).
-        Nobody waits for it, and its finishing starts nothing (§5).
-
-        **None is started once shutdown has begun.** The drain awaits the tasks it
-        found when it started, and ``_closing`` is set before it looks; a pass still
-        running then would otherwise start a task the drain never awaits, over stores
-        about to close. A tidy-up not started loses nothing: what it would have taken
-        in stays pending for a later run (§5).
-        """
-        if self._interim_tidy_up is None or self._closing:
-            return
-        working = state.working
-        if (
-            state.capture is None
-            or not state.capture.frozen
-            or not isinstance(working, _ActivationPass)
-            or working.story_links is None
-        ):
-            return
-        for run in self._interim_tidy_up.runs(working.story_links):
-            task = asyncio.get_running_loop().create_task(run, context=contextvars.Context())
-            self._inflight.add(task)
-            task.add_done_callback(self._inflight.discard)
 
     async def _understand_event(self, event: _EventPass) -> None:
         """The event path's understanding, mapped outward as the event stage maps its own.

@@ -149,6 +149,7 @@ from ai_assistant.core.types import (
     ToolOutcome,
     TurnOutcome,
     TurnResult,
+    UserMessage,
     secret_value,
 )
 from ai_assistant.orchestration.disclosure import speakable_notification_triple
@@ -2138,12 +2139,11 @@ class AssistantEngineContract(
     async def test_a_blank_identifier_is_refused_on_the_keyword_selectors(
         self, engine: AssistantEngine
     ) -> None:
-        """``converse``'s keyword-only selector, and ``answer``'s identifier.
+        """``answer``'s identifier.
 
-        ``observe`` was the second keyword-only selector until ADR-0285 §2 removed it.
+        ``observe`` was the second keyword-only selector until ADR-0285 §2 removed it,
+        and ``converse``'s the first until the switch retired it (ADR-0309 §5:1).
         """
-        with pytest.raises(ValueError, match=r"\w"):
-            await engine.converse("hello", timeout=_PATIENT, conversation_id="  ")
         with pytest.raises(ValueError, match=r"\w"):
             await engine.answer("  ", accept=True)
 
@@ -2240,12 +2240,18 @@ class AssistantEngineContract(
     # --- clause 5: the size limit, in both directions (§8c) ----------------
 
     async def test_an_oversized_argument_is_refused(self, tiny_engine: AssistantEngine) -> None:
-        """The *going in* direction: refused before dispatch, with the number."""
+        """The *going in* direction: refused before dispatch, with the number.
+
+        Held over a message written into a conversation, the surface's one free-text
+        input once ``converse`` retired at the cutover (ADR-0309 §5:1).
+        """
+        conversation = (await tiny_engine.start_conversation()).id
+        oversized = UserMessage(device_id="phone", message_id="m-1", text="x" * (_TINY_LIMIT * 4))
         with pytest.raises(OversizedValueError) as caught:
-            await tiny_engine.converse("x" * (_TINY_LIMIT * 4), timeout=_PATIENT)
+            await tiny_engine.write_message(conversation, message=oversized)
         assert caught.value.limit == _TINY_LIMIT
         assert caught.value.size > _TINY_LIMIT
-        assert caught.value.field == "utterance"
+        assert caught.value.field == "message"
 
     async def test_an_oversized_result_is_refused(self, tiny_beliefs: BeliefSubject) -> None:
         """The *coming back* direction, which is the one ADR-0084 §4 insisted on.

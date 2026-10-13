@@ -167,7 +167,6 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.reconciling import ReconciliationStage
     from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
-    from ai_assistant.orchestration.story_tidy_up_interim import InterimTidyUp
     from ai_assistant.orchestration.understanding import UnderstandingStage
     from ai_assistant.testing.invoker import FakeToolImplementation
 
@@ -686,9 +685,6 @@ class Harness:
         story_links: StoryLinksStage | None = None,
         # ADR-0303 §10:2's bound on the story summary view's notes.
         story_summary_notes: int = DEFAULT_STORY_SUMMARY_VIEW_NOTES,
-        # ADR-0300 §5's interim tidy-up run, test-hub scaffolding removed at the
-        # cutover. `None` is every other case's deployment: no tidy-up is started.
-        interim_tidy_up: InterimTidyUp | None = None,
         # ADR-0300 §9:3's matters pass. `None` is every other case's deployment:
         # `decide_story_flags` refuses, and nothing else reads it.
         matters_pass: MattersPass | None = None,
@@ -712,13 +708,13 @@ class Harness:
         now: Clock | None = None,
         id_factory: Callable[[], str] | None = None,
         epoch_factory: Callable[[], str] | None = None,
-        # ADR-0293 §6's reader. On by default, as in every deployment: a message written
-        # into a conversation is taken in and answered. A case holding the medium alone
-        # switches it off.
-        chat_reader: bool = True,
-        # ADR-0309 §2:6's thin path, built over this harness's own stores once they
-        # exist. `None` is every other case's deployment: the opt-in unset, and the
-        # controller's table unchanged.
+        # ADR-0293 §6's reader, which runs every activation through the phases (ADR-0309
+        # §2:6), so it is wired only beside them. `None`, the default, is on wherever
+        # `phases` is given and off otherwise: a case holding the medium alone, or a
+        # surface no activation reaches, builds no phases.
+        chat_reader: bool | None = None,
+        # ADR-0309 §2:6's phases, built over this harness's own stores once they exist.
+        # `None` builds none: no activation runs, so a case that drives one wires them.
         phases: Callable[[Harness], PhasePath] | None = None,
         # ADR-0314 §4:4's sink, which the controller of every pass writes through.
         # `None` is every other case's deployment: the diagnostic record off.
@@ -1017,7 +1013,6 @@ class Harness:
             story_summary_notes=story_summary_notes,
             story_candidates=story_candidates,
             story_links=story_links,
-            interim_tidy_up=interim_tidy_up,
             matters_pass=matters_pass,
             # ADR-0244 §5, §6, §11: the enumeration, the answer and the cancellation,
             # over the store above. Wired unconditionally, exactly as the composition
@@ -1047,7 +1042,7 @@ class Harness:
             # the call: ADR-0207's park cases pin that the spoken path acquired no
             # edge to it, which a subject holding no outbox at all cannot show.
             notification_outbox=notification_outbox,
-            chat_reader=chat_reader,
+            chat_reader=phases is not None if chat_reader is None else chat_reader,
             phases=None if phases is None else phases(self),
             diagnostics=diagnostics,
         )
@@ -1069,6 +1064,7 @@ def _fresh_facade(harness: Harness) -> Engine:
     the same ``plans`` and ``trail``.
     """
     return Engine(
+        chat_reader=False,
         associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         grant_operations=_grant_operations(),
@@ -1409,6 +1405,7 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
     traces.hold(ancient)
     harness = Harness(traces=traces)
     facade = Engine(
+        chat_reader=False,
         associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         grant_operations=_grant_operations(),
@@ -1514,6 +1511,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
     harness = Harness()
     with pytest.raises(ValueError, match="must be positive"):
         Engine(
+            chat_reader=False,
             associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
             composing=_composing(),
             grant_operations=_grant_operations(),
@@ -1543,6 +1541,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
     harness = Harness()
     with pytest.raises(TypeError, match="must be an integer"):
         Engine(
+            chat_reader=False,
             associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
             composing=_composing(),
             grant_operations=_grant_operations(),
@@ -2832,7 +2831,10 @@ async def test_the_question_surface_is_refused_while_the_engine_is_shutting_down
 #: public method that deliberately does *not* run through ``_tracked``: tracing it
 #: would put a trace's append inside the drain that exists to wait for appends,
 #: and the ``TraceSink`` may already be closed by the time it returned.
-_UNTRACED = frozenset({"aclose"})
+#: ``aclose``, and the members the switch retired (ADR-0309 §2:6, §5:1): each refuses
+#: before any work and reaches no wiring point, until the engine-surface deletion lane
+#: removes it.
+_UNTRACED = frozenset({"aclose", "converse", "converse_spoken", "resume"})
 
 
 class _TrackedScan(ast.NodeVisitor):

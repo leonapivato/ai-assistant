@@ -657,6 +657,7 @@ def build_world(
 
     conversations = FakeConversationStore(now=lambda: NOW)
     engine = Engine(
+        chat_reader=False,
         loop=loop,
         associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         runner=runner,

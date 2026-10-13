@@ -421,6 +421,7 @@ def _engine(
     )
     conversations = FakeConversationStore(now=lambda: AT)
     return Engine(
+        chat_reader=False,
         associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=composing if composing is not None else _composing(),
         grant_operations=_grant_operations(),
@@ -3692,6 +3693,7 @@ def _conversation_engine(
     )
     conversations = FakeConversationStore(now=lambda: AT)
     engine = Engine(
+        chat_reader=False,
         associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=composing if composing is not None else _composing(),
         grant_operations=_grant_operations(),

@@ -129,6 +129,7 @@ def _wired(  # noqa: PLR0913 — one parameter per knob a case here varies, whic
     a case that does not name one is wired exactly as it was before it was declared.
     """
     return Engine(
+        chat_reader=False,
         associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         notifications=notifications,
         notification_policy=notification_policy,

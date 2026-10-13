@@ -96,7 +96,7 @@ from ai_assistant.orchestration import (
 )
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.authorizer import AuthorizingStage
-from ai_assistant.orchestration.chat import CHAT_TURN_BUDGET, ChatWriter
+from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.informational_events import InformationalEventStage
 from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
@@ -119,7 +119,6 @@ from ai_assistant.orchestration.story_calls import (
 )
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
 from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
-from ai_assistant.orchestration.story_tidy_up_interim import InterimTidyUp
 from ai_assistant.orchestration.understanding import (
     RecentEpisodes,
     UnderstandingStage,
@@ -164,7 +163,7 @@ from ai_assistant.tools.egress_binder import EgressBindingSeam, canonical_destin
 from ai_assistant.tools.forecast import FORECAST_READ_ID
 from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
 from ai_assistant.tools.web_search import QUERY_ARGUMENT as SEARCH_QUERY_ARGUMENT
-from ai_assistant.tools.web_search import WEB_SEARCH, WEB_SEARCH_ID
+from ai_assistant.tools.web_search import WEB_SEARCH_ID
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -474,7 +473,7 @@ _CONFLICT_PROBE_OVERSHOOT: Final = 2
 #: matches nothing; naming one twice is refused at construction.
 TOOL_PREFERENCE: Final[tuple[str, ...]] = ()
 
-# --- The phases' thin path, on a test hub (ADR-0309 §2:6, §4) -------------------
+# --- The phases (ADR-0309 §2:6, §4) ---------------------------------------------
 #
 # Every number below is **provisional**: the round limit, the deadlines and the digest
 # part size belong to #2589, which has not set them. Each is chosen for a test hub to
@@ -515,9 +514,9 @@ RECALL_SECOND_RUN_CAP: Final = 2 * RECALL_ITEM_LIMIT
 #: result's digest is bounded by: a few remembered facts are one part, one call.
 PHASES_RECALL_DIGEST_DEADLINE: Final = PHASES_CALL_DEADLINE
 
-#: The budget one activation the chat's reader starts is given where the thin path
-#: runs, in place of ``CHAT_TURN_BUDGET``: several rounds, each a model call, a
-#: search and a digest, do not fit the one-reply minute. **Provisional (#2589).**
+#: The budget one activation the chat's reader starts is given, in place of
+#: ``CHAT_TURN_BUDGET``: several rounds, each a model call, a search and a digest, do
+#: not fit the one-reply minute. **Provisional (#2589).**
 PHASES_TURN_BUDGET: Final = timedelta(minutes=3)
 
 #: The bound planning cuts another episode's texts to, as understanding's is
@@ -2313,15 +2312,13 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # deployment value to read. The stage's own default *is* the production
         # reading, so naming it here would restate it rather than decide it.
         reconciliation = ReconciliationStage(plans=plans, trail=trail, invoker=tools)
-        # ADR-0300 §5's tidy-up, **one operation** for the interim run below and for
-        # planning's tidy-up call (ADR-0300 §10:4), so at most one run is on a story at
-        # a time whichever started it (§5:10). Its lookalike search keeps what recall
-        # would, at recall's threshold for the embedder wired (ADR-0303 §5:7). It runs
-        # on **consolidation's route**, the one this deployment names for background
-        # work over the assistant's own records (ADR-0285 §5): a tidy-up is that kind
-        # of work, nobody waits on it, and one skipped or failed loses nothing (§5), so
-        # it needs no fallback route and takes no share of the conversational route's
-        # limits.
+        # ADR-0300 §5's tidy-up, **one operation** for planning's tidy-up call (ADR-0300 §10:4), so
+        # at most one run is on a story at a time (§5:10). Its lookalike search keeps what recall
+        # would, at recall's threshold for the embedder wired (ADR-0303 §5:7). It runs on
+        # **consolidation's route**, the one this deployment names for background work over the
+        # assistant's own records (ADR-0285 §5): a tidy-up is that kind of work, nobody waits on it,
+        # and one skipped or failed loses nothing (§5), so it needs no fallback route and takes no
+        # share of the conversational route's limits.
         tidy_up = StoryTidyUp(
             model=consolidation_model,
             stories=stories,
@@ -2332,32 +2329,28 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             budget=STORY_TIDY_UP_BUDGET,
             threshold=RECALL_THRESHOLDS[settings.embedder],
         )
-        # ADR-0309 §2:6: the phases' thin path, only where a test hub set the opt-in,
-        # over the objects this root already built (:class:`_PhaseSeams`).
-        phases = (
-            _build_phase_path(
-                settings,
-                _PhaseSeams(
-                    model=model,
-                    registry=tools,
-                    plans=plans,
-                    trail=trail,
-                    stories=stories,
-                    memory=memory,
-                    writer=writer,
-                    binder=binder,
-                    chat=conversations,
-                    searcher=None if search is None else search.searcher,
-                    forecast_configured=forecast is not None,
-                    booking_configured=booking is not None,
-                    grants=recipient_grants,
-                    max_payload_bytes=settings.hub_max_frame_bytes - ENVELOPE_RESERVE_BYTES,
-                    diagnostics=diagnostics,
-                    tidy_up=tidy_up,
-                ),
-            )
-            if settings.phases_thin_path
-            else None
+        # ADR-0309 §2:6: the phases, which plan every activation, over the objects this
+        # root already built (:class:`_PhaseSeams`).
+        phases = _build_phase_path(
+            settings,
+            _PhaseSeams(
+                model=model,
+                registry=tools,
+                plans=plans,
+                trail=trail,
+                stories=stories,
+                memory=memory,
+                writer=writer,
+                binder=binder,
+                chat=conversations,
+                searcher=None if search is None else search.searcher,
+                forecast_configured=forecast is not None,
+                booking_configured=booking is not None,
+                grants=recipient_grants,
+                max_payload_bytes=settings.hub_max_frame_bytes - ENVELOPE_RESERVE_BYTES,
+                diagnostics=diagnostics,
+                tidy_up=tidy_up,
+            ),
         )
         engine = Engine(
             loop=loop,
@@ -2494,17 +2487,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 episodes=STORY_SHORT_VIEW_EPISODES,
             ),
             story_links=StoryLinksStage(stories=stories),
-            # ADR-0300 §5's interim run — test-hub scaffolding, removed at the cutover
-            # with `orchestration.story_tidy_up_interim`: once the episode of an
-            # activation the story-links stage linked into a story is frozen, a tidy-up
-            # of that story is started and not awaited (ADR-0303 §5:9). Its lookalike
-            # search keeps what recall would, at recall's threshold for the embedder
-            # wired (§5:7). The operation runs on **consolidation's route**, the one
-            # this deployment names for background work over the assistant's own
-            # records (ADR-0285 §5): a tidy-up is that kind of work, nobody waits on
-            # it, and one skipped or failed loses nothing (§5), so it needs no
-            # fallback route and takes no share of the conversational route's limits.
-            interim_tidy_up=InterimTidyUp(tidy_up=tidy_up),
             # ADR-0300 §9:3's matters pass, as ADR-0302 §5 builds it, which the
             # scheduler's `matters_pass` row runs on consolidation's interval. On
             # **consolidation's route**, for the tidy-up's reason: background work over
@@ -3041,11 +3023,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # encoders are byte-identical or the vectors fail), and reading it
             # beside the engine that will measure with it adds no package edge here.
             max_payload_bytes=settings.hub_max_frame_bytes - ENVELOPE_RESERVE_BYTES,
-            # ADR-0309 §2:6: the phases' thin path, built above only where a test hub
-            # set the opt-in, and with it the longer budget its rounds need; ``None``
-            # everywhere else, whose controller table runs unchanged.
+            # ADR-0309 §2:6: the phases, built above, which plan every activation, and
+            # the longer budget their rounds need.
             phases=phases,
-            chat_turn_budget=CHAT_TURN_BUDGET if phases is None else PHASES_TURN_BUDGET,
+            chat_turn_budget=PHASES_TURN_BUDGET,
         )
         # The **same** trace store again, narrowed a third way (ADR-0119 §7): a
         # ``TraceSink`` for `service`'s startup stamp, which appends one
@@ -3229,7 +3210,7 @@ def _model_specs(settings: Settings) -> tuple[str, ...]:
 
 @dataclass(frozen=True, slots=True)
 class _PhaseSeams:
-    """The objects the composition root already built that the thin path reuses.
+    """The objects the composition root already built that the phases reuse.
 
     Each is the **same** instance the old path holds, for that object's own reason:
     one trail every ruling is recorded in, one plan store every effect is claimed in,
@@ -3257,22 +3238,25 @@ class _PhaseSeams:
 
 
 def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
-    """The phases' thin path, for a test hub that set the opt-in (ADR-0309 §2:6, §4).
+    """The phases, which plan every activation (ADR-0309 §2:6, §4).
 
-    **The capabilities** are §4:2's three: the web search, remembering, and the
-    simulated booking provider's booking act, which is in the registry only where a
-    deployment configured the provider whole (ADR-0273 §1) — a test hub alone. The
-    search and remembering are in no registry, so :class:`PhaseTools` adds both
-    declarations beside the registry's for authorizing's selection. **And planning's
-    story calls that write** (ADR-0300 §10, ADR-0303 §9): start, note, link, unlink,
-    tidy-up, move, merge, split and group, in no registry either, each run through
-    acting's own-records seam by one :class:`StoryCalls` over the one story store,
-    memory store and tidy-up, with the arguments that name things by label handed to
-    planning (ADR-0307 §5:2), and the same runner checking a move or a split before it
-    is authorized (§5:3-§5:4). **And planning's look-ups** (§6:6): a memory search, a
-    story's full view and the follow-up, in no registry either, each run through the
-    own-records seam by one :class:`LookUps` over the one memory store and the story
-    views' reads.
+    **The capabilities planning is offered** are every one the phases' tools advertise
+    (ADR-0306 §2:7): each the registry holds — the current time, ``send_email`` where an
+    account is connected, and the simulated booking provider's availability read and
+    booking act, which are in the registry only where a deployment configured the
+    provider whole (ADR-0273 §1, ADR-0309 §4:2) — and, beside them, the configured web
+    search and the assistant's own records' declarations. The search is in no registry
+    (ADR-0231 §5), so :class:`PhaseTools` adds its declaration beside the registry's for
+    authorizing's selection, as it adds remembering's. **And planning's story calls that
+    write** (ADR-0300 §10, ADR-0303 §9): start, note, link, unlink, tidy-up, move, merge,
+    split and group, in no registry either, each run through acting's own-records seam
+    by one :class:`StoryCalls` over the one story store, memory store and tidy-up, with
+    the arguments that name things by label handed to planning (ADR-0307 §5:2), and the
+    same runner checking a move or a split before it is authorized (§5:3-§5:4). **And
+    planning's look-ups** (§6:6): a memory search, a story's full view and the
+    follow-up, in no registry either, each run through the own-records seam by one
+    :class:`LookUps` over the one memory store and the story views' reads. The forecast
+    read is kept out of every registry (ADR-0260 §1), so it is not offered.
 
     **The policy is the deployment's thresholds and standing grants, with no goal
     authorizations and no goal quotes** (ADR-0306 §4:11, §6): a second
@@ -3383,13 +3367,6 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
         tools=tools,
         plans=seams.plans,
         writer=ChatWriter(conversations=seams.chat, max_payload_bytes=seams.max_payload_bytes),
-        capabilities=(
-            str(WEB_SEARCH.capability),
-            REMEMBER_CAPABILITY,
-            str(BOOKING_ACT.capability),
-            *STORY_CALL_CAPABILITIES,
-            *LOOK_UP_CAPABILITIES,
-        ),
         label_arguments={**STORY_LABEL_ARGUMENTS, **LOOK_UP_LABEL_ARGUMENTS},
         # ADR-0307 §5:3-§5:4: the hub's check of a move or a split before authorizing,
         # against the stories as they stand then, by the same runner acting reaches.

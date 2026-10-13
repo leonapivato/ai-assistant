@@ -6,12 +6,11 @@ holds what they decide in the episode's working set, and runs each as a controll
 stage. It is outside the ``independence`` contract over the phase modules, so it may
 import all of them, and none of them imports it.
 
-**Only where the opt-in is set** (ADR-0309 §2:6). The composition root builds a
-:class:`PhasePath` only where ``Settings.phases_thin_path`` is set, which it is on a
-test hub alone; the engine then hands the controller
-:data:`~ai_assistant.orchestration.controller.PHASE_RULES` and these stages for a
+**Every activation** (ADR-0309 §2:6). The composition root always builds a
+:class:`PhasePath`, and the engine hands the controller its one table,
+:data:`~ai_assistant.orchestration.controller.ACTIVATION_RULES`, and these stages for a
 conversation turn the chat's reader starts, and for an event ``receive`` admits
-(ADR-0313 §4:3). Everywhere else today's table runs unchanged.
+(ADR-0313 §4:3).
 
 **An event** (ADR-0313 §4:3-§4:5, ADR-0307 §3:8, ADR-0309 §5:5-§5:6). It runs as one
 activation whose place takes no message: :meth:`PhasePath.begin_event` starts its
@@ -68,14 +67,17 @@ its message carries with its position; :meth:`PhasePath.written` is that read, o
 plan store's records of the candidate activations the reader names. A message the old
 path wrote has no record, and stays not linkable (§7:5).
 
-**The thin path's capabilities** (ADR-0309 §4:2). The web search, remembering and the
-simulated booking act. The search is registered at the egress seam and in no
-``ToolRegistry`` (ADR-0231 §5), and remembering runs against the assistant's own records
-(ADR-0306 §3:3), so :class:`PhaseTools` puts both declarations in front of authorizing's
-selection beside the deployment's registry, and routes a search call to the
-``WebSearcher`` that proposes and performs it. The search's ``origin`` is the connected
-account's: planning is offered the search without it, and the hub fills it from the
-searcher's own proposal (``WebSearcher.request``).
+**The capabilities planning is offered** (ADR-0306 §2:7, ADR-0309 §4:2). Every one
+:class:`PhaseTools` advertises, unless the path is handed a fixed list: each the
+deployment's registry holds — the simulated booking act only where a deployment
+configured it — and the assistant's own records' declarations, remembering, the story
+calls and the look-ups, beside the configured search. The search is registered at the
+egress seam and in no ``ToolRegistry`` (ADR-0231 §5), and the own records' calls run
+against the assistant's own records (ADR-0306 §3:3), so :class:`PhaseTools` puts their
+declarations in front of authorizing's selection beside the deployment's registry, and
+routes a search call to the ``WebSearcher`` that proposes and performs it. The search's
+``origin`` is the connected account's: planning is offered the search without it, and
+the hub fills it from the searcher's own proposal (``WebSearcher.request``).
 
 **Recall's second run** (ADR-0308 §2, ADR-0309 §3's row 6). The controller runs one
 stage per name, so :meth:`PhasePath.recall_stage` hands it one ``recall`` stage: the
@@ -1643,9 +1645,9 @@ class _RecallRuns[P: PhasePass]:
 
 
 class PhasePath:
-    """The thin path's stages, and what one activation's rounds need around them.
+    """The phases' stages, and what one activation's rounds need around them.
 
-    Built by the composition root only where the opt-in is set (ADR-0309 §2:6). The
+    Built by the composition root on every deployment (ADR-0309 §2:6). The
     engine attaches its episode append, starts each activation's working set with
     :meth:`begin`, hands the controller :meth:`stages` beside its own, and runs the
     pass through :meth:`run`, which writes the *couldn't finish* message where it is
@@ -1662,7 +1664,6 @@ class PhasePath:
         tools: PhaseTools,
         plans: PlanStore,
         writer: MessageWriter,
-        capabilities: Sequence[str],
         round_limit: int,
         round_wait: timedelta,
         excerpt_chars: int,
@@ -1670,6 +1671,7 @@ class PhasePath:
         memory: MemoryStore,
         recall_cap: int,
         recall_digest_wait: timedelta,
+        capabilities: Sequence[str] | None = None,
         planning_model: str | None = None,
         story_reads: StoryReads | None = None,
         label_arguments: Mapping[str, Mapping[str, LabelKind]] | None = None,
@@ -1689,7 +1691,9 @@ class PhasePath:
             tools: The thin path's registry and invoker.
             plans: The plan store a message's effect record is claimed in.
             writer: The place's writer.
-            capabilities: The capabilities planning is offered, by name (§4:2).
+            capabilities: The capabilities planning is offered, by name (§4:2), or
+                ``None``, the default, for every one ``tools`` advertises, read as each
+                round is planned.
             round_limit: The most rounds an activation runs (ADR-0307 §8:4).
             round_wait: How long the step running a round's calls waits on its
                 digests at most: the call's deadline that bounds the wait (§8:2).
@@ -1762,7 +1766,7 @@ class PhasePath:
         self._tools = tools
         self._plans = plans
         self._writer = writer
-        self._capabilities = tuple(capabilities)
+        self._capabilities = None if capabilities is None else tuple(capabilities)
         self._round_limit = round_limit
         self._round_wait = round_wait
         self._new_effect_id = new_effect_id
@@ -2094,7 +2098,11 @@ class PhasePath:
             rounds=working.planning_rounds(),
             labels=working.labels.labels,
             outcomes=working.outcomes(),
-            capabilities=await self._tools.offered(self._capabilities),
+            capabilities=await self._tools.offered(
+                await self._tools.capabilities()
+                if self._capabilities is None
+                else self._capabilities
+            ),
             label_arguments=self._label_arguments,
             evidence=tuple(working.evidence),
             outside_content_read=working.read_outside_content,

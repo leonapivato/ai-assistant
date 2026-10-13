@@ -916,6 +916,7 @@ def engine_with(scan: RecoveryScan | None) -> Engine:
     """A façade over a harness's durable state, holding ``scan``."""
     harness = Harness()
     return Engine(
+        chat_reader=False,
         associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=composing(),
         grant_operations=grant_operations(),

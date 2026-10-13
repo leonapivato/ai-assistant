@@ -858,6 +858,7 @@ async def _engine(now: Clock) -> None:
     # ADR-0192 §1 makes unconditional, and nothing here reads it.
     invoker = FakeToolInvoker([], ledger=FakeAuditTrail(), gate=FakeAuditTrail())
     await Engine(
+        chat_reader=False,
         associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         loop=LearningLoop(

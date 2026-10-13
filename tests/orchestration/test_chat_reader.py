@@ -17,6 +17,7 @@ import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
+from phases_support import phases_harness
 from test_engine import AT, Harness, NoStepPlanner
 from understanding_support import STATED_PROPOSAL, understanding_stage
 
@@ -34,6 +35,7 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RoundResponse,
     StepOutcome,
     TranscriptMessage,
     TurnOutcome,
@@ -47,19 +49,18 @@ from ai_assistant.orchestration.chat import (
     chat_reply,
     couldnt_finish,
 )
-from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.conversations import fitted_message
 from ai_assistant.testing import (
     FakeConversationStore,
     FakeMemoryStore,
     FakeModelProvider,
-    FakeStreamingCompleter,
+    FakeToolCallingCompleter,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from ai_assistant.core.types import Message
+    from ai_assistant.core.types import Message, OfferedTool
     from ai_assistant.orchestration.understanding import TranscriptWindow
 
 _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
@@ -91,6 +92,30 @@ class _FailingModel(FakeModelProvider):
         raise ModelError(msg)
 
 
+class _Composing(FakeToolCallingCompleter):
+    """Planning whose one round writes what ``composer`` answers, and proposes nothing.
+
+    The reader runs every activation through the phases (ADR-0309 §2:6), so the reply a
+    case scripts on ``composer`` is planning's message: a gate on it holds planning, a
+    failure fails it, and an empty answer writes nothing.
+    """
+
+    def __init__(self, composer: FakeModelProvider) -> None:
+        super().__init__()
+        self.composer = composer
+
+    async def respond(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[OfferedTool],
+        *,
+        model: str | None = None,
+    ) -> RoundResponse:
+        await super().respond(messages, tools, model=model)
+        answer = await self.composer.complete(messages)
+        return RoundResponse(text=answer.content)
+
+
 def _harness(
     *,
     composer: FakeModelProvider | None = None,
@@ -98,12 +123,11 @@ def _harness(
     memory: FakeMemoryStore | None = None,
     **knobs: Any,
 ) -> Harness:
-    return Harness(
-        planner=NoStepPlanner(),
-        composing=ComposingStage(
-            model=composer if composer is not None else FakeModelProvider("Hello there."),
-            streaming=FakeStreamingCompleter(),
-        ),
+    """The engine with its reader on and the phases wired, or the medium alone."""
+    if knobs.get("chat_reader") is False:
+        return Harness(planner=NoStepPlanner(), conversation_store=store, memory=memory, **knobs)
+    return phases_harness(
+        _Composing(composer if composer is not None else FakeModelProvider("Hello there.")),
         conversation_store=store,
         memory=memory,
         **knobs,

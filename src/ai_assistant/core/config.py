@@ -2559,22 +2559,6 @@ class Settings(BaseSettings):
         description="Lifetime of a parked confirmation before its answer is refused as stale.",
     )
 
-    # --- The phases' thin path, on a test hub (ADR-0309 §2:6) --------------
-    # Until the switch lane makes ADR-0309 §3's table the controller's only one, the
-    # composition root hands it to the controller only where this is set, and it is
-    # unset by default: only a test hub sets it (``ASSISTANT_PHASES_THIN_PATH=true``).
-    # Where it is set, each message the chat's reader takes in is planned by the phases
-    # — planning, authorizing, acting and digesting — over the web search, remembering
-    # and, where the simulated booking provider is configured, its booking act
-    # (ADR-0309 §4:2). The switch lane removes it.
-    phases_thin_path: bool = Field(
-        default=False,
-        description=(
-            "Run the phases' thin path for chat messages, on a test hub alone "
-            "(ADR-0309 §2:6). Unset by default."
-        ),
-    )
-
     # --- The routed confirmation's lifetime (ADR-0197 §7) -----------------
     # How long a **routed** park stays answerable. Deliberately a
     # ``_DurationSetting`` and not the ``_NullableDuration`` beside it: it takes no

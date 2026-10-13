@@ -1,10 +1,9 @@
 """Driving an activation through the phases, for cases that ran on the old path.
 
-Until the switch lane (ADR-0309 §2:6, §4:5) a case that drives a chat message or an
-event through the engine runs today's table unless the phases are wired. These helpers
-wire them, as ``test_engine_phases`` does, so a case asserting behaviour that survives
-the cutover — the stages before planning, capture, the reader, a stop, the drain — runs
-on the path the switch leaves, and stays green before and after it.
+A case that drives a chat message or an event through the engine needs the phases
+wired, since they plan every activation (ADR-0309 §2:6). These helpers wire them, as
+``test_engine_phases`` does, so a case asserting behaviour that survived the cutover —
+the stages before planning, capture, the reader, a stop, the drain — runs on them.
 
 The ``test_phases_*`` suites import from here, from the shared ``*_support`` modules,
 from ``test_engine``'s harness and from ``test_engine_phases`` alone, and copy any

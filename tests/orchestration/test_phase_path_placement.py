@@ -4,8 +4,7 @@ ADR-0204 §2's two terms are evaluated over every memory record the activation w
 or obtained — its windows' records, what either recall run kept, what its calls
 returned, digested ones included, and what its story views showed — once, at the freeze,
 over every round, the windows left out on a pass of unbounded audience. A belief a round
-remembers is placed by what planning had been given when it planned that round. With the
-opt-in unset, today's path places its episode by its own evaluation, unchanged.
+remembers is placed by what planning had been given when it planned that round.
 """
 
 from __future__ import annotations
