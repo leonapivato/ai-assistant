@@ -688,6 +688,23 @@ def test_a_cycle_through_a_group_ends() -> None:
     assert "ValueError" in str(event["exception"])
 
 
+def test_groups_sharing_members_render_each_exception_once() -> None:
+    # Adversarial review, round 1: seventeen exceptions, each group holding the one
+    # before it twice, expanded to 65,536 leaves. Each is expanded once, and one met
+    # again is named by its class.
+    shared: Exception = ValueError(_MESSAGE)
+    for _ in range(16):
+        shared = ExceptionGroup(_MESSAGE, [shared, shared])
+
+    event = scrub_exceptions(None, "error", {"event": "e", "exc_info": shared})
+
+    rendered = str(event["exception"])
+    _assert_no_content(rendered)
+    assert rendered.count("ValueError") == 2, "expanded once, then named as shown above"
+    assert "shown above" in rendered
+    assert len(rendered) < 10_000
+
+
 def test_a_long_context_chain_renders_rather_than_dropping() -> None:
     # A retry loop raising inside its own handler builds a chain as long as its
     # retries; walking it by recursion would overflow and lose the line.
