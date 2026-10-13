@@ -613,6 +613,7 @@ class _PhasePass:
     supply: BoundedAudienceSupply = field(default_factory=lambda: _BOUNDED)
     windows: None = None
     recalled: None = None
+    story_candidates: None = None
 
 
 async def _phase_path(now: Clock) -> None:

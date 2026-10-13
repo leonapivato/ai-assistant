@@ -137,7 +137,8 @@ the follow-up's question.
 **The episode's placement** (ADR-0309 §5:10, ADR-0204 §2, ADR-0217 §3:12). The working
 set holds a :class:`~ai_assistant.orchestration.supplied_records.SuppliedRecords`, handed
 every memory record the activation is given or obtains as it arrives: the windows'
-records, what either recall run kept, what a call returned, a digest's records included,
+records, the episodes of the candidate stories understanding was shown, what either
+recall run kept, what a call returned, a web search's records and a digest's included,
 and what a story view shows. The value is taken once, at the freeze, over every round,
 the windows' records left out on a pass of unbounded audience, and the episode is placed
 for the owner alone where it is ``True``. Before each round is planned the value over
@@ -153,6 +154,7 @@ through the phases.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -262,7 +264,7 @@ from ai_assistant.orchestration.supplied_records import SuppliedRecords
 from ai_assistant.orchestration.understanding import ConversationWindow, fetch_held
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
 
     from ai_assistant.core.protocols import (
         MemoryStore,
@@ -293,7 +295,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.lookups import LookUps
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.story_calls import StoryCalls
-    from ai_assistant.orchestration.story_links import ShortView, StoryCandidates
+    from ai_assistant.orchestration.story_links import Candidates, ShortView, StoryCandidates
     from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow, Windows
 
 __all__ = [
@@ -347,6 +349,12 @@ _GONE: Final = "the place took no message: the conversation is gone or refused i
 #: provider, and an unknown outcome is reported as unknown (ADR-0312 §2, ADR-0306 §5:13).
 _UNKNOWN_SEARCHES: Final = frozenset({"deadline_expired", "transport_failed"})
 
+#: The activation whose round's calls are running, by what it holds of what it was given:
+#: a search's records are handed to it as the search returns them (ADR-0309 §5:10).
+_HOLDING: Final[contextvars.ContextVar[SuppliedRecords | None]] = contextvars.ContextVar(
+    "phase_tools_holding", default=None
+)
+
 
 # --- the seams this module is handed ---------------------------------------------------
 
@@ -371,8 +379,8 @@ class PhasePass(Protocol):
 
     The engine's working set satisfies it: the pass's deadline and audience posture,
     the windows stage's decision, recall's first decision, the understanding the
-    understanding stage recorded, what that phase fetched for the windows, and the
-    phases' own part, :class:`PhaseWorking`.
+    understanding stage recorded, what that phase fetched for the windows, the
+    candidate stories it was shown, and the phases' own part, :class:`PhaseWorking`.
     """
 
     @property
@@ -398,6 +406,10 @@ class PhasePass(Protocol):
     @property
     def understanding_fetch(self) -> Fetched | None:
         """The window's and recall's records the understanding phase fetched by id."""
+
+    @property
+    def story_candidates(self) -> Candidates | None:
+        """The candidate stories the understanding phase was shown (ADR-0300 §6:1)."""
 
     @property
     def phases(self) -> PhaseWorking | None:
@@ -542,12 +554,41 @@ class PhaseTools:
         arguments: dict[str, FrozenJson] = {**call.arguments, **filled}
         return ProposedCall(call_id=call.call_id, name=call.name, arguments=arguments)
 
+    @staticmethod
+    @contextlib.contextmanager
+    def holding(supplied: SuppliedRecords) -> Iterator[None]:
+        """Hand every search run inside this scope's records to ``supplied``.
+
+        The glue opens it around acting for a round, so the records a search returns
+        are held by the activation that ran it, as the call returns them, before they
+        are rendered to text (ADR-0309 §5:10).
+
+        Args:
+            supplied: The activation's record of what it was given or obtained.
+
+        Yields:
+            Nothing: the scope is the context it runs in.
+        """
+        token = _HOLDING.set(supplied)
+        try:
+            yield
+        finally:
+            _HOLDING.reset(token)
+
     async def invoke(self, call: ToolCall, *, timeout: timedelta) -> ToolResult:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4)
-        """Invoke ``call``: a search through its searcher, any other through the invoker."""
+        """Invoke ``call``: a search through its searcher, any other through the invoker.
+
+        A search's records are memory records the call returned, so they are handed to
+        the activation running it, where a :meth:`holding` scope is open, before they
+        become the result's texts.
+        """
         search = await self.search_declaration()
         if search is None or self._searcher is None or call.request.tool != search:
             return await self._invoker.invoke(call, timeout=timeout)
-        return _searched(await self._searcher.search(call, timeout=timeout))
+        outcome = await self._searcher.search(call, timeout=timeout)
+        if (supplied := _HOLDING.get()) is not None:
+            supplied.obtained(outcome.records)
+        return _searched(outcome)
 
 
 def _properties(tool: ToolDefinition) -> set[str]:
@@ -1472,13 +1513,17 @@ def _window_records(given: PhasePass) -> tuple[MemoryRecord, ...]:
 def _hold_given(given: PhasePass, working: PhaseWorking) -> None:
     """Hold what the stages before planning gave the activation (ADR-0309 §5:10).
 
-    The windows' records, and the first recall run's kept records as the understanding
-    phase fetched them. Held again on each call, which holds each record once.
+    The windows' records; the first recall run's kept records as the understanding phase
+    fetched them; and the episodes of the candidate stories it was shown (ADR-0300
+    §6:1). Held again on each call, which holds each record once.
     """
     working.supplied.windows(_window_records(given))
     fetched = given.understanding_fetch
     if fetched is not None:
         working.supplied.obtained(fetched.recalled)
+    candidates = given.story_candidates
+    if candidates is not None:
+        working.supplied.obtained(record for view in candidates.views for record in view.episodes)
 
 
 def _found_external(found: Fetched) -> bool:
@@ -2324,12 +2369,13 @@ class PhasePath:
         if not rest:
             return ActedRound(round_id=decided.round_id)
         authorized = authorized_round(replace(decided, allowed=rest))
-        if self._look_ups is None:
-            return await self._acting.act(authorized, held=working.held)
-        with self._look_ups.scope(
-            audience=given.supply, owner_records=working.owner_records
-        ) as scope:
-            acted = await self._acting.act(authorized, held=working.held)
+        with self._tools.holding(working.supplied):
+            if self._look_ups is None:
+                return await self._acting.act(authorized, held=working.held)
+            with self._look_ups.scope(
+                audience=given.supply, owner_records=working.owner_records
+            ) as scope:
+                acted = await self._acting.act(authorized, held=working.held)
         self._pages(working, acted, scope.views)
         return acted
 

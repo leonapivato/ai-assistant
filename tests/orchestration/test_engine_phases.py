@@ -66,6 +66,8 @@ from ai_assistant.core.types import (
     NewMessage,
     PermissionOutcome,
     PermissionRuling,
+    PlacementReach,
+    PlacementSetter,
     PlanningLabel,
     PlanningRound,
     ProcessingReason,
@@ -154,6 +156,7 @@ if TYPE_CHECKING:
         PermissionDecision,
     )
     from ai_assistant.orchestration.disclosure import TurnSupply
+    from ai_assistant.orchestration.story_links import Candidates
     from ai_assistant.orchestration.understanding import Windows
 
 _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
@@ -542,9 +545,12 @@ async def test_a_search_is_digested_then_answered_in_a_second_round() -> None:
         (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED),
         (ControllerStage.END, ControllerRule.NOTHING_DUE),
     ]
-    # Read outside content, so the episode says so; the thin path places it for the
-    # owner alone (ADR-0309 §5:10 left to a later lane).
+    # Read outside content, so the episode says so; and the search returned records a
+    # channel of unbounded audience withholds, so it is placed for the owner alone
+    # (ADR-0309 §5:10).
     assert episode.provenance.derived_from_external
+    assert episode.placement.reach is PlacementReach.OWNER
+    assert episode.placement.set_by is PlacementSetter.DERIVED
     record = episode.processing_record
     assert record is not None
     (digest,) = record.digests
@@ -1352,6 +1358,7 @@ class _Given:
     supply: TurnSupply = field(default_factory=lambda: _BOUNDED)
     windows: Windows | None = None
     recalled: Recalled | None = None
+    story_candidates: Candidates | None = None
 
 
 def _begun(path: PhasePath) -> PhaseWorking:
