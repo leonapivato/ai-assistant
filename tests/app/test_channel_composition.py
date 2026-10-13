@@ -18,6 +18,7 @@ from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import (
     ActionPlan,
+    ActivationEnding,
     AssociationVerdict,
     ChannelContext,
     ChannelContextItem,
@@ -265,7 +266,9 @@ async def test_input_only_adapter_reaches_real_stage_without_durable_work(
     )
     assert result.channel == identity
     assert isinstance(result.result, InformationalEventResult)
-    assert result.result.summary == _SUMMARY
+    # ADR-0313 §4:4, §6:2: the opt-in is unset, so today's event stage ran, and its
+    # result says how the event ended rather than carrying its summary.
+    assert result.result.ended is ActivationEnding.DONE
     # ADR-0276 §5: through the real composition, the understanding stage completes
     # once ahead of the event stage, which is unchanged and completes once after it.
     understanding, event = running_channels.model.calls
@@ -349,7 +352,8 @@ def _assert_captured_result(result: ChannelResult, encoded: str, context: Channe
         assert "YXVkaW8=" not in encoded
         assert spoken.spoken.content not in encoded
     else:
-        assert episode.outcome == result.result.summary
+        # Today's event stage keeps its summary with the episode; none is returned.
+        assert episode.outcome == _SUMMARY
         assert processing.trigger.context == context
 
 

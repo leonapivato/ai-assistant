@@ -48,12 +48,12 @@ from ai_assistant.core.episode_encoding import check_detail, check_list
 from ai_assistant.core.errors import (
     ActivationStoppedError,
     AuditError,
-    ChannelProcessingTimeoutError,
     ConversationStoreError,
     GrantError,
     InvalidGrantError,
     InvalidRecipientGrantError,
     MemoryStoreError,
+    ModelTimeoutError,
     NotificationBudgetError,
     OversizedValueError,
     PlanningError,
@@ -67,6 +67,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     ActionPlan,
+    ActivationEnding,
     ActivationStop,
     AnswerKind,
     AnswerOutcome,
@@ -1424,6 +1425,21 @@ class FakeAssistantEngine:
             self._ended(activation)
         self._commit_episode(activation, report)
         failure = _stopped_failure(activation, failure)
+        target = supplied.target
+        if (
+            isinstance(target, ChannelIdentity)
+            and target.channel_type == "informational_event"
+            and isinstance(failure, Exception)
+            and not isinstance(failure, OversizedValueError)
+        ):
+            # ADR-0313 §4:5: an event that cannot finish, or is stopped, returns how it
+            # ended; its episode is classified by what ended it. A result the output
+            # bound refuses raises as every result does: one naming the same channel
+            # could not be returned either.
+            ended = (
+                ActivationEnding.STOPPED if activation.stopped else ActivationEnding.COULDNT_FINISH
+            )
+            return captured_result(_event_result(target, ended), report, episode_id=None)
         if failure is not None:
             raise failure
         if activation.output_failure is not None:
@@ -1484,16 +1500,12 @@ class FakeAssistantEngine:
         selected = None if isinstance(target, NewConversation) else target.instance_id
         if isinstance(target, ChannelIdentity) and target.channel_type == "informational_event":
             if timeout.total_seconds() <= 0:
-                raise ChannelProcessingTimeoutError("informational event processing timed out")
+                # ADR-0313 §4:5: the event's budget ran out before anything ran; the
+                # call answers it with *couldn't finish* once the episode froze.
+                raise ModelTimeoutError("the event's budget ran out before it was understood")
             activation.understand()
             self.calls.append(("receive", {"input": supplied, "reply": capability}))
-            result = ChannelResult(
-                channel=target,
-                capture=UNCAPTURED,
-                result=InformationalEventResult(
-                    summary="This fake processed an informational event."
-                ),
-            )
+            result = _event_result(target, ActivationEnding.DONE)
             activation.observe(result)
             return result
         options = supplied.conversation or ConversationInputOptions()
@@ -5391,6 +5403,13 @@ class FakeAssistantEngine:
         page_argument(offset, name="offset")
         check_arguments(method, max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
         self.calls.append((method, {"limit": limit, "offset": offset}))
+
+
+def _event_result(target: ChannelIdentity, ended: ActivationEnding) -> ChannelResult:
+    """An event's result: how its activation ended, and nothing it wrote (ADR-0313 §4:4)."""
+    return ChannelResult(
+        channel=target, capture=UNCAPTURED, result=InformationalEventResult(ended=ended)
+    )
 
 
 def _stopped_failure(

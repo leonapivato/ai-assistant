@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.types import (
+    ActivationEnding,
     ChannelContext,
     ChannelContextItem,
     ChannelIdentity,
@@ -59,7 +60,7 @@ def test_blank_speech_and_event_results_require_their_corresponding_identity() -
         ChannelResult(
             channel=conversation,
             capture=capture,
-            result=InformationalEventResult(summary="summary"),
+            result=InformationalEventResult(ended=ActivationEnding.DONE),
         )
 
 

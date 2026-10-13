@@ -19,6 +19,7 @@ from ai_assistant.core.errors import (
     OversizedValueError,
 )
 from ai_assistant.core.types import (
+    ActivationEnding,
     ChannelContext,
     ChannelContextItem,
     ChannelIdentity,
@@ -97,7 +98,9 @@ async def test_event_quotes_material_and_records_only_an_inspection_episode() ->
     before_goals = await harness.engine.goals()
     result = await harness.engine.receive(supplied, reply=None, timeout=_BUDGET)
     assert isinstance(result.result, InformationalEventResult)
-    assert result.result.summary == "The thermostat entered eco mode at 18:00."
+    # ADR-0313 §4:4, §6:2: today's path returns how the event ended, not its summary.
+    assert result.result.ended is ActivationEnding.DONE
+    assert "summary" not in result.result.model_dump()
     assert len(model.calls) == 1
     messages = model.calls[0].messages
     assert [message.role for message in messages] == [Role.SYSTEM, Role.USER]
@@ -112,7 +115,8 @@ async def test_event_quotes_material_and_records_only_an_inspection_episode() ->
     assert isinstance(episode, EpisodicMemory)
     assert episode.id == result.capture.episode_id
     assert result.capture.state == "recorded"
-    assert episode.outcome == result.result.summary
+    # The summary is kept with the episode, as before; it is no longer returned.
+    assert episode.outcome == "The thermostat entered eco mode at 18:00."
     assert episode.processing_record is not None
     assert episode.processing_record.status is ProcessingStatus.COMPLETED
     assert await harness.engine.goals() == before_goals
@@ -369,6 +373,6 @@ async def test_event_observes_complete_produced_summary_even_when_final_deadline
     else:
         result = await stage.process(supplied, deadline=deadline, on_summary=summaries.append)
         assert isinstance(result.result, InformationalEventResult)
-        assert result.result.summary == text
+        assert result.result.ended is ActivationEnding.DONE
     assert summaries == [text]
     assert len(model.calls) == 1

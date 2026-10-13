@@ -33192,11 +33192,19 @@ class SpokenChannelResult(BaseModel):
 
 
 class InformationalEventResult(BaseModel):
-    """A transient factual summary; no conversational reply or durable receipt."""
+    """How an event's activation ended, and nothing it wrote (ADR-0313 §4:3-§4:5).
+
+    An event's place takes no message: what its rounds wrote is kept with its episode
+    and written nowhere, so none of it is returned. An activation that could not
+    finish — a phase's failure, the round limit, or the event's budget running out —
+    is a result reading *couldn't finish*, not a raise (§4:5).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     kind: Literal["informational_event"] = "informational_event"
-    summary: NonBlankEncodableText
+    ended: ActivationEnding = Field(
+        description="How the event's activation ended (ADR-0293 §8:3, ADR-0295 §3:4)."
+    )
 
 
 ChannelOutcome = Annotated[
