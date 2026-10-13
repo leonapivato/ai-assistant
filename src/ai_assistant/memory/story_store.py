@@ -611,6 +611,40 @@ def _move_members(source: str, target: str, members: object) -> tuple[StoryMembe
     return named
 
 
+def _note_not_held(
+    source: str, actor: StoryActor, named: Sequence[int], carried: Sequence[int]
+) -> StoryRefusal | None:
+    """Refuse a planning split or move naming a note ``source`` does not hold (ADR-0307 §5:4).
+
+    Made inside the write's transaction, against the notes it found held there, so a
+    note moved away since anyone looked refuses the whole call. Every other actor's
+    write passes such a note over (ADR-0303 §6:2).
+    """
+    if actor is not StoryActor.PLANNING or len(carried) == len(set(named)):
+        return None
+    return StoryRefusal(reason=StoryRefusalReason.NOTE_NOT_HELD, story_id=source)
+
+
+def _notes_refusal(
+    source: str,
+    actor: StoryActor,
+    named: Sequence[int],
+    carried: Sequence[int],
+    *,
+    members: Sequence[StoryMember],
+) -> StoryRefusal | None:
+    """A move's refusal over the notes it names: ``note_not_held``, then ``no_notes``.
+
+    ADR-0307 §5:4 refuses a planning move naming a note the story does not hold;
+    ADR-0304 §9:3 refuses a note move whose story holds none of the notes it names.
+    """
+    if refused := _note_not_held(source, actor, named, carried):
+        return refused
+    if not members and not carried:
+        return StoryRefusal(reason=StoryRefusalReason.NO_NOTES, story_id=source)
+    return None
+
+
 def _summary_size(draft: StorySummaryDraft) -> int:
     """The characters a draft's lines count against ``STORY_SUMMARY_CAP_CHARS``: all of them.
 
@@ -1304,6 +1338,8 @@ class SqliteStoryStore:
             moving = set(members)
             moved = [m for m in self._member_rows(conn, story_id) if m in moving]
             carried = self._named_notes(conn, story_id, notes)
+            if refused := _note_not_held(story_id, actor, notes, carried):
+                return StoryOutcome(refusal=refused)
             if flag is not None and (refused := self._flag_refusal(conn, flag)):
                 return StoryOutcome(refusal=refused)
             split_off = self._mint(conn, stamp)
@@ -1374,10 +1410,8 @@ class SqliteStoryStore:
             moving = set(members)
             moved = [m for m in self._member_rows(conn, source) if m in moving]
             carried = self._named_notes(conn, source, notes)
-            if not members and not carried:
-                return StoryOutcome(
-                    refusal=StoryRefusal(reason=StoryRefusalReason.NO_NOTES, story_id=source)
-                )
+            if refused := _notes_refusal(source, actor, notes, carried, members=members):
+                return StoryOutcome(refusal=refused)
             if flag is not None and (refused := self._flag_refusal(conn, flag)):
                 return StoryOutcome(refusal=refused)
             logged = 0

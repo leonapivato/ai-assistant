@@ -95,3 +95,12 @@ def test_a_no_notes_refusal_names_the_story_moved_from() -> None:
     assert refusal.story_id == "story:a"
     with pytest.raises(ValidationError, match="no_notes"):
         StoryRefusal(reason=StoryRefusalReason.NO_NOTES)
+
+
+def test_a_note_not_held_refusal_names_the_story_moved_from() -> None:
+    """ADR-0307 §5:4: planning's split or move refused whole names the story moved from."""
+    refusal = StoryRefusal(reason=StoryRefusalReason.NOTE_NOT_HELD, story_id="story:a")
+    assert refusal.reason.value == "note_not_held"
+    assert refusal.story_id == "story:a"
+    with pytest.raises(ValidationError, match="note_not_held"):
+        StoryRefusal(reason=StoryRefusalReason.NOTE_NOT_HELD)

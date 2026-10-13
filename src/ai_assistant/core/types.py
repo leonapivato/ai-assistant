@@ -33398,6 +33398,13 @@ class StoryRefusalReason(StrEnum):
     """A note move, naming no member and one or more notes, named none the story moved
     from holds (ADR-0304 §9:3). The refusal names the story moved from."""
 
+    NOTE_NOT_HELD = "note_not_held"
+    """A split or a move whose actor is ``planning`` named a note the story it moves
+    from does not hold when it runs, so it is refused whole (ADR-0307 §5:4): a note
+    moved away meanwhile, by another call or by the matters pass, refuses it too. Every
+    other actor's split or move passes such a note over (ADR-0303 §6:2). The refusal
+    names the story moved from."""
+
 
 class StoryHeader(BaseModel):
     """What a story carries of its own: its id, when it was made, and where it went.
@@ -33614,7 +33621,8 @@ class StoryRefusal(BaseModel):
 
     ``story_id`` names the story the refusal is about where there is one — the
     unknown or merged story, the story merged into itself, the story a loop
-    starts from, or the story a note move found none of its notes on — and
+    starts from, the story a note move found none of its notes on, or the story a
+    planning split or move named a note it does not hold — and
     ``merged_into`` names where a merged one went. ``member``
     names the member at fault for ``not_a_member`` and ``unknown_activation``.
     ``loop`` names the stories forming the loop, in containment order starting at
@@ -33645,6 +33653,7 @@ class StoryRefusal(BaseModel):
             StoryRefusalReason.MERGED_STORY,
             StoryRefusalReason.SELF_MERGE,
             StoryRefusalReason.NO_NOTES,
+            StoryRefusalReason.NOTE_NOT_HELD,
         }
         if needs_story and self.story_id is None:
             msg = f"a {reason.value} refusal names the story it is about"

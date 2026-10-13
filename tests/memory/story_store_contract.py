@@ -37,6 +37,10 @@ names no note either and ``no_notes`` where the story holds none it names, in it
 fixed place in the order; and each note a split or a move carries logged on both
 stories, ``note_moved_out`` and ``note_moved_in``, where a merge logs none.
 
+And ADR-0307 §5:4: a split or a move whose actor is ``planning``, naming a note the
+story moved from does not hold when it runs, refused whole with ``note_not_held``,
+a note moved away meanwhile included, where every other actor's passes it over.
+
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
 """
@@ -1589,7 +1593,7 @@ class StoryStoreContract:
         outcome = await store.move(
             source,
             target,
-            actor=StoryActor.PLANNING,
+            actor=_PASS,
             trigger="act-7",
             notes=[on_y.note_id, on_x.note_id, foreign.note_id, 999_999, on_x.note_id],
         )
@@ -1615,7 +1619,7 @@ class StoryStoreContract:
         ]
         for each in (*source_lines, *target_lines):
             assert each.member is None
-            assert each.actor is StoryActor.PLANNING
+            assert each.actor is _PASS
             assert each.trigger == "act-7"
             assert each.at == STORY_AT
             assert (each.answers, each.outcome) == (None, None)
@@ -1699,6 +1703,141 @@ class StoryStoreContract:
             last_two = (await logged(store, each))[-2:]
             assert [line.change for line in last_two] == [change, StoryChange.DECIDED]
             assert last_two[1].outcome is StoryDecision.MOVED
+
+    @pytest.mark.parametrize("named", ["elsewhere", "nowhere"])
+    @pytest.mark.parametrize("operation", ["split", "move", "note_move"])
+    async def test_a_planning_split_or_move_naming_a_note_not_held_is_refused_whole(
+        self, store: StoryStore, operation: str, named: str
+    ) -> None:
+        """ADR-0307 §5:4: ``note_not_held``, naming the story moved from; nothing moves."""
+        source = await made(store, act("x"), act("y"))
+        target = await made(store, act("t"))
+        kept = await noted(store, source, "Held.", on="x")
+        foreign = await noted(store, target, "Elsewhere.", on="t")
+        missing = foreign.note_id if named == "elsewhere" else 999_999
+        before = await everything(store)
+        notes = [kept.note_id, missing]
+        stamp: dict[str, Any] = {"actor": StoryActor.PLANNING, "trigger": "act-7", "notes": notes}
+        if operation == "split":
+            outcome = await store.split(source, [act("x")], **stamp)
+        elif operation == "move":
+            outcome = await store.move(source, target, [act("x")], **stamp)
+        else:
+            outcome = await store.move(source, target, **stamp)
+        refused(outcome, StoryRefusalReason.NOTE_NOT_HELD)
+        assert outcome.refusal is not None
+        assert outcome.refusal.story_id == source
+        assert await everything(store) == before
+
+    async def test_a_note_moved_away_meanwhile_refuses_a_planning_move_whole(
+        self, store: StoryStore
+    ) -> None:
+        """ADR-0307 §5:4: held when the hub looked, moved by the matters pass since."""
+        source = await made(store, act("x"), act("y"))
+        target = await made(store, act("t"))
+        elsewhere = await made(store, act("z"))
+        first = await noted(store, source, "First.", on="x")
+        second = await noted(store, source, "Second.", on="y")
+        # What the hub's check reads: both notes are on the story moved from.
+        assert await notes_of(store, source) == [first, second]
+        await store.move(source, elsewhere, actor=_PASS, notes=[second.note_id])
+        before = await everything(store)
+        for outcome in (
+            await store.move(
+                source,
+                target,
+                [act("x")],
+                actor=StoryActor.PLANNING,
+                notes=[first.note_id, second.note_id],
+            ),
+            await store.split(
+                source,
+                [act("x")],
+                actor=StoryActor.PLANNING,
+                notes=[first.note_id, second.note_id],
+            ),
+        ):
+            refused(outcome, StoryRefusalReason.NOTE_NOT_HELD)
+        assert await everything(store) == before
+        assert await held(store, source) == [act("x"), act("y")]
+        assert await notes_of(store, source) == [first]
+
+    @pytest.mark.parametrize(
+        "actor", [StoryActor.OWNER, StoryActor.UNDERSTANDING, StoryActor.MATTERS_PASS]
+    )
+    async def test_every_other_actor_passes_a_note_not_held_over(
+        self, store: StoryStore, actor: StoryActor
+    ) -> None:
+        """ADR-0303 §6:2: only planning's split or move is refused over such a note."""
+        source = await made(store, act("x"), act("y"), act("w"))
+        target = await made(store, act("t"))
+        on_x = await noted(store, source, "On x.", on="x")
+        on_y = await noted(store, source, "On y.", on="y")
+        moved = await store.move(
+            source, target, [act("x")], actor=actor, notes=[on_x.note_id, 999_999]
+        )
+        assert moved == StoryOutcome(story_id=target, logged=2 + 2)
+        split = await store.split(source, [act("y")], actor=actor, notes=[on_y.note_id, 999_999])
+        assert split.story_id is not None
+        assert await notes_of(store, target) == [on_x]
+        assert await notes_of(store, split.story_id) == [on_y]
+
+    async def test_a_planning_move_holding_every_note_it_names_is_written(
+        self, store: StoryStore
+    ) -> None:
+        """ADR-0307 §5:4: the refusal is over a note not held, never over naming one twice."""
+        source = await made(store, act("x"), act("y"))
+        target = await made(store, act("t"))
+        note = await noted(store, source, "Goes.", on="y")
+        outcome = await store.move(
+            source,
+            target,
+            [act("x")],
+            actor=StoryActor.PLANNING,
+            trigger="act-7",
+            notes=[note.note_id, note.note_id],
+        )
+        assert outcome == StoryOutcome(story_id=target, logged=2 + 2)
+        assert await notes_of(store, target) == [note]
+
+    async def test_note_not_held_comes_after_not_a_member_and_before_the_flag(
+        self, store: StoryStore
+    ) -> None:
+        """The fixed order: the operation's own rule in its place, the flag after it."""
+        other = await made(store, act("b1"))
+        source = await made(store, act("a1"), act("a2"))
+        flag = await raised(store, source, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other))
+        before = await everything(store)
+        refused(
+            await store.move(
+                source, other, [act("nope")], actor=StoryActor.PLANNING, notes=[999_999]
+            ),
+            StoryRefusalReason.NOT_A_MEMBER,
+        )
+        refused(
+            await store.split(source, [act("nope")], actor=StoryActor.PLANNING, notes=[999_999]),
+            StoryRefusalReason.NOT_A_MEMBER,
+        )
+        assert flag.version is not None
+        unknown = flag.model_copy(update={"version": flag.version + 1})
+        for outcome in (
+            await store.move(
+                source,
+                other,
+                [act("a1")],
+                actor=StoryActor.PLANNING,
+                notes=[999_999],
+                answers=unknown,
+            ),
+            await store.split(
+                source, [act("a1")], actor=StoryActor.PLANNING, notes=[999_999], answers=unknown
+            ),
+            await store.move(
+                source, other, actor=StoryActor.PLANNING, notes=[999_999], answers=unknown
+            ),
+        ):
+            refused(outcome, StoryRefusalReason.NOTE_NOT_HELD)
+        assert await everything(store) == before
 
     async def test_a_merge_logs_no_line_for_the_notes_it_carries(self, store: StoryStore) -> None:
         """ADR-0304 §9: a merge says the two stories are one matter, and every note goes."""

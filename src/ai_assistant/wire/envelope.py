@@ -2534,7 +2534,11 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``recall_undigested``, carried in the ``StageEntry`` records of the wire-carried
 #:     ``EpisodicMemory.processing_record``: a peer at 95 refuses the new member
 #:     (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 96
+#: 97: ADR-0307 §5:4 refuses whole a split or a move whose actor is ``planning`` and
+#:     that names a note the story moved from does not hold: ``StoryRefusalReason``
+#:     gains ``note_not_held``, which the engine's story writes carry. A peer at 96
+#:     refuses the new member (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 97
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client
