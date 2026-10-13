@@ -2002,6 +2002,44 @@ async def test_a_marked_story_summary_reaches_the_first_ruling() -> None:
     assert decided.read_outside_content
 
 
+async def test_an_outside_episode_of_an_inherited_story_is_outside_content_read() -> None:
+    """ADR-0303 §3:1-§3:2: an episode whose input came from outside, shown in a story view.
+
+    Its provenance carries no mark and it holds no digest; only its origin says it rests
+    on outside content, and the working set counts it before the first round.
+    """
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="ok", notes="noted"))
+    harness = _harness(completer)
+    await harness.memory.add(_episode())
+    await harness.memory.add(_past_episode("activation:report", origin=InputOrigin.OUTSIDE))
+    stories = FakeStoryStore(now=lambda: AT)
+    trip = (
+        await stories.create(
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)], actor=StoryActor.OWNER
+        )
+    ).story_id
+    assert trip is not None
+    await stories.create(
+        [
+            StoryMember(kind=StoryMemberKind.ACTIVATION, id="report"),
+            StoryMember(kind=StoryMemberKind.STORY, id=trip),
+        ],
+        actor=StoryActor.OWNER,
+    )
+    path = _phases(completer, stories=stories)(harness)
+    working = _begun(path)
+    given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
+    (planning,) = [one for one in path.stages() if one.name is ControllerStage.PLANNING]
+
+    assert (await planning.run(given)).outcome is StageOutcome.DONE
+
+    (shown,) = json.loads(completer.calls[0].messages[1].content)["stories"]
+    (parent,) = shown["part_of"]
+    assert parent["latest_episodes"][0]["input"] == "an outside report, not shown"
+    assert working.fetched_outside
+    assert working.latest.planned.round.notes_marked
+
+
 async def test_the_story_views_are_read_again_for_each_round() -> None:
     """§6:1: each round is shown the stories as they stand when it is planned."""
     completer = FakeToolCallingCompleter.scripted(

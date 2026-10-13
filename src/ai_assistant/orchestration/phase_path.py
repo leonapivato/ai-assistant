@@ -157,6 +157,7 @@ from ai_assistant.core.types import (
     PlanningLabel,
     ProposedCall,
     RecallOutcome,
+    RecordedChannelTrigger,
     SemanticMemory,
     SendOutcome,
     StageOutcome,
@@ -712,8 +713,9 @@ def _cited(understanding: ActivationUnderstanding | None) -> list[str]:
 def _stories_external(given: PlanningStories) -> bool:
     """Whether a story view planning is shown rests on outside content (ADR-0303 §3:6).
 
-    A marked summary or note shown, an episode shown resting on outside content or
-    carrying evidence, as the episode window's count (ADR-0308 §5:4-§5:5), or a marked
+    A marked summary or note shown; an episode shown resting on outside content, carrying
+    evidence, as the episode window's count (ADR-0308 §5:4-§5:5), or whose input came
+    from outside, whose understood meaning is still shown (ADR-0303 §3:2); or a marked
     moment of where a matter stands.
     """
     shorts: list[ShortView] = [
@@ -743,10 +745,19 @@ def _stories_external(given: PlanningStories) -> bool:
         or notes
         or moments
         or any(
-            rests_on_recorded_external_content(record.provenance) or _carries_evidence(record)
+            rests_on_recorded_external_content(record.provenance)
+            or _carries_evidence(record)
+            or _from_outside(record)
             for record in episodes
         )
     )
+
+
+def _from_outside(record: EpisodicMemory) -> bool:
+    """Whether an episode's input came from outside (ADR-0284 §2:1, ADR-0303 §3:2)."""
+    processing = record.processing_record
+    trigger = None if processing is None else processing.trigger
+    return isinstance(trigger, RecordedChannelTrigger) and trigger.origin is InputOrigin.OUTSIDE
 
 
 # --- the working set ---------------------------------------------------------------------

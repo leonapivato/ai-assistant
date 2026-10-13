@@ -1123,7 +1123,12 @@ class _Request:
         return shown
 
     def _story_episode(self, record: EpisodicMemory) -> dict[str, object]:
-        """An episode of a story, rendered whole once and named by its label after."""
+        """An episode of a story, rendered whole once and named by its label after.
+
+        One resting on outside content, by its provenance or because its input came
+        from outside, whose understood meaning it is still shown (ADR-0303 §3:2), is
+        outside content planning has read (§3:1).
+        """
         label = self._book.label(LabelKind.EPISODE, record.id)
         if record.id in self._rendered:
             return {"label": label, "shown": _SHOWN_ABOVE}
@@ -1131,7 +1136,7 @@ class _Request:
             record, excerpt_chars=self._excerpt_chars, owner_records=self._inputs.owner_records
         )
         self._rendered.add(record.id)
-        if projection.derived_from_external:
+        if projection.derived_from_external or projection.origin is InputOrigin.OUTSIDE:
             self.shown.marked = True
         return self._episode(label, projection)
 
