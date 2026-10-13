@@ -11,8 +11,8 @@ implementation stands up a programmable pydantic-ai model.
 
 The suite asserts what is universal to the seam: which requests are refused before
 any model is contacted (ADR-0066 §1, ADR-0307 §2:6), that a round comes back in its
-four parts with nothing lost or invented (§2:1), that the notes and the mark are
-parts of the response and never calls (§2:2, §2:7), and that the offered tools and
+three parts with nothing lost or invented (ADR-0315 §3:1), that the notes are a part
+of the response and never a call (ADR-0315 §3:2, §3:3), and that the offered tools and
 the rendered request reach the model as given.
 
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
@@ -122,7 +122,6 @@ def _full_round() -> RoundResponse:
             ProposedCall(call_id="call-2", name="remember", arguments={"fact": "in Lisbon"}),
         ),
         notes="The user is travelling; check the forecast before suggesting plans.",
-        another_round=True,
     )
 
 
@@ -175,20 +174,19 @@ class ToolCallingCompleterContract:
         assert not caught.value.routable
         assert scripted.attempts == 0
 
-    async def test_a_round_comes_back_in_its_four_parts(self) -> None:
+    async def test_a_round_comes_back_in_its_three_parts(self) -> None:
         scripted = self.world(_full_round())
         response = await scripted.completer.respond(_request(), [_search_tool(), _remember_tool()])
         assert response == _full_round()
         assert scripted.attempts == 1
 
-    async def test_the_notes_and_the_mark_are_never_calls(self) -> None:
-        only_notes = RoundResponse(text="", notes="nothing to do yet", another_round=True)
+    async def test_the_notes_are_never_calls(self) -> None:
+        only_notes = RoundResponse(text="", notes="nothing to do yet")
         response = await self.world(only_notes).completer.respond(_request(), [_search_tool()])
         assert response.calls == ()
         assert response.notes == "nothing to do yet"
-        assert response.another_round is True
 
-    async def test_a_round_of_text_alone_carries_no_calls_notes_or_mark(self) -> None:
+    async def test_a_round_of_text_alone_carries_no_calls_or_notes(self) -> None:
         response = await self.world(RoundResponse(text="It is sunny.")).completer.respond(
             _request(), [_search_tool()]
         )

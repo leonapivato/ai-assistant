@@ -4044,9 +4044,8 @@ class ControllerRule(StrEnum):
     """Another round would be due, and the round limit has been reached (ADR-0307 §8:4,
     ADR-0309 §3). It ends a pass, so it is in :data:`ENDING_CONTROLLER_RULES`."""
     ROUND_DUE = "round_due"
-    """Every call of the latest round has finished, and one brought a result, was not
-    done, came back unknown, needed the user or was refused, or the round was marked
-    (ADR-0307 §8:1): ``planning`` is due."""
+    """The latest round made a call other than a tidy-up, and every call of it has
+    finished, whatever its calls brought back (ADR-0315 §2:1): ``planning`` is due."""
     UNDERSTOOD_NOT_RECALLED = "understood_not_recalled"
     """An understanding is recorded on the pass and there is no second-run decision
     (ADR-0308 §2:9, ADR-0309 §3): ``recall`` is due, its second run."""
@@ -4304,19 +4303,18 @@ def _distinct_call_ids(calls: tuple[ProposedCall, ...]) -> None:
 
 
 class RoundResponse(BaseModel):
-    """One model response of a planning round, in its four parts (ADR-0307 §2:1).
+    """One model response of a planning round, in its three parts (ADR-0315 §3:1).
 
     ``text`` is the round's message, possibly empty; ``calls`` the calls it proposes;
-    ``notes`` its episode notes, or ``None`` where it wrote none; and
-    ``another_round`` the mark asking for another round. The notes and the mark are
-    parts of the response and never calls (§2:2, §2:7).
+    and ``notes`` its episode notes, or ``None`` where it wrote none. The notes are a
+    part of the response and never a call (§3:2, §3:3). No part asks for a round: the
+    controller's rule alone decides whether one runs (§2, §3:4).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     text: EncodableText = Field(default="", validate_default=True)
     calls: tuple[ProposedCall, ...] = ()
     notes: NonBlankEncodableText | None = None
-    another_round: bool = False
 
     @model_validator(mode="after")
     def _calls_distinct(self) -> Self:
@@ -4395,8 +4393,8 @@ class PlanningRound(BaseModel):
     """One planning round as the episode records it (ADR-0307 §2:3, §10).
 
     Its ``id``; ``follows``, the round before it, or ``None`` for the first;
-    ``recorded_at``; the four parts of its :class:`RoundResponse`, the calls as
-    proposed, labels and all; and ``notes_marked``, which the hub sets where the
+    ``recorded_at``; the three parts of its :class:`RoundResponse` (ADR-0315 §5), the
+    calls as proposed, labels and all; and ``notes_marked``, which the hub sets where the
     activation had read outside content when the notes were written (ADR-0307 §4:3,
     ADR-0303 §3:1), never from the model's output. A round is never edited.
 
@@ -4412,7 +4410,6 @@ class PlanningRound(BaseModel):
     text: EncodableText = Field(default="", validate_default=True)
     calls: tuple[ProposedCall, ...] = ()
     notes: NonBlankEncodableText | None = None
-    another_round: bool = False
     notes_marked: bool = False
 
     @model_validator(mode="after")
@@ -4527,10 +4524,13 @@ class EpisodeProcessingRecord(BaseModel):
     ``recall_second_run`` is recall's second decision, made on what understanding
     found (ADR-0308 §2, §7), held beside the first's ``recall``. It is ``None`` where
     no second run was decided, and on a resume always, as ``recall`` is.
+
+    ``schema_version`` is 10 because a round loses the mark that asked for another
+    (ADR-0315 §3, §5): a version-9 record carries it and does not validate here.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    schema_version: Literal[9] = 9
+    schema_version: Literal[10] = 10
     activation_id: Identifier
     started_at: UtcInstant
     ended_at: UtcInstant | None = None

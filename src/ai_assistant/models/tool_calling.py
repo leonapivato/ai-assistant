@@ -6,13 +6,14 @@ direct request API, so the provider's own tool calling carries the calls and not
 parses them out of reply text. Nothing here runs a call: pydantic-ai's direct request
 returns the model's response and executes no tool.
 
-**How the notes and the mark ride the native shape is this module's** (ADR-0307 §2:7).
-They ride one reserved tool, :data:`ROUND_TOOL`, offered beside the capabilities. Its
-description tells the model that it runs nothing; a call to it is read back into
-:class:`~ai_assistant.core.types.RoundResponse`'s ``notes`` and ``another_round`` and
-never returned as a call. Outside this module neither is a call (§2:2). A model may
-call it more than once in one response: the notes are joined in order, and the mark is
-set where any call sets it. An offered capability may not take its name.
+**How the notes ride the native shape is this module's** (ADR-0315 §3:3). They ride one
+reserved tool, :data:`ROUND_TOOL`, offered beside the capabilities. Its description tells
+the model that it runs nothing; a call to it is read back into
+:class:`~ai_assistant.core.types.RoundResponse`'s ``notes`` and never returned as a call.
+Outside this module the notes are not a call (§3:2). A model may call it more than once
+in one response, and the notes are joined in order. Nothing it carries asks for a round:
+the controller's rule alone decides whether one runs (§2, §3:4). An offered capability
+may not take its name.
 
 **Each round is asked afresh** (§2:6). The request is the rendered ``Message`` history,
 translated exactly as :class:`~ai_assistant.models.provider.PydanticAIProvider`
@@ -23,7 +24,7 @@ ever replayed natively.
 provider's thinking through pydantic-ai's unified ``thinking`` setting, which a model or
 provider without it ignores. The model reasons in thinking parts and writes the round's
 message in text parts, so its working stays out of the words the user reads (§3:1). A
-thinking part is none of a round's four parts (§2:1): it is dropped here, never returned,
+thinking part is none of a round's three parts (ADR-0315 §3:1): it is dropped here, never returned,
 recorded or replayed, and the next round is asked afresh without it (§2:6). A provider
 may count thinking against the response's output ceiling, as Anthropic's does, so where
 the model takes the setting the ceiling is widened by the thinking budget pydantic-ai
@@ -88,7 +89,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import DiagnosticSink
     from ai_assistant.core.types import Message
 
-#: The reserved tool the notes and the mark ride (ADR-0307 §2:7). No capability takes
+#: The reserved tool the notes ride (ADR-0315 §3:3). No capability takes
 #: this name.
 ROUND_TOOL: Final = "planning_round"
 
@@ -108,9 +109,8 @@ _MESSAGE_TOKENS: Final = 4096
 
 _ROUND_TOOL_DESCRIPTION: Final = (
     "Not a capability: calling it runs nothing and goes to no one. Call it to keep "
-    "episode notes on this activation, to ask for another planning round once every "
-    "call of this round has finished, or both. Notes are free text for your own later "
-    "rounds and later activations to read."
+    "episode notes on this activation: free text for your own later rounds and later "
+    "activations to read."
 )
 
 _ROUND_TOOL_SCHEMA: Final[dict[str, Any]] = {
@@ -118,11 +118,7 @@ _ROUND_TOOL_SCHEMA: Final[dict[str, Any]] = {
     "properties": {
         "notes": {
             "type": "string",
-            "description": "Episode notes to keep with this round. Optional.",
-        },
-        "another_round": {
-            "type": "boolean",
-            "description": ("True to ask for another round once this round's calls have finished."),
+            "description": "Episode notes to keep with this round.",
         },
     },
     "additionalProperties": False,
@@ -208,7 +204,7 @@ class PydanticAIToolCallingCompleter:
             msg = "respond() requires distinct tool names"
             raise ModelError(msg)
         if ROUND_TOOL in names:
-            msg = f"the tool name {ROUND_TOOL!r} is reserved for the round's notes and mark"
+            msg = f"the tool name {ROUND_TOOL!r} is reserved for the round's notes"
             raise ModelError(msg)
         parameters = ModelRequestParameters(
             function_tools=[*offered, _round_tool()], allow_text_output=True
@@ -337,7 +333,7 @@ def _native(tool: OfferedTool) -> NativeTool:
 
 
 def _round_tool() -> NativeTool:
-    """The reserved tool carrying the notes and the mark, built afresh per request."""
+    """The reserved tool carrying the notes, built afresh per request."""
     return NativeTool(
         name=ROUND_TOOL,
         description=_ROUND_TOOL_DESCRIPTION,
@@ -346,9 +342,9 @@ def _round_tool() -> NativeTool:
 
 
 def _round(response: ModelResponse) -> RoundResponse:
-    """Read a provider response as a round's four parts.
+    """Read a provider response as a round's three parts (ADR-0315 §3:1).
 
-    The text is the text parts alone: a thinking part is none of the four, and is
+    The text is the text parts alone: a thinking part is none of the three, and is
     dropped.
 
     Raises:
@@ -361,7 +357,6 @@ def _round(response: ModelResponse) -> RoundResponse:
         raise ModelResponseError(msg)
     calls: list[ProposedCall] = []
     notes: list[str] = []
-    another_round = False
     try:
         for part in response.parts:
             if not isinstance(part, ToolCallPart):
@@ -374,15 +369,13 @@ def _round(response: ModelResponse) -> RoundResponse:
                     )
                 )
                 continue
-            written, marked = _round_parts(arguments)
+            written = _round_notes(arguments)
             if written is not None and written.strip():
                 notes.append(written)
-            another_round = another_round or marked
         return RoundResponse(
             text=response.text or "",
             calls=tuple(calls),
             notes="\n\n".join(notes) if notes else None,
-            another_round=another_round,
         )
     except (ValidationError, ValueError) as exc:
         msg = "the model's response could not be read as a planning round"
@@ -402,18 +395,18 @@ def _arguments(part: ToolCallPart) -> dict[str, Any]:
         raise ValueError(msg) from exc
 
 
-def _round_parts(arguments: dict[str, object]) -> tuple[str | None, bool]:
-    """The notes and the mark one call of the reserved tool carries.
+def _round_notes(arguments: dict[str, object]) -> str | None:
+    """The notes one call of the reserved tool carries.
 
     Raises:
-        ValueError: If either is present and not of its type, or anything else is.
+        ValueError: If they are present and not text, or anything else is present,
+            the retired mark included (ADR-0315 §3:4).
     """
-    if set(arguments) - {"notes", "another_round"}:
-        msg = "the round's tool takes notes and another_round alone"
+    if set(arguments) - {"notes"}:
+        msg = "the round's tool takes notes alone"
         raise ValueError(msg)
     notes = arguments.get("notes")
-    mark = arguments.get("another_round", False)
-    if (notes is not None and not isinstance(notes, str)) or not isinstance(mark, bool):
-        msg = "the round's notes are text and its mark is a boolean"
+    if notes is not None and not isinstance(notes, str):
+        msg = "the round's notes are text"
         raise ValueError(msg)
-    return notes, mark
+    return notes

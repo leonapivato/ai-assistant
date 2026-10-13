@@ -670,12 +670,18 @@ async def test_without_the_registration_the_real_policy_sends_the_search_to_the_
 
 
 async def test_a_remember_is_written_once_through_the_assistants_own_records() -> None:
-    """ADR-0306 §3:2-§3:3: remembering is claimed, run directly and ends the round."""
+    """ADR-0306 §3:2-§3:3: remembering is claimed, run directly and ends the round.
+
+    It brings another round, though it brought nothing back (ADR-0315 §2:1); that round,
+    with nothing new to say, writes no message (§4:2) and makes no call, so the activation
+    ends after it.
+    """
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             text="I'll remember that.",
             calls=(_call("c1", "remember", statement="The user likes green tea."),),
-        )
+        ),
+        RoundResponse(),
     )
     harness = _harness(completer)
     conversation = await _conversation(harness)
@@ -693,10 +699,15 @@ async def test_a_remember_is_written_once_through_the_assistants_own_records() -
     assert written is not None
     assert written.content == "The user likes green tea."
     assert written.provenance.evidence == (episode.id,)
-    # Done, no result, unmarked: one round and the end.
+    # Done with nothing brought back: a second round, shown it done, and then the end.
     assert episode.processing_record is not None
-    assert len(episode.processing_record.rounds) == 1
-    assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.NOTHING_DUE)
+    assert len(episode.processing_record.rounds) == 2
+    (call,) = json.loads(completer.calls[1].messages[1].content)["rounds"][0]["calls"]
+    assert call["outcome"] == "done"
+    assert _stages(episode)[-2:] == [
+        (ControllerStage.PLANNING, ControllerRule.ROUND_DUE),
+        (ControllerStage.END, ControllerRule.NOTHING_DUE),
+    ]
 
 
 async def test_a_booking_that_needs_you_is_answered_cannot_be_done_yet() -> None:
@@ -2400,7 +2411,6 @@ async def _the_story(stories: FakeStoryStore, activation_id: str) -> str:
 _STARTED: Final = RoundResponse(
     text="I'll keep track of the trip.",
     calls=(_call("c1", "start_story", notes=["A camping trip to Riverside."]),),
-    another_round=True,
 )
 
 
@@ -2411,6 +2421,10 @@ async def test_a_story_is_started_and_then_noted_end_to_end() -> None:
     is not safe to repeat (ADR-0306 §5:3); the next round is shown the new story under
     ``S1`` and notes on it, and the note is planning's, written during this activation
     and unmarked, since nothing it read was outside content.
+
+    The two steps complete with nothing asked for (ADR-0315 §2:1): the start brings the
+    round that notes on the story, and the note brings a third, which has nothing to say
+    or do, so the activation ends after it.
     """
     completer = FakeToolCallingCompleter.scripted(
         _STARTED,
@@ -2419,6 +2433,7 @@ async def test_a_story_is_started_and_then_noted_end_to_end() -> None:
                 _call("c2", "note_story", story="S1", note="Waiting on the campground's reply."),
             )
         ),
+        RoundResponse(),
     )
     stories = FakeStoryStore(now=lambda: AT)
     harness = _harness(completer, stories=stories, story_calls=True)
@@ -2447,12 +2462,14 @@ async def test_a_story_is_started_and_then_noted_end_to_end() -> None:
     assert [(one.capability, one.outcome) for one in effects if one.capability] == [
         ("start_story", ToolOutcome.SUCCEEDED)
     ]
-    assert _stages(episode)[-4:] == [
+    assert _stages(episode)[-5:] == [
         (ControllerStage.PLANNING, ControllerRule.ROUND_DUE),
         (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
         (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED),
+        (ControllerStage.PLANNING, ControllerRule.ROUND_DUE),
         (ControllerStage.END, ControllerRule.NOTHING_DUE),
     ]
+    assert len(record.rounds) == 3
     assert _said(await _messages(harness, conversation))[1:] == [
         (MessageAuthor.ASSISTANT, "I'll keep track of the trip.")
     ]
@@ -2539,7 +2556,7 @@ async def test_a_refused_tidy_up_still_brings_no_round(name: str, *, brings: boo
     (refused,) = working.latest.planned.refused
     assert refused.reason == "'S9' names nothing you were shown"
     assert working.latest_has_calls
-    assert working.latest_brought_something is brings
+    assert working.latest_calls_beyond_tidy_ups is brings
 
 
 @pytest.mark.parametrize("origin", [InputOrigin.USER, InputOrigin.OUTSIDE])
@@ -2629,11 +2646,9 @@ async def test_a_note_is_moved_between_stories_by_its_label_end_to_end() -> None
                     notes=["A camping trip to Riverside.", "The dog's paperwork is open."],
                 ),
             ),
-            another_round=True,
         ),
         RoundResponse(
             calls=(_call("c2", "start_story", notes=["The dog's vet visit."]),),
-            another_round=True,
         ),
         RoundResponse(calls=(_call("c3", "move_story", story="S1", to="S2", notes=["N2"]),)),
     )
@@ -3178,7 +3193,8 @@ async def test_with_the_record_on_each_source_writes_for_the_one_activation() ->
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             text="Noted.", calls=(_call("c1", "remember", statement="The user likes tea."),)
-        )
+        ),
+        RoundResponse(),
     )
     harness = Harness(
         planner=NoStepPlanner(),
@@ -3212,7 +3228,11 @@ async def test_with_the_record_on_each_source_writes_for_the_one_activation() ->
         DiagnosticKind.GIVEN,
         DiagnosticKind.RETURNED,
     ]
-    assert [one.kind for one in sink.of(DiagnosticSource.PLANNING)] == [DiagnosticKind.GIVEN]
+    # Two rounds: the remember brings a second (ADR-0315 §2:1), which has nothing to do.
+    assert [one.kind for one in sink.of(DiagnosticSource.PLANNING)] == [
+        DiagnosticKind.GIVEN,
+        DiagnosticKind.GIVEN,
+    ]
     (authorized,) = sink.of(DiagnosticSource.AUTHORIZING)
     assert authorized.model_dump(mode="json")["body"]["calls"][0]["name"] == "remember"
 
@@ -3324,11 +3344,12 @@ async def test_an_event_remembers_starts_a_story_and_notes_it() -> None:
                 _call("c1", "remember", statement="The thermostat goes to eco mode at 18:00."),
                 _call("c2", "start_story", notes=["The thermostat's schedule."]),
             ),
-            another_round=True,
         ),
         RoundResponse(
             calls=(_call("c3", "note_story", story="S1", note="Eco mode at 18:00 again."),)
         ),
+        # The note brings a third round (ADR-0315 §2:1), which has nothing to do.
+        RoundResponse(),
     )
     stories = FakeStoryStore(now=lambda: AT)
     harness = _harness(completer, stories=stories, story_calls=True)
@@ -3467,7 +3488,6 @@ async def test_a_stopped_event_returns_stopped() -> None:
     completer = _GatedCompleter(
         RoundResponse(
             calls=(_call("c1", "remember", statement="The thermostat is in eco mode."),),
-            another_round=True,
         ),
         RoundResponse(text="Done."),
         gated=2,

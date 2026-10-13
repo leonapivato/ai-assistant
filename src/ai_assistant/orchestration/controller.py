@@ -230,10 +230,6 @@ class PhaseFacts(Protocol):
         """The latest round's text is not blank."""
 
     @property
-    def latest_marked(self) -> bool:
-        """The latest round asked for another round (ADR-0307 §2:1)."""
-
-    @property
     def latest_authorized(self) -> bool:
         """There is an authorizing decision for the latest round, whatever came of it."""
 
@@ -250,11 +246,11 @@ class PhaseFacts(Protocol):
         """A call the latest round allows declares a result that may carry outside text."""
 
     @property
-    def latest_brought_something(self) -> bool:
-        """A call of the latest round brought something that calls for a round.
+    def latest_calls_beyond_tidy_ups(self) -> bool:
+        """The latest round proposed a call other than a tidy-up, refused ones included.
 
-        A result, or a call not done, unknown, needing the user or refused (ADR-0307
-        §8:1).
+        Such a round brings another once its calls have finished, whatever they brought
+        back; a tidy-up never brings one (ADR-0315 §2:1, §2:2).
         """
 
 
@@ -397,7 +393,7 @@ def _latest_round(facts: PassFacts) -> object:
 
 
 def _round_finished(phases: PhaseFacts) -> bool:
-    """Every call of the latest round has finished, digests included (ADR-0307 §8:1).
+    """Every call of the latest round has finished, digests included (ADR-0315 §2:1).
 
     The round's authorizing decision is made, and where it allowed anything, the step
     that ran it, acting with its digests beside it, has ended.
@@ -406,20 +402,15 @@ def _round_finished(phases: PhaseFacts) -> bool:
 
 
 def _another_round_called_for(facts: PassFacts) -> bool:
-    """ADR-0307 §8:1 and §8:3: a new round is called for.
+    """ADR-0315 §2: a new round is called for.
 
-    The latest round proposed a call, every call of it has finished, and one brought a
-    result, was not done, came back unknown, needed the user or was refused, or the
-    round was marked. A round with no calls is no progress, and ends the activation
-    after its message whatever its mark.
+    The latest round proposed a call other than a tidy-up, and every call of it has
+    finished, whatever its calls brought back (§2:1). A round whose only calls are
+    tidy-ups, like a round with no calls, ends the activation after its message (§2:2,
+    §2:3); the round limit ends every loop this makes (§2:4).
     """
     phases = _phases(facts)
-    return (
-        phases.rounds > 0
-        and phases.latest_has_calls
-        and _round_finished(phases)
-        and (phases.latest_brought_something or phases.latest_marked)
-    )
+    return phases.rounds > 0 and phases.latest_calls_beyond_tidy_ups and _round_finished(phases)
 
 
 def _second_run(_: PassFacts) -> object:

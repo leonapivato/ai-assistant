@@ -48,6 +48,7 @@ from ai_assistant.orchestration.planning import (
     RefusedCall,
 )
 from ai_assistant.orchestration.remembering import REMEMBER
+from ai_assistant.orchestration.story_calls import TIDY_STORY_CAPABILITY
 from ai_assistant.orchestration.understanding import TranscriptWindow
 from ai_assistant.testing import FakeAuditTrail, FakeToolInvoker, FakeWebSearcher
 
@@ -241,7 +242,37 @@ def test_the_working_set_answers_the_rules_from_the_latest_rounds_decisions() ->
     )
     assert working.latest_authorized
     assert not working.latest_allows
-    assert working.latest_brought_something
+    assert working.latest_calls_beyond_tidy_ups
+
+
+@pytest.mark.parametrize(
+    ("names", "beyond"),
+    [
+        ((), False),
+        ((TIDY_STORY_CAPABILITY,), False),
+        ((TIDY_STORY_CAPABILITY, TIDY_STORY_CAPABILITY), False),
+        (("remember",), True),
+        ((TIDY_STORY_CAPABILITY, "note_story"), True),
+    ],
+    ids=["no-calls", "one-tidy-up", "tidy-ups-only", "a-call", "a-call-beside-a-tidy-up"],
+)
+def test_only_a_call_other_than_a_tidy_up_brings_a_round(
+    names: tuple[str, ...],
+    beyond: bool,
+) -> None:
+    """ADR-0315 §2:1-§2:2: whatever the call brought back; a tidy-up never brings one."""
+    working = PhaseWorking(
+        activation_id="act",
+        place=place_window(TranscriptWindow(conversation=conversation_channel("c1"), messages=())),
+        conversation_id="c1",
+        trigger_origin=None,
+        owner_records=True,
+        round_limit=2,
+    )
+    working.planned(
+        _planned(*(ProposedCall(call_id=f"c{i}", name=name) for i, name in enumerate(names)))
+    )
+    assert working.latest_calls_beyond_tidy_ups is beyond
     with pytest.raises(ValueError, match="at least one round"):
         PhaseWorking(
             activation_id="act",

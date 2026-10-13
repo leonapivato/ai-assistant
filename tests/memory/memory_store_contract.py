@@ -1520,7 +1520,7 @@ class MemoryStoreContract:
         got = await store.get("understood")
         assert isinstance(got, EpisodicMemory)
         assert got.processing_record is not None
-        assert got.processing_record.schema_version == 9
+        assert got.processing_record.schema_version == 10
         assert got.processing_record.understanding == (version,)
         assert got.processing_record.understanding[0].meaning_referents[0].id == " "
         assert got.processing_record.understanding_omitted is None
@@ -6547,7 +6547,6 @@ class MemoryStoreContract:
                 ),
             ),
             notes="the user asked for tonight",
-            another_round=True,
             notes_marked=True,
         )
         second = PlanningRound(id="round:2", follows="round:1", recorded_at=_IN_WINDOW)

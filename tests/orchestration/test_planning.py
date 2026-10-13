@@ -293,7 +293,6 @@ async def test_one_round_is_asked_recorded_and_handed_on() -> None:
         text="Booking it now.",
         calls=(_call("c1", "book", slot="19:00"),),
         notes="the user prefers early",
-        another_round=True,
     )
     stage, completer, recorder = _stage(response)
 
@@ -306,7 +305,7 @@ async def test_one_round_is_asked_recorded_and_handed_on() -> None:
     assert planned.round.follows is None
     assert planned.round.recorded_at == _AT
     assert (planned.round.text, planned.round.calls) == (response.text, response.calls)
-    assert (planned.round.notes, planned.round.another_round) == (response.notes, True)
+    assert planned.round.notes == response.notes
     assert planned.round.notes_marked is False
     assert planned.message == "Booking it now."
     assert planned.calls == (PlannedCall(_call("c1", "book", slot="19:00")),)
@@ -398,15 +397,36 @@ async def test_the_instruction_states_the_rounds_rules() -> None:
     assert "cite" not in instruction.lower()
 
 
+@pytest.mark.parametrize("takes_message", [True, False], ids=["message", "no-message"])
+async def test_the_instruction_says_a_round_with_a_call_brings_another_and_names_no_mark(
+    takes_message: bool,
+) -> None:
+    """ADR-0315 §4:3: a call other than a tidy-up brings a round; no calls end the work."""
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(place=PlaceWindow(takes_message=takes_message)))
+    instruction = _instruction(completer)
+    assert (
+        "Once every call of this round has finished, another round follows whenever this "
+        "round made a call other than a tidy-up, whatever its calls brought back, and shows "
+        "you what came of them."
+    ) in instruction
+    assert (
+        "A round with no calls, or whose only calls are tidy-ups, ends the work after its message."
+    ) in instruction
+    assert "where there is nothing new for them, write no text" in instruction
+    assert "ask for another round" not in instruction
+    assert "ask for one" not in instruction
+    assert "mark" not in instruction.replace("marked", "")
+
+
 async def test_the_instruction_has_the_whole_message_written_before_notes_and_calls() -> None:
     """#2851: a provider's turn ends at its first tool call, so nothing after it is written."""
     stage, completer, _ = _stage()
     await stage.plan(_inputs())
     instruction = _instruction(completer)
     assert (
-        "Write the whole message first, before you propose any call, keep notes or ask for "
-        "another round: your response ends there, and anything you would write after them "
-        "is lost."
+        "Write the whole message first, before you propose any call or keep notes: your "
+        "response ends there, and anything you would write after them is lost."
     ) in instruction
     assert "the answer itself is the message, never a line saying that one follows" in (instruction)
 
@@ -684,13 +704,13 @@ async def test_each_earlier_calls_outcome_is_shown(
 
 
 async def test_an_earlier_round_and_its_notes_are_shown_whatever_the_audience() -> None:
-    earlier = _earlier(text="Looking.", notes="waiting on the search", another_round=True)
+    earlier = _earlier(text="Looking.", notes="waiting on the search")
     stage, completer, _ = _stage()
     await stage.plan(_inputs(rounds=(earlier,), owner_records=False))
     shown = _sent(completer)["rounds"][0]
     assert shown["notes"] == "waiting on the search"
     assert shown["text"] == "Looking."
-    assert shown["asked_for_another_round"] is True
+    assert set(shown) == {"round", "text", "text_was", "calls", "notes"}
 
 
 async def test_another_episodes_notes_follow_the_audience() -> None:
