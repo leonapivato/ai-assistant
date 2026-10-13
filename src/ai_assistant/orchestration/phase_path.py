@@ -141,7 +141,9 @@ source is not outside are fetched by id before the next round, the audience pred
 applied again (ADR-0282 §2:4-§2:8), and held under the result's id, every later round
 shown the same records; its outside records are held by acting by id, and its digest
 fetches them by id the same way. A story's full view, read when its call ran, is held
-under the call's result; resting on outside content, it sets ``fetched_outside``, as a
+under the call's result; it shows a page of the story's older notes too, those a tidy-up
+has taken in, under the notes' placement, so a move or a split can name them (#2893).
+Resting on outside content, older notes included, it sets ``fetched_outside``, as a
 story view does, and the notes it shows are held with their marks for authorizing. A
 follow-up's result is the result it names, as held, which digesting reads again against
 the follow-up's question.
@@ -187,6 +189,7 @@ from ai_assistant.core.errors import (
     StoryStoreError,
 )
 from ai_assistant.core.types import (
+    MAX_STORY_PAGE,
     RECALLED_ITEMS_MAX,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEffect,
@@ -248,6 +251,7 @@ from ai_assistant.orchestration.controller import (
 from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.lookups import (
+    OLDER_NOTES_PAGE,
     READ_STORY_CAPABILITY,
     SEARCH_MEMORY_CAPABILITY,
     searched_ids,
@@ -750,19 +754,22 @@ class StoryReads:
         return PlanningStories(stories=tuple(views), cited=cited)
 
     async def view(
-        self, story_id: str, *, audience: TurnSupply, owner_records: bool
+        self, story_id: str, *, audience: TurnSupply, owner_records: bool, older_page: int = 1
     ) -> PlanningStory | None:
         """One story's full view, read as the views of the activation's stories are.
 
         The full view a story read returns (ADR-0307 §6:6, ADR-0300 §10:6), under the
         same placement (§6:4): the summary and notes by whether a record placed for the
         owner alone may be shown, the episodes and where the matter stands by the
-        audience predicate.
+        audience predicate. It also shows one page of the story's older notes, those a
+        tidy-up has taken in, newest first (#2893), under the notes' placement: where
+        no note may be shown, they are not read.
 
         Args:
             story_id: The story.
             audience: The pass's audience posture, which admits the episodes.
             owner_records: Whether a record placed for the owner alone may be shown.
+            older_page: Which page of the older notes to show, the newest page 1.
 
         Returns:
             The view, or ``None`` where the store does not hold the story.
@@ -772,12 +779,25 @@ class StoryReads:
             PlanningError: If the plan store cannot be read.
             MemoryStoreError: If the story's episodes cannot be read.
         """
-        return await self._story(story_id, audience, SummaryVisibility(owner_records=owner_records))
+        return await self._story(
+            story_id,
+            audience,
+            SummaryVisibility(owner_records=owner_records),
+            older_page=older_page,
+        )
 
     async def _story(
-        self, story_id: str, audience: TurnSupply, visibility: SummaryVisibility
+        self,
+        story_id: str,
+        audience: TurnSupply,
+        visibility: SummaryVisibility,
+        *,
+        older_page: int | None = None,
     ) -> PlanningStory | None:
-        """One story's view, or ``None`` where the store no longer holds it."""
+        """One story's view, or ``None`` where the store no longer holds it.
+
+        With ``older_page``, a full view: it also carries that page of the older notes.
+        """
         state = await self._stories.current_summary(story_id)
         if state is None:
             return None
@@ -805,6 +825,13 @@ class StoryReads:
         summary = state.summary
         shown = summary is not None and visibility.summary()
         notes_shown = visibility.owner_records
+        older: tuple[StoryNote, ...] | None = None
+        more = 0
+        if older_page is not None and notes_shown:
+            taken_in = await self._older(story_id, state.pending_notes, visibility)
+            start = (older_page - 1) * OLDER_NOTES_PAGE
+            older = taken_in[start : start + OLDER_NOTES_PAGE]
+            more = max(0, len(taken_in) - start - OLDER_NOTES_PAGE)
         return PlanningStory(
             story_id=story_id,
             tidied_at=None if summary is None else summary.written_at,
@@ -815,11 +842,43 @@ class StoryReads:
             withheld=summary is not None and not shown,
             notes=tuple(note for note in state.pending_notes if visibility.note(note)),
             notes_withheld=not notes_shown,
+            older=older,
+            older_page=1 if older_page is None else older_page,
+            older_more=more,
             newer=tuple(pending[: self._episodes]),
             latest=tuple(record for address in latest if (record := fetched.get(address))),
             inherited=inherited,
             standing=standing,
         )
+
+    async def _older(
+        self,
+        story_id: str,
+        pending: Sequence[StoryNote],
+        visibility: SummaryVisibility,
+    ) -> tuple[StoryNote, ...]:
+        """The notes ``story_id`` holds that no pending list carries, newest first.
+
+        The story store pages a story's notes in the order written; every page is read,
+        as the check that a move's notes are held reads them, and the notes pending on
+        the story are left out, so a note is never in both lists (#2893).
+        """
+        pending_ids = {note.note_id for note in pending}
+        held: list[StoryNote] = []
+        cursor: int | None = None
+        while True:
+            page = await self._stories.notes(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
+            if page is None:
+                break
+            held.extend(
+                note
+                for note in page.notes
+                if note.note_id not in pending_ids and visibility.note(note)
+            )
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+        return tuple(reversed(held))
 
 
 def _latest(standing: StoryStanding, count: int) -> list[str]:
@@ -869,7 +928,7 @@ def _stories_outside(given: PlanningStories) -> tuple[str, ...]:
     notes = (
         str(note.note_id)
         for note in (
-            *(note for story in given.stories for note in story.notes),
+            *(note for story in given.stories for note in _story_notes(story)),
             *(note for one in shorts for note in one.notes),
         )
         if note.outside
@@ -900,9 +959,14 @@ def _shown_notes(given: PlanningStories) -> tuple[StoryNote, ...]:
         *(one for story in given.stories for one in story.inherited),
     ]
     return (
-        *(note for story in given.stories for note in story.notes),
+        *(note for story in given.stories for note in _story_notes(story)),
         *(note for one in shorts for note in one.notes),
     )
+
+
+def _story_notes(story: PlanningStory) -> tuple[StoryNote, ...]:
+    """A story view's notes: those since it was tidied, then a story read's older ones."""
+    return (*story.notes, *(story.older or ()))
 
 
 def _story_records(given: PlanningStories) -> tuple[EpisodicMemory, ...]:

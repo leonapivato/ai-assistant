@@ -145,6 +145,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DELIBERATE_REPEAT",
     "LOOKING_FOR",
+    "OLDER_NOTES_PAGE_ARGUMENT",
     "CallOutcome",
     "CallOutcomeKind",
     "DigestItem",
@@ -167,6 +168,16 @@ _log = structlog.get_logger(__name__)
 
 #: ADR-0306 §2:9's *looking for* argument, required where a result may carry outside text.
 LOOKING_FOR: Final = "looking_for"
+
+#: A story read's optional argument: which page of the story's older notes it shows, the
+#: newest page 1 (#2893). Defined here, where the page saying how to ask for the next is
+#: rendered, and declared by :data:`~ai_assistant.orchestration.lookups.READ_STORY`.
+OLDER_NOTES_PAGE_ARGUMENT: Final = "older_notes_page"
+
+#: The story read's capability, :mod:`~ai_assistant.orchestration.lookups`'
+#: ``READ_STORY_CAPABILITY``, which planning cannot import: the look-ups reach acting,
+#: and planning never reaches the held results.
+_READ_STORY: Final = "read_story"
 
 #: ADR-0306 §2:9's *deliberate repeat* mark, offered where a capability is not safe to
 #: repeat.
@@ -411,6 +422,11 @@ class PlanningStory:
             may be shown.
         notes_withheld: No note may be shown, and nothing is said of the notes
             (ADR-0305 §4).
+        older: One page of its older notes, those a tidy-up has taken in, newest
+            first, where a story read read them and notes may be shown (#2893); ``None``
+            on every other view, which says nothing of them.
+        older_page: Which page of the older notes ``older`` is, the newest page 1.
+        older_more: How many older notes there are beyond ``older``'s page.
         newer: The episodes newer than the summary that the audience admits, newest
             first.
         latest: Its latest episodes that the audience admits, newest first.
@@ -427,6 +443,9 @@ class PlanningStory:
     withheld: bool = False
     notes: tuple[StoryNote, ...] = ()
     notes_withheld: bool = False
+    older: tuple[StoryNote, ...] | None = None
+    older_page: int = 1
+    older_more: int = 0
     newer: tuple[EpisodicMemory, ...] = ()
     latest: tuple[EpisodicMemory, ...] = ()
     inherited: tuple[ShortView, ...] = ()
@@ -858,21 +877,31 @@ _STORY_CALLS: Final = (
     "two stories that are one matter, split off what is a matter apart, or group stories "
     "under a larger one. A move or a split carries only the notes you name by their N "
     "labels, each on the story it leaves; one naming a note that story does not hold is "
-    "refused whole.\n"
-    "\n"
+    "refused whole."
+)
+
+#: #2893: a story read shows the notes a tidy-up has taken in, so a move or a split can
+#: name them; said where a story read is offered beside the story calls.
+_OLDER_NOTES: Final = (
+    " A story's views show only its notes since it was last tidied; read the story to see "
+    "its older notes too, newest first a page at a time, and name any of them in a move "
+    "or a split."
 )
 
 
-def _instruction(*, takes_message: bool, story_calls: bool = False) -> str:
+def _instruction(
+    *, takes_message: bool, story_calls: bool = False, story_reads: bool = False
+) -> str:
     """The system message, with §3:8's paragraph where the place takes no message.
 
-    The story calls' paragraph is there only where a story call is offered.
+    The story calls' paragraph is there only where a story call is offered, and says
+    a story read shows a story's older notes where a story read is offered too.
     """
     return (
         _ROLE
         + _LABELS
         + _CALLS
-        + (_STORY_CALLS if story_calls else "")
+        + (_STORY_CALLS + (_OLDER_NOTES if story_reads else "") + "\n\n" if story_calls else "")
         + (_MESSAGE if takes_message else _NO_MESSAGE)
         + _NOTES_AND_ROUNDS
     )
@@ -902,6 +931,7 @@ _SUMMARY_WITHHELD: Final = (
 )
 _NEVER_TIDIED: Final = "never"
 _NONE_NEWER: Final = "none"
+_NO_OLDER: Final = "none on this page"
 _NO_EPISODES: Final = "none shown"
 _SHOWN_ABOVE: Final = "shown above under this label"
 _NOTHING_DONE: Final = "nothing recorded"
@@ -1160,6 +1190,10 @@ class _Request:
         shown["changes_since_tidied"] = one.changes
         if not one.notes_withheld:
             shown["notes_since_tidied"] = [self._note(note) for note in one.notes] or _NONE_NEWER
+            if one.older is not None:
+                shown["older_notes"] = [self._note(note) for note in one.older] or _NO_OLDER
+                if one.older_more:
+                    shown["more_older_notes"] = _more_older(one.older_more, one.older_page + 1)
         shown["episodes_since_tidied"] = [
             self._story_episode(record) for record in one.newer
         ] or _NONE_NEWER
@@ -1464,6 +1498,14 @@ def _text(projected: ProjectedText) -> str:
     return projected.text
 
 
+def _more_older(count: int, page: int) -> str:
+    """What a story read says of the older notes beyond the page it shows (#2893)."""
+    return (
+        f"{count} older not shown: read the story again with "
+        f"{OLDER_NOTES_PAGE_ARGUMENT} {page} for the next page"
+    )
+
+
 def _thawed(value: object) -> object:
     """A frozen JSON value as plain JSON, for rendering."""
     if isinstance(value, Mapping):
@@ -1626,6 +1668,7 @@ class PlanningStage:
                 content=_instruction(
                     takes_message=inputs.place.takes_message,
                     story_calls=any(tool.name in STORY_CALL_CAPABILITIES for tool in offered),
+                    story_reads=any(tool.name == _READ_STORY for tool in offered),
                 ),
             ),
             Message(role=Role.USER, content=rendered),

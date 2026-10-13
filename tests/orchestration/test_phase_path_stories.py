@@ -19,6 +19,7 @@ from test_engine import AT
 
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
+    MAX_STORY_PAGE,
     ActivationEffect,
     ActivationUnderstanding,
     Placement,
@@ -36,6 +37,7 @@ from ai_assistant.core.types import (
     UnderstandingReferent,
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
+from ai_assistant.orchestration.lookups import OLDER_NOTES_PAGE
 from ai_assistant.orchestration.phase_path import StoryReads
 from ai_assistant.orchestration.story_links import StoryCandidates
 from ai_assistant.testing import FakePlanStore, FakeStoryStore
@@ -329,6 +331,89 @@ async def test_a_plan_store_that_cannot_be_read_says_the_stories_are_unreadable(
     given = await world.read()
 
     assert given.unreadable
+
+
+# --- a story read's full view: the older notes (#2893) -------------------------------------
+
+
+async def _with_older(world: _World, taken_in: int, *, pending: int = 0) -> str:
+    """A story with ``taken_in`` notes a tidy-up took in, then ``pending`` newer ones."""
+    trip = await world.story("a")
+    for n in range(1, taken_in + 1):
+        await world.note(trip, f"older {n}")
+    await world.tidied(trip, "A camping trip to Riverside.")
+    for n in range(1, pending + 1):
+        await world.note(trip, f"newer {n}")
+    return trip
+
+
+async def test_a_full_view_shows_the_newest_page_of_older_notes() -> None:
+    """#2893: newest first, a page at a time, none of them pending, and how many more."""
+    world = await _world(episode("a"))
+    trip = await _with_older(world, OLDER_NOTES_PAGE + 2, pending=1)
+
+    view = await world.reads.view(trip, audience=_BOUNDED, owner_records=True)
+
+    assert view is not None
+    assert [note.text for note in view.notes] == ["newer 1"]
+    assert view.older is not None
+    assert [note.text for note in view.older] == [
+        f"older {n}" for n in range(OLDER_NOTES_PAGE + 2, 2, -1)
+    ]
+    assert (view.older_page, view.older_more) == (1, 2)
+
+
+async def test_a_full_view_pages_past_the_first_page_of_older_notes() -> None:
+    world = await _world(episode("a"))
+    trip = await _with_older(world, OLDER_NOTES_PAGE + 2)
+
+    second = await world.reads.view(trip, audience=_BOUNDED, owner_records=True, older_page=2)
+    beyond = await world.reads.view(trip, audience=_BOUNDED, owner_records=True, older_page=3)
+
+    assert second is not None
+    assert second.older is not None
+    assert [note.text for note in second.older] == ["older 2", "older 1"]
+    assert (second.older_page, second.older_more) == (2, 0)
+    assert beyond is not None
+    assert (beyond.older, beyond.older_more) == ((), 0)
+
+
+async def test_a_full_view_reads_every_page_the_store_holds() -> None:
+    """More notes than one store page holds: every page is read, none lost."""
+    world = await _world(episode("a"))
+    trip = await _with_older(world, MAX_STORY_PAGE + 1)
+
+    last = (MAX_STORY_PAGE + OLDER_NOTES_PAGE) // OLDER_NOTES_PAGE
+    view = await world.reads.view(trip, audience=_BOUNDED, owner_records=True, older_page=last)
+
+    assert view is not None
+    assert view.older is not None
+    assert view.older[-1].text == "older 1"
+    assert view.older_more == 0
+
+
+async def test_where_no_note_may_be_shown_a_full_view_reads_no_older_note() -> None:
+    """ADR-0307 §6:4, ADR-0305 §4: absent, as every story note is on such a pass."""
+    world = await _world(episode("a"))
+    trip = await _with_older(world, 2, pending=1)
+
+    view = await world.reads.view(trip, audience=_UNBOUNDED, owner_records=False)
+
+    assert view is not None
+    assert view.notes_withheld
+    assert (view.notes, view.older, view.older_more) == ((), None, 0)
+
+
+async def test_the_views_planning_is_given_each_round_read_no_older_note() -> None:
+    """#2893: the default view is unchanged, the summary and what is newer than it."""
+    world = await _world(episode("a"))
+    trip = await _with_older(world, 2, pending=1)
+    await world.stories.link(trip, [activation(_NOW)], actor=StoryActor.UNDERSTANDING)
+
+    view = _one(await world.read())
+
+    assert [note.text for note in view.notes] == ["newer 1"]
+    assert view.older is None
 
 
 def test_a_story_view_shows_at_least_one_episode() -> None:

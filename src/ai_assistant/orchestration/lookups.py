@@ -14,7 +14,7 @@ declarations (:data:`LOOK_UPS`), which of their arguments name things by label
 | Call | Takes | Result |
 | --- | --- | --- |
 | :data:`SEARCH_MEMORY` | a query | may carry outside text |
-| :data:`READ_STORY` | a story, by its ``S`` label | no outside text, marks shown |
+| :data:`READ_STORY` | a story, by its ``S`` label; a page | no outside text, marks shown |
 | :data:`FOLLOW_UP` | a result, by its ``R`` label; a new *looking for* | may carry outside text |
 
 Each declares the assistant's own records as its effect, as reading a story does
@@ -42,6 +42,14 @@ it is read when the call runs and held by the call's decision for the glue, whic
 it under the call's result. A read of a story returns no outside text: its lines are the
 user's or the assistant's words, each shown with its mark, and a marked line counts as
 outside content for the reader (ADR-0300 §10:6).
+
+**A read also shows the story's older notes** (#2893), those a tidy-up has taken in,
+which no view shows otherwise, so a move or a split can name any note the story holds by
+the label it is shown under (ADR-0307 §5:1, §5:5). They come newest first,
+:data:`OLDER_NOTES_PAGE` at a time: a read naming no page shows the newest, and
+:data:`OLDER_NOTES_PAGE_ARGUMENT` asks for a later one. On a pass that may not be shown a
+record placed for the owner alone they are absent, as every story note is (ADR-0307
+§6:4, ADR-0305 §4).
 
 **The follow-up** (ADR-0308 §6:6-§6:7). Its one planner argument is a result's ``R``
 label, which planning's check maps to the result's id, and its *looking for* carries the
@@ -92,6 +100,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.acting import HeldByIds, NamedResult
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
+from ai_assistant.orchestration.planning import OLDER_NOTES_PAGE_ARGUMENT
 from ai_assistant.orchestration.story_calls import STORY_ARGUMENT
 
 if TYPE_CHECKING:
@@ -109,6 +118,8 @@ __all__ = [
     "LOOK_UPS",
     "LOOK_UP_CAPABILITIES",
     "LOOK_UP_LABEL_ARGUMENTS",
+    "OLDER_NOTES_PAGE",
+    "OLDER_NOTES_PAGE_ARGUMENT",
     "QUERY_ARGUMENT",
     "QUERY_MAX_CHARS",
     "READ_STORY",
@@ -135,6 +146,9 @@ QUERY_ARGUMENT: Final = "query"
 
 #: The follow-up's one planner argument: the result it asks about, by its ``R`` label.
 RESULT_ARGUMENT: Final = "result"
+
+#: How many of a story's older notes one page of a story read shows (#2893).
+OLDER_NOTES_PAGE: Final = 10
 
 #: The longest query a memory search takes.
 QUERY_MAX_CHARS: Final = 500
@@ -224,14 +238,22 @@ READ_STORY: Final = _declared(
     READ_STORY_CAPABILITY,
     (
         "Read the full view of a story you were shown: its summary, its notes and "
-        "episodes since, its latest episodes, the larger stories it is part of, and "
-        "where its matter stands."
+        "episodes since, its older notes, newest first a page at a time, its latest "
+        "episodes, the larger stories it is part of, and where its matter stands."
     ),
     properties={
         STORY_ARGUMENT: {
             "type": "string",
             "minLength": 1,
             "description": "The story, by the S label you were shown it under.",
+        },
+        OLDER_NOTES_PAGE_ARGUMENT: {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "Which page of the story's older notes to show, the newest page 1; leave "
+                "it out for the newest."
+            ),
         },
     },
     required=(STORY_ARGUMENT,),
@@ -299,9 +321,12 @@ class StoryViews(Protocol):
     """
 
     async def view(
-        self, story_id: str, *, audience: TurnSupply, owner_records: bool
+        self, story_id: str, *, audience: TurnSupply, owner_records: bool, older_page: int = 1
     ) -> PlanningStory | None:
         """One story's full view, under ``audience``, or ``None`` where it is not held.
+
+        It shows the ``older_page``-th page of the story's older notes, newest first,
+        where notes may be shown (#2893).
 
         Raises:
             StoryStoreError: If the story store cannot be read.
@@ -398,7 +423,11 @@ class LookUps:
         if capability == SEARCH_MEMORY_CAPABILITY:
             return await self._search(parameters.get(QUERY_ARGUMENT))
         if capability == READ_STORY_CAPABILITY:
-            return await self._read(parameters.get(STORY_ARGUMENT), call.decision.id)
+            return await self._read(
+                parameters.get(STORY_ARGUMENT),
+                parameters.get(OLDER_NOTES_PAGE_ARGUMENT, 1),
+                call.decision.id,
+            )
         if capability == FOLLOW_UP_CAPABILITY:
             result = parameters.get(RESULT_ARGUMENT)
             if not isinstance(result, str) or not result:
@@ -465,18 +494,26 @@ class LookUps:
                     kept[record.id] = record
         return list(kept.values())
 
-    async def _read(self, story_id: object, decision_id: str) -> ToolResult:
+    async def _read(self, story_id: object, older_page: object, decision_id: str) -> ToolResult:
         """Read one story's full view under the scope, and hold it for the glue."""
         if not isinstance(story_id, str) or not story_id:
             _log.info("look_up_not_done", stage="acting", reason="malformed")
             return _not_done(ToolFailureKind.INVALID_REQUEST, "the call names no story")
+        if isinstance(older_page, bool) or not isinstance(older_page, int) or older_page < 1:
+            _log.info("look_up_not_done", stage="acting", reason="malformed")
+            return _not_done(
+                ToolFailureKind.INVALID_REQUEST, "the page of older notes is not 1 or more"
+            )
         scope = _SCOPE.get()
         if scope is None or self._views is None:
             _log.warning("look_up_not_done", stage="acting", reason="no_scope")
             return _not_done(ToolFailureKind.INTERNAL, _NOT_IN_SCOPE)
         try:
             view = await self._views.view(
-                story_id, audience=scope.audience, owner_records=scope.owner_records
+                story_id,
+                audience=scope.audience,
+                owner_records=scope.owner_records,
+                older_page=older_page,
             )
         except StoryStoreError, PlanningError, MemoryStoreError:
             _log.warning("look_up_not_done", stage="acting", reason="story_unreadable")
