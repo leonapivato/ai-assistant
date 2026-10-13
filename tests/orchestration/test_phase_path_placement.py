@@ -64,6 +64,7 @@ from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.disclosure import UnboundedAudienceSupply
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.remembering import remembered_record_id
+from ai_assistant.orchestration.story_links import Candidates, ShortView
 from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore, FakeToolCallingCompleter
 
@@ -85,6 +86,7 @@ async def _frozen_with(
     supply: TurnSupply = _BOUNDED,
     windows: tuple[EpisodicMemory, ...] | None = None,
     recalled: tuple[EpisodicMemory | SemanticMemory, ...] = (),
+    candidates: Candidates | None = None,
 ) -> bool:
     """The value the freeze sets, over a pass whose stages before planning gave these.
 
@@ -106,6 +108,7 @@ async def _frozen_with(
         phases=working,
         understanding_fetch=fetched,
         supply=supply,
+        story_candidates=candidates,
     )
     state = _admitted()
     taken: list[object] = []
@@ -137,6 +140,27 @@ async def test_a_stamped_window_record_places_the_episode_on_a_bounded_pass() ->
 async def test_the_windows_are_left_out_on_an_unbounded_pass() -> None:
     """ADR-0309 §5:10, ADR-0210 §1:1: the windows set nothing when unbounded."""
     assert not await _frozen_with(supply=_UNBOUNDED, windows=(_window_episode(stamped=True),))
+
+
+# --- understanding's candidate stories ----------------------------------------------------
+
+
+@pytest.mark.parametrize("supply", [_BOUNDED, _UNBOUNDED], ids=["bounded", "unbounded"])
+async def test_a_stamped_episode_of_a_candidate_story_places_the_episode(
+    supply: TurnSupply,
+) -> None:
+    """Understanding was shown it (ADR-0300 §6:1), though it cited and linked nothing.
+
+    A candidate story's episodes are not a window's records, so they count on every
+    pass; the view is all that brought this one.
+    """
+    view = ShortView(
+        story_id="trip", lines=(), notes=(), episodes=(episode("other", placement=_STAMPED),)
+    )
+    clean = ShortView(story_id="trip", lines=(), notes=(), episodes=(episode("other"),))
+
+    assert await _frozen_with(supply=supply, candidates=Candidates(views=(view,)))
+    assert not await _frozen_with(supply=supply, candidates=Candidates(views=(clean,)))
 
 
 # --- what recall kept --------------------------------------------------------------------
