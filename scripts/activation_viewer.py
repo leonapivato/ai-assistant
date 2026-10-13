@@ -1557,6 +1557,9 @@ SCRIPT: Final = r"""
   };
   const DASH = "\u2013";
   const OPEN_FOR_MS = 120000;
+  // The reserved tool a planning round's notes ride on, as the record names it; a hint
+  // (ADR-0316 \u00a75:2), so a record that names it otherwise loses its description alone.
+  const ROUND_TOOL = "planning_round";
   const state = {
     listVersion: null, list: [], present: true, now: null, selected: null,
     detailVersion: null, detail: null, drawnOpen: false, listBusy: false, detailBusy: false,
@@ -2098,6 +2101,23 @@ SCRIPT: Final = r"""
         box.appendChild(el("h4", null, "Call · " + part.tool_name));
         pre(box, pretty(part.args));
       }
+    }
+    offeredTools(holder, b);
+  }
+  // The tools the request offered the provider, in its order, the reserved one last
+  // (#2894): their names, and the reserved tool's description. The schemas stay in the
+  // whole body. A returned entry written before the list was kept has none, and shows
+  // no section.
+  function offeredTools(holder, b) {
+    const tools = arr(b.offered_tools).map(obj);
+    const names = tools.map((t) => t.name).filter((name) => typeof name === "string" && name);
+    if (!names.length) return;
+    const box = sec(holder, "Offered to the provider");
+    kv(box, [["tools", names.join(", ")]]);
+    for (const tool of tools) {
+      if (tool.name !== ROUND_TOOL || typeof tool.description !== "string") continue;
+      box.appendChild(el("h4", null, ROUND_TOOL + " · reserved: the round's own tool"));
+      pre(box, tool.description);
     }
   }
   function verdicts(holder, b) {

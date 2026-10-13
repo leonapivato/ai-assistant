@@ -1,8 +1,9 @@
 """The activation viewer's page, driven in a real browser (ADR-0316 §3, §6:7).
 
 What the server's JSON cannot say: that the page puts an entry's raw text into the
-document as text, that a round's calls each show their own verdict, and that a drawer
-shows only what the last click asked for, however its loads interleave. The viewer is
+document as text, that a round's calls each show their own verdict, that a round's
+drawer shows the tools its request offered, and that a drawer shows only what the last
+click asked for, however its loads interleave. The viewer is
 bound on loopback over a record written by ADR-0314's store, and driven by the suite's
 one shared browser (ADR-0216 §3).
 """
@@ -12,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -20,12 +22,20 @@ import pytest
 from playwright.async_api import expect
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _activation_record import HOSTILE, at, iso, serving, viewer, write_record
+from _activation_record import (
+    HOSTILE,
+    ROUND_TOOL_DESCRIPTION,
+    at,
+    iso,
+    serving,
+    viewer,
+    write_record,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
-    from playwright.async_api import Browser, Page, Route
+    from playwright.async_api import Browser, Locator, Page, Route
 
 pytestmark = [
     pytest.mark.integration,
@@ -85,6 +95,82 @@ async def test_each_call_shows_its_own_verdict(server: Any, gateway_browser: Bro
             ["web_search · allowed", "web_search · needs you"], timeout=_SHOWN
         )
         await expect(page.locator(".round").first).to_contain_text("marked")
+
+
+def _offered(page: Page) -> Locator:
+    """The drawer's section listing the tools a planning request offered the provider."""
+    heading = page.locator("h3", has_text=re.compile(r"^Offered to the provider$"))
+    return page.locator("#drawer-body .sec").filter(has=heading)
+
+
+async def test_a_rounds_drawer_shows_the_tools_its_request_offered(
+    server: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser) as page:
+        await _open(page, server.port, "act-1")
+        await page.locator(".round").first.click()
+        offered = _offered(page)
+        await expect(offered).to_have_count(1, timeout=_SHOWN)
+        # Every name, in the request's order, the reserved one last; and its description
+        # alone, with no schema drawn.
+        await expect(offered.locator("dd")).to_have_text("web_search, planning_round")
+        await expect(offered.locator("h4")).to_have_text(
+            ["planning_round · reserved: the round's own tool"]
+        )
+        await expect(offered.locator("pre")).to_have_text([ROUND_TOOL_DESCRIPTION])
+
+
+async def test_a_returned_entry_written_before_the_list_was_kept_shows_its_response(
+    server: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser) as page:
+        await _open(page, server.port, "act-1")
+        await page.locator(".round").nth(1).click()
+        body = page.locator("#drawer-body")
+        await expect(body).to_contain_text("Here is the answer.", timeout=_SHOWN)
+        # Authorizing's entry is drawn after planning's, so planning's is done by now.
+        await expect(body.locator(".sec h3", has_text="Message")).to_have_count(1)
+        await expect(_offered(page)).to_have_count(0)
+        await expect(body).not_to_contain_text("did not read as expected")
+
+
+async def test_offered_tools_of_an_unexpected_shape_lose_their_hint_and_stay_text(
+    server: Any, record: Path, gateway_browser: Browser
+) -> None:
+    def returned(offered: object, ms: int) -> dict[str, object]:
+        return {
+            "activation_id": "odd",
+            "source": "planning",
+            "kind": "returned",
+            "recorded_at": iso(ms),
+            "body": {"response": {"parts": []}, "read_as_round": True, "offered_tools": offered},
+        }
+
+    odd = [
+        "not a tool",
+        {"description": "no name"},
+        {"name": 7},
+        {"name": "web_search", "description": HOSTILE},
+        {"name": "planning_round", "description": HOSTILE},
+    ]
+    lines = [returned(odd, 0), returned("not a list", 10)]
+    (record / "odd.jsonl").write_text("".join(json.dumps(one) + "\n" for one in lines))
+    async with _page(gateway_browser) as page:
+        await _open(page, server.port, "odd")
+        await page.locator("details.card > summary").click()
+        rows = page.locator("#entries .entry-row")
+        await rows.first.click()
+        offered = _offered(page)
+        await expect(offered.locator("dd")).to_have_text(
+            "web_search, planning_round", timeout=_SHOWN
+        )
+        await expect(offered.locator("pre")).to_have_text([HOSTILE])
+        assert await page.locator("img").count() == 0
+        await page.locator("#drawer-close").click()
+        await rows.nth(1).click()
+        await expect(page.locator("#drawer-body")).to_contain_text("not a list", timeout=_SHOWN)
+        await expect(_offered(page)).to_have_count(0)
+        await expect(page.locator("#drawer-body")).not_to_contain_text("did not read as expected")
 
 
 async def test_a_drawer_shows_only_what_the_last_click_asked_for(

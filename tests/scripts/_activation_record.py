@@ -66,8 +66,28 @@ def _understanding_request(text: str) -> dict[str, Any]:
     }
 
 
-def _response(*parts: dict[str, Any]) -> dict[str, Any]:
-    return {"response": {"parts": list(parts), "kind": "response"}, "read_as_round": True}
+def _response(
+    *parts: dict[str, Any], offered: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "response": {"parts": list(parts), "kind": "response"},
+        "read_as_round": True,
+    }
+    if offered is not None:
+        body["offered_tools"] = offered
+    return body
+
+
+def _tool(name: str, description: str) -> dict[str, Any]:
+    return {"name": name, "description": description, "parameters": {"type": "object"}}
+
+
+#: The reserved tool's description, as the completer offers it (#2894).
+ROUND_TOOL_DESCRIPTION = "Not a capability: calling it runs nothing and goes to no one."
+
+#: Every tool round 1's request offered, in its order, the reserved one last (#2909).
+#: Round 2's returned entry is written as one from before #2909, with no such list.
+OFFERED = [_tool("web_search", "Search the web."), _tool("planning_round", ROUND_TOOL_DESCRIPTION)]
 
 
 def _text(content: str) -> dict[str, Any]:
@@ -102,6 +122,7 @@ ACTIVATION: list[tuple[DiagnosticSource, DiagnosticKind, int, dict[str, Any]]] =
             # The round's own tool, as the completer offers it: as a JSON string, and
             # asking for another round.
             _call("planning_round", '{"notes": ["n"], "another_round": true}', "c3"),
+            offered=OFFERED,
         ),
     ),
     (
