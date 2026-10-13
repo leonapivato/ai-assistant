@@ -1060,24 +1060,28 @@ class PhaseWorking:
         """What came of every round's calls, as planning reads them.
 
         A look-up's result is shown as what it looked up (ADR-0307 §6:6): a memory
-        search's records as fetched, and a story's full view as read.
+        search's records as fetched, and a story's full view as read. A follow-up naming
+        one shows only that its result was read again by a digest (ADR-0308 §6:7).
         """
-        return tuple(
-            self._looked_up(outcome)
-            for one in self._rounds
-            for outcome in call_outcomes(one.planned, one.authorization, one.acted)
-        )
+        outcomes: list[CallOutcome] = []
+        for one in self._rounds:
+            names = {call.call_id: call.name for call in one.planned.round.calls}
+            outcomes.extend(
+                self._looked_up(outcome, names.get(outcome.call_id))
+                for outcome in call_outcomes(one.planned, one.authorization, one.acted)
+            )
+        return tuple(outcomes)
 
-    def _looked_up(self, outcome: CallOutcome) -> CallOutcome:
+    def _looked_up(self, outcome: CallOutcome, capability: str | None) -> CallOutcome:
         """``outcome``, carrying what its look-up found where it was one."""
         result_id = outcome.result_id
         if result_id is None:
             return outcome
         page = self.pages.get(result_id)
-        if page is not None:
+        if page is not None and capability == READ_STORY_CAPABILITY:
             return replace(outcome, result=None, story=page)
         searched = self.searched.get(result_id)
-        if searched is not None:
+        if searched is not None and capability == SEARCH_MEMORY_CAPABILITY:
             return replace(outcome, result=None, records=searched)
         return outcome
 

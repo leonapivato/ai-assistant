@@ -60,6 +60,7 @@ nothing and is not done.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, Protocol
@@ -91,7 +92,7 @@ from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.story_calls import STORY_ARGUMENT
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Iterator
 
     from ai_assistant.core.protocols import MemoryStore
     from ai_assistant.core.types import FrozenJson, ToolCall
@@ -276,7 +277,7 @@ def searched_ids(output: object) -> tuple[str, ...]:
     Returns:
         The ids of the records whose source is not outside, in the order searched.
     """
-    if not isinstance(output, dict):
+    if not isinstance(output, Mapping):
         return ()
     ids = output.get(RECORDS_KEY)
     if not isinstance(ids, list | tuple):
