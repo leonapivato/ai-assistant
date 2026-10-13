@@ -433,13 +433,15 @@ _EPISODE_SHOWN_UNREAD: Final = "episode_shown_unread"
 _OUTSIDE_EPISODE_SHOWN: Final = "outside_episode_shown"
 
 
-def _digest_identity(digest: ActivationDigest) -> tuple[object, ...]:
-    """What tells one digest from another: a digest is never edited (ADR-0308 §5:2).
+def _digest_identity(digest: ActivationDigest) -> str:
+    """What tells one digest from another: its whole value, since it is never edited.
 
     Its result label alone does not, since a search's digest and a follow-up's both
-    name the result they read; its question and the instant it was recorded do.
+    name the result they read, and no part of it short of the whole does either: two
+    digests may share a result, a question and an instant and differ in evidence. The
+    episode's copy and the working set's of one digest are one value (ADR-0308 §5:2).
     """
-    return (digest.result, digest.question, digest.recorded_at)
+    return digest.model_dump_json()
 
 
 def _note_is_marked(label_id: str, notes: Sequence[StoryNote]) -> bool:
@@ -552,7 +554,7 @@ async def read_outside_content(  # noqa: C901, PLR0911, PLR0912 — §4:5's grou
     for digest in digests:
         if (
             digest.outcome is DigestOutcome.ANSWERED
-            and first((_DIGEST_ANSWERED, *_digest_identity(digest)))
+            and first((_DIGEST_ANSWERED, _digest_identity(digest)))
             and found(_DIGEST_ANSWERED, digest.result)
         ):
             return True

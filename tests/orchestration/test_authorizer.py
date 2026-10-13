@@ -1091,6 +1091,25 @@ async def test_each_ground_is_noted_once_where_the_record_and_working_set_both_h
     ]
 
 
+async def test_two_digests_differing_only_in_evidence_are_two_grounds() -> None:
+    """Under one clock reading, of one result and one question, two digests are still two;
+    each copy the episode's record and the working set both hold is counted once."""
+    digests = (
+        _digest(DigestOutcome.ANSWERED, "the 9:10"),
+        _digest(DigestOutcome.ANSWERED, "the 9:40"),
+    )
+    memory = FakeMemoryStore(now=_now)
+    await memory.add(_episode(digests=digests))
+    grounds: list[OutsideGround] = []
+
+    working = WorkingRecord(digests=digests)
+    assert await read_outside_content(memory, _ACTIVATION, working=working, grounds=grounds)
+    assert grounds == [
+        OutsideGround("digest_answered", "R1"),
+        OutsideGround("digest_answered", "R1"),
+    ]
+
+
 async def test_one_note_shown_under_two_labels_is_one_ground() -> None:
     """The ground rests on the note, which planning was shown twice."""
     memory = FakeMemoryStore(now=_now)
