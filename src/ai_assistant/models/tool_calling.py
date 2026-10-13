@@ -194,7 +194,7 @@ class PydanticAIToolCallingCompleter:
         return _round(response)
 
 
-def _settings(thinking: ThinkingLevel, model: models.Model) -> ModelSettings:
+def _settings(thinking: ThinkingLevel, model: models.Model) -> ModelSettings | None:
     """A round's model settings: the thinking it asks for, and room for it.
 
     A budget-based Anthropic model is given a budget and refuses a ceiling that does
@@ -205,26 +205,26 @@ def _settings(thinking: ThinkingLevel, model: models.Model) -> ModelSettings:
     precedence, or else the one the level maps to. A larger ceiling the model's own
     settings already allow is kept. Anywhere else the ceiling is left as it was: a model
     without thinking keeps the request it had.
+
+    A :class:`~pydantic_ai.models.fallback.FallbackModel`, wrapped or not, keeps the
+    request it had, with no settings at all: it sends one request's settings to each
+    model it holds in turn, and one ceiling cannot fit models whose budgets and
+    allowances differ, so it is asked for no thinking. Nothing in this project builds
+    one; the round's resilience is the caller's (see the module docstring).
     """
-    ceiling = None if thinking is False else _ceiling(thinking, model)
+    inner = model
+    while isinstance(inner, WrapperModel):
+        inner = inner.wrapped
+    if isinstance(inner, FallbackModel):
+        return None
+    ceiling = None if thinking is False else _ceiling(thinking, inner)
     if ceiling is None:
         return ModelSettings(thinking=thinking)
     return ModelSettings(thinking=thinking, max_tokens=ceiling)
 
 
 def _ceiling(thinking: ThinkingLevel, model: models.Model) -> int | None:
-    """The ceiling one model needs for ``thinking``, or ``None`` where it takes none.
-
-    A :class:`~pydantic_ai.models.fallback.FallbackModel` has no profile of its own and
-    sends the one request's settings to each model it holds in turn, so it needs the
-    largest ceiling any of them does; a :class:`~pydantic_ai.models.wrapper.WrapperModel`
-    sends them on to the model it wraps, which decides.
-    """
-    if isinstance(model, WrapperModel):
-        return _ceiling(thinking, model.wrapped)
-    if isinstance(model, FallbackModel):
-        held = [one for one in (_ceiling(thinking, each) for each in model.models) if one]
-        return max(held, default=None)
+    """The ceiling ``model`` needs for ``thinking``, or ``None`` where it takes none."""
     profile = model.profile
     if not (
         profile.get("supports_thinking", False) or profile.get("thinking_always_enabled", False)

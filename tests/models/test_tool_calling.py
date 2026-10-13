@@ -515,33 +515,26 @@ async def test_an_anthropic_response_whose_thinking_took_the_ceiling_is_a_respon
         await _anthropic_round("claude-opus-4-8", _thinking_cut_at_the_ceiling)
 
 
-@pytest.mark.parametrize("level", [True, False])
-async def test_a_fallback_model_is_given_the_largest_ceiling_its_models_need(
+@pytest.mark.parametrize("level", [True, "high", False])
+@pytest.mark.parametrize("wrapped", [False, True], ids=["bare", "wrapped"])
+async def test_a_fallback_model_keeps_the_request_it_had(
     level: ThinkingLevel,
+    wrapped: bool,
 ) -> None:
-    thinks, plain = _Seen(), _Seen()
-    fallback = FallbackModel(
-        _seeing(thinks, takes_thinking=True), _seeing(plain, takes_thinking=False)
+    def refuse(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del messages, info
+        raise ModelHTTPError(status_code=429, model_name="primary")
+
+    seen = _Seen()
+    fallback: Model = FallbackModel(
+        FunctionModel(refuse, profile=ModelProfile(supports_thinking=True)),
+        _seeing(seen, takes_thinking=True),
     )
+    if wrapped:
+        fallback = WrapperModel(fallback)
     response = await PydanticAIToolCallingCompleter(fallback, thinking=level).respond(
         _request(), [_tool()]
     )
     assert response == RoundResponse(text="ok")
-    assert thinks.thinking == [level]
-    assert thinks.max_tokens == [4096 + 10000 if level else None]
-
-
-async def test_a_fallback_model_of_models_without_thinking_keeps_the_request_it_had() -> None:
-    seen = _Seen()
-    fallback = FallbackModel(_seeing(seen, takes_thinking=False))
-    await PydanticAIToolCallingCompleter(fallback).respond(_request(), [_tool()])
     assert seen.thinking == [None]
     assert seen.max_tokens == [None]
-
-
-async def test_a_wrapped_fallback_model_is_given_the_ceiling_its_models_need() -> None:
-    seen = _Seen()
-    wrapped = WrapperModel(FallbackModel(_seeing(seen, takes_thinking=True)))
-    await PydanticAIToolCallingCompleter(wrapped).respond(_request(), [_tool()])
-    assert seen.thinking == [True]
-    assert seen.max_tokens == [4096 + 10000]
