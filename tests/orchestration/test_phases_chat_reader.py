@@ -41,12 +41,14 @@ from ai_assistant.core.types import (
     ActivationStop,
     MessageAuthor,
     ProcessingStatus,
+    ToolOutcome,
 )
 from ai_assistant.orchestration.chat import COULDNT_FINISH
 from ai_assistant.testing import (
     FakeConversationStore,
     FakeMemoryStore,
     FakeModelProvider,
+    FakePlanStore,
     FakeToolCallingCompleter,
 )
 from ai_assistant.testing.tool_calling import DEFAULT_ROUND_TEXT
@@ -438,6 +440,56 @@ async def test_a_shutdown_before_the_phases_began_writes_nothing() -> None:
     await after.engine.aclose()
 
     assert all(one.author is MessageAuthor.USER for one in await written(after, conversation))
+
+
+class _HeldFinish(FakePlanStore):
+    """A plan store whose effect finishes wait, once the place took the message."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.entered = asyncio.Event()
+
+    async def finish_activation_effect(
+        self,
+        effect_id: str,
+        /,
+        outcome: ToolOutcome,
+        *,
+        reason: str | None = None,
+        position: int | None = None,
+    ) -> None:
+        del effect_id, outcome, reason, position
+        self.entered.set()
+        await asyncio.Event().wait()
+
+
+async def test_a_shutdown_once_couldnt_finish_landed_keeps_it_as_the_outcome() -> None:
+    """ADR-0284 §4:1: the episode's outcome is what the place took, however it was cut."""
+    store = _FailsSecondMarking()
+    memory = FakeMemoryStore(now=lambda: AT)
+    plans = _HeldFinish()
+    conversation = await _backlog(store, memory)
+    after = phases_harness(
+        conversation_store=store,
+        memory=memory,
+        plans=plans,
+        drain_timeout=timedelta(milliseconds=10),
+    )
+    with capture_logs():
+        await after.engine.start()
+        await asyncio.wait_for(plans.entered.wait(), SETTLE)
+        await after.engine.aclose()
+
+    replies = [
+        one.text
+        for one in await written(after, conversation)
+        if one.author is MessageAuthor.ASSISTANT
+    ]
+    assert replies == [COULDNT_FINISH]
+    (episode,) = await episodes(memory)
+    assert episode.processing_record is not None
+    assert episode.processing_record.status is ProcessingStatus.INTERRUPTED
+    assert episode.outcome == COULDNT_FINISH
 
 
 async def test_the_window_is_the_recent_transcript_each_message_keeping_its_author() -> None:

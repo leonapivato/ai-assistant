@@ -11,31 +11,43 @@ expected failure keeps its level.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from phases_support import chat_turn, event, phases_harness, processing, written
+from phases_support import chat_turn, entries, event, phases_harness, processing, written
 from structlog.testing import capture_logs
 from test_engine import AT
+from test_engine_phases import _call
 
 from ai_assistant.core.errors import ConversationStoreError, ModelError
 from ai_assistant.core.types import (
     ActivationEnding,
+    ControllerRule,
+    ControllerStage,
     InformationalEventResult,
     MessageAuthor,
     MessageReceipt,
     NewMessage,
+    RoundResponse,
+    StageOutcome,
 )
 from ai_assistant.orchestration.chat import COULDNT_FINISH
-from ai_assistant.orchestration.phase_path import is_defect
-from ai_assistant.testing import FakeConversationStore, FakeToolCallingCompleter
+from ai_assistant.orchestration.phase_path import is_defect, log_defect
+from ai_assistant.testing import (
+    FakeConversationStore,
+    FakeModelProvider,
+    FakeToolCallingCompleter,
+    FakeWebSearcher,
+)
 
 if TYPE_CHECKING:
     from collections.abc import MutableMapping, Sequence
 
     from test_engine import Harness
 
-    from ai_assistant.core.types import EpisodicMemory, Message, OfferedTool, RoundResponse
+    from ai_assistant.core.types import EpisodicMemory, Message, OfferedTool
+    from ai_assistant.orchestration.chat import ChatWriter
 
 #: Words a failure's message carries, which no log line may.
 _PRIVATE: Final = "the user's private words"
@@ -130,7 +142,7 @@ async def test_a_defect_in_a_phase_is_logged_at_error_and_the_chat_still_told() 
     assert line["activation_id"] == _activation(episode)
     assert line["error"] == "ValueError"
     assert "respond" in line["traceback"], "the frames it passed through"
-    assert line["traceback"].endswith("ValueError")
+    assert line["traceback"].rstrip().endswith("ValueError")
     # The caller is answered as for any failure: one *couldn't finish*, nothing more.
     assert await _replies(harness, episode) == [COULDNT_FINISH]
 
@@ -215,3 +227,97 @@ async def test_an_expected_failure_in_an_event_logs_nothing_at_error() -> None:
 
     assert _errors(logs) == []
     assert _ended(result) is ActivationEnding.COULDNT_FINISH
+
+
+# --- which stage ----------------------------------------------------------------------
+
+
+class _BrokenWriter:
+    """A place's writer that raises what no store does: a defect."""
+
+    def __init__(self, writer: ChatWriter) -> None:
+        self._writer = writer
+
+    def fitted(self, conversation_id: str, message: NewMessage) -> NewMessage:
+        return self._writer.fitted(conversation_id, message)
+
+    async def send(self, conversation_id: str, message: NewMessage) -> MessageReceipt | None:
+        del conversation_id, message
+        raise RuntimeError(_PRIVATE)
+
+
+class _StalledDigests(FakeModelProvider):
+    """A digest that answers only once any case here has ended."""
+
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+        await asyncio.sleep(10)
+        return await super().complete(messages, model=model)
+
+
+async def test_a_defect_in_acting_is_named_acting_not_the_digest_cancelled_beside_it() -> None:
+    """ADR-0309 §3:4: the digest beside the failed step is recorded failed once
+    cancelled, but acting's failure is what ended the pass, and what the line names."""
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            text="Let me look that up.",
+            calls=(_call("c1", "web_search", query="museum hours", looking_for="opening"),),
+        )
+    )
+    harness = phases_harness(
+        completer,
+        phases={
+            "searcher": FakeWebSearcher(results=("Open daily from 9:00.",)),
+            "wrap": _BrokenWriter,
+            "digests": _StalledDigests(reply="unused"),
+        },
+    )
+    with capture_logs() as logs:
+        _, episode = await chat_turn(harness, "when does the museum open?")
+
+    assert entries(processing(episode))[-3:] == [
+        (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED, StageOutcome.FAILED),
+        (ControllerStage.DIGESTING, ControllerRule.ROUND_AUTHORIZED, StageOutcome.FAILED),
+        (ControllerStage.END, ControllerRule.STAGE_FAILED, StageOutcome.DONE),
+    ]
+    defects = [one for one in _errors(logs) if one["event"] == "chat_activation_failed"]
+    (line,) = defects
+    assert (line["stage"], line["error"]) == ("acting", "RuntimeError")
+    assert _PRIVATE not in repr(logs)
+
+
+# --- a group --------------------------------------------------------------------------
+
+
+def _child_raises() -> None:
+    raise ValueError(_PRIVATE)
+
+
+async def _task_group_failure() -> ExceptionGroup[Exception]:
+    """A task group whose two children raise: a defect and a model's error."""
+
+    async def child() -> None:
+        _child_raises()
+
+    async def other() -> None:
+        raise ModelError(_PRIVATE)
+
+    try:
+        async with asyncio.TaskGroup() as group:
+            group.create_task(child())
+            group.create_task(other())
+    except ExceptionGroup as caught:
+        return caught
+    raise AssertionError  # pragma: no cover - the group above always raises
+
+
+async def test_a_group_is_logged_with_each_exception_it_holds_and_where_it_was_raised() -> None:
+    nested = ExceptionGroup("outer", [await _task_group_failure(), KeyError(_PRIVATE)])
+
+    with capture_logs() as logs:
+        log_defect("chat_activation_failed", nested, stage="acting", activation_id="a-1")
+
+    line = _defect_line(logs, "chat_activation_failed")
+    held = ("ExceptionGroup(ExceptionGroup(", "ValueError", "ModelError", "KeyError")
+    assert all(one in line["error"] for one in held)
+    assert "_child_raises" in line["traceback"], "the child's own raising frame"
+    assert "| | ValueError" in line["traceback"], "listed under both groups"
