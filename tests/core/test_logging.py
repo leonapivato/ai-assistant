@@ -24,6 +24,7 @@ from ai_assistant.core.logging import (
     configure_logging,
     install_redaction,
     redact_sensitive,
+    scrub_exceptions,
 )
 
 if TYPE_CHECKING:
@@ -429,6 +430,7 @@ def test_installing_twice_does_not_duplicate_the_processor() -> None:
     processors = structlog.get_config()["processors"]
 
     assert processors.count(redact_sensitive) == 1
+    assert processors.count(scrub_exceptions) == 1
 
 
 def test_the_processor_is_installed_by_configure_logging() -> None:
@@ -515,3 +517,330 @@ def test_capture_logs_bypasses_redaction() -> None:
         structlog.get_logger(__name__).warning("call failed", prompt="hunter2")
 
     assert logs[0]["prompt"] == "hunter2"
+
+
+# --- An exception is logged by its class and frames, never its words (#2926) ---
+#
+# Every assertion below is over the **rendered** output or the processor's own
+# result, never over ``capture_logs``, for test_capture_logs_bypasses_redaction's
+# reason. The markers are kept off every line a frame shows — a frame prints its
+# source line, which is code — so a marker in the output can only have come from a
+# message, a note or a local.
+
+_MESSAGE = "MARKER-MESSAGE-7f3a"
+_LOCAL = "MARKER-LOCAL-9c1e"
+_CHAINED = "MARKER-CHAINED-2b8d"
+_MARKERS = (_MESSAGE, _LOCAL, _CHAINED)
+
+
+class _ReadFailedError(Exception):
+    """A failure raised where the conversation's text is in scope."""
+
+
+def _raise_with_content() -> None:
+    conversation = _LOCAL
+    words = f"{_MESSAGE}: could not read {conversation!r}"
+    raise _ReadFailedError(words)
+
+
+def _raise_chained() -> None:
+    try:
+        _raise_with_content()
+    except _ReadFailedError as failure:
+        detail = _CHAINED
+        raise RuntimeError(detail) from failure
+
+
+def _raise_in_handler() -> None:
+    try:
+        _raise_with_content()
+    except _ReadFailedError:
+        detail = _CHAINED
+        raise LookupError(detail)  # noqa: B904 — the implicit context is the case
+
+
+def _caught(raiser: Callable[[], None]) -> Exception:
+    try:
+        raiser()
+    except Exception as failure:
+        return failure
+    raise AssertionError("the raiser did not raise")
+
+
+def _assert_no_content(out: str) -> None:
+    for marker in _MARKERS:
+        assert marker not in out, f"{marker} reached the log"
+
+
+def test_the_default_renderer_is_the_hazard() -> None:
+    # The premise, pinned: structlog's own renderer prints the message, which is why
+    # the chain renders an exception before the renderer sees it.
+    failure = _caught(_raise_with_content)
+
+    out = structlog.dev.ConsoleRenderer(colors=False)(None, "warning", {"exc_info": failure})
+
+    assert _MESSAGE in out
+
+
+def test_an_exc_info_line_carries_the_class_and_frames_and_never_the_words(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_logging(Settings())
+
+    try:
+        _raise_with_content()
+    except _ReadFailedError:
+        structlog.get_logger(__name__).warning("read_failed", stage="reader", exc_info=True)
+
+    out = capsys.readouterr().out
+    _assert_no_content(out)
+    assert "read_failed" in out
+    assert "_ReadFailedError" in out, "the class says what happened"
+    assert "test_logging.py" in out, "the frames say where"
+    assert "in _raise_with_content" in out
+    assert "raise _ReadFailedError(words)" in out, "a frame keeps its source line"
+
+
+def test_log_exception_carries_no_words(capsys: pytest.CaptureFixture[str]) -> None:
+    configure_logging(Settings())
+
+    try:
+        _raise_with_content()
+    except _ReadFailedError:
+        structlog.get_logger(__name__).exception("read_failed")
+
+    out = capsys.readouterr().out
+    _assert_no_content(out)
+    assert "_ReadFailedError" in out
+
+
+@pytest.mark.parametrize("shape", ["exception", "tuple"])
+def test_an_exception_passed_as_exc_info_is_rendered_by_its_class(
+    shape: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Outside any handler, so it can only be the value passed that is rendered.
+    # Before this net, the redactor masked an exception object to a string, which
+    # the renderer then read as "the exception being handled".
+    configure_logging(Settings())
+    failure = _caught(_raise_with_content)
+    exc_info = failure if shape == "exception" else (type(failure), failure, failure.__traceback__)
+
+    structlog.get_logger(__name__).warning("streamed_turn_failed", exc_info=exc_info)
+
+    out = capsys.readouterr().out
+    _assert_no_content(out)
+    assert "_ReadFailedError" in out
+    assert "in _raise_with_content" in out
+
+
+def test_a_group_renders_its_member_classes_and_none_of_their_words(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_logging(Settings())
+    member = _caught(_raise_with_content)
+    nested = ExceptionGroup(_CHAINED, [KeyError(_LOCAL)])
+    group = ExceptionGroup(_MESSAGE, [member, ValueError(_LOCAL), nested])
+
+    structlog.get_logger(__name__).error("pass_failed", exc_info=group)
+
+    out = capsys.readouterr().out
+    _assert_no_content(out)
+    for cls in ("ExceptionGroup", "_ReadFailedError", "ValueError", "KeyError"):
+        assert cls in out, f"the member class {cls} is named"
+    assert "+ 1/3" in out
+    assert "in _raise_with_content" in out, "a member keeps the frames it was raised in"
+
+
+@pytest.mark.parametrize("raiser", [_raise_chained, _raise_in_handler], ids=["cause", "context"])
+def test_a_chained_exceptions_words_do_not_appear(
+    raiser: Callable[[], None], capsys: pytest.CaptureFixture[str]
+) -> None:
+    configure_logging(Settings())
+    failure = _caught(raiser)
+
+    structlog.get_logger(__name__).warning("read_failed", exc_info=failure)
+
+    out = capsys.readouterr().out
+    _assert_no_content(out)
+    assert "_ReadFailedError" in out, "the chained class is named"
+    assert type(failure).__name__ in out
+    assert "the above exception" in out.lower()
+
+
+def test_an_exceptions_notes_do_not_appear(capsys: pytest.CaptureFixture[str]) -> None:
+    configure_logging(Settings())
+    failure = _caught(_raise_with_content)
+    failure.add_note(_CHAINED)
+
+    structlog.get_logger(__name__).warning("read_failed", exc_info=failure)
+
+    _assert_no_content(capsys.readouterr().out)
+
+
+def test_a_cycle_through_a_group_ends() -> None:
+    member = ValueError(_LOCAL)
+    group = ExceptionGroup(_MESSAGE, [member])
+    member.__context__ = group
+
+    event = scrub_exceptions(None, "error", {"event": "e", "exc_info": group})
+
+    _assert_no_content(str(event["exception"]))
+    assert "ValueError" in str(event["exception"])
+
+
+def test_a_long_context_chain_renders_rather_than_dropping() -> None:
+    # A retry loop raising inside its own handler builds a chain as long as its
+    # retries; walking it by recursion would overflow and lose the line.
+    newest = ValueError(_MESSAGE)
+    for _ in range(sys.getrecursionlimit() * 2):
+        earlier = newest
+        newest = ValueError(_MESSAGE)
+        newest.__context__ = earlier
+
+    event = scrub_exceptions(None, "error", {"event": "e", "exc_info": newest})
+
+    _assert_no_content(str(event["exception"]))
+    assert "ValueError" in str(event["exception"])
+
+
+def test_exc_info_with_nothing_being_handled_renders_nothing() -> None:
+    event = scrub_exceptions(None, "warning", {"event": "e", "exc_info": True})
+
+    assert event == {"event": "e"}
+
+
+def test_an_event_without_an_exception_is_untouched() -> None:
+    event = scrub_exceptions(None, "info", {"event": "e", "route": "primary"})
+
+    assert event == {"event": "e", "route": "primary"}
+
+
+def test_an_exception_object_under_exception_is_rendered_by_its_class() -> None:
+    event = scrub_exceptions(None, "warning", {"event": "e", "exception": ValueError(_MESSAGE)})
+
+    _assert_no_content(str(event["exception"]))
+    assert "ValueError" in str(event["exception"])
+
+
+def test_a_traceback_rendered_before_the_net_is_masked() -> None:
+    # A string under ``exception`` — a host's format_exc_info upstream, or a call
+    # site's str(exc) — is a rendering whose words cannot be told from its frames.
+    event = scrub_exceptions(None, "warning", {"event": "e", "exception": f"ValueError: {_LOCAL}"})
+
+    assert event["exception"] == REDACTED
+
+
+def test_a_second_pass_keeps_what_the_first_rendered() -> None:
+    once = scrub_exceptions(None, "warning", {"event": "e", "exc_info": _caught(_raise_chained)})
+    rendered = once["exception"]
+
+    twice = scrub_exceptions(None, "warning", dict(once))
+
+    assert twice["exception"] == rendered
+    assert "RuntimeError" in str(twice["exception"])
+
+
+def test_formatting_failure_drops_the_event(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Fail closed, as redaction does: an exception that cannot be rendered without
+    # its words is not rendered at all, and neither is its line.
+    def explode(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("formatting failed")
+
+    configure_logging(Settings())
+    failure = _caught(_raise_with_content)
+    monkeypatch.setattr("traceback.extract_tb", explode)
+
+    with pytest.raises(structlog.DropEvent):
+        scrub_exceptions(None, "warning", {"event": "e", "exc_info": failure})
+
+    structlog.get_logger(__name__).warning("read_failed", exc_info=failure)
+
+    assert capsys.readouterr().out == ""
+
+
+def _installed_renderer() -> structlog.dev.ConsoleRenderer:
+    renderer = structlog.get_config()["processors"][-1]
+    assert isinstance(renderer, structlog.dev.ConsoleRenderer)
+    return renderer
+
+
+def test_the_renderers_exception_formatter_is_the_second_net() -> None:
+    # Were an ``exc_info`` to reach the renderer — a processor reordered — it is
+    # written without its words or locals, where the default prints both.
+    configure_logging(Settings())
+    failure = _caught(_raise_chained)
+
+    out = _installed_renderer()(None, "warning", {"event": "e", "exc_info": failure})
+
+    _assert_no_content(out)
+    assert "RuntimeError" in out
+    assert "_ReadFailedError" in out
+
+
+def test_the_second_nets_failure_drops_the_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    def explode(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("formatting failed")
+
+    configure_logging(Settings())
+    failure = _caught(_raise_with_content)
+    monkeypatch.setattr("traceback.extract_tb", explode)
+
+    with pytest.raises(structlog.DropEvent):
+        _installed_renderer()(None, "warning", {"event": "e", "exc_info": failure})
+
+
+def test_a_hosts_chain_gains_the_scrubber_ahead_of_the_redactor(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    renderer = structlog.dev.ConsoleRenderer(colors=False)
+    structlog.configure(processors=[renderer], logger_factory=structlog.PrintLoggerFactory())
+
+    install_redaction()
+
+    processors = structlog.get_config()["processors"]
+    assert processors.index(scrub_exceptions) < processors.index(redact_sensitive)
+    assert processors.index(redact_sensitive) < processors.index(renderer)
+
+    try:
+        _raise_with_content()
+    except _ReadFailedError:
+        structlog.get_logger("host").warning("read_failed", exc_info=True)
+
+    out = capsys.readouterr().out
+    _assert_no_content(out)
+    assert "_ReadFailedError" in out
+
+
+def test_a_host_chain_already_redacted_gains_the_scrubber_before_the_redactor() -> None:
+    # A chain composed before this net existed already holds the redactor; the
+    # scrubber goes ahead of it, where an exception object is still an exception.
+    renderer = structlog.processors.KeyValueRenderer()
+    structlog.configure(processors=[redact_sensitive, renderer])
+
+    install_redaction()
+
+    assert structlog.get_config()["processors"] == [scrub_exceptions, redact_sensitive, renderer]
+
+
+def test_a_host_that_formats_exceptions_upstream_has_the_rendering_masked(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    structlog.configure(
+        processors=[
+            structlog.processors.format_exc_info,
+            structlog.dev.ConsoleRenderer(colors=False),
+        ],
+        logger_factory=structlog.PrintLoggerFactory(),
+    )
+    install_redaction()
+
+    try:
+        _raise_with_content()
+    except _ReadFailedError:
+        structlog.get_logger("host").warning("read_failed", exc_info=True)
+
+    out = capsys.readouterr().out
+    _assert_no_content(out)
+    assert REDACTED in out
