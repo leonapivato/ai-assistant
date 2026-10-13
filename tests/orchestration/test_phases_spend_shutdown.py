@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from decimal import Decimal
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from test_engine_contract import CAPABILITY, PARAMETERS, _wire
@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     ProposedCall,
     RoundResponse,
+    ToolOutcome,
     UserMessage,
 )
 from ai_assistant.permissions.audit import SqliteAuditTrail
@@ -48,7 +49,7 @@ if TYPE_CHECKING:
     from datetime import datetime
     from pathlib import Path
 
-    from ai_assistant.core.types import Message, OfferedTool
+    from ai_assistant.core.types import Message, OfferedTool, ToolInvocation
 
 #: Long enough that a released worker finishes inside it on any machine this runs on.
 _WAITING: Final = 5.0
@@ -113,10 +114,24 @@ async def test_shutdown_drains_acting_s_wedged_invocation_before_it_closes_the_h
         path=tmp_path / "audit.db",
         spend=SpendConfiguration(currency="USD", day_ceiling=Decimal("100")),
     )
-    entered_close: list[str] = []
+    # One ordered record of the two things the clause orders: the invocation's completion
+    # appended to the trail it admitted through, and the closer entered. An invocation
+    # whose connection closed under it would come back failed or never complete, which a
+    # drain absorbing the failure would otherwise hide.
+    events: list[str] = []
+    completed: list[ToolOutcome] = []
+    complete = trail.complete_invocation
+
+    async def _completing(**kwargs: Any) -> ToolInvocation:
+        completion = await complete(**kwargs)
+        events.append("completed")
+        completed.append(kwargs["outcome"])
+        return completion
+
+    trail.complete_invocation = _completing  # type: ignore[method-assign]
 
     async def _close() -> None:
-        entered_close.append("close")
+        events.append("close")
         trail.close()
 
     engine = _wire(
@@ -149,18 +164,23 @@ async def test_shutdown_drains_acting_s_wedged_invocation_before_it_closes_the_h
                 "a shutdown returning here would have shut a connection an in-flight "
                 "admission was still reading"
             )
-            assert entered_close == [], (
+            assert events == [], (
                 "the closer was entered while an admission was still reading the "
                 "connection it closes — the ordering ADR-0042 §2 fixes, inverted"
             )
         finally:
             parked.release()
         await asyncio.wait_for(closing, _WAITING)
-        assert entered_close == ["close"], "and it was entered once the drain finished"
+        assert events == ["completed", "close"], (
+            "the invocation completed on the connection before the closer was entered"
+        )
     finally:
         parked.release()
         await engine.aclose()
 
+    # The invocation did its work: had the connection closed under it, its completion
+    # would read failed rather than succeeded.
+    assert completed == [ToolOutcome.SUCCEEDED]
     # The close the drain preceded really happened.
     with pytest.raises(sqlite3.ProgrammingError):
         trail._conn.execute("SELECT 1")
