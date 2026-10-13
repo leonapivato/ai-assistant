@@ -53,12 +53,11 @@
   Where a later ADR changes one of the ADRs cited, this ADR is read against the text
   quoted here and that ADR's own record says what moved. This is ADR-0143's clause,
   taken for its reason.
-- Superseded: 2026-10-12 by ADR-0313 — the whole decision. The phases park nothing
-  (ADR-0306 §4:8), so no spoken pass is a live confirmation park and no fixed
-  sentence is spoken for one; a call that needs the user is answered by planning's
-  own message (ADR-0307 §9:4), spoken with the pass's other messages (ADR-0313 §3).
-  The old path keeps the replaced clauses until the lane that changes that member
-  or type merges (ADR-0313 §1:3).
+- Superseded: 2026-10-13 by ADR-0313 — the whole decision. Spoken conversation
+  retires at the cutover by the owner's ruling (ADR-0313 §3:1), and the phases
+  park nothing (ADR-0306 §4:8).
+  The old path keeps the replaced clauses until the lane that changes that member,
+  type or surface merges (ADR-0313 §1:3).
   This replacement takes effect on ratification of ADR-0313. This reciprocal header
   record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.

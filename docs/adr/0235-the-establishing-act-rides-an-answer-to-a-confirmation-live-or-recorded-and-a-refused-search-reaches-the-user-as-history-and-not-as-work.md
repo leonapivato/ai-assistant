@@ -112,14 +112,14 @@
   and revocation vocabulary, and §§9–14 all stand entire. §9's browser deferral and voice
   withholding are untouched for **this** act; ADR-0244 §13 admits the browser for the parked
   read it decides, and says so in its own text rather than by reading this section wider.
-- Partially superseded: 2026-10-12 by ADR-0313 — two scopes. §3, whole: the
+- Partially superseded: 2026-10-13 by ADR-0313 — two scopes. §3, whole: the
   establishing act on a recorded `CONFIRM`, `establish_recipient_grant`, and the
   listing that offers it, `grantable_decisions`, leave the engine surface
   (ADR-0313 §5:1), as ADR-0309 §5:9 retires the act; the authority milestone redoes
   it. §9:1's `assistant remember-recipients` leaves with them. The listing and
   revocation of recipient grants stand.
-  The old path keeps the replaced clauses until the lane that changes that member
-  or type merges (ADR-0313 §1:3).
+  The old path keeps the replaced clauses until the lane that changes that member,
+  type or surface merges (ADR-0313 §1:3).
   This replacement takes effect on ratification of ADR-0313. This reciprocal header
   record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
