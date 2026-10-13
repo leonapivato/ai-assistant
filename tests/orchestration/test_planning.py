@@ -415,6 +415,29 @@ async def test_the_instruction_makes_the_message_the_assistants_own_words_to_the
     assert "never how you are working it out" in instruction
 
 
+async def test_a_round_that_acts_on_the_request_is_instructed_to_reply() -> None:
+    """#2864: a call that brings no result brings no later round, so the reply is now."""
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs())
+    instruction = _instruction(completer)
+    assert (
+        "When you act on what the user asked, this round's message tells them so, even in one "
+        "short line"
+    ) in instruction
+    assert "it may be the only reply they get, and it still never says how the calls went" in (
+        instruction
+    )
+    assert "Empty text writes no message" in instruction
+    assert "leave the text empty only where the user asked nothing of this round" in instruction
+    assert "Write no text where you have nothing to say" not in instruction
+
+
+async def test_a_place_that_takes_no_message_is_not_told_to_reply() -> None:
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(place=PlaceWindow(takes_message=False)))
+    assert "this round's message tells them so" not in _instruction(completer)
+
+
 async def test_a_needs_you_call_is_instructed_as_cannot_be_done_yet_with_no_way_to_approve() -> (
     None
 ):
