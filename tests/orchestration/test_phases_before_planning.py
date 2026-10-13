@@ -12,25 +12,25 @@ the phases wired, so it stays pinned once the switch lands. Recall's own cases a
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from datetime import timedelta
+from itertools import count
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from phases_support import chat_turn, event, phases_harness, written
-from story_support import activation, address, failing, story
+from phases_support import chat_turn, entries, event, phases_harness, processing, written
+from story_support import activation, address, episode, failing, memory_of, story
 from structlog.testing import capture_logs
 from test_engine import AT
-from test_engine_recall_stories import _SEEDED, _WINDOWED, _story, _texts
-from test_engine_recall_stories import _TURN as _RECALLED_TURN
-from test_engine_recall_stories import _seeded as _recall_seeded
-from test_engine_story_links import _TURN, _members, _proposal, _seeded, _stories
-from test_engine_understanding import _UTTERANCE, _Order, _sent
-from test_engine_windows import _episode_window, _ForgetsWhatItChose
-from understanding_support import STATED_PROPOSAL, recall_stage, understanding_stage
+from understanding_support import (
+    EPISODE_LIMIT,
+    STATED_PROPOSAL,
+    recall_stage,
+    understanding_stage,
+)
 
 from ai_assistant.core.types import (
     ControllerRule,
     ControllerStage,
-    EpisodicMemory,
     RecallOutcome,
     StageOutcome,
     StoryActor,
@@ -38,35 +38,122 @@ from ai_assistant.core.types import (
     UnderstandingProducer,
 )
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
-from ai_assistant.orchestration.understanding import RecentEpisodes, WindowsStage
-from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, FakeToolCallingCompleter
+from ai_assistant.orchestration.understanding import RecentEpisodes, Windows, WindowsStage
+from ai_assistant.testing import (
+    FakeMemoryStore,
+    FakeModelProvider,
+    FakeStoryStore,
+    FakeToolCallingCompleter,
+)
 from ai_assistant.testing.tool_calling import DEFAULT_ROUND_TEXT
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from test_engine import Harness
 
     from ai_assistant.core.types import (
-        EpisodeProcessingRecord,
         Message,
         OfferedTool,
         RoundResponse,
+        StoryMember,
     )
-    from ai_assistant.testing import FakeStoryStore
+    from ai_assistant.orchestration.disclosure import TurnSupply
+    from ai_assistant.orchestration.understanding import ChannelWindow
 
 _S = ControllerStage
 _R = ControllerRule
 _DONE = StageOutcome.DONE
 
+_UTTERANCE: Final = "Is our camping trip still on?"
+_TURN: Final = "The canoe is booked for Sunday."
+#: The episode window's one episode on recall's cases: recent, and sharing no word
+#: recall would keep it by.
+_WINDOWED: Final = "Plan the drive to Riverside."
+_SEEDED: Final = (address("a-old"), address("a-new"))
 
-def _processing(episode: EpisodicMemory) -> EpisodeProcessingRecord:
-    assert episode.processing_record is not None
-    return episode.processing_record
+
+def _sent(model: FakeModelProvider, call: int = -1) -> dict[str, Any]:
+    """What understanding's call ``call`` was sent."""
+    payload: dict[str, Any] = json.loads(model.calls[call].messages[1].content)
+    return payload
 
 
-def _entries(record: EpisodeProcessingRecord) -> list[tuple[ControllerStage, ControllerRule, Any]]:
-    return [(entry.stage, entry.due, entry.outcome) for entry in record.stages]
+def _episode_window(model: FakeModelProvider, call: int) -> Any:
+    return _sent(model, call)["episode_window"]
+
+
+def _proposal(**fields: Any) -> str:
+    return json.dumps(json.loads(STATED_PROPOSAL) | fields)
+
+
+def _stories() -> FakeStoryStore:
+    ids = count(1)
+    return FakeStoryStore(now=lambda: AT, new_id=lambda: f"{next(ids)}")
+
+
+async def _seeded() -> FakeMemoryStore:
+    """A store holding one earlier activation's episode, ``a-1``, at the harness's instant."""
+    return await memory_of(episode("a-1", at=AT), now=AT)
+
+
+async def _recall_seeded() -> FakeMemoryStore:
+    """``a-old``, which recall keeps by the turn's words, and ``a-new``, the window's one."""
+    return await memory_of(
+        episode("a-old", at=AT - timedelta(days=3), text=_TURN),
+        episode("a-new", at=AT - timedelta(hours=1), text=_WINDOWED),
+        now=AT,
+    )
+
+
+async def _story(stories: FakeStoryStore, activation_id: str) -> str:
+    story_id = (await stories.create([activation(activation_id)], actor=StoryActor.OWNER)).story_id
+    assert story_id is not None
+    return story_id
+
+
+def _texts(view: dict[str, Any]) -> str:
+    return json.dumps(view["latest_episodes"])
+
+
+async def _members(stories: FakeStoryStore, story_id: str) -> list[tuple[StoryMember, StoryActor]]:
+    view = await stories.view(story_id)
+    assert view is not None
+    return [(entry.member, entry.actor) for entry in view.entries]
+
+
+class _Order:
+    """One list every seam a case orders appends to, so the sequence is one fact."""
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    def model(
+        self, name: str, reply: str | Callable[[Sequence[Message]], str]
+    ) -> FakeModelProvider:
+        def answer(messages: Sequence[Message]) -> str:
+            self.seen.append(name)
+            return reply(messages) if callable(reply) else reply
+
+        return FakeModelProvider(answer)
+
+
+class _ForgetsWhatItChose(WindowsStage):
+    """A windows stage whose chosen episodes are deleted before understanding fetches them."""
+
+    def __init__(self, memory: FakeMemoryStore) -> None:
+        super().__init__(episodes=RecentEpisodes(memory=memory, limit=EPISODE_LIMIT))
+        self._memory = memory
+        self.chosen: list[tuple[str, ...] | None] = []
+
+    async def assemble(
+        self, channel: ChannelWindow, *, audience: TurnSupply, episodes: bool
+    ) -> Windows:
+        windows = await super().assemble(channel, audience=audience, episodes=episodes)
+        self.chosen.append(windows.episode_ids)
+        for episode_id in windows.episode_ids or ():
+            await self._memory.delete(episode_id)
+        return windows
 
 
 # --- understanding (ADR-0276) ----------------------------------------------------------------
@@ -100,7 +187,7 @@ async def test_a_turn_records_version_one_understood_before_it_was_planned() -> 
     _, episode = await chat_turn(harness, _UTTERANCE)
     assert order.seen == ["understand", "plan"]
     assert _sent(model)["input"]["text"] == _UTTERANCE
-    record = _processing(episode)
+    record = processing(episode)
     (understood,) = record.understanding
     assert understood.version == 1
     assert understood.producer is UnderstandingProducer.INTERPRETATION
@@ -121,7 +208,7 @@ async def test_an_event_is_understood_before_planning_over_its_supplied_window()
     sent = _sent(model)
     assert sent["input"]["received_as"].startswith("a report received on informational_event")
     assert [item["label"] for item in sent["channel_window"]] == ["H1"]
-    record = _processing(episode)
+    record = processing(episode)
     assert [u.version for u in record.understanding] == [1]
     assert record.understanding_omitted is None
 
@@ -230,8 +317,8 @@ async def test_a_turn_links_its_activation_into_the_story_it_named() -> None:
 
     _, episode = await chat_turn(harness, _TURN)
 
-    record = _processing(episode)
-    assert _entries(record)[2:4] == [
+    record = processing(episode)
+    assert entries(record)[2:4] == [
         (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE),
         (_S.STORY_LINKS, _R.STORY_LINKS_UNRECORDED, _DONE),
     ]
@@ -257,7 +344,7 @@ async def test_an_earlier_episode_in_no_story_starts_one_with_the_activation() -
 
     _, episode = await chat_turn(harness, _TURN)
 
-    record = _processing(episode)
+    record = processing(episode)
     assert record.understanding[-1].story_links == (activation("a-1"),)
     (started,) = (await stories.stories()).stories
     assert await _members(stories, started.story_id) == [
@@ -272,13 +359,13 @@ async def test_a_follow_up_links_the_conversation_s_earlier_turn_through_its_h_l
     model = FakeModelProvider.scripted(STATED_PROPOSAL, _proposal(story_labels=["H1"]))
     harness = _linked(FakeMemoryStore(now=lambda: AT), stories, model=model)
     conversation, first = await chat_turn(harness, "Plan the camping trip.")
-    earlier = _processing(first).activation_id
+    earlier = processing(first).activation_id
 
     _, episode = await chat_turn(harness, _TURN, conversation=conversation, message_id="m-2")
 
     item, *_ = json.loads(model.calls[1].messages[1].content)["channel_window"]
     assert item["label"] == "H1"
-    record = _processing(episode)
+    record = processing(episode)
     assert record.understanding[-1].story_links == (activation(earlier),)
     (started,) = (await stories.stories()).stories
     assert await _members(stories, started.story_id) == [
@@ -295,8 +382,8 @@ async def test_an_input_linked_to_nothing_still_records_the_decision() -> None:
 
     _, episode = await chat_turn(harness, _TURN)
 
-    record = _processing(episode)
-    assert (_S.STORY_LINKS, _R.STORY_LINKS_UNRECORDED, _DONE) in _entries(record)
+    record = processing(episode)
+    assert (_S.STORY_LINKS, _R.STORY_LINKS_UNRECORDED, _DONE) in entries(record)
     assert record.understanding[-1].story_links == ()
     assert (await stories.stories()).stories == ()
 
@@ -308,7 +395,7 @@ async def test_a_deployment_without_the_story_pieces_runs_as_before() -> None:
 
     _, episode = await chat_turn(harness, _TURN)
 
-    assert _S.STORY_LINKS not in [entry.stage for entry in _processing(episode).stages]
+    assert _S.STORY_LINKS not in [entry.stage for entry in processing(episode).stages]
     assert "stories" not in json.loads(model.calls[0].messages[1].content)
 
 
@@ -322,8 +409,8 @@ async def test_an_event_s_links_are_recorded_before_planning() -> None:
 
     _, episode = await event(harness)
 
-    record = _processing(episode)
-    assert _entries(record)[:4] == [
+    record = processing(episode)
+    assert entries(record)[:4] == [
         (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, _DONE),
         (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE),
         (_S.STORY_LINKS, _R.STORY_LINKS_UNRECORDED, _DONE),
@@ -346,9 +433,9 @@ async def test_a_story_store_failure_in_the_stage_is_tolerated_and_the_turn_goes
     conversation, episode = await chat_turn(harness, _TURN)
 
     assert [one.text for one in await written(harness, conversation)][-1] == DEFAULT_ROUND_TEXT
-    record = _processing(episode)
-    assert (_S.STORY_LINKS, _R.STORY_LINKS_UNRECORDED, StageOutcome.FAILED) in _entries(record)
-    assert _entries(record)[-1] == (_S.END, _R.NOTHING_DUE, _DONE)
+    record = processing(episode)
+    assert (_S.STORY_LINKS, _R.STORY_LINKS_UNRECORDED, StageOutcome.FAILED) in entries(record)
+    assert entries(record)[-1] == (_S.END, _R.NOTHING_DUE, _DONE)
 
 
 async def test_unreadable_candidates_say_so_and_understanding_proceeds() -> None:
@@ -360,7 +447,7 @@ async def test_unreadable_candidates_say_so_and_understanding_proceeds() -> None
 
     section = json.loads(model.calls[0].messages[1].content)["stories"]
     assert section == "missing: the stories could not be read, so none is shown"
-    assert (_S.STORY_LINKS, _R.STORY_LINKS_UNRECORDED, _DONE) in _entries(_processing(episode))
+    assert (_S.STORY_LINKS, _R.STORY_LINKS_UNRECORDED, _DONE) in entries(processing(episode))
 
 
 # --- recall's stories (ADR-0300 §7) ----------------------------------------------------------
@@ -398,9 +485,9 @@ async def test_recalls_story_is_recorded_and_joins_the_candidates_after_the_wind
     model = FakeModelProvider(_proposal(story_labels=["S2"]))
     harness = _recalling(await _recall_seeded(), stories, model=model)
 
-    _, episode = await chat_turn(harness, _RECALLED_TURN)
+    _, episode = await chat_turn(harness, _TURN)
 
-    record = _processing(episode)
+    record = processing(episode)
     assert episode.id not in _SEEDED
     assert record.recall is not None
     assert record.recall.outcome is RecallOutcome.FOUND
@@ -412,7 +499,7 @@ async def test_recalls_story_is_recorded_and_joins_the_candidates_after_the_wind
     first, second = _shown(model)["stories"]
     assert (first["label"], second["label"]) == ("S1", "S2")
     assert _WINDOWED in _texts(first)
-    assert _RECALLED_TURN in _texts(second)
+    assert _TURN in _texts(second)
     # The S2 label resolves to recall's story, and the stage links the activation there.
     assert record.understanding[-1].story_links == (story(recalled),)
     view = await stories.view(recalled)
@@ -430,9 +517,9 @@ async def test_a_story_already_a_candidate_through_the_window_is_not_repeated() 
     model = FakeModelProvider(STATED_PROPOSAL)
     harness = _recalling(await _recall_seeded(), stories, model=model)
 
-    _, episode = await chat_turn(harness, _RECALLED_TURN)
+    _, episode = await chat_turn(harness, _TURN)
 
-    record = _processing(episode)
+    record = processing(episode)
     assert record.recall is not None
     assert {item.id: item.stories for item in record.recall.items}[address("a-old")] == (both,)
     (only,) = _shown(model)["stories"]
@@ -451,13 +538,13 @@ async def test_a_story_store_failure_in_recall_is_tolerated_and_the_turn_goes_on
         recall_stories=failing(_stories(), "stories_of"),
     )
 
-    conversation, episode = await chat_turn(harness, _RECALLED_TURN)
+    conversation, episode = await chat_turn(harness, _TURN)
 
     assert [one.text for one in await written(harness, conversation)][-1] == DEFAULT_ROUND_TEXT
-    record = _processing(episode)
+    record = processing(episode)
     assert record.recall is not None
     assert record.recall.outcome is RecallOutcome.FAILED
-    stages = _entries(record)
+    stages = entries(record)
     assert (_S.RECALL, _R.NOT_RECALLED, StageOutcome.FAILED) in stages
     assert (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE) in stages
     # Recall's failure brings no candidate, and the window's episode is in no story.

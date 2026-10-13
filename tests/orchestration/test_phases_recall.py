@@ -11,28 +11,11 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
-from phases_support import chat_turn, event, phases_harness, written
+from phases_support import chat_turn, entries, event, phases_harness, processing, written
 from structlog.testing import capture_logs
 from test_engine import AT
-from test_engine_recall import (
-    _BOOKED,
-    _BUDGET,
-    _DONE,
-    _PERMIT,
-    _R,
-    _S,
-    _TURN,
-    _entries,
-    _forgetting,
-    _no_episodes,
-    _record,
-    _seeded,
-    _shown,
-    _Slow,
-    _trail_report,
-)
 from understanding_support import (
     ON_DEVICE_RECALL_THRESHOLD,
     STATED_PROPOSAL,
@@ -42,13 +25,20 @@ from understanding_support import (
 
 from ai_assistant.core.types import (
     ActivationEnding,
+    ChannelIdentity,
+    ChannelInput,
+    ControllerRule,
+    ControllerStage,
     EpisodicMemory,
     InformationalEventResult,
     MemorySource,
+    MemoryWrite,
+    MemoryWriteMode,
     Provenance,
     RecallOutcome,
     SemanticMemory,
     StageOutcome,
+    TextChannelPayload,
 )
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.models.fastembed_embedder import FastEmbedEmbedder
@@ -66,7 +56,104 @@ from ai_assistant.testing.tool_calling import DEFAULT_ROUND_TEXT
 if TYPE_CHECKING:
     from test_engine import Harness
 
-    from ai_assistant.core.types import EpisodeProcessingRecord
+    from ai_assistant.core.types import EpisodeProcessingRecord, MemoryRecord
+
+_BUDGET: Final = timedelta(seconds=10)
+_S = ControllerStage
+_R = ControllerRule
+_DONE = StageOutcome.DONE
+
+#: A stored belief the ordinary turn's words recall on the canonical fake.
+_BOOKED: Final = SemanticMemory(
+    id="fact-booked",
+    content="The campsite at Pine Flat is booked for Friday.",
+    fact="The campsite at Pine Flat is booked for Friday.",
+    provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
+)
+#: A second stored belief the same words recall.
+_PERMIT: Final = SemanticMemory(
+    id="fact-permit",
+    content="The campsite at Pine Flat needs a fire permit.",
+    fact="The campsite at Pine Flat needs a fire permit.",
+    provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
+)
+_TURN: Final = "book the campsite at Pine Flat"
+
+
+async def _seeded(*records: MemoryRecord) -> FakeMemoryStore:
+    memory = FakeMemoryStore(now=lambda: AT)
+    await memory.write_atomic(
+        [MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT) for record in records]
+    )
+    return memory
+
+
+async def _record(harness: Harness) -> EpisodeProcessingRecord:
+    """The one captured activation's processing record."""
+    (record,) = [
+        r.processing_record
+        for r in await harness.memory.export()
+        if isinstance(r, EpisodicMemory) and r.processing_record is not None
+    ]
+    return record
+
+
+def _entries(record: EpisodeProcessingRecord) -> list[tuple[ControllerStage, ControllerRule, Any]]:
+    assert all(entry.due is not ControllerRule.STAGE_REPEATED for entry in record.stages)
+    return entries(record)
+
+
+def _shown(model: FakeModelProvider) -> Any:
+    """What the understanding stage's one call rendered as its recalled section."""
+    return json.loads(model.calls[0].messages[1].content)["recalled"]
+
+
+class _Slow(FakeMemoryStore):
+    """A store whose search outlasts any budget a case sets."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+
+    async def search(self, query: str, **kwargs: Any) -> Any:
+        await asyncio.sleep(10)
+        return await super().search(query, **kwargs)
+
+
+class _ForgetsAfterSearch(FakeMemoryStore):
+    """A store that deletes the named records once a search has returned them."""
+
+    def __init__(self, *forgotten: str) -> None:
+        super().__init__(now=lambda: AT)
+        self._forgotten = forgotten
+
+    async def search(self, query: str, **kwargs: Any) -> Any:
+        found = await super().search(query, **kwargs)
+        for record_id in self._forgotten:
+            await self.delete(record_id)
+        return found
+
+
+async def _forgetting(*forgotten: str) -> _ForgetsAfterSearch:
+    memory = _ForgetsAfterSearch(*forgotten)
+    await memory.write_atomic(
+        [
+            MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT)
+            for record in (_BOOKED, _PERMIT)
+        ]
+    )
+    return memory
+
+
+async def _no_episodes(_shared: frozenset[str]) -> tuple[EpisodicMemory, ...]:
+    """An episode selector choosing none, so every stored episode is past the windows."""
+    return ()
+
+
+def _trail_report() -> ChannelInput:
+    return ChannelInput(
+        target=ChannelIdentity(channel_type="informational_event", instance_id="parks"),
+        payload=TextChannelPayload(text="Bulletin 4471: NT segment status changed to C."),
+    )
 
 
 def _harness(
@@ -85,11 +172,6 @@ def _harness(
         recall=recall or recall_stage(memory),
         **knobs,
     )
-
-
-def _processing(episode: EpisodicMemory) -> EpisodeProcessingRecord:
-    assert episode.processing_record is not None
-    return episode.processing_record
 
 
 #: An understanding model whose reply is no proposal, so understanding fails.
@@ -196,7 +278,7 @@ async def test_an_event_recalls_under_a_bounded_audience() -> None:
     )
     harness = _harness(await _seeded(episode), windows=WindowsStage(episodes=_no_episodes))
     _, captured = await event(harness)
-    record = _processing(captured)
+    record = processing(captured)
     assert _entries(record)[:3] == [
         (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, _DONE),
         (_S.RECALL, _R.NOT_RECALLED, _DONE),
@@ -221,7 +303,7 @@ async def test_an_event_captured_without_an_understanding_is_its_status_line() -
     result, captured = await event(_harness(understanding_model=_unusable()))
     assert isinstance(result.result, InformationalEventResult)
     assert result.result.ended is ActivationEnding.COULDNT_FINISH
-    record = _processing(captured)
+    record = processing(captured)
     assert record.understanding == ()
     assert record.status is not None
     assert record.reason is not None
@@ -329,7 +411,7 @@ async def test_an_episode_the_window_holds_is_not_recalled() -> None:
     model = FakeModelProvider(STATED_PROPOSAL)
     harness = _harness(await _seeded(episode, fact), understanding_model=model)
     _, captured = await event(harness)
-    record = _processing(captured)
+    record = processing(captured)
     assert record.recall is not None
     assert [item.id for item in record.recall.items] == ["fact-eco"]
     (shown,) = _shown(model)
