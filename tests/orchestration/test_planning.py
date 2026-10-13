@@ -15,6 +15,7 @@ from structlog.testing import capture_logs
 
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
+    ActivationDigest,
     ActivationUnderstanding,
     Attestation,
     CapabilityEffect,
@@ -24,8 +25,10 @@ from ai_assistant.core.types import (
     ControllerStage,
     CostBasis,
     DataTier,
+    DigestOutcome,
     EpisodeProcessingRecord,
     EpisodicMemory,
+    EvidenceItem,
     Idempotency,
     InputOrigin,
     LabelKind,
@@ -946,6 +949,49 @@ async def test_a_found_episodes_notes_follow_the_audience() -> None:
     stage, completer, _ = _stage()
     await stage.plan(_inputs(recalled=(found,), owner_records=False))
     assert _sent(completer)["recalled"][0]["rounds"] == [{"message": "Booked."}]
+
+
+def _with_evidence(episode: EpisodicMemory, text: str) -> EpisodicMemory:
+    record = episode.processing_record
+    assert record is not None
+    digest = ActivationDigest(
+        result="R1",
+        question="when is it",
+        outcome=DigestOutcome.ANSWERED,
+        evidence=(EvidenceItem(text=text, source="R1"),),
+        recorded_at=_AT,
+    )
+    return episode.model_copy(
+        update={"processing_record": record.model_copy(update={"digests": (digest,)})}
+    )
+
+
+async def test_a_found_episodes_evidence_is_shown_marked_and_without_its_source() -> None:
+    """ADR-0308 §3:1, §5:5: its text and mark, never its label; and planning has read it."""
+    found = _with_evidence(_episode("activation:found"), "The appointment is Friday at 3pm.")
+    stage, completer, _ = _stage(RoundResponse(text="Friday.", notes="a note"))
+    planned = await stage.plan(_inputs(recalled=(found,), owner_records=True))
+    (shown,) = _sent(completer)["recalled"]
+    assert shown["evidence"] == [
+        {
+            "text": "The appointment is Friday at 3pm.",
+            "outside_content": (
+                "rests on outside content: what a source reported, never what the user said"
+            ),
+        }
+    ]
+    assert "R1" not in completer.last_call.messages[1].content
+    assert planned.round.notes_marked
+
+
+async def test_a_found_episodes_evidence_follows_the_audience() -> None:
+    """ADR-0308 §5:6: placed for the owner alone, as its notes are."""
+    found = _with_evidence(_episode("activation:found"), "The appointment is Friday at 3pm.")
+    stage, completer, _ = _stage(RoundResponse(text="Friday.", notes="a note"))
+    planned = await stage.plan(_inputs(recalled=(found,), owner_records=False))
+    assert "evidence" not in _sent(completer)["recalled"][0]
+    assert "Friday at 3pm" not in completer.last_call.messages[1].content
+    assert not planned.round.notes_marked
 
 
 async def test_a_found_memory_record_is_shown_only_where_its_source_is_not_outside() -> None:
