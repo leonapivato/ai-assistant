@@ -44,13 +44,20 @@ known, so it goes to a digest: acting holds it in its part of the working episod
 its id, as soon as it records it, and the :class:`ActedCall` carries the id and never
 the content (ADR-0308 §6:1, §6:3, §6:5).
 
-**What is left to later lanes, as seams.** Writing the round's message, which needs
-ADR-0307's round (the message's record is already an :class:`ActivationEffect` shape);
-and a memory search's record-by-record routing by stored provenance, with its outside
-records held by id (ADR-0306 §5:16, ADR-0308 §6:2): until then a result of the
-assistant's own records that may carry outside text is held whole as it arrived and
-routed to a digest, the conservative direction. No controller rule runs this stage yet
-(ADR-0309 §2:6).
+**A result of the assistant's own records** (ADR-0306 §5:14, §5:16, ADR-0308 §6:2). A
+runner on the own-records seam that reads records whose sources differ, such as a memory
+search, answers :class:`HeldByIds`: what goes to planning, and the ids of the records
+whose stored source is outside, which acting holds by id under the result's id for a
+digest to fetch (ADR-0282 §2:3-§2:4). Any other result of the assistant's own records
+that may carry outside text is held whole as it arrived and routed to a digest, the
+conservative direction.
+
+**The follow-up** (ADR-0308 §6:6-§6:7). Its runner answers :class:`NamedResult`, the
+result the call names. Acting looks it up in the held results and offers that result, as
+held, to a digest again under the follow-up's own decision, so the digest answers the
+follow-up's *looking for*. It mints no result and holds nothing again, and the outcome
+carries the named result's id. A follow-up naming a result with nothing held is not
+done, with the reason.
 
 **It logs stage and code-owned reason only**, never arguments or results (ADR-0275 §8).
 """
@@ -109,6 +116,9 @@ __all__ = [
     "ActingStage",
     "AuthorizedCall",
     "AuthorizedRound",
+    "HeldByIds",
+    "NamedResult",
+    "OwnRecordsAnswer",
     "OwnRecordsByCapability",
     "OwnRecordsCalls",
     "ResultRoute",
@@ -149,6 +159,7 @@ _OUTCOMES: Final = {
 }
 
 _STOPPED: Final = "the activation was stopped before this call was claimed"
+_NOTHING_HELD: Final = "nothing is held under the result it names in this activation"
 _ALREADY_DONE: Final = "already done: an equal call was made in this matter"
 _REFUSED: Final = "refused before the call was made"
 
@@ -203,6 +214,41 @@ def values_digest(call: ToolCall) -> str:
     return hashlib.sha256(canonical_json_bytes(document)).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class HeldByIds:
+    """A done read of the assistant's own records, routed record by record (ADR-0306 §5:16).
+
+    What a runner on the own-records seam answers for a capability whose result may carry
+    outside text, such as a memory search, where it reads each record's stored source.
+
+    Attributes:
+        output: What goes to planning: the records whose source is not outside, as the
+            runner gives them, JSON ``null`` included.
+        outside: The ids of the records whose source is outside, in the order read.
+            Acting holds them by id, never their contents, and a digest fetches them
+            (ADR-0308 §6:2, ADR-0282 §2:3-§2:4).
+    """
+
+    output: FrozenJsonValue
+    outside: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class NamedResult:
+    """A follow-up's answer: the held result it names (ADR-0308 §6:6-§6:7).
+
+    Attributes:
+        result_id: The id of the result the call names, as acting minted it.
+    """
+
+    result_id: str
+
+
+#: What a runner on the own-records seam answers: the store's answer as a result, or,
+#: for a read routed record by record or a follow-up, what acting holds or offers again.
+type OwnRecordsAnswer = ToolResult | HeldByIds | NamedResult
+
+
 class OwnRecordsCalls(Protocol):
     """The seam onto the assistant's own records, for a call acting runs directly.
 
@@ -212,7 +258,7 @@ class OwnRecordsCalls(Protocol):
     behind it once they exist; none does yet.
     """
 
-    async def run(self, call: ToolCall) -> ToolResult:
+    async def run(self, call: ToolCall) -> OwnRecordsAnswer:
         """Run ``call`` against the store it reaches and say what that store answered.
 
         Args:
@@ -221,7 +267,8 @@ class OwnRecordsCalls(Protocol):
         Returns:
             The store's answer as a result: ``succeeded`` with what it returned, or
             ``failed`` with why. Never ``indeterminate``, since a call to the
-            assistant's own records is awaited to its end.
+            assistant's own records is awaited to its end. A done read routed record by
+            record answers :class:`HeldByIds`, and a follow-up :class:`NamedResult`.
         """
         ...
 
@@ -244,7 +291,7 @@ class OwnRecordsByCapability:
         """
         self._runners: dict[str, OwnRecordsCalls] = dict(runners)
 
-    async def run(self, call: ToolCall) -> ToolResult:
+    async def run(self, call: ToolCall) -> OwnRecordsAnswer:
         """Run ``call`` through its capability's runner, or say none holds it.
 
         Args:
@@ -344,12 +391,16 @@ class ActedCall:
         call: The call.
         outcome: Done, not done or unknown.
         reason: Why it was not done, in code-owned words; ``None`` otherwise.
-        output: What a done call returned, where its result goes to planning whole;
-            ``None`` otherwise. A result going to a digest is held instead, and never
-            carried here (ADR-0308 §6:5).
-        route: Where a done call's result goes; ``None`` where there is none.
+        output: What a done call returned for planning: its whole result, where it goes
+            to planning whole, or what goes to planning of a read of the assistant's own
+            records routed record by record (:class:`HeldByIds`); ``None`` otherwise.
+            What goes to a digest is held instead, and never carried here (ADR-0308
+            §6:5).
+        route: Where a done call's result goes; ``None`` where there is none. A result
+            a digest reads any part of is ``digest``.
         result_id: The id acting minted for a done call's result, which its R label
-            names; ``None`` where there is none.
+            names, or, for a follow-up, the id of the result it named; ``None`` where
+            there is none.
         effect_id: The effect record the call was claimed under, where it was.
     """
 
@@ -522,10 +573,97 @@ class ActingStage:
         self, one: AuthorizedCall, effect_id: str | None, round_id: str, held: HeldResults
     ) -> ActedCall:
         """Run a call against the assistant's own records, then finish its record."""
-        result = _detached_result(await self._own_records.run(one.call))
+        answer = await self._own_records.run(one.call)
+        if isinstance(answer, NamedResult):
+            return await self._followed_up(one, answer, effect_id, round_id, held)
+        if isinstance(answer, HeldByIds):
+            outside = tuple(str(one_id) for one_id in answer.outside)
+            result = _detached_result(
+                ToolResult(outcome=ToolOutcome.SUCCEEDED, output=answer.output)
+            )
+        else:
+            outside = ()
+            result = _detached_result(answer)
         if effect_id is not None:
             await self._finish(effect_id, result)
+        if isinstance(answer, HeldByIds):
+            return self._held_by_ids(one, result, outside, effect_id, round_id, held)
         return self._acted(one, result, effect_id, round_id, held)
+
+    def _held_by_ids(  # noqa: PLR0913 — the call, what goes to planning, the ids held, and acting's three
+        self,
+        one: AuthorizedCall,
+        result: ToolResult,
+        outside: tuple[str, ...],
+        effect_id: str | None,
+        round_id: str,
+        held: HeldResults,
+    ) -> ActedCall:
+        """A read of the assistant's own records, routed record by record (§5:14, §5:16).
+
+        The result takes a minted id. What goes to planning is ``output``; the ids of the
+        records whose source is outside are held under the result's id, for a digest to
+        fetch, and never their contents (ADR-0308 §6:2). A capability not declared to
+        carry outside text holds nothing: its result goes to planning whole, as any
+        other result declared so does.
+        """
+        if one.call.request.tool.result is not CapabilityResult.MAY_CARRY_OUTSIDE_TEXT:
+            return self._acted(one, result, effect_id, round_id, held)
+        result_id = str(self._new_result_id())
+        route = ResultRoute.PLANNING
+        if outside:
+            held.hold(
+                HeldResult(
+                    result_id=result_id,
+                    round_id=round_id,
+                    decision_id=one.call.decision.id,
+                    content=None,
+                    records=outside,
+                )
+            )
+            route = ResultRoute.DIGEST
+        return ActedCall(
+            one,
+            ActedOutcome.DONE,
+            output=result.output,
+            route=route,
+            result_id=result_id,
+            effect_id=effect_id,
+        )
+
+    async def _followed_up(
+        self,
+        one: AuthorizedCall,
+        named: NamedResult,
+        effect_id: str | None,
+        round_id: str,
+        held: HeldResults,
+    ) -> ActedCall:
+        """A follow-up, run against the held results (ADR-0308 §6:6-§6:7).
+
+        The result it names, as held, is offered to a digest again under this call's
+        decision, which answers the follow-up's *looking for*. Nothing is minted or held
+        again, and the outcome names that result. Naming a result with nothing held is
+        not done, with the reason.
+        """
+        result_id = str(named.result_id)
+        offered = held.offer_again(result_id, round_id=round_id, decision_id=one.call.decision.id)
+        if offered is None:
+            _log.info("acting_call_not_done", stage="acting", reason="nothing_held")
+            if effect_id is not None:
+                await self._plans.finish_activation_effect(
+                    effect_id, ToolOutcome.FAILED, reason=_NOTHING_HELD
+                )
+            return ActedCall(one, ActedOutcome.NOT_DONE, reason=_NOTHING_HELD, effect_id=effect_id)
+        if effect_id is not None:
+            await self._plans.finish_activation_effect(effect_id, ToolOutcome.SUCCEEDED)
+        return ActedCall(
+            one,
+            ActedOutcome.DONE,
+            route=ResultRoute.DIGEST,
+            result_id=result_id,
+            effect_id=effect_id,
+        )
 
     async def _through_invoker(
         self, one: AuthorizedCall, effect_id: str | None, round_id: str, held: HeldResults

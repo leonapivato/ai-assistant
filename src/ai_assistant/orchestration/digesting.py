@@ -41,18 +41,22 @@ activation had read outside content it never read (§5:4).
 
 **Labels** (§4:15, ADR-0307 §5:1). A kept item's source is recorded under the planning
 label of the record its local label named: the result's R label, for a result held as
-it arrived, which is one record, and a memory record's own M label, for recall's digest.
-A result's digest names its result by its R label too, and recall's names none. Each
-label is taken from the activation's :class:`ActivationLabels` as the digest is
-recorded, and the labels it assigns are recorded with it; a record no item names takes
-no label.
+it arrived, which is one record, and a memory record's own M label, for recall's digest
+and for a result of the assistant's own records. A result's digest names its result by
+its R label too, and recall's names none. Each label is taken from the activation's
+:class:`ActivationLabels` as the digest is recorded, and the labels it assigns are
+recorded with it; a record no item names takes no label.
+
+**A result held by id** (§6:2). A result of the assistant's own records, such as a
+memory search, is held by the ids of its outside records; :meth:`DigestingStage.
+digest_records` fetches them by id through the fetch it is handed and reads them as
+recall's digest reads its own, under the result's R label. A follow-up's result is the
+result it names, as held (§6:7), so it is digested as that result is, against the
+follow-up's question.
 
 **Recorded through a seam** (§5:2). The digest is appended through
 :class:`DigestRecorder` before :meth:`DigestingStage.digest_result` returns. An append
 that fails is a capture failure: it is logged and holds nothing back.
-
-**Left to later lanes:** a result of the assistant's own records held by the ids of its
-outside records (§6:2), and the follow-up (§6:6 to §6:7).
 
 **It logs stage and code-owned reason only**, never the question, the records or the
 reply (ADR-0275 §8).
@@ -516,16 +520,60 @@ class DigestingStage:
             ValueError: If ``question`` is blank or not encodable text, which a recorded
                 understanding's meaning never is.
         """
+        return await self.digest_records(
+            fetch, result_id=None, question=question, labels=labels, deadline=deadline
+        )
+
+    async def digest_records(
+        self,
+        fetch: Callable[[], Awaitable[Sequence[SemanticMemory]]],
+        *,
+        result_id: str | None,
+        question: str,
+        labels: ActivationLabels,
+        deadline: datetime,
+    ) -> Digested | None:
+        """Digest memory records held by id against ``question``, and record it.
+
+        Recall's digest (§4:4), where ``result_id`` is ``None``, and the digest of a
+        result of the assistant's own records held by the ids of its outside records
+        (§6:2), where it names that result: one digest over every record ``fetch``
+        returns, each read by its fact and named by the record's own M label. Never
+        raises for a failure §4:11 names, nor where the fetch raises
+        ``MemoryStoreError``: each makes a failed digest, recorded and returned with no
+        evidence.
+
+        Args:
+            fetch: Fetches the records by id under ADR-0282 §2:4-§2:8, the audience
+                predicate applied again, and returns those to read, in order. Awaited
+                inside the deadline.
+            result_id: The id of the result held by id, which the digest names by its
+                R label; ``None`` for recall's digest, which names none.
+            question: What the digest answers.
+            labels: The activation's labels, which the digest takes its labels from.
+            deadline: The instant bounding the digest, its fetch included.
+
+        Returns:
+            The digest, the labels it assigned, and whether it was recorded; or ``None``
+            where the fetch returned no record to read, so no call was made and nothing
+            was recorded.
+
+        Raises:
+            ValueError: If ``question`` is blank or not encodable text: planning's check
+                refuses such a call before it runs, and a recorded understanding's
+                meaning never is.
+        """
         question = _QUESTION.validate_python(question)
+        result = None if result_id is None else str(result_id)
         fetched = await self._fetched(fetch, deadline)
         if isinstance(fetched, str):
-            return await self._recorded(question, fetched, labels, result_id=None)
+            return await self._recorded(question, fetched, labels, result_id=result)
         records = [_Record(kind=LabelKind.MEMORY, thing=one.id, text=one.fact) for one in fetched]
         if not records:
             _log.info("digest_skipped", stage="digesting", reason="nothing_fetched")
             return None
         kept = await self._read(question, records, deadline)
-        return await self._recorded(question, kept, labels, result_id=None)
+        return await self._recorded(question, kept, labels, result_id=result)
 
     async def _fetched(
         self, fetch: Callable[[], Awaitable[Sequence[SemanticMemory]]], deadline: datetime

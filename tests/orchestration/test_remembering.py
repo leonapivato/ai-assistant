@@ -244,6 +244,8 @@ async def test_each_call_reaches_its_capabilitys_runner_and_no_other() -> None:
     other = REMEMBER.model_copy(update={"id": "other", "capability": "other"})
     unheld = await seam.run(_call(tool=other))
 
+    assert isinstance(held, ToolResult)
+    assert isinstance(unheld, ToolResult)
     assert held.outcome is ToolOutcome.SUCCEEDED
     assert len(runner.calls) == 1
     assert unheld.outcome is ToolOutcome.FAILED
