@@ -17,7 +17,7 @@ import pytest
 from story_support import activation, address, episode, failing, memory_of, story
 from test_engine import AT
 
-from ai_assistant.core.errors import PlanningError
+from ai_assistant.core.errors import PlanningError, StoryStoreError
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     ActivationEffect,
@@ -390,6 +390,46 @@ async def test_a_full_view_reads_every_page_the_store_holds() -> None:
     assert view.older is not None
     assert view.older[-1].text == "older 1"
     assert view.older_more == 0
+
+
+def _written_while_read(world: _World, story_id: str, *, times: int) -> None:
+    """The story store, a note appended to ``story_id`` as each of ``times`` note reads runs."""
+    read = world.stories.notes
+    left = [times]
+
+    async def notes(*args: Any, **kwargs: Any) -> Any:
+        if left[0] > 0:
+            left[0] -= 1
+            await world.note(story_id, "written meanwhile")
+        return await read(*args, **kwargs)
+
+    world.stories.notes = notes  # type: ignore[method-assign]  # a write lands mid-read
+
+
+async def test_a_note_written_while_a_full_view_reads_is_never_taken_for_an_older_one() -> None:
+    """The notes are read between two reads of the summary's state, and read again.
+
+    A note appended after the state was read is pending, not taken in: the read that
+    missed it is not kept, and the next shows it among the notes since the summary.
+    """
+    world = await _world(episode("a"))
+    trip = await world.story("a")
+    _written_while_read(world, trip, times=1)
+
+    view = await world.reads.view(trip, audience=_BOUNDED, owner_records=True)
+
+    assert view is not None
+    assert [note.text for note in view.notes] == ["written meanwhile"]
+    assert view.older == ()
+
+
+async def test_a_story_written_every_time_its_notes_are_read_cannot_be_read() -> None:
+    world = await _world(episode("a"))
+    trip = await world.story("a")
+    _written_while_read(world, trip, times=5)
+
+    with pytest.raises(StoryStoreError, match="every time they were read"):
+        await world.reads.view(trip, audience=_BOUNDED, owner_records=True)
 
 
 async def test_where_no_note_may_be_shown_a_full_view_reads_no_older_note() -> None:

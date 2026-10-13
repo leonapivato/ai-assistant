@@ -11,6 +11,7 @@ story and move any note it holds. These cases drive the phase path over fakes, a
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Final
 
 from test_authorizer import _ACTIVATION
@@ -94,8 +95,12 @@ async def _run(
     *calls: ProposedCall,
     labels: tuple[PlanningLabel, ...],
     owner_records: bool = True,
+    read_back: bool = False,
 ) -> tuple[PhaseWorking, FakeToolCallingCompleter]:
-    """Plan, authorize and act one round per call, over the story calls and the look-ups."""
+    """Plan, authorize and act one round per call, over the story calls and the look-ups.
+
+    ``read_back`` plans one round more, which is shown what the last call returned.
+    """
     completer = FakeToolCallingCompleter.scripted(
         *(RoundResponse(calls=(one,)) for one in calls), RoundResponse(text="Done.")
     )
@@ -117,6 +122,9 @@ async def _run(
     for _ in calls:
         for stage in _ROUND:
             assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+    if read_back:
+        planning = stages[ControllerStage.PLANNING]
+        assert (await planning.run(given)).outcome is StageOutcome.DONE
     return working, completer
 
 
@@ -202,13 +210,18 @@ async def test_on_a_pass_that_may_not_show_owner_records_a_read_shows_no_older_n
         _call("c1", "read_story", story="S1"),
         labels=_shown(("S1", LabelKind.STORY, trip)),
         owner_records=False,
+        read_back=True,
     )
 
     (view,) = working.pages.values()
     assert view.notes_withheld
     assert view.older is None
+    # The round after the read is shown its result: the story, and nothing of its notes.
+    (call,) = json.loads(completer.last_call.messages[1].content)["rounds"][0]["calls"]
+    shown = call["result"]["value"]
+    assert shown["label"] == "S1"
+    assert not {"notes_since_tidied", "older_notes", "more_older_notes"} & set(shown)
     assert "Dana" not in completer.last_call.messages[1].content
-    assert "older_notes" not in completer.last_call.messages[1].content
 
 
 async def test_a_marked_older_note_a_read_shows_is_named_once_in_authorizings_grounds() -> None:
