@@ -1,6 +1,6 @@
 # 58. An executor does not police an authority the trail never held
 
-- Status: Accepted
+- Status: Superseded by ADR-0319
 - Date: 2026-07-24
 - Amended: 2026-08-20 (a citation correction — the single-user premise this
   decision is scoped to is ruled by **ADR-0099 §1**, not by ADR-0002). Every
@@ -55,6 +55,7 @@
   re-taken. ADR-0099 §6 also stated this finding and filed it as **#685**,
   declining to fix another ADR's text from that lane; this note is that fix. Refs
   #685, ADR-0099 §1 and §6.
+- Superseded: 2026-10-14 by ADR-0319 — the whole decision. Every clause still in force governed `StepExecutor`'s construction without an `AuditTrail`, in `orchestration/executor.py`. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

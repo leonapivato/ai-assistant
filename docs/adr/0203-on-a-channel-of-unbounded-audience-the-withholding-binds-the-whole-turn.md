@@ -1,6 +1,6 @@
 # 203. On a channel of unbounded audience the withholding binds the whole turn, and nothing downstream inherits what it removed
 
-- Status: Partially superseded by ADR-0204 (§4's second clause, that no episode is marked, filtered or withheld on the ground that a withholding occurred during the turn that produced it)
+- Status: Partially superseded by ADR-0204 (§4's second clause, that no episode is marked, filtered or withheld on the ground that a withholding occurred during the turn that produced it) and ADR-0319 (§1:3, §2:4, §3:1–§3:6, §4:1, §5:2, §6 and §7)
 - Date: 2026-08-28
 - **Partially superseded: 2026-08-28 by ADR-0204 — §4's second clause, and
   nothing else of §4 or of this ADR.** That clause reads "No episode is marked,
@@ -79,6 +79,7 @@
   It is still decided in its own PR and ratified before anything implements
   against it (ADR-0015 §5), and it owes the adversarial lens alone, on
   `CONTRIBUTING.md` → "Stop when the required reviews are green".
+- Partially superseded: 2026-10-14 by ADR-0319 — §1:3, §2:4, §3:1–§3:6, §4:1, §5:2, §6 and §7. They governed the old turn on an operation of unbounded audience: its `TurnResult`, plan, step and capture. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

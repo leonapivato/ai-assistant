@@ -1,6 +1,6 @@
 # 201. A routed forget's lookup names beliefs, and the record of the asking is not one of them
 
-- Status: Accepted
+- Status: Superseded by ADR-0319
 - Date: 2026-08-27
 - **Partially supersedes:**
   [ADR-0197](0197-an-ask-reaches-the-hubs-own-operations-through-a-routing-stage-and-a-routed-operation-is-never-re-read.md)
@@ -23,6 +23,7 @@
   against it, because that is the sequence an ADR takes (ADR-0015 §5); it owes
   the adversarial lens alone, on `CONTRIBUTING.md` → "Stop when the required
   reviews are green".
+- Superseded: 2026-10-14 by ADR-0319 — the whole decision. Every clause still in force governed the routed `forget`'s lookup in `orchestration/routing.py`; ADR-0004 §6 and ADR-0074 §8 keep binding what `forget` destroys. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

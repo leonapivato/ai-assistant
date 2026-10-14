@@ -1,6 +1,6 @@
 # 42. The interface adapter contract
 
-- Status: Partially superseded by ADR-0084 (§1's refusal of an engine-facing Protocol and of a `core` result type; the rule in §2 and §7 that an adapter obtains its engine by calling `build_engine`) and ADR-0197 (§4's guarantee that `approved=False` becomes a `DENY` ruling, only as it reaches a resume answering a routed park) and ADR-0198 (the same guarantee, only as it reaches a resume presenting a token whose binding the engine has already settled and still retains)
+- Status: Partially superseded by ADR-0084 (§1's refusal of an engine-facing Protocol and of a `core` result type; the rule in §2 and §7 that an adapter obtains its engine by calling `build_engine`) and ADR-0197 (§4's guarantee that `approved=False` becomes a `DENY` ruling, only as it reaches a resume answering a routed park) and ADR-0198 (the same guarantee, only as it reaches a resume presenting a token whose binding the engine has already settled and still retains) and ADR-0319 (§3's `converse` and `resume` call shapes, and §4)
 - Date: 2026-07-22
 - Partially superseded: 2026-07-31 by ADR-0084 — **§1's refusal of an
   engine-facing Protocol, and the rule that an interface adapter builds its own
@@ -102,6 +102,7 @@
   outcome or reconstructs the binding from the token. ADR-0198 §§1–5 is the operative text;
   this note records the supersession and does not restate its terms.
   Refs #1621, #1640, ADR-0198 §1, §3, §8.
+- Partially superseded: 2026-10-14 by ADR-0319 — §3's `converse` and `resume` call shapes, and §4. They governed `converse`, `resume` and the confirmation token, which left the engine surface; the authority milestone redoes asking the user. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

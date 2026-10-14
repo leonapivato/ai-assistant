@@ -1,6 +1,6 @@
 # 208. `recall_memory` leaves the default tool set, and the turn's supply is retrieved at one site
 
-- Status: Partially superseded by ADR-0226 (§1's one-site clause alone — the turn path gains a second relevance-selection site, a planner-named sighted query the loop services after planning; §1's four other clauses, its keyed-load clause and both tool clauses among them, and every other section stand) and ADR-0306 (§1:1's *no memory tool is among them*, §1:2, §1:3 and §1:5, for the phases: planning may call a memory search)
+- Status: Partially superseded by ADR-0226 (§1's one-site clause alone — the turn path gains a second relevance-selection site, a planner-named sighted query the loop services after planning; §1's four other clauses, its keyed-load clause and both tool clauses among them, and every other section stand) and ADR-0306 (§1:1's *no memory tool is among them*, §1:2, §1:3 and §1:5, for the phases: planning may call a memory search) and ADR-0319 (§1:3–§1:5, §2:2–§2:3, §3, §4:1 and §6:2–§6:4)
 - Date: 2026-08-28
 - **Partially superseded: 2026-09-02 by ADR-0226 — §1's one-site clause, and no
   other clause of §1.** The offline replay recorded on **#1844** on 2026-09-01
@@ -66,6 +66,7 @@
   the cutover decision removes it. This scoped replacement takes effect on ratification of
   ADR-0306. This reciprocal header record accompanies the numbered draft under ADR-0070
   and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §1:3–§1:5, §2:2–§2:3, §3, §4:1 and §6:2–§6:4. They governed the turn path's supply, the alias rows and the planner's decline. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

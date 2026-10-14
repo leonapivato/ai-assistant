@@ -1,7 +1,8 @@
 # 39. What a finished step durably records about why
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0319 (§6, and §7's bullet on cross-restart retry)
 - Date: 2026-07-22
+- Partially superseded: 2026-10-14 by ADR-0319 — §6, and §7's bullet on cross-restart retry. They governed what `StepExecutor` in `orchestration/executor.py` wrote and retried; `StepFailure` and its rules stand. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 162. What the user tells the assistant is recorded, and selectivity moves to retrieval and forgetting
 
-- Status: Partially superseded by ADR-0220 (§7's window-overlap clauses, as they reach an observation walk paged by the observation watermark) and ADR-0221 (§8's first clause alone — the observation prompt states the phrase for an episode's recorded `disposition` where it records one, and its `outcome` where it does not; §8's four other clauses and every other section stand) and ADR-0224 (§9's episodic value clause and its ceiling-slack clause — the episodic bound becomes 30, at parity with the belief budget; §9's belief-budget, provisionality and evidence-widening clauses stand, as does every other section) and ADR-0285 (§1:1–§1:4, §2:1–§2:4, §4:1–§4:2, §6:1–§6:5, §7:1–§7:5, and §8:1 in its replaced form)
+- Status: Partially superseded by ADR-0220 (§7's window-overlap clauses, as they reach an observation walk paged by the observation watermark) and ADR-0221 (§8's first clause alone — the observation prompt states the phrase for an episode's recorded `disposition` where it records one, and its `outcome` where it does not; §8's four other clauses and every other section stand) and ADR-0224 (§9's episodic value clause and its ceiling-slack clause — the episodic bound becomes 30, at parity with the belief budget; §9's belief-budget, provisionality and evidence-widening clauses stand, as does every other section) and ADR-0285 (§1:1–§1:4, §2:1–§2:4, §4:1–§4:2, §6:1–§6:5, §7:1–§7:5, and §8:1 in its replaced form) and ADR-0319 (§9)
 - Date: 2026-08-19
 - Amended: 2026-08-19 (§7 — its progress-over-overlap sentence names one instance of
   a property that has two). §7 rules that consecutive windows overlap by *k* episodes
@@ -371,6 +371,7 @@
   ratification of ADR-0285. This reciprocal header record accompanies the numbered draft
   under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
   preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §9. They governed the answering supply's two limits, held equal to `orchestration/loop.py`'s. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

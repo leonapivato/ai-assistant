@@ -1,6 +1,6 @@
 # 55. A `ContextSource.name` is contractually safe to log
 
-- Status: Accepted
+- Status: Superseded by ADR-0319
 - Date: 2026-07-24
 - Decides issue #233, a Codex adversarial finding raised at `blocker` against
   PR #230 and waived there. The finding's grounding was wrong on two counts
@@ -26,6 +26,7 @@
   stays as it is; ADR-0001's procedure for changing a past decision is not
   triggered.
 - Refs: ADR-0004 §1, ADR-0004 §5, ADR-0008 §2.
+- Superseded: 2026-10-14 by ADR-0319 — the whole decision. Every clause still in force governed `ContextSource.name` and the assembler that logged it, in `context/`. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

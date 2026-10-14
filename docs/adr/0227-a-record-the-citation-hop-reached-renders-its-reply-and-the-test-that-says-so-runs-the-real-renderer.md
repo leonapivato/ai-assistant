@@ -1,6 +1,6 @@
 # 227. A record the citation hop reached renders its reply, and the test that says so runs the real renderer
 
-- Status: Partially superseded by ADR-0284 (§1:1's and §1:2's condition and phrase line; §1:5's byte rule) and ADR-0287 (§7:2's `ExchangeDisposition` and `disposition`); §§1 and 3 amended by ADR-0229
+- Status: Partially superseded by ADR-0284 (§1:1's and §1:2's condition and phrase line; §1:5's byte rule) and ADR-0287 (§7:2's `ExchangeDisposition` and `disposition`) and ADR-0319 (every clause but §7:1 and §7:3); §§1 and 3 amended by ADR-0229
 - Date: 2026-09-03
 - **Partially supersedes:**
   [ADR-0222](0222-the-stored-reply-is-read-back-in-the-conversation-tail-and-by-the-observer.md)
@@ -114,6 +114,7 @@
   stands too. These replacements take effect on ratification of ADR-0287. This
   reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — every clause but §7:1 and §7:3. They governed the citation hop's reply rendering through `orchestration/reads.py` and the composing stage. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

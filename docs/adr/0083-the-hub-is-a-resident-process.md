@@ -1,6 +1,6 @@
 # 83. The hub is a resident process: lifecycle, exclusivity, and an internal scheduler
 
-- Status: Partially superseded by ADR-0218 (§7's job-table row for observation, in its Default and Calls cells) and ADR-0285 (§7's job-table row for observation, whole)
+- Status: Partially superseded by ADR-0218 (§7's job-table row for observation, in its Default and Calls cells) and ADR-0285 (§7's job-table row for observation, whole) and ADR-0319 (§1's startup recovery scan, §2's `max_outstanding_confirmations`, §7's `DeferralStore.purge` limb and its bullet on confirmation deadlines, §13's #333 bullet and §14's item 7)
 - Date: 2026-07-31
 - Partially superseded: 2026-08-29 by ADR-0218 — **§7's job-table row for
   observation is replaced in two cells: the job no longer ships disabled, and it no
@@ -167,6 +167,7 @@
   and clause stands. These replacements take effect on ratification of ADR-0285. This
   reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §1's startup recovery scan, §2's `max_outstanding_confirmations`, §7's `DeferralStore.purge` limb and its bullet on confirmation deadlines, §13's #333 bullet and §14's item 7. They governed `orchestration/recovery.py`, the parked confirmation, `memory/deferral_store.py` and the continuation token. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

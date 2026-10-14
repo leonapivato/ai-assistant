@@ -1,6 +1,6 @@
 # 49. A durable `PlanStore`: what a SQLite backend persists, and how it survives a restart
 
-- Status: Partially superseded by ADR-0249 (§1's migration clause alone: "The migration is table creation only. There is no prior persistent `PlanStore` and therefore no on-disk schema to evolve" stops being true, because `Goal` and `ActionPlan` change stored shape and this store's `schema_version` moves 1 → 2 with a conversion rather than a refusal. That one clause, and nothing else in this ADR: §1's durable meta("schema_version") marker is relied on as the thing it was written for, its loud refusal of a database whose schema_version is newer than the code understands binds entire, and §1's schema, its foreign keys, its live-execution ordering and §§2-5 are untouched)
+- Status: Partially superseded by ADR-0249 (§1's migration clause alone: "The migration is table creation only. There is no prior persistent `PlanStore` and therefore no on-disk schema to evolve" stops being true, because `Goal` and `ActionPlan` change stored shape and this store's `schema_version` moves 1 → 2 with a conversion rather than a refusal. That one clause, and nothing else in this ADR: §1's durable meta("schema_version") marker is relied on as the thing it was written for, its loud refusal of a database whose schema_version is newer than the code understands binds entire, and §1's schema, its foreign keys, its live-execution ordering and §§2-5 are untouched) and ADR-0319 (§1's `goals` table and its goal-side rules, and §4)
 - Date: 2026-07-23
 - **Partially superseded: 2026-09-12 by ADR-0249 — §1's migration clause alone.
   Nothing else in this ADR.** ADR-0249 is the decision the owner ruled on 2026-09-12
@@ -40,6 +40,7 @@
   this ADR discharges that obligation for a *persistent* store, which #303 named
   as "a separate future lane" that "will model restart as reopening its backing
   file".
+- Partially superseded: 2026-10-14 by ADR-0319 — §1's `goals` table and its goal-side rules, and §4. They governed `PlanStore`'s goal members and the parked `CONFIRM` path in `orchestration/runner.py`. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

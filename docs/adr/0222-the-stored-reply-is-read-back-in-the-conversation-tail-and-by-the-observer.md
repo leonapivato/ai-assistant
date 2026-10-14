@@ -1,6 +1,6 @@
 # 222. The stored reply is read back, in the conversation tail and by the observer
 
-- Status: Partially superseded by ADR-0227 (§2's first normative clause, in the single respect that a record a turn's citation hop reached renders its `outcome` at `orchestration/composing.py`'s request assembler; and §5's eligibility enumeration, in the single respect that such a rendered reply is counted on the pair §5 already requires. §2's second normative clause — `benchmarks/` untouched and every prompt `render_context` builds byte-identical — binds entire; the retrieved group, the episodic supplement and the records a sighted query serviced all stay phrase-only; §1, §3, §4, §6, §7, §8 and §9 and the rest of §5 stand) and ADR-0284 (§1:1, §1:2, §2:1 and §3:1's condition and phrase line; §1:3; §2:2) and ADR-0285 (§2:2, §3:1–§3:4, §5:8 and §9:1–§9:5; §4:1's and §5:4's reach to §3; §4:2's third site; §4:3's two observation settings; §6:1–§6:3's observer site)
+- Status: Partially superseded by ADR-0227 (§2's first normative clause, in the single respect that a record a turn's citation hop reached renders its `outcome` at `orchestration/composing.py`'s request assembler; and §5's eligibility enumeration, in the single respect that such a rendered reply is counted on the pair §5 already requires. §2's second normative clause — `benchmarks/` untouched and every prompt `render_context` builds byte-identical — binds entire; the retrieved group, the episodic supplement and the records a sighted query serviced all stay phrase-only; §1, §3, §4, §6, §7, §8 and §9 and the rest of §5 stand) and ADR-0284 (§1:1, §1:2, §2:1 and §3:1's condition and phrase line; §1:3; §2:2) and ADR-0285 (§2:2, §3:1–§3:4, §5:8 and §9:1–§9:5; §4:1's and §5:4's reach to §3; §4:2's third site; §4:3's two observation settings; §6:1–§6:3's observer site) and ADR-0319 (§4, §5, §6 and §8)
 - Date: 2026-09-01
 - Partially superseded: 2026-09-03 by ADR-0227 — **§2's phrase-only rule no longer
   reaches a record a turn's citation hop reached, and §5's eligible set now counts the
@@ -76,6 +76,7 @@
   replacements take effect on ratification of ADR-0285. This reciprocal header record
   accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and
   the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §4, §5, §6 and §8. They governed the reply's rendering in `planning/planner.py` and `orchestration/composing.py`. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

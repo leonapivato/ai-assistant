@@ -1,6 +1,6 @@
 # 29. The tool invocation contract
 
-- Status: Partially superseded by ADR-0192 (§5's closing paragraph, "An approval is not consumed by executing it", and §5's retry conjunction where the preceding completion did not commit; §3's "carries no cost" omission as it reaches cost and not disclosure; and §4's "the seam stops waiting" together with the delivery of an expiry's classified result, over the two audit writes that decision adds to `invoke`)
+- Status: Partially superseded by ADR-0192 (§5's closing paragraph, "An approval is not consumed by executing it", and §5's retry conjunction where the preceding completion did not commit; §3's "carries no cost" omission as it reaches cost and not disclosure; and §4's "the seam stops waiting" together with the delivery of an expiry's classified result, over the two audit writes that decision adds to `invoke`) and ADR-0319 (§8 but its two wiring bullets, and §4's paragraphs obliging the executor on a cancelled call)
 - Date: 2026-07-21
 - Partially superseded: 2026-08-24 by ADR-0192 — **one paragraph of §5, and the
   reasons behind it are kept rather than reversed.** §5 closes by answering
@@ -337,6 +337,7 @@
   reading its own §4 does not support is corrected rather than grandfathered. Appended
   dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
   other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
+- Partially superseded: 2026-10-14 by ADR-0319 — §8 but its two wiring bullets, and §4's paragraphs obliging the executor on a cancelled call. They governed `StepExecutor` in `orchestration/executor.py`; the seam's own rules stand. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

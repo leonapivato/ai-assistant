@@ -1,6 +1,6 @@
 # 178. A confirmation carries the egress it is about, and its absence is the discriminator
 
-- Status: Partially superseded by ADR-0181 (§2's clause that `ConfirmationEgress` has exactly two fields) and ADR-0233 (that same field-count clause of §2, narrowed by one further required field)
+- Status: Partially superseded by ADR-0181 (§2's clause that `ConfirmationEgress` has exactly two fields) and ADR-0233 (that same field-count clause of §2, narrowed by one further required field) and ADR-0319 (§5:1–§5:4 and §9:4–§9:5)
 - Date: 2026-08-22
 - **Partially superseded: 2026-09-04 by ADR-0233 — §2's field-count clause, by one
   further required field, and that clause alone.** ADR-0181 §3 already made §2's
@@ -83,6 +83,7 @@
   (§8).
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-22**, the
   durability form ADR-0100 established. Refs #1366, #1365, #1230, #1159.
+- Partially superseded: 2026-10-14 by ADR-0319 — §5:1–§5:4 and §9:4–§9:5. They governed the engine's two confirmation assembly sites and the parked step. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

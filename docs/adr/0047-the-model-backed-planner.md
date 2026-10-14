@@ -1,6 +1,6 @@
 # 47. The model-backed planner: prompt, output envelope, and text→`ActionPlan` extraction
 
-- Status: Partially superseded by ADR-0071 (§4 step 1's extraction mechanism) and ADR-0176 (§4 step 2's non-empty `steps` requirement and the paragraph stating it)
+- Status: Superseded by ADR-0319; partially superseded before it by ADR-0071 (§4 step 1's extraction mechanism) and ADR-0176 (§4 step 2's non-empty `steps` requirement and the paragraph stating it)
 - Date: 2026-07-23
 - Note (2026-07-26): **§4 step 1's extraction *mechanism* is superseded by
   ADR-0071.** The "first `{` to last `}`" slice this ADR specified failed step 1's
@@ -38,6 +38,7 @@
   covers the whole of step 2. Step 2's shape check now admits the decline envelope;
   everything else that note lists is unaffected, and ADR-0071's own Decision text is
   partially superseded in the matching scope by the same ADR.
+- Superseded: 2026-10-14 by ADR-0319 — the whole decision. Every clause still in force governed `ModelBackedPlanner`'s prompt, envelope and extraction in `planning/planner.py`, and the `Planner` seam it implements. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

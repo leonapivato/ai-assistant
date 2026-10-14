@@ -1,6 +1,6 @@
 # 150. The egress binding is one validating value, and nothing in it is stated twice
 
-- Status: Partially superseded by ADR-0178 (§3's clause that a member of a canonical destination set is a `CanonicalDestination`; §3's clause that an account member carries the account whole; and §3's clause that the canonical destination set is a single derived property of `EgressBinding` — each only as it reaches the canonical destination set a `Confirmation` names) and ADR-0184 (§1's clause typing `PermissionDecision.egress_binding` as `EgressBinding | None`)
+- Status: Partially superseded by ADR-0178 (§3's clause that a member of a canonical destination set is a `CanonicalDestination`; §3's clause that an account member carries the account whole; and §3's clause that the canonical destination set is a single derived property of `EgressBinding` — each only as it reaches the canonical destination set a `Confirmation` names) and ADR-0184 (§1's clause typing `PermissionDecision.egress_binding` as `EgressBinding | None`) and ADR-0319 (§10:3 and §12:16)
 - Date: 2026-08-14
 - **Note (2026-08-23): §5's third clause is decided by ADR-0181, and §5's first
   clause is unchanged.** The third clause left open "how a recorded origin reaches
@@ -138,6 +138,7 @@
   and the note on ADR-0021 §1 names every argument value this binding stores — so
   this ADR adds nothing there. No `Status` line moves and no ratified text is
   rewritten anywhere.
+- Partially superseded: 2026-10-14 by ADR-0319 — §10:3 and §12:16. They governed the egress `CONFIRM` the step runner raised; the binding stands. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

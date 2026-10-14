@@ -1,7 +1,8 @@
 # 51. The executor revalidates the result the seam returns, and records an unusable one as INDETERMINATE
 
-- Status: Accepted
+- Status: Superseded by ADR-0319
 - Date: 2026-07-23
+- Superseded: 2026-10-14 by ADR-0319 — the whole decision. Every clause still in force governed `StepExecutor`'s revalidation of the result the seam returns, in `orchestration/executor.py`. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

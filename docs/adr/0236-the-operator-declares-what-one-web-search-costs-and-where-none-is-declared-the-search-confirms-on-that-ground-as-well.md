@@ -1,7 +1,8 @@
 # 236. The operator declares what one web search costs, and where none is declared the search confirms on that ground as well
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0319 (§5)
 - Date: 2026-09-04
+- Partially superseded: 2026-10-14 by ADR-0319 — §5. They governed the read audit's cost ground in `orchestration/reads.py`. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

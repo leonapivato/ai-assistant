@@ -1,6 +1,6 @@
 # 199. The audience of the output channel decides what may be said, and a withheld class is deflected rather than redacted
 
-- Status: Partially superseded by ADR-0203 (§5's second clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0204 (§3's third clause, only as it reaches a record whose provenance records that content §3 withholds from a channel of unbounded audience stood in its warrant) and ADR-0210 (§5's third clause, only as it reaches an operation whose output channel's audience is unbounded — the composing stage is told where the withholding removed something standing in the members of the turn's supply a relevance read taken with the turn's own goal statement returned, or a context facet, and not where the only thing removed stood in the conversation's own recent turns) and ADR-0217 (§3's third clause, only as it reaches a record whose own placement does not admit the audience of the channel it would be emitted on — whichever of the owner's explicit act, a model's proposal or the derivation recorded on this line set that placement)
+- Status: Partially superseded by ADR-0203 (§5's second clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0204 (§3's third clause, only as it reaches a record whose provenance records that content §3 withholds from a channel of unbounded audience stood in its warrant) and ADR-0210 (§5's third clause, only as it reaches an operation whose output channel's audience is unbounded — the composing stage is told where the withholding removed something standing in the members of the turn's supply a relevance read taken with the turn's own goal statement returned, or a context facet, and not where the only thing removed stood in the conversation's own recent turns) and ADR-0217 (§3's third clause, only as it reaches a record whose own placement does not admit the audience of the channel it would be emitted on — whichever of the owner's explicit act, a model's proposal or the derivation recorded on this line set that placement) and ADR-0319 (§5:2)
 - Date: 2026-08-27
 - **Partially superseded: 2026-08-28 by ADR-0203 — §5's second clause, only as it
   reaches an operation whose output channel's audience is unbounded, and nothing
@@ -177,6 +177,7 @@
   ADR-0094 §10's trigger for spoke surface "is examined here and does not fire".
   ADR-0124 §5 and ADR-0174 agree. Under ADR-0089 §3 only the marked clause binds, so
   the trigger has not fired. No ruling of this ADR changes (#2554).
+- Partially superseded: 2026-10-14 by ADR-0319 — §5:2. They governed the old turn's `TurnResult` and composing stage. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

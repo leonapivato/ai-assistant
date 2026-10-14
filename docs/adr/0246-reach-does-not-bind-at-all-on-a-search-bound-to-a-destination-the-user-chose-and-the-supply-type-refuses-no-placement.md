@@ -1,6 +1,6 @@
 # 246. Reach does not bind at all on a search bound to a destination the user chose, and the supply's type refuses no placement
 
-- Status: Partially superseded by ADR-0247 (§11's Arm F′ in its `calls` count alone — the per-conversation call budget that count is taken from is removed, so the arm is restated over the three counts that remain: a turn carrying an admitted `DERIVED` narrowing and an admitted `OWNER_ACT` one records the supplied count, the withheld count at **zero** and the supplied-narrowed count at **two**, each at its true value, carrying the ambient correlation identifier and no other identifier and carrying no `calls` field at all. That scope, and nothing else in this ADR: Arm F′'s remaining limbs, §1's rule that `Placement.reach` does not bind at all on a `SearchSupply` built for a destination the user chose, §§2-10, §11's other arms, §12's deferrals and §§13-15 stand entire)
+- Status: Partially superseded by ADR-0247 (§11's Arm F′ in its `calls` count alone — the per-conversation call budget that count is taken from is removed, so the arm is restated over the three counts that remain: a turn carrying an admitted `DERIVED` narrowing and an admitted `OWNER_ACT` one records the supplied count, the withheld count at **zero** and the supplied-narrowed count at **two**, each at its true value, carrying the ambient correlation identifier and no other identifier and carrying no `calls` field at all. That scope, and nothing else in this ADR: Arm F′'s remaining limbs, §1's rule that `Placement.reach` does not bind at all on a `SearchSupply` built for a destination the user chose, §§2-10, §11's other arms, §12's deferrals and §§13-15 stand entire) and ADR-0319 (every clause but §1:4, §2:1, §2:5 and §4:4)
 - Date: 2026-09-11
 - **Partially supersedes** [ADR-0245](0245-reach-is-audience-control-so-a-derived-owner-reach-record-composes-a-search-bound-to-a-destination-the-user-chose.md)
   — **§1's third clause in the two-facts rule it states; §2's third, fourth and fifth
@@ -43,6 +43,7 @@
   §§8-10; §11's Arms D, D′, B′, G and H; §12's deferrals, the first of which ADR-0247 §13
   restates unchanged; and §§13-15. **This line takes the leading token and `Accepted` is
   dropped, as `docs/adr/template.md` requires.**
+- Partially superseded: 2026-10-14 by ADR-0319 — every clause but §1:4, §2:1, §2:5 and §4:4. They governed the `SearchSupply` and its builder in `orchestration/reads.py`. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 ## Context
 
 ### Where this comes from

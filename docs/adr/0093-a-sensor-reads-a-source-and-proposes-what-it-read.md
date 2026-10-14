@@ -1,6 +1,6 @@
 # 93. A sensor reads a source and proposes what it read; the clock bounds the read, so nothing needs a cursor
 
-- Status: Partially superseded by ADR-0095 (the contract's name and the package its concretes live in) and ADR-0110 (§4's second sentence: an entry absent from a reading that declares the coverage it exhausted) and ADR-0190 (§7's non-configurable-identity clause: a source configured after the first of its type carries a minted discriminator, and the declared name is no longer every source's identity) and ADR-0294 (§3:1's ingestion consumer; §6:1, §6:3 and §6:4; §7:2; §7a:1; §9:3)
+- Status: Partially superseded by ADR-0095 (the contract's name and the package its concretes live in) and ADR-0110 (§4's second sentence: an entry absent from a reading that declares the coverage it exhausted) and ADR-0190 (§7's non-configurable-identity clause: a source configured after the first of its type carries a minted discriminator, and the declared name is no longer every source's identity) and ADR-0294 (§3:1's ingestion consumer; §6:1, §6:3 and §6:4; §7:2; §7a:1; §9:3) and ADR-0319 (§3:3, §3:4, §6:2 and §7a:2)
 - Date: 2026-08-02
 - Partially superseded: 2026-08-02 by ADR-0095 — **two decisions are replaced and
   nothing else is.** The contract below named `Sensor` is named `Reader`;
@@ -204,6 +204,7 @@
   effect on ratification of ADR-0294. This reciprocal header record accompanies the
   numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified
   body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §3:3, §3:4, §6:2 and §7a:2. They governed the facet path through `context/`. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

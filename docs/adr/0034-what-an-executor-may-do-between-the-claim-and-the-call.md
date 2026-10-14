@@ -1,6 +1,6 @@
 # 34. What an executor may do between the claim and the call
 
-- Status: Accepted
+- Status: Superseded by ADR-0319
 - Date: 2026-07-22
 - Amends: ADR-0029 §8, with a dated note on ADR-0014. Both edits **are** applied
   by this change, because this ADR merges `Accepted` alongside its
@@ -18,6 +18,7 @@
 - **Decides what first use found underspecified**, in the sense ADR-0018 and
   ADR-0031 both use the phrase: PR #224 built ADR-0029 §8's executor, and the
   question below is the one the ADR does not answer.
+- Superseded: 2026-10-14 by ADR-0319 — the whole decision. Every clause still in force governed what `StepExecutor` in `orchestration/executor.py` may do between the claim and the call. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

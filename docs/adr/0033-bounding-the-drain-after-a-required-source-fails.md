@@ -1,6 +1,6 @@
 # 33. Bounding the drain after a required source fails
 
-- Status: Accepted; the Consequences bullet that deferred the caller-cancellation
+- Status: Superseded by ADR-0319; before it, the Consequences bullet that deferred the caller-cancellation
   path (issue #231) is superseded by ADR-0057
 - Date: 2026-07-22
 - Note (2026-07-24): the Consequences bullet "The bound covers the
@@ -32,6 +32,7 @@
   *strengthen* it: today a cancellation-suppressing sibling stops that failure
   from arriving at all.
 - Refs: ADR-0008 §4, ADR-0026 §4.
+- Superseded: 2026-10-14 by ADR-0319 — the whole decision. Every clause still in force governed `AssemblingContextProvider`'s drain after a required source fails, in `context/provider.py`. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
