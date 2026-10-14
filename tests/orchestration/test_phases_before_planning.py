@@ -16,7 +16,6 @@ from datetime import timedelta
 from itertools import count
 from typing import TYPE_CHECKING, Any, Final
 
-import pytest
 from phases_support import chat_turn, entries, event, phases_harness, processing, written
 from story_support import activation, address, episode, failing, memory_of, story
 from structlog.testing import capture_logs
@@ -226,23 +225,27 @@ async def test_an_event_captured_on_one_channel_is_in_a_conversations_episode_wi
     assert episode["understood_then"]["meaning"] == "The input means what it says."
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#2899: on the chat path a transcript item carries no identifier, so the earlier "
-        "exchange is shown again as P1"
-    ),
-)
 async def test_a_second_turn_sees_the_first_under_h_and_not_again_under_p() -> None:
-    """§3's same-exchange rule, end to end: the earlier turn is not in the P window."""
+    """§3's same-exchange rule, end to end: the earlier turn is not in the P window (#2899).
+
+    The reader links the first message to the activation that took it in and the reply
+    to the one that wrote it (ADR-0303 §7:1), so both are identified by that
+    activation's episode: the exchange is rendered once, as its two messages.
+    """
     model = FakeModelProvider(STATED_PROPOSAL)
     harness = phases_harness(understanding=understanding_stage(model=model))
     conversation, _ = await chat_turn(harness, "Find a campsite.")
     await chat_turn(harness, _UTTERANCE, conversation=conversation, message_id="m-2")
     sent = _sent(model)
     # The window is the transcript: the first message, then the reply planning wrote.
-    labels = [item["label"] for item in sent["channel_window"]]
-    assert labels == ["H1", "H2"]
+    asked, replied = sent["channel_window"]
+    assert [asked["label"], replied["label"]] == ["H1", "H2"]
+    assert (asked["author"], replied["author"]) == ("the user", "the assistant")
+    # The first message carries what the episode window would have added about it.
+    assert asked["also_in_episode_window"] is True
+    assert asked["understood_then"]["meaning"] == "The input means what it says."
+    assert replied["also_in_episode_window"] is True
+    assert "understood_then" not in replied
     assert sent["episode_window"].startswith("missing")
 
 
