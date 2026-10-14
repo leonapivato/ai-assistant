@@ -634,9 +634,9 @@ def _only_a_duration(value: object) -> object:
       sentinel through to :func:`_disabled_if_sentinel` on the fields that opt in.
     - ``None``, passed through for the field's **own** annotation to judge, which
       is the only thing that knows whether this duration has a ``None`` spelling:
-      it does for ``confirmation_ttl`` (no lifetime), ``episode_retention``,
-      ``deferral_ttl`` and ``trace_retention`` (ADR-0074 §7, ADR-0078 §6,
-      ADR-0119 §10), and deliberately does not for
+      it does for ``episode_retention``, ``deferral_ttl`` and
+      ``trace_retention`` (ADR-0074 §7, ADR-0078 §6, ADR-0119 §10), and
+      deliberately does not for
       ``conversation_tombstone_grace``, where ADR-0074 §8 declines to offer one.
       Deciding that here would duplicate — and could contradict — the annotation.
 
@@ -646,8 +646,8 @@ def _only_a_duration(value: object) -> object:
     to the same one second.
 
     **Reachable only from untyped code constructing** :class:`Settings`
-    **directly** (#500): ``ASSISTANT_CONFIRMATION_TTL=True`` already fails
-    duration parsing at load.
+    **directly** (#500): ``ASSISTANT_CONVERSATION_TOMBSTONE_GRACE=True`` already
+    fails duration parsing at load.
 
     Args:
         value: The raw configured value.
@@ -693,7 +693,7 @@ _DurationSetting = Annotated[timedelta, BeforeValidator(_only_a_duration)]
 
 #: A duration setting whose ``None`` is reached by *omission* — its default is
 #: ``None``, so it needs no environment spelling for "unset" and deliberately does
-#: not opt into the disable sentinel (``confirmation_ttl``).
+#: not opt into the disable sentinel (``calendar_upcoming_interval``).
 _NullableDuration = Annotated[timedelta | None, BeforeValidator(_only_a_duration)]
 
 #: A retention horizon, or ``None`` for "keep forever" — reachable from the
@@ -2529,130 +2529,9 @@ class Settings(BaseSettings):
 
     # --- Context ---------------------------------------------------------
     # Used to localise the situational context (ADR-0008). ``timezone`` is an
-    # IANA name; working hours are a local-time window, end-exclusive. Both are
-    # validated here, so a malformed value fails at load rather than per request.
+    # IANA name, validated here, so a malformed value fails at load rather than
+    # per request.
     timezone: str = Field(default="UTC", description="IANA timezone for local-time context.")
-    working_hours_start: _IntegerSetting = Field(
-        default=9, ge=0, le=23, description="First hour of the working-hours window (local)."
-    )
-    working_hours_end: _IntegerSetting = Field(
-        default=17,
-        ge=1,
-        le=24,
-        description="End hour of the working-hours window (local, exclusive).",
-    )
-
-    # --- Orchestration ---------------------------------------------------
-    # How long a parked confirmation stands before an answer to it is refused as
-    # stale (StepRunner._check_fresh, ADR-0036 §1, #243). A deployment value, not
-    # a contract one. ``None`` (the default) means no lifetime — the pre-#243
-    # behaviour, refusing no legitimate answer — which is why StepRunner declines
-    # to invent one (ADR-0037 §4). ``gt=timedelta(0)`` mirrors the runner's own
-    # non-positive guard: a zero or negative lifetime would expire every
-    # confirmation the instant it was recorded, making the flow unanswerable by
-    # misconfiguration, so it is refused at load rather than per answer. Parsed
-    # from an ISO-8601 duration or ``HH:MM:SS`` string in the environment
-    # (e.g. ``ASSISTANT_CONFIRMATION_TTL=PT1H`` or ``01:00:00``).
-    confirmation_ttl: _NullableDuration = Field(
-        default=None,
-        gt=timedelta(0),
-        description="Lifetime of a parked confirmation before its answer is refused as stale.",
-    )
-
-    # --- The routed confirmation's lifetime (ADR-0197 §7) -----------------
-    # How long a **routed** park stays answerable. Deliberately a
-    # ``_DurationSetting`` and not the ``_NullableDuration`` beside it: it takes no
-    # part in ``confirmation_ttl``'s disable sentinel, which is exactly the wrong
-    # default to inherit here. A routed park is invisible — ``pending_confirmations``
-    # does not list it (§7) and no durable store recovers it — so a client that
-    # disconnected between the park and its token would otherwise hold a slot at
-    # ``max_outstanding_confirmations`` that nothing could ever free, and at a
-    # ceiling of one the very next "forget that I ..." would meet backpressure rather
-    # than a fresh card. ``None`` is therefore not a value this field accepts, and
-    # ``gt=timedelta(0)`` refuses a zero or negative lifetime at load rather than
-    # producing a card unusable the instant it is rendered.
-    #
-    # **It is the whole of this decision's lifetime configuration** (ADR-0197 §7):
-    # no second setting scales it, extends it or disables it. Parsed from an
-    # ISO-8601 duration or ``HH:MM:SS`` string in the environment
-    # (e.g. ``ASSISTANT_ROUTED_CONFIRMATION_TTL=PT5M``).
-    routed_confirmation_ttl: _DurationSetting = Field(
-        default=timedelta(minutes=15),
-        gt=timedelta(0),
-        description=(
-            "How long a routed operation's confirmation stays answerable before it is "
-            "evicted and its ceiling slot released (ADR-0197 §7). Positive and finite, "
-            "with no spelling for 'never'."
-        ),
-    )
-
-    # --- The parked read's lifetime (ADR-0244 §3) -------------------------
-    # How long a `ParkedRead` stays answerable, and the one field that decision adds.
-    # `expires_at` on the park **and** on the recorded `CONFIRM` are both computed from
-    # it, once, at the instant the park is written — which is what makes ADR-0244 §5's
-    # and §10's shared-deadline reasoning hold: a park past its deadline names a
-    # decision past the same one, so an expired park's decision is refused by ADR-0235
-    # §3's fifth condition on its own rather than by §5's eighth.
-    #
-    # **It admits no disable sentinel**, unlike `confirmation_ttl` and for
-    # `routed_confirmation_ttl`'s stated reason one field further: a park nothing can
-    # free is a durable row holding **Tier 1 content** — the composed query, the goal
-    # and the plan — that no act, no enumeration and no reclaim would ever reach. So
-    # `None` is not a value this field accepts, and `gt=timedelta(0)` refuses a zero or
-    # negative lifetime at load rather than producing a question unanswerable the
-    # instant it is asked.
-    #
-    # **It expires a park and never approves one** (ADR-0244 §16). No `Settings` field,
-    # no deployment mode, no threshold, no environment variable and no composition-root
-    # argument answers a park on the user's behalf, and none makes a park answer itself
-    # after an interval. Parsed from an ISO-8601 duration or `HH:MM:SS` string in the
-    # environment (e.g. `ASSISTANT_PARKED_READ_TTL=PT24H`).
-    parked_read_ttl: _DurationSetting = Field(
-        default=timedelta(hours=24),
-        gt=timedelta(0),
-        description=(
-            "How long a parked read's question stays answerable before it expires and "
-            "its content is cleared (ADR-0244 §3). Positive and finite, with no "
-            "spelling for 'never'."
-        ),
-    )
-
-    # --- A goal's clarification (ADR-0250 §8) -----------------------------
-    # How long a goal's clarification stays answerable, and the one field that
-    # decision adds. ``expires_at`` is computed from it **once**, at the instant the
-    # question is written, and is **never extended, refreshed or recomputed**.
-    #
-    # **PT72H rather than ``parked_read_ttl``'s PT24H, and the two reasons are
-    # different from ADR-0244's.** A park's deadline bounds a durable row holding the
-    # **exact query** that would leave the device, which is the most sensitive content
-    # in that decision; a question holds the system's statement of an objective the
-    # goal already carries, so the deadline is not protecting content the goal does not
-    # also hold. What it **is** doing is bounding how long one goal's single question
-    # slot stays occupied, and three days is the interval over which "I will get back
-    # to it" is the normal case rather than an abandonment — it spans a weekend.
-    #
-    # **It admits no disable sentinel**, for both of ADR-0244 §3's reasons and one of
-    # ADR-0250's own: a question nothing can free would block that goal's next question
-    # **forever**, which is the one-open rule turning from a correctness constraint into
-    # a trap. So ``None`` is not a value this field accepts, and ``gt=timedelta(0)``
-    # refuses a zero or negative lifetime at load rather than producing a question
-    # unanswerable the instant it is asked.
-    #
-    # **It expires a question and never answers one** (ADR-0250 §12). No ``Settings``
-    # field, no deployment mode, no threshold, no environment variable and no
-    # composition-root argument answers a clarification on the user's behalf, and an
-    # expiry is read as an expiry and never as a refusal, an abandonment or a denial:
-    # "Silence is neither refusal nor abandonment". Parsed from an ISO-8601 duration or
-    # ``HH:MM:SS`` string in the environment (``ASSISTANT_GOAL_QUESTION_TTL=PT72H``).
-    goal_question_ttl: _DurationSetting = Field(
-        default=timedelta(hours=72),
-        gt=timedelta(0),
-        description=(
-            "How long a goal's clarification stays answerable before it expires and its "
-            "content is cleared (ADR-0250 §8). Positive and finite, with no spelling "
-            "for 'never'."
-        ),
-    )
 
     # --- Conversations (ADR-0074) ----------------------------------------
     # How long a captured episode is retained, and how long a deleted
@@ -2680,8 +2559,7 @@ class Settings(BaseSettings):
     # that break the deletion protocol — the first drops the index immediately,
     # orphaning the late write the tombstone exists to catch; the second keeps every
     # deleted conversation's index forever — and a nullable field spells one of
-    # them. ``gt=timedelta(0)`` refuses the first at load, as ``confirmation_ttl``
-    # refuses its own non-positive values.
+    # them. ``gt=timedelta(0)`` refuses the first at load.
     episode_retention: _OptionalDuration = Field(
         default=None,
         gt=timedelta(0),
@@ -2776,13 +2654,11 @@ class Settings(BaseSettings):
     # `deferral_ttl` is parsed from an ISO-8601 duration or `HH:MM:SS` string
     # (`ASSISTANT_DEFERRAL_TTL=P7D`), and **defaults to a finite 30 days, which is
     # the whole decision** (ADR-0078 §6). The codebase holds both shapes and the
-    # choice between them is the mistake ADR-0074 §7 warned about:
-    # `confirmation_ttl` above defaults to `None`, which there means a parked
-    # confirmation never goes stale, and here would mean a never-expiring queue of
-    # machine-asked questions — precisely the undignified pile §7 exists to prevent.
-    # A permission confirmation gates an action the user just asked for and is
-    # worthless once stale; a memory deferral is generated *by the system*, at
-    # whatever rate the observer runs. So this belongs with `episode_retention`, and
+    # choice between them is the mistake ADR-0074 §7 warned about: a `None`
+    # default here would mean a never-expiring queue of machine-asked questions —
+    # precisely the undignified pile §7 exists to prevent. A memory deferral is
+    # generated *by the system*, at whatever rate the observer runs. So this
+    # belongs with `episode_retention`, and
     # 30 days is deliberately that field's horizon: a deferred question is about a
     # belief, and for an observed one the *evidence* is episodes on that clock, so a
     # question outliving them would ask the user to adjudicate something the system
@@ -2802,9 +2678,9 @@ class Settings(BaseSettings):
     # so every `ASK_USER` proposal is refused and the drop ADR-0078 exists to end
     # returns in full, by configuration, while the system reports health — exactly
     # the class of value ADR-0022 §4a refuses at construction, and the reason
-    # `confirmation_ttl` and `conversation_tombstone_grace` both carry their own
-    # positive bound. An *uncapped* queue is what §7 exists to prevent, and
-    # `deferral_ttl`'s `None` is already the deliberate escape at the other axis.
+    # `conversation_tombstone_grace` carries its own positive bound. An *uncapped*
+    # queue is what §7 exists to prevent, and `deferral_ttl`'s `None` is already
+    # the deliberate escape at the other axis.
     # The default matches the bounded default page size of `DeferralStore.pending`,
     # so the whole answerable queue fits one page and §7's "the cap is legible from
     # the first page" is true in the strongest sense — and fifty unanswered
@@ -2922,7 +2798,7 @@ class Settings(BaseSettings):
     # wants a year-over-year comparison.
     #
     # `gt=timedelta(0)` refuses a zero or negative horizon at load, as
-    # `episode_retention` and `confirmation_ttl` above refuse theirs: a
+    # `episode_retention` above refuses its own: a
     # non-positive horizon would sweep every trace at the first purge, which is
     # an instrument switched off by misconfiguration. `None` — reachable only
     # through the disable sentinel — means keep forever, matching
@@ -3569,34 +3445,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # --- The query one search is composed into (ADR-0231 §3, §5) ----------
-    # **The bound the composer enforces, and the model never sees.** ADR-0231 §3
-    # divides a bound from the value it bounds exactly as ADR-0230 §6 does: the
-    # figure is a `Settings` field with a named default, a stated domain and a
-    # load-time refusal, `QueryOutcome` carries none of it, and the *configured
-    # composer* is what refuses over it. So an outcome validates identically in
-    # every deployment, and two composers configured differently in one process
-    # produce values one model reads the same way.
-    #
-    # **A composition over it is refused, never truncated** — `QueryRefusal.TOO_LONG`
-    # — because a prefix of a query is a different question, and one no reader of
-    # the outcome could tell from the question that was asked.
-    #
-    # ADR-0231 §5 adds two further fields for the searcher itself —
-    # `search_max_results` and `search_max_result_chars`; they land with the lane
-    # that enforces them, since a bound nothing reads is a figure an operator can
-    # set and watch do nothing.
-    search_query_max_chars: _IntegerSetting = Field(
-        default=256,
-        ge=1,
-        lt=2**63,
-        description=(
-            "The most **Unicode code points** a composed web-search query may carry "
-            "(ADR-0231 §3, §5). At least 1. Enforced by the composer, never by the "
-            "model: a composition beyond it is refused `TOO_LONG` and never truncated."
-        ),
-    )
-    # **The transport's bound, and it is a different quantity from the two above.**
+    # **The transport's bound, and it is a different quantity from the two below.**
     # ADR-0231 §5 counts it "over the bytes taken off the channel" — the whole
     # response, its status line and headers included — and enforces it "while the
     # response is read and before any part of it is parsed". So it bounds what the
@@ -3668,55 +3517,6 @@ class Settings(BaseSettings):
         ),
     )
 
-    # --- How long one search may take (ADR-0241 §1, §3) --------------------
-    # **The third of the three bounds this system puts on a search, and it is a
-    # different quantity from the other two** (ADR-0241 §9). The call allowance
-    # below counts provider calls per conversation; ADR-0194's ceilings over
-    # ADR-0236's declared figure bound monetary spend; this bounds **elapsed time**
-    # for one call, enforced inside `WebSearcher.search` and reported as
-    # `SearchRefusal.DEADLINE_EXPIRED`. No implementation collapses any two, derives
-    # one from another, or reports one under another's member.
-    #
-    # **A `Settings` field rather than the module constant it replaces, because a
-    # constant an operator cannot reach is a bound nobody can size** (§3). The tree
-    # held this figure in `tools/web_search.py` with a constructor override no
-    # composition root passed, so thirty seconds was not configurable in any
-    # deployment; a provider whose tail latency does not fit it was a code change.
-    # `WEB_SEARCH_TIMEOUT` and that override are both gone — the bound comes from one
-    # place, and a searcher holding a second one would be a searcher able to disagree
-    # with its caller about what window it is running in.
-    #
-    # **Thirty seconds, unchanged, and it is the figure the tree already ran.**
-    # ADR-0241 relocates a bound and reclassifies its expiry; it retunes nothing.
-    #
-    # **It ships with a value rather than meaning "unbounded" when unset** (§3):
-    # ADR-0194 §1's "unset means unbounded" governs a monetary ceiling an operator
-    # chooses, and `search`'s parameter has no spelling for absent anyway.
-    #
-    # **`orchestration` reads it and passes it at the call** (§3). The composition
-    # root hands the value to `SearchServicer` — the one site holding the
-    # `WebSearcher` — and that site passes it as `timeout` on every `search`. No
-    # component below `orchestration` reads this field.
-    #
-    # **Deployment-wide and not per operation.** ADR-0228 §4 keys a planning budget
-    # on the operation because two operations of one audience have different latency
-    # tolerances, and §1 makes the bound a parameter precisely so a per-operation
-    # figure stays a later `Settings` or ADR decision rather than a Protocol change.
-    # ADR-0241 §13 defers that figure with its trigger.
-    search_call_deadline: _DurationSetting = Field(
-        default=timedelta(seconds=30),
-        gt=timedelta(0),
-        description=(
-            "How long one web search may take over the work "
-            "`WebSearcher.search` owns — the revalidation, the spend admission, "
-            "the credential read, the channel, the response read and the "
-            "transcription (ADR-0241 §1, §3). Strictly positive. It does **not** "
-            "bound either ledger append, which ADR-0192 §3 pins unbounded by that "
-            "seam. An expiry is `SearchRefusal.DEADLINE_EXPIRED` and spends the "
-            "conversation's admitted call like any other outcome."
-        ),
-    )
-
     # --- The registered search account (ADR-0231 §5, §17) -----------------
     # **Which connected account the web search is registered against, and the one
     # origin it names.** Both, or neither: a deployment that names both gets a
@@ -3731,7 +3531,8 @@ class Settings(BaseSettings):
     # fields — `search_query_max_chars`, `search_max_results`,
     # `search_max_result_chars` and `search_max_response_bytes` — each "with the
     # named default, stated domain and load-time refusal ADR-0230 §6 requires of
-    # its own", and all four are above. What is here is the same pair every
+    # its own". The last three are above; the first left with the old request path
+    # that was its only reader (ADR-0309 §5). What is here is the same pair every
     # registering lane owes, in `send_email_connection`/`send_email_endpoint`'s
     # own shape and for its own reason: §5 requires the request to be built "from
     # the connected account's configuration alone" and pins the channel to "the
@@ -4311,27 +4112,6 @@ class Settings(BaseSettings):
         description=(
             "The most source-read records the trail holds; beyond it the earliest "
             "recorded are pruned rather than a new one refused (ADR-0185 §6). Positive, "
-            "with no unlimited spelling."
-        ),
-    )
-
-    # --- The routing trail's horizon (ADR-0197 §9) ------------------------
-    # The shape and the number ``source_read_trail_max_rows`` already carries, and
-    # ADR-0197 §9 chooses them for a stated reason rather than by imitation: a
-    # routing row is smaller than a read row, and the two trails are read by the
-    # same kind of operator. **No spelling for "unlimited"** (ADR-0185 §6 applied
-    # here), and pruning is earliest-recorded-first inside ``record``'s critical
-    # section and blind to what the row says — an unanswered park's ``OWED`` row is
-    # pruned at the bound like any other, and pruning it neither evicts the park nor
-    # releases its slot nor makes its token unresolvable. The park is in memory and
-    # the trail is the record rather than the state.
-    routing_trail_max_rows: _IntegerSetting = Field(
-        default=200_000,
-        gt=0,
-        lt=2**63,
-        description=(
-            "The most routed-operation records the trail holds; beyond it the earliest "
-            "recorded are pruned rather than a new one refused (ADR-0197 §9). Positive, "
             "with no unlimited spelling."
         ),
     )
@@ -5004,17 +4784,6 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return self
 
-    @model_validator(mode="after")
-    def _working_hours_are_a_range(self) -> Settings:
-        """Require the working-hours window to be a non-empty range."""
-        if self.working_hours_start >= self.working_hours_end:
-            msg = (
-                f"invalid working-hours window: start={self.working_hours_start} "
-                f"must be < end={self.working_hours_end}"
-            )
-            raise ValueError(msg)
-        return self
-
 
 def load_settings() -> Settings:
     """Load and validate settings from the environment.
@@ -5024,7 +4793,7 @@ def load_settings() -> Settings:
 
     Raises:
         ConfigurationError: If any setting is missing or invalid (e.g. an unknown
-            timezone or an empty working-hours window).
+            timezone).
     """
     try:
         return Settings()
