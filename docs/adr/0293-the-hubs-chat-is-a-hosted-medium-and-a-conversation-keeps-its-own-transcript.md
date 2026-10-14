@@ -1,6 +1,6 @@
 # 293. The hub's chat is a hosted medium, and a conversation keeps its own transcript
 
-- Status: Partially superseded by ADR-0295 (§8:3's list of endings, in the addition alone; §9:1 and §10:2, for a stopped activation) and ADR-0296 (§11:1's delivery poll as the change stream's transport, once the change stream is built) and ADR-0307 (§6:14 and §11:6, each whole; §6:10, §6:11 and §10:4, until the timers and proactivity milestone)
+- Status: Partially superseded by ADR-0295 (§8:3's list of endings, in the addition alone; §9:1 and §10:2, for a stopped activation) and ADR-0296 (§11:1's delivery poll as the change stream's transport, once the change stream is built) and ADR-0307 (§6:14 and §11:6, each whole; §6:10, §6:11 and §10:4, until the timers and proactivity milestone) and ADR-0317 (§9:1 whole: an activation whose last round made no call other than a tidy-up has finished, and one that wrote nothing writes no message; *couldn't finish* is written where the round limit, a stage's failure or a deadline ended it, or where a message was refused or lost and none reached the conversation)
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the conversation channel, the first channel ADR-0292's model is applied to.
 - Authorization: the owner accepted proposal #2680 on 2026-10-04, at `f21aeb7b`, after walking it through section by section the same day, and the dispatcher assigned 0293. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
@@ -35,6 +35,17 @@
   goes only into the place the input came from, an activation whose place takes no message
   writes none, and the assistant starts no conversation (ADR-0307 §3:1, §3:8). Every other
   clause stands. These scoped replacements take effect on ratification of ADR-0307. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-13 by ADR-0317 — one scope. §9:1 whole: an activation
+  started from a conversation whose last round made no call other than a tidy-up has
+  finished and ends done, and where every round's text was empty it writes nothing, no
+  *couldn't finish* included; its episode freezes `completed / returned` and the current
+  state shows done (§8:3). *Couldn't finish*, listing the effects that happened, is written
+  where the round limit, a stage's failure or a deadline ended the activation, whatever
+  earlier rounds wrote, or where a message was refused or lost and none of the
+  activation's messages reached the conversation (ADR-0317 §2–§3). Every other clause
+  stands. This scoped replacement takes effect on ratification of ADR-0317. This
   reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   prior supersessions and the ratified body below are preserved.
 
