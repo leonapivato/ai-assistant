@@ -35,7 +35,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, final
 from uuid import uuid4
 
-import structlog
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
@@ -92,21 +91,6 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import RecipientGrantResolution
     from ai_assistant.core.types import RecipientGrant
-
-_log = structlog.get_logger(__name__)
-
-#: The named condition a park is refused under when the row it would be rebuilt
-#: from predates ADR-0181's ``planned_with_external_content``. In the corpus's
-#: condition style — ``hub-unreachable``, ``no-live-session`` — and a module
-#: constant rather than a literal so a test asserts the *name* a reader will meet
-#: in the log rather than a spelling of it.
-ORIGIN_UNRECORDED = "origin-unrecorded"
-
-#: The named condition a park is refused under when the row it would be rebuilt from
-#: predates ADR-0233's ``coverage``. Its **own** name rather than a reuse of the one
-#: above (ADR-0233 §14), for that constant's reason: a reader meeting it in the log
-#: learns which fact the row is missing, and the two epochs are different epochs.
-COVERAGE_UNRECORDED = "coverage-unrecorded"
 
 _OWNER_ONLY = 0o600
 
@@ -278,8 +262,9 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # The columns beside the ``data`` blob exist only so SQLite can order and
 # constrain; the blob is the record. ``execution_id``, ``step_id`` and
-# ``outcome`` (ADR-0044) are what the per-binding rule and the recovery query
-# read; ``expires_at_us`` (ADR-0059 §1) is the durable confirmation deadline as
+# ``outcome`` (ADR-0044) are what the per-binding rule and its indexes read
+# (the recovery query that also read them retired under ADR-0309 §5);
+# ``expires_at_us`` (ADR-0059 §1) is the durable confirmation deadline as
 # whole microseconds since the epoch (the ``decided_at_us`` shape), a queryable
 # projection of the value the blob already carries. All are kept nullable so an
 # existing older table can grow them by ``ALTER`` (:meth:`_migrate`), identical
@@ -336,7 +321,9 @@ _INDEXES: Final[dict[str, str]] = {
         "ON decisions(execution_id, step_id) "
         "WHERE resolves IS NOT NULL AND execution_id IS NOT NULL AND step_id IS NOT NULL"
     ),
-    # ADR-0044 §3: ``pending_confirmation`` finds a binding's CONFIRMs by this.
+    # ADR-0044 §3's index over a binding's CONFIRMs. Its reader retired with the old
+    # path (ADR-0309 §5); it stays, unchanged, as one of the indexes the collation
+    # check reads ``outcome``'s collating sequence from.
     "decisions_binding": (
         "CREATE INDEX IF NOT EXISTS decisions_binding ON decisions(execution_id, step_id, outcome)"
     ),
@@ -570,9 +557,8 @@ _INVOCATION_OBJECTS: Final = {
 #: order, never the record: an admission decided on ``decision_id`` or ``completes``
 #: alone would be decided on a value nothing revalidates, and a claim whose
 #: ``decision_id`` column was altered would then drop out of the set §1's consume is
-#: read over and let a second act be authorised by a spent authorisation. The
-#: decision rows are already handled this way where the read is *acted* on
-#: (:meth:`SqliteAuditTrail.resolution_of`); every read below acts.
+#: read over and let a second act be authorised by a spent authorisation. Every
+#: read below acts.
 #:
 #: Spelled out in each statement below rather than interpolated from one constant:
 #: an f-string here is a linted SQL-injection shape (``S608``), and four literals a
@@ -646,39 +632,15 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-#: A binding's CONFIRMs, newest first — the candidates ``pending_confirmation``
-#: chooses from once it knows the binding is undecided.
-_BINDING_CONFIRMS = (
-    "SELECT data FROM decisions "
-    "WHERE outcome = ? AND execution_id = ? AND step_id = ? "
-    "ORDER BY decided_at_us DESC, id ASC"
-)
-
 #: Whether a concrete binding already carries a resolution. A resolution's own
 #: ``(execution_id, step_id)`` equals its confirmation's (ADR-0044 §2a and the
 #: ``step_id`` check enforce it at record time), so a resolving row with this
-#: binding *is* a resolution of one of its CONFIRMs. Answers both step 1 of
-#: ``pending_confirmation`` and §2b's checked refusal, and matches exactly what
-#: the ``decisions_binding_resolution`` partial unique index constrains.
+#: binding *is* a resolution of one of its CONFIRMs. Answers §2b's checked
+#: refusal, and matches exactly what the ``decisions_binding_resolution`` partial
+#: unique index constrains.
 _BINDING_HAS_RESOLUTION = (
     "SELECT 1 FROM decisions "
     "WHERE resolves IS NOT NULL AND execution_id = ? AND step_id = ? LIMIT 1"
-)
-
-#: The resolution recorded for a concrete binding — the ALLOW or DENY
-#: ``resolution_of`` (ADR-0059 §2) hands back. Same predicate as
-#: ``_BINDING_HAS_RESOLUTION`` but selecting the row: a resolving decision's own
-#: ``(execution_id, step_id)`` equals its confirmation's (ADR-0044 §2a), so a
-#: resolving row with this binding *is* a resolution of one of its CONFIRMs. By
-#: §2b at most one exists per concrete binding (the
-#: ``decisions_binding_resolution`` unique index); the ordering makes the read
-#: deterministic even if that net were somehow bypassed. Never a CONFIRM: a
-#: resolving decision whose ruling is CONFIRM is unconstructable
-#: (``_a_resolution_is_not_itself_a_question``).
-_BINDING_RESOLUTION = (
-    "SELECT data FROM decisions "
-    "WHERE resolves IS NOT NULL AND execution_id = ? AND step_id = ? "
-    "ORDER BY decided_at_us DESC, id ASC LIMIT 1"
 )
 
 
@@ -1231,7 +1193,7 @@ class SqliteAuditTrail:
         exist, so a pre-ADR-0044 decision belongs to no execution and its column
         is correctly left ``NULL`` (a non-concrete binding, which §2b never
         constrains). ``step_id`` and ``outcome`` are backfilled from each row's
-        stored value so the recovery query and the per-binding index see them.
+        stored value so the per-binding indexes see them.
         Read straight from the JSON rather than through a full model validation
         (the MemoryStore precedent, ADR-0045 §9): a migration must not fail on a
         record an unrelated future field made momentarily unvalidatable. Runs
@@ -1522,11 +1484,10 @@ class SqliteAuditTrail:
         ADR-0184 a pre-ADR-0181 one is legible here rather than raising.** No clause
         is added for it and none is owed: ADR-0184 §4 states ``record``'s refusal
         over the **incoming** decision, and a resolution *of* such a row is closed
-        one seam out rather than here. Nothing can build one — ``StepRunner.resume``
-        narrows the recovered decision's binding and refuses before any ruling is
-        sought (ADR-0184 §8's fourth clause), ``pending_confirmation`` never offers
-        such a park at all, and ``ActionPolicy.resolve`` returns no ``ALLOW`` on one
-        whatever the user answered (§7). What reaching this check would take is a
+        one seam out rather than here. Nothing in the tree builds one — the old
+        path's park and resume, which re-presented a recorded ``CONFIRM``, retired
+        under ADR-0309 §5, and ``ActionPolicy.resolve`` returns no ``ALLOW`` on one
+        whatever the user answered (ADR-0184 §7). What reaching this check would take is a
         caller hand-authoring a resolving decision, which is the boundary ADR-0018
         §3 drew for detachment: a caller falsifying its own trail, not a producer
         this store can catch.
@@ -1640,197 +1601,6 @@ class SqliteAuditTrail:
             ).fetchone()
         except sqlite3.Error as exc:
             msg = f"failed to read decision {decision_id!r}: {exc}"
-            raise AuditError(msg) from exc
-        return None if row is None else str(row[0])
-
-    async def pending_confirmation(
-        self, *, execution_id: str, step_id: str
-    ) -> PermissionDecision | None:
-        """The confirmation this binding still awaits, or ``None`` (ADR-0044 §3).
-
-        Two steps in order: if the binding already carries a resolution it is
-        decided, so return ``None`` (never a still-unresolved sibling orphan — the
-        #257 hazard §2b closes); otherwise return the newest unresolved ``CONFIRM``
-        by ``decided_at`` descending, ``id`` ascending, or ``None`` if the binding
-        carries none. Query-only, returning a detached snapshot rebuilt from JSON.
-
-        **A third and a fourth way to answer ``None``: the ``CONFIRM`` is there and
-        a fact its question rests on was never recorded**
-        (:data:`ORIGIN_UNRECORDED`, :data:`COVERAGE_UNRECORDED`). A row written
-        before ADR-0181 §3 added ``planned_with_external_content`` decodes carrying
-        an :class:`~ai_assistant.core.types.OriginUnrecordedBinding` (ADR-0184 §2);
-        one written before ADR-0233 §4 added ``coverage`` decodes carrying a
-        :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` (ADR-0233 §14).
-        Neither fact can be established at all: each is required with no default and
-        each ADR forbids a seam inventing one, which rules out every value alike.
-        ADR-0181 §5's second clause then leaves no route by which any authorisation
-        covers such a call — so there is no answerable question here to hand back,
-        and this returns ``None`` rather than a decision. **Each carries its own
-        condition name**, because a reader meeting one in the log learns which fact
-        the row is missing, and the second is detected in its own narrowing rather
-        than inherited: a coverage-unrecorded row *has*
-        ``planned_with_external_content`` and falls straight past the first.
-
-        **What ADR-0184 changed here is only the detection.** The case is recognised
-        on the decoded value's **type** rather than on the shape of a
-        ``ValidationError``, which is strictly the stronger form of the same rule:
-        the narrowness ``_is_origin_unrecorded`` maintained by hand — "a row with a
-        second fault, a fault anywhere else, or a fault of any other type is a
-        corrupted or downgraded database exactly as before" — is now carried by the
-        type system, so no lane can widen the tolerance by loosening a predicate
-        (ADR-0184 §1, §3, §5). The condition name a reader meets in the log is
-        unchanged.
-
-        **This is the one reader whose answer a caller rebuilds a park from** — the
-        engine's recovery enumeration and the runner's restart path both reach a
-        durably parked step through it — which is why the case is answered here and
-        not in :func:`_decode`. Two things follow, and they are the whole reason the
-        branch is worth having. One legacy row no longer takes **every** park down
-        with it: the enumeration walks past it exactly as it walks past a decided
-        binding, so every other pending confirmation is still offered. And no
-        *false* card is composed, which is what handing back a decision would have
-        cost: ADR-0150 §1 rules that ``None`` on a decision "means the request is not
-        an egress call", so a decision projected without its binding would state that
-        a call with an account and a recipient had neither.
-
-        **Refused, not resolved, and never authorised.** Nothing is written, so the
-        step stays durably ``AWAITING_APPROVAL`` with its ``CONFIRM`` unresolved and
-        its row intact. The two callers refuse by their own existing names — the
-        enumeration skips the step, and ``StepRunner._confirmation_for`` raises
-        ``PermissionDeniedError`` — so under no route does such a park reach
-        ``resolve``, an ``ALLOW`` or a transmission. The park is unanswerable, not
-        erased; reclaiming one is the same open question a permanently unanswerable
-        park already poses.
-
-        **A reader that only reads answers differently, and the asymmetry is the
-        distinction the design turns on** (ADR-0184 §5). :meth:`get`,
-        :meth:`recent`, :meth:`export` and :meth:`resolution_of` now return such a
-        row **as history**, carrying the account, the recipients and the payload
-        description it actually holds. A park is a question put to the user and
-        answering it composes a card they act on; a history read states what was
-        recorded. There is no answerable question in an unanswerable park, so this
-        hands back nothing — and there is a perfectly legible record behind it, so
-        the readers hand it back.
-
-        Raises:
-            AuditError: If the trail cannot be read, or holds a row that no longer
-                validates for any reason but the one above.
-        """
-        async with self._lock:
-            data = await _run_to_completion(self._pending_confirmation_sync, execution_id, step_id)
-        if data is None:
-            return None
-        park = _decode(data)
-        if isinstance(park.egress_binding, OriginUnrecordedBinding):
-            _log.info(
-                ORIGIN_UNRECORDED,
-                execution_id=execution_id,
-                step_id=step_id,
-                refused="park",
-            )
-            return None
-        # ADR-0233 §14: the same refusal one epoch on, detected on the decoded
-        # value's type and carrying **its own** condition name. Written rather than
-        # inherited because such a row *has* ``planned_with_external_content`` and
-        # so falls straight past the narrowing above. Nothing is written, the step
-        # stays durably ``AWAITING_APPROVAL`` with its ``CONFIRM`` unresolved and its
-        # row intact, and one such park does not hide another binding's live one —
-        # the four history readers go on returning the row as history (ADR-0184 §5).
-        if isinstance(park.egress_binding, CoverageUnrecordedBinding):
-            _log.info(
-                COVERAGE_UNRECORDED,
-                execution_id=execution_id,
-                step_id=step_id,
-                refused="park",
-            )
-            return None
-        return park
-
-    def _pending_confirmation_sync(self, execution_id: str, step_id: str) -> str | None:
-        """The open ``CONFIRM`` for this binding, read as **one** observation.
-
-        Two *dependent* reads: the first decides whether the binding is already
-        resolved, the second answers "then which ``CONFIRM`` is still open". Run
-        bare, they describe two states of the trail either side of a racing
-        commit — the first says unresolved, the second returns a ``CONFIRM`` that
-        has since been answered, and the caller is handed a park for a binding
-        that is already decided. That is the #257 hazard ADR-0044 §2b exists to
-        close, reachable here across *processes*: the ``asyncio`` lock arbitrates
-        one event loop and ADR-0036 §2 is explicit that a second process on the
-        same file is the case this store exists for.
-
-        ``immediate=False`` is the read form — a deferred transaction, so the two
-        ``SELECT``s share one snapshot without taking the write lock a reader has
-        no use for. It is the shape :meth:`_spend_rows_sync` and the sibling
-        stores' paged reads already use (#720).
-        """
-        with self._transaction(
-            f"read the pending confirmation for ({execution_id!r}, {step_id!r})",
-            immediate=False,
-        ) as conn:
-            if conn.execute(_BINDING_HAS_RESOLUTION, (execution_id, step_id)).fetchone():
-                return None
-            row = conn.execute(
-                _BINDING_CONFIRMS, (PermissionOutcome.CONFIRM.value, execution_id, step_id)
-            ).fetchone()
-        return None if row is None else str(row[0])
-
-    async def resolution_of(self, *, execution_id: str, step_id: str) -> PermissionDecision | None:
-        """The resolution recorded for this binding, or ``None`` (ADR-0059 §2).
-
-        The complement of :meth:`pending_confirmation`: it returns the ALLOW or
-        DENY whose ``resolves`` names a CONFIRM of the ``(execution_id, step_id)``
-        binding, so a step stranded ``AWAITING_APPROVAL`` with its ruling durable
-        but its transition uncommitted (#257) can be driven to the disposition
-        already decided. ``None`` means the binding carries no resolution — never a
-        read failure, which is raised. Query-only, returning a detached snapshot
-        rebuilt from JSON; always an ALLOW or DENY, since a resolving CONFIRM is
-        unconstructable.
-
-        **The decoded blob is authoritative, not the projection columns.** The
-        ``resolves``, ``execution_id`` and ``step_id`` columns are only the fast
-        filter :meth:`_record_sync` maintains; the SQL narrows by all three, but
-        the returned decision's *own* fields are then re-checked against them. A
-        row whose ``resolves`` projection was tampered non-``NULL`` (a pending
-        ``CONFIRM`` or a direct decision masquerading as a resolution), or whose
-        binding projection names a binding its blob does not, is a corrupt store —
-        reported rather than mis-routed as this binding's ruling. Load-bearing
-        here because the recovery this feeds *acts* on the ruling, and because the
-        ALLOW-or-DENY guarantee rests on the blob's ``resolves`` (by
-        ``_a_resolution_is_not_itself_a_question`` a decision that resolves is
-        never a ``CONFIRM``), not on the column the SQL selected by.
-
-        Raises:
-            AuditError: If the trail cannot be read, holds a resolution that no
-                longer validates, or holds a row whose stored ``resolves`` or
-                binding disagrees with the projection it was found by.
-        """
-        async with self._lock:
-            data = await _run_to_completion(self._resolution_of_sync, execution_id, step_id)
-        if data is None:
-            return None
-        resolution = _decode(data)
-        if resolution.resolves is None:
-            msg = (
-                f"the audit trail holds a row found as the resolution of "
-                f"({execution_id!r}, {step_id!r}) whose record resolves nothing; its "
-                f"resolves projection was tampered"
-            )
-            raise AuditError(msg)
-        if resolution.execution_id != execution_id or resolution.step_id != step_id:
-            msg = (
-                f"the audit trail holds a resolution whose stored binding "
-                f"({resolution.execution_id!r}, {resolution.step_id!r}) disagrees with the "
-                f"projection it was found by ({execution_id!r}, {step_id!r})"
-            )
-            raise AuditError(msg)
-        return resolution
-
-    def _resolution_of_sync(self, execution_id: str, step_id: str) -> str | None:
-        try:
-            row = self._conn.execute(_BINDING_RESOLUTION, (execution_id, step_id)).fetchone()
-        except sqlite3.Error as exc:
-            msg = f"failed to read the resolution for ({execution_id!r}, {step_id!r}): {exc}"
             raise AuditError(msg) from exc
         return None if row is None else str(row[0])
 
@@ -3069,8 +2839,7 @@ def _as_projected(row: Sequence[Any]) -> ToolInvocation:
     the blob followed by the projection columns, which every invocation read
     selects in that order.
 
-    **The decoded blob is authoritative, not the columns**, exactly as it is for a
-    decision found by its binding (:meth:`SqliteAuditTrail.resolution_of`). Four of
+    **The decoded blob is authoritative, not the columns**. Four of
     the five are `GENERATED ALWAYS` over ``data`` (:data:`_CREATE_INVOCATIONS`), so
     for those the comparison is structurally true rather than a check — it is kept
     because it costs a tuple compare and because a future edit that un-derives one

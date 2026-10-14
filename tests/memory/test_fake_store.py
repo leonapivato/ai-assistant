@@ -294,8 +294,8 @@ async def test_every_read_raises_the_configured_failure(
 
 
 async def test_the_failure_repeats_as_a_distinct_instance_each_call() -> None:
-    # A fresh exception per call, for `FakeContextProvider`'s reason: one stored
-    # instance re-raised would accumulate a traceback across calls.
+    # A fresh exception per call: one stored instance re-raised would accumulate a
+    # traceback across calls.
     store = _broken_store()
 
     raised = []

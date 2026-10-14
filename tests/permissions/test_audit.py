@@ -22,7 +22,6 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
-import structlog.testing
 from audit_trail_contract import AuditTrailContract
 from permission_builders import AT, action, decision, ruling, tool
 from recipient_builders import ALICE
@@ -51,8 +50,6 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.permissions import SqliteAuditTrail, audit
 from ai_assistant.permissions.audit import (
-    COVERAGE_UNRECORDED,
-    ORIGIN_UNRECORDED,
     _run_to_completion,
 )
 from ai_assistant.testing.cancellation import (
@@ -98,8 +95,6 @@ _SYNC_METHODS = {
     "record": "_record_sync",
     "clear": "_clear_sync",
     "get": "_get_sync",
-    "pending_confirmation": "_pending_confirmation_sync",
-    "resolution_of": "_resolution_of_sync",
     "recent": "_ordered_sync",
     "export": "_ordered_sync",
 }
@@ -276,107 +271,6 @@ async def test_recording_opens_and_closes_exactly_one_immediate_transaction(
     with _traced(ephemeral) as statements:
         assert await ephemeral.clear() == 2
     _assert_one_immediate_transaction(statements, what="clear")
-
-
-async def test_the_pending_confirmation_pair_reads_inside_one_deferred_transaction(
-    ephemeral: SqliteAuditTrail,
-) -> None:
-    """The read form of the discipline: one snapshot, and **not** the write lock.
-
-    ``BEGIN`` rather than ``BEGIN IMMEDIATE`` is the assertion that carries
-    meaning here. The two ``SELECT``s must see one state of the trail (#720), and
-    that is all a reader needs; taking the write lock as well would exclude every
-    other writer for the length of a read that writes nothing, which is a cost
-    the hazard does not ask for.
-    """
-    await ephemeral.record(decision("c-1", request=action(execution_id="exec-a")))
-
-    with _traced(ephemeral) as statements:
-        park = await ephemeral.pending_confirmation(execution_id="exec-a", step_id="step-1")
-
-    assert park is not None
-    opened, first, second, closed = statements
-    assert opened.strip().upper() == "BEGIN", (
-        f"the read pair opened with {opened!r}: a reader has no use for the write "
-        f"lock, and `immediate=False` is the form the sibling reads use"
-    )
-    assert first.strip().upper().startswith("SELECT")
-    assert second.strip().upper().startswith("SELECT")
-    assert closed.strip().upper() == "COMMIT"
-    assert ephemeral._conn.in_transaction is False
-
-
-@pytest.mark.integration
-async def test_a_resolution_cannot_land_between_the_two_pending_reads(tmp_path: Path) -> None:
-    """#720, staged: the hazard is another **process**, so there are two connections.
-
-    ``pending_confirmation`` makes two dependent reads — "is this binding already
-    resolved", then "which ``CONFIRM`` is still open". Run bare, a resolution
-    committed between them makes the pair describe two states of the trail: the
-    first says unresolved, the second hands back a ``CONFIRM`` that has since been
-    answered, and the caller rebuilds a park for a binding that is already decided
-    (the #257 hazard ADR-0044 §2b closes, and the ``asyncio`` lock arbitrates only
-    one process — ADR-0036 §2).
-
-    The second trail is the second process, and it writes through the store's own
-    ``record`` path rather than through hand-built SQL, so what is staged is a
-    real commit and not an approximation of one. It is driven from a trace
-    callback on the *first* trail's connection, which fires immediately before the
-    second ``SELECT`` executes — the exact instant the issue is about, and one no
-    sleep or thread schedule has to be trusted to hit. Its ``busy_timeout`` is
-    zeroed so the excluded write is refused at once instead of waiting out the
-    driver's five seconds.
-
-    Without the transaction the interleaved commit lands (the first read's
-    implicit transaction ended with the statement, so nothing holds the file) and
-    ``refused`` comes back empty.
-    """
-    path = tmp_path / "audit.db"
-    trail = SqliteAuditTrail(path=path)
-    racer = SqliteAuditTrail(path=path)
-    try:
-        racer._conn.execute("PRAGMA busy_timeout = 0")
-        await trail.record(decision("c-1", request=action(execution_id="exec-a")))
-        resolution = decision(
-            "r-1",
-            request=action(execution_id="exec-a"),
-            ruled=ruling(PermissionOutcome.DENY),
-            resolves="c-1",
-        )
-        refused: list[AuditError] = []
-
-        def interleave(statement: str) -> None:
-            if not statement.strip().upper().startswith("SELECT DATA FROM DECISIONS"):
-                return
-            trail._conn.set_trace_callback(None)  # once, and before re-entering SQL
-            try:
-                racer._record_sync(resolution, None)
-            except AuditError as exc:
-                refused.append(exc)
-
-        trail._conn.set_trace_callback(interleave)
-        park = await trail.pending_confirmation(execution_id="exec-a", step_id="step-1")
-
-        assert refused, (
-            "a second process committed a resolution between the two reads, so the "
-            "park handed back describes a binding that is already decided"
-        )
-        # Named, not merely counted: ``AuditError`` covers the store's refusals too,
-        # so a duplicate id or an invalid resolution would otherwise satisfy the
-        # assertion above without the exclusion having done anything.
-        assert "locked" in str(refused[0]), refused[0]
-        assert park is not None
-        assert park.id == "c-1"
-        assert await trail.resolution_of(execution_id="exec-a", step_id="step-1") is None
-
-        # And the exclusion is only for the length of the read: the same write
-        # lands once it is over, and the park is then gone.
-        await racer.record(resolution)
-        assert await trail.pending_confirmation(execution_id="exec-a", step_id="step-1") is None
-    finally:
-        trail._conn.set_trace_callback(None)
-        racer.close()
-        trail.close()
 
 
 async def test_the_refusals_share_one_catchable_base(ephemeral: SqliteAuditTrail) -> None:
@@ -563,11 +457,11 @@ async def test_a_pre_binding_database_is_migrated_and_stays_usable(tmp_path: Pat
     """A trail written before ADR-0044 grows the binding columns on reopen (§1).
 
     ``step_id`` and ``outcome`` are backfilled from each row's JSON so the
-    per-binding index and the recovery query see them; ``execution_id`` stays
-    ``NULL``, since a pre-ADR-0044 decision belongs to no execution — a
-    non-concrete binding §2b never constrains. The legacy record stays readable,
-    and the reopened trail records and recovers a new concrete binding, proving
-    the migrated schema is fully functional.
+    per-binding indexes see them; ``execution_id`` stays ``NULL``, since a
+    pre-ADR-0044 decision belongs to no execution — a non-concrete binding §2b
+    never constrains. The legacy record stays readable, and the reopened trail
+    records and reads back a new concrete binding, proving the migrated schema is
+    fully functional.
     """
     path = tmp_path / "audit.db"
     legacy = sqlite3.connect(str(path))
@@ -597,9 +491,9 @@ async def test_a_pre_binding_database_is_migrated_and_stays_usable(tmp_path: Pat
 
         # The migrated schema supports the new binding features end to end.
         await reopened.record(decision("c-new", request=action(execution_id="exec-a")))
-        found = await reopened.pending_confirmation(execution_id="exec-a", step_id="step-1")
+        found = await reopened.get("c-new")
         assert found is not None
-        assert found.id == "c-new"
+        assert (found.execution_id, found.step_id) == ("exec-a", "step-1")
     finally:
         reopened.close()
 
@@ -673,9 +567,9 @@ async def test_a_second_trail_opens_a_migrated_legacy_database_without_failing(
         assert await first.get("c-old") == old
         assert await second.get("c-old") == old
         await first.record(decision("c-a", request=action(execution_id="exec-a")))
-        found = await second.pending_confirmation(execution_id="exec-a", step_id="step-1")
+        found = await second.get("c-a")
         assert found is not None
-        assert found.id == "c-a"
+        assert (found.execution_id, found.step_id) == ("exec-a", "step-1")
     finally:
         first.close()
         second.close()
@@ -760,9 +654,9 @@ async def test_a_pre_marker_database_is_stamped_rather_than_refused(tmp_path: Pa
         assert await reopened.get("c-old") == old  # the history survives the stamping
         # ...and the migrated, now-labelled schema is fully functional.
         await reopened.record(decision("c-new", request=action(execution_id="exec-a")))
-        found = await reopened.pending_confirmation(execution_id="exec-a", step_id="step-1")
+        found = await reopened.get("c-new")
         assert found is not None
-        assert found.id == "c-new"
+        assert (found.execution_id, found.step_id) == ("exec-a", "step-1")
     finally:
         reopened.close()
 
@@ -1515,93 +1409,6 @@ async def test_a_row_the_model_no_longer_accepts_is_reported_not_returned(
         await ephemeral.export()
 
 
-async def test_resolution_of_reports_an_unreadable_trail_as_an_audit_error(
-    ephemeral: SqliteAuditTrail,
-) -> None:
-    """A read failure must raise, not return ``None`` (ADR-0059 §2).
-
-    ``None`` on an unreadable trail would let recovery classify a still-resolved
-    step as trail-unanswerable and route it to cancellation, discarding a durable
-    ruling. Closing the connection is the reachable "closed store" the boundary
-    names; the query then hits ``sqlite3`` and must surface as this layer's error.
-    """
-    ephemeral.close()
-
-    with pytest.raises(AuditError):
-        await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")
-
-
-async def test_resolution_of_reports_a_corrupt_resolution_row_not_none(
-    ephemeral: SqliteAuditTrail,
-) -> None:
-    """A resolution row that no longer validates is reported, like ``get``/``export``.
-
-    Returning ``None`` for a row the model rejects would make a tampered
-    resolution indistinguishable from an unresolved binding — the ambiguity the
-    ``AuditError`` boundary exists to remove.
-    """
-    ephemeral._conn.execute(
-        "INSERT INTO decisions("
-        "id, decided_at_us, resolves, execution_id, step_id, outcome, data"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("r-bad", 0, "c-1", "exec-a", "step-1", "allow", '{"id": "r-bad"}'),
-    )
-
-    with pytest.raises(AuditError):
-        await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")
-
-
-async def test_resolution_of_rejects_a_projection_that_disagrees_with_the_record(
-    ephemeral: SqliteAuditTrail,
-) -> None:
-    """The blob is the record; a tampered index column must not misroute a ruling (ADR-0059 §2).
-
-    The ``execution_id``/``step_id`` columns are only the fast filter ``record``
-    maintains — the decoded decision is authoritative. A resolution whose column
-    was tampered to match a binding its blob does not name is a corrupt store, and
-    ``resolution_of`` must report it rather than hand it back as another binding's
-    ruling — the recovery it feeds would otherwise *act* on a mis-attributed
-    resolution.
-    """
-    bind: dict[str, object] = {"execution_id": "exec-b"}  # the resolution genuinely names exec-b
-    await ephemeral.record(decision("c-1", request=action(**bind)))
-    await ephemeral.record(
-        decision(
-            "r-1",
-            request=action(**bind),
-            ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-1"),
-            resolves="c-1",
-        )
-    )
-    # Tamper only the projection column, leaving the JSON blob (which names exec-b) intact.
-    ephemeral._conn.execute("UPDATE decisions SET execution_id = ? WHERE id = ?", ("exec-a", "r-1"))
-
-    with pytest.raises(AuditError):
-        await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")
-
-
-async def test_resolution_of_rejects_a_confirm_masquerading_as_a_resolution(
-    ephemeral: SqliteAuditTrail,
-) -> None:
-    """A tampered ``resolves`` projection must not turn a pending CONFIRM into a resolution.
-
-    ``_BINDING_RESOLUTION`` selects on ``resolves IS NOT NULL``, so corrupting only
-    that column makes a still-pending ``CONFIRM`` (or a direct decision) match. Its
-    binding blob agrees with the query, so the binding check passes — but the
-    decoded record resolves nothing, so it is not a resolution at all. The
-    ALLOW-or-DENY guarantee rests on the blob's ``resolves``, not the column: a
-    corrupt store is reported, never returned as the question it actually is.
-    """
-    await ephemeral.record(decision("c-1", request=action(execution_id="exec-a")))
-    assert await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1") is None
-
-    # Tamper only the resolves projection; the blob is still a pending CONFIRM.
-    ephemeral._conn.execute("UPDATE decisions SET resolves = ? WHERE id = ?", ("d-phantom", "c-1"))
-
-    with pytest.raises(AuditError):
-        await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")
-
-
 async def test_expires_at_is_persisted_and_read_back(ephemeral: SqliteAuditTrail) -> None:
     """The durable deadline survives ``record`` → read, in the blob and the column (ADR-0059 §1).
 
@@ -2275,34 +2082,6 @@ async def test_a_returned_coverage_legacy_decision_fabricates_no_coverage_on_the
     assert "coverage" not in got.model_dump()["egress_binding"]
 
 
-async def test_a_coverage_legacy_park_is_refused_by_its_own_condition_name(
-    ephemeral: SqliteAuditTrail,
-) -> None:
-    """ADR-0233 §14's park clause, and the condition name that is **not** inherited.
-
-    ``pending_confirmation`` answers ``None`` for this epoch too, detected on the
-    decoded value's type, and carries ``coverage-unrecorded`` rather than
-    ``origin-unrecorded`` — a reader meeting one in the log learns which fact the row
-    is missing, and these are different epochs. Nothing is written, the step stays
-    durably ``AWAITING_APPROVAL`` with its ``CONFIRM`` unresolved and its row intact.
-
-    Asserted over the **bytes in the ``data`` column**, because a read-side
-    representation is precisely the thing a decoded comparison could not tell apart
-    from a rewrite.
-    """
-    await _record_as_coverage_legacy(ephemeral, _egress_decision())
-    before = _stored(ephemeral, "d-egress")
-
-    with structlog.testing.capture_logs() as captured:
-        park = await ephemeral.pending_confirmation(execution_id="exec-a", step_id="step-1")
-
-    assert park is None
-    refusals = [entry for entry in captured if entry.get("refused") == "park"]
-    assert [entry["event"] for entry in refusals] == [COVERAGE_UNRECORDED]
-    assert refusals[0]["step_id"] == "step-1"
-    assert _stored(ephemeral, "d-egress") == before
-
-
 async def test_the_trail_reads_the_coverage_legacy_shape_and_refuses_to_write_one(
     ephemeral: SqliteAuditTrail,
 ) -> None:
@@ -2414,51 +2193,6 @@ async def test_get_returns_the_legacy_row_by_id(ephemeral: SqliteAuditTrail) -> 
     assert isinstance(got.egress_binding, OriginUnrecordedBinding)
 
 
-async def test_resolution_of_returns_a_legacy_resolution_by_its_binding(
-    ephemeral: SqliteAuditTrail,
-) -> None:
-    """§5's fifth clause, §10's sixth: history, and nothing more.
-
-    ``resolution_of`` is the reader recovery *acts* on — a step stranded
-    ``AWAITING_APPROVAL`` with its ruling durable but its transition uncommitted
-    (#257) is driven to the disposition already decided. So the row has to be
-    readable, and reading it must not be mistaken for an authorisation: no consumer
-    treats a decision a reader returned as one without
-    ``PermissionDecision.authorises``, which ADR-0184 §6 makes answer ``False`` for
-    this shape against every request.
-
-    The resolution itself is downgraded here — not the ``CONFIRM`` it answers —
-    because it is the *returned* row this clause is about.
-    """
-    confirmed = _egress_decision("d-confirm")
-    await ephemeral.record(confirmed)
-    answer = _egress_decision(
-        "d-answer",
-        egress_binding=confirmed.egress_binding,
-    ).model_copy(
-        update={
-            "ruling": ruling(PermissionOutcome.ALLOW, authorised_by="d-confirm"),
-            "resolves": "d-confirm",
-        }
-    )
-    await ephemeral.record(answer)
-    legacy = _stored(ephemeral, "d-answer")
-    del legacy["egress_binding"]["planned_with_external_content"]
-    del legacy["egress_binding"]["coverage"]
-    # And no ``closed_loop`` and no ``forecast_reach``: ADR-0238 §13 and ADR-0260 §11
-    # each added their member after both, so a row of this epoch carries neither and
-    # every older shape forbids an extra key.
-    del legacy["egress_binding"]["closed_loop"]
-    del legacy["egress_binding"]["forecast_reach"]
-    _rewrite(ephemeral, "d-answer", legacy)
-
-    resolution = await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")
-
-    assert resolution is not None
-    assert resolution.id == "d-answer"
-    assert isinstance(resolution.egress_binding, OriginUnrecordedBinding)
-
-
 async def test_a_returned_legacy_decision_fabricates_no_origin_on_the_way_out(
     ephemeral: SqliteAuditTrail,
 ) -> None:
@@ -2486,104 +2220,17 @@ async def test_a_row_carrying_the_origin_round_trips_unchanged(
     """Nothing changes for a row written by this build.
 
     The tolerance is reached only by the one legacy shape, so a current row decodes
-    with its binding whole **and** its park is still answerable. Without this the
-    park case below would be satisfied by an implementation that refused every
-    egress park.
+    with its binding whole.
     """
     recorded = _egress_decision()
     await ephemeral.record(recorded)
 
     got = await ephemeral.get("d-egress")
-    park = await ephemeral.pending_confirmation(execution_id="exec-a", step_id="step-1")
 
     assert got is not None
     assert got.egress_binding == recorded.egress_binding
     assert isinstance(got.egress_binding, EgressBinding)
     assert got.egress_binding.planned_with_external_content is False
-    assert park is not None, "a current park is still answerable"
-    assert park.egress_binding == recorded.egress_binding
-
-
-# --- §5, §10: the park is still refused, by name and without a write ----------
-
-
-async def test_a_park_rebuilt_from_a_row_without_an_origin_is_refused_by_name(
-    ephemeral: SqliteAuditTrail,
-) -> None:
-    """§5's second and third clauses, §10's eighth: an unresumable park, refused by name.
-
-    #1443's follow-on lane's case, re-pointed at the structural check. ADR-0184 §10
-    is explicit that a lane which *deletes* these has removed the refusal rather than
-    reimplemented it, so what changed is only how the case is detected — on the
-    decoded value's type rather than on the shape of a ``ValidationError`` — and the
-    ``origin-unrecorded`` condition stands in name and in effect.
-
-    ``pending_confirmation`` is the one reader whose answer a caller *rebuilds a park
-    from*. Such a call's origin cannot be established — ADR-0181 §3 forbids a
-    default, §4's second clause forbids a seam inventing one — and §5's second clause
-    then leaves no route by which any authorisation covers it. There is no answerable
-    question to hand back, and that is a different question from whether the row is
-    legible, which the readers above answer yes to.
-
-    Two things are asserted because they are two claims: that no park comes back, and
-    that the refusal is *named* rather than an unexplained silence.
-    """
-    await _record_as_legacy(ephemeral, _egress_decision())
-
-    with structlog.testing.capture_logs() as captured:
-        park = await ephemeral.pending_confirmation(execution_id="exec-a", step_id="step-1")
-
-    assert park is None
-    refusals = [entry for entry in captured if entry.get("refused") == "park"]
-    assert [entry["event"] for entry in refusals] == [ORIGIN_UNRECORDED]
-    assert refusals[0]["step_id"] == "step-1"
-
-
-async def test_refusing_the_park_writes_nothing_and_leaves_the_row_intact(
-    ephemeral: SqliteAuditTrail,
-) -> None:
-    """§5's second clause, §10's eighth: refused, not resolved, and not erased.
-
-    The park stays unanswerable and the record stays exactly as it was: nothing is
-    migrated, backfilled, annotated, versioned, re-keyed or deleted (§4). Asserted
-    over the **bytes in the ``data`` column** rather than over a decoded value,
-    because a read-side representation is precisely the thing a decoded comparison
-    could not tell apart from a rewrite.
-    """
-    await _record_as_legacy(ephemeral, _egress_decision())
-    before = _stored(ephemeral, "d-egress")
-
-    assert await ephemeral.pending_confirmation(execution_id="exec-a", step_id="step-1") is None
-
-    assert _stored(ephemeral, "d-egress") == before
-    assert [held.id for held in await ephemeral.export()] == ["d-egress"]
-
-
-async def test_one_legacy_row_does_not_hide_another_bindings_pending_confirmation(
-    ephemeral: SqliteAuditTrail,
-) -> None:
-    """§5, §10's eighth: the point of refusing rather than raising, as its own case.
-
-    A second, current park under a different binding is still offered while the
-    legacy one is refused. An implementation that raised here would fail the
-    enumeration that reaches both, so **every** pending confirmation in the trail
-    would become unanswerable because of one pre-upgrade row — which is the damage
-    this branch exists to stop.
-    """
-    await _record_as_legacy(ephemeral, _egress_decision())
-    current = decision(
-        "d-current",
-        request=action(parameters={"to": "b@example.com"}, execution_id="exec-b"),
-        ruled=ruling(PermissionOutcome.CONFIRM),
-    )
-    await ephemeral.record(current)
-
-    legacy_park = await ephemeral.pending_confirmation(execution_id="exec-a", step_id="step-1")
-    other_park = await ephemeral.pending_confirmation(execution_id="exec-b", step_id="step-1")
-
-    assert legacy_park is None
-    assert other_park is not None
-    assert other_park.id == "d-current"
 
 
 async def test_the_trail_reads_the_shape_and_refuses_to_write_one(

@@ -71,17 +71,12 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
     CostBasis,
-    CurrentContext,
     DataTier,
     DestinationProtocol,
     DestinationTrust,
     DestinationTrustRecord,
     FeedbackEvent,
     FeedbackKind,
-    Goal,
-    GoalBrief,
-    GoalInterpretation,
-    Ground,
     Idempotency,
     MemoryDecisionKind,
     MemoryKind,
@@ -100,7 +95,6 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     TextChannelPayload,
-    TimeOfDay,
     ToolCall,
     ToolCost,
     ToolDefinition,
@@ -189,7 +183,6 @@ from ai_assistant.testing import (
     FakeNotificationPolicy,
     FakeNotificationStore,
     FakeNotificationWriter,
-    FakePlanner,
     FakePlanStore,
     FakeReader,
     FakeRecipientGrants,
@@ -258,40 +251,6 @@ def _record(*, expires_at: datetime | None = None) -> SemanticMemory:
             source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AWARE
         ),
         expires_at=expires_at,
-    )
-
-
-def _goal() -> GoalBrief:
-    """The brief a planner and a servicing are handed (ADR-0249 §9, §11)."""
-    return GoalBrief.of(_goal_record())
-
-
-def _goal_record() -> Goal:
-    return Goal(
-        id="g1",
-        interpretation=(
-            GoalInterpretation(
-                revision=1,
-                outcome="book the flight",
-                outcome_ground=Ground.USER_STATED,
-                outcome_span="book the flight",
-                recorded_at=_AWARE,
-                raised_by="t-1",
-            ),
-        ),
-        provenance=Provenance(
-            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AWARE
-        ),
-        created_at=_AWARE,
-    )
-
-
-def _context() -> CurrentContext:
-    return CurrentContext(
-        now=_AWARE,
-        time_of_day=TimeOfDay.AFTERNOON,
-        is_weekend=False,
-        within_working_hours=True,
     )
 
 
@@ -641,12 +600,6 @@ async def _local_file_fetcher(now: Clock) -> None:
             await fetcher.listing()
         finally:
             fetcher.close()
-
-
-async def _fake_planner(now: Clock) -> None:
-    await FakePlanner(now=now).plan(
-        _goal(), utterance="a request", context=_context(), capabilities=()
-    )
 
 
 async def _fake_plan_store(now: Clock) -> None:
@@ -1094,7 +1047,6 @@ SEAMS = [
     Seam("PhasePath", _phase_path, ClockReadingError),
     Seam("FakeMemoryStore", _fake_store, MemoryStoreError),
     Seam("FakeMemoryWriter", _fake_writer, MemoryStoreError),
-    Seam("FakePlanner", _fake_planner, PlanningError),
     Seam("FakePlanStore", _fake_plan_store, PlanningError),
     # A twelfth, later than the ADR's table (ADR-0119 §10): the façade reads a
     # clock to place the trace horizon, so its error is the sweep's own.

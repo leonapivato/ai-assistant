@@ -68,8 +68,7 @@ def _derived_id(event: FeedbackEvent) -> str:
     already seen. That buys both properties a canonical fake needs at once:
     deterministic, so a test can assert an exact id without depending on
     execution order; and identical across instances, so two fakes writing into
-    one store cannot silently overwrite each other. ``FakePlanner``'s
-    ``f"{goal.id}-plan"`` is the same idea.
+    one store cannot silently overwrite each other.
 
     Only two events that are equal *in every field* map to one id. That is the
     intended reading — the same feedback establishes the same memory — and it is

@@ -26,7 +26,6 @@ from ai_assistant.testing.connections import (
     FakeConnectionProvisioner,
     FakeConnectionPurger,
 )
-from ai_assistant.testing.context import FakeContextProvider
 from ai_assistant.testing.conversations import FakeConversationStore
 from ai_assistant.testing.coverage_answers import FakeCoverageAnswers
 from ai_assistant.testing.deferrals import FakeDeferralStore
@@ -116,13 +115,8 @@ from ai_assistant.testing.permissions import (
     FakeSpendGate,
     FakeSpendLedger,
 )
-from ai_assistant.testing.planning import FakeGoalAssociator, FakePlanner, FakePlanStore
+from ai_assistant.testing.planning import FakePlanStore
 from ai_assistant.testing.policy import FakeMemoryPolicy, PolicyCall
-from ai_assistant.testing.queries import (
-    DEFAULT_COMPOSED_QUERY,
-    DEFAULT_QUERY_MAX_CHARS,
-    FakeQueryComposer,
-)
 from ai_assistant.testing.readers import (
     DEFAULT_READER_NAME,
     FakeReader,
@@ -153,11 +147,6 @@ from ai_assistant.testing.recipient_grants import (
     recipient_grant,
     recipient_revocation_of,
 )
-from ai_assistant.testing.routing import (
-    FakeRoutingRecorder,
-    FakeRoutingTrail,
-    routed_operation_record,
-)
 from ai_assistant.testing.searching import (
     DEFAULT_MAX_RESULT_CHARS,
     DEFAULT_MAX_RESULTS,
@@ -184,13 +173,6 @@ from ai_assistant.testing.speech import (
     FakeSpeechTranscriber,
 )
 from ai_assistant.testing.stories import FakeStoryStore
-from ai_assistant.testing.streaming import (
-    DEFAULT_STREAM_DELTAS,
-    DEFAULT_STREAM_REPLY,
-    FakeStreamingCompleter,
-    StreamAttempt,
-    StreamCall,
-)
 from ai_assistant.testing.tool_calling import (
     DEFAULT_ROUND_TEXT,
     FakeToolCallingCompleter,
@@ -227,7 +209,6 @@ __all__ = [
     "DEFAULT_BATCH_ISSUER",
     "DEFAULT_BATCH_REPLY",
     "DEFAULT_CHECKED_AT",
-    "DEFAULT_COMPOSED_QUERY",
     "DEFAULT_DECIDED_AT",
     "DEFAULT_FETCHER_NAME",
     "DEFAULT_FORECAST_DAYS",
@@ -245,7 +226,6 @@ __all__ = [
     "DEFAULT_MAX_RESULT_CHARS",
     "DEFAULT_MAX_ROWS",
     "DEFAULT_OCCURRED_AT",
-    "DEFAULT_QUERY_MAX_CHARS",
     "DEFAULT_READER_NAME",
     "DEFAULT_READ_SOURCE",
     "DEFAULT_REPORTED_AT",
@@ -253,8 +233,6 @@ __all__ = [
     "DEFAULT_SEARCH_CONTENT",
     "DEFAULT_SEARCH_ORIGIN",
     "DEFAULT_SEARCH_SOURCE_NAME",
-    "DEFAULT_STREAM_DELTAS",
-    "DEFAULT_STREAM_REPLY",
     "FAKE_FORECAST_ID",
     "FAKE_FORECAST_READ",
     "FAKE_WEB_SEARCH",
@@ -283,7 +261,6 @@ __all__ = [
     "FakeConnectionEntry",
     "FakeConnectionProvisioner",
     "FakeConnectionPurger",
-    "FakeContextProvider",
     "FakeConversationStore",
     "FakeCoverageAnswers",
     "FakeDeferralStore",
@@ -295,7 +272,6 @@ __all__ = [
     "FakeFeedbackProcessor",
     "FakeFetcher",
     "FakeForecaster",
-    "FakeGoalAssociator",
     "FakeGoalAuthorizationStore",
     "FakeGoalAuthorizations",
     "FakeGoalQuotes",
@@ -314,14 +290,10 @@ __all__ = [
     "FakeOutboundTransport",
     "FakeParkedReads",
     "FakePlanStore",
-    "FakePlanner",
-    "FakeQueryComposer",
     "FakeReader",
     "FakeRecipientGrantResolution",
     "FakeRecipientGrantStore",
     "FakeRecipientGrants",
-    "FakeRoutingRecorder",
-    "FakeRoutingTrail",
     "FakeSecretStore",
     "FakeSecrets",
     "FakeSourceGrantStore",
@@ -333,7 +305,6 @@ __all__ = [
     "FakeSpendGate",
     "FakeSpendLedger",
     "FakeStoryStore",
-    "FakeStreamingCompleter",
     "FakeToolCallingCompleter",
     "FakeToolImplementation",
     "FakeToolInvoker",
@@ -349,8 +320,6 @@ __all__ = [
     "ScriptedDay",
     "SecretBacking",
     "SecretMethod",
-    "StreamAttempt",
-    "StreamCall",
     "TransportAttempt",
     "account_member",
     "attested_proposal",
@@ -370,7 +339,6 @@ __all__ = [
     "recipient_grant",
     "recipient_revocation_of",
     "revocation_of",
-    "routed_operation_record",
     "source_grant",
     "source_read_record",
     "succeeds",

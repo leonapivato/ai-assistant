@@ -269,8 +269,8 @@ def test_the_clock_fed_planning_fields_refuse_a_naive_reading() -> None:
 
     They were the last fields in ``core`` still attributing UTC to a naive
     value, held back by ADR-0023 §6 only until every producer
-    (``PlanExecution``, ``InMemoryPlanStore``, ``FakePlanner``,
-    ``FakePlanStore``) stored a guarded clock. They all do now, so a naive
+    (``PlanExecution``, ``InMemoryPlanStore``, ``FakePlanStore``) stored a
+    guarded clock. They all do now, so a naive
     reading is refused at the seam by its named owner — and refused here too,
     which is what makes the deferral closed rather than merely unenforced.
     """
