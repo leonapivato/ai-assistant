@@ -218,10 +218,6 @@ button[disabled] {
   margin: 0 0 1rem;
 }
 
-.rationale {
-  font-weight: 600;
-}
-
 .notice {
   color: var(--muted);
   font-size: 0.9rem;
@@ -254,7 +250,7 @@ button[disabled] {
  * rather than in the panel's fault slot (ADR-0177 §7's fourth clause, ADR-0244 §11).
  * It is the same ink and the same frame as a fault, because that is what it reports;
  * what it is not is a fault *slot*, which every listing read clears on its way in and
- * which `#confirmations > .fault` is how the tests ask about.
+ * which `#<panel> > .fault` is how the tests ask about.
  */
 .panel > .fault,
 .panel > .account {
@@ -564,62 +560,9 @@ code {
 .grant-row,
 .belief-row,
 .notification-row,
-.connection-row,
-.routed-row,
-.confirmation-row {
+.connection-row {
   border-top: 1px solid var(--line);
   padding: 0.7rem 0;
-}
-
-/*
- * The routed account's listing (ADR-0197 §10). It carries the records a routed
- * operation returned or a routed lookup matched, and it has no rule that could hide
- * part of one for the reason the rows above have none: ADR-0197 §5's last clause is
- * that "no surface renders fewer candidates than the outcome carries or summarises
- * in place of them", and a stylesheet is where a page that renders them all can
- * still show a few. So no `max-height`, no `overflow`, no clamp — a long listing
- * makes the answer taller.
- */
-.routed-listing {
-  margin: 0.3rem 0 0;
-}
-
-/*
- * The CONFIRM prompt (ADR-0178 §7). Like `.source-row` and `.belief-row` above, it
- * has no rule that could hide part of what it carries — no `max-height`, no
- * `overflow: hidden`, no clamped line count. §7 requires the occurrences rendered
- * whole, "none omitted, none truncated silently, and none ordered so as to hide one",
- * and a stylesheet is where a surface that renders them all can still show a few: a
- * confirmation whose recipient list scrolled out of a fixed box would put the owner's
- * approval on the part they could see.
- */
-
-/*
- * One argument's value, as the owner reads it before approving it (ADR-0233 §8).
- *
- * `pre-wrap` for `.reply`'s reason, arriving at text where it matters more: an email
- * body written as three paragraphs is three paragraphs, and a paragraph's default
- * collapsing would render it as one run-on line — a value the owner did not write and
- * is being asked to approve. `body`'s `overflow-wrap: anywhere` does the rest, so a
- * long unbroken token wraps to the column instead of running off it.
- *
- * **No `max-height`, no `overflow`, no clamped line count, and no rule that could hide
- * part of one**, for the reason `.confirmation-row` has none and one of its own:
- * ADR-0233 §8 requires every value rendered whole, "not truncated, not elided, not
- * abbreviated, not summarised, not paraphrased, not collapsed behind a control the
- * user must operate to see them". A long body therefore makes the card taller, on a
- * phone as much as on a desktop; a scroller here would put the approval on the part
- * that happened to be in the box.
- *
- * It is the page's own ink rather than `.hint`'s muted grey. Everything around it is
- * framing this page wrote; this is the thing being answered about, and it is the one
- * text in the card that should be the easiest to read.
- */
-.argument-value {
-  white-space: pre-wrap;
-  margin: 0.2rem 0 0.7rem;
-  padding-left: 0.7rem;
-  border-left: 2px solid var(--line);
 }
 
 .source-name {

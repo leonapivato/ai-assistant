@@ -283,19 +283,6 @@ def structlog_configuration_is_this_test_s_own() -> Iterator[None]:
                 structlog.reset_defaults()
 
 
-#: The launch arguments ADR-0216's layer needs, and the reason each is here.
-#:
-#: The first two hand Chromium its own synthetic capture device, so ``getUserMedia``
-#: resolves and ``MediaRecorder`` writes a real WebM/Opus blob with no microphone, no
-#: prompt and no operator on a CI runner. The third is about the *playback* side: a
-#: page whose audio context the browser suspends until a gesture decodes perfectly and
-#: sounds nothing, which is the one failure this layer must not read as the page's own.
-LAUNCH_ARGUMENTS = (
-    "--use-fake-device-for-media-stream",
-    "--use-fake-ui-for-media-stream",
-    "--autoplay-policy=no-user-gesture-required",
-)
-
 #: What ADR-0216 §6 tells a developer to run when the browser build is absent.
 #: Named in the skip message, because a skip that says only "no browser" leaves the
 #: reader to find the command themselves.
@@ -494,7 +481,7 @@ async def gateway_browser() -> AsyncIterator[Browser]:
     """
     async with async_playwright() as driver:
         try:
-            browser = await driver.chromium.launch(channel="chromium", args=list(LAUNCH_ARGUMENTS))
+            browser = await driver.chromium.launch(channel="chromium")
         except BrowserError as refusal:
             classify_launch_refusal(refusal)
         try:

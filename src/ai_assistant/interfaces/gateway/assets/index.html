@@ -67,7 +67,6 @@
           <button type="button" id="chat-button">Chat</button>
         </p>
         <button type="button" id="conversations-button">Conversations</button>
-        <button type="button" id="confirmations-button">What is waiting for your answer</button>
       </section>
 
       <!--
@@ -198,8 +197,8 @@
 
       <!--
         The index of what is on screen (#1429), built by `app.js` from the open panels'
-        own headings and empty in this document for the reason the confirmation prompt
-        is: a name written here would be a second place a panel is called something,
+        own headings and empty in this document: a name written here would be a second
+        place a panel is called something,
         and the interesting thing about it would be which of the two had gone stale.
 
         It sits here, immediately under the console, because the console is where a
@@ -207,77 +206,6 @@
         that produced it, rather than at the foot of everything it points at.
       -->
       <nav id="panel-index" class="panel-index" aria-label="Panels on this page" hidden></nav>
-
-      <section id="answer" class="panel" hidden>
-        <h2>What happened</h2>
-        <div id="answer-body"></div>
-      </section>
-
-      <!--
-        The CONFIRM prompt (ADR-0177 §8, ADR-0178 §7). This panel is the **recovery**
-        route and nothing else: `pending_confirmations` is the one way a browser that
-        was closed and reopened, or a gateway that was restarted, gets back to a park
-        (ADR-0052 §1). A confirmation raised by a turn this page just drove is rendered
-        with that turn, in the panel above.
-
-        There is no markup for the prompt itself here, and its absence is deliberate:
-        every part of a confirmation is a value the hub returned, so all of it is built
-        by `app.js` through text nodes (ADR-0168 §6, ADR-0175 §9). A template in this
-        document would be a second place a value could be put, and the one interesting
-        thing about it would be that it parses markup.
-      -->
-      <section id="confirmations" class="panel" hidden>
-        <h2>Waiting for your answer</h2>
-        <p class="hint">
-          Actions the assistant has parked. Each one is shown whole before you answer
-          it — what it would run, and, where it would send something, whose account it
-          would send from and where it would go. Answering one here is the same act as
-          answering it at a terminal.
-        </p>
-        <!--
-          What the cancellation act did (ADR-0244 §11), and it is **outside**
-          `confirmation-list` on purpose.
-
-          §11 makes `cancel_read`'s own answer the whole of what tells the user: "the
-          cancellation is a teardown and is converted into neither an outcome nor a
-          refusal … what tells the user is `cancel_read`'s own answer, which is the act
-          they performed". Every other place this page could say it is swept by
-          something: a row goes when the listing is re-read, and a park that was
-          withdrawn or settled is not in the listing; the panel's fault slot is cleared
-          by every listing read, and the answer this act interrupted starts one on its
-          way out, whether it ends in a rejected request, a refusal, a reply that cannot
-          be rendered, or a perfectly good `ALREADY_SETTLED` (§6).
-
-          So the act's answer gets a node of its own, which nothing but the act and the
-          owner's own press of **What is waiting for your answer** writes. It is a
-          statement and not a fault, and it survives the refresh the answer triggers —
-          adversarial review found the same result being wiped by a different path on
-          three consecutive rounds, and this is the place that ends the class rather
-          than the third guard against it.
-        -->
-        <p id="cancellation-said" class="hint" hidden></p>
-        <!--
-          What became of an answer this page sent and never read a reply for
-          (ADR-0177 §7's fourth clause), in a node of its own and for the reason the
-          act's answer above has one.
-
-          One park now carries two acts, and each of them starts the listing read that
-          clears the panel's fault slot — so an account written into that slot is
-          erased by whichever of the two replies lands second, and which one that is
-          is the network's choice. Adversarial review found seven orderings of that one
-          fact over eight rounds, and the answer's account was the half still living in
-          the swept slot. It gets its own node here, both are written by one function
-          over the pair of states, and nothing but that function and the owner's own
-          press of **What is waiting for your answer** writes either.
-
-          It is `.account` and not `.fault` on purpose: it carries the fault's ink,
-          because an outcome that is not known is what it reports, but it is not in the
-          panel's fault slot and must not answer to the selector that asks whether that
-          slot is showing.
-        -->
-        <p id="answer-said" class="account" hidden></p>
-        <div id="confirmation-list"></div>
-      </section>
 
       <!--
         Notifications are rendered here and by no other means (ADR-0175 §9). No
