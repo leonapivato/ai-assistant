@@ -2727,17 +2727,25 @@ def test_a_deployment_still_setting_the_retired_email_variables_starts(
     An operator whose environment or ``.env`` still configures the email reader is
     not refused at load: ``Settings`` ignores a variable that names no field, so the
     hub starts, and nothing in it reads those variables again.
+
+    The suite's autouse fixture switches ``.env`` loading off, so the ``dotenv``
+    case points ``Settings`` back at a file of its own, and both cases carry one
+    live setting beside the retired six, whose loaded value proves the carrier
+    was read at all.
     """
-    monkeypatch.chdir(tmp_path)
+    variables = {**_RETIRED_EMAIL_VARIABLES, "ASSISTANT_TIMEZONE": "America/New_York"}
     if carrier == "dotenv":
-        lines = (f"{name}={value}" for name, value in _RETIRED_EMAIL_VARIABLES.items())
-        (tmp_path / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        dotenv = tmp_path / ".env"
+        lines = (f"{name}={value}" for name, value in variables.items())
+        dotenv.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        monkeypatch.setitem(Settings.model_config, "env_file", dotenv)
     else:
-        for name, value in _RETIRED_EMAIL_VARIABLES.items():
+        for name, value in variables.items():
             monkeypatch.setenv(name, value)
 
     settings = load_settings()
 
+    assert settings.timezone == "America/New_York", "the carrier was read"
     for name in _RETIRED_EMAIL_VARIABLES:
         field = name.removeprefix("ASSISTANT_").lower()
         assert field not in Settings.model_fields, field
