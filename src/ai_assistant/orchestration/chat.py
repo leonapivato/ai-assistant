@@ -93,10 +93,10 @@ _log = structlog.get_logger(__name__)
 #: (``HISTORY_REPLAY_BOUND``), so the window an input arrives with is as wide as it was.
 CHAT_WINDOW_SIZE: Final = 20
 
-#: The budget one activation the reader starts is given. The reader has no caller to
-#: hand it one (ADR-0029 §4), so it takes the turn budget the interfaces give a typed
-#: turn on today's wire — the gateway's ``_TURN_BUDGET`` and the CLI's ``--timeout``
-#: default.
+#: The budget one activation the reader starts is given, where the engine is built
+#: without one. The reader has no caller to hand it one (ADR-0029 §4), so the engine
+#: takes it as ``chat_turn_budget``; the composition root passes its own
+#: ``PHASES_TURN_BUDGET``, so this default holds only for an engine built without it.
 CHAT_TURN_BUDGET: Final = timedelta(seconds=60)
 
 #: How many positions one ``take_in`` call marks, and one ``taken_in`` call reads: the
