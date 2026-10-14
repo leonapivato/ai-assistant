@@ -1,10 +1,9 @@
-"""The chat's spokes in the hub: its reader, its writer, and the adapter between (ADR-0293).
+"""The chat's spokes in the hub: its reader and its writer (ADR-0293).
 
 The conversation channel's medium is the hub's chat space, and its spokes are in the
 hub (ADR-0293 §1:2): a **reader**, its sensor, which notices the user's new messages
 and brings them in as a push, and a **writer**, its actuator, which adds the
-assistant's messages. Until the phases send messages, an **adapter** writes what
-today's compose stage produced (§10).
+assistant's messages.
 
 **The reader** (§6). A user's message is recorded by the act that wrote it and starts
 nothing there; the engine tells this reader the conversation has a message, and the
@@ -35,12 +34,12 @@ is what the message links to (ADR-0303 §7:3). Where the phases write messages, 
 brings the activation that **wrote** each assistant message, by acting's effect record
 (ADR-0303 §7:1, ADR-0306 §5:3), read through the ``written`` reader it is handed.
 
-**The adapter and the writer** (§9, §10). The reply the compose stage produced is
-written as one assistant message into the conversation the input came from; a pass
-that ends without one writes the fixed *couldn't finish* message, listing any effect
-that did happen. A restart writes nothing (§9:2): an activation cancelled by a
-shutdown has its episode closed as interrupted and nothing is written for it, and the
-conversation's current state shows *interrupted* (§8:3).
+**The writer** (§9, §10). The phases write the activation's messages into the
+conversation the input came from as it runs, and a pass that cannot finish writes the
+fixed *couldn't finish* message, listing any effect that did happen
+(:func:`couldnt_finish`; ADR-0307 §3, ADR-0317 §3). A restart writes nothing (§9:2):
+an activation cancelled by a shutdown has its episode closed as interrupted and nothing
+is written for it, and the conversation's current state shows *interrupted* (§8:3).
 
 Nothing concrete is imported: the conversation store arrives by injection and is seen
 only through its Protocol (CLAUDE.md golden rule 1).
@@ -57,12 +56,9 @@ import structlog
 
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import (
-    TRANSCRIPT_MESSAGE_MAX_CHARS,
     DeletedMessage,
-    Disposition,
     MessageAuthor,
     NewMessage,
-    RouteOutcome,
     TranscriptMessage,
 )
 from ai_assistant.orchestration.conversations import conversation_channel, fitted_message
@@ -72,7 +68,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 
     from ai_assistant.core.protocols import ConversationStore
-    from ai_assistant.core.types import MessageReceipt, StepOutcome, TurnOutcome
+    from ai_assistant.core.types import MessageReceipt
 
 __all__ = [
     "CHAT_TURN_BUDGET",
@@ -81,8 +77,6 @@ __all__ = [
     "ChatInput",
     "ChatReader",
     "ChatWriter",
-    "chat_effects",
-    "chat_reply",
     "couldnt_finish",
 ]
 
@@ -158,54 +152,12 @@ class ChatInput:
         )
 
 
-def chat_effects(
-    outcome: TurnOutcome | None, *, step: StepOutcome | None = None
-) -> tuple[str, ...]:
-    """The effects a pass made, as the *couldn't finish* message lists them (§9:1).
-
-    An effect is what the pass did outside the conversation: a step it drove that ran
-    its tool, and a routed operation it performed that is not a listing. ``step`` is
-    the step a pass that raised had driven, where it had driven one; a pass that
-    returned carries its own.
-    """
-    effects: list[str] = []
-    driven = step if outcome is None else outcome.step
-    if driven is not None and driven.disposition is Disposition.EXECUTED:
-        effects.append("a step ran" if driven.tool_id is None else f"the tool {driven.tool_id} ran")
-    routed = None if outcome is None else outcome.routed
-    if routed is not None and routed.outcome is RouteOutcome.PERFORMED and routed.listing is None:
-        effects.append(f"the operation {routed.operation.value} was performed")
-    return tuple(effects)
-
-
 def couldnt_finish(effects: Sequence[str] = ()) -> NewMessage:
     """The fixed *couldn't finish* message, listing any effects that did happen (§9:1)."""
     text = COULDNT_FINISH
     if effects:
         text += _EFFECTS_INTRODUCED + "".join(f"\n- {one}" for one in effects)
     return NewMessage(author=MessageAuthor.ASSISTANT, text=text)
-
-
-def chat_reply(outcome: TurnOutcome | None, *, effects: Sequence[str] = ()) -> NewMessage:
-    """The adapter: what a pass the reader started writes into its conversation (§10).
-
-    The reply today's compose stage produced is written as one assistant message
-    (§10:1); one held past the transcript's bound is cut there and marked cut off, as
-    is a reply whose composing did not complete (§5:2, §6:16). A pass that ended
-    without a reply — it raised, its composing failed, or it parked on a
-    confirmation — writes the fixed *couldn't finish* message (§10:2), listing
-    ``effects``.
-    """
-    if outcome is None or outcome.reply is None:
-        return couldnt_finish(effects)
-    text = outcome.reply
-    cut = outcome.reply_degraded
-    if len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS:
-        text = text[:TRANSCRIPT_MESSAGE_MAX_CHARS]
-        cut = True
-    if not text.strip():
-        return couldnt_finish(effects)
-    return NewMessage(author=MessageAuthor.ASSISTANT, text=text, cut_off=cut)
 
 
 class ChatWriter:
