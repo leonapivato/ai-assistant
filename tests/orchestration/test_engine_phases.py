@@ -1927,6 +1927,38 @@ async def test_a_later_activation_sees_what_an_earlier_one_wrote_under_its_episo
     assert effect.position == 4
 
 
+async def test_planning_is_shown_an_earlier_exchange_once_with_its_notes() -> None:
+    """ADR-0276 §3, read with ADR-0307 §5:6 and §6:1 (#2951), end to end.
+
+    The second message's planning is shown the first exchange as its two messages in
+    the place window, under the first activation's episode label, and that episode in
+    the episode window by its label and its notes, its texts said to be in the window.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(text="Hello!", notes="they opened with a greeting"),
+        RoundResponse(text="Again."),
+    )
+    harness = _harness(completer)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "hi")
+    await _settled(harness, conversation)
+    again = UserMessage(device_id=_PHONE.device_id, message_id="m-2", text="again")
+    await harness.engine.write_message(conversation, message=again)
+    await _all_settled(harness, conversation, 2)
+
+    rendered = completer.calls[1].messages[1].content
+    sent = json.loads(rendered)
+    taken, wrote, _input = sent["place_window"]
+    assert (taken["text"], wrote["text"]) == ("hi", "Hello!")
+    (episode,) = sent["episode_window"]
+    assert taken["episode"] == wrote["episode"] == episode["label"]
+    in_place = "shown in the place window under this label, not repeated here"
+    assert (episode["input"], episode["response"]) == (in_place, in_place)
+    assert episode["rounds"] == [{"message": in_place, "notes": "they opened with a greeting"}]
+    assert rendered.count('"Hello!"') == 1
+
+
 async def test_the_writers_read_keeps_only_a_message_done_in_the_conversation() -> None:
     """ADR-0306 §5:5: only a message done carries its position, in its own place."""
     completer = FakeToolCallingCompleter.scripted()

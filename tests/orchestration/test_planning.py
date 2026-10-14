@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 from structlog.testing import capture_logs
 
+from ai_assistant.core.diagnostics import diagnosed_activation
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
     ActivationDigest,
@@ -25,6 +26,8 @@ from ai_assistant.core.types import (
     ControllerStage,
     CostBasis,
     DataTier,
+    DiagnosticKind,
+    DiagnosticSource,
     DigestOutcome,
     EpisodeProcessingRecord,
     EpisodicMemory,
@@ -78,7 +81,7 @@ from ai_assistant.orchestration.planning import (
     RefusedCall,
     offered_tools,
 )
-from ai_assistant.testing import FakeToolCallingCompleter
+from ai_assistant.testing import FakeDiagnosticSink, FakeToolCallingCompleter
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -231,6 +234,7 @@ def _episode(
     origin: InputOrigin = InputOrigin.USER,
     rounds: Sequence[PlanningRound] = (),
     outcome: str | None = "Booked a table earlier.",
+    text: str = "the words they wrote",
 ) -> EpisodicMemory:
     end = StageEntry(
         stage=ControllerStage.END,
@@ -246,7 +250,7 @@ def _episode(
         trigger=RecordedChannelTrigger(
             target=NewConversation(),
             channel=None,
-            payload=RecordedTextInput(text="the words they wrote"),
+            payload=RecordedTextInput(text=text),
             context=ChannelContext(),
             reply=WholeTextReply(),
             origin=origin,
@@ -620,6 +624,193 @@ async def test_a_place_item_linking_to_an_activation_takes_its_episodes_label() 
     assert [item.get("episode") for item in sent["place_window"]] == ["E1", "E1", None]
     assert sent["place_window"][2]["is_the_input"] is True
     assert [episode["label"] for episode in sent["episode_window"]] == ["E1"]
+
+
+# --- the same exchange, shown once (ADR-0276 §3, ADR-0307 §5:6, §6:1; #2951) ---------------
+
+_IN_PLACE: Final = "shown in the place window under this label, not repeated here"
+
+
+def _exchange(*items: PlaceItem) -> PlaceWindow:
+    """A chat's place window: ``items``, then the input, which links to nothing."""
+    return PlaceWindow(
+        takes_message=True,
+        items=(*items, PlaceItem(PlaceAuthor.USER, "and tomorrow?", is_input=True)),
+    )
+
+
+def _linked(author: PlaceAuthor, text: str, episode_id: str = "activation:old") -> PlaceItem:
+    return PlaceItem(author, text, episode_id=episode_id)
+
+
+def _booked(**fields: Any) -> EpisodicMemory:
+    """The earlier exchange: one message taken in, one written, with episode notes."""
+    values: dict[str, Any] = {
+        "text": "Booked a table earlier.",
+        "notes": "they prefer early tables",
+    }
+    values.update(fields)
+    return _episode("activation:old", rounds=(_earlier(**values),))
+
+
+_BOOKED: Final = (
+    PlaceItem(PlaceAuthor.USER, "the words they wrote", episode_id="activation:old"),
+    PlaceItem(PlaceAuthor.ASSISTANT, "Booked a table earlier.", episode_id="activation:old"),
+)
+
+
+async def test_an_earlier_exchange_is_shown_once_and_its_episode_keeps_its_notes() -> None:
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(place=_exchange(*_BOOKED), episodes=(_booked(),), owner_records=True))
+    sent = _sent(completer)
+    # The messages stay in the place window, under the episode's label (§5:6).
+    assert [(one["text"], one.get("episode")) for one in sent["place_window"]] == [
+        ("the words they wrote", "E1"),
+        ("Booked a table earlier.", "E1"),
+        ("and tomorrow?", None),
+    ]
+    # The episode keeps its label and what only it carries, and says where its texts are.
+    (shown,) = sent["episode_window"]
+    assert shown["label"] == "E1"
+    assert shown["input"] == _IN_PLACE
+    assert shown["response"] == _IN_PLACE
+    assert shown["rounds"] == [{"message": _IN_PLACE, "notes": "they prefer early tables"}]
+    assert shown["ended"] == "completed: returned"
+    rendered = completer.last_call.messages[1].content
+    assert rendered.count("the words they wrote") == 1
+    assert rendered.count("Booked a table earlier.") == 1
+
+
+async def test_an_exchange_of_several_messages_each_way_is_shown_once() -> None:
+    """The input joins the messages taken in, and the response the messages written."""
+    episode = _episode(
+        "activation:old",
+        text="book us dinner\n\nfor two",
+        outcome="On it.\n\nBooked for 19:00.",
+        rounds=(
+            _earlier(text="On it."),
+            _earlier("round:2", follows="round:earlier", text="Booked for 19:00."),
+        ),
+    )
+    place = _exchange(
+        _linked(PlaceAuthor.USER, "book us dinner"),
+        _linked(PlaceAuthor.USER, "for two"),
+        _linked(PlaceAuthor.ASSISTANT, "On it."),
+        _linked(PlaceAuthor.ASSISTANT, "Booked for 19:00."),
+    )
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(place=place, episodes=(episode,)))
+    (shown,) = _sent(completer)["episode_window"]
+    assert (shown["input"], shown["response"]) == (_IN_PLACE, _IN_PLACE)
+    assert shown["rounds"] == [{"message": _IN_PLACE}, {"message": _IN_PLACE}]
+
+
+async def test_a_text_the_place_window_shows_only_in_part_is_shown_as_before() -> None:
+    """The window begins after the exchange's first messages: only the rest are dropped."""
+    episode = _episode(
+        "activation:old",
+        text="book us dinner\n\nfor two",
+        outcome="On it.\n\nBooked for 19:00.",
+        rounds=(
+            _earlier(text="On it."),
+            _earlier("round:2", follows="round:earlier", text="Booked for 19:00."),
+        ),
+    )
+    place = _exchange(
+        _linked(PlaceAuthor.USER, "for two"),
+        _linked(PlaceAuthor.ASSISTANT, "Booked for 19:00."),
+    )
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(place=place, episodes=(episode,)))
+    (shown,) = _sent(completer)["episode_window"]
+    assert shown["input"] == "book us dinner\n\nfor two"
+    assert shown["response"] == "On it.\n\nBooked for 19:00."
+    assert shown["rounds"] == [{"message": "On it."}, {"message": _IN_PLACE}]
+
+
+async def test_a_text_cut_to_the_excerpt_bound_is_still_matched_whole() -> None:
+    long = "x" * 150 + "y" * 150
+    episode = _episode("activation:old", text=long, outcome=long)
+    place = _exchange(_linked(PlaceAuthor.USER, long), _linked(PlaceAuthor.ASSISTANT, long))
+    stage, completer, _ = _stage(RoundResponse(text="ok"), RoundResponse(text="ok"))
+    await stage.plan(_inputs(place=place, episodes=(episode,)))
+    (shown,) = _sent(completer)["episode_window"]
+    assert (shown["input"], shown["response"]) == (_IN_PLACE, _IN_PLACE)
+    # An item that differs only past the bound is not that text.
+    other = "x" * 150 + "z" * 150
+    place = _exchange(_linked(PlaceAuthor.USER, other), _linked(PlaceAuthor.ASSISTANT, other))
+    await stage.plan(_inputs(place=place, episodes=(episode,)))
+    (shown,) = _sent(completer)["episode_window"]
+    assert shown["input"].startswith("x" * 150 + "y" * 50)
+    assert shown["response"].startswith("x" * 150 + "y" * 50)
+
+
+async def test_an_episode_no_place_item_links_to_is_rendered_whole() -> None:
+    # The same words, linked to nothing, or to another activation's episode.
+    place = _exchange(
+        PlaceItem(PlaceAuthor.USER, "the words they wrote"),
+        _linked(PlaceAuthor.ASSISTANT, "Booked a table earlier.", "activation:other"),
+    )
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(place=place, episodes=(_booked(),), owner_records=True))
+    (shown,) = _sent(completer)["episode_window"]
+    assert shown["input"] == "the words they wrote"
+    assert shown["response"] == "Booked a table earlier."
+    assert shown["rounds"] == [
+        {"message": "Booked a table earlier.", "notes": "they prefer early tables"}
+    ]
+
+
+async def test_an_item_someone_else_wrote_shows_nothing_of_an_episode() -> None:
+    """Its text is never shown (ADR-0307 §9:2), so the episode's own text stays."""
+    place = _exchange(_linked(PlaceAuthor.OTHER, "the words they wrote"))
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(place=place, episodes=(_episode("activation:old"),)))
+    (shown,) = _sent(completer)["episode_window"]
+    assert shown["input"] == "the words they wrote"
+
+
+async def test_a_shown_exchange_s_notes_still_follow_the_readers_audience() -> None:
+    """ADR-0307 §6:4, ADR-0312 §4: withheld notes stay absent, with nothing said."""
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(place=_exchange(*_BOOKED), episodes=(_booked(),), owner_records=False))
+    (shown,) = _sent(completer)["episode_window"]
+    assert shown["rounds"] == [{"message": _IN_PLACE}]
+    assert "prefer early" not in completer.last_call.messages[1].content
+
+
+async def test_a_marked_note_of_a_shown_exchange_is_still_outside_content_read() -> None:
+    """ADR-0303 §3:6, ADR-0307 §4:3: dropping its texts does not drop the mark."""
+    episode = _booked(notes="the email said 19:00", notes_marked=True)
+    stage, completer, _ = _stage(RoundResponse(text="Noted.", notes="check the time"))
+    planned = await stage.plan(
+        _inputs(place=_exchange(*_BOOKED), episodes=(episode,), owner_records=True)
+    )
+    (shown,) = _sent(completer)["episode_window"]
+    (one,) = shown["rounds"]
+    assert one["message"] == _IN_PLACE
+    assert one["notes"] == "the email said 19:00"
+    assert one["notes_outside_content"]
+    assert planned.round.notes_marked is True
+
+
+async def test_the_diagnostic_record_keeps_the_request_with_the_exchange_shown_once() -> None:
+    """ADR-0314 §4: planning's given entry is the request as it was rendered."""
+    completer = FakeToolCallingCompleter(RoundResponse(text="On it."))
+    sink = FakeDiagnosticSink()
+    stage = PlanningStage(
+        completer=completer, recorder=_Recorder(), excerpt_chars=200, now=_now, diagnostics=sink
+    )
+    with diagnosed_activation("a1", clock=_now):
+        await stage.plan(
+            _inputs(place=_exchange(*_BOOKED), episodes=(_booked(),), owner_records=True)
+        )
+    (given,) = sink.of(DiagnosticSource.PLANNING, DiagnosticKind.GIVEN)
+    _, request = given.model_dump(mode="json")["body"]["messages"]
+    assert request["content"] == completer.last_call.messages[1].content
+    (shown,) = json.loads(request["content"])["episode_window"]
+    assert (shown["input"], shown["response"]) == (_IN_PLACE, _IN_PLACE)
+    assert shown["rounds"] == [{"message": _IN_PLACE, "notes": "they prefer early tables"}]
 
 
 async def test_labels_hold_for_the_activation_and_new_ones_continue_the_count() -> None:
