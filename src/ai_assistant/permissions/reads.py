@@ -19,8 +19,7 @@ ADR-0097 §4's reason applied to a read: ``PermissionDecision.tool`` is a requir
 ``ToolDefinition`` embedded by value, a read has no declaration, and synthesising
 one would put "a fabricated record into the one store whose entire premise is that
 its records are not fabricated". ``SqliteAuditTrail``'s invariants compare
-``tool``, ``parameters_digest``, ``step_id`` and ``execution_id``, none of which a
-read has.
+``tool`` and ``parameters_digest``, neither of which a read has.
 
 **One class satisfying two Protocols**, structurally: a driver names
 :class:`~ai_assistant.core.protocols.SourceReadRecorder` and can reach only

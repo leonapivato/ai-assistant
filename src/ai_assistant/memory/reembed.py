@@ -445,12 +445,11 @@ def _derived(
     searchable on a store that was only re-embedded — so :func:`_verify` compares
     this tuple against the blob for every row before anything is moved.
 
-    **``occurred_at`` is here for exactly that reason, one axis on** (ADR-0237 §1).
-    It binds before ``search``'s ranking cut and before ``select``'s, which it can
-    only do from a column; a rebuild that carried the blob and left the column
-    ``NULL`` would leave every window filter reaching *nothing* while every record
-    round-tripped intact — the same quiet failure as ``valid_from``'s, in the other
-    direction.
+    **``occurred_at`` is here for a like reason** (ADR-0237 §1 added the column).
+    Episode inspection orders and pages by it, which it can only do from a column; a
+    rebuild that carried the blob and left the column ``NULL`` would sort every
+    episode last and drop it from every later page while every record round-tripped
+    intact — the same quiet failure as ``valid_from``'s, in the other direction.
 
     **The channel pair is here for the same reason again** (ADR-0283 §1): a channel's
     reads and its deletion enumeration are served from those two columns alone, so a

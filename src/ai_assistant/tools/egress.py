@@ -268,7 +268,7 @@ class IndeterminateTransmissionError(ToolError):
     could not be read. ADR-0017 §3 names the distinction this exists for —
     "otherwise a timeout is indistinguishable from a successful disclosure" — and
     ADR-0148 §9 maps it onto the step's ``INDETERMINATE`` outcome, which ADR-0014
-    §4's recovery scan is the reconciliation path for.
+    §4's recovery scan was the reconciliation path for until it retired (ADR-0309 §5).
 
     **Not** an :class:`EgressTransportError`, and the split is the whole point:
     every member of that hierarchy is a refusal that transmitted nothing, and
@@ -1883,7 +1883,7 @@ class _SmtpSession:
                 written and the verdict could not be read. This is the case
                 ADR-0017 §3 names — "a timeout is indistinguishable from a
                 successful disclosure" — and it is reported as itself rather than
-                as a failure, so ADR-0014 §4's recovery scan has something true to
+                as a failure, so a reconciliation has something true to
                 reconcile.
 
                 **``OSError`` and ``TransportError`` are caught here and
@@ -2042,7 +2042,7 @@ class HttpsExchangeError(ToolError):
     **It is not** :class:`IndeterminateTransmissionError` **either, and for a
     reason about the far end rather than about this class.** That type exists
     because an SMTP message may or may not have been accepted, and ADR-0014 §4's
-    recovery scan is the reconciliation path for the difference. A search changes
+    recovery scan was the reconciliation path for the difference. A search changes
     nothing at the far end — ADR-0231 §5 decides ``reversibility=REVERSIBLE`` on
     exactly that ground, "a search is a **read** of a remote index: nothing at the
     far end changes" — so there is no effect to reconcile. What did happen, in

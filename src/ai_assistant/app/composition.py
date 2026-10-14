@@ -334,15 +334,14 @@ _CONFLICT_PROBE_OVERSHOOT: Final = 2
 #: anything runs.
 #:
 #: Empty by default, in which case key 6 ranks every candidate equally and a
-#: genuine tie stays ``AMBIGUOUS_CAPABILITY``. It lives here rather than in
-#: ``Settings`` because ADR-0144 §4 puts it at the composition root and §7 scopes
-#: a *user-facing* preference out — that needs durable per-user policy state with
-#: its own data-rights obligations, filed as #1101. Until then §5 names the
-#: recovery in full and it runs through this line: an operator reads the tied ids
-#: off the ``step_capability_ambiguous`` log record, names one here, **restarts**
-#: — the snapshot is taken at construction and never re-read — and re-runs the
-#: still-``PENDING`` step. An id naming no registered tool is permitted and
-#: matches nothing; naming one twice is refused at construction.
+#: genuine tie stays a tie, on which authorizing does not do the call. It lives
+#: here rather than in ``Settings`` because ADR-0144 §4 puts it at the composition
+#: root and §7 scopes a *user-facing* preference out — that needs durable per-user
+#: policy state with its own data-rights obligations, filed as #1101. Until then
+#: the recovery runs through this line: an operator names one of the tied tools
+#: here and **restarts** — the snapshot is taken at construction and never re-read.
+#: An id naming no registered tool is permitted and matches nothing; naming one
+#: twice is refused at construction.
 TOOL_PREFERENCE: Final[tuple[str, ...]] = ()
 
 # --- The phases (ADR-0309 §2:6, §4) ---------------------------------------------
@@ -588,8 +587,8 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             when given; see :func:`build_composition`.
 
     Returns:
-        A ready :class:`Engine`. Drive it with ``converse``/``resume`` and close
-        it with ``aclose`` when the session ends.
+        A ready :class:`Engine`. Drive it through its operations and close it
+        with ``aclose`` when the session ends.
 
     Raises:
         ConfigurationError: Whatever :func:`build_composition` raises, unchanged.
@@ -729,8 +728,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     sixth somewhere else would be a second wiring convention bought for nothing.
 
     Returns:
-        A :class:`Composition`: the ready :class:`Engine` — drive it with
-        ``converse``/``resume`` and close it with ``aclose`` when the session ends
+        A :class:`Composition`: the ready :class:`Engine` — drive it through its
+        operations and close it with ``aclose`` when the session ends
         — beside the trace sink this build opened and the conflict probe's effective
         ``search`` limit it produced, which ADR-0119 §9's startup stamp records and
         cannot read off ``Settings``.
@@ -774,8 +773,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     # costs one worker at most, which is still bounded, and each consumer then owns
     # its own failure.
     #
-    # **The calendar has two consumers: the request-path facet and ADR-0132's
-    # producer**, and ADR-0132 §3 requires the producer's read to be its own — "The
+    # **The calendar had two consumers: the request-path facet, retired with the
+    # old path's context provider (ADR-0309 §5), and ADR-0132's producer**, and
+    # ADR-0132 §3 requires the producer's read to be its own — "The
     # producer performs its own ``Reader.read()`` on its own schedule, and derives
     # nothing from the facet path's reading". It has no ingestion consumer, because
     # scheduled ingestion into memory is retired (ADR-0294 §1); the count follows
@@ -783,8 +783,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     # (ADR-0320 §3), and returns only through the channel model's design of an
     # email capability.
     #
-    # **Nothing reads through a facet reader since the old path's context provider
-    # was retired** (ADR-0309 §5). Each is still built for its identity and location:
+    # **Nothing reads through the facet reader since the old path's context provider
+    # was retired** (ADR-0309 §5). It is still built for its identity and location:
     # the grant operations list it as a grantable source, and ADR-0199 §3 reads the
     # calendar's name below. Whether the facet goes too is its own decision.
     #
@@ -987,8 +987,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             ),
         )
         opened.append(trail.close)
-        # Durable plan/execution state, so a parked AWAITING_APPROVAL step survives
-        # a restart and can be recovered through the façade (ADR-0049, ADR-0052; #318).
+        # The durable plan store: an activation's stop record and acting's effect
+        # records (ADR-0297 §1, ADR-0306 §6), which survive a restart.
         plans = SqlitePlanStore(path=directory / "plans.db")
         opened.append(plans.close)
         # The conversation index (ADR-0074 §9). Both durations come from settings and
@@ -1027,9 +1027,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # instance lock already covers, opened by the same process, and closed in the
         # same ordered shutdown.
         #
-        # **One object, passed four times** (ADR-0185 §4, ADR-0186 §10): as a
-        # `SourceReadRecorder` to each of the three drivers, and **whole, as the
-        # `SourceReadTrail`, to the engine**. Structural typing is what makes that
+        # **One object, passed twice** (ADR-0185 §4, ADR-0186 §10): as a
+        # `SourceReadRecorder` to the one driver left, the upcoming-event stage, and
+        # **whole, as the `SourceReadTrail`, to the engine**. Structural typing is what makes that
         # sound, and the narrowing is the *annotation on the driver's constructor*
         # rather than anything done here — what a driver cannot do is name `recent`,
         # which is what keeps ADR-0093 §5's forbidden cursor out of a sensor's reach.
@@ -1039,7 +1039,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # is the design: the drivers write and cannot read, the façade reads and does
         # not write — authoring a row stays on the seam that gated the read (ADR-0185
         # §5), and ADR-0186 §4's refusal of a promoted `record` is one store over the
-        # same rule. That all four positions hold the **same instance** is a
+        # same rule. That both positions hold the **same instance** is a
         # composition-root obligation no type can state: a façade wired to a second
         # trail would answer a user's history from a store nothing writes to, which
         # is worse than an error, since it is indistinguishable from the truthful
@@ -1560,14 +1560,14 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # reads and the ceiling the seam enforces cannot disagree — while an
             # adapter reaching this member acquires no route to an admission.
             spend=trail,
-            # The very trail the three drivers record into, handed over **whole**
-            # here and narrowed to `SourceReadRecorder` at each of them (ADR-0185 §4,
+            # The very trail the upcoming-event driver records into, handed over
+            # **whole** here and narrowed to `SourceReadRecorder` there (ADR-0185 §4,
             # ADR-0186 §10). This is the only position that names the wide seam, and
             # it is what makes `recent_reads` and `export_reads` answer about the
             # reads that actually happened rather than about an empty second store.
             reads=reads,
-            # ADR-0276's understanding stage, over the **same** model seam routing and
-            # the planner reach through — the routing-over-retrying provider built
+            # ADR-0276's understanding stage, over the **same** model seam the phases
+            # reach through — the routing-over-retrying provider built
             # above, which carries ADR-0011's retry policy. The stage reads no store
             # and receives no goal, plan, memory retrieval or context state.
             understanding=UnderstandingStage(
@@ -1697,7 +1697,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # **Its own reader, its own grant scope, its own cadence** — three
             # independences ADR-0132 states separately because each is a different
             # ADR's rule. The reader is not shared (§3, ADR-0096 §5); the read is
-            # gated on `NOTIFY` and on nothing else, so a live `INGEST` or `FACET`
+            # gated on `NOTIFY` and on nothing else, so a live `INGEST`
             # grant on this calendar authorises it not at all (§2, ADR-0133 §2);
             # and its interval is its own field (§4).
             #
@@ -1848,9 +1848,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # store this root constructs.
             #
             # **The store's face reaches the engine and nothing else** (ADR-0242 §13,
-            # ADR-0238 §14). It is handed here and to `SearchFooting` above, and to no
-            # other subsystem: no `interfaces` module imports it, and `uv run
-            # lint-imports` is what keeps that true rather than this comment. A surface
+            # ADR-0238 §14). It is handed here and to no other subsystem: no
+            # `interfaces` module imports it, and `uv run lint-imports` is what keeps
+            # that true rather than this comment. A surface
             # is given records by the three operations and reads no store, which is
             # golden rule 3 — a renderer handed this face would hold `record`, `revoke`
             # and `export`, and a remote client could not perform the read at all.
@@ -2109,8 +2109,8 @@ def ensure_model_credentials(settings: Settings) -> None:
     **Deliberately not part of :func:`build_engine`, and that is the decision
     rather than a detail.** For a one-shot CLI the present behaviour is right and
     #530 says so in as many words: the failure lands on the command that needed a
-    credential, and the commands that did not — ``beliefs``, ``learn``,
-    ``questions``, ``answer``, ``forget``, none of which touch a model — are not
+    credential, and the commands that did not — ``beliefs`` and ``forget`` among
+    them, neither of which touches a model — are not
     blocked by its absence. Folding this into ``build_engine`` would make every
     one of them start failing without a key: a regression introduced by a fix, for
     a defect the CLI does not have.

@@ -2772,10 +2772,11 @@ class Gateway:
         than what is already there**, and ADR-0175 §6 states the accounting rather
         than hiding it: ADR-0168 §6's residual — "script running on the gateway's own
         origin defeats both halves… it can simply issue requests the browser will
-        authenticate" — has covered ``converse`` since milestone 13, and a turn can
-        approve a tool, execute it and durably commit a non-idempotent effect. So
-        this adds a destructive operation to a surface that already carried a more
-        destructive one, and adds no new class of residual.
+        authenticate" — covered ``converse`` from milestone 13 until it retired
+        (ADR-0309 §5:4), and a turn could approve a tool, execute it and durably
+        commit a non-idempotent effect. So this added a destructive operation to a
+        surface that already carried a more destructive one, and no new class of
+        residual.
         """
         named = _required_string(_payload(request), "conversation_id")
         destroyed = await self._relayed(partial(self._engine.forget_conversation, named))

@@ -427,8 +427,7 @@ async def _claimed(
 
     **Every ``AssistantError`` this append raises is an exit before the callable
     is entered**, so each qualifies on ADR-0034 §1's *second* ground — "the
-    contract says the exit precedes the callable" — and the executor commits
-    ``RUNNING → FAILED`` on the window rather than on a list of causes. The one
+    contract says the exit precedes the callable". The one
     branch where an ``AssistantError`` is not what leaves is an external
     cancellation pending: there the ``CancelledError`` leaves carrying the
     append's failure as its cause, and ADR-0029 §4's classification governs.

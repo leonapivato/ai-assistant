@@ -671,8 +671,8 @@ class _UpstreamWatchingGate:
     ``asyncio.Timeout.__aexit__`` calls ``uncancel`` on its way out **whatever** the
     exception was, so a gate that catches the deadline's cancellation and raises an
     ordinary fault instead leaves the caller with a fault and a count that never
-    moved — and the expiry would be reported as ADR-0241 §8's ``SEARCH_FAILED``
-    rather than as §4's own member. This object sits inside that context manager, so
+    moved — and the expiry would be reported as an ordinary fault rather than as §4's
+    own member. This object sits inside that context manager, so
     it observes the cancellation while it is still on the task.
 
     Attributes:
@@ -786,11 +786,12 @@ class WebSearchEgress:
        ADR-0154 §1 designates. Then §10's transcription and minting, here.
 
     **A claim left open states, as its own state, that the search may have reached the
-    provider, and nothing reconciles it** (§6). ``orchestration``'s recovery scan finds
-    a durable ``RUNNING`` *step* and completes the open claims under its approval; a
-    search decision has no step, so that scan never reaches this claim and this class
-    does not teach it to. What that costs is nothing: the reconciliation exists to stop
-    **two** records disagreeing, and a search produces one.
+    provider, and nothing reconciles it** (§6). ``orchestration``'s recovery scan,
+    which completed the open claims under a durable ``RUNNING`` *step*'s approval,
+    retired with the old path (ADR-0309 §5); a search decision never had a step, so
+    that scan never reached this claim. What that costs is nothing: the
+    reconciliation exists to stop **two** records disagreeing, and a search produces
+    one.
 
     **Every source reason is returned and none is raised** (§17). What *does* leave
     :meth:`search` is a fault that no :class:`SearchRefusal` member names: a call that
@@ -801,9 +802,7 @@ class WebSearchEgress:
     :class:`~ai_assistant.core.errors.ToolBindingError`,
     :class:`~ai_assistant.core.errors.ToolError`,
     :class:`~ai_assistant.tools.egress.TransportPinError` or one of ADR-0192's — the
-    classes ``ToolInvoker.invoke`` raises for the same facts — and a servicer degrades
-    the turn on them exactly as ADR-0226 §5 requires it to degrade on anything else,
-    recording ADR-0241 §8's ``SEARCH_FAILED``.
+    classes ``ToolInvoker.invoke`` raises for the same facts.
 
     **The deadline is the caller's and this class holds none** (ADR-0241 §1, §3).
     :meth:`search` takes it as a required keyword with no default, so there is no
@@ -915,15 +914,12 @@ class WebSearchEgress:
         construction of the ``ToolCall`` are all the caller's (§6).
 
         Args:
-            query: The query one composition wrote for this turn, carried byte for byte
-                from that servicing's ``QueryOutcome.query`` (§11).
+            query: The query the call asked for, carried byte for byte (§11).
 
         Returns:
             The request to rule on: this searcher's declaration by value, exactly the
-            origin and the query as arguments, and ``None`` for ``step_id``,
-            ``execution_id`` and ``egress_binding`` — a ``WEB_SEARCH`` decision has no
-            plan step and no execution (§6), and the binding is derived by
-            ``EgressBinder`` and accepted from nobody (§6).
+            origin and the query as arguments, and ``None`` for ``egress_binding`` —
+            the binding is derived by ``EgressBinder`` and accepted from nobody (§6).
         """
         parameters: dict[str, FrozenJson] = {
             ORIGIN_ARGUMENT: self._transport.origin,
@@ -1038,8 +1034,7 @@ class WebSearchEgress:
                 # nothing was cancelled and this is a fault the callable raised.
                 # ADR-0241 §7 says what it must *not* become: not a teardown that
                 # ends the turn, and not an outcome. So it leaves as an
-                # `AssistantError`, which is what reaches ADR-0226 §5's degradation
-                # and §8's `SEARCH_FAILED`. The claim is left open, exactly as it is
+                # `AssistantError`. The claim is left open, exactly as it is
                 # for a `TransportPinError` raised at the same point — the honest
                 # state for a send that may have happened (§6).
                 msg = (
@@ -1195,10 +1190,10 @@ class WebSearchEgress:
         except Exception:
             # **An ordinary fault out of the admission is not evidence that nothing was
             # cancelled either.** A gate that catches the caller's cancellation and
-            # raises an `AuditError` instead would otherwise reach ADR-0226 §5's
-            # degradation and ADR-0241 §8's `SEARCH_FAILED`, letting a cancelled turn
-            # degrade and carry on. The transport's counterpart is checked inside
-            # `act`; this is the same rule at the one stage above it.
+            # raises an `AuditError` instead would otherwise leave as an ordinary
+            # fault, letting a cancelled activation carry on. The transport's
+            # counterpart is checked inside `act`; this is the same rule at the one
+            # stage above it.
             self._deliver_absorbed(admitting)
             if not watched.interrupted:
                 # Nothing interrupted the admission, so the fault is the whole of what

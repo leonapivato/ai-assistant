@@ -844,7 +844,7 @@ async def _shut_down(  # noqa: PLR0913 — one parameter per thing ADR-0083 §4'
     After that join no job is in flight, so the engine's drain has nothing of the
     scheduler's left to wait for. The scheduler's own loop is the one thing
     ``Engine._tracked`` does not cover — every *job* is a public engine call and is
-    therefore in ``_inflight`` already, drained exactly as a ``converse`` is.
+    therefore in ``_inflight`` already, drained exactly as any other engine call is.
 
     Phase A and phase B are the engine's (§4): it owns the tracked set, so bounding
     and cancelling can only be done there. What this function adds is the account of

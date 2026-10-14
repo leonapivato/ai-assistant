@@ -34,9 +34,8 @@ search's.
 **No place crosses the *planning* seam, which is the seam ADR-0260 §3 is about.** The
 coordinate is read from ``Settings`` by the composition root, held by the forecaster as
 its own configuration, and written into a request the policy and the trail see. It is
-rendered to no model and accepted from none, there is no ``ReadAsk`` field for it, and a
-planner cannot name it — so the failure mode ADR-0231 §1 is built against is unreachable
-rather than forbidden.
+rendered to no model and accepted from none, and a planner cannot name it — so the
+failure mode ADR-0231 §1 is built against is unreachable rather than forbidden.
 
 **The reference provider, and what it is for** (ADR-0260 §12, §14). The documented
 format below is *this lane's* reference provider — the M33 walkthrough's forecast half
@@ -637,9 +636,7 @@ class ForecastEgress:
     transport invented with nothing cancelled. Each is
     :class:`~ai_assistant.core.errors.ToolBindingError`,
     :class:`~ai_assistant.core.errors.ToolError`,
-    :class:`~ai_assistant.tools.egress.TransportPinError` or a ``ValueError``, and a
-    servicer degrades the turn on them exactly as ADR-0226 §5 requires it to degrade on
-    anything else.
+    :class:`~ai_assistant.tools.egress.TransportPinError` or a ``ValueError``.
 
     **One ask is one read, and the count is this class's** (§3). Exactly one exchange is
     opened on every outcome read off the wire, and **none** on the ADR-0148 §6 refusal
@@ -746,9 +743,8 @@ class ForecastEgress:
         Returns:
             The request to rule on: this forecaster's declaration by value, exactly the
             origin and the configured coordinate as arguments, and ``None`` for
-            ``step_id``, ``execution_id`` and ``egress_binding`` — a forecast decision
-            has no plan step and no execution (§6), and the binding is derived by
-            ``EgressBinder`` and accepted from nobody.
+            ``egress_binding`` — the binding is derived by ``EgressBinder`` and
+            accepted from nobody (§6).
         """
         parameters: dict[str, FrozenJson] = {
             ORIGIN_ARGUMENT: self._transport.origin,

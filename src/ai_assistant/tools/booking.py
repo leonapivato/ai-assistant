@@ -293,9 +293,8 @@ BOOKING_AVAILABILITY: Final = ToolDefinition(
   nothing: the provider is in-process, reaches no metered service and holds no account
   that could be billed. Nothing derives it from, defaults it from or keeps it in step
   with the configured prices.
-- **Nothing is declared for the effect key**: it is derived at ``ToolCall.effect_key``,
-  and *"Derived rather than minted, supplied, configured or carried as a field"* is
-  relied on rather than restated.
+- **Nothing is declared for an effect key**: the one ``ToolCall.effect_key`` derived
+  retired with the old path (ADR-0309 §5).
 """
 
 

@@ -119,8 +119,7 @@ resting on recorded external content, it did not, or the origin was **never
 recorded** — the third distinct from the other two and never shown as ``False``,
 as "no", or as an absence (ADR-0184 §2, ADR-0186 §7). And **a row is never
 rendered as a live permission, a transmission, or a question still open**
-(ADR-0186 §8): nothing here composes a
-:class:`~ai_assistant.core.types.Confirmation`, offers an approval control,
+(ADR-0186 §8): nothing here composes a confirmation, offers an approval control,
 computes ``authorises``, or says a call went anywhere.
 
 **The export is one JSON document on standard output and nothing else on that
@@ -6724,25 +6723,6 @@ def _print_hint(line: str) -> None:
     console.print(line, soft_wrap=True)
 
 
-# --- the routed account (ADR-0197 §10) --------------------------------------
-#
-# **Rendered beside the reply, never instead of it, and never suppressed.** ADR-0197
-# §10 binds here for ADR-0170 §6's reason and sharpens it: on a routed pass the
-# composing stage saw two enum values and nothing else (§6), so the worst prose it
-# can produce is prose about the wrong thing, while the account beside it is typed
-# data from the store that no prompt influenced. Where the two disagree the account
-# is correct by construction, and nothing here — no setting, no flag — resolves that
-# disagreement in the reply's favour.
-#
-# **Every word around the values is this adapter's own, selected by the enum
-# member** (§7's card clause, read across the whole account). No free text the
-# router produced reaches the screen: the operation and the outcome are closed
-# vocabularies, and the listing is records the store already held. Each is put
-# through :func:`_safe` on the way out (§10's last clause) — a stored `source` is
-# whatever a reader declared it to be, and a belief's content is the user's own
-# words, neither of which this terminal may be handed unescaped.
-
-
 def _render_conversations(
     page: tuple[ConversationSummary, ...], *, limit: int, offset: int
 ) -> None:
@@ -6941,9 +6921,9 @@ def _outside_warrant(belief: Belief | BeliefSummary) -> str:
 
     **The arm reaches the belief listing alone**, and that is scope rather than
     oversight. §5 binds "every surface that renders the belief listing"; a
-    :class:`~ai_assistant.core.types.Question` carries a *proposal* and no proposal is
-    ever episodic — an observer "distils
-    evidence, it does not manufacture it" (ADR-0077 §2) — and no episode reaches a
+    ``Question``, until the old path retired it (ADR-0309 §5), carried a *proposal*
+    and no proposal is ever episodic — an observer "distils
+    evidence, it does not manufacture it" (ADR-0077 §2) — and no episode reached a
     deferral at all, because capture writes through ``write_atomic`` and never through
     ``MemoryWriter.ingest``, so ADR-0106 §6's gate is not on its path (ADR-0223 §8).
     A lane that ever routes capture through the writer inherits this arm's question
@@ -8513,19 +8493,13 @@ def _egress_disclosure_phrase(provenance: DiscloserProvenance) -> str:
 def _recipient_line(protocol: DestinationProtocol | None, canonical: str | None) -> str:
     """The selected-recipient arm of a canonical destination set member.
 
-    Shared by the confirmation's set and the recorded binding's, because ADR-0186
-    §7 renders a history row's recipients under **ADR-0178 §7's** obligations rather
-    than a second set of its own: "a second, differently worded floor would be a
-    second vocabulary to keep in step with the first, and the failure would be a
-    history that renders a disclosure the card showed, or shows one it did not". One
-    function is that argument made structural — the two surfaces cannot drift
-    because there is nothing to drift.
-
-    The two member types differ only in their **account** arm, which is why the
-    account is each caller's and the recipient is this function's:
-    :class:`~ai_assistant.core.types.ConfirmationDestination` carries the account's
-    identity where :class:`~ai_assistant.core.types.CanonicalDestination` carries
-    the whole account (ADR-0178 §3).
+    The recorded binding's, rendered under **ADR-0178 §7's** obligations because
+    ADR-0186 §7 renders a history row's recipients under them rather than a second
+    set of its own: "a second, differently worded floor would be a second vocabulary
+    to keep in step with the first, and the failure would be a history that renders
+    a disclosure the card showed, or shows one it did not". The confirmation card
+    this function was shared with retired with the old path (ADR-0309 §5). The
+    account is the caller's and the recipient is this function's.
 
     Args:
         protocol: The member's protocol, as the value carries it.
@@ -8620,7 +8594,7 @@ def _origin_line(*, planned_with_external_content: bool) -> str:
 # --- rendering the audit trail (ADR-0186 §7, §8) ----------------------------
 # A history row is not a question, and that difference is the whole of this
 # block. ADR-0178 §7's content obligations are **borrowed** rather than restated,
-# so the same helpers render the same facts here as on a confirmation card; what
+# so the same helpers render the same facts here as the confirmation card did; what
 # is added is the two things a record needs that a question does not — a third
 # origin state (ADR-0184 §2), and a bar on presenting a ruling as an event.
 
@@ -8733,7 +8707,7 @@ def _render_recorded_egress(
     The confirmation card's facts in its order — the connected
     account's identity, the call's origin, the canonical destination set in both
     forms, and the payload description — because they *are* the same facts:
-    ADR-0178 §5 builds a ``ConfirmationEgress`` from the recorded decision, so a
+    ADR-0178 §5 built a ``ConfirmationEgress`` from the recorded decision, so a
     second wording here would be a second vocabulary to keep in step with the first.
 
     **The labels are the one thing that changes, and the change is §8's third

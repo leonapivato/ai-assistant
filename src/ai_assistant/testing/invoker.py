@@ -897,7 +897,7 @@ def invoker_over(
 async def authorised(trail: FakeAuditTrail, call: ToolCall) -> ToolCall:
     """Record ``call``'s decision in ``trail``, and return the call unchanged.
 
-    What ``StepRunner`` does in front of every execution, available to a test that
+    What the retired ``StepRunner`` did in front of every execution, available to a test that
     drives the seam directly. ADR-0192 §1 has the ledger require the decision it is
     passed to equal the one the store holds under that id, so a call whose
     authorisation was never recorded is refused ``UnrecordedAuthorisationError``

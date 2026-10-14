@@ -696,14 +696,15 @@ class SqliteMemoryStore:
                 conn.execute("ALTER TABLE records ADD COLUMN valid_from INTEGER")
                 self._backfill_valid_from(conn)
             if "occurred_at" not in info:
-                # ADR-0237 §1's window axis binds before the ranking cut, and the
-                # instant it compares lives in the blob as ISO text of *variable
-                # precision* — the same reason ``valid_from`` became a column.
-                # Backfilled rather than left ``NULL`` because ``NULL`` is read as
-                # *no instant*, which is correct for every kind but the episodic
-                # one and wrong for every episode already stored: an un-backfilled
-                # column would make every captured episode unreachable by every
-                # window, silently.
+                # Episode inspection orders and pages by this instant (ADR-0237
+                # §1's window axis, which it was added for, retired with
+                # ``search``'s structured axes), and it lives in the blob as ISO
+                # text of *variable precision* — the same reason ``valid_from``
+                # became a column. Backfilled rather than left ``NULL`` because
+                # ``NULL`` is read as *no instant*, which is correct for every kind
+                # but the episodic one and wrong for every episode already stored:
+                # an un-backfilled column would sort every captured episode last
+                # and drop it from every later page, silently.
                 conn.execute("ALTER TABLE records ADD COLUMN occurred_at INTEGER")
                 self._backfill_occurred_at(conn)
             if "revision" not in info:
@@ -741,10 +742,10 @@ class SqliteMemoryStore:
             # is ``NULL``, which reads as an *open* window, so a not-yet-live
             # record would become eligible for every pre-filtered read.
             valid_from = self._micros_from_json(data, "valid_from", nested="validity")
-            # Recovered from the blob for ADR-0237 §1's window axis, for the reason
-            # the two beside it are: an un-backfilled ``occurred_at`` is ``NULL``,
-            # ``NULL`` is read as *no instant*, and every already-stored episode
-            # would then be unreachable by every window.
+            # Recovered from the blob, for the reason the two beside it are: an
+            # un-backfilled ``occurred_at`` is ``NULL``, ``NULL`` is read as *no
+            # instant*, and every already-stored episode would then fall out of
+            # episode inspection's order and paging.
             occurred_at = self._micros_from_json(data, "occurred_at")
             # ``about_person`` is left NULL rather than read out of ``data``: a
             # table this old predates the field, so its blobs carry no subject to
@@ -856,8 +857,8 @@ class SqliteMemoryStore:
         Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, like every other
         migration here, so the ``ADD COLUMN`` and the values it needs commit
         together or not at all — a half-backfilled column leaves every unvisited
-        episode reading as *no instant*, which is a record ADR-0237 §1 requires a
-        window filter to reach and this one would not.
+        episode reading as *no instant*, which episode inspection's order and
+        paging would then misplace.
 
         **Chunked, each chunk read whole before anything is written, and the first
         page unbounded**, for :meth:`_backfill_valid_from`'s reasons exactly: reads
@@ -1253,11 +1254,11 @@ class SqliteMemoryStore:
             if record.validity.valid_from is not None
             else None
         )
-        # ADR-0237 §1's window axis binds before the ranking cut and cannot reach
-        # into the blob to do it, so the instant is a column beside the three
-        # already there. ``NULL`` on every kind but the episodic one, which is the
-        # right value: a record carrying no ``occurred_at`` is reached by no window
-        # (§6), and ``NULL`` fails the ``IS NOT NULL`` the restriction leads with.
+        # Episode inspection orders and pages by the instant and cannot reach into
+        # the blob to do it, so it is a column beside the three already there
+        # (added for ADR-0237 §1's window axis, since retired). ``NULL`` on every
+        # kind but the episodic one, which is the right value: only an episode
+        # carries an ``occurred_at``.
         occurred_at = _to_micros(record.occurred_at) if isinstance(record, EpisodicMemory) else None
         # ADR-0283 §1's channel columns, from the same record the blob is. An upsert
         # rewrites them with every other column, and never to a different value once
@@ -1846,7 +1847,7 @@ class SqliteMemoryStore:
         asked for — where an unfiltered search raises only when the corrupt row is
         actually among the KNN's hits. That is a real amplification and it is
         accepted: the store is corrupt either way, the failure is a conforming
-        ``MemoryStoreError`` that ``LoopEngine._retrieve`` degrades on, and the
+        ``MemoryStoreError`` that a caller can degrade on, and the
         alternative — a ``json_valid`` guard that skips unreadable rows — would
         silently drop a live belief out of a band-scoped answer, which is worse than
         failing loudly. An indexed source column would remove it, and is the reason
@@ -1936,7 +1937,7 @@ class SqliteMemoryStore:
         # the subquery — before the decode path that used to translate that same
         # corruption. Unfiltered, a corrupt row surfaces as ``MemoryStoreError`` out
         # of ``_decode``; band-scoped and unwrapped it surfaced as a raw
-        # ``sqlite3.OperationalError``, which ``LoopEngine._retrieve`` does not
+        # ``sqlite3.OperationalError``, which ``LoopEngine._retrieve`` did not
         # catch, so a corrupt store aborted the turn instead of degrading it. An
         # earlier revision of this comment asserted the opposite and was wrong; the
         # case is pinned by test.
@@ -1954,7 +1955,7 @@ class SqliteMemoryStore:
         # renders it ``NULL``. The similarity is *undefined*, not zero and not
         # infinite, and ``1.0 - None`` raised ``TypeError`` — outside
         # ``MemoryStoreError``, so outside what ``LoopEngine._retrieve`` and
-        # ``_supplement`` catch, and it aborted a turn instead of degrading it.
+        # ``_supplement`` caught, and it aborted a turn instead of degrading it.
         #
         # **The floor, and not a drop**, which is the disposition both review
         # rounds of this change argued over and the texts settle. ADR-0128 §1

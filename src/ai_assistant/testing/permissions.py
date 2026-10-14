@@ -1950,7 +1950,8 @@ def _spend_refusal(decision_id: str) -> Callable[[str], AuthorisationSpentError]
 FakeInvocationLedger = FakeAuditTrail
 
 #: :class:`FakeAuditTrail` under the narrow face's name — the one ``orchestration``'s
-#: recovery scan is handed, which cannot express a claim at all.
+#: recovery scan was handed until it retired (ADR-0309 §5), which cannot express a
+#: claim at all.
 FakeInvocationCompleter = FakeAuditTrail
 
 #: :class:`FakeAuditTrail` under the spend faces' names (ADR-0194 §5). **One

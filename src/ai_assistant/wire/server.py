@@ -734,7 +734,7 @@ async def _serve_requests(  # noqa: PLR0913 — the engine, the two stream halve
     concurrency the engine does not offer.
 
     The watcher runs with **no idle deadline**, because the hub is not idle while a
-    request is in flight: a ``converse`` may legitimately take longer than
+    request is in flight: a request may legitimately take longer than
     ``hub_read_timeout``, and closing a working connection because the reply was
     slow would be the deadline defeating the purpose it was added for. The idle
     deadline applies where the hub genuinely is idle — waiting for the *first*
@@ -758,7 +758,7 @@ async def _serve_requests(  # noqa: PLR0913 — the engine, the two stream halve
     directions**, which is the clause a draft of that ADR stated only about the
     client. A poll on a connection that has carried anything else closes, and
     anything else on a delivery connection closes — because the serial server
-    accepts *sequential* frames happily, so a socket that completed a ``converse``
+    accepts *sequential* frames happily, so a socket that completed another request
     and then polled would claim a delivery slot out of the capacity §5 reserves for
     isolated pollers, with §2's "carrying no other request for its lifetime"
     contradicted and nothing to contradict it. Both are closes rather than typed

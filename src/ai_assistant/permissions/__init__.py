@@ -27,7 +27,7 @@ pure function — no clock, no id minting, no store — because a ``CONFIRM`` is
 answered by the user long after ``decide`` returns, so a policy that recorded
 its own rulings would put half the trail in this subsystem and half in
 `orchestration`. Nothing here forces a decision to be recorded; that obligation
-sits with the executor holding the ``approval_ref`` (issue #107).
+sits with the caller holding the ruling (issue #107).
 
 **Two subjects, and they are governed separately.** ``ActionRequest`` is about
 invoking a tool; a ``SourceGrant`` is about reading a connected source. ADR-0021

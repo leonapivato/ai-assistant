@@ -1,10 +1,10 @@
 """A canonical :class:`~ai_assistant.core.protocols.Reader` fake (ADR-0093 §10).
 
 The shared test double for the ``Reader`` contract, so a subsystem that drives a
-read — `orchestration`'s upcoming-event producer and `context`'s facet adapter —
-can exercise every branch of its own pipeline without a source on disk and
-without importing a concrete reader (``CLAUDE.md`` golden rule 1; ADR-0093 §2
-forbids importing ``ai_assistant.readers`` from a subsystem outright).
+read — `orchestration`'s upcoming-event producer — can exercise every branch of
+its own pipeline without a source on disk and without importing a concrete reader
+(``CLAUDE.md`` golden rule 1; ADR-0093 §2 forbids importing ``ai_assistant.readers``
+from a subsystem outright).
 
 It is scriptable to the **three states ADR-0093 §8 distinguishes**, which is what
 a consumer needs to test its own degradation path:
@@ -382,13 +382,11 @@ class FakeReader:
                 must be this fake's own: :class:`SourceReading`'s validator refuses
                 a facet naming a different source or carrying different instants,
                 which is what makes a mis-stamped script fail *here* rather than at
-                the consumer that lifted it into ``CurrentContext``. Annotated
+                a consumer. Annotated
                 :data:`~ai_assistant.core.types.ReadingFacet` — *any* member of the
                 union a reading may carry, not the calendar's alone (ADR-0140 §6).
                 A fake that admitted one concrete type could not model the reading
-                a second facet-bearing reader returns, and so could not drive the
-                adapter wired for it — nor the mis-wiring ADR-0096 §5 makes a
-                ``ContextError``, which needs a reading carrying the *other* one.
+                a second facet-bearing reader returns.
             failure: The **source-level** failure to model. When given, every read
                 raises :class:`~ai_assistant.core.errors.ReaderError` from it —
                 with a payload-free message carrying only this reader's identity
