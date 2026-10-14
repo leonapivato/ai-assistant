@@ -1196,9 +1196,9 @@ async def _configuration_stamp(now: Clock, sink: FakeTraceSink) -> None:
     refused to start because the instrument's clock was misconfigured would have
     let Tier 2 tracing become a boot dependency.
     """
-    await ConfigurationStamp(
-        sink=sink, retrieval_search_limit=10, conflict_search_limit=12, now=now
-    ).record(Settings(embedder=EmbedderKind.HASHING))
+    await ConfigurationStamp(sink=sink, conflict_search_limit=12, now=now).record(
+        Settings(embedder=EmbedderKind.HASHING)
+    )
 
 
 #: Every seam whose clock fault costs an observation and never the work: both

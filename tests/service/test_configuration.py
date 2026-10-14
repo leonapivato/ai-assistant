@@ -51,7 +51,6 @@ from ai_assistant.service.configuration import (
     RECONCILER_MAX_CONFLICTS,
     RETENTION_PURGE_ARMED,
     RETENTION_PURGE_SECONDS,
-    RETRIEVAL_SEARCH_LIMIT,
     SCHEDULER_CHUNK_SIZE,
     SCHEDULER_RUN_BUDGET_SECONDS,
     SEAM_STARTUP,
@@ -66,9 +65,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
-#: The figures a test hands the stamp in place of the composition root's. Chosen
+#: The figure a test hands the stamp in place of the composition root's. Chosen
 #: distinct from every default on the list so a key crossed with another fails.
-_RETRIEVAL_LIMIT = 7
 _CONFLICT_LIMIT = 102
 
 _INSTANT = datetime(2026, 8, 9, 10, 30, tzinfo=UTC)
@@ -79,10 +77,9 @@ def _clock() -> datetime:
 
 
 def _stamp(sink: Any, *, now: Any = _clock) -> ConfigurationStamp:
-    """A stamp over ``sink``, with the two cardinality figures fixed."""
+    """A stamp over ``sink``, with the cardinality figure fixed."""
     return ConfigurationStamp(
         sink=sink,
-        retrieval_search_limit=_RETRIEVAL_LIMIT,
         conflict_search_limit=_CONFLICT_LIMIT,
         now=now,
     )
@@ -226,7 +223,6 @@ async def test_a_default_deployment_records_its_effective_figures(settings: Sett
         # datable in the trace.
         EPISODE_RETENTION_FINITE: False,
         EMBEDDING_TIMEOUT_SECONDS: 30.0,
-        RETRIEVAL_SEARCH_LIMIT: _RETRIEVAL_LIMIT,
         CONFLICT_SEARCH_LIMIT: _CONFLICT_LIMIT,
         NOTIFICATION_QUEUE_LIMIT: 100,
         NOTIFICATION_RETENTION_FINITE: True,
@@ -442,17 +438,18 @@ async def test_a_moved_notification_cap_moves_the_recorded_mapping(tmp_path: Pat
     assert before != after
 
 
-async def test_the_two_cardinality_figures_come_from_the_caller(settings: Settings) -> None:
+async def test_the_cardinality_figure_comes_from_the_caller(settings: Settings) -> None:
     """§9's fourth clause: the effective limit, and not a control's own value.
 
-    Neither figure is a ``Settings`` field, so neither can be read here — "a
-    ``Settings`` dump would show neither". What the stamp records is what it was
-    handed, which is what the composition root produced.
+    The figure is not a ``Settings`` field, so it cannot be read here. What the stamp
+    records is what it was handed, which is what the composition root produced.
+    Recall's limit depends on each activation's data, so no key records it
+    (ADR-0319 §4).
     """
     metrics = dict((await _recorded(settings)).metrics)
 
-    assert metrics[RETRIEVAL_SEARCH_LIMIT] == _RETRIEVAL_LIMIT
     assert metrics[CONFLICT_SEARCH_LIMIT] == _CONFLICT_LIMIT
+    assert "retrieval_search_limit" not in metrics
 
 
 # --- The tier discipline (§2) ------------------------------------------------

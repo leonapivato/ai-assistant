@@ -8,11 +8,12 @@ shutdown path — everything ADR-0042 §2 requires of this layer.
 :func:`build_engine` is that build read down to its engine, and it stays the
 entry point for every caller that needs nothing else. What the second return
 value exists for is ADR-0119 §9's startup stamp: the configuration trace records
-the **effective** ``search`` limit of each cardinality control, and §9 is explicit
-that "the figure to record is the one the composition root actually produced" —
-because neither control is a ``Settings`` field, so "a ``Settings`` dump would
-show neither". :class:`Composition` is that figure leaving the one layer that
-knows it, beside the ``TraceSink`` the stamp writes through.
+the **effective** ``search`` limit of each cardinality control a startup figure can
+describe, and §9 is explicit that "the figure to record is the one the composition
+root actually produced", because the control is not a ``Settings`` field.
+:class:`Composition` is that figure leaving the one layer that knows it, beside the
+``TraceSink`` the stamp writes through. Recall's limit depends on each activation's
+data and is not stamped (ADR-0319 §4).
 """
 
 from __future__ import annotations
@@ -163,125 +164,15 @@ if TYPE_CHECKING:
     from ai_assistant.tools.registry import InMemoryToolRegistry
 
 
-#: What this layer tunes :class:`LearningLoop`'s retrieval to, and **passed
-#: explicitly rather than left to the constructor's default** (ADR-0119 §9).
-#:
-#: The value is the one ``orchestration`` already defaults to, so nothing about a
-#: deployment moves. What moves is *where the figure is decided*: §9 has the
-#: configuration stamp record "the **effective** ``search`` limit that control
-#: produces at the seam", and the honest figure is the one the composition root
-#: produced, not one this module re-states from memory beside a default it does
-#: not control. Passing it makes the two the same object of knowledge — a stamp
-#: reading this constant is reading exactly what the loop was built with, and a
-#: later change to ``orchestration``'s own default cannot make the record wrong.
-#:
-#: **No production retrieval is built with it any more.** The loop it tuned was the
-#: old path's, and the cutover deleted that path (ADR-0309 §5); the phases recall
-#: under ``RECALL_ITEM_LIMIT`` and search under ``PHASES_MEMORY_SEARCH_LIMIT``. The
-#: configuration stamp still records this figure as
-#: :attr:`Composition.retrieval_search_limit` until that field is decided again.
-#:
-#: **15 rather than 5, on measurement rather than taste** (#1163, #1029's scored
-#: pilot re-rank analysis). Over the retrieval misses whose gold record was
-#: *present in the store* — so a ranking failure, not an ingestion one — the
-#: gold-citing record's median cosine rank was 12, and 114 of 277 sat at ranks
-#: 6 to 10. A budget of 5 cut the answer off above almost all of them; 15 covers
-#: about 80% of that population, and the deeper page is the cheapest lever there
-#: is, because the records are already ranked and already in the store.
-#:
-#: **And 30 rather than 15, because complete intake removed the ceiling that made
-#: depth in beliefs worthless** (ADR-0162 §9). ADR-0160 §1 took the episodic bound
-#: to 15 on a correct reading of a store that no longer exists: the belief layer was
-#: saturated at 63.1%, "the ceiling of what its distilled records cite at all", so
-#: buying depth here bought nothing. Under ADR-0162 §1 the probe's belief-reach
-#: curve runs 55.1% at 5 to 81.2% at 50 and is still climbing, where the control's
-#: runs 31.2% to 38.8% and is flat by 15. On union all-gold-reached the probe swept
-#: 15+15 79.8%, 20+10 80.9%, 20+20 83.3%, **30+10 85.1%**, 30+15 86.5%, 30+30 88.6%,
-#: 50+10 88.4% — so 30+10 beats 20+20 at a comparable prompt size (~6.5k against
-#: ~5.9k characters) and beats the incumbent 15+15 by 5.3 points at about 1.5 times the
-#: context. Spending the marginal slot on the layer still returning new gold is
-#: ADR-0160's own reasoning applied to the store its ruling helped create.
-#:
-#: **It is provisional in a stated way, which is a cost this constant carries**
-#: (§9's third clause). Whatever the byte-budgeted single ranked pool ADR-0160 §5
-#: leaves open decides replaces it, and pilot 5's post-hoc attribution (ADR-0160 §3)
-#: re-tests it. No ratified clause fixed the old value — ADR-0160 §6 lists
-#: "``RETRIEVAL_LIMIT`` stays 15" among what that ADR does *not* decide, in unmarked
-#: text, which under ADR-0089 §3 supplies no obligation — so this is the same kind of
-#: composition-root tuning move on the same kind of evidence.
-#:
-#: What it costs is answer context: 5 records filled roughly 4KB, so this is
-#: about six times that in the prompt, per turn. That is the trade the
-#: evidence buys, and it is bounded on both sides — ADR-0119 §3's
-#: ``TRACE_RECORD_SET_CAP`` of 256 is still an order of magnitude away, so no
-#: traced read moves nearer to truncating and §9's diagnostic keeps saying the
-#: same thing about this deployment.
-RETRIEVAL_LIMIT: Final = 30
-
-#: How many episodes a turn's **supplementary** read may add to the answering
-#: prompt (ADR-0158 §3), beside — never out of — :data:`RETRIEVAL_LIMIT`.
-#:
-#: A composition-root constant rather than a
-#: :class:`~ai_assistant.core.config.Settings` field, and ADR-0158 §5 rules that
-#: placement: the belief budget is a composition constant and this is the same kind
-#: of thing, a cardinality control whose authority is measurement. The contrast
-#: that decides it is ``episode_retention``, which *is* a setting because ADR-0074
-#: §7 makes it a privacy choice the user owns. How many episodes help an answer is
-#: not a preference; it is a fact nobody has measured, and offering it as a knob
-#: would imply a user could know it.
-#:
-#: **30 against a belief budget of 30, and the two still never share.** ADR-0158 §3
-#: gives the supplement a budget of its own precisely so that
-#: :data:`RETRIEVAL_LIMIT`'s moves — bought for *beliefs*, on #1029's rank-miss
-#: measurement and then on ADR-0162 §9's reach sweep — are not handed back to
-#: episodes. What has changed is the evidence, not the separation: the bound began
-#: at 5 as a judgement standing in for a measurement, ADR-0160 §1 replaced it with
-#: one at 15 on a store where the belief layer was saturated, ADR-0162 §9 took it
-#: back to 10 on a store where it is not, and ADR-0224 §1 takes it to 30 on the
-#: #1844 replay's measured widening of the existing blind read.
-#:
-#: **Why 30 rather than 15, which was the cheaper arm** (ADR-0224 §1). The replay
-#: converts its reach measurement through pilot-5's own scored answers: 30+30 buys
-#: ≈ +3.6 points of LoCoMo accuracy where 30+15 buys ≈ +1.3, and it buys them for no
-#: additional model call, no new read, no envelope and no trigger. That is 2.3 points
-#: for the second half of the budget on a curve with no knee in it, and choosing
-#: between the two arms is a judgement rather than a reading of the measurement:
-#: what the larger one spends is prompt bytes on a budget nobody has bounded —
-#: ADR-0158 §5 left it open, and ADR-0224 §4 is honest that it is still unmeasured
-#: and now being spent from two directions at once. The owner made that call on
-#: 2026-09-02 and took the larger arm; the direction stays reversible in one
-#: integer, which a byte bound set on a guess would not be.
-#:
-#: **Why not 60, which the same replay measures higher still** (≈ +6.1pt): the
-#: ceiling below forbids it — 60 against a belief budget of 30 is a configuration
-#: asking for more transcript than belief — and ADR-0224 §2 takes the ceiling's side
-#: knowing that price.
-#:
-#: **Both numbers are provisional in a stated way** (ADR-0162 §9's third clause) —
-#: the byte-budgeted single ranked pool ADR-0160 §5 leaves open replaces them, and
-#: pilot 5's post-hoc attribution (ADR-0160 §3) re-tests them. That clause has
-#: already worked once rather than merely standing: the re-test it named is what
-#: moved this value, and it stays live for the next move. ADR-0160 §1's remaining
-#: half stands and is relied on here: no separately registered ablation arm is owed
-#: for the bound.
-#:
-#: **It may never exceed :data:`RETRIEVAL_LIMIT`**, which ``LearningLoop`` enforces
-#: at construction rather than trusting this line. That ceiling is where ADR-0158
-#: §3 puts the product thesis in checkable form: whatever the numbers become,
-#: nobody can configure a system that asks for more transcript than belief. At 30
-#: against 30 it is **met** rather than satisfied with slack, so ADR-0160 §2's
-#: admission that parity *meets* the ceiling is exercised rather than untouched and
-#: the coupling it warned about is live: this bound cannot rise unless
-#: :data:`RETRIEVAL_LIMIT` rises first, and a lane lowering the belief budget lowers
-#: this one with it (ADR-0224 §2).
-EPISODIC_SUPPLEMENT_LIMIT: Final = 30
-
-#: What this layer tunes :class:`MemoryIngestor`'s conflict ceiling to, passed
-#: explicitly for :data:`RETRIEVAL_LIMIT`'s reason.
+#: What this layer tunes :class:`MemoryIngestor`'s conflict ceiling to, **passed
+#: explicitly rather than left to the constructor's default** (ADR-0119 §9): the
+#: configuration stamp records the effective ``search`` limit it produces, and the
+#: honest figure is the one this build used, not one restated beside a default this
+#: module does not control.
 CONFLICT_LIMIT: Final = 100
 
 #: How many episodes the understanding stage's **episode window** holds (ADR-0276 §4),
-#: beside :data:`RETRIEVAL_LIMIT` on ADR-0158 §5's rule: a cardinality control whose
+#: on ADR-0158 §5's rule: a cardinality control whose
 #: authority is measurement, so a composition-root constant and never a
 #: :class:`~ai_assistant.core.config.Settings` field. Ten by recency is the owner's
 #: first guess with no measurement behind it (#2544, 2026-09-22), and the exit run is
@@ -524,8 +415,8 @@ class Composition:
     Returned by :func:`build_composition` and consumed by `service`, which stamps
     one ``CONFIGURATION`` trace per hub startup. Everything on it beyond the
     engine is there because the stamp cannot obtain it anywhere else: the sink is
-    opened here, and the two cardinality figures are properties of *how this layer
-    constructed two collaborators* rather than of any setting.
+    opened here, and the cardinality figure is a property of *how this layer
+    constructed a collaborator* rather than of any setting.
 
     **Narrow by construction.** The sink is typed as a
     :class:`~ai_assistant.core.protocols.TraceSink` and never as the concrete
@@ -538,10 +429,6 @@ class Composition:
     Attributes:
         engine: The ready façade, exactly as :func:`build_engine` returns it.
         trace_sink: The **append** seam of the trace store opened by this build.
-        retrieval_search_limit: :data:`RETRIEVAL_LIMIT`, the largest ``limit``
-            the old path's retrieval reached ``MemoryStore.search`` with. No
-            production retrieval is built with it since that path was deleted
-            (ADR-0309 §5); the stamp records it until the field is decided again.
         conflict_search_limit: The ``limit`` the ingestor's conflict probe reaches
             ``MemoryStore.search`` with — the ceiling **plus two** (ADR-0079 §1),
             which is the figure §9 requires and the control's own value is not.
@@ -549,7 +436,6 @@ class Composition:
 
     engine: Engine
     trace_sink: TraceSink
-    retrieval_search_limit: int
     conflict_search_limit: int
 
 
@@ -692,8 +578,8 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     """The engine alone, for every caller that needs nothing else (ADR-0042 §2).
 
     The composition root's entry point, unchanged in behaviour and in signature.
-    :func:`build_composition` is the same build with ADR-0119 §9's two extra
-    figures still attached; a caller that is not stamping a configuration trace
+    :func:`build_composition` is the same build with ADR-0119 §9's extra figure
+    still attached; a caller that is not stamping a configuration trace
     wants this one.
 
     Args:
@@ -845,9 +731,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     Returns:
         A :class:`Composition`: the ready :class:`Engine` — drive it with
         ``converse``/``resume`` and close it with ``aclose`` when the session ends
-        — beside the trace sink this build opened and the two effective ``search``
-        limits it produced, which ADR-0119 §9's startup stamp records and cannot
-        read off ``Settings``.
+        — beside the trace sink this build opened and the conflict probe's effective
+        ``search`` limit it produced, which ADR-0119 §9's startup stamp records and
+        cannot read off ``Settings``.
 
     Raises:
         ConfigurationError: If the data directory cannot be prepared — blocked by
@@ -1604,8 +1490,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # to join within (ADR-0119 §8).
         #
         # **``conflict_limit`` is passed rather than defaulted** (ADR-0119 §9). It
-        # is one of the two cardinality controls whose *effective* ``search`` limit
-        # the configuration stamp records, and §9 puts the figure to record here:
+        # is the cardinality control whose *effective* ``search`` limit the
+        # configuration stamp records, and §9 puts the figure to record here:
         # "the figure to record is the one the composition root actually produced".
         # A default filled in by `memory` would leave this layer stating a number
         # it did not choose. The value is `memory`'s own, so nothing moves.
@@ -2131,13 +2017,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # The **same** trace store again, narrowed a third way (ADR-0119 §7): a
         # ``TraceSink`` for `service`'s startup stamp, which appends one
         # ``CONFIGURATION`` trace and can no more walk the store than an emitter
-        # inside the pipeline can. The two figures beside it are §9's effective
-        # ``search`` limits, read off the constants this build tuned the two
-        # collaborators with rather than off ``Settings``, which holds neither.
+        # inside the pipeline can. The figure beside it is §9's effective ``search``
+        # limit, read off the constant this build tuned the ingestor with rather than
+        # off ``Settings``, which does not hold it. Recall has none (ADR-0319 §4).
         return Composition(
             engine=engine,
             trace_sink=traces,
-            retrieval_search_limit=RETRIEVAL_LIMIT,
             conflict_search_limit=CONFLICT_LIMIT + _CONFLICT_PROBE_OVERSHOOT,
         )
     except BaseException:
