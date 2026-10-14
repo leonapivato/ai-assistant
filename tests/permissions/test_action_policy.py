@@ -1250,7 +1250,6 @@ async def test_the_forecast_read_asks_nothing_and_the_turns_other_send_is_unaffe
     assert forecast.outcome is PermissionOutcome.ALLOW
     assert forecast.authorised_by == FORECAST_ACCOUNT.reference
     assert forecast.authorised_subject is None
-    assert forecast.authorised_goal is None
     assert grants.call_count == 0
 
     elsewhere = await policy.decide(

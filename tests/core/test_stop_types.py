@@ -5,7 +5,6 @@ from __future__ import annotations
 from ai_assistant.core.errors import (
     ActivationStoppedError,
     AssistantError,
-    ClaimRefused,
     ClaimStopped,
 )
 from ai_assistant.core.types import (
@@ -45,4 +44,3 @@ def test_activation_stopped_error_is_an_assistant_error_carrying_only_a_message(
     assert isinstance(error, AssistantError)
     assert not isinstance(error, ClaimStopped)
     assert error.args == ("stopped",)
-    assert not isinstance(ClaimStopped("x"), ClaimRefused)

@@ -3,15 +3,14 @@
 ADR-0074 §9's coordinator ruling in one object, as ADR-0283 partially supersedes
 it. A conversation's history, membership and deletion are the episodes on its
 channel (``ChannelIdentity("conversation", <id>)``), which the ``MemoryStore``
-holds; the ``ConversationStore`` holds the conversation and two small facts about
-it, its delivery rows and the observer's watermark. A ``ConversationStore`` asked
+holds; the ``ConversationStore`` holds the conversation and its chat space. A
+``ConversationStore`` asked
 whether a conversation still has live episodes would have to reach into memory and
 break golden rule 1, so this stage — the one place that legitimately holds both
 handles by injection — owns the cross-store sequences:
 
-* **history** (ADR-0283 §4, §10; ADR-0284 §6:2) — every live episode of the
-  conversation in number order within the replay bound, each paired with its
-  delivery row;
+* **history** (ADR-0283 §4; ADR-0284 §6:2) — every live episode of the
+  conversation in number order within the replay bound;
 * **deletion** (§8, as ADR-0293 §2:3 partially supersedes it) — stamp, which
   deletes the transcript, then drop the record conditionally, and **destroy no
   episode**: deleting a conversation forgets nothing;
@@ -38,7 +37,7 @@ through their Protocols (CLAUDE.md golden rule 1).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
@@ -73,7 +72,7 @@ from ai_assistant.orchestration.activation_writer import ActivationWriter
 from ai_assistant.orchestration.payloads import canonical_payload, check_payload
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
     from datetime import timedelta
 
     from ai_assistant.core.clock import Clock
@@ -87,8 +86,6 @@ if TYPE_CHECKING:
         DeviceConversation,
         MemoryRecord,
         MessageReceipt,
-        SpokenDelivery,
-        SpokenDeliveryReport,
         UserMessage,
     )
 
@@ -585,26 +582,18 @@ def fit_stream_chunk(chunk: ChatStreamChunk, *, max_bytes: int) -> ChatStreamChu
 
 @dataclass(frozen=True, slots=True)
 class AssembledHistory:
-    """A conversation's recent episodes, with their delivery facts (ADR-0283 §4, §10).
+    """A conversation's recent episodes (ADR-0283 §4).
 
     Attributes:
         records: The channel's live episodes, oldest first in number order
             (ADR-0283 §1), within the replay bound. A deleted or expired episode is
             simply not on the channel's live read, so a conversation that lost a turn
             still resumes and never resurrects the deleted one.
-        deliveries: What a device reported playing of each of those episodes, keyed
-            by the episode qualified (ADR-0205 §5, ADR-0283 §10). **Every such
-            episode of the tail and not only the previous one**, because a report may
-            name a turn that is no longer the previous one. It is read with one
-            ``deliveries`` call for the episodes this page returned, so a delivery
-            fact travels with the episode it qualifies and never without it; an
-            episode with no delivery row is simply absent.
         degraded: Whether reading them failed outright, which costs the turn its
             continuity exactly as a failed retrieval costs it its personalisation.
     """
 
     records: tuple[MemoryRecord, ...] = ()
-    deliveries: Mapping[str, SpokenDelivery] = field(default_factory=dict)
     degraded: bool = False
 
 
@@ -705,13 +694,12 @@ class ConversationLifecycle:
         return await self._conversations.mark_active(conversation_id)
 
     async def history(self, conversation_id: str) -> AssembledHistory:
-        """The conversation's recent episodes, oldest first, with their deliveries (§4).
+        """The conversation's recent episodes, oldest first (§4).
 
         ADR-0283 §4:1: a ``get`` that answers nothing for a stamped or absent
         conversation, then the conversation's channel read with
-        ``MemoryStore.channel_episodes`` with the replay bound as ``limit`` — and
-        then, by §10, one ``deliveries`` call for the episodes it returned, each paired
-        with its episode. No turn is read from the conversation store.
+        ``MemoryStore.channel_episodes`` with the replay bound as ``limit``. No turn
+        is read from the conversation store.
 
         **Every episode, and no eligibility** (ADR-0284 §6:2, superseding ADR-0283
         §4:1's ``episode_model_eligible=True``): a failed, interrupted or outside
@@ -723,7 +711,7 @@ class ConversationLifecycle:
         deleted, expired or never-landed episode is a gap here rather than a fault.
 
         Returns:
-            The records and their deliveries, and whether reading them failed
+            The records, and whether reading them failed
             outright — which a stamped or absent conversation counts as, exactly as
             the turn index's refusal of it did.
         """
@@ -734,72 +722,12 @@ class ConversationLifecycle:
                 conversation_channel(conversation_id), limit=HISTORY_REPLAY_BOUND
             )
             records: list[MemoryRecord] = [entry.record for entry in page.entries]
-            delivered = (
-                await self._conversations.deliveries(
-                    conversation_id, episode_ids=[record.id for record in records]
-                )
-                if records
-                else {}
-            )
-            # ADR-0205 §5 / ADR-0283 §10: paired with the episode it qualifies, so a
-            # fact whose episode is not in this page is never carried.
-            deliveries: dict[str, SpokenDelivery] = {
-                record.id: delivered[record.id] for record in records if record.id in delivered
-            }
         except ConversationStoreError, MemoryStoreError:
             # Losing continuity costs the answer its history, not its usefulness —
             # so the turn goes on, saying so, exactly as a failed retrieval does.
             _log.warning("conversation_history_degraded", stage="history", exc_info=True)
             return AssembledHistory(degraded=True)
-        return AssembledHistory(records=tuple(records), deliveries=deliveries)
-
-    async def record_delivery(self, conversation_id: str, report: SpokenDeliveryReport) -> bool:
-        """Apply one device's report to the turn it names (ADR-0205 §1, §3).
-
-        **One store call and no sequence**, which is why this is short: the store
-        owns all three of §3's conditions and decides them under its own
-        per-conversation exclusion, so there is nothing here to compose and nothing
-        for a caller to re-derive. It sits on this stage rather than on the engine
-        because this stage is where the ``ConversationStore`` handle lives.
-
-        **A benign miss is discarded rather than raised** (§1). A report naming a
-        turn this conversation does not carry — an index entry deleted or reclaimed,
-        an id belonging to another conversation, a turn already stamped — performs
-        nothing and returns ``False``, and the call that carried it goes on: a benign
-        state must not cost the owner the turn they just spoke.
-
-        **A store fault degrades it too, and that is this stage's judgement rather
-        than a ratified clause.** ADR-0205 leaves it open; the reason to degrade is
-        capture's own — the report is a fact about a turn that has already happened,
-        and losing it costs a later prompt one input, where raising would throw away
-        the turn the owner is speaking now. It is logged rather than swallowed.
-
-        **An unknown conversation still raises**, because that is not a fact about
-        the report at all: the same id is about to be handed to :meth:`begin`, which
-        refuses it for the same reason, so answering it here would only move the
-        refusal one line later.
-
-        Args:
-            conversation_id: The conversation the report is about.
-            report: The device's report, naming its turn by episode id.
-
-        Returns:
-            Whether a row was stamped — the store's own answer, relayed
-            (ADR-0283 §6:4) — and ``False`` where a store fault was degraded.
-
-        Raises:
-            UnknownConversationError: If the conversation is absent or stamped
-                deleted.
-        """
-        try:
-            return await self._conversations.record_delivery(
-                conversation_id, episode_id=report.episode_id, delivery=report.delivery
-            )
-        except UnknownConversationError:
-            raise
-        except ConversationStoreError:
-            _log.warning("spoken_delivery_unrecorded", stage="record_delivery", exc_info=True)
-            return False
+        return AssembledHistory(records=tuple(records))
 
     # --- deletion (§8) -------------------------------------------------------
 

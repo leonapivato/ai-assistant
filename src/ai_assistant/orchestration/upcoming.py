@@ -607,7 +607,6 @@ class UpcomingEventStage:
             # already sitting in, and would make a day-long entry interruptible for
             # a day. At 14:01 the meeting at 14:00 is not news.
             expires_at=start,
-            goal_id=None,
             confidence=CONFIDENCE,
             # §7: stated by the producer and never defaulted. The reader's
             # proposals over the identical content state the same tier, and a

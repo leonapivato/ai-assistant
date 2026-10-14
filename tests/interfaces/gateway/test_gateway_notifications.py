@@ -239,7 +239,7 @@ async def test_the_listing_carries_no_evidence_beside_the_ruling() -> None:
     and ``retention`` are the reconsideration job's bookkeeping.
     """
     engine = _engine()
-    await _hold(engine, goal_id="goal-1", references=("rec-1",))
+    await _hold(engine, references=("rec-1",))
     async with _harness(engine) as one:
         _, body = await one.whole("POST", "/notifications", {})
 
@@ -247,7 +247,6 @@ async def test_the_listing_carries_no_evidence_beside_the_ruling() -> None:
             "confidence",
             "sensitivity",
             "references",
-            "goal_id",
             "candidate_key",
             "reconsider_at",
             "retention",

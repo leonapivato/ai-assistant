@@ -9,9 +9,9 @@ it holds no history — a conversation's turns are the episodes on its channel i
 ``MemoryStore`` (ADR-0283 §1, §4).
 
 It honours the whole contract, including the parts a dict gets for free only if
-they are written down: the per-conversation mutation exclusion, the stamped-once
-delivery rows, and the tombstone's asymmetric visibility (hidden from every
-presenting read, still enumerable by the sweeps).
+they are written down: the per-conversation mutation exclusion and the
+tombstone's asymmetric visibility (hidden from every presenting read, still
+enumerable by the sweeps).
 
 It holds ADR-0293's chat space as the store does: each conversation's transcript,
 "my devices" and each conversation's devices, the change stream as one list of
@@ -73,7 +73,6 @@ from ai_assistant.core.types import (
     MessageDeletedChange,
     MessageReceipt,
     SendOutcome,
-    SpokenDeliveryState,
     TranscriptMessage,
     TranscriptPage,
     UtcInstant,
@@ -86,7 +85,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import ChatChange, NewMessage, SpokenDelivery
+    from ai_assistant.core.types import ChatChange, NewMessage
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: One past the largest value a paging argument accepts — the signed 64-bit
@@ -116,19 +115,14 @@ _DEFAULT_TOMBSTONE_GRACE = timedelta(hours=1)
 #: How many times :meth:`FakeConversationStore.start` re-mints before giving up.
 _START_RETRY_BUDGET = 8
 
-#: The most episode ids one :meth:`FakeConversationStore.deliveries` call takes
-#: (ADR-0283 §6:5). Duplicated from the production store rather than shared, for
-#: :data:`_PAGE_BOUND`'s reason.
-_MAX_DELIVERY_IDS: Final = 1000
-
 #: ``record_turn``'s two checked arguments go through ``core``'s own annotated types,
 #: exactly as the production store's do, so the two refuse the same values.
 _EPISODE_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
 _INSTANT: Final[TypeAdapter[datetime]] = TypeAdapter(UtcInstant)
 
-#: The most ids or positions one chat-space call takes (ADR-0293): the page bound
-#: ``deliveries`` already sets, for the same one-page-one-call reason. Duplicated from
-#: the production store rather than shared, for :data:`_PAGE_BOUND`'s reason.
+#: The most ids or positions one chat-space call takes (ADR-0293), so one page is one
+#: call. Duplicated from the production store rather than shared, for
+#: :data:`_PAGE_BOUND`'s reason.
 _MAX_NAMED: Final = 1000
 
 #: The page sizes the chat-space reads default to. The snapshot's is the figure
@@ -272,9 +266,7 @@ def _check_page_bound(name: str, value: object) -> None:
         raise ValueError(msg)
 
 
-def _checked_turn(
-    episode_id: object, occurred_at: object, delivery: SpokenDelivery | None
-) -> tuple[str, datetime]:
+def _checked_turn(episode_id: object, occurred_at: object) -> tuple[str, datetime]:
     """Check ``record_turn``'s arguments before anything is read (ADR-0283 §6:3).
 
     Duplicated from the production store rather than shared, for :data:`_PAGE_BOUND`'s
@@ -284,15 +276,9 @@ def _checked_turn(
         The episode id and the instant, as ``core`` normalises them.
 
     Raises:
-        ValueError: If ``delivery`` is given and is not ``UNKNOWN``, ``episode_id``
-            is not a non-blank ``str``, or ``occurred_at`` is not an aware instant.
+        ValueError: If ``episode_id`` is not a non-blank ``str``, or ``occurred_at``
+            is not an aware instant.
     """
-    if delivery is not None and delivery.state is not SpokenDeliveryState.UNKNOWN:
-        msg = (
-            f"record_turn writes only an UNKNOWN delivery, got {delivery.state.value}: "
-            f"a device's report reaches a row through record_delivery (ADR-0283 §6:3)"
-        )
-        raise ValueError(msg)
     try:
         checked_id = _EPISODE_ID.validate_python(episode_id, strict=True)
     except ValidationError as exc:
@@ -307,33 +293,6 @@ def _checked_turn(
         )
         raise ValueError(msg) from exc
     return checked_id, checked_at
-
-
-def _checked_episode_ids(episode_ids: object) -> list[str]:
-    """Check ``deliveries``' ids before anything is read (ADR-0283 §6:5).
-
-    Duplicated from the production store rather than shared, for :data:`_PAGE_BOUND`'s
-    reason. A bare ``str`` is refused by name rather than read as its characters.
-
-    Returns:
-        The ids, as a list in the order given.
-
-    Raises:
-        ValueError: If ``episode_ids`` is a ``str`` or not a sequence, holds more than
-            :data:`_MAX_DELIVERY_IDS` ids, or holds an element that is not a ``str``.
-    """
-    if isinstance(episode_ids, (str, bytes)) or not isinstance(episode_ids, Sequence):
-        msg = f"episode_ids must be a sequence of str, got {describe_untrusted(episode_ids)}"
-        raise ValueError(msg)
-    ids = list(episode_ids)
-    if len(ids) > _MAX_DELIVERY_IDS:
-        msg = f"episode_ids holds {len(ids)} ids; at most {_MAX_DELIVERY_IDS} are read at once"
-        raise ValueError(msg)
-    for one in ids:
-        if type(one) is not str:
-            msg = f"episode_ids holds an id that is not a str: {describe_untrusted(one)}"
-            raise ValueError(msg)
-    return ids
 
 
 @dataclass(slots=True)
@@ -429,8 +388,6 @@ class FakeConversationStore:
         self._grace = tombstone_grace
         self._purge_batch = purge_batch
         self._conversations: dict[str, Conversation] = {}
-        #: ADR-0283 §6's delivery rows: per conversation, episode id to delivery.
-        self._deliveries: dict[str, dict[str, SpokenDelivery]] = {}
         #: One entry per conversation currently being mutated, and only those:
         #: :meth:`_exclusive` discards an entry once nobody holds it (#453).
         self._locks: dict[str, _Exclusion] = {}
@@ -681,7 +638,6 @@ class FakeConversationStore:
                 if conversation.id in self._conversations:
                     continue
                 self._conversations[conversation.id] = conversation
-                self._deliveries[conversation.id] = {}
                 # ADR-0293 §2:1, §3:1: empty, on "my devices" as they stand.
                 devices = self._my_devices
                 self._messages[conversation.id] = {}
@@ -732,95 +688,28 @@ class FakeConversationStore:
         *,
         episode_id: str,
         occurred_at: datetime,
-        delivery: SpokenDelivery | None = None,
     ) -> Conversation | None:
         """Record that a conversational episode landed, under the exclusion (ADR-0283 §6:2).
 
         **Read and write inside the one exclusion**, which is what makes a ``None``
         here the writer's deletion verification (§7:2): a ``stamp_deleted`` or a
-        ``drop_if_eligible`` lands wholly before or wholly after it. The delivery
-        row is written only where none exists, so a retried capture cannot reset a
-        stamped delivery (ADR-0205 §1).
+        ``drop_if_eligible`` lands wholly before or wholly after it.
 
         The argument checks are before the exclusion is taken and before anything
         is read, which is "locally, before any I/O" (§6:3).
 
         Raises:
-            ValueError: If ``delivery`` is not ``UNKNOWN``, ``episode_id`` is blank,
-                or ``occurred_at`` is not an aware instant.
+            ValueError: If ``episode_id`` is blank, or ``occurred_at`` is not an
+                aware instant.
         """
-        checked_id, checked_at = _checked_turn(episode_id, occurred_at, delivery)
+        _, checked_at = _checked_turn(episode_id, occurred_at)
         async with self._exclusive(conversation_id):
             conversation = self._conversations.get(conversation_id)
             if conversation is None or conversation.deleted_at is not None:
                 return None
             recorded = conversation.model_copy(update={"last_turn_at": checked_at})
             self._conversations[conversation_id] = recorded
-            if delivery is not None:
-                # ADR-0205 §1: a row already held for the episode stands as it is.
-                self._deliveries[conversation_id].setdefault(checked_id, delivery)
             return recorded
-
-    async def record_delivery(
-        self, conversation_id: str, *, episode_id: str, delivery: SpokenDelivery
-    ) -> bool:
-        """Stamp the episode's delivery row if it is still ``UNKNOWN`` (ADR-0283 §6:4).
-
-        **Read and write inside the one exclusion** (ADR-0205 §3), which is what the
-        suite's two-reports-racing
-        cases are asserting against: the exclusion hands the loop back before this
-        reads anything, so a second report really has to queue and really does find
-        the state the first left.
-
-        The ``UNKNOWN`` refusal is before the exclusion is taken and before anything
-        is read, which is "locally, before any I/O".
-
-        Raises:
-            ValueError: If ``delivery.state`` is ``UNKNOWN``.
-            UnknownConversationError: If the id names nothing or names a stamped
-                conversation.
-        """
-        if delivery.state is SpokenDeliveryState.UNKNOWN:
-            msg = (
-                "record_delivery does not carry an UNKNOWN delivery: that value is written "
-                "by capture through record_turn, and a device that does not know reports "
-                "nothing (ADR-0205 §2, §3)"
-            )
-            raise ValueError(msg)
-        async with self._exclusive(conversation_id):
-            self._live(conversation_id)
-            held = self._deliveries[conversation_id]
-            current = held.get(episode_id)
-            if current is None or current.state is not SpokenDeliveryState.UNKNOWN:
-                # Any of ADR-0205 §3's conditions failing: the episode belongs to
-                # another conversation or to nothing, or its row already carries a
-                # stamp. An episode with no row is not given one by this operation.
-                return False
-            held[episode_id] = delivery
-            return True
-
-    async def deliveries(
-        self, conversation_id: str, *, episode_ids: Sequence[str]
-    ) -> Mapping[str, SpokenDelivery]:
-        """Return the delivery rows the conversation holds among ``episode_ids``.
-
-        Read inside the modelled resource, like every other read (#492). An absent or
-        stamped conversation answers with an empty mapping, and the mapping is a
-        fresh one on every call.
-
-        Raises:
-            ValueError: If ``episode_ids`` is a ``str``, holds more than 1000 ids, or
-                holds an element that is not a ``str``.
-        """
-        ids = _checked_episode_ids(episode_ids)
-        if not ids:
-            return {}
-        async with self._resource.held():
-            conversation = self._conversations.get(conversation_id)
-            if conversation is None or conversation.deleted_at is not None:
-                return {}
-            held = self._deliveries[conversation_id]
-            return {one: held[one] for one in ids if one in held}
 
     async def stamped_conversation_ids(
         self,
@@ -883,7 +772,7 @@ class FakeConversationStore:
             return True
 
     async def drop_if_eligible(self, conversation_id: str) -> bool:
-        """Remove the record and its delivery rows if still eligible, under the exclusion.
+        """Remove the record and what is kept under it if still eligible, under the exclusion.
 
         Re-checks eligibility here rather than trusting the caller's earlier
         reading, which is what stops a reclaim destroying a conversation the user
@@ -909,7 +798,6 @@ class FakeConversationStore:
                 )
             if not eligible:
                 return False
-            self._deliveries.pop(conversation_id, None)  # ADR-0283 §6:7
             ends = self._readers_of(conversation_id)
             self._clear_chat_of(conversation_id)
             del self._conversations[conversation_id]

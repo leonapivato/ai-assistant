@@ -8,7 +8,7 @@ types follow in their own lane.
 
 What stays is pinned here, each value built locally rather than from a fake that no
 longer exists: the bound a user can state (``BoundKind``, ``ValueBound``), the tool
-declaration's own refusals (``system_supplied``, ``bounded_arguments``), the fields
+declaration's own refusal (``system_supplied``), the fields
 ``ActionRequest`` and ``PermissionRuling`` still carry, the one canonical encoding, and
 ``Settings``' absence of any authorization field.
 """
@@ -25,15 +25,12 @@ from pydantic import ValidationError
 from ai_assistant.core.config import Settings
 from ai_assistant.core.types import (
     ActionRequest,
-    BoundedArgument,
     BoundKind,
     CapabilityEffect,
     CapabilityResult,
     CostBasis,
     DataTier,
     Idempotency,
-    PermissionOutcome,
-    PermissionRuling,
     Reversibility,
     RiskLevel,
     ToolCost,
@@ -317,150 +314,7 @@ def test_a_terms_bound_is_non_empty_duplicate_free_and_keeps_the_users_order() -
         terms_bound("flexible", "flexible")
 
 
-# --- ADR-0266 §7: the declaration's own refusals -----------------------------
-
-
-def test_a_declaration_declaring_a_system_supplied_key_at_a_kind_is_not_constructible() -> None:
-    """ADR-0266 §7, restating §3's protection one field over (arms 68, 6(b)).
-
-    **The rule is preserved and its carrier moved.** §3 made a row whose coverage
-    names a system-supplied argument not constructible by reading
-    ``CoverageMember.argument``, which no longer exists; a system-supplied key being
-    declarable at **no** kind is what keeps *"a user is never asked to approve an
-    idempotency key"* true — no member can be met against one, on either route.
-    """
-    with pytest.raises(ValidationError, match="name no key it fills itself"):
-        ToolDefinition.model_validate(
-            {
-                **TOOL.model_dump(),
-                "system_supplied": ("locale",),
-                "bounded_arguments": (
-                    {"argument": "locale", "kind": "terms", "currency_argument": None},
-                ),
-            }
-        )
-
-
-@pytest.mark.parametrize(
-    ("kind", "currency_argument", "refusal"),
-    [
-        (BoundKind.MONEY, None, "names the key carrying its currency"),
-        (BoundKind.PERIOD, "currency", "carries no currency_argument"),
-        (BoundKind.TERMS, "currency", "carries no currency_argument"),
-        (BoundKind.MONEY, "amount", "names a second key"),
-    ],
-    ids=["money-without", "period-with", "terms-with", "one-key-for-both"],
-)
-def test_a_bounded_argument_of_a_shape_section_seven_does_not_admit_is_refused(
-    kind: BoundKind, currency_argument: str | None, refusal: str
-) -> None:
-    """ADR-0266 §7's two shapes, and arm 6(b)'s enumeration of what neither admits.
-
-    ``MONEY`` **with** a ``currency_argument`` or ``PERIOD``/``TERMS`` **with
-    none** — an amount is the only kind §4's readings denominate, and a currency key
-    beside a period or a term is a value nothing reads. **And ``argument`` never
-    equals ``currency_argument``**: one key cannot carry both the amount and the
-    code it is denominated in, and a declaration claiming so would have §4's
-    currency conjunct compare an amount against a currency. Adversarial review,
-    round 7, ``blocker``.
-    """
-    with pytest.raises(ValidationError, match=refusal):
-        BoundedArgument(argument="amount", kind=kind, currency_argument=currency_argument)
-
-
-@pytest.mark.parametrize(
-    ("kind", "currency_argument"),
-    [(BoundKind.MONEY, "currency"), (BoundKind.PERIOD, None), (BoundKind.TERMS, None)],
-)
-def test_a_bounded_argument_of_a_shape_section_seven_admits_is_constructible(
-    kind: BoundKind, currency_argument: str | None
-) -> None:
-    """The controls beside the refusals above: exactly two shapes, and both work."""
-    assert (
-        BoundedArgument(argument="amount", kind=kind, currency_argument=currency_argument).kind
-        is kind
-    )
-
-
-def test_a_declaration_declaring_one_argument_twice_is_not_constructible() -> None:
-    """ADR-0266 §7: ``bounded_arguments`` is **duplicate-free on ``argument``**.
-
-    Two declarations of one key would need a precedence rule at the comparison,
-    which is the shape ADR-0254 §2 refuses one type over. **Two declarations of one
-    *kind* are admitted** and are not a defect — §7 answers those by meeting no
-    member of that kind on the argument route at all, which the policy suite
-    exercises. Adversarial review, round 7, ``blocker``.
-    """
-    with pytest.raises(ValidationError, match="name the same argument"):
-        ToolDefinition.model_validate(
-            {
-                **TOOL.model_dump(),
-                "bounded_arguments": (
-                    {"argument": "amount", "kind": "money", "currency_argument": "currency"},
-                    {"argument": "amount", "kind": "terms", "currency_argument": None},
-                ),
-            }
-        )
-
-
-def test_a_declaration_declaring_two_arguments_at_one_kind_is_constructible() -> None:
-    """The control beside it, and the distinction the rule turns on: the refusal is
-    over the **argument**, and two arguments at one kind are a declaration this type
-    admits and the comparison answers (ADR-0266 §7)."""
-    declared = ToolDefinition.model_validate(
-        {
-            **TOOL.model_dump(),
-            "bounded_arguments": (
-                {"argument": "amount", "kind": "money", "currency_argument": "currency"},
-                {"argument": "fee", "kind": "money", "currency_argument": "currency"},
-            ),
-        }
-    )
-    assert len(declared.bounded_arguments) == 2
-
-
-def test_a_declaration_filling_the_currency_key_itself_declares_no_money_argument() -> None:
-    """ADR-0266 §7's refusal read over **both** keys a ``BoundedArgument`` names.
-
-    §7 states it over the entry *"naming no key of that declaration's own
-    ``system_supplied``"*, and a currency key the system fills is as much a value
-    the user never stated as the amount's. The restrictive direction ADR-0254 §2
-    asks for: it costs a declaration and never authorises a call.
-    """
-    with pytest.raises(ValidationError, match="name no key it fills itself"):
-        ToolDefinition.model_validate(
-            {
-                **TOOL.model_dump(),
-                "system_supplied": ("currency",),
-                "bounded_arguments": (
-                    {"argument": "amount", "kind": "money", "currency_argument": "currency"},
-                ),
-            }
-        )
-
-
 # --- §3, §6, §7: what the ruling, the request and the declaration carry -------
-
-
-def test_a_ruling_scoping_a_goal_it_names_no_authorisation_for_is_refused() -> None:
-    """§7: *"a scope for an authorisation the row names none of is incoherent"*.
-
-    The same shape and the same reason as ``authorised_subject``'s refusal.
-    """
-    with pytest.raises(ValidationError, match="scopes none"):
-        PermissionRuling(
-            outcome=PermissionOutcome.ALLOW,
-            reason="because",
-            authorised_goal="goal-0001",
-        )
-
-
-def test_the_converse_is_not_required_because_three_routes_carry_no_goal_scope() -> None:
-    """§7: a route-(a), route-(b) or route-(c) ``ALLOW`` sets a pointer and no scope."""
-    ruling = PermissionRuling(
-        outcome=PermissionOutcome.ALLOW, reason="because", authorised_by="dec-1"
-    )
-    assert ruling.authorised_goal is None
 
 
 def test_an_action_request_carries_no_goal_unless_orchestration_sets_one() -> None:

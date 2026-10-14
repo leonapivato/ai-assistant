@@ -55,7 +55,6 @@ if TYPE_CHECKING:
         PlanningLabel,
         PlanningRound,
         ReplyCapability,
-        SpokenDelivery,
         StageEntry,
     )
 
@@ -73,7 +72,6 @@ class CaptureFacts:
     modality: Modality
     supplied_withheld: bool
     derived_from_external: bool
-    delivery: SpokenDelivery | None
 
 
 @dataclass

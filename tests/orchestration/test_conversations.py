@@ -28,11 +28,7 @@ from ai_assistant.core.errors import (
     MemoryStoreError,
     UnknownConversationError,
 )
-from ai_assistant.core.types import (
-    SpokenDelivery,
-    SpokenDeliveryState,
-    Validity,
-)
+from ai_assistant.core.types import Validity
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.orchestration.conversations import (
     HISTORY_REPLAY_BOUND,
@@ -44,10 +40,14 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.types import ChannelEpisodeId, ChannelEpisodePage, ChannelIdentity
+    from ai_assistant.core.types import (
+        ChannelEpisodeId,
+        ChannelEpisodePage,
+        ChannelIdentity,
+        Conversation,
+    )
 
 AT = datetime(2026, 7, 28, 9, 0, tzinfo=UTC)
 MINUTE = timedelta(minutes=1)
@@ -56,13 +56,6 @@ DAY = timedelta(days=1)
 
 RETENTION = 30 * DAY
 GRACE = HOUR
-
-UNSTAMPED = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
-COMPLETE = SpokenDelivery(
-    state=SpokenDeliveryState.COMPLETE,
-    played=timedelta(seconds=9, milliseconds=800),
-    rendered=timedelta(seconds=9, milliseconds=800),
-)
 
 
 class MovableClock:
@@ -112,7 +105,6 @@ class Wiring:
         episode_id: str,
         *,
         completed: bool = True,
-        delivery: SpokenDelivery | None = None,
         occurred_at: datetime | None = None,
         expires_at: datetime | None = None,
         validity: Validity | None = None,
@@ -121,9 +113,9 @@ class Wiring:
         """Put one episode on ``conversation_id``'s channel, as the writer leaves it.
 
         The episode first, then ``record_turn`` — ADR-0283 §7's order — so the
-        conversation's ``last_turn_at`` and its delivery row are what a written turn
-        leaves. The expiry is the writer's (``occurred_at`` plus the retention)
-        unless a case names one or asks for none.
+        conversation's ``last_turn_at`` is what a written turn leaves. The expiry is
+        the writer's (``occurred_at`` plus the retention) unless a case names one or
+        asks for none.
         """
         at = occurred_at if occurred_at is not None else self.clock()
         if expires_at is None and not unexpiring and self.retention is not None:
@@ -138,9 +130,7 @@ class Wiring:
                 validity=validity or Validity(),
             )
         )
-        await self.conversations.record_turn(
-            conversation_id, episode_id=episode_id, occurred_at=at, delivery=delivery
-        )
+        await self.conversations.record_turn(conversation_id, episode_id=episode_id, occurred_at=at)
         return episode_id
 
 
@@ -249,83 +239,6 @@ async def test_a_run_of_failed_passes_takes_its_place_in_the_replay_page() -> No
     assert [record.id for record in history.records] == (episodes + ended)[-HISTORY_REPLAY_BOUND:]
 
 
-async def test_history_pairs_each_episode_with_its_delivery() -> None:
-    """§10, ADR-0205 §5: a delivery fact travels with the episode it qualifies.
-
-    A spoken turn's row starts ``UNKNOWN`` and a device's report stamps it; a typed
-    turn has no row at all and is simply absent from the mapping.
-    """
-    wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
-    spoken = await wiring.seed(conversation.id, "activation:spoken", delivery=UNSTAMPED)
-    typed = await wiring.seed(conversation.id, "activation:typed")
-    unreported = await wiring.seed(conversation.id, "activation:unreported", delivery=UNSTAMPED)
-    assert await wiring.conversations.record_delivery(
-        conversation.id, episode_id=spoken, delivery=COMPLETE
-    )
-
-    history = await wiring.stage.history(conversation.id)
-
-    assert [record.id for record in history.records] == [spoken, typed, unreported]
-    assert dict(history.deliveries) == {spoken: COMPLETE, unreported: UNSTAMPED}
-
-
-async def test_a_delivery_whose_episode_is_outside_the_page_is_never_carried() -> None:
-    """§10: one ``deliveries`` call, for exactly the episodes the page returned."""
-
-    class Recording(FakeConversationStore):
-        def __init__(self) -> None:
-            super().__init__(now=clock, retention=RETENTION)
-            self.asked: list[tuple[str, ...]] = []
-
-        async def deliveries(
-            self, conversation_id: str, *, episode_ids: Sequence[str]
-        ) -> Mapping[str, SpokenDelivery]:
-            self.asked.append(tuple(episode_ids))
-            return await super().deliveries(conversation_id, episode_ids=episode_ids)
-
-    clock = MovableClock()
-    conversations = Recording()
-    wiring = Wiring(clock=clock, conversations=conversations)
-    conversation = await wiring.stage.begin(None)
-    old = await wiring.seed(conversation.id, "activation:old", delivery=UNSTAMPED)
-    newest = [
-        await wiring.seed(conversation.id, f"activation:new-{index}")
-        for index in range(HISTORY_REPLAY_BOUND)
-    ]
-
-    history = await wiring.stage.history(conversation.id)
-
-    assert conversations.asked == [tuple(newest)]
-    assert old not in history.deliveries
-
-
-async def test_history_of_a_conversation_with_no_episodes_asks_for_no_deliveries() -> None:
-    """§10: an empty page reads nothing further."""
-
-    class Recording(FakeConversationStore):
-        def __init__(self) -> None:
-            super().__init__(now=clock, retention=RETENTION)
-            self.asked = 0
-
-        async def deliveries(
-            self, conversation_id: str, *, episode_ids: Sequence[str]
-        ) -> Mapping[str, SpokenDelivery]:
-            self.asked += 1
-            return await super().deliveries(conversation_id, episode_ids=episode_ids)
-
-    clock = MovableClock()
-    conversations = Recording()
-    wiring = Wiring(clock=clock, conversations=conversations)
-    conversation = await wiring.stage.begin(None)
-
-    history = await wiring.stage.history(conversation.id)
-
-    assert history.records == ()
-    assert history.degraded is False
-    assert conversations.asked == 0
-
-
 async def test_history_of_a_stamped_conversation_is_degraded_and_reads_no_channel() -> None:
     """§4:1: a ``get`` that answers nothing for a stamped conversation comes first."""
 
@@ -360,8 +273,8 @@ async def test_history_of_a_stamped_conversation_is_degraded_and_reads_no_channe
 async def test_history_degrades_rather_than_failing_the_turn(failing: str) -> None:
     """Losing continuity costs the answer its history, not its usefulness.
 
-    Each store faults the one read history makes of it: the channel read, and the
-    delivery read that follows it.
+    Each store faults the one read history makes of it: the conversation's ``get``,
+    and the channel read that follows it.
     """
 
     class FaultingMemory(FakeMemoryStore):
@@ -382,13 +295,11 @@ async def test_history_degrades_rather_than_failing_the_turn(failing: str) -> No
     class FaultingConversations(FakeConversationStore):
         fail = False
 
-        async def deliveries(
-            self, conversation_id: str, *, episode_ids: Sequence[str]
-        ) -> Mapping[str, SpokenDelivery]:
+        async def get(self, conversation_id: str) -> Conversation | None:
             if self.fail:
                 msg = "the index would not read"
                 raise ConversationStoreError(msg)
-            return await super().deliveries(conversation_id, episode_ids=episode_ids)
+            return await super().get(conversation_id)
 
     clock = MovableClock()
     memory = FaultingMemory(now=clock)

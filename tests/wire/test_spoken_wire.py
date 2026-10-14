@@ -15,7 +15,6 @@ refuses (§4:1), so the refusal path is pinned there.
 from __future__ import annotations
 
 from base64 import b64encode
-from datetime import timedelta
 from typing import Final
 
 import pytest
@@ -23,9 +22,6 @@ import pytest
 from ai_assistant.core.types import (
     SpokenAudio,
     SpokenAudioFormat,
-    SpokenDelivery,
-    SpokenDeliveryReport,
-    SpokenDeliveryState,
 )
 from ai_assistant.wire.codec import project
 from ai_assistant.wire.errors import UndecodableFrameError
@@ -129,35 +125,3 @@ def test_a_recording_projects_as_ordinary_text() -> None:
     projected = project(SpokenAudio(content=_CLIP, media_type=SpokenAudioFormat.MP4))
 
     assert projected == {"content": _CLIP, "media_type": "audio/mp4"}
-
-
-# --- ADR-0205 §9: the report crosses on the shape the codec already carries ----
-
-
-def test_the_report_projects_through_the_branches_the_codec_already_had() -> None:
-    """ADR-0205 §9: "``wire/codec.py``'s ``project`` gains no branch, ADR-0087 §2c's
-    scalar table gains no row".
-
-    The claim is checked rather than taken: a nested frozen model of a ``StrEnum``
-    and two durations render through the ``BaseModel`` branch and ADR-0087
-    §2e's duration form, both of which existed before this decision.
-    """
-    projected = project(
-        SpokenDeliveryReport(
-            episode_id="conv:c-1:1",
-            delivery=SpokenDelivery(
-                state=SpokenDeliveryState.INTERRUPTED,
-                played=timedelta(seconds=3, milliseconds=200),
-                rendered=timedelta(seconds=9, milliseconds=800),
-            ),
-        )
-    )
-
-    assert projected == {
-        "episode_id": "conv:c-1:1",
-        "delivery": {
-            "state": "interrupted",
-            "played": "PT3.2S",
-            "rendered": "PT9.8S",
-        },
-    }

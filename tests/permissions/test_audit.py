@@ -24,9 +24,6 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from audit_trail_contract import AuditTrailContract
 from permission_builders import AT, action, decision, ruling, tool
-from recipient_builders import ALICE
-from recipient_builders import binding as egress_binding
-from recipient_builders import request as egress_request
 
 from ai_assistant.core.errors import (
     AuditError,
@@ -307,73 +304,6 @@ async def test_a_resolving_deny_citing_an_authorisation_is_refused(
     assert await ephemeral.get("d-answer") is None
 
 
-_GOAL = "goal-1"
-
-
-@pytest.mark.parametrize("subject", ["0" * 64, None], ids=["with a digest", "without one"])
-async def test_a_standing_egress_row_scoped_to_a_goal_is_refused(
-    ephemeral: SqliteAuditTrail, subject: str | None
-) -> None:
-    """Route (d) is retired, so no standing row may carry a goal scope (ADR-0309 §5).
-
-    The goal authorizations a route-(d) pointer resolved to are gone, so the row is
-    refused from its shape alone — the answer a trail holding no authorization store
-    always gave such a row — and nothing is written.
-    """
-    scoped = decision(
-        "d-route-d",
-        request=egress_request(egress_binding(ALICE)),
-        ruled=ruling(
-            PermissionOutcome.ALLOW,
-            authorised_by="a1",
-            authorised_subject=subject,
-            authorised_goal=_GOAL,
-        ),
-    )
-
-    with pytest.raises(InvalidAuthorisationError, match="route \\(d\\) is retired"):
-        await ephemeral.record(scoped)
-
-    assert await ephemeral.export() == []
-
-
-async def test_a_resolving_allow_scoped_to_a_goal_is_refused(ephemeral: SqliteAuditTrail) -> None:
-    """Route (a) rests on the user's answer about this call and carries no goal scope."""
-    with pytest.raises(InvalidAuthorisationError, match="scopes its authorisation to a goal"):
-        await ephemeral.record(
-            decision(
-                "d-route-a",
-                request=egress_request(egress_binding(ALICE)),
-                ruled=ruling(PermissionOutcome.ALLOW, authorised_by="d-0", authorised_goal=_GOAL),
-                resolves="d-0",
-            )
-        )
-
-    assert await ephemeral.export() == []
-
-
-@pytest.mark.parametrize("subject", ["0" * 64, None], ids=["with a digest", "without one"])
-async def test_a_goal_scope_on_a_decision_recording_no_egress_call_is_refused(
-    ephemeral: SqliteAuditTrail, subject: str | None
-) -> None:
-    """A row naming no egress call is on no standing route, so its goal scope is refused."""
-    with pytest.raises(InvalidAuthorisationError, match="scopes its authorisation to a goal"):
-        await ephemeral.record(
-            decision(
-                "d-no-egress",
-                request=action(),
-                ruled=ruling(
-                    PermissionOutcome.ALLOW,
-                    authorised_by="g-1",
-                    authorised_subject=subject,
-                    authorised_goal=_GOAL,
-                ),
-            )
-        )
-
-    assert await ephemeral.export() == []
-
-
 async def test_clearing_an_empty_trail_removes_nothing(ephemeral: SqliteAuditTrail) -> None:
     assert await ephemeral.clear() == 0
 
@@ -439,15 +369,15 @@ async def test_a_fresh_trail_records_the_schema_version(ephemeral: SqliteAuditTr
     """A database created here is labelled, so a future migration has a marker to read.
 
     The marker ``SqlitePlanStore`` writes from day one (ADR-0049 §1), which this
-    store had none of. Exactly one row, so the label is unambiguous. Version 5 is
-    the record without a step or an execution, in a table without their columns
-    (ADR-0318 §6:1), which is what this code writes.
+    store had none of. Exactly one row, so the label is unambiguous. Version 6 is
+    the record without the quote family (ADR-0313 §5:4), in a table without a step's
+    or an execution's columns (ADR-0318 §6:1), which is what this code writes.
     """
     rows = ephemeral._conn.execute(
         "SELECT key, value FROM meta WHERE key = 'schema_version'"
     ).fetchall()
 
-    assert rows == [("schema_version", "5")]
+    assert rows == [("schema_version", "6")]
 
 
 async def test_a_fresh_trail_keeps_no_step_no_execution_and_no_binding_index(
@@ -525,21 +455,23 @@ def _downstamp(path: Path, version: str) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("stored", ["1", "2", "3", "4"])
+@pytest.mark.parametrize("stored", ["1", "2", "3", "4", "5"])
 async def test_an_older_marker_is_refused_rather_than_restamped(
     tmp_path: Path, stored: str
 ) -> None:
-    """Every version before 5 was openable and restamped; none is now (ADR-0309 §6:4).
+    """Every version before 5 was openable and restamped; none before 6 is now (ADR-0309 §6:4).
 
     A version-4 row carries ``step_id`` and ``execution_id`` and does not decode as the
     record this code writes (ADR-0318 §6:1), and no reader is written for a store from
-    before the cutover, so an older marker is refused at open and left as it was.
+    before the cutover, so an older marker is refused at open and left as it was. A
+    version-5 row carries the quote family's members and does not decode either
+    (ADR-0313 §5:4).
     """
     path = tmp_path / "audit.db"
     SqliteAuditTrail(path=path).close()
     _downstamp(path, stored)
 
-    with pytest.raises(AuditError, match="can open only version 5"):
+    with pytest.raises(AuditError, match="can open only version 6"):
         SqliteAuditTrail(path=path)
 
     assert _stored_schema_version(path) == stored
@@ -569,14 +501,14 @@ async def test_the_current_marker_is_refused_at_open_by_code_at_the_previous_one
         kept = await trail.get("c-1")
     finally:
         trail.close()
-    assert _stored_schema_version(path) == "5"
+    assert _stored_schema_version(path) == "6"
 
-    monkeypatch.setattr(audit, "_OPENABLE_VERSIONS", frozenset({4}))
-    with pytest.raises(AuditError, match="can open only version 4"):
+    monkeypatch.setattr(audit, "_OPENABLE_VERSIONS", frozenset({5}))
+    with pytest.raises(AuditError, match="can open only version 5"):
         SqliteAuditTrail(path=path)
 
     monkeypatch.undo()
-    assert _stored_schema_version(path) == "5", "a refused open leaves the marker alone"
+    assert _stored_schema_version(path) == "6", "a refused open leaves the marker alone"
     reopened = SqliteAuditTrail(path=path)
     try:
         assert await reopened.get("c-1") == kept  # ...and leaves the records alone
@@ -599,17 +531,17 @@ async def test_the_current_marker_is_refused_before_a_decisions_table_is_made(
     raw = sqlite3.connect(str(path))
     try:
         raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '5')")
+        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '6')")
         raw.commit()
     finally:
         raw.close()
 
-    monkeypatch.setattr(audit, "_OPENABLE_VERSIONS", frozenset({4}))
-    with pytest.raises(AuditError, match="schema_version=5"):
+    monkeypatch.setattr(audit, "_OPENABLE_VERSIONS", frozenset({5}))
+    with pytest.raises(AuditError, match="schema_version=6"):
         SqliteAuditTrail(path=path)
 
     assert "decisions" not in _tables(path)
-    assert _stored_schema_version(path) == "5"
+    assert _stored_schema_version(path) == "6"
 
 
 _STORE_SHAPE = (
@@ -621,7 +553,7 @@ _STORE_SHAPE = (
 #: unmarked file that already holds a ``decisions`` table (ADR-0309 §6:4).
 _MARKED = (
     "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-    "INSERT INTO meta(key, value) VALUES ('schema_version', '5')",
+    "INSERT INTO meta(key, value) VALUES ('schema_version', '6')",
 )
 
 
@@ -832,7 +764,7 @@ async def test_reopening_a_labelled_trail_keeps_the_one_marker(tmp_path: Path) -
     finally:
         reopened.close()
 
-    assert rows == [("schema_version", "5")]
+    assert rows == [("schema_version", "6")]
 
 
 @pytest.mark.integration
@@ -874,7 +806,7 @@ async def test_a_newer_marker_on_a_populated_trail_is_refused_rather_than_read(
 
     The same rule the trail applies to a row that no longer validates: a database
     this code cannot account for is a fault to report, not records to hand on. The
-    marker is moved past the current version rather than to it: ``'5'`` would name
+    marker is moved past the current version rather than to it: ``'6'`` would name
     the shape this code writes, and the refusal under test is for the one it does
     not know.
     """
@@ -887,7 +819,7 @@ async def test_a_newer_marker_on_a_populated_trail_is_refused_rather_than_read(
 
     raw = sqlite3.connect(str(path))
     try:
-        raw.execute("UPDATE meta SET value = '6' WHERE key = 'schema_version'")
+        raw.execute("UPDATE meta SET value = '7' WHERE key = 'schema_version'")
         raw.commit()
     finally:
         raw.close()
@@ -954,7 +886,7 @@ async def test_a_marker_of_the_wrong_type_is_reported_as_an_audit_error(
 
 @pytest.mark.integration
 async def test_an_integer_marker_of_the_supported_version_is_accepted(tmp_path: Path) -> None:
-    """A marker stored as INTEGER 5 rather than '5' still names version 5.
+    """A marker stored as INTEGER 6 rather than '6' still names version 6.
 
     The type guard refuses what cannot be read as a version; it must not refuse a
     version legibly stored in the other of SQLite's two integral forms, which is
@@ -964,7 +896,7 @@ async def test_an_integer_marker_of_the_supported_version_is_accepted(tmp_path: 
     raw = sqlite3.connect(str(path))
     try:
         raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value)")
-        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', 5)")
+        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', 6)")
         raw.commit()
     finally:
         raw.close()
@@ -976,7 +908,7 @@ async def test_an_integer_marker_of_the_supported_version_is_accepted(tmp_path: 
     finally:
         trail.close()
 
-    assert _stored_schema_version(path) == "5"
+    assert _stored_schema_version(path) == "6"
 
 
 @pytest.mark.integration
@@ -996,7 +928,7 @@ async def test_conflicting_markers_are_refused_rather_than_resolved_by_row_order
     raw = sqlite3.connect(str(path))
     try:
         raw.execute("CREATE TABLE meta(key TEXT, value TEXT NOT NULL)")  # no primary key
-        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '5')")
+        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '6')")
         raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '999')")
         raw.commit()
     finally:
@@ -1030,7 +962,7 @@ async def test_clearing_the_trail_leaves_it_openable(tmp_path: Path) -> None:
     finally:
         trail.close()
 
-    assert _stored_schema_version(path) == "5"
+    assert _stored_schema_version(path) == "6"
     reopened = SqliteAuditTrail(path=path)
     try:
         assert await reopened.export() == []

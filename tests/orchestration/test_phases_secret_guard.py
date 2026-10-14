@@ -357,8 +357,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     ``ProposedRelationship``, and digesting's ``_Proposed`` and ``_ProposedItem``, are
     the parse of a reply: prose the model wrote and labels it was shown.
 
-    **The capabilities planning is offered.** ``ToolDefinition`` with ``ToolCost``,
-    ``BoundedArgument``, ``QuotedOutput``, ``ChargedOutput`` and ``StepVerification`` is
+    **The capabilities planning is offered.** ``ToolDefinition`` with ``ToolCost`` is
     what a tool declares of itself: identifiers, closed values, the tiers it reaches as
     members of ``DataTier`` (a label, not a value of that tier), descriptions, a JSON
     schema, a ``Decimal`` and currency names. ``system_supplied`` names arguments the hub
@@ -410,7 +409,6 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ActivationRecall",
         "ActivationUnderstanding",
         "Attestation",
-        "BoundedArgument",
         "BoundedAudienceSupply",
         "CallOutcome",
         "Candidates",
@@ -418,7 +416,6 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ChannelContext",
         "ChannelContextItem",
         "ChannelIdentity",
-        "ChargedOutput",
         "ConversationWindow",
         "DeletedMessage",
         "DigestItem",
@@ -448,7 +445,6 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ProposedReference",
         "ProposedRelationship",
         "Provenance",
-        "QuotedOutput",
         "RecalledItem",
         "RecordedChannelTrigger",
         "RecordedSpeechInput",
@@ -460,7 +456,6 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ShortView",
         "SpokenReply",
         "StageEntry",
-        "StepVerification",
         "StoryHeader",
         "StoryMember",
         "StoryNote",

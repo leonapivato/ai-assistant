@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import datetime
 
-    from ai_assistant.core.types import Conversation, MemoryWrite, SpokenDelivery
+    from ai_assistant.core.types import Conversation, MemoryWrite
 
 #: A span no log line could carry by accident.
 _SPAN: Final = "zarquon-seven-marmalade"
@@ -63,7 +63,6 @@ class _RefusingIndex(FakeConversationStore):
         *,
         episode_id: str,
         occurred_at: datetime,
-        delivery: SpokenDelivery | None = None,
     ) -> Conversation | None:
         msg = "the conversation store is down"
         raise ConversationStoreError(msg)

@@ -38,8 +38,6 @@ from ai_assistant.core.types import (
     MessageAuthor,
     NewMessage,
     SendOutcome,
-    SpokenDelivery,
-    SpokenDeliveryState,
 )
 from ai_assistant.memory import conversation_store
 from ai_assistant.memory._episode_format import EPISODE_RECORD_FORMAT
@@ -73,8 +71,6 @@ _SYNC_METHODS = {
     "stamp_deleted": "_stamp_deleted_sync",
     "drop_if_eligible": "_drop_if_eligible_sync",
     "record_turn": "_record_turn_sync",
-    "record_delivery": "_record_delivery_sync",
-    "deliveries": "_deliveries_sync",
     "get": "_get_sync",
     "stamped_conversation_ids": "_stamped_ids_sync",
     "recent": "_recent_sync",
@@ -278,12 +274,12 @@ class TestSqliteConversationStoreContract(ConversationStoreContract):
         A different position from ``store_suspended_mid_write`` above, and
         deliberately so. ADR-0060's hook goes *inside* the connection — inside the
         worker thread, past every argument this store reads. ADR-0065's must be at
-        the method's own first suspension point, which for both operations the cases
-        drive is ``async with self._lock``: neither ``record_turn`` nor
-        ``deliveries`` awaits anything before it, and both hand their argument to
-        the worker only afterwards. Suspending any later would put the mutation
-        past the point a non-conforming implementation would have read the argument
-        — the entry-side mistake ADR-0065 §3 warns about, in mirror image.
+        the method's own first suspension point, which for every operation the cases
+        drive is ``async with self._lock``: none awaits anything before it, and each
+        hands its argument to the worker only afterwards. Suspending any later would
+        put the mutation past the point a non-conforming implementation would have
+        read the argument — the entry-side mistake ADR-0065 §3 warns about, in mirror
+        image.
 
         The gate goes *before* ``acquire``, not after: a conforming implementation
         has observed its argument on its first executed lines and cannot be reached
@@ -545,7 +541,8 @@ async def test_a_fresh_store_holds_no_turn_table_and_reopens(tmp_path: Path) -> 
     finally:
         raw.close()
     assert "turns" not in tables
-    assert {"conversations", "deliveries", "episode_record_format"} <= tables
+    assert {"conversations", "episode_record_format"} <= tables
+    assert "deliveries" not in tables, "the spoken delivery report retired (ADR-0313 §3:3)"
 
     reopened = SqliteConversationStore(path=path, now=_fixed_now)
     try:
@@ -672,7 +669,6 @@ async def test_two_stores_over_one_file_serialise_their_mutations(tmp_path: Path
     path = tmp_path / "conversations.db"
     first = SqliteConversationStore(path=path, now=_fixed_now)
     second = SqliteConversationStore(path=path, now=_fixed_now)
-    unstamped = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
     try:
         conversation = await first.start()
         assert await second.get(conversation.id) is not None, "both see one database"
@@ -681,19 +677,17 @@ async def test_two_stores_over_one_file_serialise_their_mutations(tmp_path: Path
         await asyncio.gather(
             *(
                 (first, second)[index % 2].record_turn(
-                    conversation.id, episode_id=episode, occurred_at=_NOW, delivery=unstamped
+                    conversation.id, episode_id=episode, occurred_at=_NOW
                 )
                 for index, episode in enumerate(episodes)
             )
         )
-        assert await second.deliveries(conversation.id, episode_ids=episodes) == dict.fromkeys(
-            episodes, unstamped
-        ), "every recorded episode from either engine has its delivery row"
+        recorded_once = await second.get(conversation.id)
+        assert recorded_once is not None
+        assert recorded_once.last_turn_at == _NOW, "every engine's turn landed"
 
         recorded, stamped = await asyncio.gather(
-            first.record_turn(
-                conversation.id, episode_id="activation:late", occurred_at=_NOW, delivery=unstamped
-            ),
+            first.record_turn(conversation.id, episode_id="activation:late", occurred_at=_NOW),
             second.stamp_deleted(conversation.id),
         )
 
@@ -855,12 +849,11 @@ async def test_a_capture_holds_off_a_deletion_in_another_process(tmp_path: Path)
         conversation = await store.start()
     finally:
         store.close()
-    unstamped = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
 
     def _hold_then_record(announce: Callable[[], None]) -> str:
         child = _store_holding_its_liveness_read(path, announce=announce, hold=_HOLD_SECONDS)
         try:
-            row = child._record_turn_sync(conversation.id, "activation:held", _NOW, unstamped)
+            row = child._record_turn_sync(conversation.id, _NOW)
         finally:
             child.close()
         return "NONE" if row is None else "RECORDED"
@@ -879,12 +872,9 @@ async def test_a_capture_holds_off_a_deletion_in_another_process(tmp_path: Path)
         f"queue behind it and the episode had to be recorded: {recorded}"
     )
     assert stamped == "True", f"the deletion is unconditional and must have happened: {stamped}"
-    assert [row[1] for row in _delivery_rows(path)] == ["activation:held"], (
-        "the record succeeded, so its delivery row is on the stamped conversation"
-    )
 
 
-# --- a delivery row cannot name a conversation that is absent (#452) --------
+# --- a row kept under a conversation cannot name one that is absent (#452) --
 
 
 @pytest.mark.integration
@@ -893,10 +883,9 @@ async def test_the_store_enforces_foreign_keys_on_its_own_connection(tmp_path: P
 
     Read off the connection because there is no black-box observation to make, and
     that is the finding rather than a weakness of the test: every statement this
-    module issues is already referentially clean — the one ``INSERT`` into
-    ``deliveries`` proves the parent exists in the same transaction, and the drop
-    deletes the rows explicitly — so switching enforcement off changes nothing the
-    store itself does.
+    module issues is already referentially clean — the drop deletes the rows kept
+    under a conversation explicitly — so switching enforcement off changes nothing
+    the store itself does.
     Its whole effect is on a writer that is not this module, which is what the
     constraint exists for. Without this case, deleting the pragma would break no test.
     """
@@ -947,163 +936,6 @@ async def test_a_transaction_is_rolled_back_even_for_a_base_exception(tmp_path: 
         # connection rather than leaving it mid-transaction.
         marked = await store.mark_active(conversation.id)
         assert marked.id == conversation.id
-    finally:
-        store.close()
-
-
-async def test_a_delivery_row_duration_this_store_cannot_hold_is_this_seams_error(
-    tmp_path: Path,
-) -> None:
-    """ADR-0205 §3: ``ConversationStoreError`` "where the store cannot be written".
-
-    ``timedelta`` reaches ``timedelta.max`` — about 8.6e19 microseconds — which
-    :class:`~ai_assistant.core.types.SpokenDelivery`'s partition admits and a signed
-    64-bit SQLite ``INTEGER`` cannot hold. Left to the driver it is an
-    ``OverflowError``, which is **not** a ``sqlite3.Error``, so it would cross this
-    module's translation untouched and escape ``record_delivery``.
-
-    **In this store's own tests and not the shared suite**: the bound is a property
-    of a backend that persists 64-bit integers, and the canonical fake holds the value
-    perfectly well. The row is read back afterwards, because a refusal that had
-    already written half a delivery would be the worse failure.
-    """
-    store = SqliteConversationStore(path=str(tmp_path / "conversations.db"), now=_fixed_now)
-    try:
-        conversation = await store.start()
-        unstamped = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
-        await store.record_turn(
-            conversation.id, episode_id="activation:a", occurred_at=_NOW, delivery=unstamped
-        )
-
-        with pytest.raises(ConversationStoreError, match="outside the range"):
-            await store.record_delivery(
-                conversation.id,
-                episode_id="activation:a",
-                delivery=SpokenDelivery(
-                    state=SpokenDeliveryState.COMPLETE,
-                    played=timedelta.max,
-                    rendered=timedelta.max,
-                ),
-            )
-
-        assert await store.deliveries(conversation.id, episode_ids=["activation:a"]) == {
-            "activation:a": unstamped
-        }, "the refusal wrote nothing, so a report that fits still lands"
-    finally:
-        store.close()
-
-
-def _delivery_rows(database: Path) -> list[tuple[Any, ...]]:
-    """Every row the ``deliveries`` table holds, read through a raw connection."""
-    raw = sqlite3.connect(database, isolation_level=None)
-    try:
-        return [tuple(row) for row in raw.execute("SELECT * FROM deliveries")]
-    finally:
-        raw.close()
-
-
-async def test_a_dropped_conversation_leaves_no_delivery_row_behind(tmp_path: Path) -> None:
-    """ADR-0283 §6:7 against the table itself, which the contract can only infer.
-
-    Deleted explicitly rather than left to the cascade: ``PRAGMA foreign_keys`` is
-    per connection, and a drop that relied on it would leave
-    the rows behind on any connection that had not enabled it.
-    """
-    path = tmp_path / "conversations.db"
-    clock = [_NOW]
-    store = SqliteConversationStore(path=path, now=lambda: clock[0])
-    try:
-        conversation = await store.start()
-        kept = await store.start()
-        unstamped = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
-        for one in (conversation, kept):
-            await store.record_turn(
-                one.id, episode_id=f"activation:{one.id}", occurred_at=_NOW, delivery=unstamped
-            )
-        assert await store.stamp_deleted(conversation.id) is True
-        clock[0] = _NOW + timedelta(days=1)
-
-        assert await store.drop_if_eligible(conversation.id) is True
-
-        assert [row[0] for row in _delivery_rows(path)] == [kept.id]
-    finally:
-        store.close()
-
-
-async def test_delivery_rows_survive_a_reopen(tmp_path: Path) -> None:
-    """They are durable state, which is the whole reason they are a table."""
-    path = tmp_path / "conversations.db"
-    unstamped = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
-    first = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await first.start()
-        await first.record_turn(
-            conversation.id, episode_id="activation:a", occurred_at=_NOW, delivery=unstamped
-        )
-        await first.record_turn(
-            conversation.id, episode_id="activation:b", occurred_at=_NOW, delivery=unstamped
-        )
-        complete = SpokenDelivery(
-            state=SpokenDeliveryState.COMPLETE,
-            played=timedelta(seconds=4),
-            rendered=timedelta(seconds=4),
-        )
-        assert await first.record_delivery(
-            conversation.id, episode_id="activation:b", delivery=complete
-        )
-    finally:
-        first.close()
-
-    reopened = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        assert await reopened.deliveries(
-            conversation.id, episode_ids=["activation:a", "activation:b"]
-        ) == {"activation:a": unstamped, "activation:b": complete}
-    finally:
-        reopened.close()
-
-
-async def test_the_schema_refuses_a_delivery_row_that_names_no_conversation(
-    tmp_path: Path,
-) -> None:
-    """The ``deliveries`` table carries a cascading key (#452, ADR-0283 §6)."""
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        with pytest.raises(sqlite3.IntegrityError):
-            store._conn.execute(
-                "INSERT INTO deliveries(conversation_id, episode_id, delivery_state) "
-                "VALUES ('nobody', 'activation:a', 'unknown')"
-            )
-    finally:
-        store.close()
-
-
-@pytest.mark.parametrize(
-    ("state", "played"),
-    [("not-a-state", None), ("complete", "four seconds")],
-    ids=["unknown-state", "non-integer-duration"],
-)
-async def test_a_corrupt_delivery_row_is_a_store_fault_on_the_read(
-    tmp_path: Path, state: str, played: object
-) -> None:
-    """A row the store cannot decode is this seam's error, never a guessed delivery."""
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        raw = sqlite3.connect(path, isolation_level=None)
-        try:
-            raw.execute(
-                "INSERT INTO deliveries(conversation_id, episode_id, delivery_state, "
-                "delivery_played, delivery_rendered) VALUES (?, 'activation:a', ?, ?, NULL)",
-                (conversation.id, state, played),
-            )
-        finally:
-            raw.close()
-
-        with pytest.raises(ConversationStoreError):
-            await store.deliveries(conversation.id, episode_ids=["activation:a"])
     finally:
         store.close()
 
@@ -1283,7 +1115,7 @@ async def test_each_transaction_opens_in_the_form_its_call_site_asked_for() -> N
         assert opened[-1].strip().upper() == "COMMIT"
 
         with _traced(store) as read:
-            await store.deliveries(conversation.id, episode_ids=["activation:a"])
+            await store.export()
         assert read[0].strip().upper() == "BEGIN"
         assert read[-1].strip().upper() == "COMMIT"
 
@@ -1511,7 +1343,7 @@ class _InitializationFails(sqlite3.Connection):
 
     def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
         """Inject a storage failure partway through fresh initialization."""
-        if sql.startswith("CREATE TABLE IF NOT EXISTS deliveries"):
+        if sql.startswith("CREATE TABLE IF NOT EXISTS messages"):
             raise sqlite3.OperationalError("injected initialization failure")
         return super().execute(sql, parameters)
 
@@ -1603,8 +1435,7 @@ async def test_a_file_written_before_the_chat_space_opens_with_empty_transcripts
     """The chat tables are created on open; no existing row changes shape (ADR-0293).
 
     Simulated by dropping them from a file this build wrote, which leaves exactly
-    what a build before them wrote: the format marker, the conversations and the
-    delivery rows.
+    what a build before them wrote: the format marker and the conversations.
     """
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)

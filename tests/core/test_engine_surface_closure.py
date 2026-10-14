@@ -1700,6 +1700,15 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     at 103 sends and accepts shapes a hub at 104 refuses (ADR-0124 §9:2). **The method
     set does not move and stays at 64** (ADR-0318 §2:1).
 
+    **105 is ADR-0313 §6:4, on wire-carried core types and the error vocabulary.**
+    ``PermissionDecision`` loses ``intended_action``, ``PermissionRuling``
+    ``authorised_goal`` and ``proved_quote``, ``ToolDefinition`` its four quote, charge,
+    bound and postcondition members, and ``NotificationCandidate`` ``goal_id``
+    (§5:4); the spoken delivery report leaves ``core`` (§3:3); and twelve of the old
+    path's errors leave ``core.errors``, by whose names the wire rebuilds an error
+    (ADR-0309 §5). A peer at 104 sends shapes a hub at 105 refuses (ADR-0124 §9:2).
+    **The method set does not move and stays at 64.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1708,7 +1717,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (64, 104), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (64, 105), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

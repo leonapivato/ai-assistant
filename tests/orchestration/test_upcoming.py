@@ -248,7 +248,7 @@ async def test_an_upcoming_occurrence_becomes_one_candidate_expiring_at_its_star
     assert candidate.notification_class == NOTIFICATION_CLASS
     assert candidate.confidence == CONFIDENCE
     assert candidate.sensitivity is DataTier.PERSONAL
-    assert candidate.goal_id is None
+    assert "goal_id" not in type(candidate).model_fields  # ADR-0313 §5:4
 
 
 async def test_the_sentence_is_the_reading_s_own_rendering_and_nothing_else() -> None:

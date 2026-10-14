@@ -40,15 +40,12 @@ from booking_harness import (
 
 from ai_assistant.core.errors import EgressBindingError
 from ai_assistant.core.types import (
-    ChargedOutput,
     CostBasis,
     DataTier,
     Idempotency,
-    QuotedOutput,
     Reversibility,
     RiskLevel,
     ToolCost,
-    VerificationKind,
 )
 from ai_assistant.tools.builtin import egress_registrations
 
@@ -143,16 +140,10 @@ async def test_the_availability_reads_declaration_is_exactly_what_the_adr_fixes(
     assert registered.writes == ()
     assert registered.discloses == ()
     assert registered.cost == ToolCost(basis=CostBasis.FREE)
-    assert registered.quoted_output == QuotedOutput(
-        amount="price_amount", currency="price_currency"
-    )
-    assert registered.charged_output is None
-    assert registered.bounded_arguments == ()
-    assert registered.postconditions == ()
 
 
 async def test_the_booking_acts_declaration_is_exactly_what_the_adr_fixes() -> None:
-    """Arm 4, the act's half — every field ADR-0273 §2 names, including its postcondition.
+    """Arm 4, the act's half — every field ADR-0273 §2 names that ADR-0313 §5:4 keeps.
 
     ``IRREVERSIBLE`` and ``HIGH`` are **not lowered because the provider is simulated**
     (§2): a declaration tuned to make a walkthrough quieter would demonstrate a
@@ -173,15 +164,6 @@ async def test_the_booking_acts_declaration_is_exactly_what_the_adr_fixes() -> N
     assert registered.writes == (DataTier.PERSONAL, DataTier.OPERATIONAL)
     assert registered.discloses == ()
     assert registered.cost == ToolCost(basis=CostBasis.FREE)
-    assert registered.quoted_output is None
-    assert registered.charged_output == ChargedOutput(
-        amount="charged_amount", currency="charged_currency"
-    )
-    assert registered.bounded_arguments == ()
-    assert len(registered.postconditions) == 1
-    assert registered.postconditions[0].kind is VerificationKind.FIELD_EQUALS
-    assert registered.postconditions[0].field == "booked"
-    assert registered.postconditions[0].equals is True
 
 
 async def test_the_act_classifies_at_adr_0262_s_rung_two() -> None:
