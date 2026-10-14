@@ -980,6 +980,106 @@ def test_a_class_name_put_in_is_not_matched_again() -> None:
     assert stream.getvalue().splitlines()[0] == "read failed: ValueError / ValueError"
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param(lambda failure: [failure], id="list"),
+        pytest.param(lambda failure: {"read": (failure,)}, id="dict of tuple"),
+        pytest.param(lambda failure: {failure}, id="set"),
+    ],
+)
+def test_an_exception_inside_an_argument_names_only_its_class(
+    shape: Callable[[BaseException], object],
+) -> None:
+    # Adversarial review, round 1: only a direct argument was looked at.
+    stream = _configured_on_a_bare_root()
+
+    logging.getLogger("thirdparty").error("failures: %s", shape(ValueError(_MESSAGE)))
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert "ValueError" in out
+
+
+def test_an_argument_holding_itself_is_masked_not_walked_forever() -> None:
+    stream = _configured_on_a_bare_root()
+    held: list[object] = [ValueError(_MESSAGE)]
+    held.append(held)
+
+    logging.getLogger("thirdparty").error("failures: %s", held)
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert out == f"failures: [ValueError, {REDACTED!r}]\n"
+
+
+def test_an_exception_in_an_extra_names_only_its_class() -> None:
+    # Adversarial review, round 1: a host's format may print a call site's extra.
+    root = logging.getLogger()
+    for one in list(root.handlers):
+        root.removeHandler(one)
+    stream = io.StringIO()
+    hosts = logging.StreamHandler(stream)
+    hosts.setFormatter(logging.Formatter("%(message)s|%(failure)s|%(detail)s"))
+    root.addHandler(hosts)
+    configure_logging(Settings())
+    failure = _caught(_raise_with_content)
+
+    logging.getLogger("thirdparty").error(
+        "read failed",
+        exc_info=failure,
+        extra={"failure": failure, "detail": f"because {failure}"},
+    )
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    message, shown, detail = out.splitlines()[0].split("|")
+    assert message == "read failed"
+    assert shown.endswith("_ReadFailedError"), "the extra names the class"
+    assert detail == f"because {shown}", "and a string extra loses the exception's text"
+
+
+def _raise_it(failure: BaseException) -> None:
+    raise failure
+
+
+def test_a_repr_cut_short_by_reprlib_is_masked() -> None:
+    # Adversarial review, round 1: asyncio's debug mode prints a callback's arguments
+    # through reprlib, which cuts a long repr to ``ValueError('M…<end>')``, and no
+    # whole repr or text matches that.
+    stream = _configured_on_a_bare_root()
+    failure = ValueError(_MESSAGE + "x" * 100 + _CHAINED)
+
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_debug(True)
+        loop.call_soon(_raise_it, failure)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert "Exception in callback _raise_it(ValueError([redacted])" in out
+
+
+def test_groups_sharing_members_are_logged_without_building_their_repr() -> None:
+    # Adversarial review, round 1: seventeen exceptions, each group holding the one
+    # before it twice, have a repr of millions of characters. It is never built.
+    stream = _configured_on_a_bare_root()
+    shared: Exception = ValueError(_MESSAGE)
+    for _ in range(16):
+        shared = ExceptionGroup(_CHAINED, [shared, shared])
+
+    logging.getLogger("thirdparty").error("pass failed: %s", shared, exc_info=shared)
+    logging.getLogger("thirdparty").error("pass failed: %r", [shared])
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert len(out) < 10_000
+
+
 async def _fail_with_content() -> None:
     _raise_with_content()
 

@@ -474,9 +474,14 @@ class _ClassName:
         return format(self._name, spec)
 
 
-def _named(value: object) -> object:
-    """``value``, or its class alone if it is an exception."""
-    return _ClassName(value) if isinstance(value, BaseException) else value
+#: The attributes every ``LogRecord`` has, and those a formatter adds. Any other
+#: attribute was set by a call site's ``extra``, which a host's format may print.
+_RECORD_FIELDS: Final = frozenset(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
+
+#: The containers walked for an exception inside a record's arguments or extras.
+#: Builtins alone: a ``range`` or a library's lazy sequence is a ``Sequence`` whose
+#: walk can be unbounded, and none of them holds an exception in practice.
+_WALKED: Final = (list, tuple, dict, set, frozenset)
 
 
 def _exc_info_raised(exc_info: object) -> BaseException | None:
@@ -491,26 +496,48 @@ def _exc_info_raised(exc_info: object) -> BaseException | None:
     return exc_info if isinstance(exc_info, BaseException) else None
 
 
-def _record_raised(record: logging.LogRecord) -> BaseException | None:
-    """The exception ``record``'s ``exc_info`` names, if any."""
-    return _exc_info_raised(record.exc_info)
+def _stand_in(value: object, found: list[BaseException], done: dict[int, object]) -> object:
+    """``value`` with each exception in it standing as its class alone.
 
-
-def _record_failures(record: logging.LogRecord) -> list[BaseException]:
-    """Every exception a record carries, with each one's chain and a group's members.
-
-    The record's ``exc_info``, a message that is itself an exception, and an
-    exception among its arguments, then everything each of those holds: its cause,
-    its context and, for a group, its members. Each is listed once, so a cycle or a
-    member groups share ends the walk rather than repeating it.
+    An exception becomes a :class:`_ClassName` and is added to ``found``. A builtin
+    container is walked, keys included, and rebuilt only if something inside it
+    changed, so a value with no exception in it is handed on as it was. A container
+    met again is given what it became the first time, so shared structure is walked
+    once; one met again while it is still being walked — a cycle — is masked.
     """
-    carried: list[object] = [_record_raised(record), record.msg]
-    args = record.args
-    if isinstance(args, Mapping):
-        carried.extend(args.values())
-    elif isinstance(args, tuple):
-        carried.extend(args)
-    pending = [one for one in carried if isinstance(one, BaseException)]
+    if isinstance(value, BaseException):
+        found.append(value)
+        return _ClassName(value)
+    if not isinstance(value, _WALKED):
+        return value
+    if id(value) in done:
+        return done[id(value)]
+    done[id(value)] = REDACTED
+    result: object = value
+    if isinstance(value, dict):
+        pairs = [
+            (_stand_in(key, found, done), _stand_in(item, found, done))
+            for key, item in value.items()
+        ]
+        if any(
+            new_key is not key or new is not item
+            for (new_key, new), (key, item) in zip(pairs, value.items(), strict=True)
+        ):
+            result = dict(pairs)
+    else:
+        items = [_stand_in(item, found, done) for item in value]
+        if any(new is not item for new, item in zip(items, value, strict=True)):
+            result = tuple(items) if isinstance(value, tuple) else items
+    done[id(value)] = result
+    return result
+
+
+def _held(carried: Sequence[BaseException]) -> list[BaseException]:
+    """``carried`` with each one's chain and a group's members, each listed once.
+
+    So a cycle, or a member groups share, ends the walk rather than repeating it.
+    """
+    pending = list(carried)
     found: list[BaseException] = []
     seen: set[int] = set()
     while pending:
@@ -526,63 +553,129 @@ def _record_failures(record: logging.LogRecord) -> list[BaseException]:
     return found
 
 
-def _record_message(record: logging.LogRecord, failures: Sequence[BaseException]) -> str:
-    """The record's message with every exception it carries named by its class alone.
+def _plainly_built(failure: BaseException) -> bool:
+    """Whether ``failure``'s arguments are plain values, so its repr costs no more than they do.
 
-    An exception passed as the message or among the arguments is formatted as its
-    class. What remains is a message that *embeds* an exception's words itself —
-    asyncio's "Task exception was never retrieved" carries the task's repr, and
-    that holds ``exception=ValueError('…')`` — so each carried exception's repr and
-    its text are then replaced wherever they appear. One pass, longest first: a
-    group's repr goes whole before a member's could split it, and a class name put
-    in is never matched again.
+    A group's arguments hold its members, and a group sharing members has a repr
+    exponential in its nesting; an argument of any other type can be as costly. Those
+    reprs are never built here, and :func:`_unspoken` masks one where it appears.
+    """
+    return all(type(arg) is str or type(arg) in _SAFE_EXACT_TYPES for arg in failure.args)
+
+
+def _replaced(text: str, words: Mapping[str, str]) -> str:
+    """``text`` with each of ``words`` replaced by its value, in one pass, longest first.
+
+    Every occurrence of every word is found with ``str.find``, then taken leftmost
+    first and, at one place, longest first, skipping any that overlaps one already
+    taken; so a replacement put in is never read again. Not a regular expression: an
+    exception's text can be megabytes long, and compiling it — then holding it in
+    the ``re`` module's cache — would cost far more than finding it.
+    """
+    spans: list[tuple[int, int, str]] = []
+    for word, replacement in words.items():
+        at = text.find(word)
+        while at != -1:
+            spans.append((at, at + len(word), replacement))
+            at = text.find(word, at + len(word))
+    if not spans:
+        return text
+    spans.sort(key=lambda span: (span[0], span[0] - span[1]))
+    parts: list[str] = []
+    cursor = 0
+    for start, end, replacement in spans:
+        if start >= cursor:
+            parts.extend((text[cursor:start], replacement))
+            cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+def _unspoken(text: str, failures: Sequence[BaseException]) -> str:
+    """``text`` with no word of any exception in ``failures`` left in it.
+
+    First each exception's text, and its repr where that is plainly built, is
+    replaced by its class wherever it appears: one pass, longest first, so a class
+    name put in is never matched again. That leaves a rendering this module could
+    not reproduce — asyncio's debug mode prints a callback's arguments through
+    ``reprlib``, which cuts a long repr to ``ValueError('P…_END')`` — so a line
+    still holding a carried exception's class followed by ``(`` is cut there, and
+    what followed is masked.
 
     Over-matching is the intended direction, as for the redactor's keys: an
-    exception whose text is a common word takes that word out of the rest of its
-    own record's message too.
+    exception whose text is a common word takes that word out of the rest of the
+    text too.
     """
-    named = copy.copy(record)
-    named.msg = _named(record.msg)
-    args = record.args
-    if isinstance(args, Mapping):
-        named.args = {key: _named(value) for key, value in args.items()}
-    elif isinstance(args, tuple):
-        named.args = tuple(_named(value) for value in args)
-    text = named.getMessage()
+    if not failures:
+        return text
     words: dict[str, str] = {}
     for failure in failures:
         name = _class_name(failure)
-        for said in (repr(failure), str(failure)):
-            if said:
-                words.setdefault(said, name)
-    if not words:
-        return text
-    spoken = re.compile("|".join(re.escape(said) for said in sorted(words, key=len, reverse=True)))
-    return spoken.sub(lambda found: words[found.group(0)], text)
+        said = [str(failure)]
+        if _plainly_built(failure):
+            said.append(repr(failure))
+        for one in said:
+            if one:
+                words.setdefault(one, name)
+    text = _replaced(text, words)
+    names = sorted({type(failure).__name__ for failure in failures}, key=len, reverse=True)
+    built = re.compile(r"\b(" + "|".join(re.escape(name) for name in names) + r")\(")
+    lines = []
+    for line in text.splitlines(keepends=True):
+        opened = built.search(line)
+        if opened is None:
+            lines.append(line)
+        else:
+            ending = line[len(line.rstrip("\r\n")) :]
+            lines.append(f"{line[: opened.start()]}{opened.group(1)}({REDACTED}){ending}")
+    return "".join(lines)
 
 
 def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
     """A copy of ``record`` that carries no exception's words.
 
-    The copy's message is rendered and scrubbed (:func:`_record_message`) and has
-    no arguments left to format. Its exception is rendered here as its class and
-    frames, as :func:`scrub_exceptions` renders one, and set as the text a
-    formatter appends, with no ``exc_info`` left for a formatter to render its own
-    way. Text a formatter rendered before this net — a record sent over a socket
-    carries its traceback as text alone — cannot have its words told from its
-    frames, so it is masked. ``stack_info`` is kept: the logging module builds it
-    from the caller's frames alone, which hold no message and print no local.
+    Every exception the record carries — its ``exc_info``, its message, one among
+    its arguments or its extras, at any depth of a builtin container — stands as its
+    class wherever it would be formatted. Then the message, rendered, and any
+    string extra lose every word of those exceptions, their chains and a group's
+    members (:func:`_unspoken`): asyncio's "Task exception was never retrieved"
+    embeds the task's repr, and that holds ``exception=ValueError('…')``.
+
+    The copy's message has no arguments left to format. Its exception is rendered
+    as its class and frames, as :func:`scrub_exceptions` renders one, and set as the
+    text a formatter appends, with no ``exc_info`` left for a formatter to render
+    its own way. Text a formatter rendered before this net — a record sent over a
+    socket carries its traceback as text alone — cannot have its words told from
+    its frames, so it is masked. ``stack_info`` is kept: the logging module builds
+    it from the caller's frames alone, which hold no message and print no local.
 
     The record itself is untouched, so every other handler it reaches is handed the
     record as it was logged.
     """
-    failures = _record_failures(record)
-    text = _record_message(record, failures)
+    raised = _exc_info_raised(record.exc_info)
+    carried: list[BaseException] = [] if raised is None else [raised]
+    done: dict[int, object] = {}
+    named = copy.copy(record)
+    named.msg = _stand_in(record.msg, carried, done)
+    args = record.args
+    if isinstance(args, Mapping):
+        named.args = {key: _stand_in(value, carried, done) for key, value in args.items()}
+    elif isinstance(args, tuple):
+        named.args = tuple(_stand_in(value, carried, done) for value in args)
+    extras = {
+        key: _stand_in(value, carried, done)
+        for key, value in vars(record).items()
+        if key not in _RECORD_FIELDS
+    }
+    failures = _held(carried)
+    text = _unspoken(named.getMessage(), failures)
+
     safe = copy.copy(record)
+    for key, value in extras.items():
+        setattr(safe, key, _unspoken(value, failures) if isinstance(value, str) else value)
     safe.msg = text
     safe.args = ()
     safe.message = text
-    raised = _record_raised(record)
     if raised is not None:
         safe.exc_text = _described(raised)
     elif isinstance(record.exc_text, _Described) or not record.exc_text:
