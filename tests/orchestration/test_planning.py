@@ -728,21 +728,67 @@ async def test_a_text_the_place_window_shows_only_in_part_is_shown_as_before() -
     assert shown["rounds"] == [{"message": "On it."}, {"message": _IN_PLACE}]
 
 
-async def test_a_text_cut_to_the_excerpt_bound_is_still_matched_whole() -> None:
-    long = "x" * 150 + "y" * 150
-    episode = _episode("activation:old", text=long, outcome=long)
+async def test_a_text_longer_than_the_excerpt_bound_is_matched_whole() -> None:
+    """The excerpt bound is 200: a match is decided on the whole text, not its excerpt."""
+    long = "x" * 200 + "approved"
+    episode = _episode(
+        "activation:old", text=long, outcome=long, rounds=(_earlier(text=long, notes="kept"),)
+    )
     place = _exchange(_linked(PlaceAuthor.USER, long), _linked(PlaceAuthor.ASSISTANT, long))
     stage, completer, _ = _stage(RoundResponse(text="ok"), RoundResponse(text="ok"))
-    await stage.plan(_inputs(place=place, episodes=(episode,)))
+    await stage.plan(_inputs(place=place, episodes=(episode,), owner_records=True))
     (shown,) = _sent(completer)["episode_window"]
     assert (shown["input"], shown["response"]) == (_IN_PLACE, _IN_PLACE)
-    # An item that differs only past the bound is not that text.
-    other = "x" * 150 + "z" * 150
+    assert shown["rounds"] == [{"message": _IN_PLACE, "notes": "kept"}]
+    # An item of the same length that differs only past the bound is not that text.
+    other = "x" * 200 + "declined"
     place = _exchange(_linked(PlaceAuthor.USER, other), _linked(PlaceAuthor.ASSISTANT, other))
+    await stage.plan(_inputs(place=place, episodes=(episode,), owner_records=True))
+    (shown,) = _sent(completer)["episode_window"]
+    cut = "x" * 200 + "… (cut: 200 of 208 chars)"
+    assert (shown["input"], shown["response"]) == (cut, cut)
+    assert shown["rounds"] == [{"message": cut, "notes": "kept"}]
+
+
+async def test_a_round_whose_message_the_window_does_not_show_keeps_it() -> None:
+    """Two messages alike to the excerpt bound and in length; the window shows the second."""
+    approved, declined = "x" * 200 + "approved", "x" * 200 + "declined"
+    episode = _episode(
+        "activation:old",
+        outcome=f"{approved}\n\n{declined}",
+        rounds=(
+            _earlier(text=approved, notes="first"),
+            _earlier("round:2", follows="round:earlier", text=declined, notes="second"),
+        ),
+    )
+    place = _exchange(_linked(PlaceAuthor.ASSISTANT, declined))
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(place=place, episodes=(episode,), owner_records=True))
+    (shown,) = _sent(completer)["episode_window"]
+    cut = "x" * 200 + "… (cut: 200 of 208 chars)"
+    assert shown["response"] != _IN_PLACE
+    assert shown["rounds"] == [
+        {"message": cut, "notes": "first"},
+        {"message": _IN_PLACE, "notes": "second"},
+    ]
+
+
+async def test_one_item_stands_for_one_round_the_latest_first() -> None:
+    """Two rounds wrote the same words; the window shows them once, the latest one's."""
+    episode = _episode(
+        "activation:old",
+        outcome="On it.\n\nOn it.",
+        rounds=(
+            _earlier(text="On it."),
+            _earlier("round:2", follows="round:earlier", text="On it."),
+        ),
+    )
+    place = _exchange(_linked(PlaceAuthor.ASSISTANT, "On it."))
+    stage, completer, _ = _stage()
     await stage.plan(_inputs(place=place, episodes=(episode,)))
     (shown,) = _sent(completer)["episode_window"]
-    assert shown["input"].startswith("x" * 150 + "y" * 50)
-    assert shown["response"].startswith("x" * 150 + "y" * 50)
+    assert shown["response"] == "On it.\n\nOn it."
+    assert shown["rounds"] == [{"message": "On it."}, {"message": _IN_PLACE}]
 
 
 async def test_an_episode_no_place_item_links_to_is_rendered_whole() -> None:

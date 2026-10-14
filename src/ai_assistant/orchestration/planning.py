@@ -88,6 +88,7 @@ is the story store's half, in the lane that builds planning's story calls.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -117,6 +118,8 @@ from ai_assistant.core.types import (
     PlanningLabel,
     PlanningRound,
     ProposedCall,
+    RecordedChannelTrigger,
+    RecordedTextInput,
     Role,
     StoryEffectState,
     StoryMemberKind,
@@ -1158,7 +1161,7 @@ class _Request:
                 owner_records=self._inputs.owner_records,
             )
             label = self._book.label(LabelKind.EPISODE, record.id)
-            shown.append(self._episode(label, projection, record_id=record.id))
+            shown.append(self._episode(label, projection, record))
             self._rendered.add(record.id)
         return shown
 
@@ -1188,7 +1191,7 @@ class _Request:
                     owner_records=self._inputs.owner_records,
                 )
                 label = self._book.label(LabelKind.EPISODE, record.id)
-                episode = self._episode(label, projection, record_id=record.id)
+                episode = self._episode(label, projection, record)
                 self._rendered.add(record.id)
                 stories = self._inputs.recalled_stories.get(record.id, ())
                 if stories:
@@ -1288,7 +1291,7 @@ class _Request:
             record, excerpt_chars=self._excerpt_chars, owner_records=self._inputs.owner_records
         )
         self._rendered.add(record.id)
-        return self._episode(label, projection, record_id=record.id)
+        return self._episode(label, projection, record)
 
     def _short(self, view: ShortView, *, inherited: bool = False) -> dict[str, object]:
         """A story's short view (ADR-0300 §6:2), under the same minimum (ADR-0304 §4)."""
@@ -1375,7 +1378,7 @@ class _Request:
         }
 
     def _episode(
-        self, label: str, projection: EpisodeProjection, *, record_id: str
+        self, label: str, projection: EpisodeProjection, record: EpisodicMemory
     ) -> dict[str, object]:
         """Another episode, shown whole: the episode window's, recall's or a story's.
 
@@ -1388,24 +1391,24 @@ class _Request:
 
         Where the place window links items to it, each of its texts the window shows
         whole says so in its place, and the rest is rendered as before (ADR-0276 §3,
-        #2951).
+        #2951). Which those are is decided by :func:`_in_place` over the episode's own
+        texts; what is rendered is still only the projection (ADR-0284 §8:3).
         """
-        place = self._in_place.get(record_id, _PlaceTexts())
+        place = _in_place(record, projection, self._in_place.get(record.id))
         shown: dict[str, object] = {"label": label, "at": projection.occurred_at.isoformat()}
         if projection.origin is InputOrigin.OUTSIDE:
             shown["input"] = "an outside report, not shown"
             self.shown.marked = True
-        elif (given := _unless_in_place(projection.input, place.user)) is not None:
-            shown["input"] = given
+        elif projection.input is not None:
+            shown["input"] = _IN_PLACE_WINDOW if place.input else _text(projection.input)
         if projection.meaning is not None:
             shown["understood_then"] = projection.meaning
         steps = [STEP_DISPOSITION_PHRASES[one] for one in projection.step_dispositions]
         steps += [ROUTE_OUTCOME_PHRASES[one] for one in projection.route_outcomes]
         if steps:
             shown["what_happened"] = steps
-        response = _unless_in_place(projection.response, place.assistant)
-        if response is not None:
-            shown["response"] = response
+        if projection.response is not None:
+            shown["response"] = _IN_PLACE_WINDOW if place.response else _text(projection.response)
         if projection.status is not None and projection.reason is not None:
             shown["ended"] = f"{projection.status.value}: {projection.reason.value}"
         if projection.derived_from_external:
@@ -1413,7 +1416,8 @@ class _Request:
             self.shown.marked = True
         if projection.rounds:
             shown["rounds"] = [
-                self._episode_round(one, place.assistant) for one in projection.rounds
+                self._episode_round(one, in_place=index in place.messages)
+                for index, one in enumerate(projection.rounds)
             ]
         if projection.evidence:
             # ADR-0308 §3:1, §5:5: the episode's evidence, each item's text and its mark
@@ -1426,17 +1430,15 @@ class _Request:
             self.shown.marked = True
         return shown
 
-    def _episode_round(self, one: ProjectedRound, written: Sequence[str]) -> dict[str, object]:
+    def _episode_round(self, one: ProjectedRound, *, in_place: bool) -> dict[str, object]:
         """One of another episode's rounds: its message, and its notes where shown.
 
-        Its message says it is in the place window where one of ``written``, the
-        assistant's items the window links to the episode, is that message whole.
+        Its message says it is in the place window where ``in_place`` says the window
+        shows it whole (ADR-0276 §3).
         """
         shown: dict[str, object] = {}
-        message = one.message
-        if message is not None:
-            in_place = any(_shows(message, (text,)) for text in written)
-            shown["message"] = _IN_PLACE_WINDOW if in_place else _text(message)
+        if one.message is not None:
+            shown["message"] = _IN_PLACE_WINDOW if in_place else _text(one.message)
         if one.notes is not None:
             shown["notes"] = _text(one.notes)
             if one.notes_marked:
@@ -1551,27 +1553,87 @@ def _text(projected: ProjectedText) -> str:
     return projected.text
 
 
-def _unless_in_place(projected: ProjectedText | None, texts: Sequence[str]) -> str | None:
-    """A projected text as shown, or the line saying the place window shows it whole."""
-    if projected is None:
-        return None
-    return _IN_PLACE_WINDOW if _shows(projected, texts) else _text(projected)
+@dataclass(frozen=True, slots=True)
+class _InPlace:
+    """Which of an episode's texts the place window shows whole (ADR-0276 §3, #2951).
 
-
-def _shows(projected: ProjectedText, texts: Sequence[str]) -> bool:
-    """Whether the place window shows ``projected`` whole, as ``texts`` joined (ADR-0276 §3).
-
-    ``texts`` are the items the window links to the episode, in its order. The
-    projection carries a prefix and the whole text's length, so the window shows the
-    text where joining the items gives that length and begins with that prefix: the
-    items are the episode's own, so a match is that text. An item missing from the
-    window, a message cut to fit the place or a text joined otherwise does not match,
-    and the text is shown as before.
+    Attributes:
+        input: Its input.
+        response: Its response.
+        messages: Its rounds whose message it shows, by their place in the
+            projection's rounds.
     """
-    if not texts:
-        return False
-    whole = _JOINED.join(texts)
-    return len(whole) == projected.full_chars and whole.startswith(projected.text)
+
+    input: bool = False
+    response: bool = False
+    messages: frozenset[int] = frozenset()
+
+
+def _in_place(
+    record: EpisodicMemory, projection: EpisodeProjection, place: _PlaceTexts | None
+) -> _InPlace:
+    """Which of ``record``'s texts the items ``place`` holds show whole.
+
+    Decided over the episode's own whole texts, never the projection's cut ones, so a
+    text is said to be in the window only where it is there character for character:
+    its input where the user's items, joined, are that input; its response where the
+    assistant's, joined, are that response; and a round's message where an assistant's
+    item is that message, each item standing for one round, the latest rounds first,
+    since the window is the conversation's most recent part.
+    """
+    if place is None:
+        return _InPlace()
+    user, assistant = place.user, place.assistant
+    return _InPlace(
+        input=bool(user) and _JOINED.join(user) == _input_of(record),
+        response=bool(assistant) and _JOINED.join(assistant) == record.outcome,
+        messages=_messages_in_place(record, projection, assistant),
+    )
+
+
+def _input_of(record: EpisodicMemory) -> str | None:
+    """An episode's whole input, as :func:`project_episode` reads it before cutting it."""
+    processing = record.processing_record
+    if processing is None:
+        return record.content
+    trigger = processing.trigger
+    if not isinstance(trigger, RecordedChannelTrigger):
+        return None
+    payload = trigger.payload
+    return payload.text if isinstance(payload, RecordedTextInput) else payload.transcript
+
+
+def _messages_in_place(
+    record: EpisodicMemory, projection: EpisodeProjection, written: Sequence[str]
+) -> frozenset[int]:
+    """The projection's rounds whose message one of ``written`` is, whole.
+
+    The projection shows a round's message where its text is not blank, in the order
+    recorded, so its rounds carrying a message are the record's rounds with text, one
+    for one. That is checked, each projected message a cut of its round's text, and
+    where it does not hold no message is said to be in the window.
+    """
+    processing = record.processing_record
+    if processing is None or not written:
+        return frozenset()
+    texts = [one.text for one in processing.rounds if one.text.strip()]
+    projected = [
+        (index, one.message)
+        for index, one in enumerate(projection.rounds)
+        if one.message is not None
+    ]
+    if len(texts) != len(projected) or not all(
+        message.full_chars == len(text) and text.startswith(message.text)
+        for (_, message), text in zip(projected, texts, strict=True)
+    ):
+        return frozenset()
+    unclaimed = Counter(written)
+    shown: set[int] = set()
+    for (index, _), text in reversed(list(zip(projected, texts, strict=True))):
+        if unclaimed[text]:
+            unclaimed[text] -= 1
+            shown.add(index)
+    return frozenset(shown)
 
 
 def _more_older(count: int, page: int) -> str:
