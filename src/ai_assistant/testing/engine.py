@@ -1737,9 +1737,13 @@ class FakeAssistantEngine:
             if marked and not activation.stopped:
                 # ADR-0317 §3: what was marked is consumed, so its failure is written.
                 # Never raising but for a cancellation, as the phases' own write of it:
-                # the pass is already ending on its own error.
-                with contextlib.suppress(Exception):
-                    await self._say(activation, couldnt_finish())
+                # the pass is already ending on its own error. A cancellation there
+                # ends the pass as one does anywhere, its episode still captured.
+                try:
+                    with contextlib.suppress(Exception):
+                        await self._say(activation, couldnt_finish())
+                except asyncio.CancelledError as cancelled:
+                    failure = cancelled
         try:
             report = await activation.finish(
                 memory=self.episode_memory,
