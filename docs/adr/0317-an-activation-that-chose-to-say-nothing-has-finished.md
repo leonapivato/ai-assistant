@@ -1,6 +1,6 @@
 # 317. An activation that chose to say nothing has finished
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-10-13
 - Scope: the phases, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): how an activation started from a conversation ends when planning chose to write nothing, and where the *couldn't finish* message is written ([#2943](https://github.com/leonapivato/ai-assistant/issues/2943)).
 - Authorization: the owner ruled this decision's content on 2026-10-13 in #2943, option A: silence is a normal ending. The dispatcher assigned 0317 and authorized ratifying it once its reviews are green.
@@ -10,7 +10,7 @@
   (§9:1 whole: an activation whose planning chose to write nothing has finished and writes
   no message, and *couldn't finish* is written where §3 below names) and
   [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md)
-  (§3:7, in the addition alone: a stage's failure also writes *couldn't finish*, whatever
+  (§3:7, in the addition alone: a stage's failure that ends the activation also writes *couldn't finish*, whatever
   earlier rounds wrote).
 
 ## Context
@@ -93,12 +93,14 @@ finished activation's are.
 > **Normative.** It is written where the round limit ended the activation (ADR-0315
 > §2:4), whatever earlier rounds wrote. This is ADR-0307 §3:7 as written.
 
-> **Normative.** It is written where a stage failed, or a deadline ended the activation,
-> whatever earlier rounds wrote. The controller's loop guard ending the activation
-> (ADR-0280 §4:6, in the scopes later decisions give it) counts as a stage's failure, and
-> so does a failure after the activation took in any of the conversation's waiting
-> messages and before its first stage ran. A failure before it took in any writes
-> nothing, since the activation did nothing.
+> **Normative.** It is written where a stage's failure or a deadline ended the activation,
+> whatever earlier rounds wrote. A failure a stage tolerates, after which the activation
+> goes on (such as recall's under ADR-0281 §5), ends nothing and writes nothing; where the
+> activation then finishes, §2 decides its ending. The controller's loop guard ending the
+> activation (ADR-0280 §4:6, in the scopes later decisions give it) counts as a stage's
+> failure ending it, and so does a failure after the activation took in any of the
+> conversation's waiting messages and before its first stage ran. A failure before it
+> took in any writes nothing, since the activation did nothing.
 
 > **Normative.** It is written where a message a round wrote was refused by authorizing,
 > or its write did not come back done (ADR-0306 §5), and no later message of the
@@ -186,7 +188,7 @@ the second is how the user hears that the assistant acted, not a guard against
 | ADR-0293 §10:2 | Nothing: it governs the adapter that wrote the compose stage's reply until the phases sent messages |
 | ADR-0295 §3:3 | Nothing: a stop writes nothing (§3:6); its record on ADR-0293 §9:1 names a clause §3:6 now carries |
 | ADR-0307 §3:2 | Nothing: a round whose text is empty writes no message |
-| ADR-0307 §3:7 | In the addition alone: a stage's failure also writes *couldn't finish*, whatever earlier rounds wrote (§3:3). The round limit and a deadline stand as written, and the message is the one §3:1 describes |
+| ADR-0307 §3:7 | In the addition alone: a stage's failure that ends the activation also writes *couldn't finish*, whatever earlier rounds wrote (§3:3). The round limit and a deadline stand as written, and the message is the one §3:1 describes |
 | ADR-0313 §4:5 | Nothing: an event, whose place takes no message, writes none, and returns how it ended |
 | ADR-0314 §4:2–§4:3 | Nothing: no entry is added (§4) |
 | ADR-0315 §2, §4:2 | Nothing: §2:1 reads the last round as ADR-0315 §2:2–§2:3 end it |
@@ -218,6 +220,8 @@ the second is how the user hears that the assistant acted, not a guard against
 - A message lost to a store failure, and a failure before the first stage ran, leave the
   diagnostic record without the cause of the *couldn't finish* written for them (§4:3).
   The effect record and the episode's end entry hold each.
+- The viewer also badges a failure a stage tolerated as *could not finish*, where §3:3
+  writes none ([#2973](https://github.com/leonapivato/ai-assistant/issues/2973)).
 
 ## Alternatives considered
 
