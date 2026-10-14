@@ -90,10 +90,6 @@ class CoverageSubject(NamedTuple):
     goal: str | None
     """``request.goal``, carried so that a rewrite of it is a changed request."""
 
-    intended_action: str | None
-    """``request.intended_action``, carried so that a rewrite of it is a changed
-    request."""
-
     tool: ToolDefinition
     """The declaration by value, which ``decide`` reads its rule table off."""
 
@@ -146,7 +142,6 @@ def coverage_subject(request: ActionRequest) -> CoverageSubject:
     binding = request.egress_binding
     return CoverageSubject(
         goal=request.goal,
-        intended_action=request.intended_action,
         tool=ToolDefinition.model_validate(field_state(ToolDefinition, request.tool)),
         parameters=_PARAMETERS.validate_python(request.parameters),
         parameters_digest=request.parameters_digest,

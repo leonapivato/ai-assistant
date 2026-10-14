@@ -630,31 +630,6 @@ class UnknownConversationError(ConversationStoreError):
     """
 
 
-class DeferralStoreError(AssistantError):
-    """Reading from or writing to the deferred-question queue failed (ADR-0078 §2).
-
-    Its own class in the :class:`AssistantError` hierarchy for the reason
-    :class:`ConversationStoreError` is one: a deferred question is none of the
-    things the existing errors name — not memory, not planning, not context, not
-    audit. It is a *question about* a candidate belief, deliberately not a belief
-    of any band (ADR-0078 §1), and it lives in a store of its own.
-
-    It covers a store fault, an exhausted claim-token re-mint, and every
-    caller-side fault around the re-deferral exemption: a ``predecessor_id``
-    naming a live deferral whose claim the supplied token does not match, one that
-    is no longer ``APPLYING`` or already names a successor, and a
-    ``predecessor_id`` and a token that disagree about being present. Each of those
-    would otherwise strand a claimed answer with no successor to name, which is the
-    class of fault to surface rather than absorb.
-
-    A malformed *argument* is not this error: a paging value out of range is a
-    ``ValueError``, inherited from ADR-0073 §2 unchanged rather than restated.
-    Where a method already has a spelling for absence or refusal — a ``None``
-    return from ``get``/``claim``, the ``bool`` of ``resolve``/``delete`` — that
-    spelling is used and nothing is raised.
-    """
-
-
 class StoryStoreError(AssistantError):
     """The story store could not read or write its file (ADR-0289 §3).
 
@@ -756,35 +731,6 @@ class NotificationBudgetError(AssistantError):
     """
 
 
-class DeferralIdConflictError(DeferralStoreError):
-    """A ``defer`` supplied an id a stored row already carries (ADR-0078 §2).
-
-    Nothing was committed; the caller minted a colliding id and should re-mint and
-    retry. "Already carries" is *physical presence* in ADR-0046 §3's sense rather
-    than read-visibility, so a resolved or lapsed row still blocks the id.
-
-    Narrowed out of :class:`DeferralStoreError` for one caller and one question:
-    **a re-mint is the only correct response to this and the wrong response to
-    everything else.** A caller that retried on an exhausted token draw or on a
-    stranded-parent refusal would loop on a fault that will not change; one that
-    did not re-mint here would drop a question over a bad dice roll.
-
-    It is deliberately **not** what a same-question retry produces. Key idempotency
-    is about the *question*: if the stored row's ``question_key`` equals the
-    incoming one and still speaks for it, the id names a question that is still
-    open — which is exactly what an uncertain admission retried under the same id
-    produces — so the admission is suppressed instead. This error is for one id
-    naming **two different questions**, which is the minting fault, and it takes
-    precedence over suppression when both apply: a fault that is reported can be
-    fixed, and one absorbed into a plausible-looking success is found later, by
-    someone else.
-
-    Subclasses :class:`DeferralStoreError`, so every ``except DeferralStoreError``
-    still catches it — the shape :class:`MemoryStoreConflictError` has under
-    :class:`MemoryStoreError`, for the reason recorded there.
-    """
-
-
 class TraceStoreError(AssistantError):
     """Reading from or writing to the evaluation-trace store failed (ADR-0119 §13b).
 
@@ -815,10 +761,6 @@ class DiagnosticRecordError(AssistantError):
     because a failure to describe the work may not propagate into the work
     (§2:4). Only ``DiagnosticRetention.purge_before``, the hub's sweep, raises it.
     """
-
-
-class ContextError(AssistantError):
-    """Situational context could not be assembled (e.g. a source-wiring bug)."""
 
 
 class ReaderError(AssistantError):
@@ -1373,69 +1315,6 @@ class DuplicateRecipientGrantError(InvalidRecipientGrantError):
     """
 
 
-class AuthorizationError(AssistantError):
-    """A goal-authorization store could not be read or written (ADR-0254 §16).
-
-    The store fault, and the base for the refusal below, so a caller that only
-    wants "the authorization store could not answer" gets one handler. It is
-    :class:`RecipientGrantError`'s shape one store over, and the split between a
-    fault and a refusal is ADR-0193 §1's own: **a refusal is the caller's error
-    and a fault is the store's**.
-
-    **It is also what**
-    :meth:`~ai_assistant.core.protocols.GoalAuthorizations.live_for` **raises where
-    more than one live row of a goal and declaration id would answer** (ADR-0254
-    §1, §16). That is an integrity failure rather than an answer: ``None`` is this
-    seam's word for *"the store holds no live record"*, and two rows are not none
-    of them. A query that chose between them would be the composition ADR-0254 §5
-    declines.
-
-    **A fault takes ADR-0254 §6's bar and is never read as an absence**, which is
-    the one place this seam departs from
-    :class:`~ai_assistant.core.protocols.RecipientGrants`'s discipline. The grant
-    seam discovers **permissions** only, so a fault there can only make a ruling
-    more restrictive and answering ``None`` is safe. This seam discovers
-    **restrictions** as well — a live record the request exceeds is what refuses
-    route (b) and route (c) — so a fault read as absence would turn a ``CONFIRM``
-    the user's own act earned into an ``ALLOW``. A policy that catches this logs
-    it, takes the bar, and rules the ``CONFIRM`` the request would have drawn had
-    the user authorised nothing.
-    """
-
-
-class InvalidAuthorizationError(AuthorizationError):
-    """A goal-authorization store refused the record it was handed (ADR-0254 §16).
-
-    Raised by :meth:`~ai_assistant.core.protocols.GoalAuthorizationStore.record`
-    where the write is not one the store admits: a second ``ESTABLISHED`` row of
-    one ``goal`` and declaration **id**; a path-(ii) row that fails the
-    transcription or the non-widening check; a row carrying ``confirmation``
-    written in any disposition but ``PROPOSED``; a row carrying ``confirmation``
-    **unset** written in any disposition but ``ESTABLISHED`` or with ``settled_at``
-    unequal to ``proposed_at``; a ``supersedes`` that resolves to no
-    ``ESTABLISHED`` row of that goal and declaration id; and a duplicate id, the
-    store being write-once.
-
-    **One class rather than several**, on :class:`InvalidRecipientGrantError`'s
-    reasoning and for its reason: the caller's recourse is identical in every
-    refusing case — read the store and construct a different record.
-
-    **A refusal is the caller's error and a fault is the store's** (ADR-0254 §16).
-    The subclass relation means a caller catching :class:`AuthorizationError`
-    still catches both, and the policy's fault clause is stated over the base
-    class deliberately — a ``record`` refusal never reaches a policy, which writes
-    nothing.
-
-    **A settlement that cannot be taken is not this class and is not an
-    exception.** :meth:`~ai_assistant.core.protocols.GoalAuthorizationStore.settle`
-    answers a
-    :class:`~ai_assistant.core.types.AuthorizationSettlement` member — a refusal
-    that is a **result** rather than a raise, which is
-    ``AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception``'s
-    rule (ADR-0254 §16).
-    """
-
-
 class InvalidDestinationTrustError(AssistantError):
     """A destination-trust store refused a record, or could not answer (ADR-0238 §1).
 
@@ -1546,38 +1425,6 @@ class UntrustableDestinationError(AssistantError):
     """
 
 
-class UngrantableActError(AssistantError):
-    """The establishing act was refused before any answer was recorded (ADR-0235 §3).
-
-    One class over every refusal of the act that leaves **no answer recorded** on
-    either operation — ADR-0235 §3's seven availability conditions, whether they
-    fail at the check or the fourth of them fails late against the trail's own
-    resolution invariant; §2's binding refusal on a held confirmation; and §1's
-    expiry refusal on both. The message names which condition failed and **no lane
-    branches on the message**; where more than one fails, the first in the order §3
-    states is the one named, so the refusal is deterministic across
-    implementations.
-
-    **One type rather than one per condition**, because every one of them has the
-    same user-visible consequence — the act was not performed, nothing was
-    recorded, nothing was sent, and the call may still be answered without the
-    standing request — and a client needs one handler for exactly that.
-
-    **An** :class:`AssistantError` **and not a bare** ``ValueError``, for the
-    reason ADR-0042 §7 fixes: a ``ValueError`` is not an ``AssistantError``, so it
-    would escape a command's ``except (AssistantError, TransportError)`` boundary
-    as an uncaught traceback with no controlled exit code. ``ValueError`` stays
-    where ADR-0235 already puts it — a non-positive ``limit``, and
-    :meth:`~ai_assistant.core.types.PermissionDecision.from_confirmation`'s
-    construction refusals — both of which are caller argument errors rather than
-    outcomes of the act.
-
-    **Distinct from the two** :class:`InvalidRecipientGrantError` **subclasses
-    above**, which name a refusal the store makes *after* the answer was recorded
-    rather than one an operation makes before it.
-    """
-
-
 class SourceNotGrantedError(AssistantError):
     """A source was read for a use no live grant covers (ADR-0097 §5, §10).
 
@@ -1684,114 +1531,11 @@ class ReadTrailError(AssistantError):
     """
 
 
-class RoutingTrailError(AssistantError):
-    """The routing trail could not be written or read (ADR-0197 §9).
-
-    Raised by a :class:`~ai_assistant.core.protocols.RoutingRecorder` or a
-    :class:`~ai_assistant.core.protocols.RoutingTrail` when the store refuses a row
-    — a row id already held under a differing record, a ``route_id`` already held by
-    a retained row of a different route, a sequence the route state machine does not
-    admit, or a record that does not satisfy its own model — and when the backend
-    cannot be read or written at all.
-
-    **One class rather than several**, as :class:`ReadTrailError` is one class rather
-    than two, and ADR-0197 §9 fixes it in as many words. The recourse is identical
-    however the write failed: the act the row precedes **does not proceed**, the pass
-    ends in :attr:`~ai_assistant.core.types.RouteOutcome.UNRECORDED`, and the
-    operation is never called. A caller that could tell a broken store from a
-    colliding ``route_id`` would do nothing different with the answer.
-
-    **What this error means to its catcher is that nothing happened** (ADR-0197 §9).
-    The row is written *before* the act it precedes, so a refusal here is a refusal
-    to act: no belief is destroyed, no grant is withdrawn, no park is registered and
-    no token is minted. That is the whole difference between
-    :attr:`~ai_assistant.core.types.RouteOutcome.UNRECORDED` and
-    :attr:`~ai_assistant.core.types.RouteOutcome.FAILED`, which states that the
-    operation was called and raised — and a surface that rendered the two alike would
-    tell a user their belief might be gone when this decision guarantees it is not.
-    """
-
-
 class PlanningError(AssistantError):
     """A request could not be turned into an executable plan.
 
     Also the base for the plan-execution faults below, so a caller can catch the
     whole planning family with one handler.
-    """
-
-
-class IllegalTransitionError(PlanningError):
-    """A step transition is not legal from the step's current status (ADR-0014 §4).
-
-    Raised by the execution tracker rather than tolerated, because the
-    transition graph is what keeps execution state deterministic (VISION §7).
-    """
-
-
-class RetriesExhaustedError(PlanningError):
-    """A step has used its retry budget and may not be claimed again.
-
-    Distinct from :class:`IllegalTransitionError` because the caller's response
-    differs: an illegal transition is a bug, whereas exhausted retries are an
-    expected outcome the executor should surface rather than keep hammering.
-    """
-
-
-class StaleExecutionError(PlanningError):
-    """A write lost the optimistic-concurrency race (ADR-0014 §5).
-
-    The stored execution has advanced since the caller read it, so the write was
-    computed against a state that no longer holds. The caller should re-read and
-    retry. This is the failure that stops two workers from both claiming a step
-    and running a non-idempotent tool twice.
-    """
-
-
-class ClaimRefused(PlanningError):  # noqa: N818 — ADR-0261 §7 names the class, and the name says what happened rather than that something is broken
-    """A ``→ RUNNING`` claim was refused because a **user act** changed something.
-
-    Raised by exactly two things, which are the two *liveness* conjuncts a claim
-    meets (ADR-0261 §7):
-
-    * **ADR-0255 §3's attempt conjunct, in its *state* limb alone** — the attempt the
-      claim names is in a state that is terminal (``CANCELLED`` or ``ENDED``) or
-      paused (``AWAITING_CLARIFICATION``, ``AWAITING_AUTHORIZATION`` or ``BLOCKED``).
-    * **ADR-0249 §8's revision conjunct** — the plan the execution runs does not
-      target its goal's current interpretation revision, because a correction
-      replaced what the user asked for.
-
-    **Every other limb of every conjunct keeps the class it has today, and no lane
-    raises this from any of them**: an attempt that does not exist, one that does not
-    carry this execution, one of two attempts naming it, and ADR-0255 §3's successor
-    conjunct each stay on the non-stale :class:`PlanningError` that section gives
-    them, being defects of the *walk* rather than states a user act produced. So do a
-    lost ``expected_version`` (:class:`StaleExecutionError`), an illegal move
-    (:class:`IllegalTransitionError`) and an unknown execution (bare
-    :class:`PlanningError`). **No other member of any Protocol and no other subsystem
-    raises it.**
-
-    **Catching this *is* catching "a user act changed something under this walk"**,
-    which is what makes composing safe. Until ADR-0261 the two liveness raisers raised
-    classes shared with refusals that are not claim guards at all —
-    :class:`StaleExecutionError` is also an ordinary compare-and-swap loss, a bare
-    :class:`PlanningError` also an unknown execution — so a driver could not tell
-    *the user changed something* from *this driver built a bad transition*.
-
-    **It says *that* a liveness conjunct refused and never *which*.** It defines no
-    ``__init__``, carries a message and **no structured state**, and sends no
-    ``details`` (ADR-0085 §10a): the read that follows the refusal names the state
-    the goal is in, and even that cannot establish which conjunct fired — a claim
-    refused on the attempt conjunct, on a goal a correction had meanwhile revised,
-    answers ``UNDERSTANDING_CHANGED``, true of the goal while naming the wrong
-    conjunct. **No lane gives it structured state naming one.**
-
-    **A subclass of** :class:`PlanningError` **so nothing that catches the planning
-    family stops seeing it**, and so a peer that cannot name the code never completes
-    a connect at all: ADR-0085 §10a fixes that an unknown error code is a
-    transport-level protocol failure and **not** a fall back to the nearest ancestor,
-    and ADR-0084 §3's exact-match handshake is what keeps the two halves shipping
-    together — which is why the class and ``PROTOCOL_VERSION``'s move land in one
-    change.
     """
 
 
@@ -1921,16 +1665,6 @@ class DeviceRefusedError(AssistantError):
             )
             raise ValueError(msg)
         self.reason: DeviceRefusal = DeviceRefusal(reason)
-
-
-class ActiveExecutionError(PlanningError):
-    """A destructive store operation was refused because work is in flight.
-
-    Erasing an execution while a step is ``RUNNING`` would destroy the record
-    the executor is about to commit against, leaving a side effect in the world
-    with nothing recording it. The caller cancels the execution first, then
-    retries (ADR-0014 §5).
-    """
 
 
 class OversizedValueError(AssistantError):

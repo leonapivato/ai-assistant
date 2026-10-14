@@ -32,8 +32,6 @@ from ai_assistant.core.types import (
     PlacementSetter,
     ProcessingReason,
     RecordedChannelTrigger,
-    SpokenDelivery,
-    SpokenDeliveryState,
     StageEntry,
     StageOutcome,
     TextChannelPayload,
@@ -114,7 +112,6 @@ class TurnUnrecordable(FakeConversationStore):
         *,
         episode_id: str,
         occurred_at: datetime,
-        delivery: SpokenDelivery | None = None,
     ) -> Conversation | None:
         raise ConversationStoreError("private provider diagnostics")
 
@@ -149,7 +146,6 @@ class Wiring:
         *,
         captured: bool = True,
         standalone: bool = False,
-        delivery: SpokenDelivery | None = None,
     ) -> ActivationState:
         """One admitted text activation, optionally with canonical conversational facts."""
         conversation = None if standalone else await self.conversations.start()
@@ -171,7 +167,6 @@ class Wiring:
                 modality=Modality.TEXT,
                 supplied_withheld=False,
                 derived_from_external=False,
-                delivery=delivery,
             )
             state.response = "the complete reply"
         return state
@@ -453,16 +448,6 @@ async def test_a_write_known_not_to_have_committed_reaches_nothing_else() -> Non
     state = await wiring.state()
     assert (await wiring.write(state)).state == "degraded"
     assert await wiring.last_turn_at(state) is None
-
-
-async def test_a_spoken_capture_writes_its_unknown_delivery_row() -> None:
-    """§10: capture passes ``UNKNOWN`` through ``record_turn``."""
-    unknown = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
-    wiring = Wiring()
-    state = await wiring.state(delivery=unknown)
-    assert (await wiring.write(state)).state == "recorded"
-    rows = await wiring.conversations.deliveries(str(state.conversation_id), episode_ids=[_ADDRESS])
-    assert dict(rows) == {_ADDRESS: unknown}
 
 
 async def test_standalone_collision_preserves_existing_record_and_does_not_retry() -> None:

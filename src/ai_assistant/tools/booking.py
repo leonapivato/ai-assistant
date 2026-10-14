@@ -16,13 +16,9 @@ system outside the deployment, moves no money and confers no capability in the w
 so it is §13's own **controlled integration** and that rule's first sentence is not
 reached rather than narrowed.
 
-**Two declarations and not one, because the money path needs both ends** (§1). The quote
-is read from a step's ``output`` (ADR-0267 §4) and the charge from the acting step's own
-(ADR-0271 §2), and ADR-0271 §2 forbids that *"no lane … mints an ``ActionQuote`` from a
-charge"*. A single declaration that both quoted and charged would make the acting step
-its own quote's producer, which is the defect #2409 names. So
-:data:`BOOKING_AVAILABILITY` carries a ``quoted_output`` and no ``charged_output``, and
-:data:`BOOKING_ACT` carries a ``charged_output`` and no ``quoted_output``.
+**Two declarations and not one** (§1): :data:`BOOKING_AVAILABILITY` reads whether a
+date is available and what it would cost, and :data:`BOOKING_ACT` books it and reports
+what it charged.
 
 **Both go in the ``ToolRegistry`` as well as the seam's table**, which is the email
 integration's shape and deliberately **not** the forecast read's (§1). ADR-0260 §1 keeps
@@ -81,21 +77,17 @@ from ai_assistant.core.errors import AssistantError, ClassifiedToolError, Connec
 from ai_assistant.core.types import (
     CapabilityEffect,
     CapabilityResult,
-    ChargedOutput,
     CostBasis,
     DataTier,
     DestinationProtocol,
     Idempotency,
     ProvisioningState,
-    QuotedOutput,
     Reversibility,
     RiskLevel,
-    StepVerification,
     ToolCost,
     ToolDefinition,
     ToolFailure,
     ToolFailureKind,
-    VerificationKind,
     parameter_violations,
 )
 from ai_assistant.tools.egress_declaration import DESTINATION_KEYWORD, TIER_KEYWORD
@@ -130,16 +122,14 @@ ORIGIN_ARGUMENT: Final = "origin"
 #: of the owner's own trip (ADR-0146 §5).
 DATE_ARGUMENT: Final = "date"
 
-#: The availability answer's keys. :data:`PRICE_AMOUNT_KEY` and
-#: :data:`PRICE_CURRENCY_KEY` are what :data:`BOOKING_AVAILABILITY`'s ``quoted_output``
-#: names, so ADR-0267 §4's mint reads the price from them and from nothing else.
+#: The availability answer's keys: whether the day is available, and the whole price
+#: with its ISO-4217 code.
 AVAILABLE_KEY: Final = "available"
 PRICE_AMOUNT_KEY: Final = "price_amount"
 PRICE_CURRENCY_KEY: Final = "price_currency"
 
-#: The booking's keys. :data:`CHARGED_AMOUNT_KEY` and :data:`CHARGED_CURRENCY_KEY` are
-#: what :data:`BOOKING_ACT`'s ``charged_output`` names, so ADR-0271 §2's reading takes
-#: the charge from them and from nothing else.
+#: The booking's keys: whether it booked, and the whole amount charged with its
+#: ISO-4217 code.
 BOOKED_KEY: Final = "booked"
 CHARGED_AMOUNT_KEY: Final = "charged_amount"
 CHARGED_CURRENCY_KEY: Final = "charged_currency"
@@ -278,8 +268,6 @@ BOOKING_AVAILABILITY: Final = ToolDefinition(
     result=CapabilityResult.NO_OUTSIDE_TEXT,
     outcome_can_be_unknown=False,
     safe_to_repeat=True,
-    quoted_output=QuotedOutput(amount=PRICE_AMOUNT_KEY, currency=PRICE_CURRENCY_KEY),
-    charged_output=None,
     parameters_schema=_parameters_schema(),
 )
 """The availability read's declaration, every field of which ADR-0273 §2 fixes.
@@ -305,13 +293,6 @@ BOOKING_AVAILABILITY: Final = ToolDefinition(
   nothing: the provider is in-process, reaches no metered service and holds no account
   that could be billed. Nothing derives it from, defaults it from or keeps it in step
   with the configured prices.
-- ``quoted_output`` names, at depth one, the key carrying the **whole price this
-  provider quotes for the booking** — ``QuotedOutput.amount`` in ADR-0267 §3's own
-  sense — and the key carrying its ISO-4217 code.
-- ``charged_output=None``: a read charges nothing, and ADR-0271 §2's *"A declaration
-  carrying ``None`` reports no charge ever"* is the true statement here.
-- **No ``bounded_arguments`` member**, so no ``BoundKind.MONEY`` argument is declared
-  and the owner's ``max_price`` route is not opened here (§2, §8).
 - **Nothing is declared for the effect key**: it is derived at ``ToolCall.effect_key``,
   and *"Derived rather than minted, supplied, configured or carried as a field"* is
   relied on rather than restated.
@@ -338,11 +319,6 @@ BOOKING_ACT: Final = ToolDefinition(
     result=CapabilityResult.NO_OUTSIDE_TEXT,
     outcome_can_be_unknown=True,
     safe_to_repeat=False,
-    quoted_output=None,
-    charged_output=ChargedOutput(amount=CHARGED_AMOUNT_KEY, currency=CHARGED_CURRENCY_KEY),
-    postconditions=(
-        StepVerification(kind=VerificationKind.FIELD_EQUALS, field=BOOKED_KEY, equals=True),
-    ),
     parameters_schema=_parameters_schema(),
 )
 """The booking act's declaration, every field of which ADR-0273 §2 fixes.
@@ -364,18 +340,8 @@ BOOKING_ACT: Final = ToolDefinition(
 - ``reads=(SECRET, OPERATIONAL)`` as the read's, for the read's reasons.
 - ``writes=(PERSONAL, OPERATIONAL)`` — the booking record, which carries what the user
   asked, and the commit count beside it, which carries nothing of theirs.
-- ``discloses=()`` (§3), ``cost=FREE`` and no ``bounded_arguments``, exactly as the
-  read declares them and for the same stated reasons.
-- ``charged_output`` names, at depth one, the key carrying the **whole amount that
-  invocation charged** and the key carrying its ISO-4217 code (ADR-0271 §2);
-  ``quoted_output=None``, because **a quote is prospective and a charge is
-  retrospective**, and a single declaration doing both would make the acting step its
-  own quote's producer (§1).
-- **One ``postcondition``** (ADR-0253 §4), over a key of its own output, so that M33's
-  verification half has a subject. §2 *"requires no more than one and requires no
-  strength of it"*: the owner ruled on #2255 that verification space exists but need
-  not be strong, and a predicate over one step's own output is *"not the verification
-  A10 lands"*.
+- ``discloses=()`` (§3) and ``cost=FREE``, exactly as the read declares them and for
+  the same stated reasons.
 
 **It classifies at ADR-0262 §3's rung 2, and §7 requires that it does**: it is
 ``side_effecting``, its ``reversibility`` is more severe than ``REVERSIBLE``, and its
@@ -668,9 +634,7 @@ class BookingCatalogue:
         price_currency: That price's ISO-4217 code.
         charge_amount: The whole amount a booking charges. **Not required to equal
             :attr:`price_amount`**: ADR-0271 §2 makes a charge *retrospective*, and §3
-            of that decision exists precisely for the case where the two differ. §5's
-            disagreeing-charge configuration is *"not a provider whose ``quoted_output``
-            lies"*; it is the case the corpus wrote a finding for.
+            of that decision exists precisely for the case where the two differ.
         charge_currency: That charge's ISO-4217 code, independently configurable from
             :attr:`price_currency` for the same reason.
         retained_records: How many booking records the store keeps, beyond which the

@@ -321,7 +321,7 @@ class ActivationWriter:
         Each is frozen ``interrupted`` / ``hub_stopped`` by an end entry due
         ``hub_stopped`` with outcome ``done``, at this clock's one reading. The
         placement and ``Provenance.derived_from_external`` stay as stored, and
-        ``record_turn`` is called with no delivery only where the episode is on a
+        ``record_turn`` is called only where the episode is on a
         conversation's channel; a ``None`` from it keeps the episode (ADR-0293 §2:7,
         superseding §7:3 in its deletion). The closed record is measured against
         ADR-0275 §9:1's bound as every write of an episode is (§3:6), and one that
@@ -563,13 +563,11 @@ class ActivationWriter:
         writes: _Writes,
     ) -> None:
         """Tell the conversation its episode landed, which is the verification (§7:2)."""
-        facts = state.facts
         try:
             standing = await self._conversations.record_turn(
                 conversation_id,
                 episode_id=episode.id,
                 occurred_at=episode.occurred_at,
-                delivery=None if facts is None else facts.delivery,
             )
         except Exception:
             # Indeterminate, so the fence re-reads the conversation (§7:4's posture).

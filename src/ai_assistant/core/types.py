@@ -2580,192 +2580,6 @@ class Capture(BaseModel):
 
 
 # Channel envelope dependencies precede episode records (ADR-0275).
-class SpokenDeliveryState(StrEnum):
-    """How much of a spoken answer a device reports having played (ADR-0205 §2).
-
-    **A closed vocabulary of three, and adding a member is a change to what was
-    decided.** §2 fixes it at exactly these, and §8 leaves a fourth — for a
-    rendering that never existed — available additively to a later ADR rather than
-    taking it here.
-
-    **The three partition the durations** (:class:`SpokenDelivery`), so the state
-    is derivable from them and cannot disagree with them. That is the whole reason
-    a state is carried beside two numbers rather than inferred at each reader:
-    inference at the reader is where two readers disagree.
-
-    Attributes:
-        UNKNOWN: Nothing was reported. What capture writes on every turn of
-            ``converse_spoken`` (§4) and **never** a value a caller supplies: a
-            device that does not know reports nothing, and the absence of a report
-            is spelled by omitting the argument (§2).
-        COMPLETE: The device played the rendering out. ``played`` equals
-            ``rendered``, which is what a source that ended of its own accord did
-            (§7).
-        INTERRUPTED: The device stopped short. ``played`` is strictly below
-            ``rendered``.
-    """
-
-    UNKNOWN = "unknown"
-    COMPLETE = "complete"
-    INTERRUPTED = "interrupted"
-
-
-class SpokenDelivery(BaseModel):
-    """What a device played of one spoken answer, in time (ADR-0205 §2, §3).
-
-    **Exactly three members**, and this is the *fact* rather than the report: the
-    conversation store keeps it on a delivery row keyed by the episode's id
-    (ADR-0283 §6, superseding ADR-0205 §3's turn row), and
-    :class:`SpokenDeliveryReport` is what names the episode it is about.
-
-    **Granularity is time.** No lane derives a word, a sentence or a character
-    position from these durations, and no surface promises one — the synthesizer
-    gives no word timestamps and §2 rules that time is enough.
-
-    **It is a device's claim and nothing verifies it** (§2). No component decodes
-    the rendering, measures it, re-times it, or compares a reported duration
-    against anything: the device is the only witness to what a loudspeaker
-    actually emitted, so an unverified claim is not the worse of two available
-    answers, it is the only one. ADR-0200 §9's refusal of a *declared* duration on
-    :class:`SpokenAudio` is not read as forbidding this one — that refusal was
-    about a second answer to a question the payload already answers, and this
-    answers one the payload does not answer at all.
-
-    **It carries no audio and permits none to be reconstructed** (§2), so
-    ADR-0200 §8's retention clause binds this path exactly as it binds every other.
-    No fragment, no transcript, no span of what was heard, no word count, no
-    character offset, no sample position and no format.
-
-    Frozen and ``extra="forbid"``, so the three members are the whole of it.
-
-    Attributes:
-        state: Which of §2's three states this is. Derivable from the two
-            durations, and refused where it disagrees with them.
-        played: How much of the rendering the device says it played, or ``None``
-            beside ``UNKNOWN``.
-        rendered: How long the whole rendering was, by the device's own decoding
-            of it, or ``None`` beside ``UNKNOWN``.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    state: SpokenDeliveryState = Field(
-        description="Whether nothing was reported, the answer played out, or it was cut short."
-    )
-    played: timedelta | None = Field(
-        default=None,
-        description="How much of the rendering the device played; None beside UNKNOWN.",
-    )
-    rendered: timedelta | None = Field(
-        default=None,
-        description="How long the whole rendering was; None beside UNKNOWN.",
-    )
-
-    @model_validator(mode="after")
-    def _the_state_partitions_the_durations(self) -> Self:
-        """Refuse every value outside §2's partition.
-
-        ``DeferredProposal``'s coherence-validator shape, taken for ADR-0130 §2's
-        stated reason: a value that has already contradicted itself is not a
-        report, it is a defect. No value satisfies two of the three states and
-        none satisfies none of them.
-
-        **``COMPLETE`` is equality and not ``played <= rendered``**, which
-        ADR-0205 §2 argues at length: the weaker rule admits ``COMPLETE`` beside a
-        ``played`` of zero — a report saying in one member that nothing was heard
-        and in another that the answer was delivered — and §5 permits a
-        ``COMPLETE`` turn to be rendered as nothing, so that value would make an
-        entirely unheard answer disappear from the prompt as delivered. Equality
-        costs the device nothing: a source that ended of its own accord played the
-        buffer, so the buffer's own duration is both numbers.
-
-        Raises:
-            ValueError: If the three members do not describe one of §2's states.
-        """
-        if self.state is SpokenDeliveryState.UNKNOWN:
-            if self.played is not None or self.rendered is not None:
-                msg = (
-                    "an UNKNOWN delivery carries no durations: nothing was reported, so "
-                    "there is nothing to have measured (ADR-0205 §2)"
-                )
-                raise ValueError(msg)
-            return self
-        if self.played is None or self.rendered is None:
-            msg = (
-                f"a {self.state.value} delivery carries both durations: the state is "
-                f"derivable from them, so a state without them is a claim with nothing "
-                f"behind it (ADR-0205 §2)"
-            )
-            raise ValueError(msg)
-        if self.rendered <= timedelta(0):
-            msg = (
-                f"a rendering that was played has a positive duration, and this one is "
-                f"{self.rendered} (ADR-0205 §2)"
-            )
-            raise ValueError(msg)
-        if self.played < timedelta(0):
-            msg = f"a device cannot have played a negative duration, and this is {self.played}"
-            raise ValueError(msg)
-        if self.state is SpokenDeliveryState.COMPLETE:
-            if self.played != self.rendered:
-                msg = (
-                    "a COMPLETE delivery played the whole rendering, so played equals "
-                    "rendered; anything less is INTERRUPTED (ADR-0205 §2)"
-                )
-                raise ValueError(msg)
-            return self
-        if self.state is SpokenDeliveryState.INTERRUPTED:
-            if self.played >= self.rendered:
-                msg = (
-                    "an INTERRUPTED delivery stopped short, so played is strictly below "
-                    "rendered; the two being equal is COMPLETE (ADR-0205 §2)"
-                )
-                raise ValueError(msg)
-            return self
-        assert_never(self.state)
-
-
-class SpokenDeliveryReport(BaseModel):
-    """One device's report about one turn's spoken answer (ADR-0205 §1, §2).
-
-    **Exactly two members**, and it exists only as ``converse_spoken``'s fifth
-    argument. Two types rather than one because the subject is a property of the
-    *report* and not of the turn: the row §3 stamps already names its own episode,
-    so a stored fact carrying that id a second time would be ADR-0084 §3's
-    redundancy — a second answer to a question the record already answers.
-
-    **A report names the turn it is about, and is applied to that turn and no
-    other** (§1). No report is resolved from position: not from "the
-    conversation's most recent turn", not from an ordinal the caller counted, and
-    not from anything a caller could get wrong without saying so. A report about
-    turn 1 that reaches the hub after turn 2 was captured therefore records
-    delivery of turn 1, which is true, rather than of turn 2, which is a confident
-    falsehood nothing in the value would have exposed.
-
-    **It is not an audience and cannot become one** (§1). It says how much of a
-    rendering a device played, not who was within range of it; ADR-0199 §1's third
-    clause reaches this value as squarely as ADR-0200 §3 says it reaches ``plays``,
-    and no implementation reads it on the disclosure path.
-
-    Attributes:
-        episode_id: The id of the episode recording the turn this report is about
-            — the value ``SpokenTurn.episode_id`` disclosed, handed back
-            unchanged.
-        delivery: What the device played of that turn's rendering. Its ``state``
-            is never ``UNKNOWN``: a device that does not know reports nothing, and
-            the absence of a report is spelled by omitting the argument (§2).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    episode_id: Identifier = Field(
-        description="The episode recording the turn this report is about (ADR-0205 §1)."
-    )
-    delivery: SpokenDelivery = Field(
-        description="What the device played of that turn's rendering (ADR-0205 §2)."
-    )
-
-
 class SpokenAudioFormat(StrEnum):
     """A container-and-codec one recording or rendering is carried in (ADR-0200 §9).
 
@@ -16025,10 +15839,9 @@ class ConversationExport(BaseModel):
     here — every message that stands, in ``messages``, and no deleted message's
     marker, which carries nothing of the user's. **No episode** (ADR-0283 §4:3): an
     episode is a ``MemoryStore`` record and that store's own export carries it, and
-    the transcript and the episodes are never kept in step (ADR-0293 §5:5). The
-    delivery rows, "my devices", a conversation's devices and the reader's
-    bookkeeping are the store's bookkeeping rather than a record of what was said,
-    and are not exported.
+    the transcript and the episodes are never kept in step (ADR-0293 §5:5). "My
+    devices", a conversation's devices and the reader's bookkeeping are the store's
+    bookkeeping rather than a record of what was said, and are not exported.
 
     **This is the store's raw snapshot.** A conversation stamped deleted is absent
     from it (that is what the validator below enforces), but a conversation whose
@@ -17013,14 +16826,8 @@ def _system_supplied(value: tuple[str, ...]) -> tuple[str, ...]:
 # §3). Every field a decision depends on is required, because a default is a
 # claim, and the natural default for a reach tuple is a false one.
 #
-# :class:`BoundKind` is declared here rather than beside :class:`ValueBound`
-# because ADR-0266 §7 gives it a second consumer — :class:`BoundedArgument`, which
-# :class:`ToolDefinition` carries and which is declared long before the
-# authorization section. That is the move this module's own comment above
-# :data:`Identifier` prescribes: *"A forward reference plus ``model_rebuild`` would
-# have kept the old position at the cost of making a `core` type depend on an
-# import-order side effect, so the primitive moved rather than the model."*
-# **Nothing about it changed** but the count of kinds it is read at.
+# :class:`BoundKind` is declared here rather than beside :class:`ValueBound`: it
+# had a second consumer on the declaration, which left with ADR-0313 §5:4.
 
 
 class BoundKind(StrEnum):
@@ -17053,9 +16860,7 @@ class BoundKind(StrEnum):
     :attr:`ValueBound.minimum`, and :attr:`ValueBound.maximum_exclusive` where the
     user stated the ceiling strictly. **Which argument carries the currency is not
     the bound's** (ADR-0266 §§3, 7): the act records what the user stated and never
-    which slot it fills, so the key is
-    :attr:`BoundedArgument.currency_argument` on the *declaration*, read at the
-    comparison. The owner's *"additional costs"*."""
+    which slot it fills. The owner's *"additional costs"*."""
 
     PERIOD = "period"
     """A half-open interval of instants, ``[starts_at, ends_at)`` (ADR-0254 §2).
@@ -17071,312 +16876,6 @@ class BoundKind(StrEnum):
     characters and nothing else**, which is ADR-0237 §3's rule for a
     ``TopicLabel`` — *"No fold is applied and none is needed"* — read onto a set
     the user named. The owner's *"materially different terms"*."""
-
-
-class BoundedArgument(BaseModel):
-    """What one argument of one declaration takes: a kind, not a value (ADR-0266 §7).
-
-    **The whole of what a declaration says about which of its arguments takes an
-    amount, a period or a named term.** A :class:`CoverageMember` records what the
-    user stated and names no argument (ADR-0266 §3), so this is the other half of
-    the argument route: a member of kind *k* is met against the request's value at
-    the argument a ``BoundedArgument`` declares at *k*, and nowhere else.
-
-    **Declaring a money argument is a safeguard and not a requirement.** The owner's
-    ruling of 2026-09-14 makes the **quote** the primary route at every tool — *"the
-    price is usually a consequence of those choices, not an argument the assistant
-    supplies"* — so a declaration omitting one keeps its ceiling proved against the
-    quote and forgoes only the second comparison. *"A filter is not a charge"*: a
-    ``max_price`` constrains what a search returns, so where one **is** declared the
-    ``MONEY`` member must satisfy it **as well** as the quote.
-
-    **No association is inferred from anything.** ADR-0254 §2's no-inference limb
-    stated one field over: not from a field name, a type, a schema keyword or a
-    neighbouring argument, and never from a value's JSON type or a schema keyword at
-    the comparison — ADR-0254 §4's *"No reading consults a schema to decide what an
-    argument means, and there is no exception"*.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    argument: EncodableText = Field(
-        description=(
-            "The key of ``ActionRequest.parameters`` this declares, at depth **one**: "
-            "never a dotted expression, an index, a wildcard or a selector, and **no "
-            "lane adds an addressing syntax**. ADR-0253 §6's rule for a "
-            "``StepOutputRef.field`` stated once more rather than re-derived, and for "
-            "its reason — a path language is a second thing to get wrong at the one "
-            "comparison that decides whether a call is authorised."
-        )
-    )
-    kind: BoundKind = Field(
-        description=(
-            "Which kind of value this argument takes, and so which kind of coverage "
-            "member may be met against it (ADR-0266 §7)."
-        )
-    )
-    currency_argument: EncodableText | None = Field(
-        default=None,
-        description=(
-            "``MONEY`` only, required there: the key of ``parameters`` that carries "
-            "this amount's currency. **It is the whole of the association between an "
-            "amount and the currency it is denominated in** — a fact about a "
-            "**declaration** rather than about an act, which is why ADR-0266 §3 takes "
-            "it off :class:`ValueBound`. ADR-0254 §4's currency conjunct is read here "
-            "on the argument route, **which is what makes that key covered rather than "
-            "unexamined**."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def _the_kind_carries_its_own_currency_key_and_no_other(self) -> BoundedArgument:
-        """Admit exactly the two shapes ADR-0266 §7 names.
-
-        ``MONEY`` **with** a ``currency_argument``, or ``PERIOD`` or ``TERMS``
-        **with none** — an amount is the only kind §4's readings denominate, and a
-        currency key beside a period or a term is a value nothing reads. **And
-        ``argument`` never equals ``currency_argument``**: one key cannot carry both
-        the amount and the code it is denominated in, and a declaration claiming so
-        would have §4's currency conjunct compare an amount against a currency.
-
-        Raises:
-            ValueError: If a ``MONEY`` argument carries no ``currency_argument``, if
-                a ``PERIOD`` or ``TERMS`` one carries one, or if the two keys are
-                equal.
-        """
-        if self.kind is BoundKind.MONEY and self.currency_argument is None:
-            msg = (
-                f"a MONEY bounded argument names the key carrying its currency; "
-                f"{self.argument!r} names none, and §4 compares no amount without one "
-                f"(ADR-0266 §7)"
-            )
-            raise ValueError(msg)
-        if self.kind is not BoundKind.MONEY and self.currency_argument is not None:
-            msg = (
-                f"a {self.kind} bounded argument carries no currency_argument; "
-                f"{self.argument!r} is denominated in nothing (ADR-0266 §7)"
-            )
-            raise ValueError(msg)
-        if self.argument == self.currency_argument:
-            msg = (
-                f"a bounded argument's currency_argument names a second key; "
-                f"{self.argument!r} cannot carry both the amount and its currency "
-                f"(ADR-0266 §7)"
-            )
-            raise ValueError(msg)
-        return self
-
-
-def _bounded_arguments(value: tuple[BoundedArgument, ...]) -> tuple[BoundedArgument, ...]:
-    """Require ADR-0266 §7's duplicate-free rule over ``argument``.
-
-    Two declarations of one key would need a precedence rule at the comparison,
-    which is the shape ADR-0254 §2 refuses one type over. **Two declarations of one
-    *kind* are admitted and are not a defect**: §7 answers them by meeting no member
-    of that kind on the argument route at all, which is the restrictive direction
-    and a fact about the comparison rather than about the declaration.
-
-    Raises:
-        ValueError: If two entries name the same ``argument``.
-    """
-    named = [one.argument for one in value]
-    if len(set(named)) != len(named):
-        msg = (
-            "no two bounded arguments of one declaration name the same argument; a "
-            "precedence rule between them is one somebody would have to remember at the "
-            "comparison (ADR-0266 §7)"
-        )
-        raise ValueError(msg)
-    return value
-
-
-def _postconditions(value: tuple[StepVerification, ...]) -> tuple[StepVerification, ...]:
-    """Refuse ``OUTPUT_PRESENT`` as a declared postcondition (ADR-0262 §2).
-
-    *"The producing step's ``output`` is not ``None``"* is the circularity R48 exists
-    to close, one level down from the reply: a declaration establishing a criterion
-    because the call it verifies returned **anything at all** would let a goal reach
-    ``ACHIEVED`` on the fact that a tool answered. ``FIELD_PRESENT`` and
-    ``FIELD_EQUALS`` name a key of the output object and, for the second, the literal
-    it must equal byte-exactly, so each says something about *what* came back.
-
-    **It is not a criticism of ``verifies``'s own vocabulary** (ADR-0253 §4). There
-    ``OUTPUT_PRESENT`` answers *did this step produce what the plan said it would*,
-    which is a question about one step's own run and is answered honestly by *it
-    returned something*. Here the question is whether the user's goal was reached,
-    and that answer establishes nothing about it. The member stays in the enumeration
-    and stays constructible as a :class:`StepVerification`; what is refused is
-    declaring one **on a tool**.
-
-    Raises:
-        ValueError: If any member's ``kind`` is ``VerificationKind.OUTPUT_PRESENT``.
-    """
-    if any(one.kind is VerificationKind.OUTPUT_PRESENT for one in value):
-        msg = (
-            "a tool declares no OUTPUT_PRESENT postcondition: 'the producing step's "
-            "output is not None' establishes nothing about a goal's criteria, and a "
-            "criterion met by a tool having answered at all is the circularity R48 "
-            "closes one level down from the reply (ADR-0262 §2)"
-        )
-        raise ValueError(msg)
-    return value
-
-
-class QuotedOutput(BaseModel):
-    """Where a declaration says a price may be read from its output (ADR-0267 §3).
-
-    **Exactly two fields**, each a key of the step's ``output`` at depth **one**.
-    ``StepOutputRef.field``'s rule stated once more where it governs: neither names a
-    dotted expression, an index, a wildcard or a selector, and **no lane adds an
-    addressing syntax to either**.
-
-    **The field that selects the number lives on the declaration and on nothing a turn
-    produces, and that is the whole answer to *no model chooses which number the quote
-    is*** (§3). **No plan, no plan step, no planner envelope, no ``ActionRequest``, no
-    ``Authorization`` and no ``CoverageMember`` carries a key a price is read at**, and
-    no lane adds one. A declaration is authored once by an integration author and
-    reviewed once; a plan is authored by a model on every turn. Against
-    ``{"price": "200", "stars": 4, "currency": "EUR"}`` a plan-carried selector naming
-    ``stars`` quotes ``4``, satisfies a ``150`` ceiling and authorises the ``200``
-    purchase — a number of the right **shape** in the wrong **slot**, which no
-    validation of shape catches. ADR-0266 §8's *"A model names no argument key, no
-    currency key and no identifier anywhere in this decision"* is adopted whole and
-    extended by one: **no output key either.**
-
-    **One quoted output per declaration, never a tuple** (§3). A declaration states
-    where its price is or states nothing. A second would need a selection rule at the
-    mint, and every candidate for one is refused already: by kind is ADR-0266 §7's rule
-    about members, by the plan is the clause above, by a schema keyword is ADR-0254
-    §4's *"No reading consults a schema to decide what an argument means, and there is
-    no exception"*, and by order is arbitrary.
-
-    **Depth is one, and nothing here interprets a key to keep it that way** (§3).
-    *"Depth is one and no lane adds an addressing syntax to either — ``StepOutputRef.
-    field``'s rule, stated once more where it governs"*, and that record enforces it by
-    carrying **no validator at all**: the guarantee is that nothing splits the string,
-    so a key is looked up whole and a nested value is unreachable however the key is
-    spelled. **A provider's flat ``"price.total"`` is therefore an ordinary key and is
-    admitted**, and §3 names exactly one model validator on this record — the unequal
-    fields below. A blacklist of ``.``, ``[``, ``]`` and ``*`` would narrow what a
-    boundary-crossing ``core`` type admits, which golden rule 5 makes a contract
-    decision of its own and which would leave this record refusing what
-    :class:`StepOutputRef` admits under the rule §3 says the two share. §11 arm 3's
-    *"or where either names a key below depth one"* is booked as an adjudication
-    rather than implemented here (issue #2439).
-
-    Attributes:
-        amount: The key of the step's ``output`` whose value is the **whole charge**
-            the act will make (§1). **No code checks that it is**, and ADR-0267 §10
-            books that residual with what fires it.
-        currency: The key at depth one carrying that amount's ISO-4217 code.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    amount: EncodableText = Field(
-        description="The output key carrying the whole charge the act will make (ADR-0267 §3)."
-    )
-    currency: EncodableText = Field(
-        description="The output key carrying that amount's ISO-4217 code (ADR-0267 §3)."
-    )
-
-    @model_validator(mode="after")
-    def _the_two_keys_are_different(self) -> QuotedOutput:
-        """Refuse ``amount`` equal to ``currency`` (ADR-0267 §3).
-
-        One key cannot carry both a number and a three-letter code, so a declaration
-        naming one for both describes an output no reading of §4 can succeed against —
-        and the mint would refuse every act under it silently. Refusing at
-        construction is where the integration author sees it.
-
-        Raises:
-            ValueError: If the two keys are equal.
-        """
-        if self.amount == self.currency:
-            msg = (
-                f"a quoted output names two different keys of the step's output, and "
-                f"{self.amount!r} is named for both the amount and the currency "
-                f"(ADR-0267 §3)"
-            )
-            raise ValueError(msg)
-        return self
-
-
-class ChargedOutput(BaseModel):
-    """Where a declaration says an act reports what it **charged** (ADR-0271 §2).
-
-    **Exactly two fields**, each a key of the step's ``output`` at depth **one**:
-    ``amount``, whose value is **the whole amount that invocation charged**, and
-    ``currency``, whose value is that amount's ISO-4217 code. ADR-0267 §3's rule
-    stated once more where it governs — neither names a dotted expression, an index,
-    a wildcard or a selector, and **no lane adds an addressing syntax to either**.
-    Depth is one because nothing splits the string, so a provider's flat
-    ``"total.charged"`` is an ordinary key and a nested value is unreachable however
-    the key is spelled.
-
-    **It is its own type and not** :class:`QuotedOutput` **reused, and the reason is
-    that the two name different facts** (§2). ``QuotedOutput.amount`` is a
-    **prospective** price on offer, the number ADR-0267 §4's mint appends an
-    :class:`ActionQuote` from; a charge is **retrospective**, and one output may
-    carry both — an estimate at one key and a settled total at another. Reusing the
-    type would make one of those two readings wrong at every declaration that carries
-    both: selecting the estimate hides the very mismatch ADR-0271 exists to report,
-    and selecting the total makes ``QuotedOutput``'s own accepted meaning false. So
-    ADR-0267 §3 is left binding entire, and the price of that is one ``core`` type of
-    identical shape and different semantics — ADR-0251 §3's *"one carrier for two
-    facts"* refused rather than paid for twice.
-
-    **The two fields are read for their own fact and never for each other's** (§2).
-    **No lane reads** :attr:`ToolDefinition.quoted_output` **as a charge, reads**
-    :attr:`ToolDefinition.charged_output` **as a quote, mints an** ``ActionQuote``
-    **from a charge, appends anything to a goal's quotes on this decision's
-    authority, or defaults either field from the other.** Reading a charge at
-    ``quoted_output`` would make the acting step's own appended reading the operand,
-    which is the defect issue #2409 names. A declaration may carry both, one or
-    neither; where it carries both they may name the same key or different ones, and
-    **no clause compares them, requires them to agree, or refuses either on the
-    other's account**.
-
-    Attributes:
-        amount: The key of the step's ``output`` whose value is the **whole amount
-            that invocation charged** (§2). **No code checks that it is**, exactly as
-            ``QuotedOutput.amount``'s totality obligation is unchecked; what the
-            reading does check is the shape at that key, and ADR-0271 §2 states it by
-            reference to ADR-0267 §4 rather than re-specifying it.
-        currency: The key at depth one carrying that amount's ISO-4217 code.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    amount: EncodableText = Field(
-        description="The output key carrying the whole amount the act charged (ADR-0271 §2)."
-    )
-    currency: EncodableText = Field(
-        description="The output key carrying that amount's ISO-4217 code (ADR-0271 §2)."
-    )
-
-    @model_validator(mode="after")
-    def _the_two_keys_are_different(self) -> ChargedOutput:
-        """Refuse ``amount`` equal to ``currency`` (ADR-0271 §2).
-
-        :class:`QuotedOutput`'s refusal one record over, and for its reason: one key
-        cannot carry both a number and a three-letter code, so a declaration naming
-        one for both describes an output §2's reading can succeed against in no case
-        — it would report **no charge at every act**, silently, and a call under it
-        would never be satisfying. Refusing at construction is where the integration
-        author sees it.
-
-        Raises:
-            ValueError: If the two keys are equal.
-        """
-        if self.amount == self.currency:
-            msg = (
-                f"a charged output names two different keys of the step's output, and "
-                f"{self.amount!r} is named for both the amount and the currency "
-                f"(ADR-0271 §2)"
-            )
-            raise ValueError(msg)
-        return self
 
 
 class CapabilityEffect(StrEnum):
@@ -17492,8 +16991,7 @@ class ToolDefinition(BaseModel):
         description=(
             "The keys of ``parameters`` the **system** fills — an idempotency key, a "
             "client reference, a locale — possibly empty and duplicate-free, each a "
-            "key name at depth **one** exactly as "
-            ":attr:`~ai_assistant.core.types.BoundedArgument.argument` is (ADR-0266 §7). "
+            "key name at depth **one** (ADR-0266 §7). "
             "**Every key it does not name is user-facing**, and only a user-facing "
             "argument needs coverage: §3's condition 6 and §6's argument-authority bar "
             "each read this field, so a system-supplied key neither needs a coverage "
@@ -17513,110 +17011,9 @@ class ToolDefinition(BaseModel):
             "where it has none. It costs a question and can never authorise a call."
         ),
     )
-    bounded_arguments: Annotated[
-        tuple[BoundedArgument, ...], AfterValidator(_bounded_arguments)
-    ] = Field(
-        default=(),
-        description=(
-            "Which of this declaration's arguments take an amount, a period or a named "
-            "term, possibly empty and duplicate-free on ``argument`` (ADR-0266 §7). "
-            "**The whole of what a declaration says about that**, and the argument "
-            "route's only source: a coverage member names no argument, so a member is "
-            "met against a concrete value only where an entry here declares one at that "
-            "member's kind. **It names no key of this declaration's own "
-            "``system_supplied``** — which is what preserves ADR-0254 §3's protection "
-            'after the validator stating it is gone: *"a user is never asked to approve '
-            'an idempotency key"* stays true one field over, a system-supplied key '
-            "being declarable at no kind. **This is a second exception to this class's "
-            "required-field rule, recorded rather than argued away** (ADR-0266 §9's "
-            "ADR-0016 scope): the empty default makes the **opposite** claim to the one "
-            "ADR-0016 §1 refuses, since a declaration that declares nothing is met on "
-            "that route nowhere — it forgoes the second comparison and keeps the "
-            "primary one, the quote's."
-        ),
-    )
-    quoted_output: QuotedOutput | None = Field(
-        default=None,
-        description=(
-            "Where a price may be read from this declaration's output, and the whole "
-            "of what a declaration says about that (ADR-0267 §3). **A declaration "
-            "carrying ``None`` yields no quote ever**, so every act proved against a "
-            "quote of that declaration's output is uncovered and asks — the "
-            "fail-closed direction. **This is a third exception to this class's "
-            "required-field rule, recorded rather than argued away** (ADR-0267 §9's "
-            "ADR-0016 scope, taken on §1's own test applied afresh and not on the two "
-            "records beside it): absent makes the **opposite** claim to the one "
-            "ADR-0016 §1 refuses, a declaration naming no quoted output producing no "
-            "quote at all — so the default costs a question and can never authorise a "
-            "call. Requiring it would oblige every declaration and fixture in the tree "
-            "to write ``None`` for a fact absent on almost all of them, and would "
-            "refuse every definition written before it. **Authored by the "
-            "integration** and by nothing this system runs: no component writes, "
-            "edits, infers or repairs one at run time (§8)."
-        ),
-    )
-    charged_output: ChargedOutput | None = Field(
-        default=None,
-        description=(
-            "Where this declaration's output reports what an invocation **charged**, "
-            "and the whole of what a declaration says about that (ADR-0271 §2). **A "
-            "declaration carrying ``None`` reports no charge ever**, so no call under "
-            "it is ever **satisfying** and it establishes no ``MONEY`` criterion (§4) "
-            "— the fail-closed default, and ADR-0016 §1's *“Declared, not "
-            "inferred”*. **It is read for its own fact and never for "
-            ":attr:`quoted_output`'s**: a charge is retrospective and a quote "
-            "prospective, one output may carry both, and **no lane reads either as the "
-            "other, mints an ``ActionQuote`` from a charge, or defaults either field "
-            "from the other** (§2). A declaration may carry both, one or neither; "
-            "where it carries both they may name the same key or different ones, and "
-            "no clause compares them or requires them to agree.\n\n"
-            "**This is a fifth exception to this class's required-field rule, recorded "
-            "rather than argued away** (ADR-0271 §9's ADR-0016 scope, taken on §1's own "
-            "test applied afresh and not on the four records beside it): absent makes "
-            "the **opposite** claim to the one ADR-0016 §1 refuses — a declaration "
-            "naming no charged output reports no charge at all, so the default can "
-            "only refuse to establish a ``MONEY`` criterion and never establish one. "
-            "Requiring it would oblige every declaration and fixture in the tree to "
-            "write ``None`` for a fact absent on almost all of them, and would refuse "
-            "every definition written before it. **Authored by the integration** and "
-            "by nothing this system runs: no component writes, edits, infers or "
-            "repairs one at run time (§2)."
-        ),
-    )
     parameters_schema: FrozenJsonMapping = Field(
         default=_EMPTY_PARAMS,
         description="JSON Schema (draft 2020-12) for the call's arguments; enforced by ADR-0145.",
-    )
-    postconditions: Annotated[tuple[StepVerification, ...], AfterValidator(_postconditions)] = (
-        Field(
-            default=(),
-            description=(
-                "What a **successful** invocation of this tool establishes about its own "
-                "output, possibly empty and **declared by whoever registers the tool** "
-                "(ADR-0262 §2). It is ADR-0016 §1's own shape, *\u201cDeclared, not "
-                "inferred\u201d*, and the verification phase holds an act's stored output "
-                "against these declarations and authors no predicate of its own \u2014 so "
-                "**no model supplies one**, and no lane mints a postcondition for a tool "
-                "that declared none or infers one from ``parameters_schema``. It is a "
-                "declaration **beside** that schema and never a keyword inside it.\n\n"
-                "**A member whose kind is ``OUTPUT_PRESENT`` is not constructible here** "
-                "and ``_postconditions`` says why; ``FIELD_PRESENT`` and ``FIELD_EQUALS`` "
-                "are admitted, the second comparing byte-exactly as ADR-0253 §4 compares a "
-                "literal. **No lane adds a kind or relaxes the comparison.**\n\n"
-                "**This is a fourth exception to this class's required-field rule, "
-                "recorded rather than argued away** (ADR-0262's ADR-0016 scope), and it is "
-                "taken on §1's own fail-closed ground rather than on the field being "
-                "outside a permission decision's reach \u2014 it **is** within one, since "
-                "ADR-0254 §3's condition 3 compares the request's declaration with the "
-                "row's **by value**, so editing a postcondition moves a route-(d) coverage "
-                "answer exactly as editing a severity does. The empty tuple is an "
-                "exception because it makes the **opposite** claim to the one ADR-0016 §1 "
-                "refuses: it declares nothing, so **nothing is verified**, no criterion "
-                "resting on this tool is ever met and no goal of it reaches "
-                "``GoalStatus.ACHIEVED`` \u2014 a value that can only refuse to establish "
-                "and never establish."
-            ),
-        )
     )
 
     @field_validator("description")
@@ -17743,43 +17140,6 @@ class ToolDefinition(BaseModel):
                 raise ValueError(msg)
         elif self.idempotency_window is not None:
             msg = f"idempotency_window is only valid for a KEYED tool, not {self.idempotency}"
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _no_bounded_argument_names_a_system_supplied_key(self) -> ToolDefinition:
-        """Refuse declaring a kind for a key the system fills itself (ADR-0266 §7).
-
-        **This is what preserves ADR-0254 §3's system-supplied protection after the
-        validator stating it is gone.** That section made a row whose coverage names
-        a system-supplied argument not constructible by reading
-        ``CoverageMember.argument``, which no longer exists; a system-supplied key
-        being declarable at **no** kind is what keeps *"a user is never asked to
-        approve an idempotency key"* true one field over — no member can be met
-        against one, so none is ever rendered in a question about one.
-
-        **Read over both keys a ``BoundedArgument`` names**, the amount's and its
-        currency's. §7 states the refusal over the entry *"naming no key of that
-        declaration's own ``system_supplied``"*, and a currency key the system fills
-        is as much a value the user never stated as the amount's is. Refusing both is
-        the restrictive direction ADR-0254 §2 asks for: it costs a declaration that
-        wanted one, and it never authorises a call.
-
-        Raises:
-            ValueError: If a bounded argument names a key of ``system_supplied``.
-        """
-        supplied = set(self.system_supplied)
-        declared = {one.argument for one in self.bounded_arguments} | {
-            one.currency_argument
-            for one in self.bounded_arguments
-            if one.currency_argument is not None
-        }
-        named = sorted(declared & supplied)
-        if named:
-            msg = (
-                f"a declaration's bounded arguments name no key it fills itself; this one "
-                f"fills {', '.join(repr(key) for key in named)} (ADR-0266 §7)"
-            )
             raise ValueError(msg)
         return self
 
@@ -19918,11 +19278,8 @@ class ActionRequest(BaseModel):
             "no seam, no interface adapter and no model output writes it. **A request "
             "carrying ``None`` is met by ADR-0266 §7's evidence route in no case**, so "
             "no ``MONEY`` member is met and the act asks — the fail-closed direction. "
-            "**Unlike :attr:`goal` it *is* transcribed onto "
-            ":class:`PermissionDecision`**, and ADR-0254 §16's stated ground for "
-            "declining the goal is what requires it: an intended action is precisely "
-            "what selects the quote the comparison was taken against, so it is not a "
-            "value the trail cannot compare."
+            "Like :attr:`goal` it is not transcribed onto :class:`PermissionDecision` "
+            "(ADR-0313 §5:4)."
         ),
     )
     egress_binding: Annotated[EgressBinding | None, AfterValidator(_detached_binding)] = Field(
@@ -20106,41 +19463,6 @@ class ActionRequest(BaseModel):
         return self
 
 
-def _detached_quote(value: ActionQuote | None) -> ActionQuote | None:
-    """Take the ruling's own copy of the pinned quote, rebuilt through validation.
-
-    The discipline :func:`_detached_tool` already carries for the declaration and
-    :func:`_detached_binding` for the binding (ADR-0018 §3), applied to the one field
-    ADR-0271 §1 says is *"carried **by value**"*. Pydantic passes an already-valid
-    model instance through without copying, so a :class:`PermissionRuling` would
-    otherwise share whatever instance
-    :meth:`~ai_assistant.core.protocols.GoalQuotes.for_action` returned — and
-    ``object.__setattr__`` on that original would change which price the row says
-    condition 6 was proved against, **after** the comparison was made. The window is
-    narrow, since :meth:`PermissionDecision.from_request` deep-copies the ruling on the
-    way to the durable record, but it is the window ADR-0018 §3 drew the boundary at:
-    *"between them no reference a caller still holds reaches recorded state"*, and a
-    seam's cached row is exactly the registry query that clause was written about.
-
-    **This is what makes "by value" true rather than nominal**, which is
-    ``from_request``'s own words for the same discipline one record over. It does not
-    relax §1's other sense of by-value — no id is minted and nothing is keyed on the
-    quote — it makes that sense hold against a holder that still has the object.
-
-    Rebuilt through ``model_validate`` rather than merely deep-copied, for the reason
-    the two beside it are: a quote assembled by ``model_construct``, or corrupted past
-    its frozen model's guard, skips every validator — a ``currency`` written back as
-    ``"eur"`` is the ordinary case, matching no ``MONEY`` bound's ``"EUR"`` ever — and
-    the pin reaches a durable record that
-    ADR-0021 §4 requires to survive a ``model_dump(mode="json")`` round trip. Revalidating
-    here means the ruling's own copy has passed them whatever the caller handed over,
-    and the refusal lands at the ruling rather than at the trail.
-    """
-    if value is None:
-        return None
-    return ActionQuote.model_validate(value.model_dump())
-
-
 class PermissionRuling(BaseModel):
     """What a policy said about an :class:`ActionRequest` (ADR-0021 §3).
 
@@ -20159,20 +19481,6 @@ class PermissionRuling(BaseModel):
     records supplies both. That leaves ``decide`` a genuine function of its
     argument, which is in turn what makes the monotonicity obligations in
     ADR-0021 §5 checkable at all.
-
-    :attr:`proved_quote` (ADR-0271 §1) is the one field that reaches past that
-    absence, and it is recorded here rather than left for a reader to notice. An
-    :class:`ActionQuote` carries ``plan`` and a ``read_from`` naming the **reading**
-    step, so the roster's *"no field naming ... a step"* is now *"no field naming the
-    step this ruling is about"*. The hazard the split closes is untouched: the value
-    names **no tool and no payload**, so nothing in it can make
-    :meth:`PermissionDecision.authorises` approve a declaration the policy was not
-    handed — that method compares ``tool``, ``parameters_digest`` and
-    ``intended_action``, and reads this field in no case. It is an **operand and never
-    a verdict** (§1), carried so that a later comparison can say which price the
-    dispatch was proved against; the two provenance fields are read by no clause of
-    ADR-0266, no route of ADR-0267 and no test of either, and **nothing resolves the
-    reference**.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -20197,67 +19505,6 @@ class PermissionRuling(BaseModel):
             "size, so a grant naming ten thousand recipients adds sixty-four "
             "characters to a decision rather than ten thousand destination entries "
             "(ADR-0004 §7's minimisation)."
-        ),
-    )
-    authorised_goal: Identifier | None = Field(
-        default=None,
-        description=(
-            "The ``goal`` of the :class:`Authorization` a **route-(d)** ``ALLOW`` rests "
-            "on (ADR-0254 §7). Set **only** on a route-(d) ``ALLOW``, and set **only** "
-            "to the goal of the record the policy's one ``live_for`` read returned — "
-            "read off that record and carried from nowhere else. A policy constructed "
-            "with no ``GoalAuthorizations`` leaves it unset, as it leaves "
-            "``authorised_by`` unset.\n\n"
-            "**It is the conjunct that completes the four-route partition**, read from "
-            "the row alone with no store read: route (b) is a digest with this field "
-            "**unset** and route (d) a digest with it **set**, which narrows ADR-0247 "
-            "§2's discriminator in its route-(b) limb alone, by one conjunct, and "
-            "breaks none of it."
-        ),
-    )
-    proved_quote: Annotated[ActionQuote | None, AfterValidator(_detached_quote)] = Field(
-        default=None,
-        description=(
-            "The :class:`ActionQuote` the coverage comparison at ``ActionPolicy.decide`` "
-            "took ADR-0266 §7's **evidence route** over for this request, carried **by "
-            "value** and read a second time by nobody (ADR-0271 §1). Set **only** on a "
-            "**route-(d)** ``ALLOW`` — ADR-0254 §7's discriminator — whose coverage "
-            "carried a ``MONEY`` member met through that route, and set **only** to the "
-            "governing quote the route was taken over: of the quotes "
-            ":meth:`~ai_assistant.core.protocols.GoalQuotes.for_action` returned, the "
-            "**last** of them (ADR-0267 §5), and no other. It is **absent in every other "
-            "case** — every ruling that is not a route-(d) ``ALLOW``, a coverage carrying "
-            "no ``MONEY`` member, a request carrying no ``intended_action``, a goal no "
-            "quote of which names that action.\n\n"
-            "**It is the operand a comparison was taken over and never the verdict of "
-            "one** (§1). It states **which** quote condition 6 was evaluated against at "
-            "this dispatch and asserts nothing about coverage, completeness or "
-            "authority. **No component covers a request against it, re-tests it, "
-            "refreshes it, compares it to a later quote, carries it to a further "
-            "dispatch, or reads it — or its absence — as evidence of anything a "
-            "comparison decided.** ADR-0254 §13's “no cached coverage verdict anywhere” "
-            "is untouched: the recheck reads the **current** governing quote through "
-            "ADR-0267 §5's seam at every dispatch, as if this field were not there.\n\n"
-            "**By value, and named by nothing** (§1). The record is the ``ActionQuote`` "
-            "itself, on ADR-0021 §1's own ground for embedding a ``ToolDefinition`` whole "
-            "— “There is no name left to rebind”. Naming it by the act and the digest "
-            "would name **the governing** quote for that pair **at the instant of the "
-            "read**, which a later append displaces and ADR-0267 §2's elision can drop, so "
-            "the pin would drift off the reading it exists to fix. **No lane mints a "
-            "quote id, adds a field to** :class:`ActionQuote`**, keys a record on one, or "
-            "reconciles the pinned value against the goal's tuple.**\n\n"
-            "**``permissions`` writes it, at the ruling, and nothing else writes or "
-            "repairs one** (§1). No ``AuditTrail``, no store, no reader, no interface "
-            "adapter, no tool and no model output constructs, writes, edits or repairs "
-            "it; **a planner envelope carrying one has that value discarded silently**; "
-            "and **it is never back-filled** — a decision recorded without one is a "
-            "decision whose dispatch was not proved against a quote, and no pass supplies "
-            "one afterwards. It reaches the durable :class:`PermissionDecision` by the "
-            "path that exists today, :meth:`PermissionDecision.from_request` transcribing "
-            "the ruling whole, so **``PermissionDecision`` gains no field**. The value is "
-            "**detached** on the way in (:func:`_detached_quote`), which is what makes "
-            "*by value* true rather than nominal against a seam that still holds the row "
-            "it returned."
         ),
     )
 
@@ -20322,67 +19569,6 @@ class PermissionRuling(BaseModel):
             raise ValueError(msg)
         return self
 
-    @model_validator(mode="after")
-    def _a_scope_needs_the_authorisation_it_scopes(self) -> PermissionRuling:
-        """Refuse an ``authorised_goal`` where ``authorised_by`` is unset (ADR-0254 §7).
-
-        **The same shape and the same reason** as the refusal above: a scope for an
-        authorisation the row names none of is incoherent.
-
-        **It does not require the converse**, and the asymmetry is this type's
-        already. A route-(a), route-(b) or route-(c) ``ALLOW`` sets
-        ``authorised_by`` and carries no goal scope, so a pointer without one is the
-        ordinary shape; which of the four shapes is *owed* is decided at
-        :meth:`~ai_assistant.core.protocols.AuditTrail.record`, the only component
-        that can see ``resolves`` and ``egress_binding``.
-
-        Raises:
-            ValueError: If ``authorised_goal`` is set and ``authorised_by`` is not.
-        """
-        if self.authorised_goal is not None and self.authorised_by is None:
-            msg = (
-                f"a ruling that names no authorisation scopes none, got "
-                f"authorised_goal={self.authorised_goal!r} (ADR-0254 §7)"
-            )
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _a_pin_needs_the_goal_scope_it_was_proved_under(self) -> PermissionRuling:
-        """Refuse a ``proved_quote`` where ``authorised_goal`` is unset (ADR-0271 §1).
-
-        ``authorised_goal`` is ADR-0254 §7's own route-(d) discriminating field, and
-        this is **that field's own refusal one field over**: a quote proved for a
-        goal-scoped authority the row names no goal for is incoherent. The pin is set
-        exactly where ADR-0266 §7's evidence route decided something, and that route is
-        reached on route (d) alone.
-
-        **It gates on ``authorised_goal`` and not on ``authorised_by``**, which is the
-        whole of what it adds over the three refusals beside it: a validator reading
-        ``authorised_by`` alone would admit a pin on a **route-(b)** ``ALLOW``
-        (``authorised_by`` and ``authorised_subject`` set, ``authorised_goal`` unset)
-        and on a **route-(c)** one (``authorised_by`` set, the other two unset) — two
-        rows no evidence route was taken over. Gating here refuses both, and refuses
-        the ``authorised_by``-unset row as well, because
-        :meth:`_a_scope_needs_the_authorisation_it_scopes` already makes a scope
-        without a pointer unconstructible.
-
-        **It does not require the converse**, and the asymmetry is this type's
-        already: a route-(d) ``ALLOW`` whose coverage carried no ``MONEY`` member sets
-        ``authorised_goal`` and pins nothing, which is the ordinary shape.
-
-        Raises:
-            ValueError: If ``proved_quote`` is set and ``authorised_goal`` is not.
-        """
-        if self.proved_quote is not None and self.authorised_goal is None:
-            msg = (
-                f"a ruling that names no goal-scoped authority was proved against no "
-                f"quote, got a proved_quote for intended_action="
-                f"{self.proved_quote.intended_action!r} (ADR-0271 §1)"
-            )
-            raise ValueError(msg)
-        return self
-
 
 class PermissionDecision(BaseModel):
     """A ruling bound to the request it was made about (ADR-0021 §1).
@@ -20427,19 +19613,6 @@ class PermissionDecision(BaseModel):
             "is durable *and ordered* (ADR-0021 §4), which is why a naive value "
             "is refused rather than assumed — see :data:`UtcInstant`."
         )
-    )
-    intended_action: Identifier | None = Field(
-        default=None,
-        description=(
-            "The ``IntendedAction`` (ADR-0265 §1) the request this decision was made "
-            "about is an **attempt at**, by id (ADR-0266 §7). Transcribed from the "
-            "request by :meth:`from_request`, never asserted by a caller. "
-            ":meth:`authorises` compares it, because ADR-0266's whole proof is that "
-            "the amount was quoted for **that** act — a decision that could not say "
-            "which act it was taken for would authorise a request that is an attempt "
-            "at another. A decision written before this field decodes carrying "
-            "``None``, which then matches only a request carrying none."
-        ),
     )
     resolves: DurableIdentifier | None = Field(
         default=None, description="The CONFIRM decision this one answers, if any."
@@ -20497,8 +19670,8 @@ class PermissionDecision(BaseModel):
 
         **The only construction path a caller should use**, and it exists so the
         binding is *transcribed* rather than asserted. Every field describing
-        what was ruled on — ``tool``, ``parameters_digest``, the egress binding and
-        the intended action — is copied from the request by ``core``, so a decision
+        what was ruled on — ``tool``, ``parameters_digest`` and the egress binding
+        — is copied from the request by ``core``, so a decision
         naming a different tool than the one the policy saw cannot be produced by
         following the contract.
 
@@ -20567,7 +19740,6 @@ class PermissionDecision(BaseModel):
             tool=request.tool.model_copy(deep=True),
             parameters_digest=request.parameters_digest,
             decided_at=decided_at,
-            intended_action=request.intended_action,
             resolves=resolves,
             expires_at=expires_at,
             egress_binding=None if binding is None else binding.model_copy(deep=True),
@@ -20661,12 +19833,6 @@ class PermissionDecision(BaseModel):
             tool=confirmed.tool.model_copy(deep=True),
             parameters_digest=confirmed.parameters_digest,
             decided_at=decided_at,
-            # **Transcribed with the rest of the subject, and accepted from no
-            # caller** (ADR-0235 §4, ADR-0266 §7): a resolving decision that lost the
-            # act the question was asked about would answer a request that is an
-            # attempt at another, which is the substitution `authorises`'
-            # ``intended_action`` conjunct exists to refuse.
-            intended_action=confirmed.intended_action,
             resolves=confirmed.id,
             expires_at=None,
             egress_binding=None if binding is None else binding.model_copy(deep=True),
@@ -20750,18 +19916,6 @@ class PermissionDecision(BaseModel):
         None`` is ``True``, so every request and decision in the tree today
         compares exactly as it did before this conjunct existed.
 
-        **``intended_action`` is compared too, and it is the one value the
-        coverage was proved *through*** (ADR-0266 §7). Without it a decision taken
-        for one act would authorise a later request differing **only** in the act it
-        is an attempt at — and the whole of ADR-0266's proof is that the amount was
-        quoted *for that act*, so the value selecting the evidence would be the one
-        value the trail could not compare. It meets ADR-0016 §2's test for living on
-        the type: an identifier on both records, not a decision. It is ``None``-safe in
-        both directions on that conjunct's own reading — a **stored** decision written
-        before this field decodes carrying ``None`` and then authorises only a request
-        carrying none, which is the fail-closed direction and needs no migration to be
-        true.
-
         **``effect`` is not compared** (ADR-0306 §6). It names acting's record of the
         call, which the recorder mints and the request never carries, so it says
         nothing about which request was ruled on.
@@ -20771,7 +19925,6 @@ class PermissionDecision(BaseModel):
             and request.tool == self.tool
             and request.parameters_digest == self.parameters_digest
             and request.egress_binding == self.egress_binding
-            and request.intended_action == self.intended_action
         )
 
     @model_validator(mode="after")
@@ -28874,10 +28027,6 @@ class NotificationCandidate(BaseModel):
             "candidate with no expiry is held, never interrupted."
         ),
     )
-    goal_id: Identifier | None = Field(
-        default=None,
-        description="The Goal this is relevant to, by identifier, or None (ADR-0130 §2).",
-    )
     confidence: float = Field(
         ge=0.0,
         le=1.0,
@@ -29559,12 +28708,9 @@ class SpokenRendering(StrEnum):
     by a loop — which is why this is a closed enumeration rather than the boolean
     pair ADR-0200 §4 carries one surface over.
 
-    **It is not** :class:`SpokenDeliveryState`, **and no lane merges them**
-    (ADR-0205 §2, ADR-0206 §6). That one is what a *device reports* about a spoken
-    answer it played; this is what the *hub produced* for a delivery nobody asked
-    for. Neither is derivable from the other and the two never appear on one value:
-    :attr:`RENDERED` says the audio left the hub and says nothing about whether it
-    was heard.
+    It is what the *hub produced* for a delivery, never what a device reports about
+    a spoken answer it played (ADR-0206 §6): :attr:`RENDERED` says the audio left
+    the hub and says nothing about whether it was heard.
 
     Attributes:
         NOT_REQUESTED: ``plays`` was empty, so no placement was decided and no

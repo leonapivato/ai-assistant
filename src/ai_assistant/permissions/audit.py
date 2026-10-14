@@ -187,6 +187,16 @@ _MIN_SQLITE_INT = -(2**63)
 #: reader has a marker to judge the file by — the seam ADR-0049 §1 describes and
 #: the ``SqlitePlanStore`` pattern this follows.
 #:
+#: **Version 6 is the record without the quote family** (ADR-0313 §5:4). Nothing
+#: about the *tables* changes: what changes is the JSON a ``decisions`` row holds. A
+#: ``PermissionDecision`` loses ``intended_action``, its ``PermissionRuling`` loses
+#: ``authorised_goal`` and ``proved_quote``, and the ``ToolDefinition`` it embeds
+#: loses ``bounded_arguments``, ``quoted_output``, ``charged_output`` and
+#: ``postconditions``. Every one of those models sets ``extra="forbid"``, so a
+#: version-5 row carrying any of those keys does not decode here; the marker moves so
+#: the file is refused at open rather than at its first row, and no reader is written
+#: for it (ADR-0309 §6:4).
+#:
 #: **Version 5 is the record without a step or an execution** (ADR-0318 §6:1): a
 #: ``PermissionDecision`` carries neither ``step_id`` nor ``execution_id``, and the
 #: ``decisions`` table loses the columns and the two indexes ADR-0044 kept them in,
@@ -232,12 +242,13 @@ _MIN_SQLITE_INT = -(2**63)
 #: requires to be total, silently partial — and its uniqueness check sees only
 #: ``decisions``, so it can record a decision under an id an invocation already
 #: holds, which the joined reads then resolve to two rows under one identifier.
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 
 #: The versions this code can *open*: the current one alone. Anything else is
 #: refused, newer or older (ADR-0049 §1). The older versions were openable and
 #: restamped until version 5, whose record an older row does not decode as, and no
-#: reader is written for a store from before the cutover (ADR-0309 §6:4).
+#: reader is written for a store from before the cutover (ADR-0309 §6:4); version 6
+#: refuses version 5 on the same ground.
 _OPENABLE_VERSIONS: Final[frozenset[int]] = frozenset({_SCHEMA_VERSION})
 
 #: Created first and on its own, so a database labelled with a schema this code
@@ -1159,8 +1170,8 @@ class SqliteAuditTrail:
                 not carry exactly one of ``closed_loop`` and ``forecast_reach``, or a
                 pointer that is not that binding's ``account.reference`` (ADR-0247 §2,
                 ADR-0272 §1); or if a **resolving** ``ALLOW``
-                carries an ``authorised_subject`` or an ``authorised_goal`` (ADR-0254
-                §7's partition puts both outside route (a)). A sibling of the two above under
+                carries an ``authorised_subject`` (ADR-0254 §7's partition puts it
+                outside route (a)). A sibling of the two above under
                 ``AuditError`` because a replayed write, a substituted resolution
                 subject and an unvalidated standing pointer are three facts an
                 operator must be able to tell apart.
@@ -1388,15 +1399,6 @@ class SqliteAuditTrail:
         if (
             confirmed.tool != decision.tool
             or confirmed.parameters_digest != decision.parameters_digest
-            # **The act the question was asked about is part of that subject**
-            # (ADR-0266 §7). ``from_confirmation`` transcribes it, so a conforming
-            # caller cannot differ — and this check exists for the one that does not:
-            # without it a ``CONFIRM`` put about action A is answerable by an
-            # otherwise identical decision naming action B, and ``authorises`` then
-            # authorises B. The whole of ADR-0266's proof is that the amount was
-            # quoted **for that act**, so the value the coverage was proved through
-            # would be the one value this trail could not compare.
-            or confirmed.intended_action != decision.intended_action
         ):
             msg = (
                 f"decision {decision.id!r} resolves {confirmed.id!r} but rules on a "
@@ -2897,7 +2899,6 @@ def _names_a_standing_authorisation(decision: PermissionDecision) -> bool:
     return (
         _rests_on_a_standing_authorisation(decision)
         and decision.ruling.authorised_subject is not None
-        and decision.ruling.authorised_goal is None
     )
 
 
@@ -2938,40 +2939,15 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
     configured-provider fact, so no lane reads an unrecorded origin as a configured
     provider.
 
-    **Route (a) carries neither fingerprint nor scope, and both halves are refused
-    here** (ADR-0254 §7). That section's partition puts route (a) at *"``resolves``
-    set, ``authorised_by`` equal to it"* and says ``authorised_goal`` *"is set
-    **only** on a route-(d) ``ALLOW``"*. A resolving row is returned from this
-    function before anything below looks at the scope, and
-    :func:`_check_authorisation` checks the **pointer** alone — so without the
-    second refusal a durable row would carry a goal scope on a route no clause of
-    §7 validates a scope on, and the four-route partition would stop being one.
-
-    **And a goal scope outside the standing shape altogether is refused with it**,
-    which is the same clause reaching the *other* way out of this function. A
-    decision that records **no egress call**, or an ``ALLOW`` naming no
-    authorisation at all, is in none of §7's four routes — route (d) is an egress
-    route — yet :func:`_rests_on_a_standing_authorisation` is deliberately narrow
-    and returns ``False`` on it, so the early exit below would write a durable row
-    asserting a goal scope that nothing resolved and nothing compared.
-    :class:`~ai_assistant.core.types.PermissionRuling` cannot take this check
-    itself: it refuses a scope with no pointer and says in terms that *"which of
-    the four shapes is owed is decided at ``record``, the only component that can
-    see ``resolves`` and ``egress_binding``"*. This is that decision.
-
-    **And a standing row carrying a goal scope — the route-(d) shape — is refused
-    outright** (ADR-0309 §5). Route (d) retired with the goal authorizations it
-    rested on, so there is no record its pointer could resolve to; the refusal is the
-    one a trail holding no authorization store already gave every such row, now
-    decided from the row alone.
+    **Route (a) carries no fingerprint, and that is refused here** (ADR-0254 §7).
+    That section's partition puts route (a) at *"``resolves`` set, ``authorised_by``
+    equal to it"*. A ruling carries no goal scope at all (ADR-0313 §5:4), so the
+    route-(d) shape is no longer representable.
 
     Raises:
         InvalidAuthorisationError: If a **resolving** ``ALLOW`` carries an
-            ``authorised_subject`` or an ``authorised_goal``; if a decision outside
-            the standing shape — one recording no egress call, or naming no
-            authorisation — carries an ``authorised_goal``; if a standing egress
-            decision's binding records no origin; if a standing egress decision
-            carries an ``authorised_goal`` (route (d), retired); if a route-(b) decision's binding
+            ``authorised_subject``; if a standing egress decision's binding records
+            no origin; if a route-(b) decision's binding
             records that the call was planned over external content **without
             recording that it was closed-loop** (ADR-0238 §6); or if a digest-free
             standing decision's binding does not carry exactly one of ``closed_loop``
@@ -2987,24 +2963,8 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
                 f"which is not a grant and has no subject digest (ADR-0193 §6)"
             )
             raise InvalidAuthorisationError(msg)
-        if ruling.authorised_goal is not None:
-            msg = (
-                f"decision {decision.id!r} resolves a confirmation and scopes its "
-                f"authorisation to a goal; route (a) rests on a recorded confirmation "
-                f"about this call, which carries no goal scope — authorised_goal is set "
-                f"only on a route-(d) ALLOW (ADR-0254 §7)"
-            )
-            raise InvalidAuthorisationError(msg)
         return
     if not _rests_on_a_standing_authorisation(decision):
-        if ruling.authorised_goal is not None:
-            msg = (
-                f"decision {decision.id!r} scopes its authorisation to a goal but is in none "
-                f"of ADR-0254 §7's four routes; authorised_goal is set only on a route-(d) "
-                f"ALLOW — a non-resolving ALLOW that records an egress call and names the "
-                f"record it rests on (ADR-0254 §7)"
-            )
-            raise InvalidAuthorisationError(msg)
         return
     binding = decision.egress_binding
     if not isinstance(binding, EgressBinding):
@@ -3012,18 +2972,6 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
             f"decision {decision.id!r} rests on a standing authorisation but records an "
             f"egress call whose origin was never recorded; no standing authorisation "
             f"covers such a call (ADR-0193 §2, §6)"
-        )
-        raise InvalidAuthorisationError(msg)
-    if ruling.authorised_goal is not None:
-        # **Route (d) is retired** (ADR-0309 §5): the goal authorizations it rested on
-        # are gone, so no record exists for its pointer to resolve to, and a standing
-        # row scoped to a goal is refused here exactly as a trail holding no
-        # authorization store refused it — the fail-closed answer, from the row alone.
-        msg = (
-            f"decision {decision.id!r} scopes standing authorisation "
-            f"{ruling.authorised_by!r} to a goal; route (d) is retired with the goal "
-            f"authorizations it rested on, so no record validates that pointer "
-            f"(ADR-0254 §7, ADR-0309 §5)"
         )
         raise InvalidAuthorisationError(msg)
     if ruling.authorised_subject is None:

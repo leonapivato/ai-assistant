@@ -2589,7 +2589,27 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``GrantScope`` loses ``facet``, carried by the grant and read members (§6:2). A
 #:     peer at 103 refuses the version as unknown, and sends members and fields a hub at
 #:     104 refuses (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 104
+#: 105: ADR-0313 §6:4 advances the version once for the cutover's stores-and-types
+#:     lane (§3:3, §5:4), on these grounds: ``PermissionDecision`` loses
+#:     ``intended_action`` and its ``PermissionRuling`` loses ``authorised_goal`` and
+#:     ``proved_quote``, carried by ``recent_decisions`` and ``export_decisions``;
+#:     ``ToolDefinition`` loses ``bounded_arguments``, ``quoted_output``,
+#:     ``charged_output`` and ``postconditions``, with ``BoundedArgument``,
+#:     ``QuotedOutput`` and ``ChargedOutput``, carried inside those decisions and inside
+#:     the ``RecipientGrant`` that ``standing_recipient_grants`` and
+#:     ``recent_recipient_grants`` return; and ``NotificationCandidate`` loses
+#:     ``goal_id``, carried by ``notifications`` and ``next_notification`` (§5:4). The
+#:     spoken delivery report's ``SpokenDeliveryReport``, ``SpokenDelivery`` and
+#:     ``SpokenDeliveryState`` leave ``core`` (§3:3); no member has carried them since
+#:     ``converse_spoken`` left at 100. And ``UngrantableActError``,
+#:     ``RoutingTrailError``, ``DeferralStoreError``, ``DeferralIdConflictError``,
+#:     ``ContextError``, ``AuthorizationError``, ``InvalidAuthorizationError``,
+#:     ``ClaimRefused``, ``StaleExecutionError``, ``ActiveExecutionError``,
+#:     ``IllegalTransitionError`` and ``RetriesExhaustedError`` leave ``core.errors``
+#:     with the old path (ADR-0309 §5); the wire rebuilds an error by its name there.
+#:     A peer at 104 sends fields a hub at 105 refuses, and may name an error class a
+#:     peer at 105 no longer has (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 105
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

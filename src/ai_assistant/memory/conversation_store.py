@@ -1,7 +1,7 @@
 """A persistent :class:`~ai_assistant.core.protocols.ConversationStore` on SQLite.
 
 Local-first storage (ADR-0002) for ADR-0074's conversation record: the durable
-identity of a conversation and the delivery rows ADR-0283 §6 keeps beside it. It
+identity of a conversation, and the hub's chat space beside it (ADR-0293). It
 holds no history — a conversation's turns are the episodes on its channel in the
 ``MemoryStore`` (ADR-0283 §1, §4) — so this store
 needs no embedder and no vector table, which is the whole of why it is a second
@@ -22,16 +22,14 @@ mutation runs inside one ``BEGIN IMMEDIATE`` transaction, which is how the
 per-conversation exclusion ADR-0074 §8 puts on the *seam* holds across processes
 as well as across coroutines — a lock inside one engine would not.
 
-**A delivery row cannot name a conversation that does not exist** (#452).
-``deliveries`` carries a foreign key to ``conversations`` with ``ON DELETE
-CASCADE``, and enforcement is switched on for the connection at open — ``PRAGMA
-foreign_keys`` is off by default and is *per connection*, so it has to be. The only
-``INSERT`` into ``deliveries`` already proves the parent exists inside the same
-``IMMEDIATE`` transaction, so the constraint is there for a writer that is not this
-module; and :meth:`SqliteConversationStore.drop_if_eligible` deletes the rows
-*explicitly* before the record rather than leaning on the cascade — see the
-comment there for why the pragma's per-connection scope makes that the safer of the
-two.
+**A row kept under a conversation cannot name a conversation that does not
+exist** (#452). Every such table carries a foreign key to ``conversations`` with
+``ON DELETE CASCADE``, and enforcement is switched on for the connection at open —
+``PRAGMA foreign_keys`` is off by default and is *per connection*, so it has to be.
+The constraint is there for a writer that is not this module; this module deletes
+the rows *explicitly* before the record rather than leaning on the cascade — see
+:meth:`SqliteConversationStore.drop_if_eligible` for why the pragma's
+per-connection scope makes that the safer of the two.
 
 **There is no turn table** (ADR-0283 §6, §12). The turn index ADR-0074 gave this
 store is retired: nothing here creates, reads or writes one. ADR-0283 §12 moves the
@@ -101,8 +99,6 @@ from ai_assistant.core.types import (
     MessageDeletedChange,
     MessageReceipt,
     SendOutcome,
-    SpokenDelivery,
-    SpokenDeliveryState,
     TranscriptMessage,
     TranscriptPage,
     UtcInstant,
@@ -159,12 +155,6 @@ _DEFAULT_TOMBSTONE_GRACE = timedelta(hours=1)
 #: How many times :meth:`SqliteConversationStore.start` re-mints before giving up.
 _START_RETRY_BUDGET = 8
 
-#: The most episode ids one :meth:`SqliteConversationStore.deliveries` call takes
-#: (ADR-0283 §6:5): ``MemoryStore.channel_episodes``' page bound, so one history page
-#: is one call. Duplicated in the canonical fake rather than shared, for
-#: :data:`_PAGE_BOUND`'s reason.
-_MAX_DELIVERY_IDS: Final = 1000
-
 #: The two arguments :meth:`SqliteConversationStore.record_turn` checks before any
 #: I/O through ``core``'s own annotated types, so the store and the fake refuse
 #: exactly what a ``core`` model would.
@@ -172,31 +162,6 @@ _EPISODE_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
 _INSTANT: Final[TypeAdapter[datetime]] = TypeAdapter(UtcInstant)
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-
-#: What a SQLite ``INTEGER`` holds: a signed 64-bit value. A duration beyond it is
-#: refused by :func:`_to_micros_of` as this seam's own error rather than left to raise
-#: the driver's ``OverflowError``, which is not a ``sqlite3.Error`` and so would cross
-#: :meth:`SqliteConversationStore._transaction`'s translation untouched.
-_SQLITE_INT_BOUND: Final = 2**63
-
-#: The columns of the ``deliveries`` table (ADR-0283 §6): one row per spoken episode,
-#: keyed by the conversation and the episode's id, carrying ADR-0205 §3's fact as
-#: three columns rather than one blob — the state as its ``StrEnum`` value, and each
-#: duration as a whole number of microseconds, which is ``timedelta``'s own resolution
-#: and so exact in both directions. A column per member is what lets a stored row's
-#: corruption surface as this seam's own error rather than as a decode of text nobody
-#: validated. The state is ``NOT NULL``, because a row exists only where a delivery
-#: was recorded and absence is spelled by there being no row; the two durations are
-#: nullable, because ``UNKNOWN`` carries neither. The cascading key to
-#: ``conversations`` (#452) means a delivery row cannot name a conversation that does
-#: not exist. No index beyond the primary key: every read and write names the
-#: conversation and the episode together.
-_DELIVERIES_COLUMNS: Final = (
-    "conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, "
-    "episode_id TEXT NOT NULL, delivery_state TEXT NOT NULL, "
-    "delivery_played INTEGER, delivery_rendered INTEGER, "
-    "PRIMARY KEY(conversation_id, episode_id)"
-)
 
 #: ADR-0238 §8's per-conversation search budget: one counter and one flag, on the
 #: *conversation* row. **Both are vestigial and both stay** (ADR-0247 §5): the budget
@@ -245,7 +210,7 @@ _SEARCH_DRAW_COLUMNS: Final = (
 #: removal.
 #: Every table but ``chat_changes`` and ``chat_devices``
 #: cascades from its conversation, and each is also cleared explicitly where a
-#: conversation goes, for the reason ``drop_if_eligible`` gives for the deliveries.
+#: conversation goes, for the reason ``drop_if_eligible`` gives.
 _CHAT_SCHEMA: Final = (
     "CREATE TABLE IF NOT EXISTS messages("
     "conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, "
@@ -273,9 +238,9 @@ _CHAT_SCHEMA: Final = (
     "PRIMARY KEY(conversation_id, position))",
 )
 
-#: The most ids or positions one chat-space call takes: the page bound ``deliveries``
-#: already sets, for the same one-page-one-call reason. Duplicated in the canonical
-#: fake rather than shared, for :data:`_PAGE_BOUND`'s reason.
+#: The most ids or positions one chat-space call takes: ``MemoryStore.channel_episodes``'
+#: page bound, so one page is one call. Duplicated in the canonical fake rather than
+#: shared, for :data:`_PAGE_BOUND`'s reason.
 _MAX_NAMED: Final = 1000
 
 #: The page sizes the chat-space reads default to. The snapshot's is the figure
@@ -453,27 +418,9 @@ def _instant_from(value: object, *, what: str) -> datetime:
         raise ConversationStoreError(msg) from exc
 
 
-def _episode_id_of(value: object) -> str:
-    """Read a stored episode id, refusing anything that is not a usable identifier.
-
-    :meth:`SqliteConversationStore.deliveries` keys its answer by this value and
-    reaches no frozen type whose ``Identifier`` would refuse a corrupt one first, so
-    it makes the check itself: coercing a ``BLOB`` with ``str()`` would yield a
-    plausible-looking ``"b'...'"`` key that names no episode the caller asked about.
-
-    Raises:
-        ConversationStoreError: If the stored value is not a non-blank ``str``.
-    """
-    if type(value) is not str or not value.strip():
-        msg = f"a stored episode id is not usable: {describe_untrusted(value)}"
-        raise ConversationStoreError(msg)
-    return value
-
-
 def _stamped_id_of(value: object) -> str:
     """Read a stored conversation id, refusing anything that is not usable.
 
-    The sibling of :func:`_episode_id_of`, and needed for the same reason:
     :meth:`SqliteConversationStore.stamped_conversation_ids` hands its result
     straight to a caller that will act on it, and it reaches no frozen type whose
     ``Identifier`` would refuse a ``BLOB`` or a stray number first. Coercing one
@@ -490,85 +437,21 @@ def _stamped_id_of(value: object) -> str:
     return value
 
 
-def _delivery_from(state: object, played: object, rendered: object) -> SpokenDelivery | None:
-    """Rebuild ADR-0205 §3's fact from its three columns, or report there is none.
-
-    ``NULL`` in ``delivery_state`` is reported as **absence** and not as a state;
-    the column is ``NOT NULL``, so :meth:`SqliteConversationStore._decode_delivery`
-    reads that answer as the corruption it is. The two durations are read only where
-    a state is present, so a stray microsecond beside a ``NULL`` state cannot conjure
-    a delivery out of half a row.
-
-    The partition itself is not re-checked here. :class:`SpokenDelivery`'s validator
-    owns it and a row that breaches it raises ``ValidationError``, which
-    :meth:`SqliteConversationStore._decode_delivery` translates into this seam's
-    corrupt-row error — one rule, in the one place ADR-0205 §2 puts it.
-
-    Raises:
-        ConversationStoreError: If ``state`` is a string this build's vocabulary does
-            not name, which is a stored row no validator further along can place.
-    """
-    if state is None:
-        return None
-    try:
-        member = SpokenDeliveryState(str(state))
-    except ValueError as exc:
-        msg = f"a stored delivery carries an unknown state: {describe_untrusted(state)}"
-        raise ConversationStoreError(msg) from exc
-    return SpokenDelivery(
-        state=member,
-        played=None if played is None else timedelta(microseconds=_micros_of(played)),
-        rendered=None if rendered is None else timedelta(microseconds=_micros_of(rendered)),
-    )
-
-
-def _refuse_unknown_delivery(delivery: SpokenDelivery) -> None:
-    """Refuse an ``UNKNOWN`` report before any I/O (ADR-0205 §3).
-
-    ``UNKNOWN`` is written by capture and only through ``record_turn``; it is not a value
-    ``record_delivery`` carries. Without this a consumer holding the Protocol could
-    stamp ``UNKNOWN`` over ``UNKNOWN`` — a write the row's own state cannot
-    distinguish from no write, leaving the row eligible afterwards — and ADR-0205
-    §1's stamped-once rule would be a promise the store could not keep against a
-    caller that is not the engine.
-
-    Raises:
-        ValueError: If the delivery's state is ``UNKNOWN``.
-    """
-    if delivery.state is SpokenDeliveryState.UNKNOWN:
-        msg = (
-            "record_delivery does not carry an UNKNOWN delivery: that value is written "
-            "by capture through record_turn, and a device that does not know reports "
-            "nothing (ADR-0205 §2, §3)"
-        )
-        raise ValueError(msg)
-
-
-def _checked_turn(
-    episode_id: object, occurred_at: object, delivery: SpokenDelivery | None
-) -> tuple[str, datetime]:
+def _checked_turn(episode_id: object, occurred_at: object) -> tuple[str, datetime]:
     """Check ``record_turn``'s arguments before any I/O (ADR-0283 §6:3).
 
-    The delivery first, because its refusal is the one ADR-0283 names: capture writes
-    ``UNKNOWN`` and nothing else, and a device's report reaches a row only through
-    ``record_delivery`` and its stamped-once rule. The id and the instant go through
-    ``core``'s own annotated types, so a naive or indeterminate instant is refused
-    rather than localised to the host's zone (ADR-0023 §3), and a blank id is refused
-    rather than written as a key nothing will ever name.
+    The id and the instant go through ``core``'s own annotated types, so a naive or
+    indeterminate instant is refused rather than localised to the host's zone
+    (ADR-0023 §3), and a blank id is refused rather than written as a key nothing
+    will ever name.
 
     Returns:
         The episode id and the instant, as ``core`` normalises them.
 
     Raises:
-        ValueError: If ``delivery`` is given and is not ``UNKNOWN``, ``episode_id``
-            is not a non-blank ``str``, or ``occurred_at`` is not an aware instant.
+        ValueError: If ``episode_id`` is not a non-blank ``str``, or ``occurred_at``
+            is not an aware instant.
     """
-    if delivery is not None and delivery.state is not SpokenDeliveryState.UNKNOWN:
-        msg = (
-            f"record_turn writes only an UNKNOWN delivery, got {delivery.state.value}: "
-            f"a device's report reaches a row through record_delivery (ADR-0283 §6:3)"
-        )
-        raise ValueError(msg)
     try:
         checked_id = _EPISODE_ID.validate_python(episode_id, strict=True)
     except ValidationError as exc:
@@ -583,97 +466,6 @@ def _checked_turn(
         )
         raise ValueError(msg) from exc
     return checked_id, checked_at
-
-
-def _checked_episode_ids(episode_ids: object) -> list[str]:
-    """Check ``deliveries``' ids before any I/O (ADR-0283 §6:5).
-
-    A bare ``str`` is a ``Sequence[str]`` to the type checker and would be read as its
-    characters, so it is refused by name. Each element must be a ``str``, because the
-    ids reach SQL as one JSON array and a stray number would match nothing silently.
-
-    Returns:
-        The ids, as a list in the order given.
-
-    Raises:
-        ValueError: If ``episode_ids`` is a ``str`` or not a sequence, holds more than
-            :data:`_MAX_DELIVERY_IDS` ids, or holds an element that is not a ``str``.
-    """
-    if isinstance(episode_ids, (str, bytes)) or not isinstance(episode_ids, Sequence):
-        msg = f"episode_ids must be a sequence of str, got {describe_untrusted(episode_ids)}"
-        raise ValueError(msg)
-    ids = list(episode_ids)
-    if len(ids) > _MAX_DELIVERY_IDS:
-        msg = f"episode_ids holds {len(ids)} ids; at most {_MAX_DELIVERY_IDS} are read at once"
-        raise ValueError(msg)
-    for one in ids:
-        if type(one) is not str:
-            msg = f"episode_ids holds an id that is not a str: {describe_untrusted(one)}"
-            raise ValueError(msg)
-    return ids
-
-
-def _delivery_row(delivery: SpokenDelivery | None) -> tuple[Any, Any, Any]:
-    """Render ADR-0205 §3's fact into the three columns, or three nulls.
-
-    The inverse of :func:`_delivery_from`, written beside it so the two spellings of
-    one encoding cannot drift. Microseconds because that is ``timedelta``'s own
-    resolution, so the value read back is the value written.
-    """
-    if delivery is None:
-        return (None, None, None)
-    return (
-        delivery.state.value,
-        None if delivery.played is None else _to_micros_of(delivery.played),
-        None if delivery.rendered is None else _to_micros_of(delivery.rendered),
-    )
-
-
-def _to_micros_of(duration: timedelta) -> int:
-    """One duration as a whole number of microseconds, refusing one too large to store.
-
-    **The bound is this backend's, so the refusal is this seam's error** (ADR-0205 §3:
-    ``ConversationStoreError`` "where the store cannot be written"). ``timedelta``
-    reaches ``timedelta.max`` — about 8.6e19 microseconds — which is a value
-    :class:`~ai_assistant.core.types.SpokenDelivery`'s partition happily admits and
-    SQLite's signed 64-bit ``INTEGER`` cannot hold. Adversarial review, round 1,
-    ``blocker``: without this the driver raises ``OverflowError``, which is **not** a
-    ``sqlite3.Error`` and so passes straight through :meth:`_transaction`'s
-    translation, out of ``record_delivery``, past
-    ``ConversationLifecycle.record_delivery``'s degradation — which catches this seam's
-    error and not that one — and costs the owner the turn they had just spoken, for a
-    fact about a turn that had already happened.
-
-    Checked before the statement rather than caught after it, so nothing is half
-    written and the message names what is wrong rather than relaying a driver's.
-
-    Raises:
-        ConversationStoreError: If the duration is outside the range this store can
-            hold.
-    """
-    micros = duration // timedelta(microseconds=1)
-    if not -_SQLITE_INT_BOUND <= micros < _SQLITE_INT_BOUND:
-        msg = (
-            f"a delivery duration of {micros} microseconds is outside the range this "
-            f"store can hold, so the episode's delivery was not written (ADR-0205 §3)"
-        )
-        raise ConversationStoreError(msg)
-    return micros
-
-
-def _micros_of(value: object) -> int:
-    """Read one stored duration's microseconds, refusing anything that is not one.
-
-    ``bool`` is excluded with the same care :func:`_instant_from` takes over an
-    instant: it is an ``int`` subclass and ``True`` is not a duration.
-
-    Raises:
-        ConversationStoreError: If the stored value is not an integer.
-    """
-    if isinstance(value, bool) or not isinstance(value, int):
-        msg = f"a stored delivery carries a duration that is not an integer: {value!r}"
-        raise ConversationStoreError(msg)
-    return value
 
 
 def _check_page_bound(name: str, value: object) -> None:
@@ -1160,9 +952,9 @@ class SqliteConversationStore:
             # database written before ADR-0238 would otherwise fail its first read on
             # two columns that are not there.
             self._migrate_search_draw(conn)
-            # ADR-0283 §6's delivery rows. No turn table is created: the index is
-            # retired (ADR-0283 §6, §12).
-            conn.execute("CREATE TABLE IF NOT EXISTS deliveries(" + _DELIVERIES_COLUMNS + ")")
+            # No turn table is created: the index is retired (ADR-0283 §6, §12). No
+            # delivery table either: the spoken delivery report retired (ADR-0313
+            # §3:3).
             # ADR-0293's chat space, beside the conversation it belongs to.
             for statement in _CHAT_SCHEMA:
                 conn.execute(statement)
@@ -1189,7 +981,7 @@ class SqliteConversationStore:
         """Set foreign key enforcement for this connection, and prove the setting took.
 
         ``PRAGMA foreign_keys`` is **per connection**, so switching it on here is
-        what makes the constraint in :data:`_DELIVERIES_COLUMNS` mean anything at all
+        what makes the constraints in :data:`_CHAT_SCHEMA` mean anything at all
         — a schema carrying a key nobody enforces is documentation.
 
         Reading the setting back is the point of the method rather than a flourish:
@@ -1219,8 +1011,8 @@ class SqliteConversationStore:
         reading = conn.execute("PRAGMA foreign_keys").fetchone()
         if not reading or reading[0] != wanted:
             msg = (
-                "this SQLite build does not enforce foreign keys, so a delivery row could "
-                "not be kept from naming a conversation that does not exist"
+                "this SQLite build does not enforce foreign keys, so a row kept under a "
+                "conversation could not be kept from naming one that does not exist"
                 if enforced
                 else "foreign key enforcement could not be switched off for the schema rebuild"
             )
@@ -1451,7 +1243,7 @@ class SqliteConversationStore:
         """Delete the transcript, devices, bookkeeping and changes kept under a conversation.
 
         Explicitly rather than by the cascade, for the reason ``drop_if_eligible``
-        gives for the deliveries; the change rows have no key to cascade from.
+        gives; the change rows have no key to cascade from.
         """
         conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
         conn.execute(
@@ -1656,37 +1448,28 @@ class SqliteConversationStore:
         *,
         episode_id: str,
         occurred_at: datetime,
-        delivery: SpokenDelivery | None = None,
     ) -> Conversation | None:
         """Record that a conversational episode landed, under the exclusion (ADR-0283 §6:2).
 
-        The read of the conversation and both writes are one ``IMMEDIATE``
+        The read of the conversation and the write are one ``IMMEDIATE``
         transaction, so a ``stamp_deleted`` or a ``drop_if_eligible`` lands wholly
         before or wholly after it — which is what lets the writer read a ``None``
-        here as "the conversation was gone when the episode landed" (§7:2). The
-        delivery row is inserted only where none exists, so a retried capture cannot
-        reset a stamped delivery (ADR-0205 §1).
+        here as "the conversation was gone when the episode landed" (§7:2).
 
         The argument checks are **before the lock and before any I/O** (§6:3).
 
         Raises:
-            ValueError: If ``delivery`` is not ``UNKNOWN``, ``episode_id`` is blank,
-                or ``occurred_at`` is not an aware instant.
+            ValueError: If ``episode_id`` is blank, or ``occurred_at`` is not an
+                aware instant.
             ConversationStoreError: If the store cannot be written.
         """
-        checked_id, checked_at = _checked_turn(episode_id, occurred_at, delivery)
+        _, checked_at = _checked_turn(episode_id, occurred_at)
         async with self._lock:
-            row = await _run_to_completion(
-                self._record_turn_sync, conversation_id, checked_id, checked_at, delivery
-            )
+            row = await _run_to_completion(self._record_turn_sync, conversation_id, checked_at)
         return None if row is None else self._decode_conversation(row)
 
     def _record_turn_sync(
-        self,
-        conversation_id: str,
-        episode_id: str,
-        occurred_at: datetime,
-        delivery: SpokenDelivery | None,
+        self, conversation_id: str, occurred_at: datetime
     ) -> Sequence[Any] | None:
         with self._transaction("record a conversational episode") as conn:
             row = self._row_of(conn, conversation_id)
@@ -1698,136 +1481,10 @@ class SqliteConversationStore:
                 "UPDATE conversations SET last_turn_at = ? WHERE id = ?",
                 (_to_micros(occurred_at), conversation_id),
             )
-            if delivery is not None:
-                # `OR IGNORE`: a row this conversation already holds for the episode
-                # stands as it is, so a retried capture cannot put UNKNOWN back over a
-                # stamp (ADR-0205 §1).
-                conn.execute(
-                    "INSERT OR IGNORE INTO deliveries(conversation_id, episode_id, "
-                    "delivery_state, delivery_played, delivery_rendered) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (conversation_id, episode_id, *_delivery_row(delivery)),
-                )
             recorded = self._row_of(conn, conversation_id)
             if recorded is None:  # pragma: no cover — the row was just updated here
                 return None
             return recorded
-
-    async def record_delivery(
-        self, conversation_id: str, *, episode_id: str, delivery: SpokenDelivery
-    ) -> bool:
-        """Stamp the episode's delivery row if it is still ``UNKNOWN`` (ADR-0283 §6:4).
-
-        The three conditions and the write are one ``IMMEDIATE`` transaction, so two
-        reports observing ``UNKNOWN`` cannot both write: the second finds a state that
-        is no longer ``UNKNOWN`` and performs nothing, which is ADR-0205 §1's
-        stamped-once rule held across processes and not only across coroutines on one
-        loop.
-
-        The ``UNKNOWN`` refusal is **before the lock and before any I/O**, on
-        ADR-0085 §3's convention for a malformed argument.
-
-        Raises:
-            ValueError: If ``delivery.state`` is ``UNKNOWN``.
-            UnknownConversationError: If the id names nothing or names a stamped
-                conversation.
-            ConversationStoreError: If the store cannot be written.
-        """
-        _refuse_unknown_delivery(delivery)
-        async with self._lock:
-            return await _run_to_completion(
-                self._record_delivery_sync, conversation_id, episode_id, delivery
-            )
-
-    def _record_delivery_sync(
-        self, conversation_id: str, episode_id: str, delivery: SpokenDelivery
-    ) -> bool:
-        with self._transaction("record an episode's delivery") as conn:
-            row = self._row_of(conn, conversation_id)
-            if row is None or row[4] is not None:
-                raise self._unknown(conversation_id)
-            # All three of ADR-0205 §3's conditions in one predicate, so the row is
-            # written only where every one of them held at the moment of writing —
-            # the conversation, the episode, and a recorded state of ``UNKNOWN``. An
-            # episode with no row fails the second and is left as it stands: this
-            # operation is not a way to give an episode a delivery.
-            written = conn.execute(
-                "UPDATE deliveries SET delivery_state = ?, delivery_played = ?, "
-                "delivery_rendered = ? WHERE conversation_id = ? AND episode_id = ? "
-                "AND delivery_state = ?",
-                (
-                    *_delivery_row(delivery),
-                    conversation_id,
-                    episode_id,
-                    SpokenDeliveryState.UNKNOWN.value,
-                ),
-            ).rowcount
-            return bool(written)
-
-    async def deliveries(
-        self, conversation_id: str, *, episode_ids: Sequence[str]
-    ) -> Mapping[str, SpokenDelivery]:
-        """Return the delivery rows the conversation holds among ``episode_ids``.
-
-        One deferred transaction, so the conversation's liveness and its rows are
-        read from one snapshot: a stamp landing between the two cannot leave a
-        stamped conversation's rows presented. The ids reach SQL as one JSON array
-        read through ``json_each`` rather than as up to a thousand bind parameters,
-        so no build's variable limit decides whether a page can be read.
-
-        The argument checks are **before the lock and before any I/O** (§6:5).
-
-        Raises:
-            ValueError: If ``episode_ids`` is a ``str``, holds more than 1000 ids, or
-                holds an element that is not a ``str``.
-            ConversationStoreError: If the store cannot be read, or a stored row is
-                corrupt.
-        """
-        ids = _checked_episode_ids(episode_ids)
-        if not ids:
-            return {}
-        async with self._lock:
-            rows = await _run_to_completion(self._deliveries_sync, conversation_id, ids)
-        found: dict[str, SpokenDelivery] = {}
-        for row in rows:
-            delivery = self._decode_delivery(row)
-            found[_episode_id_of(row[0])] = delivery
-        return found
-
-    def _deliveries_sync(self, conversation_id: str, ids: list[str]) -> list[Any]:
-        with self._transaction("read a conversation's deliveries", immediate=False) as conn:
-            row = self._row_of(conn, conversation_id)
-            if row is None or row[4] is not None:
-                return []
-            return self._fetch(
-                conn,
-                "read a conversation's deliveries",
-                "SELECT episode_id, delivery_state, delivery_played, delivery_rendered "
-                "FROM deliveries WHERE conversation_id = ? "
-                "AND episode_id IN (SELECT value FROM json_each(?))",
-                (conversation_id, json.dumps(ids)),
-            )
-
-    @staticmethod
-    def _decode_delivery(row: Sequence[Any]) -> SpokenDelivery:
-        """Rebuild one delivery row's fact, surfacing corruption as this seam's error.
-
-        The state column is ``NOT NULL`` in the schema, so a ``NULL`` here is a row
-        written by something other than this module and is a fault, not an absence:
-        absence is spelled by there being no row at all.
-
-        Raises:
-            ConversationStoreError: If the stored row does not decode.
-        """
-        try:
-            delivery = _delivery_from(row[1], row[2], row[3])
-        except (ValidationError, TypeError, OverflowError) as exc:
-            msg = f"a stored delivery could not be decoded: {exc}"
-            raise ConversationStoreError(msg) from exc
-        if delivery is None:
-            msg = f"a stored delivery row carries no state: {describe_untrusted(row[0])}"
-            raise ConversationStoreError(msg)
-        return delivery
 
     async def stamped_conversation_ids(
         self,
@@ -1926,7 +1583,7 @@ class SqliteConversationStore:
             return True
 
     async def drop_if_eligible(self, conversation_id: str) -> bool:
-        """Remove the record and its delivery rows if still eligible, under the exclusion.
+        """Remove the record and what is kept under it if still eligible, under the exclusion.
 
         The eligibility re-check happens *inside* the transaction that drops, which
         is what stops a reclaim destroying a conversation the user has just come
@@ -1972,16 +1629,15 @@ class SqliteConversationStore:
                 )
             if not eligible:
                 return False
-            # The delivery rows go first and **explicitly** (ADR-0283 §6:7), with
-            # ``ON DELETE CASCADE`` behind them as a backstop rather than as the
-            # mechanism (#452). ``PRAGMA foreign_keys`` is per connection and off by
-            # default, so a cascade this module *relied* on would stop happening on
-            # any connection that had not enabled it — and the failure mode is the
-            # silent one: every drop would leave rows behind for a conversation
-            # minted later under the same id to inherit. Deleting them here makes
-            # the drop correct whatever the pragma says; the cascade then only ever
-            # fires for a writer that is not this module.
-            conn.execute("DELETE FROM deliveries WHERE conversation_id = ?", (conversation_id,))
+            # The rows kept under the conversation go **explicitly**, with ``ON
+            # DELETE CASCADE`` behind them as a backstop rather than as the mechanism
+            # (#452). ``PRAGMA foreign_keys`` is per connection and off by default, so
+            # a cascade this module *relied* on would stop happening on any connection
+            # that had not enabled it — and the failure mode is the silent one: every
+            # drop would leave rows behind for a conversation minted later under the
+            # same id to inherit. Deleting them here makes the drop correct whatever
+            # the pragma says; the cascade then only ever fires for a writer that is
+            # not this module.
             if stamped:
                 # The stamp cleared the chat and recorded the deletion; what is left
                 # is the change that tells devices so, which stays.

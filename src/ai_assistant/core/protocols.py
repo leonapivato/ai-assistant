@@ -200,7 +200,6 @@ if TYPE_CHECKING:
         SpendTotal,
         SpokenAudio,
         SpokenAudioFormat,
-        SpokenDelivery,
         SpokenReply,
         StoryActor,
         StoryFlagName,
@@ -3827,15 +3826,11 @@ class PlanStore(Protocol):
     async def clear(self) -> int:
         """Delete every record in this store, returning the number removed.
 
-        Refused while an execution the store holds has a **live** (``RUNNING``) step:
-        a bulk erase is not a licence to orphan a side effect its executor is about
-        to commit against.
-
         **Every stop record goes with the rest** (ADR-0297 §1), and is counted among
         the records removed.
 
         Raises:
-            ActiveExecutionError: If any execution has a live step.
+            PlanningError: If the backend fails.
         """
         ...
 
@@ -6919,8 +6914,7 @@ class ConversationStore(Protocol):
     (§5), and the chat's reader's **bookkeeping** of what it has taken in (§6). The
     transcript and the episodes are never kept in step (ADR-0293 §5:5), and
     forgetting, which is memory's act on the episodes, never reaches anything here
-    (§5:6). Beside them it keeps the conversation itself and one small fact about an
-    episode: the delivery rows below.
+    (§5:6). Beside them it keeps the conversation itself.
 
     **What this contract does not own.** Every sequence spanning both stores —
     writing a conversational episode, finishing a user deletion, the retention
@@ -6931,9 +6925,9 @@ class ConversationStore(Protocol):
 
     **The mutation exclusion, which is this seam's obligation and not a
     caller's.** Per conversation, a :meth:`mark_active`, a :meth:`record_turn`, a
-    :meth:`record_delivery`, a :meth:`stamp_deleted`, a :meth:`drop_if_eligible`, an
-    :meth:`append_message`, a :meth:`delete_message`, a
-    :meth:`set_conversation_devices` and a :meth:`take_in` **never interleave**
+    :meth:`stamp_deleted`, a :meth:`drop_if_eligible`, an :meth:`append_message`, a
+    :meth:`delete_message`, a :meth:`set_conversation_devices` and a :meth:`take_in`
+    **never interleave**
     (ADR-0283 §6:8, less the ``record_observed`` member ADR-0285 §4 removes, and with
     ADR-0293's acts in the medium added); each observes the conversation, decides, and
     writes as one indivisible step. :meth:`set_my_devices` and :meth:`start` are
@@ -6953,8 +6947,8 @@ class ConversationStore(Protocol):
     verification (ADR-0283 §7:2).
 
     **A conversation stamped deleted is absent from every read that presents
-    it** — :meth:`get`, :meth:`recent`, :meth:`export`, :meth:`deliveries`,
-    :meth:`transcript`, :meth:`conversation_devices`, :meth:`untaken_messages`,
+    it** — :meth:`get`, :meth:`recent`, :meth:`export`, :meth:`transcript`,
+    :meth:`conversation_devices`, :meth:`untaken_messages`,
     :meth:`conversations_awaiting`, :meth:`taken_in` and :meth:`device_conversations`
     — while
     :meth:`stamped_conversation_ids` still enumerates it, so the deletion
@@ -6972,27 +6966,17 @@ class ConversationStore(Protocol):
     arguments carry ADR-0073 §2's range posture unchanged — out of range is a
     ``ValueError``, not a clamp — inherited rather than restated.
 
-    **Delivery rows** (ADR-0283 §6, §10). Beside the conversation, the store keeps
-    one small fact per spoken episode: a
-    :class:`~ai_assistant.core.types.SpokenDelivery`, keyed by the conversation and
-    the episode's id. :meth:`record_turn` writes it ``UNKNOWN``,
-    :meth:`record_delivery` stamps it once, :meth:`deliveries` reads it back, and
-    :meth:`drop_if_eligible` drops it with the conversation. It is state about an
-    episode, not content of one, so "this store holds no history" binds unchanged.
-
     **Every read returns a detached snapshot.** The exchanged types are frozen
     pydantic models, so this costs nothing; it is stated so an implementation that
-    grows an internal mutable row cannot hand one out. :meth:`deliveries` returns a
-    mapping, which is a fresh one on every call.
+    grows an internal mutable row cannot hand one out.
 
     Every method raises :class:`~ai_assistant.core.errors.ConversationStoreError`
     for a store fault, and **refuses an id the store does not know rather than
     creating one** (§1) — silently starting a conversation turns a typo or a
     stale id into "my conversation vanished". Where a method already has a
-    spelling for absence (a ``None`` return — :meth:`record_turn`'s included — the
-    empty mapping of :meth:`deliveries`, or the ``bool`` of the two lifecycle
-    mutations) that spelling is used and nothing is raised; every other method
-    raises.
+    spelling for absence (a ``None`` return — :meth:`record_turn`'s included — or
+    the ``bool`` of the two lifecycle mutations) that spelling is used and nothing
+    is raised; every other method raises.
 
     **The unknown-id refusal is the narrower
     :class:`~ai_assistant.core.errors.UnknownConversationError`** (ADR-0076 §2),
@@ -7006,8 +6990,7 @@ class ConversationStore(Protocol):
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060). Input observation (ADR-0065) binds it too: every argument this seam
     takes is immutable — a ``str``, an ``int``, a ``datetime`` or a frozen model —
-    except the caller-owned sequences — :meth:`deliveries`' ``episode_ids``,
-    :meth:`changes`' ``conversation_ids``, the ``devices`` of
+    except the caller-owned sequences — :meth:`changes`' ``conversation_ids``, the ``devices`` of
     :meth:`set_my_devices` and :meth:`set_conversation_devices`, and the
     ``positions`` of :meth:`take_in` and :meth:`taken_in` — which an implementation
     reads once, before its first ``await``.
@@ -7148,7 +7131,6 @@ class ConversationStore(Protocol):
         *,
         episode_id: str,
         occurred_at: datetime,
-        delivery: SpokenDelivery | None = None,
     ) -> Conversation | None:
         """Record that a conversational episode landed, and return the conversation.
 
@@ -7165,136 +7147,25 @@ class ConversationStore(Protocol):
         and returns ``None``, and raises nothing: that is the outcome a capture
         racing a deletion is owed, not a fault. Otherwise it sets ``last_turn_at``
         to ``occurred_at`` — "a turn was recorded", unconditionally and from the
-        caller's reading rather than the store's clock — leaves ``last_active_at``
-        alone, and, where ``delivery`` is given, writes the delivery row for
-        ``episode_id`` (see the class docstring).
-
-        **The delivery row is written if absent.** A second call naming an episode
-        the conversation already holds a row for leaves that row as it stands, so a
-        retried capture cannot reset a stamped delivery to ``UNKNOWN`` behind
-        ADR-0205 §1's stamped-once rule. The episode id is opaque here: the store
-        does not derive it, parse it or check that the episode exists.
+        caller's reading rather than the store's clock — and leaves
+        ``last_active_at`` alone. The episode id is opaque here: the store does not
+        derive it, parse it or check that the episode exists.
 
         Args:
             conversation_id: The conversation the episode was written for.
             episode_id: The episode's id, ``activation:<activation_id>`` from
-                admission (ADR-0283 §2). Keys the delivery row; unused without one.
+                admission (ADR-0283 §2).
             occurred_at: The episode's own ``occurred_at``, so the conversation and
                 the episode carry one instant (ADR-0283 §7:1).
-            delivery: ``SpokenDelivery(state=UNKNOWN)`` on ``converse_spoken``, and
-                ``None`` everywhere else (ADR-0205 §4). An absent value writes no
-                delivery row, which reads as no delivery fact for that episode —
-                never as delivered and never as heard.
 
         Returns:
             The conversation as written, or ``None`` where it is absent or stamped.
 
         Raises:
-            ValueError: Before any I/O, if ``delivery`` is given and its state is
-                not ``UNKNOWN`` (ADR-0283 §6:3) — a device's report reaches a row
-                only through :meth:`record_delivery` — or if ``episode_id`` is not
-                a non-blank ``str``, or ``occurred_at`` is not a timezone-aware
-                instant with a determinate offset (ADR-0023 §3).
+            ValueError: Before any I/O, if ``episode_id`` is not a non-blank
+                ``str``, or ``occurred_at`` is not a timezone-aware instant with a
+                determinate offset (ADR-0023 §3).
             ConversationStoreError: If the store cannot be written.
-        """
-        ...
-
-    async def record_delivery(
-        self, conversation_id: str, *, episode_id: str, delivery: SpokenDelivery
-    ) -> bool:
-        """Stamp what a device played of one episode's spoken answer (ADR-0205 §3).
-
-        The operation on this contract that writes a fact arriving **after** the
-        episode it is about was recorded. ``MemoryStore`` offers no update —
-        ADR-0068 froze the record graph — so a row here is what can carry a late
-        fact at all.
-
-        **Which row** (ADR-0283 §6:4): the delivery row the conversation holds for
-        ``episode_id``, which :meth:`record_turn` wrote. There is no other.
-
-        **It stamps that row if and only if three conditions hold together**: the
-        row belongs to the conversation the caller named; its episode is the one
-        the caller named; and its recorded delivery's state is ``UNKNOWN``. Where any
-        fails the operation **performs nothing and returns ``False``** — no row is
-        written, and no error is raised. A report is never applied across
-        conversations: a delivery row is keyed by the conversation, so this store is
-        where that relation is checked and no caller re-derives it.
-
-        **An episode with no delivery row is left exactly as it stands.** Such an
-        episode is one no delivery fact was recorded for — one that did not run on
-        ``converse_spoken`` — and a report naming it is answered by doing nothing:
-        this is not a way to give an episode a delivery, and no lane reads it as
-        one. A row already carrying ``COMPLETE`` or ``INTERRUPTED`` is likewise left
-        alone, which is ADR-0205 §1's stamped-once rule.
-
-        **Reading the three conditions and writing the row are one indivisible
-        step**, decided by the store under the same per-conversation exclusion its
-        other mutations run under, and never a read a caller composes with a write.
-        Two reports observing ``UNKNOWN`` and both writing would each believe it had
-        stamped the episode once, and §1's rule would be true of neither. Which of
-        two concurrent reports wins is not decided here and does not need to be;
-        that exactly one returns ``True`` is.
-
-        Args:
-            conversation_id: The conversation the report is about.
-            episode_id: The episode whose delivery to stamp.
-            delivery: What the device played. **Never** ``UNKNOWN``: that value is
-                written by capture, through :meth:`record_turn`, and the refusal
-                below is part of this contract rather than a caller's discipline.
-
-        Returns:
-            ``True`` where this call stamped a row, ``False`` where no row met all
-            three conditions (ADR-0283 §6:4).
-
-        Raises:
-            ValueError: If ``delivery.state`` is ``UNKNOWN`` — refused locally,
-                before any I/O, as a malformed argument (ADR-0085 §3's convention).
-                Without it a consumer holding this Protocol could stamp ``UNKNOWN``
-                over ``UNKNOWN``, a write the row's own state cannot distinguish
-                from no write, leaving the row eligible afterwards — and ADR-0205
-                §1's stamped-once rule would be a promise this store could not keep
-                against a caller that is not the engine.
-            UnknownConversationError: If ``conversation_id`` names nothing or names
-                a conversation stamped deleted (ADR-0205 §3:4's two refusals).
-            ConversationStoreError: If the store cannot be written.
-        """
-        ...
-
-    async def deliveries(
-        self, conversation_id: str, *, episode_ids: Sequence[str]
-    ) -> Mapping[str, SpokenDelivery]:
-        """Return the delivery rows this conversation holds among ``episode_ids``.
-
-        ADR-0283 §6:5, the read history takes once per page to pair each episode it
-        returns with its delivery fact (§10). Keyed by episode id; an id the
-        conversation holds no delivery row for is **simply missing**, never an
-        error and never a ``None`` value — ``MemoryStore.get_many``'s posture.
-
-        A conversation that is **absent or stamped deleted** answers with an empty
-        mapping, and nothing is raised: a stamped conversation's rows are withheld
-        exactly as every other presenting read withholds it, and a history read
-        that reaches this after a racing deletion is owed an answer, not a fault.
-
-        A read, so it takes no exclusion; it answers from one consistent reading of
-        the conversation and its rows. The mapping is a fresh one on every call.
-
-        Args:
-            conversation_id: The conversation whose rows to read.
-            episode_ids: The episodes to look up — at most 1000, the bound
-                ``MemoryStore.channel_episodes`` puts on a page (ADR-0283 §3), so
-                one history page is one call. Duplicates are permitted and count
-                towards the bound as given. A bare ``str`` is refused rather than
-                read as its characters.
-
-        Returns:
-            The delivery for every named episode the conversation holds a delivery
-            row for.
-
-        Raises:
-            ValueError: Before any I/O, if ``episode_ids`` holds more than 1000
-                ids, is a ``str``, or holds an element that is not a ``str``.
-            ConversationStoreError: If the store cannot be read, or a stored row is
-                corrupt.
         """
         ...
 
@@ -7499,14 +7370,13 @@ class ConversationStore(Protocol):
         the user gets an answer that was not recorded. The two clauses describe
         different instants and neither weakens the other.
 
-        **The delivery rows go with the record** (ADR-0283 §6:7), in the same
-        step: a conversation's delivery rows never outlive it, and none is left for
-        a conversation minted later to inherit. So does everything else this store
-        keeps under the conversation — its transcript's markers, its devices and the
-        reader's bookkeeping — and its changes but the record of its deletion.
+        **Everything this store keeps under the conversation goes with the record**,
+        in the same step — its transcript's markers, its devices and the reader's
+        bookkeeping — and its changes but the record of its deletion, so none is
+        left for a conversation minted later to inherit.
 
         Returns:
-            ``True`` if the record and its delivery rows were removed; ``False`` if
+            ``True`` if the record was removed; ``False`` if
             the conversation is not (or no longer) eligible, or the id names
             nothing. ``False`` on absence is what makes the sweep idempotent: it
             can run any number of times, and a re-run after a successful drop is a
@@ -7836,8 +7706,8 @@ class ConversationStore(Protocol):
     ) -> Mapping[int, str]:
         """Return which activation took in each named message, where one did (§6:6).
 
-        Keyed by position; a position no activation took in is simply missing, as
-        :meth:`deliveries` answers. An absent or stamped conversation answers with
+        Keyed by position; a position no activation took in is simply missing, never
+        an error and never a ``None`` value. An absent or stamped conversation answers with
         an empty mapping. A fresh mapping on every call.
 
         Raises:

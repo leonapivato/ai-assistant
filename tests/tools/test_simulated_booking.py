@@ -156,19 +156,17 @@ async def test_the_read_answers_the_configured_price_under_and_over_a_bound(
     below differ in exactly one configured field and in nothing else — no code path, no
     argument and no declaration — which is what §5's *"without a code change"* means.
 
-    The price is read under the **registered** ``quoted_output``'s own keys, so what is
-    asserted is that a real provider's answer carries the configured price where its
-    declaration says it does. ADR-0267 §4's mint over that output retired with the old
-    path (ADR-0309 §5); the provider's half of the arm is what stands.
+    The price is read under the provider's own output keys. ADR-0267 §4's mint over
+    that output retired with the old path (ADR-0309 §5), and the declaration's
+    ``quoted_output`` with the quote family (ADR-0313 §5:4); the provider's half of
+    the arm is what stands.
     """
     result, _ = await _answer(price_amount=price)
     output = _succeeded(result)
-    quoted = BOOKING_AVAILABILITY.quoted_output
 
-    assert quoted is not None
-    assert output[quoted.amount] == price
-    assert output[quoted.currency] == CURRENCY
-    assert (Decimal(str(output[quoted.amount])) <= Decimal("200")) is under
+    assert output[PRICE_AMOUNT_KEY] == price
+    assert output[PRICE_CURRENCY_KEY] == CURRENCY
+    assert (Decimal(str(output[PRICE_AMOUNT_KEY])) <= Decimal("200")) is under
 
 
 # --------------------------------------------------------------------------- #
