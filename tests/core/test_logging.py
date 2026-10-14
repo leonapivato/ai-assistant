@@ -8,6 +8,7 @@ import logging
 import logging.handlers
 import subprocess
 import sys
+import threading
 from collections import ChainMap, UserDict, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ import pytest
 import structlog
 from pydantic import BaseModel
 
+import conftest
 from ai_assistant.core.config import Settings
 from ai_assistant.core.logging import (
     REDACTED,
@@ -33,6 +35,7 @@ from ai_assistant.core.logging import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, MutableMapping
+    from types import TracebackType
 
 
 def _redact(**event: object) -> dict[str, object]:
@@ -1582,3 +1585,129 @@ def test_a_traceback_formatted_before_the_net_is_masked() -> None:
     logging.getLogger("remote").handle(record)
 
     assert stream.getvalue() == f"{_WITHHELD}\n{REDACTED}\n"
+
+
+# --- Follow-ups to F7 and F8: #2930, #2976, #2977, #2980 ---
+
+
+def _shortened() -> tuple[type[BaseException], BaseException, TracebackType]:
+    """An ``exc_info`` tuple whose traceback is not its exception's current one.
+
+    The exception's own traceback starts in ``_caught``; the tuple's starts in the
+    raiser, as a caller that saved or shortened it would hand it on.
+    """
+    failure = _caught(_raise_with_content)
+    whole = failure.__traceback__
+    assert whole is not None
+    assert whole.tb_next is not None
+    return type(failure), failure, whole.tb_next
+
+
+@pytest.mark.parametrize("path", ["chain", "renderer", "stdlib", "formatter"])
+def test_an_exc_info_tuples_own_traceback_is_the_one_shown(
+    path: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Issue #2930: the frames shown were the exception's current ones, not the
+    # tuple's, in the structlog chain and the renderer's formatter, and in the
+    # stdlib's handler and formatter.
+    exc_info = _shortened()
+    if path == "chain":
+        configure_logging(Settings())
+        structlog.get_logger(__name__).warning("read_failed", exc_info=exc_info)
+        out = capsys.readouterr().out
+    elif path == "renderer":
+        configure_logging(Settings())
+        out = _installed_renderer()(None, "warning", {"event": "e", "exc_info": exc_info})
+    elif path == "stdlib":
+        stream = _configured_on_a_bare_root()
+        logging.getLogger("thirdparty").error("read failed", exc_info=exc_info)
+        out = stream.getvalue()
+    else:
+        _configured_on_a_bare_root()
+        formatter = _ours().formatter
+        assert formatter is not None
+        out = formatter.formatException(exc_info)
+
+    _assert_no_content(out)
+    assert "_ReadFailedError" in out
+    assert "in _raise_with_content" in out, "the tuple's frames"
+    assert "in _caught" not in out, "and not the exception's own"
+
+
+def test_a_wrapped_events_record_exc_info_a_factory_set_keeps_its_class_and_frames() -> None:
+    # Issue #2976: structlog's ``wrap_for_formatter`` passes no ``exc_info``, but a
+    # host's record factory may set one. Described in ``exc_text`` alone, it was
+    # cleared by ``ProcessorFormatter`` before it rendered.
+    made = logging.getLogRecordFactory()
+    failure = _caught(_raise_with_content)
+
+    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = made(*args, **kwargs)
+        record.exc_info = (type(failure), failure, failure.__traceback__)
+        return record
+
+    stream = _hosted_by_processor_formatter()
+    logging.setLogRecordFactory(factory)
+    try:
+        structlog.get_logger("host").warning("read_failed")
+    finally:
+        logging.setLogRecordFactory(made)
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert "read_failed" in out
+    assert out.count("._ReadFailedError\n") == 1, "the class, once"
+    assert "in _raise_with_content" in out, "and the frames"
+
+
+def test_the_root_handlers_come_back_in_their_order() -> None:
+    # Issue #2977: removed handlers were re-appended, so removing the first of
+    # ``[A, B]`` handed on ``[B, A]``.
+    root = logging.getLogger()
+    first, second = logging.NullHandler(), logging.NullHandler()
+    root.handlers[:] = [first, second]
+
+    with conftest.root_logging_restored():
+        root.removeHandler(first)
+
+    assert root.handlers == [first, second]
+
+
+def test_concurrent_configuration_on_a_bare_root_installs_one_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue #2980: the first caller is held between finding no handler and adding
+    # its own while a second caller runs as far as it can. Unlocked, the second
+    # also finds none and adds one; under the logging module's lock it waits, then
+    # finds the first's.
+    root = logging.getLogger()
+    for one in list(root.handlers):
+        root.removeHandler(one)
+    settings = Settings()
+    add = logging.Logger.addHandler
+    second: list[threading.Thread] = []
+    failures: list[BaseException] = []
+
+    def configure() -> None:
+        try:
+            configure_logging(settings)
+        except BaseException as exc:
+            failures.append(exc)
+
+    def adding(self: logging.Logger, handler: logging.Handler) -> None:
+        if not second:
+            other = threading.Thread(target=configure)
+            second.append(other)
+            other.start()
+            other.join(timeout=0.5)
+        add(self, handler)
+
+    monkeypatch.setattr(logging.Logger, "addHandler", adding)
+    configure_logging(settings)
+    second[0].join(timeout=10)
+
+    assert not second[0].is_alive()
+    assert not failures
+    _ours()
+    for handler in root.handlers:
+        assert sum(type(one).__name__ == "_ScrubRecords" for one in handler.filters) == 1
