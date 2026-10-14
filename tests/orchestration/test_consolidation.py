@@ -1,4 +1,7 @@
-"""The consolidation job: ADR-0106 §10's eight cases, and ADR-0111's run mechanics.
+"""The consolidation job: ADR-0106 §10's cases, and ADR-0111's run mechanics.
+
+Case 7, answering a question yes, was the old question surface's, and it retired
+with that surface (ADR-0309 §5).
 
 Every clause exercised here names the case that can fail, because each has a wrong
 implementation the neighbouring test waves through — the discipline ADR-0106 §10
@@ -59,7 +62,6 @@ from ai_assistant.orchestration.consolidation import (
     ConsolidationStage,
     _render,
 )
-from ai_assistant.orchestration.questions import QuestionStage
 from ai_assistant.service.scheduler import Job, Scheduler
 from ai_assistant.testing import (
     FakeDeferralStore,
@@ -401,52 +403,22 @@ async def test_the_question_reaching_the_user_says_the_warrant_is_external() -> 
     Protocol — ADR-0106 §6 declines to promote ``reason`` wording into the shared
     suite, because no test can distinguish a sentence that conveys externality from
     one that claims to, and #40 tracks the Protocol statement that would be needed.
+
+    Read off the queued deferral's ruling, which is where the question's ``reason``
+    comes from: the question surface that rendered it retired (ADR-0309 §5).
     """
     store = await _seeded([_record("r1", source=MemorySource.EXTERNAL), _record("r2")])
     writes, queue = _gated(store)
-    questions = QuestionStage(writer=writes._inner._writer, deferrals=queue, memory=store)
 
     await _stage(store=store, writes=writes).run()
-    asked = await questions.questions()
+    asked = await queue.pending()
 
     assert len(asked) == 1
-    reason = asked[0].reason.lower()
+    reason = asked[0].decision.reason.lower()
     assert "external" in reason, (
         "the question must say why it was raised: `Question.band` reads DERIVED for a "
         "tainted consolidation, which is correct as what it documents and misleading "
         "as a statement about warrant"
-    )
-
-
-# --- ADR-0106 §10, case 7: the question outlives the run, and yes lands ------
-
-
-async def test_answering_a_tainted_consolidation_lands_a_record_still_carrying_the_marker() -> None:
-    """§4, §6, §10 case 7: enumerable afterwards, and confirmable into durable memory.
-
-    Both legs carry one of ADR-0106's own review defects. The first would have
-    caught round 1's, where the ruling was right and the question reached nobody
-    because ``MemoryIngestor`` "writes nothing at all" on ``ASK_USER``; the second
-    round 3's, where the question was raised and answering it yes could not land
-    anything, because the rule fired again on the confirmed re-ingest. A test that
-    stops at the policy's ruling satisfies neither.
-    """
-    store = await _seeded([_record("r1", source=MemorySource.EXTERNAL), _record("r2")])
-    writes, queue = _gated(store)
-    questions = QuestionStage(writer=writes._inner._writer, deferrals=queue, memory=store)
-
-    await _stage(store=store, writes=writes).run()
-    parked = await queue.pending()
-    assert len(parked) == 1, "the question must outlive the run that raised it"
-
-    answered = await questions.answer(parked[0].id, accept=True)
-
-    assert answered.record_id is not None
-    landed = await store.get(answered.record_id)
-    assert landed is not None
-    assert landed.provenance.derived_from_external is True, (
-        "the marker never clears: the confirmed re-ingest carries it, and no fold, "
-        "merge or reinforcement may drop it (ADR-0106 §4)"
     )
 
 
