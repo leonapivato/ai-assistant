@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
+from zoneinfo import ZoneInfoNotFoundError
 
 import pytest
 from structlog.testing import capture_logs
@@ -331,6 +332,7 @@ async def test_the_request_is_asked_afresh_as_two_messages() -> None:
     sent = _sent(completer)
     assert set(sent) == {
         "now",
+        "time_zone",
         "place",
         "understanding",
         "place_window",
@@ -342,6 +344,62 @@ async def test_the_request_is_asked_afresh_as_two_messages() -> None:
     }
     assert sent["now"] == _AT.isoformat()
     assert sent["place"] == {"takes_message": True, "description": "the kitchen chat"}
+
+
+def _zoned(timezone: str, at: datetime) -> tuple[PlanningStage, FakeToolCallingCompleter]:
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="ok"))
+    stage = PlanningStage(
+        completer=completer,
+        recorder=_Recorder(),
+        excerpt_chars=200,
+        now=lambda: at,
+        timezone=timezone,
+    )
+    return stage, completer
+
+
+async def test_the_default_zone_shows_the_current_time_in_utc() -> None:
+    # #2964: a deployment with no zone configured keeps UTC, the setting's default.
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs())
+    sent = _sent(completer)
+    assert sent["now"] == "2026-10-11T12:00:00+00:00"
+    assert sent["time_zone"] == "UTC"
+
+
+async def test_a_configured_zone_shows_the_local_time_with_its_offset_and_name() -> None:
+    # #2964: the current instant in the user's zone, so a time told is told in local
+    # time; the round's own record keeps the UTC instant.
+    stage, completer = _zoned("Asia/Kolkata", _AT)
+    planned = await stage.plan(_inputs())
+    sent = _sent(completer)
+    assert sent["now"] == "2026-10-11T17:30:00+05:30"
+    assert sent["time_zone"] == "Asia/Kolkata"
+    assert planned.round.recorded_at == _AT
+
+
+@pytest.mark.parametrize(
+    ("at", "shown"),
+    [
+        # Eastern daylight time, in force on 11 October.
+        (_AT, "2026-10-11T08:00:00-04:00"),
+        # Eastern standard time, in force on 11 January.
+        (datetime(2026, 1, 11, 12, 0, tzinfo=UTC), "2026-01-11T07:00:00-05:00"),
+    ],
+)
+async def test_a_daylight_saving_zone_shows_the_offset_in_force_at_that_instant(
+    at: datetime, shown: str
+) -> None:
+    stage, completer = _zoned("America/New_York", at)
+    await stage.plan(_inputs())
+    sent = _sent(completer)
+    assert sent["now"] == shown
+    assert sent["time_zone"] == "America/New_York"
+
+
+def test_an_unknown_zone_is_refused_at_construction() -> None:
+    with pytest.raises(ZoneInfoNotFoundError):
+        _zoned("Mars/Olympus_Mons", _AT)
 
 
 async def test_a_model_failure_propagates_and_nothing_is_recorded() -> None:

@@ -2622,6 +2622,9 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
         recall_digest_wait=PHASES_RECALL_DIGEST_DEADLINE,
         story_reads=story_reads,
         now=_utcnow,
+        # #2964: planning tells the time in the user's zone, the one `Settings.timezone`
+        # the spend and notification policies read, validated at load.
+        timezone=settings.timezone,
         diagnostics=seams.diagnostics,
     )
 

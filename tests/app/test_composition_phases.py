@@ -222,3 +222,28 @@ async def test_a_connected_account_s_send_is_offered(tmp_path: Path) -> None:
         assert "send_email" in offered
     finally:
         await engine.aclose()
+
+
+async def test_planning_is_shown_the_time_in_the_configured_zone(tmp_path: Path) -> None:
+    """#2964: ``Settings.timezone`` reaches planning, the one timezone source."""
+    engine = build_engine(
+        Settings(embedder=EmbedderKind.HASHING, timezone="America/New_York"),
+        data_dir=tmp_path,
+    )
+    try:
+        phases = engine._phases
+        assert phases is not None
+        assert phases._planning._zone.key == "America/New_York"
+    finally:
+        await engine.aclose()
+
+
+async def test_planning_is_shown_utc_where_no_zone_is_configured(tmp_path: Path) -> None:
+    """#2964: a deployment with no zone configured keeps UTC, the setting's default."""
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        phases = engine._phases
+        assert phases is not None
+        assert phases._planning._zone.key == "UTC"
+    finally:
+        await engine.aclose()
