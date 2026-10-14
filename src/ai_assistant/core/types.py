@@ -1968,15 +1968,14 @@ class Placement(BaseModel):
     **One exception, on one class of record** (ADR-0210 §1, §8, as ADR-0217 §2
     carries it forward by field name alone). On an episode captured from an
     operation whose **output channel's audience is unbounded**, both routes above
-    range over less than the whole supply: over the members of that turn's supply a
-    relevance read taken with the turn's own goal statement returned — the belief
-    composition and ADR-0158's episodic supplement, ADR-0074 §5's second and third
-    groups — together with the turn's context facets, and never over a member the
-    supply holds only because it stands in ADR-0074 §5's first group, the
+    range over less than the whole supply: over what the activation obtained — what
+    either recall run kept and what its calls returned, digested ones included
+    (ADR-0309 §5:10) — and never over a record it holds only because it stands in
+    one of its windows, as ADR-0210 §1:1 leaves out ADR-0074 §5's first group, the
     conversation's own recent turns. Both routes survive and neither is dropped;
     what narrows is the set they range over. The **withholding is not narrowed with
-    it**: an ``OWNER``-placed record is removed from that turn's supply wherever in
-    it it stood, so what a member of the first group loses is the power to narrow a
+    it**: an ``OWNER``-placed record is withheld from such a pass wherever it stood,
+    windows included, so what a window's record loses is the power to narrow a
     placement and nothing else. On every **other** record — an episode of a
     bounded-channel turn, a belief, a record written before either decision — the
     derivation is exactly what ADR-0204 §1 says.
@@ -4899,12 +4898,13 @@ class MemoryUpdateProposal(BaseModel):
     def _secret_data_carries_no_confirmation(self) -> MemoryUpdateProposal:
         """Refuse a confirmation on a ``DataTier.SECRET`` proposal (ADR-0078 §1, §5a).
 
-        A confirmation exists only because a question was queued, claimed and
-        answered — and a secret-tier proposal is **never queued**: ADR-0004 §3 puts
-        Tier 0 content in the OS keyring and forbids it a committed file, so the
-        write stage never offers it one. There is therefore no deferral for such a
-        proposal, no claim over it,
-        and no answer to it. The pairing is a *contradiction*, not a case the
+        A confirmation is the user's answer to a question about the proposal — and a
+        secret-tier proposal is **never put to the user**: ADR-0004 §3 puts Tier 0
+        content in the OS keyring and forbids it a committed file, so it was never
+        queued as a question even while questions were queued. Since the deferral
+        store retired nothing is queued at all (ADR-0319 §5:1), and no production
+        module constructs a confirmation (§6:1); either way there is no answer to
+        such a proposal. The pairing is a *contradiction*, not a case the
         applier should be left to rule on, so it is unconstructable rather than
         merely refused downstream — the one half of ADR-0078's belt-and-braces
         that a bypass cannot get past.
@@ -4987,8 +4987,8 @@ class MemoryUpdateProposal(BaseModel):
         """A stable digest of *what is being proposed, against what* (ADR-0078 §7).
 
         ``digest(proposal_fingerprint, canonical conflict ids)`` — the outer of the
-        two layers, and the one the deferral queue dedups on and a
-        :class:`UserConfirmation` binds to. A question is not merely a proposal: it
+        two layers, and the one a :class:`UserConfirmation` binds to (the retired
+        deferral queue deduplicated on it too). A question is not merely a proposal: it
         is a proposal shown **against a particular conflict set**, so two questions
         can share a fingerprint exactly and still be different questions. The
         conflict ids are canonicalised the way ``evidence`` is — sorted and
@@ -7123,7 +7123,7 @@ class CanonicalDestination(BaseModel):
 # Declared here, mid-planning: the retired `StepFailure` and `StepExecution`
 # recorded the tool's own classification rather than a planning-owned mirror of it
 # (ADR-0039 §3, ADR-0031 §1). `ToolFailure`, at the end of the module, is the
-# seam-facing form the executor reads it from.
+# seam-facing form a caller of the seam reads it from.
 
 
 class ToolFailureKind(StrEnum):
@@ -7133,7 +7133,7 @@ class ToolFailureKind(StrEnum):
     and ``StepExecution`` recorded it: a finished step kept the tool's own
     classification of how its call failed, not a planning-owned mirror of it
     (ADR-0039 §3, ADR-0031 §1). Shared with :class:`ToolFailure` below, which is
-    the seam-facing form the executor reads it from.
+    the seam-facing form a caller of the seam reads it from.
     """
 
     INVALID_REQUEST = "invalid_request"
@@ -7173,7 +7173,7 @@ class ToolFailureKind(StrEnum):
 
         Not whether repeating is *safe* — that is
         :attr:`ToolDefinition.idempotency`'s answer, and ADR-0029 §5 requires
-        both. An executor that read this alone would double a charge on the
+        both. A caller that read this alone would double a charge on the
         first ``TIMED_OUT`` send it saw.
 
         Declared once here rather than per consumer, copying the shape
@@ -9696,7 +9696,7 @@ class ToolDefinition(BaseModel):
         Zero or negative is rejected rather than merely discouraged: no retry
         can fall inside such a window, so the definition would advertise a
         guarantee unsatisfiable by construction — worse than declaring ``NONE``,
-        which at least tells the executor the truth.
+        which at least tells a caller the truth.
         """
         if self.idempotency is Idempotency.KEYED:
             if self.idempotency_window is None:
@@ -9910,11 +9910,11 @@ class ToolDefinition(BaseModel):
         Declared once here rather than per consumer, on the same three-part test
         :attr:`ToolFailureKind.retryable` passes (ADR-0016 §2, ADR-0031 §1): it
         reads two of this type's own fields and nothing else, consults no policy,
-        settings, context or clock, and gives one answer for every consumer. It
-        has three readers — the seam on a deadline expiry, the seam again when a
-        tool reports its effect may have committed, and the executor on a
-        cancellation — and two of them are in subsystems that cannot import each
-        other, so a second copy could only be one free to disagree.
+        settings, context or clock, and gives one answer for every consumer. Its
+        readers are the seams' interrupted exits — a deadline expiry, a
+        cancellation, and a tool reporting its effect may have committed — in
+        ``tools/`` and again in the canonical fakes, which may not import
+        ``tools/``, so a second copy could only be one free to disagree.
 
         **Read it from the registry's declaration for the tool the call is bound
         to, never from ``call.request.tool``.** The seam's binding
@@ -13334,8 +13334,8 @@ class SourceReadRecord(BaseModel):
 class ToolOutcome(StrEnum):
     """How an invocation finished (ADR-0029 §3).
 
-    Three members, one for each way a finished invocation can end, so an
-    executor's mapping is total and needs no default branch.
+    Three members, one for each way a finished invocation can end, so a
+    caller's mapping is total and needs no default branch.
     """
 
     SUCCEEDED = "succeeded"
@@ -13463,7 +13463,7 @@ class ActivationEffect(BaseModel):
 
 
 class ToolFailure(BaseModel):
-    """Why an invocation failed, in a form an executor can record (ADR-0029 §3).
+    """Why an invocation failed, in a form a caller can record (ADR-0029 §3).
 
     :attr:`message` is **operator-facing Tier 2 text and must not carry Tier 0 or
     Tier 1 data**. It is bound for a log, and ADR-0004 §5 forbids Tier 1 data
@@ -13488,7 +13488,7 @@ class ToolFailure(BaseModel):
 
         The ``_has_visible_text`` test ADR-0018 §1 applies to a tool's
         description and ADR-0021 §1 to a ruling's reason, for the same reason: a
-        failure that renders as nothing leaves the executor and the user with
+        failure that renders as nothing leaves the caller and the user with
         nothing to say about it.
         """
         stripped = value.strip()
@@ -13501,8 +13501,8 @@ class ToolFailure(BaseModel):
 class ToolResult(BaseModel):
     """What an invocation produced, as data rather than as an exception (ADR-0029 §3).
 
-    Failure is *returned* because ``INDETERMINATE`` cannot be an exception: an
-    executor that learned "we do not know whether the effect happened" by
+    Failure is *returned* because ``INDETERMINATE`` cannot be an exception: a
+    caller that learned "we do not know whether the effect happened" by
     catching something would be one ``except Exception:`` away from recording a
     completed action as failed.
 
@@ -13555,7 +13555,7 @@ class ToolResult(BaseModel):
         with nothing to say about why. A ``SUCCEEDED`` result carrying one is a
         contradiction a caller reads whichever half it looks at first. And a
         non-``SUCCEEDED`` result carrying an output is a *partial* result an
-        executor could record as a whole one, which is worse than an absent one.
+        caller could record as a whole one, which is worse than an absent one.
         """
         succeeded = self.outcome is ToolOutcome.SUCCEEDED
         if succeeded and self.failure is not None:

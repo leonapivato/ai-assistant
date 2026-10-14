@@ -822,7 +822,7 @@ class ToolBindingError(ToolError):
 
     All four are the same fault, and none of them is a tool failing — so none
     may be an ordinary ``FAILED`` :class:`~ai_assistant.core.types.ToolResult`
-    an executor might retry. That is why this is raised where every other
+    a caller might retry. That is why this is raised where every other
     invocation outcome is returned: an exception has no
     ``failure.kind.retryable`` to read, so there is nothing for a retry decision
     to be made from (ADR-0029 §8).

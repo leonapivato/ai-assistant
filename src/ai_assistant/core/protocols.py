@@ -2262,18 +2262,20 @@ class Reader(Protocol):
     re-derive it by reading an implementation. Here it is a type" (ADR-0077 §1,
     taken for its own reason rather than by imitation).
 
-    **Every belief it proposes reaches memory through the gate**, i.e.
-    :meth:`MemoryWriter.ingest` and the :class:`MemoryPolicy` behind it. A reader
-    inherits no part of ADR-0075's capture exemption: a calendar entry is a third
-    party's report, which is the definition of the ``ATTESTED`` band, and a band
-    whose whole standing is that someone else said it is the last band that should
-    reach the store unmediated (ADR-0093 §1).
+    **Nothing it proposes reaches memory on its own** (ADR-0294 §1): scheduled
+    ingestion is retired, and a source's content reaches memory only as what an
+    activation concludes, through :meth:`MemoryWriter.ingest` and the
+    :class:`MemoryPolicy` behind it. A reader inherits no part of ADR-0075's
+    capture exemption: a calendar entry is a third party's report, which is the
+    definition of the ``ATTESTED`` band, and a band whose whole standing is that
+    someone else said it is the last band that should reach the store unmediated
+    (ADR-0093 §1).
 
-    **It is never its own caller.** Selecting when a reader runs, and ingesting
-    what it returns, are `orchestration`'s (ADR-0093 §1). Its reading has two
-    legitimate consumers at two cadences — the situational context facet at
-    assembly time, and ingestion on its schedule — and neither may derive its
-    answer from the other's reading (§3).
+    **It is never its own caller.** Selecting when a reader runs, and what is done
+    with what it returns, are `orchestration`'s (ADR-0093 §1). Its reading's one
+    consumer now is the upcoming-event producer (ADR-0319 §7:1); the situational
+    context facet and ingestion, which once read it at their own cadences, are
+    retired.
 
     **A ``Reader`` is not a spoke** (ADR-0094 §1, ADR-0095 §1). It is an
     in-process object that opens a file, not an attachment that dials the hub
@@ -2305,7 +2307,8 @@ class Reader(Protocol):
         filename, address or account identifier may not be used as one, or as any
         part of one — because the identity is what lands on the reading, on
         :attr:`~ai_assistant.core.types.Attestation.reported_by` of every belief
-        the gate then stores, in every export, and in every log line, in a system
+        it proposes and of every one the retired ingestion stored, which stay
+        (ADR-0294 §3), in every export, and in every log line, in a system
         whose ADR-0004 §5 rule is that logs never contain Tier 1 data. A reader
         that wraps personal data names *itself* (``"calendar"``), never the data it
         holds (``"alice@example.com calendar"``). It is stated as its own clause
@@ -2678,11 +2681,13 @@ class WebSearcher(Protocol):
     **It is not a registered tool and this seam is why.** ADR-0231 §5 registers
     the search integration at the egress seam against a connected account and in
     **no** ``ToolRegistry``, so it is absent from
-    :meth:`ToolRegistry.capabilities` and :meth:`ToolRegistry.all_tools`,
-    unreachable by any plan step, and un-invocable through :class:`ToolInvoker`.
-    A planner cannot name it, so the failure mode ADR-0170 §5a and ADR-0208 §1
-    both argue against — a turn driving a tool whose result is a payload with no
-    per-span provenance — is unreachable rather than forbidden.
+    :meth:`ToolRegistry.capabilities` and :meth:`ToolRegistry.all_tools`, and
+    un-invocable through the deployment's :class:`ToolInvoker`. Planning reaches
+    it by capability all the same: `orchestration`'s phase path offers the
+    declaration :meth:`request` proposes beside the registry's, and sends a search
+    call to :meth:`search` rather than to the invoker (ADR-0309 §4:2). What a
+    search returns is the records it mints, each with its own provenance, and
+    never a tool's payload.
 
     **No member takes a store, a supply or a policy.** Not a
     :class:`~ai_assistant.core.types.MemoryRecord`, not a :class:`MemoryStore`,
@@ -3695,8 +3700,9 @@ class EgressBinder(Protocol):
 
     **A third Protocol rather than a member on** :class:`ToolRegistry`. ADR-0029
     §1's argument for splitting :class:`ToolInvoker` off transfers: a binder is a
-    third capability with a third consumer set — the selection stage needs it not
-    at all, and the executor needs it not at all — and adding ``bind`` to a
+    third capability with a third consumer set — selection's lookup needs it not
+    at all, and acting, which invokes what authorizing ruled, needs it not at all
+    — and adding ``bind`` to a
     registry would hand every holder of a lookup the ability to materialise an
     account reference and a transport endpoint (ADR-0017 §8). Whether one object
     in `tools/` presents all three faces or a second object presents this one is
@@ -11071,7 +11077,7 @@ class AssistantEngine(Protocol):
         no operation narrows a trust record, re-scopes one, extends one or edits one in
         place — and is **prospective**: it takes effect for every later request and
         rewrites no recorded decision, so a search already ruled ``ALLOW`` stays ruled
-        and a record already supplied to a composer is not retracted.
+        and a record a search already returned is not retracted.
 
         Args:
             record_id: The id :meth:`standing_destination_trust` renders. A
