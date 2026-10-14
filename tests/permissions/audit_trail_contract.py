@@ -253,7 +253,6 @@ class _ClearOp:
 #: step is ``step-1``, ``action``'s default, so each pair is a concrete binding.
 _EXEC_A = "exec-read-a"
 _EXEC_B = "exec-read-b"
-_STEP = "step-1"
 
 
 class _ReadOp:
@@ -311,34 +310,6 @@ class _GetOp(_ReadOp):
         return trail.get("c-b")
 
 
-class _PendingConfirmationOp(_ReadOp):
-    """``pending_confirmation`` — ADR-0044 §3's two-step lookup, its own lock site."""
-
-    name = "pending_confirmation"
-
-    def first(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
-        """Look up binding A's outstanding question — the call that is cancelled."""
-        return trail.pending_confirmation(execution_id=_EXEC_A, step_id=_STEP)
-
-    def second(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
-        """Look up binding B's concurrently."""
-        return trail.pending_confirmation(execution_id=_EXEC_B, step_id=_STEP)
-
-
-class _ResolutionOfOp(_ReadOp):
-    """``resolution_of`` — ADR-0059 §2's complement, its own lock site."""
-
-    name = "resolution_of"
-
-    def first(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
-        """Look up binding A's resolution — the call that is cancelled."""
-        return trail.resolution_of(execution_id=_EXEC_A, step_id=_STEP)
-
-    def second(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
-        """Look up binding B's concurrently."""
-        return trail.resolution_of(execution_id=_EXEC_B, step_id=_STEP)
-
-
 class _RecentOp(_ReadOp):
     """``recent`` — the ordered page, its own lock site though it shares a reader."""
 
@@ -376,8 +347,6 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _RecordOp,
     _ClearOp,
     _GetOp,
-    _PendingConfirmationOp,
-    _ResolutionOfOp,
     _RecentOp,
     _ExportOp,
 )
@@ -1982,214 +1951,6 @@ class AuditTrailContract:
             resolves="c-2",
         )
         assert await trail.record(answer_for_the_other) == "r-2"
-
-    # --- recovering a parked confirmation (ADR-0044 §3) ------------------
-
-    async def test_pending_confirmation_returns_the_unresolved_confirm(
-        self, trail: AuditTrail
-    ) -> None:
-        """The recovery query: a restart finds the parked question by its binding."""
-        confirmed = decision("c-1", request=action(execution_id="exec-a"))
-        await trail.record(confirmed)
-
-        found = await trail.pending_confirmation(execution_id="exec-a", step_id="step-1")
-
-        assert found == confirmed
-
-    async def test_pending_confirmation_is_none_for_an_unparked_binding(
-        self, trail: AuditTrail
-    ) -> None:
-        assert await trail.pending_confirmation(execution_id="exec-a", step_id="step-1") is None
-
-    async def test_pending_confirmation_is_none_once_the_binding_is_resolved(
-        self, trail: AuditTrail
-    ) -> None:
-        """A resolved binding is decided, so nothing is awaiting an answer."""
-        bind = {"execution_id": "exec-a"}
-        await trail.record(decision("c-1", request=action(**bind)))
-        await trail.record(
-            decision(
-                "r-1",
-                request=action(**bind),
-                ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-1"),
-                resolves="c-1",
-            )
-        )
-
-        assert await trail.pending_confirmation(execution_id="exec-a", step_id="step-1") is None
-
-    async def test_pending_confirmation_returns_the_newest_of_several_unresolved(
-        self, trail: AuditTrail
-    ) -> None:
-        """ADR-0037 §2's CAS loser leaves a second unresolved CONFIRM under the binding.
-
-        They are the same action (selection is deterministic and single-candidate,
-        ADR-0037 §1), so any is a correct question to re-present and the newest is
-        returned deterministically — ``decided_at`` descending, ``id`` ascending.
-        The query does not raise on the several.
-        """
-        bind = {"execution_id": "exec-a"}
-        await trail.record(decision("c-old", request=action(**bind), decided_at=AT))
-        await trail.record(
-            decision("c-new", request=action(**bind), decided_at=AT + timedelta(hours=1))
-        )
-
-        found = await trail.pending_confirmation(execution_id="exec-a", step_id="step-1")
-
-        assert found is not None
-        assert found.id == "c-new"
-
-    async def test_pending_confirmation_is_none_when_a_sibling_is_resolved(
-        self, trail: AuditTrail
-    ) -> None:
-        """ADR-0044 §3 step 1 — the #257 safety, the blocker an earlier draft failed.
-
-        Once *any* CONFIRM for the binding is resolved the binding is decided, so
-        the query returns ``None`` rather than handing back a still-unresolved
-        sibling orphan for the pipeline to re-answer the other way.
-        """
-        bind = {"execution_id": "exec-a"}
-        await trail.record(decision("c-1", request=action(**bind)))
-        await trail.record(decision("c-2", request=action(**bind)))  # the unresolved sibling
-        await trail.record(
-            decision(
-                "r-1",
-                request=action(**bind),
-                ruled=ruling(PermissionOutcome.DENY),
-                resolves="c-1",
-            )
-        )
-
-        assert await trail.pending_confirmation(execution_id="exec-a", step_id="step-1") is None
-
-    # --- recovering a resolved binding (ADR-0059 §2) ---------------------
-
-    @pytest.mark.parametrize(
-        "approved", [True, False], ids=["an ALLOW resolution", "a DENY resolution"]
-    )
-    async def test_resolution_of_returns_the_recorded_resolution(
-        self, trail: AuditTrail, approved: bool
-    ) -> None:
-        """The mirror of ``pending_confirmation`` — both outcomes are recoverable.
-
-        A step stranded ``AWAITING_APPROVAL`` with its ruling durable but its
-        disposition transition uncommitted (#257) is driven to the decided
-        disposition by this lookup, so an ``ALLOW`` and a ``DENY`` must both be
-        found — not only the grant — and the result is never the question itself.
-        """
-        bind = {"execution_id": "exec-a"}  # step_id defaults to "step-1": a concrete binding
-        await trail.record(decision("c-1", request=action(**bind)))
-        answer = decision(
-            "r-1",
-            request=action(**bind),
-            ruled=(
-                ruling(PermissionOutcome.ALLOW, authorised_by="c-1")
-                if approved
-                else ruling(PermissionOutcome.DENY)
-            ),
-            resolves="c-1",
-        )
-        await trail.record(answer)
-
-        found = await trail.resolution_of(execution_id="exec-a", step_id="step-1")
-
-        assert found == answer
-        assert found is not None
-        assert found.ruling.outcome is not PermissionOutcome.CONFIRM
-
-    async def test_resolution_of_is_none_while_the_binding_is_only_pending(
-        self, trail: AuditTrail
-    ) -> None:
-        """An unanswered park has no resolution yet — ``pending_confirmation`` owns it."""
-        await trail.record(decision("c-1", request=action(execution_id="exec-a")))
-
-        assert await trail.resolution_of(execution_id="exec-a", step_id="step-1") is None
-
-    async def test_resolution_of_is_none_for_an_unparked_binding(self, trail: AuditTrail) -> None:
-        """No confirmation, so no resolution; ``None`` is a clean read, not a failure."""
-        assert await trail.resolution_of(execution_id="exec-a", step_id="step-1") is None
-
-    @pytest.mark.parametrize(
-        ("query_execution", "query_step"),
-        [("exec-b", "step-1"), ("exec-a", "step-2")],
-        ids=["another execution", "another step"],
-    )
-    async def test_resolution_of_is_isolated_by_binding(
-        self, trail: AuditTrail, query_execution: str, query_step: str
-    ) -> None:
-        """A resolution under ``(E, s)`` is never returned for ``(E', s)`` or ``(E, s')``.
-
-        The same execution/step key ``record``'s §2a conjunct enforces, so recovery
-        can never replay another execution's — or another step's — ruling.
-        """
-        bind = {"execution_id": "exec-a"}
-        await trail.record(decision("c-1", request=action(**bind)))
-        await trail.record(
-            decision(
-                "r-1",
-                request=action(**bind),
-                ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-1"),
-                resolves="c-1",
-            )
-        )
-
-        assert await trail.resolution_of(execution_id=query_execution, step_id=query_step) is None
-
-    async def test_resolution_of_finds_a_resolution_of_a_sibling_confirm(
-        self, trail: AuditTrail
-    ) -> None:
-        """§2b makes the *binding*, not one confirmation, the unit of resolution.
-
-        Two unresolved ``CONFIRM``s (a compare-and-swap loser, ADR-0037 §2) share
-        the binding; resolving one decides it. The lookup is keyed on the binding,
-        not on which confirmation was answered, so it finds the resolution even
-        though the caller no longer holds the confirmation id it named (the whole
-        of #242).
-        """
-        bind = {"execution_id": "exec-a"}
-        await trail.record(decision("c-1", request=action(**bind)))
-        await trail.record(decision("c-2", request=action(**bind)))  # the sibling actually answered
-        answer = decision(
-            "r-1",
-            request=action(**bind),
-            ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-2"),
-            resolves="c-2",
-        )
-        await trail.record(answer)
-
-        found = await trail.resolution_of(execution_id="exec-a", step_id="step-1")
-
-        assert found == answer
-
-    async def test_resolution_of_returns_a_detached_snapshot(self, trail: AuditTrail) -> None:
-        """Recursive detachment, like every other read (ADR-0018 §3).
-
-        A resolution reaches its embedded ``ToolDefinition`` and the ``ToolCost``
-        nested in that, so a shallow copy would hand back a decision sharing the
-        stored cost — and rewriting it would rewrite the record of what was
-        approved through something technically detached.
-        """
-        priced = tool(cost=ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("5"), currency="USD"))
-        bind: dict[str, object] = {"tool": priced, "execution_id": "exec-a"}
-        await trail.record(decision("c-1", request=action(**bind)))
-        await trail.record(
-            decision(
-                "r-1",
-                request=action(**bind),
-                ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-1"),
-                resolves="c-1",
-            )
-        )
-
-        leaked = await trail.resolution_of(execution_id="exec-a", step_id="step-1")
-        assert leaked is not None
-        object.__setattr__(leaked.tool.cost, "amount", Decimal("0"))
-        object.__setattr__(leaked.ruling, "outcome", PermissionOutcome.DENY)
-
-        refetched = await trail.resolution_of(execution_id="exec-a", step_id="step-1")
-        assert refetched is not None
-        assert refetched.tool.cost.amount == Decimal("5")
-        assert refetched.ruling.outcome is PermissionOutcome.ALLOW
 
     # --- ordering and bounds ---------------------------------------------
 

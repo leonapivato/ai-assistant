@@ -492,10 +492,10 @@ class FakeMemoryStore:
                 — a turn that loses memory degrades and says so — against the shared
                 fake rather than a bespoke raising subclass (issue #105).
 
-                A message rather than an exception instance, for the reason
-                ``FakeContextProvider`` records: an instance parameter would make it
-                possible to configure the canonical fake to raise outside the
-                contract, and one stored instance re-raised would accumulate a
+                A message rather than an exception instance: an instance
+                parameter would make it possible to configure the canonical fake
+                to raise outside the contract, and one stored instance re-raised
+                would accumulate a
                 traceback across calls. Every call raises a fresh instance.
 
                 **It models the backing being unavailable, so it bites exactly where

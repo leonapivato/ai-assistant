@@ -90,7 +90,7 @@ The two clauses are a **different axis each**, deliberately, and neither is
 scoped from the other's list (ADR-0065 §"This is not ADR-0060's axis"): one is
 about a resource the implementation acquired, the other about an object the
 caller still owns. ``AuditTrail`` is enforced under the first and wholly vacuous
-under the second; ``Planner`` is the reverse.
+under the second.
 
 Each subsystem declared in the architecture map adds its Protocol here as it is
 designed, so this file grows to hold every seam that crosses a subsystem
@@ -151,7 +151,6 @@ if TYPE_CHECKING:
         ConversationSummary,
         CoverageAnswer,
         CoverageMember,
-        CurrentContext,
         DeferralAdmission,
         DeferralClaim,
         DeferralState,
@@ -171,7 +170,6 @@ if TYPE_CHECKING:
         EpisodePage,
         EpisodicMemory,
         EvaluationTrace,
-        EvidenceDigest,
         EvidenceHistory,
         ExecutionState,
         FeedbackEvent,
@@ -179,10 +177,7 @@ if TYPE_CHECKING:
         ForecastOutcome,
         FrozenJsonMapping,
         Goal,
-        GoalAssociation,
         GoalAttempt,
-        GoalBrief,
-        GoalCandidacy,
         GoalCandidates,
         GoalDeletion,
         GoalEvidence,
@@ -219,20 +214,14 @@ if TYPE_CHECKING:
         PermissionRuling,
         Placement,
         PlanExport,
-        PlannerOutput,
         ProcessingStatus,
-        QueryOutcome,
-        ReadAskOutcome,
         RecipientGrant,
         RecordChunk,
         RecordedInvocation,
         RoundResponse,
-        RoutedOperationRecord,
         SearchOutcome,
-        SearchSupply,
         SecretName,
         SecretValue,
-        ShownFile,
         SourceGrant,
         SourceListing,
         SourceListingEntry,
@@ -625,167 +614,15 @@ class BatchCompleter(Protocol):
 
 
 @runtime_checkable
-class StreamingCompleter(Protocol):
-    """Streaming inference: the assistant's reply as ordered text deltas.
-
-    A **sibling** of :class:`ModelProvider`, not a widening of it (ADR-0173 §5),
-    on the ground ADR-0143 §1 already established for :class:`BatchCompleter`:
-    this module's own guideline prefers a new Protocol to a wider one, ADR-0021 §3
-    makes a separate Protocol the presumptive shape because it takes nothing away
-    from anyone, and ``Protocol`` is *structural* — a new member on
-    ``ModelProvider`` would silently unsatisfy every existing implementation at
-    once (``PydanticAIProvider``, ``RetryingProvider``, ``RoutingProvider``, the
-    canonical ``FakeModelProvider``, and every test double) and, since
-    ``ModelProvider`` is ``@runtime_checkable``, change what ``isinstance``
-    answers about all of them. Nothing here is added to ``ModelProvider``, this
-    Protocol does not inherit from it, and an object may implement both without
-    anything requiring that it does.
-
-    **The fourth ground is stronger here than it was for a batch, and it is what
-    :meth:`stream`'s commit clause exists to state.** A completion is atomic:
-    nobody has seen anything until it returns, so ``RetryingProvider`` may
-    re-issue it and ``RoutingProvider`` may send it down another route, and a
-    second attempt is invisible. A stream is not atomic. Once a delta carrying
-    real text has been handed upward, a retry produces a *second* answer to a
-    question already half-answered and a fallback route produces a different one,
-    and no clause anywhere could say which of the two the user was reading. A
-    member on ``ModelProvider`` would therefore have obliged both wrappers to
-    forward an operation whose safe behaviour past that point contradicts the one
-    thing each of them exists to do.
-
-    **A streamed turn is genuinely less resilient than the same turn unstreamed,
-    and that is a trade rather than an implementation detail** (ADR-0173
-    Consequences). The resilience every other model call gets is available on this
-    seam *before* the first non-blank delta and gone after it. A caller that would
-    rather have the fallback calls :meth:`ModelProvider.complete`, which is
-    exactly why ADR-0173 §4 keeps it.
-
-    **What this seam does not promise.** Tool use — it inherits
-    :meth:`ModelProvider.complete`'s position that nothing at the model seam
-    promises tool support, and :meth:`stream` refuses a history containing a
-    ``Role.TOOL`` turn rather than representing one. Nor a delta size, a delta
-    count, a token boundary, any relation between a delta and a word, or a
-    non-empty stream: a stream that yields no text at all is admissible, and
-    classifying it is the caller's (ADR-0170 §8, ADR-0173 §5).
-
-    How :meth:`stream` observes the conversation it is handed is governed by this
-    module's input-observation clause (ADR-0065), which has bite here for the same
-    reason it has bite on ``BatchCompleter.submit``: the argument is a
-    caller-owned ``Sequence`` and the call suspends, repeatedly, between reading
-    it and finishing. Cancellation is governed by this module's cancellation
-    clause (ADR-0060), and the resource in question is the provider exchange the
-    deltas are being read from.
-
-    **Stopping early is the caller's to declare, and this is the one obligation
-    this seam places on it.** An implementation releases the exchange when the
-    iterator is exhausted, when it fails, and when it is **closed** — and the
-    iterator it returns supports ``aclose()``, because otherwise a caller would
-    have no way to say it has stopped. Python does not close an abandoned async
-    iterator at the point of abandonment, so a caller that stops reading part-way
-    closes it, through :func:`contextlib.aclosing` or an ``aclose()`` of its own;
-    until it does, the exchange may still be open and still being paid for.
-
-    This is not a weakening of ADR-0060: that clause binds what a method does
-    with a resource *it* acquired at the moment cancellation leaves it, and an
-    iterator nobody has cancelled and nobody has closed has not reached that
-    moment. Stopping early is ordinary here — a composing stage that has run out
-    of room, a turn whose client went away — so the obligation is stated rather
-    than left to be discovered.
-    """
-
-    def stream(
-        self,
-        messages: Sequence[Message],
-        *,
-        model: str | None = None,
-    ) -> AsyncIterator[EncodableText]:
-        """Stream the assistant's next message as text deltas, oldest first.
-
-        The same arguments :meth:`ModelProvider.complete` takes, in the same
-        shape, and subject to the same precondition (ADR-0066 §1): ``messages``
-        must be non-empty and must not end on a ``Role.ASSISTANT`` turn, read as
-        that docstring states it — a **necessary condition, not a sufficient
-        one**, admitting nothing by omission. A history containing a ``Role.TOOL``
-        turn is refused although the clause does not name it. This seam widens the
-        model seam's admissible history by nothing.
-
-        **Each yielded value is** :data:`~ai_assistant.core.types.EncodableText`
-        **rather than a bare** ``str``, so ADR-0085 §4c's rule that every string
-        this system carries has a UTF-8 encoding binds *at this seam* — as it
-        already binds at ``complete``'s, whose returned ``Message.content`` is
-        that type. A delta with no encoding is refused **here**, before it can
-        reach the construction of whatever the caller renders it into, rather than
-        surfacing later as a validation error from a value the caller built
-        (ADR-0173 §5, §14).
-
-        **The concatenation of the deltas is the reply**, in the order they were
-        yielded, and nothing else about their shape is promised. A delta
-        conveying no text is admissible and is the caller's to coalesce — and to
-        coalesce **without discarding**, because a blank delta is a separator the
-        model emitted and belongs to the text on either side of it: a provider
-        yielding ``"hello"``, ``" "``, ``"world"`` means ``"hello world"``, and an
-        implementation of the *caller* that filters the middle delta produces
-        ``"helloworld"`` (ADR-0173 §5). A stream that yields no non-blank text at
-        all is the blank-completion case ADR-0170 §8 classifies; it is **not** a
-        failure at this seam, which returns it exactly as it returns any other
-        stream, and no postcondition of ``ModelProvider`` changes (#1324).
-
-        **The commit boundary, which is the clause that makes this a sibling
-        rather than a copy of** ``complete``. An implementation may retry,
-        re-issue or substitute a route **freely until it yields its first delta
-        containing a non-whitespace character, and never after it**. A delta that
-        is empty or wholly whitespace publishes nothing, so it commits nothing —
-        which is why the boundary is drawn at the first *non-blank* delta and not
-        at the first delta, and why an implementation that commits at any delta at
-        all is giving away resilience for nothing. Past that boundary it does not
-        restart, does not fall back, and does not re-issue; a failure there is
-        raised from the iteration rather than repaired beneath it.
-
-        **A failure raised past the boundary keeps its class, and the caller stops
-        acting on it.** ADR-0011 §1's taxonomy binds — a ``ModelError`` may be
-        raised from the call or from the iteration — but its ``retryable`` and
-        ``routable`` dispositions are actionable **only before** the first
-        non-blank delta. After it, no caller and no wrapper acts on them. The
-        error is not downgraded to say so: a mid-stream ``ModelRateLimitError`` is
-        still that error, and what changes is that the answer it interrupted has
-        already been published and cannot be composed twice.
-
-        Args:
-            messages: Conversation history, oldest first. Non-empty, and not
-                ending on a ``Role.ASSISTANT`` turn.
-            model: Optional ``"provider:model"`` override; falls back to the
-                configured default when ``None``.
-
-        Returns:
-            An async iterator over the reply's text deltas, in order. Iterating it
-            is what starts the exchange; an implementation is free to raise the
-            precondition failures below from the call instead, and a caller
-            therefore drives the iterator rather than inspecting the return.
-
-        Raises:
-            ModelError: If ``messages`` is empty, ends on a ``Role.ASSISTANT``
-                turn, or contains a ``Role.TOOL`` turn — from the call or from the
-                first iteration step, the implementation's choice, and in either
-                case before any model is contacted. What binds every
-                implementation is the *disposition*, not the class identity:
-                neither ``retryable`` nor ``routable``, because a malformed
-                argument reproduces identically on every attempt from every route
-                (ADR-0066 §3). Also raised, from the iteration, if a delta has no
-                UTF-8 encoding or the exchange with the provider fails, narrowed
-                to the most specific subclass.
-        """
-        ...
-
-
-@runtime_checkable
 class ToolCallingCompleter(Protocol):
     """One planning round: a model response in the provider's native tool-calling shape.
 
     A **sibling** of :class:`ModelProvider`, not a widening of it (ADR-0307 §10), on
     the ground ADR-0143 §1 and ADR-0173 §5 established for :class:`BatchCompleter`
-    and :class:`StreamingCompleter`: a member on ``ModelProvider`` would assert of
-    every route a capability not every model offers, and would silently unsatisfy
-    every existing implementation of a ``@runtime_checkable`` Protocol. Nothing is
+    and for the streaming completer ADR-0309 §5 retired: a member on
+    ``ModelProvider`` would assert of every route a capability not every model
+    offers, and would silently unsatisfy every existing implementation of a
+    ``@runtime_checkable`` Protocol. Nothing is
     added to ``ModelProvider`` or ``Message``, this Protocol does not inherit from
     either, and an object may implement both.
 
@@ -797,7 +634,7 @@ class ToolCallingCompleter(Protocol):
     **Each round is asked afresh** (§2:6). The conversation handed in is rendered
     text, and no earlier tool exchange is replayed in the provider's native form, so
     the seam takes ``Message`` values and represents no tool exchange: a
-    ``Role.TOOL`` turn is refused, as :meth:`StreamingCompleter.stream` refuses one.
+    ``Role.TOOL`` turn is refused.
 
     **It proposes and runs nothing.** A returned call is what the model proposed, as
     the provider returned it: nothing here runs it, checks it against its schema, or
@@ -2910,27 +2747,6 @@ class MemoryWriter(Protocol):
 
 
 @runtime_checkable
-class ContextProvider(Protocol):
-    """Assembles the situational :class:`~ai_assistant.core.types.CurrentContext`.
-
-    The pipeline's context step (ADR-0008). Implementations compose one or more
-    internal sources; only this typed contract crosses a subsystem boundary.
-
-    Cancelling :meth:`assemble` is governed by this module's cancellation clause
-    (ADR-0060).
-    """
-
-    async def assemble(self) -> CurrentContext:
-        """Return the situational context for right now.
-
-        Assembly is advisory: a failing optional source degrades its facet rather
-        than aborting, so this returns a valid context whenever the required core
-        can be built.
-        """
-        ...
-
-
-@runtime_checkable
 class FeedbackProcessor(Protocol):
     """Turns feedback into memory-update proposals — the learning step (ADR-0009).
 
@@ -2953,8 +2769,8 @@ class Reader(Protocol):
     The read-only seam: it opens a source the hub can read — a notes vault synced
     onto the box, the maildir a co-located fetcher writes — and returns one bounded
     :class:`~ai_assistant.core.types.SourceReading` of what that source currently
-    says. Named for its product role, as every Protocol here is (``Planner``,
-    ``FeedbackProcessor``, ``MemoryPolicy``): the role is *reading a source*.
+    says. Named for its product role, as every Protocol here is
+    (``FeedbackProcessor``, ``MemoryPolicy``): the role is *reading a source*.
 
     **It holds no store handle, no writer, no policy and no engine**, which is the
     scope limit rather than a rule about it. An implementation may not write to any
@@ -3149,9 +2965,8 @@ class Fetcher(Protocol):
     The **fetch** seam: it shows what a configured local root currently holds, and
     reads one entry of that listing into a single attested
     :class:`~ai_assistant.core.types.MemoryRecord` carrying the file's own text.
-    Named for its product role, as every Protocol here is (``Planner``,
-    ``FeedbackProcessor``, ``Reader``): the role is *fetching one named thing, now, for
-    this turn*.
+    Named for its product role, as every Protocol here is (``FeedbackProcessor``,
+    ``Reader``): the role is *fetching one named thing, now, for this turn*.
 
     **It is not a ``Reader`` and reusing that seam was never available.** A
     ``Reader`` performs a whole-source read on its own cadence, bound by its own
@@ -3366,152 +3181,6 @@ class Fetcher(Protocol):
 
 
 @runtime_checkable
-class QueryComposer(Protocol):
-    """Turns what a turn may be composed over into one web-search query (ADR-0238 §2).
-
-    The **composing** seam: it is handed a
-    :class:`~ai_assistant.core.types.SearchSupply` for the turn being planned, and
-    it answers with the query a search would be made with, or with the reason none
-    was composed. Named for its product role, as every Protocol here is: the role is
-    *writing the question this turn would ask the world*.
-
-    **One member, one positional argument, and what bounds what it carries is the
-    construction site** (ADR-0238 §2). ADR-0231 §3 gave this seam one argument on
-    ADR-0093 §10's ground, that "a caller able to widen the read is a caller able to
-    defeat the bound", so the utterance-only property was decidable from the
-    declaration rather than kept by a rule. ADR-0238 §2 widened what the one argument
-    carries and put two bounds on it — §2's three populations, and that a non-empty
-    ``records`` is built only for a destination whose recorded trust is
-    ``USER_CHOSEN`` — **both of which are the one construction site's** and neither
-    of which a type can hold (ADR-0245 §3's third clause, ADR-0246 §3).
-
-    **And no placement is refused** (ADR-0246 §1, §3). Reach is audience control —
-    ADR-0217 §1's denotation of a set of **people** — and a search provider the owner
-    named in a recorded act is not a person this assistant talks to, so on a
-    destination the user chose no record is withheld from a supply on its reach, on
-    its setter, or on any combination of the two, whatever the setter. ADR-0245 §3's
-    ``AfterValidator`` on
-    :attr:`~ai_assistant.core.types.SearchSupply.records` is deleted with that
-    decision, so an implementation is handed the turn's own records and has no
-    placement to check. Reach keeps its full force where a person listens:
-    ``orchestration/disclosure.py`` withholds a narrowed record from every reply whose
-    audience is wider than the owner, exactly as it does today.
-
-    **Why one value rather than three parameters** (§2). Three parameters would put
-    the bound back in the caller's hands one member at a time — a supply site that
-    passed the right records would be conforming and one that passed the wrong ones
-    would be a defect nobody could see from the signature. One value names the whole
-    of what a composition may draw on in a place a reviewer reads once.
-
-    **The parameter stays positional-only and stays the only one, this stays a
-    single-member Protocol, and every other clause of ADR-0231 §3 binds entire and
-    unchanged** (ADR-0238 §2): no keyword, no second member, and no constructor
-    dependency on a store seam — not a :class:`MemoryStore`, not a
-    :class:`ContextProvider`, not a :class:`ConversationStore`, not any other. A
-    composer holds a :class:`ModelProvider` and nothing else that reads, lives in
-    ``ai_assistant.planning``, and is reached by `orchestration` through this
-    Protocol and by no other route. The conformance suite checks the
-    one-positional-parameter half against the runtime signature, and restates it
-    over the new parameter type, because it is the clause the safety claim rests on
-    for **every** ``QueryComposer`` this system ever wires.
-
-    **What the argument is, and what it is not.** It is one
-    :class:`~ai_assistant.core.types.SearchSupply`, and no implementation is passed
-    — or may be passed — a context facet, a listing, a plan, a rationale, a prior
-    turn, a conversation tail, a capability set, or any *second* value at all. There
-    is no parameter through which one could arrive.
-
-    **Which supply a destination gets is decided by a recorded fact and never by a
-    judgement** (ADR-0238 §2). A supply carrying a non-empty ``records`` is
-    constructed only for a destination whose recorded trust is
-    :attr:`~ai_assistant.core.types.DestinationTrust.USER_CHOSEN`; where the
-    destination reads ``UNCHOSEN`` the supply carries the utterance and an empty
-    ``records``. That is a property of the **one construction site** ADR-0238 §2
-    fixes — ``service_read_request`` in `orchestration` — and not of this contract,
-    which is why a conforming composer is handed the same type either way.
-
-    **What this gives up, said plainly** (ADR-0238 §4). ADR-0231 §4's first clause —
-    "no component supplies a ``QueryComposer`` with covered content in ADR-0155 §3's
-    sense" — is **superseded** in terms, and ADR-0155 §3's third clause takes a
-    second exception beside ADR-0233 §9's. The replacement is *not* a new structural
-    claim: it is a destination the user chose by name, a per-conversation budget and
-    an audit. No lane reads this docstring as though the utterance-only property
-    survived a supply carrying records; what survives it is ADR-0238 §2's membership
-    bound — the three populations and the trust read, both held at the one
-    construction site — which is a different and narrower guarantee, and since
-    ADR-0246 §1 it is the whole of it. Where the supply's
-    ``records`` is empty — every destination on a tree with no recorded trust —
-    ADR-0231 §3's and §4's reasoning applies exactly as ratified, because the
-    utterance is a value this system received from its user and obtained from no
-    store.
-
-    **A composer holds a ``ModelProvider`` and nothing else that reads** (§3). It
-    may not hold a store, may not read a belief, and may not decide the fate of
-    anything it composes. `orchestration` reaches the production composer through
-    this Protocol and by no other route, and imports no name from `planning` on
-    account of it (golden rule 1).
-
-    **The bound is the implementation's, never this contract's.**
-    ``search_query_max_chars`` is a ``Settings`` field a configured composer
-    enforces; :class:`~ai_assistant.core.types.QueryOutcome` carries no bound and
-    validates identically in every deployment (ADR-0230 §6's division, ADR-0093 §5).
-
-    ADR-0065's input-observation clause is **vacuous here**, and the reason is the
-    signature rather than an implementation's care: the one argument is a ``str``,
-    which is immutable all the way down, so there is no version of it a caller could
-    change under a suspended call.
-    """
-
-    async def compose(self, supply: SearchSupply, /) -> QueryOutcome:
-        """Write the query this turn would search with, or refuse to (ADR-0238 §2).
-
-        **The parameter is positional-only, and that is a decision** (ADR-0231 §3,
-        kept by ADR-0238 §2). No keyword name of it exists for a caller to pass a
-        second value under, and no implementation may rename it into a wider one. It
-        takes one positional argument and no other.
-
-        **A refusal is a return value and never an exception** (§3). Every member of
-        :class:`~ai_assistant.core.types.QueryRefusal` is *returned*: a composer
-        that raised would make ADR-0226 §5's degradation posture the servicer's
-        problem to catch correctly at every call site, where a closed refusal
-        enumeration makes the non-yield a value the audit can count and the turn can
-        ignore. That is ADR-0230 §4's reasoning on the fetch seam, and ADR-0231 adds
-        no error class to ``core/errors.py`` for it.
-
-        **A composition over ``search_query_max_chars`` is refused and never
-        truncated** (§3), with :attr:`~ai_assistant.core.types.QueryRefusal.TOO_LONG`.
-
-        Args:
-            supply: What this composition may be composed over (ADR-0238 §2) — the
-                turn's unrewritten utterance and, for a destination of recorded
-                trust ``USER_CHOSEN``, the records it may draw on. Which records
-                those are is closed by §2's three populations at the one
-                construction site; **no member is refused on its placement**
-                (ADR-0246 §1, §3), so an implementation may be handed a record
-                narrowed to the owner by a derivation, by the owner's own act or by
-                a model's proposal, and has no placement to check. It is the whole
-                of what an implementation is given.
-
-        Returns:
-            One outcome carrying a query **or** a refusal, never both and never
-            neither — a condition
-            :class:`~ai_assistant.core.types.QueryOutcome` enforces itself, so a
-            composer cannot emit an unreadable outcome and a consumer never has to
-            decide which half to believe.
-
-        Raises:
-            CancelledError: Re-raised unchanged when the call is cancelled from
-                outside while suspended, and converted into neither a query nor a
-                refusal — this module's cancellation clause (ADR-0060) with the one
-                consequence ADR-0231 §3 spells out, because it is the place a
-                conforming-looking implementation could satisfy every other clause
-                and still get it wrong. It is the **only** exception that leaves
-                this member.
-        """
-        ...
-
-
-@runtime_checkable
 class WebSearcher(Protocol):
     """Asks one connected search account a question, and mints what it answers.
 
@@ -3560,7 +3229,7 @@ class WebSearcher(Protocol):
     that answered something else, an over-large response, an unattested one and an
     empty one are
     :class:`~ai_assistant.core.types.SearchRefusal` members and never exceptions,
-    for :class:`Fetcher`'s and :class:`QueryComposer`'s reason: a closed refusal
+    for :class:`Fetcher`'s reason: a closed refusal
     enumeration makes the non-yield a value the audit can count and the turn can
     ignore, where an exception would make ADR-0226 §5's degradation posture the
     servicer's problem to catch correctly at every call site. ADR-0231 adds **no**
@@ -3616,7 +3285,7 @@ class WebSearcher(Protocol):
         """Propose the search this query would make, or answer that there is none.
 
         **The parameter is positional-only, and that is a decision**
-        (ADR-0231 §17), for :meth:`QueryComposer.compose`'s reason: no keyword
+        (ADR-0231 §17): no keyword
         name of it exists for a caller to pass a second value under, and no
         implementation may rename it into a wider one.
 
@@ -3787,7 +3456,7 @@ class Forecaster(Protocol):
     no-arguments rule, ADR-0095's placement ruling and every clause governing
     ``readers/`` bind exactly as they do today, ``ai_assistant.readers`` gains
     nothing from this decision, and no lane widens ``Reader.read``, adds an argument
-    to it or adds a member to it. **It is not a** :class:`ContextProvider` either:
+    to it or adds a member to it. **It is not a context facet** either:
     ADR-0252 §3 rules that no facet produces an evidence row and ADR-0096 §3 bars
     one from a carried-over reading, and a forecast read's whole purpose is the
     evidence row it writes.
@@ -4019,631 +3688,6 @@ class Forecaster(Protocol):
                 refusal (ADR-0060, ADR-0260 §4). **Never converted into
                 ``DEADLINE_EXPIRED``** (ADR-0241 §7): a cancellation this seam did
                 not itself issue is not its expiry.
-        """
-        ...
-
-
-@runtime_checkable
-class GoalAssociator(Protocol):
-    """Decides which of a conversation's goals a turn is about (ADR-0250 §4).
-
-    **One seam, one member, one value.** An implementation holds a
-    :class:`ModelProvider` and **nothing else that reads** — not a
-    :class:`MemoryStore`, not a :class:`PlanStore`, not a ``ConversationStore``, not a
-    :class:`ContextProvider` and not any other. It lives in ``ai_assistant.planning``
-    and is reached by ``orchestration`` **through this Protocol and by no other
-    route**.
-
-    **This is not a new mechanism; it is** :class:`QueryComposer`'s **applied to a
-    second judgement**, and that Protocol's own docstring states the shape copied
-    here: "The parameter stays positional-only and stays the only one, this stays a
-    single-member Protocol … no keyword, no second member, and no constructor
-    dependency on a store seam." The reason that decides it is ADR-0238 §2's: "Three
-    parameters would put the bound back in the caller's hands one member at a time — a
-    supply site that passed the right records would be conforming and one that passed
-    the wrong ones would be a defect nobody could see from the signature. One value
-    names the whole of what a composition may draw on in a place a reviewer reads
-    once."
-
-    **And the association cannot ride the planner's envelope**, which is the argument
-    against the cheaper-looking design. :meth:`Planner.plan` takes a
-    :class:`~ai_assistant.core.types.GoalBrief` first, and a brief is projected from
-    *the* goal's current interpretation alone (ADR-0249 §9) — so calling the planner
-    requires already knowing **which** goal. The circularity is structural, not
-    incidental: the association is what makes the brief, so it precedes the call that
-    consumes one.
-
-    **This is not a** :meth:`Planner.plan` **call and ADR-0228 §3's bound is
-    untouched.** That section rules that "A turn makes **at most two** calls to
-    ``Planner.plan``"; an :meth:`associate` call is a call to a different Protocol
-    with a different value and a different answer, so the figure two is neither read,
-    raised nor made configurable here. **A turn makes at most one** ``associate``
-    **call**, and no lane makes a second, retries one, or re-asks on a different
-    prompt.
-
-    **A BREAKING contract change under golden rule 5**, landing with its shared
-    conformance suite and its canonical fake in :mod:`ai_assistant.testing`
-    (``CONTRIBUTING.md`` -> "Adding a Protocol").
-
-    Cancelling :meth:`associate` is governed by this module's cancellation clause
-    (ADR-0060).
-    """
-
-    async def associate(self, candidacy: GoalCandidacy, /) -> GoalAssociation:
-        """Decide which candidate this turn is about, or decline to (ADR-0250 §4).
-
-        **The labels are rendered from the tuple this call was given and resolved by
-        nobody but the caller.** The label of the candidate at 1-based index *n* is
-        the ASCII string ``G`` followed by *n* in decimal with no padding — "that is
-        the whole of the scheme, it is the same on both sides of the seam, both sides
-        derive it from the value they hold and neither consults the other, and no
-        label survives the call that rendered it and none is persisted as a
-        reference" (ADR-0250 §3, on ADR-0226 §3's scheme). The worst a label a model
-        invents can do is name a candidate index that is not there, which the caller
-        turns into an ask.
-
-        **A declining answer is asserted rather than empty** (ADR-0176 §1's shape).
-        An implementation that cannot parse its model's answer returns
-        :attr:`~ai_assistant.core.types.AssociationVerdict.UNDECIDED` and **never a
-        guess**: it never reads an unparseable answer as ``FRESH``, as ``CONTINUES``,
-        or as an error that fails the turn. A parse failure read as ``FRESH`` would
-        open a duplicate goal on every malformed answer, and one read as ``CONTINUES``
-        would revise the focused goal on the strength of nothing at all.
-
-        **It renders no identifier and accepts none** (ADR-0228 §8). A
-        :class:`~ai_assistant.core.types.GoalCandidacy` carries none to render, which
-        is a property of the type rather than a discipline an implementation keeps.
-
-        Args:
-            candidacy: The turn's request, the labelled candidates in ADR-0250 §1's
-                order, what the cap dropped, and the focused candidate's label where
-                there is one. Positional-only and the only parameter, for the reason
-                the class docstring gives.
-
-        Returns:
-            The verdict and the labels it names, in one of the four shapes
-            :class:`~ai_assistant.core.types.GoalAssociation` admits.
-
-        Raises:
-            ModelError: If the provider could not be reached at all. An answer that
-                came back and could not be read is ``UNDECIDED`` and not a raise.
-        """
-        ...
-
-
-@runtime_checkable
-class Planner(Protocol):
-    """Turns a :class:`~ai_assistant.core.types.GoalBrief` into a plan (ADR-0014 §6).
-
-    The pipeline's planning step. Implementations produce a
-    :class:`~ai_assistant.core.types.PlannerOutput` — a plan, what they propose the
-    system now understands, and **what acts they propose the goal now intends**
-    (ADR-0265 §2, which makes §7's two-field envelope a three-field one in the count
-    alone) — and nothing else: no model output ever sets execution status, which stays
-    the property of deterministic code (VISION §7), and no model output writes a phase,
-    a revision number, a ``raised_by`` or a ``recorded_at`` (ADR-0249 §6).
-
-    **And no model output names an identifier or mints one.** A
-    :class:`~ai_assistant.core.types.ProposedAction` carries an ``intent`` and
-    ``serves`` **labels**, never an ``IntendedAction.id``: ``orchestration`` mints the
-    identity once at the instant the action is first recorded, which is ADR-0228 §8's
-    namer rule binding this field as it binds every other (ADR-0265 §2).
-    """
-
-    async def plan(  # noqa: PLR0913 — the brief plus one keyword per thing the pipeline assembled before planning; ADR-0230 §3, ADR-0240 §7 (as ADR-0251 §3 widens it) and ADR-0249 §7 each add to it, and bundling them into a context object would mint a core type ADR-0211 §2 already refused
-        self,
-        goal: GoalBrief,
-        *,
-        utterance: str,
-        context: CurrentContext,
-        memories: Sequence[MemoryRecord] = (),
-        capabilities: Sequence[str],
-        files: Sequence[ShownFile] = (),
-        read_outcomes: Sequence[ReadAskOutcome] = (),
-        evidence: Sequence[EvidenceDigest] = (),
-    ) -> PlannerOutput:
-        """Produce a plan for ``goal``.
-
-        **The first parameter is a projection and not the record, and that is a
-        property of the types** (ADR-0249 §7, §9). A ``GoalBrief`` carries the
-        outcome's ``Ground`` and each element's — the **kind** and never the
-        reference — and carries no ground reference, no record identifier, no
-        evidence identifier, no span, no revision number, no attempt, no plan, no
-        effort figure and no authority. ADR-0230 §4's sentence for ``ShownFile`` is
-        the one being applied: "the capability does not cross the planning seam, and
-        that is a property of the types rather than a rule a planner is trusted to
-        keep". Passing the whole ``Goal`` would leave ADR-0228 §8's namer rule —
-        "no record identifier is rendered to a model and none is accepted from one" —
-        resting on a renderer remembering not to print the ``evidence_id`` values its
-        elements carry.
-
-        **A brief's elements are labelled, and the scheme is ADR-0226 §3's applied to
-        four sequences** (§9, widened by ADR-0265 §4 in the sequence count alone): the
-        element at 1-based index *n* of ``constraints`` is ``C`` followed by *n* in
-        decimal with no padding, of ``criteria`` ``S`` followed by *n*, of
-        ``conditions`` ``D`` followed by *n*, and of ``actions`` — the acts this goal
-        already intends — ``A`` followed by *n* in **ASCII** decimal digits, with no
-        padding and no sign. Both sides derive the label from the brief they hold and
-        neither consults the other. A label is meaningful only within the call that
-        rendered it: **no label survives that call, and none is persisted as a
-        reference.** That is the brief's own rendering and **not the whole of the ``A``
-        space**, which the paragraph below states: the supply a step selects from runs
-        on past the brief into this call's own proposals.
-
-        **The ``A`` space is selection and never invention** (ADR-0265 §4). **The label
-        supply is the brief's ``actions`` extended by this call's own
-        ``PlannerOutput.actions``, in that order** (§4, §2). ``orchestration`` records
-        this call's proposals **before** it resolves the plan's labels, so a step may
-        name an act this same output proposed — which is *"book two rooms"* on the turn
-        the user says it, the ordinary shape and not an exotic one. A step selects from
-        that supply, or names none; a planner mints no action there and names no
-        identifier. A label the loop cannot resolve **refuses the plan** rather than
-        being dropped — the fail-closed direction, because "a step whose action was
-        dropped is a step whose effect claim would be scoped to nothing". Nothing else
-        is a label — not ``A01``, not ``A+1``, not ``a1``, not a digit outside
-        ``0``-``9`` — and each resolves to nothing rather than being parsed, repaired
-        or case-folded, which is ADR-0253 §9's strict-extraction rule applied to one
-        more vocabulary.
-
-        **``goal_id`` is on the brief and is rendered nowhere** (§9). It names the
-        *subject* of the call rather than a record in the labelled supply, it has
-        crossed this seam since ADR-0014 §6, and ``ActionPlan.goal_id`` is the value
-        ``Engine._check_plan_is_for_goal`` compares it against. The containment §9
-        buys is over **ground references**, which are identifiers into another
-        subsystem's store.
-
-        **The brief of a goal at revision 1 carries its outcome and no elements, and
-        that is a well-formed brief rather than a degraded one** (§9). No
-        implementation treats an element-free brief as an error, a failure to
-        understand, or a reason to ask a question.
-
-        **``utterance`` is this turn's own request** (ADR-0248 §1, ADR-0249 §7) — the
-        text the pass that produced this turn received, unrewritten and
-        uninterpreted. It is required, and it is annotated ``str`` rather than
-        ``NonBlankEncodableText`` **because a Protocol annotation validates nothing
-        and a second spelling of the refusal would suggest otherwise**: the blank
-        refusal lives where ADR-0248 §1 put it, on ``TurnResult.utterance`` and on the
-        pass that strips the text once, and no implementation of this Protocol
-        re-checks it.
-
-        **``evidence`` is what the planner may act on about a read that was taken**
-        (ADR-0249 §10). Each member carries what the ask named, what the response
-        establishes a proposition about, when it was read, what instant it speaks
-        for, the typed outcome's own value and whether it still stands — and **no
-        record identifier**, no evidence row id, no memory id, no snippet, no title
-        and no address. ``()`` means no evidence is offered on this call, which is the
-        semantically correct answer for every turn of ADR-0249's own lanes and is
-        never an error.
-
-        **The inputs stay keyword parameters and are not bundled into a
-        planning-input type** (ADR-0249 §7, applying ADR-0211 §2 rather than
-        reopening it): "a frozen ``core`` model is **harder** to extend than a
-        keyword-only parameter list, because every field addition is another ``core``
-        change with its own ADR, where a fourth keyword is one more line in the same
-        block." ``GoalBrief`` is not an exception to that ruling — it is not
-        packaging, it is a projection bought for the containment above.
-
-        **The return moves to ``PlannerOutput`` and this is a BREAKING contract
-        change under golden rule 5** (ADR-0249 §7). ``understanding`` is ``None``
-        where the planner proposed no change, which is the semantically correct
-        answer for a planner that knows nothing of this envelope; no implementation
-        reads ``None`` as an error, a degradation, or an instruction to re-plan.
-
-        **A planner envelope that comes back carrying a phase, a revision number, a
-        ``raised_by`` or a ``recorded_at`` has those values discarded silently**
-        (ADR-0249 §6) — not an error, not a park, not a degradation of the turn.
-        ``orchestration`` stamps the phase, records the interpretation revision and
-        its provenance, and sets ``supersedes`` and ``targets_revision``; no model
-        output writes any of them, and **no field of this envelope carries a phase**.
-
-        ``context``, ``memories`` and ``capabilities`` are passed in rather than
-        fetched: the pipeline assembles context, retrieves memory and reads the
-        advertised vocabulary before planning, and a planner that reached for them
-        itself would import subsystems it has no business importing. Retrieved
-        memory is also what makes a plan personal rather than generic.
-
-        **``capabilities`` is the vocabulary the registry advertised for this
-        turn** (ADR-0211 §1) — what ``ToolRegistry.capabilities()`` answered on the
-        very object the turn's tool-selection stage will resolve the resulting
-        steps against (ADR-0211 §3). It is an open vocabulary of strings, of which
-        the registry is the sole authority (ADR-0016 §5), and it is nothing else:
-        not tool ids, not ``ToolDefinition`` objects, not risk, cost, reversibility
-        or reach. A planner treats it as the complete statement of what is
-        advertised for this turn — it neither re-derives one, nor fetches one, nor
-        imports any name from ``ai_assistant.tools``, nor holds a ``ToolRegistry``.
-        It does not re-sort, de-duplicate or otherwise canonicalise the value and
-        asserts nothing about its order: ``capabilities()`` already answers a
-        sorted, de-duplicated tuple, and a second normalisation here would be a
-        second authority on the vocabulary.
-
-        **It is required and carries no default**, which is a departure from
-        ``memories`` and a deliberate one (ADR-0211 §1). A call that forgets
-        ``memories`` plans impersonally — the same *kind* of plan, less personal. A
-        call that forgets the vocabulary would be handed the empty one, under which
-        every goal requiring an act declines: a system that silently refuses to act
-        at all, indistinguishable from a deployment that genuinely advertises
-        nothing. Required, that omission is a ``mypy`` error rather than a live
-        regression nobody can see.
-
-        **An empty vocabulary is legal and never an error** (ADR-0211 §6). A
-        conforming planner raises nothing, refuses nothing and enters no repair
-        round on account of it; what it means is that no step can be carried, so a
-        decline is the only shape available for that turn. That binds what a
-        planner is *asked* for and not what a model returns: a step naming a
-        capability outside the vocabulary is still planned, still reaches
-        selection, and is still reported ``NO_CAPABLE_TOOL`` (ADR-0037 §1). No
-        implementation rejects a plan, or a step of one, on the ground that its
-        capability is unadvertised — an emitted name is resolved as it always was,
-        through ADR-0053's selection-time alias layer and failing that through
-        ADR-0037 §1.
-
-        **``memories`` is what the pipeline assembled for this turn, not one
-        relevance cut** (ADR-0074 §5, widened by ADR-0158 §5). It carries **three
-        groups, in order**: the conversation's recent turns **first**, in order;
-        then the records retrieved as relevant; then the episodic supplement —
-        episodes retrieved by relevance from other conversations, under a budget of
-        their own. Each grouping is meaningful and **the sequence is not one
-        relevance ranking** — not across the groups, and **not across the retrieved
-        group either**, whose internal order is the assembling consumer's rather
-        than this contract's: ADR-0072 §5 gives the retrieved records a precedence
-        and ADR-0113 §6 makes the budget and the assembly order the consumer's, so
-        they arrive precedence first and relevance-ordered only *within* one
-        precedence band, and a more relevant record can sit below a less relevant
-        one by decision. A planner may rely on the grouping and may not read a
-        single relevance order across it. The wording is restated rather than read
-        generously: a conversation tail is usually the most relevant thing the store
-        holds for a continued exchange, but a user who changes the subject mid-conversation is
-        handed prior turns that are not relevant to the new goal at all, so calling
-        the sequence "best first" would be a strain at either scope.
-
-        **The third group sits last by decision, not by convenience** (ADR-0158
-        §4). Position is how this pipeline expresses precedence into a prompt, and a
-        distilled belief outranks the raw turn it might have been distilled from:
-        the belief has passed the propose/dispose gate, carries provenance and
-        confidence, is corrigible and is what the user can inspect and kill. An
-        episode is unjudged material. Sorting the two together by relevance would
-        let an episode take a belief's position invisibly, which is exactly what the
-        separate budgets exist to prevent one layer down.
-
-        The three groups arrive on one parameter and ``Planner`` grows no
-        ``history`` parameter — all three are ``MemoryRecord``s the planner already
-        renders, and a second channel would split one prompt input in two. ADR-0074
-        §5 refused that
-        channel because the planner did "not act on" the distinction; ADR-0158 §4
-        records that the premise has since moved and that carrying an explicit
-        boundary is now a ``Planner`` contract change taking its own ADR. Both
-        widenings are flagged under golden rule 5 rather than smuggled.
-
-        **A turn's *first* call carries exactly those three groups, and a turn's
-        *second* call carries a fourth** (ADR-0226 §7, partially superseded by
-        ADR-0228 §§1, 7). On the first call the planner is reached before the loop
-        services any read request and receives what it has always received, so every
-        clause above binds on this parameter word for word. On a turn that serviced
-        one, the loop may call the planner **again** over the supply as it stands
-        after that servicing — the same three groups, in the same order and the same
-        positions, followed by the records the servicing appended as a **fourth**
-        group. That group is appended whole after the episodic supplement and is
-        never interleaved (ADR-0158 §4), it only grows across a turn, and nothing is
-        removed from the supply between a turn's two calls. There is no fifth group:
-        where a turn services twice, both servicings' records form one fourth group
-        in servicing order. This is the fourth widening of this contract's documented
-        meaning and is flagged under golden rule 5 with the others; like them it
-        **breaks nothing** — no signature moves, and a planner that renders whatever
-        sequence it is handed conforms exactly as it does today.
-
-        **A turn may put two requests to one planner** (ADR-0228 §3, superseding
-        ADR-0226 §2's second-emission clause). A turn makes **at most two** calls to
-        ``plan``, so a planner may be asked twice on one turn and each emission is
-        serviced once under ADR-0226 §§5-7. Each call is an ordinary call and the
-        planner is **not told which iteration it is on** (ADR-0228 §12): no parameter
-        carries an index, no prompt says "this is your last look", and an
-        implementation neither infers one nor changes what it emits on account of
-        one. That is the fifth widening, and it breaks nothing for the same reason.
-
-        **Labels are per call, and the second level is reached only by naming it**
-        (ADR-0228 §8). ADR-0226 §3's scheme binds each call separately and as
-        written: the label of the record at 1-based index *n* of **this call's**
-        ``memories`` is ``M`` followed by *n*. The same label string may name
-        different records on a turn's two calls, which is the scheme working rather
-        than a collision to repair. A record the first servicing's hop fetched stands
-        in the supply by the second call, is labelled there, and its own stored
-        evidence is reachable by a ``CITATION_HOP`` the second plan emits — and by no
-        other route: no implementation follows evidence the model did not name, and
-        within one servicing a hop still follows exactly one level.
-
-        What the returned
-        :class:`~ai_assistant.core.types.ActionPlan` may now carry is a
-        ``read_request``: **at most one**, over a closed enumeration of three kinds
-        (``SIGHTED_QUERY``, ``CITATION_HOP`` and — since ADR-0230 §1 — ``LOCAL_FILE``,
-        which names one entry of ``files`` below), stating one further read the
-        planner judged this turn's supply too thin without. That is a third
-        widening of this contract's documented meaning, flagged under golden rule 5
-        for the same reason as the other two. It is **not** a compatibility break:
-        the signature is unchanged and the field is additive and defaulted, so an
-        implementation returning a plan without one conforms exactly as it does
-        today, and ``None`` is the true answer about such a planner rather than a
-        degradation (ADR-0226 §4).
-
-        **A planner that emits one owes three things and no more** (ADR-0226 §§1-3).
-        It emits **at most one ask of each kind** *per emission*, which is the clause
-        ADR-0228 leaves standing — decomposition is still not admitted (ADR-0228 §14)
-        — while the prohibition on a second request within one turn is gone with the
-        re-planning deferral it rested on. It labels a
-        ``CITATION_HOP`` by **position in this call's ``memories``**: the record at
-        1-based index *n* is labelled ``M`` followed by *n* in decimal with no
-        padding. §3 fixes that scheme for every implementation and for both sides of
-        the seam, so no planner invents a spelling, adds a per-group prefix or makes
-        it configurable, and no mapping, table or identifier crosses between
-        ``planning`` and ``orchestration``: both sides read the very ``memories``
-        sequence this call passed. And it emits **no record identifier at all** —
-        §3's invariant is that the namer may be data, or the user, or the model
-        pointing outward, never the model pointing inward, so a planner neither
-        renders an identifier to a model nor accepts one from one. A label the
-        emission names that this call's ``memories`` never rendered resolves to
-        nothing and is discarded silently by the loop (§3); a planner does not
-        pre-filter its own emission to hide that, because the drop is what ADR-0226
-        §9's audit exists to count.
-
-        **The request is a statement of what to read, never a step and never an
-        act** (ADR-0226 §4). It is not selected against ``capabilities``, not
-        resolved to a tool, not ruled on by the permission gate and reaches no
-        executor; the loop — never the planner, and never a tool — services it, and
-        a planner performs no read of its own on account of one.
-
-        **``files`` is the listing the loop showed this turn, and it is the whole of
-        what a ``LOCAL_FILE`` ask may name** (ADR-0230 §§2-3). It carries the
-        planner-facing projection of what a configured local root held when the loop
-        listed it — one :class:`~ai_assistant.core.types.ShownFile` per entry, in the
-        listing's own order, the whole sequence — and it is read **once per turn**, so
-        a turn's two calls are handed the **same** sequence. That is where this scheme
-        differs from ``memories``', deliberately: ADR-0228 §8 lets an ``M`` label name
-        different records on a turn's two calls because the supply grows, and the
-        listing does not, so ``F3`` names the same entry on both calls of one turn.
-
-        **``()`` means no file is nameable on this turn**, and is the semantically
-        correct answer rather than a degradation: a deployment with no fetcher wired
-        passes it, a fetcher whose listing came back empty is the same case for the
-        turn, and no implementation reads it as an error or as an instruction to fetch
-        a default. The emptiness carries no further meaning — it does not distinguish
-        unconfigured, an empty root, an unreadable root or a failed read, and no
-        consumer may infer which it was.
-
-        **A file is named by an ordinal into this sequence and never by a path**
-        (ADR-0230 §2). The label of the entry at 1-based index *n* is the ASCII string
-        ``F`` followed by *n* in decimal with no padding — ``F`` and not ``M`` because
-        the two index different sequences — and both sides derive it from the sequence
-        itself: the planner renders each file's label from what it was given, and the
-        loop resolves a label by indexing the very sequence it passed on this call. No
-        mapping, no table and no path crosses between `planning` and `orchestration`.
-        A planner emits **no filesystem address of any kind**: not a path, not a name
-        it composed, not a name it read out of an utterance or a record's content, and
-        a label outside the shown set resolves to nothing and is discarded silently by
-        the loop, exactly as an out-of-range ``M`` label is.
-
-        **A ``ShownFile`` carries no capability, and that is a property of the type**
-        (ADR-0230 §4). The address a fetch is performed against lives on the
-        fetcher-facing :class:`~ai_assistant.core.types.SourceListingEntry`, which a
-        planner is never handed; an implementation that rendered every field of every
-        value it received, logged them, or returned them discloses nothing, because
-        there is nothing on the value to disclose. The listing is **external content**
-        under ADR-0098 §1 — this system authored no file's name and received it from
-        its user as no utterance — so an implementation rendering an entry into a
-        prompt escapes it for that target under ADR-0098 §2, as it does any other
-        external span, and renders none of it as a fact of the system's own.
-
-        **``read_outcomes`` carries one entry per ask this turn has already
-        serviced, in servicing order, and nothing else** (ADR-0251 §3, which replaces
-        ADR-0240 §7's ``empty_reads`` in that term alone). Each member's ``ask`` is
-        the frozen :class:`~ai_assistant.core.types.ReadAsk` **this planner itself
-        emitted**, carried back byte for byte and never edited on the way — no
-        implementation, and no caller, widens a window, drops an axis, rewrites a
-        label or composes a suggested ask to put in its place — and each member's
-        ``outcome`` is one member of
-        :class:`~ai_assistant.core.types.ReadOutcomeKind`, saying what became of that
-        ask and never why a source ruled the way it did.
-
-        **Every ADR-0240 §7 clause binds verbatim over the wider carrier** (ADR-0251
-        §3). It is ``()`` on a turn's **first** call, and ``()`` means *no read of
-        this turn has been serviced* — the semantically correct answer for the first
-        call, for a turn that asked for nothing, for a servicing that was declined or
-        that the budget did not reach, and for a ``Planner`` that knows nothing of
-        this parameter. A read the budget did not reach **is not in it**, because a
-        read that was never made certifies nothing about the store; nor is one the
-        supply's shape blocked, nor a servicing that failed or was partial (ADR-0226
-        §5 leaves the supply as planning saw it) — each of those is the classifier's
-        **no-entry** case rather than a seventh member.
-
-        **What the widening changes is the range and not the discipline.** ADR-0240
-        §6 admitted only an empty ``STRUCTURED_READ``; an empty read of **any** kind
-        now reaches a planner as a fact about that ask, and so does a refused,
-        failed, expired, truncated, duplicated or productive one. §6's own ground is
-        unchanged and is not disputed: which emptiness licenses a *broadening
-        inference* is still a structured read's alone, and this carrier neither draws
-        that inference nor invites it.
-
-        **Nothing the store said crosses on it.** No record, no count, no identifier,
-        no instant of the read, no ``capped`` value and no value of any kind the store
-        returned or computed. The only content it carries is the planner's own prior
-        composition and one member of a closed vocabulary, and that member says what
-        became of the ask and never why a source ruled the way it did (ADR-0251 §2,
-        ADR-0242 §9's bar).
-
-        **This parameter is what makes the second call worth making** (ADR-0240 §6,
-        §7). ADR-0228 §2(e) admitted a revision only on a servicing that returned
-        something new, on the ground that a planner called twice over one input "is
-        being asked the same question twice"; ADR-0240 §6 partially supersedes that
-        condition for an empty structured read, and this parameter is the input that
-        keeps §2(e)'s own reasoning honoured rather than set aside. A later lane that
-        dropped it while keeping §6 would have reinstated the defect (e) exists to
-        prevent.
-
-        **Every other signal ADR-0228 §12 forbids stays forbidden.** The planner is
-        still not told which iteration it is on, and no lane adds an iteration index,
-        a "last look" instruction, a count of the turn's calls, or any signal about
-        its budget or its deadline. §1's enumeration of what is not re-run binds
-        verbatim: one context assembly, one conversation-tail read, one retrieval, one
-        episodic supplement, and no group of the supply beyond the fourth.
-
-        **This carrier and ADR-0240 §10's audit record are governed separately**, and
-        neither is licence for the other: the audit is a Tier 2 log event carrying no
-        value on any axis, while this is an in-process argument handed to the author
-        of the value it carries.
-
-        **This one is a compatibility break, where the four widenings above were not**
-        (ADR-0230 §3, golden rule 5). The parameter is additive and defaulted, and
-        this contract does not argue itself out of the classification on that ground:
-        ``plan``'s other inputs are keyword-only, the loop passes ``files`` on **every**
-        call, and a ``plan`` declaring no such parameter raises ``TypeError`` when it is
-        called and fails structurally under ``mypy --strict`` besides. What survives
-        the widening is the **semantics**, not the signature — an implementation that
-        accepts the parameter and ignores its value means exactly what it meant, which
-        is what ``()``'s default encodes. Its declaration must move.
-
-        **And so is ``read_outcomes``, on the identical footing** (ADR-0240 §7 as
-        ADR-0251 §3 widens it, golden rule 5). The loop passes it on **every** call
-        for the same reason it passes ``files`` on every call, so a ``plan``
-        declaring no such parameter raises ``TypeError``; ADR-0230 §3's paragraph
-        above is inherited whole and not re-argued. Every ``Planner`` implementation
-        must be widened to declare it, and an implementation that accepts the
-        parameter and ignores its value means exactly what it meant.
-
-        **Replacing ``empty_reads`` rather than standing beside it** (ADR-0251 §3).
-        ADR-0240 §7's parameter carried exactly the asks that came back empty; those
-        same asks are in this one with ``outcome`` ``EMPTY``, and every other ask
-        besides. Keeping both would put one ask in two places with two spellings of
-        its state, and the first implementation to disagree with itself would be
-        right in one of them.
-
-        Args:
-            goal: The brief of the objective to plan for (ADR-0249 §9) — the
-                projection of the goal's current interpretation, never the record.
-            utterance: This turn's own request, as the pass that produced it received
-                it (ADR-0248 §1, ADR-0249 §7). Required; annotated ``str`` because a
-                Protocol annotation validates nothing.
-            context: The situational context assembled for this request.
-            memories: The records the pipeline assembled for this turn — the
-                conversation's recent turns in order, then the records retrieved
-                as relevant, then the episodic supplement (ADR-0158 §4), and, on a
-                turn's **second** call alone, the records its first plan's read
-                returned as a fourth group after them (ADR-0228 §7). The
-                retrieved group is composed under the assembling consumer's
-                precedence rather than as one relevance rank; see above. It is also
-                the sequence a ``CITATION_HOP`` label indexes into, per call
-                (ADR-0226 §3, ADR-0228 §8).
-            capabilities: The capability vocabulary the registry advertised for
-                this turn (ADR-0211 §1) — read by the caller from the same
-                ``ToolRegistry`` object selection will resolve against, never
-                fetched here. Required; an empty vocabulary is legal and means the
-                behaviour above.
-            files: The listing the loop showed this turn (ADR-0230 §3) — the
-                planner-facing projection of a configured local root's entries, one
-                per entry in the listing's own order, read once per turn and the
-                **same** sequence on both of a turn's calls. It is the sequence a
-                ``LOCAL_FILE`` label indexes into, and the whole of what such an ask
-                may name (§2). Defaults to ``()``, which means no file is nameable on
-                this turn and is never an error.
-            read_outcomes: One entry per ask this turn has already serviced, in
-                servicing order (ADR-0251 §3) — each carrying the frozen ``ReadAsk``
-                this planner emitted, byte for byte, beside one ``ReadOutcomeKind``
-                saying what became of it, and carrying nothing the store said.
-                Always ``()`` on a turn's first call, and ``()`` wherever no ask of
-                the turn was serviced, which is never an error.
-            evidence: What this call may act on about the reads already taken for
-                this goal (ADR-0249 §10) — each a digest carrying no record
-                identifier of any kind. Defaults to ``()``, which means no evidence
-                is offered and is never an error.
-
-        Returns:
-            A frozen :class:`~ai_assistant.core.types.PlannerOutput`: the plan,
-            carrying a ``read_request`` where the planner asked for one more read and
-            ``None`` where it did not (ADR-0226 §4), the understanding it
-            proposes or ``None`` where it proposes no change (ADR-0249 §7), and
-            ``actions`` — the acts it proposes this goal now intends, or ``()``
-            (ADR-0265 §2). **Empty means the planner proposes no new intended
-            action**, which is the semantically correct answer for an implementation
-            that knows nothing of this envelope and for every turn that acts on an
-            intent the goal already holds; no implementation reads an empty
-            ``actions`` as an error, a degradation or an instruction to re-plan.
-
-            **A proposal is warranted by the user's words and never by a plan's
-            convenience** (ADR-0265 §2). One is warranted where the request requires
-            an act the goal does not already hold an action for — *"book two identical
-            rooms" warrants two because the user asked for two* — and an implementation
-            that splits one intended act across two steps for its own reasons warrants
-            none. That is ADR-0249 §7's asymmetry observed rather than extended: a
-            **count of acts the user asked for** is interpretation, and interpretation
-            is the model's.
-
-            **``actions`` rides here and never inside ``ProposedUnderstanding``**,
-            because that value's omission rule is removal (ADR-0249 §7) and an intended
-            action must survive every revision that does not mention it. So minting is
-            independent of revising: an implementation may propose actions without
-            proposing an understanding, and an understanding that mentions no action
-            removes none.
-
-            The
-            plan's ``supersedes`` and ``targets_revision`` are **not the planner's**:
-            the loop takes both fields on every plan a planner returns, discarding any
-            value it came back carrying (ADR-0228 §5, ADR-0249 §8), so an
-            implementation neither sets them nor is penalised for setting them.
-
-            **ADR-0253 makes that a four-field clause — and ADR-0265 §4 a five-field
-            one — and each adds obligations to what a conforming implementation
-            produces.** The signature does not move and this envelope gains no member
-            on either count; what changes is what a plan may *be*, which ADR-0253 §10
-            classifies a **breaking** Protocol change under golden rule 5 precisely
-            because it is stated here rather than in a type alone.
-
-            - **A plan declaring none of ADR-0253's fields is conforming and unchanged.**
-              ``depends_on``, ``resolves``, ``when`` and ``interpretations`` default
-              empty and ``verifies`` and ``evidence_recency`` to ``None``, and a plan
-              carrying those values is exactly the plan this system wrote before that
-              decision: no dependency, no reference, no condition, no verification and
-              no interpretation.
-            - **An element is named by a label and never by an identifier** (§9,
-              ADR-0228 §8). Each ``StepCondition.about`` and each
-              ``PlanInterpretation.settles`` a planner returns is a **condition
-              label** — the ASCII ``D`` followed by a 1-based ordinal in decimal with
-              no padding — indexing the ``conditions`` of the ``understanding`` this
-              same call returns where it returns one, and the ``GoalBrief.conditions``
-              it received where it does not. **The loop substitutes each for the
-              ``GoalElement.id`` it resolves to**, once, before any other component
-              observes the plan, and ``PlanStore.save_plan`` refuses a plan on which it
-              has not. An implementation neither resolves them nor is penalised for
-              returning a label. A ``GoalBrief`` carries no element id for one to copy.
-            - **And a step names the act it is an attempt at by an ``A`` label**
-              (ADR-0265 §4), which is the clause above applied to one more vocabulary:
-              ``PlanStep.intended_action`` a planner returns is a label of the supply
-              the paragraph on the ``A`` space states — the brief's ``actions``
-              extended by this call's own ``PlannerOutput.actions`` — and the loop
-              substitutes it for the ``IntendedAction.id`` it resolves to, once, at the
-              same moment and under the same discipline. A label resolving to nothing
-              refuses the plan rather than being dropped. **So the fields another
-              component sets become exactly five** (ADR-0265's supersession of ADR-0253
-              §9's own four-field count) — ``supersedes``, ``targets_revision``, each
-              ``StepCondition.about``, each ``PlanInterpretation.settles``, and each
-              ``PlanStep.intended_action``.
-            - **Step and interpretation ids are the implementation's** and are minted
-              by whatever mints step ids today. **No step identifier is rendered to a
-              model and none is accepted from one** (§1): a model names a step by its
-              1-based position in the envelope's own ``steps`` list, and the
-              implementation resolves each ordinal to the id it minted.
-            - **What a returned plan may not be, it may not construct.** A reference
-              outside the declaring step's ``depends_on``, a dependency that does not
-              point strictly earlier, a fifth interpretation, two sharing an ``id`` or a
-              ``settles``, and a step requiring a verdict read from a step at or after
-              it are each **unconstructible** (§§1, 6, 8) — so a planner producing one
-              raises rather than returns, and a conforming implementation does not
-              produce one.
-            - **A vocabulary member is extracted strictly and never repaired** (§9). A
-              ``basis``, a required ``InterpretationVerdict``, a ``VerificationKind``
-              and a ``read_kind`` outside their enumerations, and an
-              ``evidence_recency`` that is not a strictly positive ISO-8601 duration,
-              are each an extraction failure for that envelope rather than a value
-              coerced, case-folded, aliased or clamped into range.
-
-        Raises:
-            PlanningError: If no plan could be produced for the goal.
         """
         ...
 
@@ -6371,8 +5415,7 @@ class ToolRegistry(Protocol):
     The pipeline's tool-selection stage queries this, and ``permissions`` reads
     a candidate's declared metadata to rule on it. Both only ever *ask*, which
     is why this contract is **query-only**: populating a registry is internal to
-    `tools`, in the way `context` keeps its ``ContextSource`` seam behind
-    ``ContextProvider`` (ADR-0008).
+    `tools`.
 
     **The registry does not choose.** :meth:`find` returns every candidate;
     which one runs needs the user's policy and the current context, neither of
@@ -7232,8 +6275,7 @@ class ActionPolicy(Protocol):
           default and §4's second clause forbids a seam inventing one — and ADR-0181
           §5's second clause then leaves no route by which any authorisation covers
           it, the user's own answer included. It is a **floor rather than a route
-          that exists**: ``AuditTrail.pending_confirmation`` answers ``None`` for
-          such a row, so nothing in the tree hands one here today, and ADR-0021 §5's
+          that exists**: nothing in the tree hands such a row here today, and ADR-0021 §5's
           "fail-closed twice over" is why the clause is written anyway — a floor is
           worth having because it holds when a route appears, and this one is
           checkable on any implementation without knowing its rules. ``decide``
@@ -7251,9 +6293,8 @@ class ActionPolicy(Protocol):
           not catch this epoch: such a row **has**
           ``planned_with_external_content``, so it is not an
           ``OriginUnrecordedBinding`` and trips no ``isinstance`` written for that
-          class. It is a floor on the same terms as the clause above —
-          ``AuditTrail.pending_confirmation`` answers ``None`` for such a row too,
-          so nothing in the tree hands one here today — and ``decide`` gains no
+          class. It is a floor on the same terms as the clause above — nothing in
+          the tree hands such a row here today either — and ``decide`` gains no
           matching clause for the same reason.
 
         A resolving ``ALLOW`` sets ``authorised_by`` to ``confirmed.id`` — this
@@ -7494,18 +6535,16 @@ class AuditTrail(Protocol):
 
     **A history read hands back what the row says, including a binding recorded
     before a member of :class:`~ai_assistant.core.types.EgressBinding` existed**
-    (ADR-0184 §5, ADR-0233 §14). ``get``, ``recent``, ``export`` and
-    ``resolution_of`` return such a decision — carrying an
+    (ADR-0184 §5, ADR-0233 §14). ``get``, ``recent`` and ``export`` return such
+    a decision — carrying an
     :class:`~ai_assistant.core.types.OriginUnrecordedBinding` for a row written
     before ADR-0181 §3's ``planned_with_external_content``, or a
     :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` for one written
     before ADR-0233 §4's ``coverage`` — as history, rather than failing; and a
     ``recent`` or an ``export`` over a trail holding one returns it **together
-    with** every other row, which is the all-or-nothing failure that closes.
-    ``pending_confirmation`` still answers ``None`` for **either**: a park is a
-    question put to the user and there is no answerable question in one whose
-    origin, or whose coverage, was never recorded, while a history read states what
-    was recorded. Every *other* unreadable row is reported exactly as before; the
+    with** every other row, which is the all-or-nothing failure that closes. A
+    history read states what was recorded. Every *other* unreadable row is
+    reported exactly as before; the
     tolerance is exactly as many shapes wide as there are epochs (ADR-0184 §1,
     ADR-0233 §14).
 
@@ -7725,81 +6764,6 @@ class AuditTrail(Protocol):
         """
         ...
 
-    async def pending_confirmation(
-        self, *, execution_id: str, step_id: str
-    ) -> PermissionDecision | None:
-        """The confirmation this binding still awaits, or ``None`` (ADR-0044 §3).
-
-        The recovery query. A restarted process reads a reloaded
-        ``AWAITING_APPROVAL`` step, sees it is awaiting an answer, and asks the
-        trail — *the store that already holds the confirmation* — for it by the
-        ``(execution_id, step_id)`` binding ADR-0044 §1 and §2 established, rather
-        than by a decision id it no longer has after the restart. ``resume`` then
-        proceeds exactly as it does in-process, including its existing check that
-        the returned confirmation's ``tool`` equals the reloaded step's
-        ``bound_tool``.
-
-        Keys on whether the *binding* carries a resolution, not on any single
-        confirmation's state, and works in two steps **in this order**:
-
-        1. **If any ``CONFIRM`` for ``(execution_id, step_id)`` is already
-           resolved, return ``None``.** By §2b the binding is decided and no
-           further resolution may be recorded, so the pipeline must not present
-           it as answerable — and returning a still-unresolved sibling orphan
-           here would hand back exactly the #257 hazard §2b closes.
-        2. **Otherwise return the newest unresolved ``CONFIRM``** by the trail's
-           own order (``decided_at`` descending, ``id`` ascending), or ``None``
-           if the binding carries none. A binding may hold more than one
-           unresolved ``CONFIRM`` (ADR-0037 §2's compare-and-swap loser), but
-           they are the same action — selection is deterministic and
-           single-candidate (ADR-0037 §1) — so any is a correct question to
-           re-present and the newest is returned deterministically. This does
-           **not** raise on multiple unresolved ``CONFIRM``s: that is a reachable,
-           accepted state, not a corrupt one.
-
-        **Query-only and returns a detached snapshot**, like every other
-        ``AuditTrail`` read (ADR-0018 §3): it adds no write path and no way to
-        mutate the trail, so the append-only and single-resolution guarantees are
-        untouched.
-        """
-        ...
-
-    async def resolution_of(self, *, execution_id: str, step_id: str) -> PermissionDecision | None:
-        """The recorded resolution of this binding's confirmation, or None.
-
-        The complement of ``pending_confirmation``. Where that method answers "what
-        unresolved CONFIRM does this binding still await?", this answers "what
-        resolution has this binding already received?" — the ALLOW or DENY whose
-        ``resolves`` names a CONFIRM of the concrete ``(execution_id, step_id)``
-        binding (ADR-0044 §2). It exists so a step stranded ``AWAITING_APPROVAL``
-        with its ruling durable but its disposition transition uncommitted (#257) can
-        be driven to the disposition already decided — idempotently, authoring
-        nothing new — rather than re-authored, which the single-resolution rule
-        (§2b) refuses.
-
-        Returns None **only for a successful read of a binding that carries no
-        resolution** (it is genuinely pending — ``pending_confirmation`` answers it —
-        or carries no confirmation at all); None never stands in for a failure to
-        read. By §2b a concrete binding carries at most one resolution, so when a
-        resolution exists it is unique and this returns it. Query-only and returns a
-        detached snapshot, like every other ``AuditTrail`` read (ADR-0018 §3).
-
-        The ALLOW-or-DENY guarantee needs no new invariant: a resolving decision
-        (``resolves`` set) whose own ruling is ``CONFIRM`` is already unconstructable
-        (``PermissionDecision._a_resolution_is_not_itself_a_question``), so a
-        resolving-``CONFIRM`` can never occupy the binding's resolution slot and
-        this can never return one.
-
-        Raises:
-            AuditError: If the trail cannot be read (a closed or corrupt store, an
-                I/O error). This is the same boundary ``pending_confirmation`` draws,
-                and it is load-bearing: a read failure returned as None would let
-                recovery classify a still-resolved step as trail-unanswerable and
-                route it to cancellation, discarding a durable ruling. The cause is
-                preserved.
-        """
-        ...
-
     async def get(self, decision_id: str) -> PermissionDecision | None:
         """Return the decision with ``decision_id``, or ``None`` if absent."""
         ...
@@ -7885,7 +6849,7 @@ class AuditTrail(Protocol):
         answer would let a scan transition over claims it never saw.
 
         **A recovery query belongs with the store that owns the record**, which is
-        ADR-0044 §3's move for ``pending_confirmation`` and not a new one — a
+        ADR-0044 §3's move and not a new one — a
         restarted process asking the trail for the record it can no longer name by
         id. It goes here and never on :class:`InvocationLedger`, because the ledger
         is what ``tools/`` holds and a by-decision query over past claims is a
@@ -10509,232 +9473,6 @@ class SourceReadTrail(Protocol):
 
         Raises:
             ReadTrailError: If the trail cannot be cleared.
-        """
-        ...
-
-
-@runtime_checkable
-class RoutingRecorder(Protocol):
-    """Records what a routing stage decided, and can answer nothing (ADR-0197 §9).
-
-    The **write** half of the routing seam. The routing stage of ADR-0197 §2 holds
-    this and only this, as a required constructor argument with no default, so a
-    composition that omits the recorder does not type-check — :class:`SourceReadRecorder`'s
-    own arrangement on ADR-0097 §5's pattern.
-
-    **The split from :class:`RoutingTrail` is ADR-0185 §4's move, and here it
-    forecloses something worse than a cursor.** There the capability removed from the
-    driver was the ability to *read* the trail. Here the stage must write, and the
-    capability removed is the same one plus ``clear`` — which means a routing stage
-    handed the whole trail could **erase the record of its own decisions**. ``clear``
-    exists for ADR-0007's deletion right and belongs to the surface that answers to
-    the user; a stage whose acts the rows are *about* is the last thing that should be
-    able to call it. Making that a ``mypy --strict`` failure rather than a review note
-    is ADR-0185 §4's own standard on ADR-0097 §3's argument.
-
-    **It is a static guarantee and is stated as one.** Structural typing means the one
-    ``permissions/`` store satisfies both Protocols, so the composition root passes one
-    object to the stage and to a future hub-owned read surface alike; what the stage
-    cannot do is *name* ``recent``, ``export`` or ``clear``.
-
-    **The two names are deliberately not close**, for :class:`SourceReadRecorder`'s
-    reason: the *wide* seam is the dangerous one here, so the two should not be
-    substitutable at a glance.
-
-    Cancelling :meth:`record` is governed by this module's cancellation clause
-    (ADR-0060 §1), and no member orphans a resource it acquired when the call is
-    cancelled.
-    """
-
-    async def record(self, record: RoutedOperationRecord) -> None:
-        """Append ``record`` to the trail (ADR-0197 §9).
-
-        **Returns nothing, and takes the identity the caller minted** rather than
-        producing one. A store that minted the id could not be handed a frozen record,
-        and a retry could not name the row it was retrying.
-
-        **The checks and the append are one critical section**: the row-``id``
-        equality test, the ``route_id`` test, the route state machine, the append and
-        ADR-0197 §9's prune happen under one transaction or one lock, so two
-        concurrent calls carrying a colliding ``route_id`` cannot both observe no
-        conflict and both append. Exactly one succeeds and the other raises, and the
-        loser's act does not proceed.
-
-        **Idempotent over the whole record and never over the id alone.** A row
-        already present under the same ``id`` *whose every field is equal to the one
-        supplied* is not appended twice and is not an error, so a retried write is
-        safe; a row present under the same ``id`` differing in **any** field raises
-        and appends nothing. A repeating id factory would otherwise let a routed
-        ``revoke`` be performed while the trail kept only an earlier ``forget``'s row,
-        which is the one failure this store exists to make impossible.
-
-        **The ``route_id`` rule is a consistency check over the rows the store
-        retains**, and never a fact about a park it is not the authority for. It
-        refuses a row whose ``route_id`` is already held by a **retained** row
-        differing in ``operation``, ``subject`` or ``conversation_id``. The route's
-        rows form a **state machine** it enforces in the same critical section: a
-        read-only route is exactly one ``NOT_OWED`` row, so a second row of any kind
-        under a ``route_id`` retaining one is refused, an answer included; a
-        confirm-owed route holds at most one ``OWED`` row and at most one answer, so a
-        second ``OWED``, and a ``GIVEN`` or ``REFUSED`` under a ``route_id`` already
-        retaining either answer, are refused.
-
-        **An answer arriving under a ``route_id`` that retains no row is accepted**,
-        and no ``OWED`` row is required to admit one. That is forced by the bound:
-        pruning is by recording order alone, so a live park's ``OWED`` row can be
-        pruned while the park is still registered and still claimable. Requiring the
-        row would make a *retention* setting decide whether a user's approval of a
-        live confirmation is honoured, which is the strictly worse failure of the two
-        — an orphan ``GIVEN`` costs an operator one join that finds no ``OWED``, where
-        the refusal costs the user the operation they had just approved.
-
-        **Called before the act it precedes, always** (ADR-0197 §9). Where this
-        raises, the caller does **not** proceed: the operation is not called, no park
-        is registered, no token is minted, and the pass ends in
-        :attr:`~ai_assistant.core.types.RouteOutcome.UNRECORDED`. One ordering, one
-        failure mode, and no partial mode in which some routed operations are recorded
-        and others are not.
-
-        Args:
-            record: The row to append, whose ``id`` and ``route_id`` the caller
-                minted and whose ``decided_at`` came from the injected clock.
-
-        Raises:
-            RoutingTrailError: If the record is not a valid one, if its ``id`` is
-                already recorded under a differing record, if its ``route_id`` is held
-                by a retained row of another route, if the sequence is one the state
-                machine does not admit, or if the store cannot be written. One class
-                for all of them, because the caller's recourse is identical (ADR-0197
-                §9).
-        """
-        ...
-
-
-@runtime_checkable
-class RoutingTrail(Protocol):
-    """The append-only record of what every routed operation decided (ADR-0197 §9).
-
-    A **Tier 1 local store**, so ADR-0155 §1's residency clause governs it:
-    implementations persist **locally only**, the file lives under
-    ``Settings.data_dir`` and is created owner-only (ADR-0004 §4, ADR-0084 §9), and
-    the hub owns it exclusively as it owns every other database in that directory
-    (ADR-0083 §1, §10). ``ai-assistant-purge`` destroys it as part of destroying the
-    data directory, with no per-store step (ADR-0126 §1).
-
-    **The wide seam, and the one nothing but a future hub-owned read surface holds.**
-    It carries :meth:`RoutingRecorder.record` with exactly the semantics stated there,
-    so one ``permissions/`` class satisfies both Protocols structurally. This Protocol
-    deliberately does **not** inherit :class:`RoutingRecorder`: keeping them unrelated
-    is what stops a stage's annotation from being widened by an ``isinstance`` habit.
-
-    **A fourth row kind, joining neither of ADR-0186 §10's two partitions.** A routed
-    operation is never a ``PermissionDecision`` and never a ``SourceReadRecord``, and
-    no lane widens ``recent_decisions``, ``export_decisions``, ``recent_reads`` or
-    ``export_reads`` to return one.
-
-    **Nothing can read it yet, and that is ADR-0185 → ADR-0186's own sequence**
-    (ADR-0197 §9, §11). ``AssistantEngine`` gains **no method** for this trail, so the
-    row is written for a surface a later decision gives it, and an operator debugging
-    a routed act reads the store directly until then. The two unreached members are
-    specified now rather than added later because widening a ratified Protocol is a
-    breaking change, and a store built against a two-member seam would be rebuilt
-    against a four-member one.
-
-    **The store has a horizon, and it is uniform.** It holds at most
-    ``Settings.routing_trail_max_rows`` rows; when an append would exceed that, the
-    **earliest-recorded** rows are deleted until it does not, atomically with the
-    append, and there is **no spelling for "unlimited"** (ADR-0185 §6). Pruning takes
-    no account of a route's state: an unanswered park's ``OWED`` row is pruned at the
-    bound like any other, and pruning it neither evicts the park, releases its ceiling
-    slot, nor makes its token unresolvable. The park is in memory and the trail is the
-    record rather than the state, so a pruned row costs history and never costs a
-    resolution — which is true only because :meth:`RoutingRecorder.record` admits an
-    answer under a ``route_id`` retaining no row. The two clauses are one decision read
-    from its two ends, and a lane may not implement one without the other.
-
-    **Every query returns a detached snapshot** — the tuple, the records in it, and
-    everything mutable those reach (ADR-0018 §3, ADR-0021 §4).
-
-    Cancelling any method here is governed by this module's cancellation clause
-    (ADR-0060 §1).
-    """
-
-    async def record(self, record: RoutedOperationRecord) -> None:
-        """Append ``record`` to the trail.
-
-        Exactly :meth:`RoutingRecorder.record`'s semantics — one critical section over
-        the id check, the ``route_id`` check, the state machine, the append and the
-        prune; idempotent over the whole record; and called before the act it
-        precedes.
-
-        Args:
-            record: The row to append.
-
-        Raises:
-            RoutingTrailError: As :meth:`RoutingRecorder.record` states.
-        """
-        ...
-
-    async def recent(self, *, limit: int) -> tuple[RoutedOperationRecord, ...]:
-        """Return the most recently recorded rows, **newest-recorded first**.
-
-        Ordered by **recording order**, reversed — never by ``decided_at``, which is
-        caller-supplied and which a host clock corrected backwards would send the
-        prune after the rows it just wrote (ADR-0185 §6's reasoning, which this store
-        inherits along with the bound).
-
-        ``limit`` is **required with no default**, unlike
-        :meth:`SourceReadTrail.recent`'s: nothing reads this trail yet (ADR-0197 §9),
-        so there is no consumer whose page size a default here would be guessing at,
-        and the surface ADR that gives it one will state its own.
-
-        Args:
-            limit: Maximum number of rows to return. Refused outside ``[1, 2**63)``
-                **locally and before any I/O**, as ADR-0186 §3 requires of every
-                bounded listing: a store issuing ``LIMIT ?`` against SQLite turns
-                ``limit=-1`` into no limit at all, so the one call offering a bounded
-                read becomes the unbounded read it exists to avoid.
-
-        Returns:
-            Up to ``limit`` rows, newest-recorded first.
-
-        Raises:
-            ValueError: If ``limit`` is outside ``[1, 2**63)``.
-            RoutingTrailError: If the trail cannot be read.
-        """
-        ...
-
-    async def export(self) -> tuple[RoutedOperationRecord, ...]:
-        """Return every row the store holds, in recording order (ADR-0004 §6).
-
-        The user's export right. **It delivers the horizon rather than the history**:
-        the store prunes, so this reconstructs every decision it still holds and rows
-        older than the configured cap are gone. Bounded only by ADR-0085 §8c's payload
-        limit.
-
-        Returns:
-            Every row held, oldest-recorded first.
-
-        Raises:
-            RoutingTrailError: If the trail cannot be read.
-        """
-        ...
-
-    async def clear(self) -> None:
-        """Destroy every row, for ADR-0007's deletion right.
-
-        Wholesale erasure only, for :meth:`AuditTrail.clear`'s reason: it destroys the
-        trail visibly and completely, which is what a data-rights operation should look
-        like, where a selective delete would be indistinguishable from tampering
-        (ADR-0004 §6, ADR-0021 §4). This and the prune are the only deletions the store
-        performs.
-
-        **Returns nothing**, unlike :meth:`SourceReadTrail.clear`'s count. Nothing reads
-        this trail (ADR-0197 §9), so a count would be a value with no consumer, and
-        ADR-0197 §9 fixes the member's shape rather than leaving it to imitation.
-
-        Raises:
-            RoutingTrailError: If the trail cannot be cleared.
         """
         ...
 
@@ -16836,8 +15574,9 @@ class AssistantEngine(Protocol):
     #
     # **Three of the five stay unpromoted, each for its own reason** (ADR-0186 §4),
     # and no lane adds a counterpart on the strength of this Protocol.
-    # ``resolution_of`` is keyed on a binding a user does not hold and every row it
-    # can return is in the export; ``record`` would let a client append to the audit
+    # ``resolution_of`` was keyed on a binding a user does not hold and every row it
+    # could return is in the export (ADR-0309 §5 has since retired it with the old
+    # path's park and resume); ``record`` would let a client append to the audit
     # record of what was permitted, which is the fabrication ADR-0184 §4 closed the
     # last route to; and ``clear`` would put an irreversible destruction of the whole
     # record one request away on a transport an enrolled device reaches — the user's

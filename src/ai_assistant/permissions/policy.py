@@ -963,8 +963,8 @@ class ThresholdActionPolicy:
           model-composed span approvable *by confirmation*, and neither standing
           route is a confirmation. ADR-0238 §7 opened the one exception this corpus
           admits and ADR-0247 §3 restates it over the configured provider, **in one
-          act with the limb above**: a query a ``QueryComposer`` composed over a
-          supply carrying any record at all is a model-composed span over covered
+          act with the limb above**: a query a model composed over a supply
+          carrying any record at all is a model-composed span over covered
           content, so a deployment that retired the lineage floor alone would still
           be stopped here on every query the milestone exists to compose. "Where any
           of the three fails, the clause forbids the span exactly as written".
@@ -1057,10 +1057,10 @@ class ThresholdActionPolicy:
         are known, and here one of them never was. **The second branch is written
         rather than inherited**, because a coverage-unrecorded row *has*
         ``planned_with_external_content`` and so falls straight past the first
-        ``isinstance``. Both are a **floor rather than a route that exists**:
-        ``AuditTrail.pending_confirmation`` refuses to offer either park and
-        ``StepRunner.resume`` refuses each again before any ruling is sought, so
-        nothing in the tree reaches these branches — which is exactly ADR-0021 §5's
+        ``isinstance``. Both are a **floor rather than a route that exists**: the
+        old path's park and resume that re-presented a recorded ``CONFIRM`` retired
+        under ADR-0309 §5, so nothing in the tree reaches these branches — which is
+        exactly ADR-0021 §5's
         "fail-closed twice over" and why they are written anyway. ``decide`` gains no
         counterpart: :attr:`ActionRequest.egress_binding` stays narrow, so both cases
         are unconstructable at that member.
