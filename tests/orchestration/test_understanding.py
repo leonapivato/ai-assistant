@@ -22,9 +22,6 @@ from ai_assistant.core.types import (
     ChannelContext,
     ChannelContextItem,
     ChannelIdentity,
-    ControllerRule,
-    ControllerStage,
-    Disposition,
     EpisodeProcessingRecord,
     EpisodicMemory,
     MemorySource,
@@ -40,8 +37,6 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedTextInput,
     SemanticMemory,
-    StageEntry,
-    StageOutcome,
     TranscriptMessage,
     UnderstandingGround,
     UnderstandingOmission,
@@ -439,7 +434,7 @@ async def test_a_tail_record_alone_in_the_channel_window_shows_no_understanding_
 
     A turn on a channel of unbounded audience takes no episode window and is shown its
     tail through the channel window alone, so a tail record there carries its two
-    halves, its status and its verdicts — and no earlier understanding, which was
+    halves and its status — and no earlier understanding, which was
     derived from whatever that pass's windows held. Only a record also in the episode
     window carries one, on the turns that have that window.
     """
@@ -513,8 +508,8 @@ async def test_a_supplied_item_naming_a_windowed_episode_carries_its_annotations
 
     A supplied item is not a record, so it renders as supplied; where its id names an
     episode the episode window holds, that episode is rendered once, here, and what the
-    window would have said about it rides on the item — its status and reason, the
-    phrase for each verdict (ADR-0284 §8:6) and what was understood then.
+    window would have said about it rides on the item — its status and reason and
+    what was understood then, and no verdict (ADR-0318 §3:1).
     """
     failed = _episode(
         "activation:e-1",
@@ -539,17 +534,7 @@ async def test_a_supplied_item_naming_a_windowed_episode_carries_its_annotations
                 update={
                     "status": ProcessingStatus.FAILED,
                     "reason": ProcessingReason.PROCESSING_FAILED,
-                    "stages": (
-                        StageEntry(
-                            stage=ControllerStage.DRIVE,
-                            due=ControllerRule.PLAN_HAS_STEPS,
-                            started_at=AT,
-                            ended_at=AT,
-                            outcome=StageOutcome.DONE,
-                            step_disposition=Disposition.DENIED,
-                        ),
-                        *ended_pass(AT),
-                    ),
+                    "stages": ended_pass(AT),
                 }
             )
         }
@@ -566,7 +551,7 @@ async def test_a_supplied_item_naming_a_windowed_episode_carries_its_annotations
     assert item["text"] == "A feed line."
     assert item["also_in_episode_window"] is True
     assert (item["status"], item["reason"]) == ("failed", "processing_failed")
-    assert item["what_became_of_it"] == ["the action was refused by the permission policy"]
+    assert "what_became_of_it" not in item
     assert item["understood_then"]["meaning"] == "A campsite filled up."
     assert sent["episode_window"] == "missing: there are no other recent episodes to show"
 

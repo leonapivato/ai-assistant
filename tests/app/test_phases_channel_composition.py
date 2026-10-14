@@ -313,5 +313,4 @@ async def test_concurrent_activations_on_two_conversations_keep_records_isolated
         assert processing.trigger.channel == ChannelIdentity(
             channel_type="conversation", instance_id=turn.conversation_id
         )
-        assert processing.links.predecessor_episode_id is None
         assert episode.outcome == REPLY

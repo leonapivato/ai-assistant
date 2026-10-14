@@ -2187,7 +2187,8 @@ def test_the_page_offers_every_use_a_new_grant_may_name_and_no_other() -> None:
     offering the uses for a new grant, including an amendment's new scope, offers
     ``FACET`` and ``NOTIFY`` and not ``INGEST``", so the offer is
     :data:`~ai_assistant.wire.GRANTABLE_SCOPES` and the page may hold no box for the
-    member the hub refuses.
+    member the hub refuses. ADR-0318 §6:2 takes ``FACET`` out of the vocabulary, so
+    the offer is ``NOTIFY`` alone, named in words.
 
     Read off the shipped file against ``core``'s own vocabulary, so a fourth member
     added to the enum fails here rather than reaching a user as a silently absent
@@ -2205,6 +2206,8 @@ def test_the_page_offers_every_use_a_new_grant_may_name_and_no_other() -> None:
     for use in GrantScope:
         assert f'value: "{use.value}"' in phrases, use.value
     assert phrases.count("label:") == len(GrantScope)
+    # ADR-0318 §6:2: the use nothing reads for is neither offered nor phrased.
+    assert '"facet"' not in script
 
     # The offer is that vocabulary less exactly the uses a new grant may not name.
     retired = re.search(r"^const RETIRED_USES = \[(.*)\];$", script, re.MULTILINE)

@@ -704,7 +704,6 @@ def _request() -> ActionRequest:
     return ActionRequest(
         tool=_tool(),
         parameters={},
-        step_id="s1",
         intended_action="ia1",
     )
 

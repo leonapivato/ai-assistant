@@ -2562,7 +2562,7 @@ class FakeAssistantEngine:
         self,
         identity: str,
         *,
-        scope: Sequence[GrantScope] = (GrantScope.FACET,),
+        scope: Sequence[GrantScope] = (GrantScope.NOTIFY,),
         decided_at: datetime | None = None,
         revokes: str | None = None,
     ) -> SourceGrant:

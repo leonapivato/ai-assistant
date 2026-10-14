@@ -36,7 +36,6 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     Provenance,
     RecordedChannelTrigger,
-    RecordedResumeTrigger,
     RecordedSpeechInput,
     StageOutcome,
     UnderstandingOmission,
@@ -50,7 +49,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import ConversationStore, MemoryStore
-    from ai_assistant.core.types import MemoryRecord, RecordedActivationTrigger
+    from ai_assistant.core.types import MemoryRecord
     from ai_assistant.orchestration.activation_state import ActivationState
 
 _log = structlog.get_logger(__name__)
@@ -59,7 +58,7 @@ _log = structlog.get_logger(__name__)
 _OPEN_PAGE = 100
 
 
-def _on_its_conversation(trigger: RecordedActivationTrigger) -> RecordedActivationTrigger:
+def _on_its_conversation(trigger: RecordedChannelTrigger) -> RecordedChannelTrigger:
     """``trigger`` on the conversation it targets, where a dead pass had not yet named it.
 
     A conversational pass names the conversation its episode is written for once the
@@ -70,7 +69,7 @@ def _on_its_conversation(trigger: RecordedActivationTrigger) -> RecordedActivati
     where it is read, as forgetting the conversation walks them (§2:4). Setting an
     unset ``channel`` extends the record (ADR-0286 §3:3).
     """
-    if not isinstance(trigger, RecordedChannelTrigger) or trigger.channel is not None:
+    if trigger.channel is not None:
         return trigger
     target = trigger.target
     if not isinstance(target, ChannelIdentity) or target.channel_type != "conversation":
@@ -152,9 +151,8 @@ class ActivationWriter:
 
         Called once the activation is admitted and before any of its processing runs.
         The record carries what admission holds — the trigger as admitted,
-        ``started_at``, the links established, no stage entry — and the write takes the
-        capture timestamp once (§2:2). A resume whose conversation is not resolved
-        writes nothing (§2:3).
+        ``started_at``, no stage entry — and the write takes the capture timestamp
+        once (§2:2).
 
         **A collision writes nothing and deletes nothing** (§2:4): the record at the
         address is not this activation's, so capture ends without touching it. Any
@@ -163,8 +161,6 @@ class ActivationWriter:
         """
         address = state.episode_address
         if state.capture is not None or address is None or state.started_at is None:
-            return
-        if isinstance(state.trigger, RecordedResumeTrigger) and state.conversation_id is None:
             return
         try:
             captured_at = self._now()
@@ -264,11 +260,6 @@ class ActivationWriter:
         **A record the user forgets while it is captured leaves nothing** (ADR-0286
         §8).
         """
-        if isinstance(state.trigger, RecordedResumeTrigger) and state.conversation_id is None:
-            capture_loss("association", "unresolved")
-            if state.capture is not None:
-                await self._settle(state.capture, drain)
-            return state.degraded_report()
         writes = _Writes()
         conversation_id = state.conversation_id
         try:
@@ -424,19 +415,12 @@ class ActivationWriter:
         if progress.ended:
             return state.degraded_report()
         conversation_id = state.conversation_id
-        facts = state.facts
-        if facts is not None and facts.parked is not None:
-            # ADR-0283 §3:4: the binding this activation's own step parked, which is
-            # what a later resume finds its conversation through (§5).
-            state.relate(parks=facts.parked)
         if conversation_id is not None:
             # ADR-0275 §4:5 as ADR-0283 partially supersedes it: a conversational
             # channel names the conversation the episode is written for.
             state.resolved_conversation(conversation_id)
         try:
-            preflight = processing.model_copy(
-                update={"trigger": state.trigger, "links": state.links}
-            )
+            preflight = processing.model_copy(update={"trigger": state.trigger})
             self._frozen(state, preflight, progress, payload_limit)
             processing = checked_output()
             episode = self._frozen(state, processing, progress, payload_limit)
@@ -693,10 +677,7 @@ class ActivationWriter:
 
 
 def _trigger_modality(state: ActivationState) -> Modality:
-    trigger = state.trigger
-    return (
-        trigger.payload.modality if isinstance(trigger, RecordedChannelTrigger) else Modality.TEXT
-    )
+    return state.trigger.payload.modality
 
 
 def _bounded(episode: EpisodicMemory, payload_limit: int) -> None:
@@ -749,17 +730,13 @@ def _closed_omission(processing: EpisodeProcessingRecord) -> UnderstandingOmissi
 
     A restart's close is the freezing write (ADR-0286 §7:3), which carries the
     omission (§4:1); it classifies by where the record shows the pass ended, never by
-    its text. A recorded version outranks every omission; a resume carries no input;
-    speech whose recorded transcript is blank yielded no words; a non-``done``
-    understanding entry is the stage's failure and a routing entry carrying an
-    outcome a taken route; anything else ended before the stage was entered.
+    its text. A recorded version outranks every omission; speech whose recorded
+    transcript is blank yielded no words; a non-``done`` understanding entry is the
+    stage's failure; anything else ended before the stage was entered.
     """
     if processing.understanding:
         return None
-    trigger = processing.trigger
-    if isinstance(trigger, RecordedResumeTrigger):
-        return UnderstandingOmission.NO_INPUT
-    payload = trigger.payload
+    payload = processing.trigger.payload
     if (
         isinstance(payload, RecordedSpeechInput)
         and payload.transcript is not None
@@ -769,6 +746,4 @@ def _closed_omission(processing: EpisodeProcessingRecord) -> UnderstandingOmissi
     for entry in processing.stages:
         if entry.stage is ControllerStage.UNDERSTANDING and entry.outcome is not StageOutcome.DONE:
             return UnderstandingOmission.FAILED
-        if entry.stage is ControllerStage.ROUTING and entry.route_outcome is not None:
-            return UnderstandingOmission.ROUTED
     return UnderstandingOmission.NOT_REACHED

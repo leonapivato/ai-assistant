@@ -27,18 +27,14 @@ from ai_assistant.core.types import (
     DataTier,
     DestinationProtocol,
     DiscloserProvenance,
-    Disposition,
     EgressDestination,
     EgressSpan,
-    ExecutionState,
     RecordedInvocation,
     SpanCoverage,
-    StepOutcome,
     ToolCost,
     ToolFailureKind,
     ToolInvocation,
     ToolOutcome,
-    TurnOutcome,
 )
 from ai_assistant.wire.codec import canonical_payload, project
 from ai_assistant.wire.surface import (
@@ -106,9 +102,9 @@ def test_an_egress_confirmation_survives_the_round_trip_a_client_actually_makes(
     :func:`~ai_assistant.wire.codec.project` and the canonical encoding, and the
     client validated the decoded payload against the method's declared return
     annotation (ADR-0085 §10). No promoted method returns a ``TurnOutcome`` since
-    ``converse`` and ``resume`` retired (ADR-0309 §5:1), so the payload is validated
-    against the type itself, which keeps the codec's half of the claim until the type
-    retires.
+    ``converse`` and ``resume`` retired (ADR-0309 §5:1), and the type itself has left
+    (ADR-0318), so the confirmation is projected and validated as itself, which keeps
+    the codec's half of the claim.
 
     ``tier`` of ``None`` and ``index`` of ``None`` are in the vector deliberately:
     both are optional on :class:`~ai_assistant.core.types.EgressSpan`, and an
@@ -156,27 +152,14 @@ def test_an_egress_confirmation_survives_the_round_trip_a_client_actually_makes(
         read=None,
         authorization=None,
     )
-    outcome = TurnOutcome(
-        turn=None,
-        step=StepOutcome(
-            disposition=Disposition.AWAITING_CONFIRMATION,
-            state=ExecutionState(id="e-1", plan_id="p-1", steps=(), updated_at=_AT),
-            step_id="step-1",
-            tool_id="smtp",
-            confirmation=confirmation,
-        ),
-    )
+    payload = json.loads(canonical_payload(project(confirmation)))
+    decoded = TypeAdapter(Confirmation).validate_python(payload)
 
-    payload = json.loads(canonical_payload(project(outcome)))
-    decoded = TypeAdapter(TurnOutcome).validate_python(payload)
-
-    assert decoded == outcome
-    assert decoded.step is not None
-    assert decoded.step.confirmation == confirmation
+    assert decoded == confirmation
     # Present as ``null`` rather than omitted, which is what makes the bump bite:
     # a version 9 client fails ``extra_forbidden`` on this member.
-    assert "egress" in payload["step"]["confirmation"]
-    assert "canonical_destination_set" not in payload["step"]["confirmation"]["egress"]
+    assert "egress" in payload
+    assert "canonical_destination_set" not in payload["egress"]
 
 
 def test_a_non_egress_confirmation_crosses_as_an_explicit_null() -> None:

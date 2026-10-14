@@ -785,7 +785,7 @@ def test_a_permission_decision_carrying_a_per_call_cost_crosses_the_wire() -> No
         cost=ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("1.50"), currency="USD"),
         idempotency=Idempotency.NONE,
     )
-    request = ActionRequest(tool=definition, parameters={"to": "a@b"}, step_id="step-1")
+    request = ActionRequest(tool=definition, parameters={"to": "a@b"})
     priced = PermissionDecision.from_request(
         request,
         PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="because it is allowed"),

@@ -57,8 +57,6 @@ def test_it_transcribes_the_subject_and_answers_the_question() -> None:
     assert answer.tool == confirmed.tool
     assert answer.parameters_digest == confirmed.parameters_digest
     assert answer.egress_binding == confirmed.egress_binding
-    assert answer.step_id == confirmed.step_id
-    assert answer.execution_id == confirmed.execution_id
     # **The act the question was asked about is transcribed with the rest of the
     # subject** (ADR-0266 §7): a resolving decision that lost it would answer a
     # request that is an attempt at another act.
@@ -72,8 +70,8 @@ def test_it_accepts_no_parameter_naming_a_subject() -> None:
     """ADR-0235 §12, asserted by introspection as ``established_from``'s own test is.
 
     §4 removes the capability rather than forbidding it (ADR-0021 §3's move): a
-    parameter for ``tool``, ``parameters_digest``, ``egress_binding``, ``step_id``,
-    ``execution_id`` or ``resolves`` is a parameter through which a caller could
+    parameter for ``tool``, ``parameters_digest``, ``egress_binding`` or
+    ``resolves`` is a parameter through which a caller could
     point the answer at a different question, and the signature is where that is
     checked because a docstring is not.
     """
@@ -106,23 +104,6 @@ def test_a_confirmation_that_is_not_a_confirm_is_refused() -> None:
 
     with pytest.raises(ValueError, match="answers a recorded CONFIRM"):
         _answer(allowed)
-
-
-@pytest.mark.parametrize("field", ["step_id", "execution_id"])
-def test_a_confirmation_belonging_to_a_step_is_refused(field: str) -> None:
-    """The refusal that keeps this constructor off every path that executes a call.
-
-    ADR-0235 §4: a confirmation carrying either field belongs to a step of an
-    execution and its answer must be built from a *rebound* request through
-    ``from_request`` (ADR-0152 §7). A confirmation carrying neither belongs to no
-    step, so there is nothing to rebind and nothing to run — which is what makes
-    this refusal the structural half of §3's third availability condition rather
-    than a second rule to remember.
-    """
-    confirmed = _confirmation(_binding(ALICE)).model_copy(update={field: "x-1"})
-
-    with pytest.raises(ValueError, match="belongs to a step of an execution"):
-        _answer(confirmed)
 
 
 def test_an_answer_predating_the_question_is_refused() -> None:

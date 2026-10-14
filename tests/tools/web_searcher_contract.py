@@ -470,8 +470,6 @@ class WebSearcherContract:
             [subject.origin, QUERY]
         )
         assert len(request.parameters) == 2
-        assert request.step_id is None
-        assert request.execution_id is None
         assert request.egress_binding is None
 
     # --- the identity a record is attested to (ADR-0231 §10, §17) -----------

@@ -157,21 +157,6 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: One past the largest value ``list_beliefs`` accepts for ``limit``/``offset``:
 #: the signed 64-bit ceiling a SQLite bind parameter tops out at (ADR-0073 §2).
 _PAGE_BOUND = 2**63
-#: The two halves of the binding an episode's own step parked, as the expression
-#: ``records_by_parking`` indexes (ADR-0283 §3:3). The index lost its one reader when
-#: ADR-0309 §5 retired ``episode_parking``, and leaves with ``links.parks`` itself
-#: (ADR-0318). Guarded by ``json_valid``
-#: because SQLite evaluates an indexed expression on every write and delete of a
-#: row: a bare ``json_extract`` would make a corrupt blob refuse its own deletion,
-#: where guarded it indexes as ``NULL`` and the reads report it as they always have.
-_PARKS_EXECUTION: Final = (
-    "CASE WHEN json_valid(data) "
-    "THEN json_extract(data, '$.processing_record.links.parks.execution_id') END"
-)
-_PARKS_STEP: Final = (
-    "CASE WHEN json_valid(data) "
-    "THEN json_extract(data, '$.processing_record.links.parks.step_id') END"
-)
 #: The read-time liveness predicate over the lifecycle and window columns, as
 #: ``get`` applies it — expiry and both window ends — taking ``now`` three times.
 _LIVE: Final = (
@@ -1299,19 +1284,12 @@ class SqliteMemoryStore:
 
         ``records_by_channel`` orders a channel's rows by number, so
         :meth:`channel_episodes` and :meth:`channel_episode_ids` read one index range
-        in number order rather than scanning the table (§1). ``records_by_parking``
-        is an expression index over the binding an episode's own step parked; no
-        read uses it since ADR-0309 §5 retired ``episode_parking``, and it leaves
-        with ``links.parks`` (ADR-0318). SQLite maintains it with every write, a
-        re-embedding's included.
+        in number order rather than scanning the table (§1). The parks index ADR-0283
+        §3:3 added left with ``links.parks`` (ADR-0318 §4:2, §8).
         """
         conn.execute(
             "CREATE INDEX IF NOT EXISTS records_by_channel "
             "ON records(channel_type, channel_instance, rowid)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS records_by_parking ON records("
-            f"{_PARKS_EXECUTION}, {_PARKS_STEP})"
         )
         # ADR-0286 §12:4: whether an episode is open is an indexed column. Keyed with
         # the number, so the walk's lowest open episode and ``open_episodes``' page

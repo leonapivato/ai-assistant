@@ -189,7 +189,7 @@ async def test_a_recorded_attempt_survives_the_process_that_recorded_it(
             source_read_record(
                 SOURCE,
                 record_id="r-1",
-                use=GrantScope.FACET,
+                use=GrantScope.NOTIFY,
                 outcome=ReadOutcome.REFUSED,
             )
         )

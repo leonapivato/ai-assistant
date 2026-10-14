@@ -1991,7 +1991,7 @@ class InvocationLedgerContract(InvocationCompleterContract):
             # refusal never arrives at all.
             cyclic: list[object] = []
             cyclic.append(cyclic)
-            handed.__dict__["step_id"] = cyclic
+            handed.__dict__["intended_action"] = cyclic
         elif tamper == "hidden-model":
             # A model where the field declares none, inside a `FrozenDict` — which
             # is a `Mapping` and not a `dict`, so a walk written for `dict` alone
@@ -2010,7 +2010,7 @@ class InvocationLedgerContract(InvocationCompleterContract):
                     msg = "this container refuses to be read"
                     raise RuntimeError(msg)
 
-            handed.__dict__["step_id"] = _Unwalkable([1])
+            handed.__dict__["intended_action"] = _Unwalkable([1])
         elif tamper == "deep":
             # Acyclic but deep, with a model at the bottom: the walk has to reach
             # it, so a check that gives up at a depth — or that pays for depth
@@ -2023,9 +2023,9 @@ class InvocationLedgerContract(InvocationCompleterContract):
                 cursor.append(inner)
                 cursor = inner
             cursor.append(ToolCost(basis=CostBasis.FREE))
-            handed.__dict__["step_id"] = deep
+            handed.__dict__["intended_action"] = deep
         elif tamper == "unspeakable":
-            handed.__dict__["step_id"] = Unspeakably([1])
+            handed.__dict__["intended_action"] = Unspeakably([1])
         else:
             _undeclared(handed, {1: "one", "extra": "text"})
 

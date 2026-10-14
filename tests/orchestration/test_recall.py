@@ -37,7 +37,6 @@ from ai_assistant.core.types import (
     RecallOutcome,
     RecallProvenance,
     RecordedChannelTrigger,
-    RecordedResumeTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
     SemanticMemory,
@@ -59,7 +58,7 @@ from ai_assistant.testing.activation import ended_pass
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import MemoryRecord, MemorySearchResult, RecordedActivationTrigger
+    from ai_assistant.core.types import MemoryRecord, MemorySearchResult
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.recall import Recalled
 
@@ -104,7 +103,7 @@ def _fact(  # noqa: PLR0913 — one knob per field a case varies
 
 
 def _processing(
-    trigger: RecordedActivationTrigger,
+    trigger: RecordedChannelTrigger,
     *,
     understanding: tuple[ActivationUnderstanding, ...] = (),
     failed: bool = False,
@@ -502,9 +501,6 @@ async def test_another_episodes_excerpt_is_its_input_text_or_its_content() -> No
     )
     records = (
         _episode("typed", processing=_processing(_text_trigger("Book the dentist."))),
-        _episode(
-            "resumed", processing=_processing(RecordedResumeTrigger(channel=None, approved=True))
-        ),
         _episode("untranscribed", processing=_processing(speech, failed=True)),
         _episode("unprocessed"),
     )
@@ -512,7 +508,6 @@ async def test_another_episodes_excerpt_is_its_input_text_or_its_content() -> No
     content = "The dentist appointment was booked."
     assert {item.id: item.excerpt for item in recalled.result.items} == {
         "typed": "Book the dentist.",
-        "resumed": content,
         "untranscribed": content,
         "unprocessed": content,
     }

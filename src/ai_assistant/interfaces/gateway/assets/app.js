@@ -3412,19 +3412,19 @@ function renderConversationDevices() {
 // Every use a grant may name, in words — the vocabulary a recorded grant is
 // rendered in (ADR-0139 §3's third clause). It keeps "ingest": a grant recorded
 // with it still names it, and a rendering names every use its grant names
-// (ADR-0294 §4).
+// (ADR-0294 §4). "facet" left (ADR-0318 §6:2): nothing reads a source for it.
 //
 // The phrases say what the reading is *used for* and never what follows from it
 // (ADR-0133 §1): granting "notify" decides nothing about whether you are ever
 // contacted, so its phrase is about reading, on the same footing as the others.
 const USE_PHRASES = [
-  { value: "facet", label: "Look at it while answering you" },
   { value: "ingest", label: "Durably remember what it says" },
   { value: "notify", label: "Read it to raise things with you unprompted" },
 ];
 
 // The uses a **new** grant may name, which is what a choice offers (ADR-0294 §4):
-// every phrase above but the one a new grant may no longer name. Nothing reads a
+// every phrase above but the one a new grant may no longer name, which leaves
+// "notify" alone, in words (ADR-0318 §6:2). Nothing reads a
 // source under "ingest" any more, and the hub refuses a new grant naming it, so a
 // box for it would offer a use the hub refuses — the surface disagreeing with the
 // vocabulary that ADR-0139 §3's second clause forbids, from the other side.

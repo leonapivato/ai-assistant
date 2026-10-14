@@ -27,7 +27,6 @@ from ai_assistant.core.types import (
     RecallOutcome,
     RecallProvenance,
     RecordedChannelTrigger,
-    RecordedResumeTrigger,
     RecordedTextInput,
     StageEntry,
     StageOutcome,
@@ -256,21 +255,12 @@ def test_a_recall_is_bounded_by_the_types_ceiling() -> None:
 def test_the_record_defaults_to_no_recall_at_the_current_schema_version() -> None:
     record = _record()
     assert record.recall is None
-    assert record.schema_version == 10
+    assert record.schema_version == 11
 
 
 def test_a_schema_3_record_is_refused() -> None:
     with pytest.raises(ValidationError):
         _record(schema_version=3)
-
-
-_RESUME = RecordedResumeTrigger(channel=None, approved=True)
-
-
-def test_a_resume_carries_no_recall_result() -> None:
-    assert _record(trigger=_RESUME).recall is None
-    with pytest.raises(ValidationError, match="carries no recall result"):
-        _record(trigger=_RESUME, recall=_recall())
 
 
 def test_the_record_carries_a_recall_result() -> None:
@@ -303,11 +293,6 @@ def test_the_record_carries_the_second_run_beside_the_first() -> None:
     first, second = _recall(), _second_run()
     record = _record(recall=first, recall_second_run=second)
     assert (record.recall, record.recall_second_run) == (first, second)
-
-
-def test_a_resume_carries_no_second_run() -> None:
-    with pytest.raises(ValidationError, match="carries no recall result"):
-        _record(trigger=_RESUME, recall_second_run=_second_run())
 
 
 def test_a_record_round_trips_with_its_second_run() -> None:

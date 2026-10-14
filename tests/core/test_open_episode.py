@@ -15,7 +15,6 @@ from pydantic import ValidationError
 from ai_assistant.core.episode_encoding import episode_content, episode_extends, project_episode
 from ai_assistant.core.types import (
     ENDING_CONTROLLER_RULES,
-    ActivationLinks,
     ActivationRecall,
     ActivationUnderstanding,
     ChannelContext,
@@ -36,7 +35,6 @@ from ai_assistant.core.types import (
     RecallCue,
     RecallOutcome,
     RecordedChannelTrigger,
-    RecordedResumeTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
     SpokenAudioFormat,
@@ -77,11 +75,11 @@ def _speech(transcript: str | None) -> RecordedChannelTrigger:
     )
 
 
-def _stage(index: int, stage: ControllerStage = ControllerStage.TURN_LOOP) -> StageEntry:
+def _stage(index: int, stage: ControllerStage = ControllerStage.PLANNING) -> StageEntry:
     at = _NOW + timedelta(seconds=index)
     return StageEntry(
         stage=stage,
-        due=ControllerRule.UNPLANNED,
+        due=ControllerRule.ROUND_DUE,
         started_at=at,
         ended_at=at,
         outcome=StageOutcome.DONE,
@@ -296,11 +294,6 @@ def test_the_freezing_revision_may_record_the_omission() -> None:
         ({"trigger": _trigger()}, {"trigger": _trigger(channel=_CONVERSATION)}),
         ({"trigger": _speech(None)}, {"trigger": _speech("what is on today?")}),
         ({"trigger": _speech(None)}, {"trigger": _speech("")}),
-        ({}, {"links": ActivationLinks(goal_id="g1")}),
-        (
-            {"links": ActivationLinks(goal_id="g1")},
-            {"links": ActivationLinks(goal_id="g1", attempt_id="a1")},
-        ),
         (
             {},
             {
@@ -317,7 +310,6 @@ def test_the_freezing_revision_may_record_the_omission() -> None:
                 )
             },
         ),
-        ({}, {"response_degraded": True}),
         ({}, {"output_degraded": True}),
         ({}, {"understanding": (_understanding(1),)}),
         (
@@ -345,8 +337,7 @@ def test_several_admitted_differences_at_once_extend() -> None:
             trigger=_speech("hello").model_copy(update={"channel": _CONVERSATION}),
             stages=(_stage(1), _stage(2)),
             understanding=(_understanding(1),),
-            links=ActivationLinks(goal_id="g1"),
-            response_degraded=True,
+            output_degraded=True,
         )
     )
     assert episode_extends(_episode(stored), _episode(revision, outcome="Hello."))
@@ -375,7 +366,7 @@ def test_a_difference_outside_the_record_and_outcome_does_not_extend() -> None:
 
 def test_nothing_extends_a_frozen_record() -> None:
     stored = _frozen(_open(stages=(_stage(1),)))
-    revision = stored.model_copy(update={"response_degraded": True})
+    revision = stored.model_copy(update={"output_degraded": True})
     assert not episode_extends(
         _episode(stored, content="x", placement=Placement()),
         _episode(revision, content="x", placement=Placement()),
@@ -411,9 +402,6 @@ def test_an_episode_without_a_processing_record_neither_extends_nor_is_extended(
         ({"trigger": _trigger(channel=_CONVERSATION)}, {"trigger": _trigger()}),
         ({"trigger": _speech("hello")}, {"trigger": _speech("goodbye")}),
         ({"trigger": _speech("hello")}, {"trigger": _speech(None)}),
-        ({"links": ActivationLinks(goal_id="g1")}, {"links": ActivationLinks(goal_id="g2")}),
-        ({"links": ActivationLinks(goal_id="g1")}, {"links": ActivationLinks()}),
-        ({"response_degraded": True}, {"response_degraded": False}),
         ({"output_degraded": True}, {"output_degraded": False}),
         (
             {
@@ -448,7 +436,6 @@ def test_an_episode_without_a_processing_record_neither_extends_nor_is_extended(
             {"recall_second_run": None},
         ),
         ({}, {"started_at": _LATER}),
-        ({}, {"trigger": RecordedResumeTrigger(channel=None, approved=True)}),
         ({"trigger": _speech(None)}, {"trigger": _trigger()}),
     ],
 )

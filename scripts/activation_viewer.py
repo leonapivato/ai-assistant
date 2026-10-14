@@ -1547,7 +1547,7 @@ SCRIPT: Final = r"""
     refused: "refused", truncated: "truncated",
   };
   const ENDINGS = {
-    nothing_due: "finished", route_taken: "routed", round_limit_reached: "round limit reached",
+    nothing_due: "finished", round_limit_reached: "round limit reached",
     stage_failed: "a stage failed", stage_timed_out: "a stage timed out",
     stage_repeated: "a stage repeated", interrupted: "interrupted", stopped: "stopped by you",
     hub_stopped: "hub stopped", no_text_input: "no text input",
@@ -2069,7 +2069,6 @@ SCRIPT: Final = r"""
       ["stage", b.stage], ["due to", b.due], ["outcome", b.outcome],
       ["took", isNaN(start) || isNaN(end) ? undefined : duration(end - start)],
       ["started", b.started_at], ["ended", b.ended_at],
-      ["disposition", b.step_disposition || undefined], ["route", b.route_outcome || undefined],
       ["failure", failure(b.failure)],
     ]);
   }

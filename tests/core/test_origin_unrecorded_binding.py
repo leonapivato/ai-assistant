@@ -441,8 +441,6 @@ def test_a_decision_carrying_the_sibling_authorises_nothing(offered_origin: bool
     request = ActionRequest(
         tool=_TOOL,
         parameters={},
-        step_id="step-1",
-        execution_id="exec-1",
         egress_binding=EgressBinding(
             **_SHARED,  # type: ignore[arg-type]  # heterogeneous test kwargs
             planned_with_external_content=offered_origin,
@@ -455,8 +453,6 @@ def test_a_decision_carrying_the_sibling_authorises_nothing(offered_origin: bool
         tool=_TOOL,
         parameters_digest=request.parameters_digest,
         decided_at=_AT,
-        step_id="step-1",
-        execution_id="exec-1",
         egress_binding=OriginUnrecordedBinding(**_SHARED),  # type: ignore[arg-type]  # heterogeneous test kwargs
     )
 
@@ -476,7 +472,6 @@ def test_a_request_cannot_carry_the_sibling_at_all() -> None:
         ActionRequest(
             tool=_TOOL,
             parameters={},
-            step_id="step-1",
             egress_binding=OriginUnrecordedBinding(**_SHARED),  # type: ignore[arg-type]  # the widening under test
         )
 
@@ -491,7 +486,6 @@ def test_from_request_transcribes_the_narrow_field_and_makes_no_sibling() -> Non
     request = ActionRequest(
         tool=_TOOL,
         parameters={},
-        step_id="step-1",
         egress_binding=EgressBinding(
             **_SHARED,  # type: ignore[arg-type]  # heterogeneous test kwargs
             planned_with_external_content=True,
@@ -538,8 +532,6 @@ def test_the_sibling_survives_the_promoted_surfaces_own_return_adapter() -> None
         tool=_TOOL,
         parameters_digest="0" * 64,
         decided_at=_AT,
-        step_id="step-1",
-        execution_id="exec-1",
         egress_binding=OriginUnrecordedBinding(**_SHARED),  # type: ignore[arg-type]  # heterogeneous test kwargs
     )
     adapter: TypeAdapter[tuple[PermissionDecision, ...]] = TypeAdapter(

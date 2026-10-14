@@ -380,8 +380,6 @@ def authorised(  # noqa: PLR0913 — one keyword per fact a ruling fixes; a case
     request = ActionRequest(
         tool=definition,
         parameters=parameters,
-        step_id=step_id,
-        execution_id=execution_id,
         goal=goal,
         intended_action=intended_action,
         egress_binding=binding,

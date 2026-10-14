@@ -1,4 +1,7 @@
-"""ADR-0284 §2, §7 and §8: the input's origin, the search text and the one projection."""
+"""ADR-0284 §2, §7 and §8: the input's origin, the search text and the one projection.
+
+As ADR-0318 §3 and §4 leave them: no resume trigger and no stage verdict.
+"""
 
 from __future__ import annotations
 
@@ -8,12 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.channel_validation import input_origin
-from ai_assistant.core.episode_encoding import (
-    ROUTE_OUTCOME_PHRASES,
-    STEP_DISPOSITION_PHRASES,
-    episode_content,
-    project_episode,
-)
+from ai_assistant.core.episode_encoding import episode_content, project_episode
 from ai_assistant.core.types import (
     ActivationUnderstanding,
     Capture,
@@ -21,7 +19,6 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ControllerRule,
     ControllerStage,
-    Disposition,
     EpisodeProcessingRecord,
     EpisodeProjection,
     EpisodicMemory,
@@ -33,12 +30,9 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     ProjectedText,
     Provenance,
-    RecordedActivationTrigger,
     RecordedChannelTrigger,
-    RecordedResumeTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
-    RouteOutcome,
     SpokenAudioFormat,
     SpokenReply,
     StageEntry,
@@ -91,19 +85,6 @@ def _understanding(meaning: str, *, version: int = 1, **fields: object) -> Activ
     )
 
 
-def _stage(stage: ControllerStage, due: ControllerRule, **verdict: object) -> StageEntry:
-    return StageEntry.model_validate(
-        {
-            "stage": stage,
-            "due": due,
-            "started_at": _NOW,
-            "ended_at": _LATER,
-            "outcome": StageOutcome.DONE,
-            **verdict,
-        }
-    )
-
-
 _END = StageEntry(
     stage=ControllerStage.END,
     due=ControllerRule.NOTHING_DUE,
@@ -114,7 +95,7 @@ _END = StageEntry(
 
 
 def _episode(  # noqa: PLR0913 — one keyword per part of the record a test varies
-    trigger: RecordedActivationTrigger,
+    trigger: RecordedChannelTrigger,
     *,
     understanding: tuple[ActivationUnderstanding, ...] = (),
     stages: tuple[StageEntry, ...] = (_END,),
@@ -123,13 +104,7 @@ def _episode(  # noqa: PLR0913 — one keyword per part of the record a test var
     reason: ProcessingReason = ProcessingReason.RETURNED,
     provenance: Provenance | None = None,
 ) -> EpisodicMemory:
-    omitted = None
-    if not understanding:
-        omitted = (
-            UnderstandingOmission.NO_INPUT
-            if isinstance(trigger, RecordedResumeTrigger)
-            else UnderstandingOmission.NOT_REACHED
-        )
+    omitted = None if understanding else UnderstandingOmission.NOT_REACHED
     processing = EpisodeProcessingRecord(
         activation_id="activation",
         started_at=_NOW,
@@ -163,9 +138,6 @@ def _recordless(content: str = "The user asked: what is on today?") -> EpisodicM
     )
 
 
-_RESUME = RecordedResumeTrigger(channel=_CONVERSATION, approved=True)
-
-
 # --- §2: where the input came from ----------------------------------------------
 
 
@@ -178,15 +150,6 @@ def test_a_recorded_trigger_round_trips_its_origin(origin: InputOrigin) -> None:
     trigger = _trigger(origin)
     assert RecordedChannelTrigger.model_validate_json(trigger.model_dump_json()) == trigger
     assert trigger.origin is origin
-
-
-def test_a_resume_trigger_has_no_origin_field() -> None:
-    # §2:4: a resume has no input.
-    assert "origin" not in RecordedResumeTrigger.model_fields
-    with pytest.raises(ValidationError, match="extra_forbidden"):
-        RecordedResumeTrigger.model_validate(
-            {"channel": None, "approved": True, "origin": InputOrigin.USER}
-        )
 
 
 @pytest.mark.parametrize(
@@ -244,10 +207,10 @@ def test_an_outside_episode_no_stage_understood_never_carries_the_report() -> No
 def test_an_episode_with_no_understanding_is_found_by_how_it_ended() -> None:
     record = _episode(
         _trigger(InputOrigin.USER),
-        status=ProcessingStatus.WAITING,
-        reason=ProcessingReason.DISAMBIGUATION,
+        status=ProcessingStatus.FAILED,
+        reason=ProcessingReason.PROCESSING_FAILED,
     )
-    assert episode_content(record) == f"status waiting, reason disambiguation\n{_USER_WORDS}"
+    assert episode_content(record) == f"status failed, reason processing_failed\n{_USER_WORDS}"
 
 
 def test_a_users_transcript_is_their_words() -> None:
@@ -277,11 +240,6 @@ def test_speech_with_no_words_adds_none(transcript: str | None) -> None:
         trigger, status=ProcessingStatus.FAILED, reason=ProcessingReason.TRANSCRIPTION_FAILED
     )
     assert episode_content(record) == "status failed, reason transcription_failed"
-
-
-def test_a_resume_is_found_by_how_it_ended() -> None:
-    record = _episode(_RESUME, outcome="Done: the invite is sent.")
-    assert episode_content(record) == "status completed, reason returned"
 
 
 def test_the_search_text_ignores_the_content_it_replaces() -> None:
@@ -373,59 +331,6 @@ def test_an_episode_without_a_processing_record_shows_its_content_as_its_input()
     assert (projection.channel, projection.origin, projection.status) == (None, None, None)
 
 
-def test_a_resume_projects_no_origin_and_no_input() -> None:
-    projection = project_episode(
-        _episode(_RESUME, outcome="Sent."), excerpt_chars=100, admit_outside_input=True
-    )
-    assert (projection.origin, projection.input, projection.meaning) == (None, None, None)
-    assert projection.channel == _CONVERSATION
-
-
-def test_the_stage_verdicts_are_projected_in_stage_order() -> None:
-    stages = (
-        _stage(ControllerStage.ROUTING, ControllerRule.ROUTE_UNCHECKED),
-        _stage(
-            ControllerStage.DRIVE,
-            ControllerRule.PLAN_HAS_STEPS,
-            step_disposition=Disposition.EXECUTED,
-        ),
-        _stage(ControllerStage.DRIVE, ControllerRule.PLAN_HAS_STEPS),
-        _stage(
-            ControllerStage.DRIVE,
-            ControllerRule.PLAN_HAS_STEPS,
-            step_disposition=Disposition.AWAITING_CONFIRMATION,
-        ),
-        _END,
-    )
-    projection = project_episode(
-        _episode(_trigger(InputOrigin.USER), stages=stages), excerpt_chars=100
-    )
-    assert projection.step_dispositions == (Disposition.EXECUTED, Disposition.AWAITING_CONFIRMATION)
-    assert projection.route_outcomes == ()
-
-
-def test_a_routed_verdict_is_projected() -> None:
-    stages = (
-        _stage(
-            ControllerStage.ROUTING,
-            ControllerRule.ROUTE_UNCHECKED,
-            route_outcome=RouteOutcome.NOT_FOUND,
-        ),
-        StageEntry(
-            stage=ControllerStage.END,
-            due=ControllerRule.ROUTE_TAKEN,
-            started_at=_LATER,
-            ended_at=_LATER,
-            outcome=StageOutcome.DONE,
-        ),
-    )
-    projection = project_episode(
-        _episode(_trigger(InputOrigin.USER), stages=stages), excerpt_chars=100
-    )
-    assert projection.route_outcomes == (RouteOutcome.NOT_FOUND,)
-    assert projection.step_dispositions == ()
-
-
 def test_derived_from_external_is_what_the_predicate_answers() -> None:
     tainted = Provenance(
         source=MemorySource.OBSERVED,
@@ -504,11 +409,6 @@ def test_a_projected_text_is_no_longer_than_its_whole() -> None:
             "carries its content alone",
             id="recordless-with-origin",
         ),
-        pytest.param(
-            {"capture_modality": Modality.TEXT, "step_dispositions": (Disposition.EXECUTED,)},
-            "carries its content alone",
-            id="recordless-with-verdict",
-        ),
         pytest.param({}, "carries its content alone", id="recordless-without-modality"),
         pytest.param(
             {
@@ -526,61 +426,12 @@ def test_a_projection_takes_one_of_the_two_shapes(fields: dict[str, object], mat
         EpisodeProjection.model_validate({"occurred_at": _NOW, **fields})
 
 
-# --- §8:6: the verdict phrases --------------------------------------------------------
+# --- ADR-0318 §3:1: a rendering states status and reason, and no verdict -----------
 
 
-#: ADR-0221 §2's table, as the composer, the planner and the observer each render it
-#: (their three copies are byte-identical), keyed by the member each phrase names.
-_ADR_0221_STEP_PHRASES = {
-    Disposition.EXECUTED: "the selected tool ran",
-    Disposition.DENIED: "the action was refused by the permission policy",
-    Disposition.AWAITING_CONFIRMATION: "the action was parked for the user to confirm",
-    Disposition.NO_CAPABLE_TOOL: "no tool advertised the capability the step needed",
-    Disposition.AMBIGUOUS_CAPABILITY: "several tools advertised the capability, so none was chosen",
-    Disposition.INVALID_PARAMETERS: (
-        "the step's arguments did not fit the declared schema of any capable tool"
-    ),
-    Disposition.EGRESS_UNBINDABLE: (
-        "the outbound call could not be described, so nothing was asked or sent"
-    ),
-    Disposition.EFFECT_ALREADY_CLAIMED: (
-        "this goal had already claimed the act, so nothing was dispatched"
-    ),
-    Disposition.EFFECT_UNSCOPED: (
-        "the plan did not say which act the step was, so nothing was dispatched"
-    ),
-}
-_ADR_0221_ROUTE_PHRASES = {
-    RouteOutcome.PERFORMED: "the assistant performed the operation the user asked for",
-    RouteOutcome.AWAITING_CONFIRMATION: "the operation was parked for the user to confirm",
-    RouteOutcome.REFUSED: "the user declined, so the operation was not performed",
-    RouteOutcome.AMBIGUOUS: "more than one record matched, so nothing was performed",
-    RouteOutcome.AMBIGUOUS_TRUNCATED: (
-        "more records matched than could be shown, so nothing was performed"
-    ),
-    RouteOutcome.NOT_FOUND: "nothing matched, so nothing was performed",
-    RouteOutcome.UNRECORDED: "the decision could not be recorded, so nothing was performed",
-    RouteOutcome.FAILED: "the operation was attempted and failed",
-}
-
-
-def test_every_disposition_has_exactly_its_adr_0221_phrase() -> None:
-    assert set(STEP_DISPOSITION_PHRASES) == set(Disposition)
-    assert dict(STEP_DISPOSITION_PHRASES) == _ADR_0221_STEP_PHRASES
-
-
-def test_every_route_outcome_has_exactly_its_adr_0221_phrase() -> None:
-    assert set(ROUTE_OUTCOME_PHRASES) == set(RouteOutcome)
-    assert dict(ROUTE_OUTCOME_PHRASES) == _ADR_0221_ROUTE_PHRASES
-
-
-def test_a_parked_step_and_a_parked_route_read_differently() -> None:
-    # The enums share the value `awaiting_confirmation`; the two tables keep them apart.
-    step = STEP_DISPOSITION_PHRASES[Disposition.AWAITING_CONFIRMATION]
-    route = ROUTE_OUTCOME_PHRASES[RouteOutcome.AWAITING_CONFIRMATION]
-    assert step != route
-
-
-def test_the_phrase_tables_are_read_only() -> None:
-    with pytest.raises(TypeError):
-        STEP_DISPOSITION_PHRASES[Disposition.EXECUTED] = "x"  # type: ignore[index]
+def test_the_projection_carries_no_stage_verdict() -> None:
+    assert {"step_dispositions", "route_outcomes"}.isdisjoint(EpisodeProjection.model_fields)
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        EpisodeProjection.model_validate(
+            {"occurred_at": _NOW, "capture_modality": Modality.TEXT, "step_dispositions": ()}
+        )

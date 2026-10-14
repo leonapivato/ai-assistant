@@ -96,8 +96,6 @@ def _request(binding: EgressBinding) -> ActionRequest:
     return ActionRequest(
         tool=_TOOL,
         parameters={"body": "hello"},
-        step_id="step-1",
-        execution_id="exec-1",
         egress_binding=binding,
     )
 

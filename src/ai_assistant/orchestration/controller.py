@@ -60,8 +60,8 @@ class PassFacts(Protocol):
 
     Every member answers from a decision a stage made on the pass — or from what
     the pass was wired with — and never from whether a stage has run. A decision
-    that nothing came of is still a decision: a declined route, an association that
-    found no goal, a degraded composed reply.
+    that nothing came of is still a decision: a recall that found nothing, a failed
+    story-links decision. The old path's facts left with its rules (ADR-0309 §3:6).
     """
 
     @property
@@ -75,18 +75,6 @@ class PassFacts(Protocol):
     @property
     def conversation_resolved(self) -> bool:
         """The conversation the turn runs under has been resolved."""
-
-    @property
-    def routing_wired(self) -> bool:
-        """The deployment wired the routing stage."""
-
-    @property
-    def route_decided(self) -> bool:
-        """Routing has decided, ``declined`` or ``taken``."""
-
-    @property
-    def route_taken(self) -> bool:
-        """Routing took the route."""
 
     @property
     def windows_decided(self) -> bool:
@@ -123,58 +111,6 @@ class PassFacts(Protocol):
     @property
     def story_links_decided(self) -> bool:
         """The story-links stage made its decision, a failed one included (§6:10)."""
-
-    @property
-    def event_summarized(self) -> bool:
-        """The event summary has been produced."""
-
-    @property
-    def associated(self) -> bool:
-        """Association has decided, including that it found no goal."""
-
-    @property
-    def asks_which_goal(self) -> bool:
-        """The association asks which goal is meant."""
-
-    @property
-    def disambiguation_asked(self) -> bool:
-        """The disambiguation question has been asked."""
-
-    @property
-    def continues_goal(self) -> bool:
-        """The association continues a stored goal."""
-
-    @property
-    def reconciliation_wired(self) -> bool:
-        """The deployment wired reconciliation for this pass."""
-
-    @property
-    def reconciled(self) -> bool:
-        """Reconciliation has a result."""
-
-    @property
-    def turn_decided(self) -> bool:
-        """``LearningLoop.respond`` returned a turn."""
-
-    @property
-    def turn_raised_question(self) -> bool:
-        """The turn's planner raised a question."""
-
-    @property
-    def plan_has_steps(self) -> bool:
-        """The turn's plan has at least one step."""
-
-    @property
-    def drive_decided(self) -> bool:
-        """The drive has a disposition, including a withheld claim."""
-
-    @property
-    def parked(self) -> bool:
-        """The driven step parked for confirmation."""
-
-    @property
-    def reply_composed(self) -> bool:
-        """A composed reply is present, degraded or not."""
 
     @property
     def phases(self) -> PhaseFacts | None:
@@ -347,8 +283,8 @@ def _recall_digest(_: PassFacts) -> object:
 
 #: ADR-0309 §3's table, in its order, the controller's only table (§2:6, §7:1). The first
 #: rule that answers decides, and ``nothing_due`` is last and always answers, so every
-#: pass ends by a rule. The old path's rows are gone from it (§3:6); the members that
-#: named them stay in ``ControllerRule`` until the types lane removes them.
+#: pass ends by a rule. The old path's rows are gone from it, and the members that
+#: named them from ``ControllerStage`` and ``ControllerRule`` (§3:6).
 ACTIVATION_RULES: Final[tuple[Rule, ...]] = (
     Rule(
         ControllerRule.CONVERSATION_UNRESOLVED,

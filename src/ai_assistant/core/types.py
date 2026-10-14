@@ -2795,22 +2795,6 @@ class SpokenAudioFormat(StrEnum):
     MP4 = "audio/mp4"
 
 
-class ParkedBinding(BaseModel):
-    """The ``(execution_id, step_id)`` a parked confirmation is recovered by.
-
-    One value rather than two positional strings, so the pair a recovered resume
-    is keyed on (ADR-0044 §3) cannot be swapped in transit. A turn that parked
-    records the binding it parked on, and the conversation store resolves that
-    binding back to the turn — and so to the conversation the resumption belongs
-    in (ADR-0074 §3).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    execution_id: Identifier
-    step_id: Identifier
-
-
 class TurnReference(BaseModel):
     """What a turn says it is answering, or which goal it is about (ADR-0250 §11).
 
@@ -2947,246 +2931,35 @@ ReplyCapability = Annotated[
 ]
 
 
-# --- the step's and the route's verdicts (ADR-0037, ADR-0197) ---------------
-#
-# Declared here, ahead of :class:`StageEntry`, because ADR-0284 §5:1 puts each
-# verdict on the stage entry that reached it. They used to sit beside their first
-# consumers far below; the rule above :data:`Identifier` decides the move — a
-# forward reference plus ``model_rebuild`` would have made a `core` type depend on
-# an import-order side effect, so the enums moved instead of the model. Relocating
-# an enum is not redefining it (ADR-0084 §4): nothing about either changed.
-
-
-class Disposition(StrEnum):
-    """What became of one plan step at the runner stage (ADR-0037 §1, §4, §5).
-
-    Seven members, and the four that commit nothing are as much a result as the
-    three that do: a step the stage declines to act on is a fact its caller has to
-    be told, not an error.
-
-    **Relocating an enum is not redefining it** (ADR-0084 §4). It kept its members
-    and everything ADR-0037 ratified about them, ADR-0084 §8's refusal to add a
-    ``FAILED`` member is unaffected by the move, and the ``StrEnum`` base is
-    unchanged so every existing value string is byte-identical on the wire.
-
-    ``INVALID_PARAMETERS`` is ADR-0145 §4's addition and ``EGRESS_UNBINDABLE`` is
-    ADR-0152 §9's, and adding a member is additive on the wire for the same reason
-    (ADR-0084 §4): the values are ``StrEnum`` strings a client reads, and the
-    exposure is bounded by deployment rather than by a compatibility rule, since
-    the hub is loopback-only and ships with its client from one install.
-    """
-
-    EXECUTED = "executed"
-    """The call was authorised and handed to the executor; ``state`` carries the
-    outcome the executor committed."""
-
-    DENIED = "denied"
-    """The policy refused. The step is ``SKIPPED``/``APPROVAL_DENIED``, naming
-    the recorded decision."""
-
-    AWAITING_CONFIRMATION = "awaiting_confirmation"
-    """The policy wants a human answer. The step is durably
-    ``AWAITING_APPROVAL``; ``AssistantEngine.resume`` continues it."""
-
-    NO_CAPABLE_TOOL = "no_capable_tool"
-    """Nothing advertises the step's capability. The step is
-    ``SKIPPED``/``NO_CAPABLE_TOOL`` (ADR-0014 §4)."""
-
-    AMBIGUOUS_CAPABILITY = "ambiguous_capability"
-    """Several tools advertise it and no rule chooses between them (ADR-0037 §1,
-    #241). Nothing is committed and the step stays ``PENDING``."""
-
-    INVALID_PARAMETERS = "invalid_parameters"
-    """The step's parameters were not established as acceptable to any tool that
-    could have run them (ADR-0145 §4).
-
-    **One definition and two causes.** Either the evaluation reported violations
-    for every capable candidate, so ADR-0144 §7's eligibility filter left the set
-    empty; or an evaluation *raised* rather than reporting anything, which ADR-0145
-    §7 makes a refusal of the step rather than of the candidate that raised —
-    continuing to rank over the remainder would be selecting under an unknown. What
-    separates them is what is reported alongside: violations for the first, none
-    for the second. They are one member because the pipeline's answer is identical
-    and both are corrected the same way, by different arguments — which is a
-    different request. A second member would be a distinction a client cannot act
-    on differently.
-
-    **It commits nothing:** no ruling is requested, no audit record is written, no
-    claim is made, and the step stays ``PENDING``. It is terminal for the turn that
-    met it and for nothing beyond it. This is ``AMBIGUOUS_CAPABILITY``'s shape and
-    ADR-0037 §1's argument for it transfers unchanged — no ``SkipReason`` is true
-    of it, because ``NO_CAPABLE_TOOL`` is a lie when the tools were capable and the
-    arguments were not, and writing a falsehood into durable state to tidy a return
-    value is what ADR-0014 §4's legal-skip table exists to prevent. It is likewise
-    not the ``FAILED`` member ADR-0037 refused: it asserts nothing about the step's
-    status and writes nothing."""
-
-    EGRESS_UNBINDABLE = "egress_unbindable"
-    """The egress binding seam refused this call, so no ruling was sought for it
-    (ADR-0152 §9).
-
-    Returned when :class:`~ai_assistant.core.protocols.EgressBinder` raised
-    :class:`~ai_assistant.core.errors.EgressBindingError` — a declaration that
-    cannot describe the call, a destination with no canonical form, a top-level
-    argument the schema never statically named, a reference that is not
-    connectable, a definition unequal to its registered original, or a resumed
-    binding unequal to the one that was approved (ADR-0152 §6, §7, §8).
-
-    **It commits nothing:** no ruling is requested, no audit record is written, no
-    claim is made, and the step stays ``PENDING`` at its stored version. It is
-    terminal for the turn that met it and for nothing beyond it —
-    ``AMBIGUOUS_CAPABILITY``'s and ``INVALID_PARAMETERS``' shape, and ADR-0037 §1's
-    argument for the third time.
-
-    **Not ``INVALID_PARAMETERS``, and this is the choice most worth arguing.**
-    That member has one definition and two causes (ADR-0145 §4), both of them
-    about a schema evaluation over capable candidates — and most of ADR-0152 §6's
-    refusals are not about the parameters at all. Reporting a keyword in the wrong
-    place, a tool registered against no account, or a tampered definition as "the
-    step's parameters were not established as acceptable" writes a falsehood into a
-    returned value, and widening ``INVALID_PARAMETERS`` to a third cause would
-    amend ADR-0145 §4.
-
-    **Not ``DENIED``, and the distinction is the point of minting it.** A ``DENY``
-    means the policy refused, is recorded in the trail, and moves the step to
-    ``SKIPPED``/``APPROVAL_DENIED`` naming a decision. This refusal has no decision
-    to name, because it happens before one exists — so a client that could not tell
-    them apart would report "the assistant declined to send this" for a tool whose
-    declaration is malformed, which is a falsehood about the user's own policy.
-
-    **A store outage is not this.** A :class:`~ai_assistant.core.errors.ConnectionStoreError`
-    is never translated into this member: it asserts nothing about the call, which
-    may be perfectly bindable a second later, and it propagates out of the runner
-    stage instead (ADR-0152 §9)."""
-
-    EFFECT_ALREADY_CLAIMED = "effect_already_claimed"
-    """This goal has already claimed this act, so nothing was dispatched
-    (ADR-0259 §2).
-
-    Returned for a ``COMPLETED_OTHERWISE``, an ``UNCERTAIN`` or a ``HELD``
-    :class:`EffectClaim`, and for a ``COMPLETED`` one whose reuse conditions fail.
-    **Which member produced it is not carried on the disposition**, and what the turn
-    tells the user about it is the reply surface's.
-
-    **It commits nothing:** no call is made, no invocation is claimed, no
-    authorisation is spent, no transition is committed, and the step **keeps the
-    status it was entered at** — ``PENDING`` where ``StepRunner.run`` took the claim,
-    ``AWAITING_APPROVAL`` where ``StepRunner.resume`` did. It is the entry status
-    rather than ``PENDING`` because no transition is committed: naming ``PENDING``
-    for a resumed step would demand a move ADR-0014 §4's table does not admit. **No
-    step is moved to** ``SKIPPED`` **on this ground, with any**
-    :class:`SkipReason`.
-
-    Not ``EFFECT_UNSCOPED``, and the two are two members because they are two
-    different facts about the world — *this goal has already claimed this act*
-    against *this plan cannot say which act this step is* — and a client that could
-    not tell them apart could not tell a user which of the two it was, while the
-    second is a defect in the plan and this is not."""
-
-    EFFECT_UNSCOPED = "effect_unscoped"
-    """A side-effecting call whose step names no intended action, so nothing was
-    dispatched (ADR-0259 §2, ADR-0265 §4).
-
-    ADR-0265 §4 leaves *"whether an effect-bearing dispatch must name one"* to be
-    decided where the effect claim is taken, and it must:
-    :meth:`PlanStore.claim_effect` is **not called**, nothing is committed, the step
-    keeps the status it was entered at and the walk stops. Dispatching there would
-    perform an effect **no row could ever recognise**, so every later plan of the
-    goal would answer ``CLAIMED`` and repeat it — ADR-0255 §7's obligation unmet, and
-    the fail-open direction ADR-0265 §4 refuses for a dropped condition label.
-
-    **A call that is not side-effecting is untouched**: it has no effect key, so it
-    reaches the claim never and is held to nothing by this ground."""
-
-
-class RouteOutcome(StrEnum):
-    """What became of one routed operation (ADR-0197 §8).
-
-    Eight members, and the two a reader is most likely to conflate are the two that
-    matter most: :attr:`FAILED` means the operation was **called and raised**, and the
-    engine asserts nothing about whether it took effect; :attr:`UNRECORDED` means §9's
-    row was not written, so the operation was **never called** and nothing was
-    destroyed. They are separate members because they are opposite statements about
-    the same question — did anything happen — and a surface that rendered them alike
-    would tell a user their belief might be gone when ADR-0197 §9 guarantees it is
-    not.
-
-    **The tag decides which of the eight an operation admits** (§8), stated on
-    :meth:`RoutedOperation._describes_one_route` as a closed set per tag: a read-only
-    operation admits exactly :attr:`PERFORMED`, :attr:`UNRECORDED` and :attr:`FAILED`,
-    and a confirm-owed one admits all eight.
-
-    **This is not the fusion ADR-0084 §8 refused for** :class:`Disposition`. That
-    section could keep ``Disposition`` a gate verdict because ``StepOutcome.state``
-    already carried the step's own status, so a client had a second value to read. A
-    routed operation has no ``ExecutionState`` and no durable step, so splitting this
-    enum would mint a second value whose only job is to be read beside the first, and
-    whose disagreement with it would have no defensible interpretation.
-    """
-
-    PERFORMED = "performed"
-    """The operation was called and returned. On a read-only member the listing it
-    produced rides :attr:`RoutedOperation.listing`."""
-
-    AWAITING_CONFIRMATION = "awaiting_confirmation"
-    """A confirm-owed route parked: nothing was performed, and
-    :attr:`RoutedOperation.confirmation` carries the card and the token to answer it
-    with (ADR-0197 §7)."""
-
-    REFUSED = "refused"
-    """The user answered a routed park ``False``. Nothing was performed, and **no**
-    ``PermissionDeniedError`` is raised — no ``ActionPolicy`` was consulted and no
-    ``PermissionDecision`` recorded, so there is no ruling for a refusal to be
-    (ADR-0197 §7)."""
-
-    AMBIGUOUS = "ambiguous"
-    """§5's lookup resolved to more than one candidate and no more than
-    :data:`DEFAULT_PAGE_SIZE` of them. Nothing was performed, nothing was confirmed,
-    and the candidates ride :attr:`RoutedOperation.listing`."""
-
-    AMBIGUOUS_TRUNCATED = "ambiguous_truncated"
-    """:attr:`AMBIGUOUS`, over a lookup that would have **exceeded** the bound. This
-    member is the whole of what tells the reply the request matched more than can be
-    shown: §6 gives the composing stage no count, so a single ``AMBIGUOUS`` could not
-    distinguish two candidates from a hundred (ADR-0197 §5)."""
-
-    NOT_FOUND = "not_found"
-    """§5's lookup resolved to no candidate. Nothing was performed and nothing was
-    confirmed."""
-
-    UNRECORDED = "unrecorded"
-    """§9's row was not written — the store refused it, or no ``route_id`` could be
-    minted for it — so the operation was **never called**, no park was registered and
-    no token was minted."""
-
-    FAILED = "failed"
-    """The operation was called and raised. Whether it took effect is not asserted."""
-
-
 # --- post-processing activation records (ADR-0275) -------------------------
 
 
 class ProcessingStatus(StrEnum):
-    """How one admitted processing pass ended, independently of goal success."""
+    """How one admitted processing pass ended, independently of goal success.
+
+    ``waiting`` left with the old path's parks and questions (ADR-0318 §5:1), a
+    recorded exception to *added to and never renamed*: the data directory is fresh,
+    so nothing stored names it (§5:5).
+    """
 
     COMPLETED = "completed"
-    WAITING = "waiting"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
 
 
 class ProcessingReason(StrEnum):
-    """Code-owned reasons for the terminal processing classification."""
+    """Code-owned reasons for the terminal processing classification.
+
+    ``confirmation``, ``clarification``, ``disambiguation`` and ``composition_failed``
+    left with the old path that produced them (ADR-0318 §5:1), a recorded exception
+    to *added to and never renamed*: the data directory is fresh (§5:5).
+    """
 
     RETURNED = "returned"
     NO_CONTENT = "no_content"
-    CONFIRMATION = "confirmation"
-    CLARIFICATION = "clarification"
-    DISAMBIGUATION = "disambiguation"
     TIMEOUT = "timeout"
     TRANSCRIPTION_FAILED = "transcription_failed"
     UNDERSTANDING_FAILED = "understanding_failed"
-    COMPOSITION_FAILED = "composition_failed"
     OUTPUT_OVERSIZED = "output_oversized"
     PROCESSING_FAILED = "processing_failed"
     INTERNAL_ERROR = "internal_error"
@@ -3281,43 +3054,6 @@ class RecordedChannelTrigger(BaseModel):
             msg = "a recorded trigger's channel is its target where the target names one"
             raise ValueError(msg)
         return self
-
-
-class RecordedResumeTrigger(BaseModel):
-    """An unsettled control resolution; never retains the continuation token."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: Literal["resume"] = "resume"
-    channel: ChannelIdentity | None
-    approved: bool
-    remember_recipients_until: UtcInstant | None = None
-
-
-RecordedActivationTrigger = Annotated[
-    RecordedChannelTrigger | RecordedResumeTrigger, Field(discriminator="kind")
-]
-
-
-class ActivationLinks(BaseModel):
-    """Only relationships established by processing, carrying no authority.
-
-    Attributes:
-        parked: The binding a resumed activation continues (ADR-0275 §4).
-        parks: The binding the activation's own step parked (ADR-0283 §3:4). It is
-            what :meth:`~ai_assistant.core.protocols.MemoryStore.episode_parking`
-            matches, and it is a field of its own rather than a second meaning of
-            ``parked``, so the parking episode and the episodes resuming it stay
-            distinguishable.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    predecessor_episode_id: Identifier | None = None
-    question_id: Identifier | None = None
-    read_park_id: Identifier | None = None
-    parked: ParkedBinding | None = None
-    goal_id: Identifier | None = None
-    attempt_id: Identifier | None = None
-    parks: ParkedBinding | None = None
 
 
 # --- frozen JSON, and the identifier primitive (ADR-0014 §2) -----------------
@@ -3762,17 +3498,13 @@ class UnderstandingGround(StrEnum):
 class UnderstandingOmission(StrEnum):
     """Why a processing record carries no understanding (ADR-0276 §2, §5, §6).
 
-    Closed and never renamed, on :class:`UnderstandingGround`'s rule.
+    Closed and never renamed, on :class:`UnderstandingGround`'s rule. ``routed`` and
+    ``no_input`` left with the route and the resume they classified (ADR-0318 §5:4),
+    a recorded exception to that rule: the data directory is fresh (§5:5).
     """
-
-    ROUTED = "routed"
-    """A taken route ended the pass before the understanding stage."""
 
     NO_TEXT = "no_text"
     """Speech yielded no words, or transcription failed."""
-
-    NO_INPUT = "no_input"
-    """The activation carries no input to understand (a resume trigger)."""
 
     FAILED = "failed"
     """The understanding stage raised."""
@@ -3947,19 +3679,13 @@ class ControllerStage(StrEnum):
 
     Closed, **added to and never renamed**. A stage is not a phase: the two do
     not map one to one (ADR-0280 §1). :attr:`END` names the record's final entry,
-    which ran nothing.
+    which ran nothing. The old path's stages left at the cutover (ADR-0309 §3:6), a
+    recorded exception to that rule: the data directory is fresh, so nothing stored
+    names them.
     """
 
     BEGIN_CONVERSATION = "begin_conversation"
-    ROUTING = "routing"
     UNDERSTANDING = "understanding"
-    EVENT_SUMMARY = "event_summary"
-    ASSOCIATE_GOAL = "associate_goal"
-    ASK_DISAMBIGUATION = "ask_disambiguation"
-    RECONCILE = "reconcile"
-    TURN_LOOP = "turn_loop"
-    DRIVE = "drive"
-    COMPOSE = "compose"
     END = "end"
     RECALL = "recall"
     WINDOWS = "windows"
@@ -3984,20 +3710,13 @@ class ControllerRule(StrEnum):
 
     Closed, **added to and never renamed**. The members in
     :data:`ENDING_CONTROLLER_RULES` end a pass; every other member makes a stage
-    due.
+    due. The old path's rules left at the cutover (ADR-0309 §3:6), a recorded
+    exception to that rule: the data directory is fresh, so nothing stored names
+    them.
     """
 
     CONVERSATION_UNRESOLVED = "conversation_unresolved"
-    ROUTE_UNCHECKED = "route_unchecked"
-    ROUTE_TAKEN = "route_taken"
     NOT_UNDERSTOOD = "not_understood"
-    EVENT_UNSUMMARIZED = "event_unsummarized"
-    ASSOCIATION_DUE = "association_due"
-    DISAMBIGUATION_RAISED = "disambiguation_raised"
-    CONTINUING_UNRECONCILED = "continuing_unreconciled"
-    UNPLANNED = "unplanned"
-    PLAN_HAS_STEPS = "plan_has_steps"
-    REPLY_OWED = "reply_owed"
     NOTHING_DUE = "nothing_due"
     STAGE_REPEATED = "stage_repeated"
     NO_TEXT_INPUT = "no_text_input"
@@ -4007,8 +3726,6 @@ class ControllerRule(StrEnum):
     ENDED_BEFORE_CONTROLLER = "ended_before_controller"
     NOT_RECALLED = "not_recalled"
     WINDOWS_UNASSEMBLED = "windows_unassembled"
-    PARK_ANSWERED = "park_answered"
-    """A resume continues the stage its parked work stopped in (ADR-0284 §5:4)."""
     HUB_STOPPED = "hub_stopped"
     """The process ended while the pass was open, and a restart's close appended the
     end entry (ADR-0286 §7). It ends a pass, so it is in
@@ -4050,7 +3767,6 @@ class ControllerRule(StrEnum):
 #: The rules that end a pass rather than make a stage due (ADR-0280 §4, §5).
 ENDING_CONTROLLER_RULES: Final[frozenset[ControllerRule]] = frozenset(
     {
-        ControllerRule.ROUTE_TAKEN,
         ControllerRule.NOTHING_DUE,
         ControllerRule.STAGE_REPEATED,
         ControllerRule.NO_TEXT_INPUT,
@@ -4082,11 +3798,9 @@ class StageEntry(BaseModel):
 
     It names which stage ran, the rule that made it due and how it ended, or, for
     the final :attr:`ControllerStage.END` entry, the rule that ended the pass. It
-    carries no stage result but one: the verdict a ``drive`` or a ``routing`` stage
-    reached (ADR-0284 §5:1-§5:2, superseding ADR-0280 §6:3 for those two fields).
-    ``step_disposition`` is admitted on a ``drive`` entry alone and ``route_outcome``
-    on a ``routing`` entry alone; each is ``None`` where the stage reached no verdict.
-    Every other result stays where the episode already keeps it.
+    carries no stage result (ADR-0280 §6:3): the two verdicts the old path's
+    ``drive`` and ``routing`` stages recorded left with those stages (ADR-0309 §3:7).
+    Every result stays where the episode already keeps it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -4095,19 +3809,6 @@ class StageEntry(BaseModel):
     started_at: UtcInstant
     ended_at: UtcInstant
     outcome: StageOutcome
-    step_disposition: Disposition | None = None
-    route_outcome: RouteOutcome | None = None
-
-    @model_validator(mode="after")
-    def _verdict_on_its_own_stage(self) -> Self:
-        # ADR-0284 §5:1: each verdict on the one stage that reaches it.
-        if self.step_disposition is not None and self.stage is not ControllerStage.DRIVE:
-            msg = "a step disposition is recorded on a drive entry alone"
-            raise ValueError(msg)
-        if self.route_outcome is not None and self.stage is not ControllerStage.ROUTING:
-            msg = "a route outcome is recorded on a routing entry alone"
-            raise ValueError(msg)
-        return self
 
     @model_validator(mode="after")
     def _end_entry_is_an_ending(self) -> Self:
@@ -4515,23 +4216,23 @@ class EpisodeProcessingRecord(BaseModel):
 
     ``recall_second_run`` is recall's second decision, made on what understanding
     found (ADR-0308 §2, §7), held beside the first's ``recall``. It is ``None`` where
-    no second run was decided, and on a resume always, as ``recall`` is.
+    no second run was decided.
 
-    ``schema_version`` is 10 because a round loses the mark that asked for another
-    (ADR-0315 §3, §5): a version-9 record carries it and does not validate here.
+    ``schema_version`` is 11 because the record loses the old path's links, resume
+    trigger and compose-stage degradation, and its stages their verdicts (ADR-0318
+    §4, §5:3, §7:1; ADR-0309 §3:7): a version-10 record carries them and does not
+    validate here.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    schema_version: Literal[10] = 10
+    schema_version: Literal[11] = 11
     activation_id: Identifier
     started_at: UtcInstant
     ended_at: UtcInstant | None = None
-    trigger: RecordedActivationTrigger
+    trigger: RecordedChannelTrigger
     status: ProcessingStatus | None = None
     reason: ProcessingReason | None = None
-    response_degraded: bool = False
     output_degraded: bool = False
-    links: ActivationLinks = Field(default_factory=ActivationLinks)
     understanding: tuple[ActivationUnderstanding, ...] = ()
     understanding_omitted: UnderstandingOmission | None = None
     understanding_elided: int = Field(default=0, strict=True, ge=0, lt=2**31)
@@ -4597,9 +4298,8 @@ class EpisodeProcessingRecord(BaseModel):
 
     @model_validator(mode="after")
     def _stages_follow_the_trigger(self) -> Self:
-        # ADR-0280 §7: a channel activation records its stages ending in exactly one end
-        # entry, last, and ADR-0284 §5:4-§5:5 holds a resume to the same rule. ADR-0286
-        # §1: an open record's stages carry no end entry.
+        # ADR-0280 §7: an activation records its stages ending in exactly one end entry,
+        # last. ADR-0286 §1: an open record's stages carry no end entry.
         ends = [entry.stage is ControllerStage.END for entry in self.stages]
         if self.is_open:
             if any(ends):
@@ -4607,17 +4307,6 @@ class EpisodeProcessingRecord(BaseModel):
                 raise ValueError(msg)
         elif not ends or not ends[-1] or any(ends[:-1]):
             msg = "a stage record ends in exactly one end entry, last"
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _no_recall_on_a_resume(self) -> Self:
-        # ADR-0281 §6: a resume keeps its legacy path, and recall makes no decision on it.
-        # ADR-0308 §7: nor a second run's.
-        if isinstance(self.trigger, RecordedResumeTrigger) and (
-            self.recall is not None or self.recall_second_run is not None
-        ):
-            msg = "a resume's processing record carries no recall result"
             raise ValueError(msg)
         return self
 
@@ -4860,10 +4549,10 @@ class EpisodeProjection(BaseModel):
     **An episode with a processing record** carries its ``channel``, the trigger's
     ``origin``, its input text where ``origin`` is ``user`` (or ``outside``, for the
     two renderings that admit it, §8:5), the latest understanding's ``meaning``,
-    ``meaning_ground`` and ``unresolved``, the stage verdicts, its ``status`` and
-    ``reason``. **An episode without one** (§8:2) carries its ``capture_modality``
-    instead of a channel and its ``content`` as its input, and no origin, no
-    understanding, no verdict and no status; ``status`` is ``None`` exactly there.
+    ``meaning_ground`` and ``unresolved``, its ``status`` and ``reason``, and no stage
+    verdict (ADR-0318 §3:1). **An episode without one** (§8:2) carries its
+    ``capture_modality`` instead of a channel and its ``content`` as its input, and no
+    origin, no understanding and no status; ``status`` is ``None`` exactly there.
     Both carry ``occurred_at``, ``response`` and ``derived_from_external``. Only an
     episode with a processing record carries ``rounds`` (ADR-0307 §10) and
     ``evidence`` (ADR-0308 §5:5).
@@ -4872,15 +4561,13 @@ class EpisodeProjection(BaseModel):
         occurred_at: When the episode happened.
         channel: The channel its trigger names, where it has a processing record.
         capture_modality: Its capture modality, where it has no processing record.
-        origin: Who the trigger's input came from; ``None`` on a resume and on an
-            episode with no processing record.
+        origin: Who the trigger's input came from; ``None`` on an episode with no
+            processing record.
         input: The input text or transcript, cut to the excerpt bound, or ``None``
             where none is shown.
         meaning: The latest understanding's meaning, or ``None`` where there is none.
         meaning_ground: Its ground, present exactly with ``meaning``.
         unresolved: The latest understanding's unresolved matters.
-        step_dispositions: Each ``drive`` entry's verdict, in stage order.
-        route_outcomes: Each ``routing`` entry's verdict, in stage order.
         response: What the episode records the assistant sent back (``outcome``),
             cut to the excerpt bound.
         status: How processing ended, or ``None`` where there is no processing record.
@@ -4904,8 +4591,6 @@ class EpisodeProjection(BaseModel):
     meaning: NonBlankEncodableText | None = None
     meaning_ground: UnderstandingGround | None = None
     unresolved: tuple[UnresolvedMatter, ...] = ()
-    step_dispositions: tuple[Disposition, ...] = ()
-    route_outcomes: tuple[RouteOutcome, ...] = ()
     response: ProjectedText | None = None
     status: ProcessingStatus | None = None
     reason: ProcessingReason | None = None
@@ -4925,14 +4610,12 @@ class EpisodeProjection(BaseModel):
             msg = "a projection carries unresolved matters only with a meaning"
             raise ValueError(msg)
         if self.status is None:
-            # §8:2: no origin, no understanding, no verdict and no status.
+            # §8:2: no origin, no understanding and no status.
             if (
                 self.channel is not None
                 or self.capture_modality is None
                 or self.origin is not None
                 or self.meaning is not None
-                or self.step_dispositions
-                or self.route_outcomes
                 or self.rounds
                 or self.evidence
             ):
@@ -20242,12 +19925,6 @@ class ActionRequest(BaseModel):
             "value the trail cannot compare."
         ),
     )
-    step_id: DurableIdentifier | None = Field(
-        default=None, description="The plan step this action belongs to, if any."
-    )
-    execution_id: DurableIdentifier | None = Field(
-        default=None, description="The execution this action belongs to, if any."
-    )
     egress_binding: Annotated[EgressBinding | None, AfterValidator(_detached_binding)] = Field(
         default=None,
         description=(
@@ -20751,17 +20428,6 @@ class PermissionDecision(BaseModel):
             "is refused rather than assumed — see :data:`UtcInstant`."
         )
     )
-    step_id: DurableIdentifier | None = None
-    execution_id: DurableIdentifier | None = Field(
-        default=None,
-        description=(
-            "The execution this decision belongs to, if any (ADR-0044 §1). "
-            "Transcribed from the request by :meth:`from_request`, never asserted "
-            "by a caller, so a decision cannot name an execution the policy did "
-            "not see. ``None`` for a direct ruling outside a plan execution, "
-            "exactly as ``step_id`` is."
-        ),
-    )
     intended_action: Identifier | None = Field(
         default=None,
         description=(
@@ -20831,10 +20497,10 @@ class PermissionDecision(BaseModel):
 
         **The only construction path a caller should use**, and it exists so the
         binding is *transcribed* rather than asserted. Every field describing
-        what was ruled on — ``tool``, ``parameters_digest``, ``step_id`` and
-        ``execution_id`` (ADR-0044 §1) — is copied from the request by ``core``,
-        so a decision naming a different tool, or a different execution, than the
-        one the policy saw cannot be produced by following the contract.
+        what was ruled on — ``tool``, ``parameters_digest``, the egress binding and
+        the intended action — is copied from the request by ``core``, so a decision
+        naming a different tool than the one the policy saw cannot be produced by
+        following the contract.
 
         A factory rather than a validator because the request is not a field of
         the decision: embedding it whole would store the parameters this design
@@ -20901,8 +20567,6 @@ class PermissionDecision(BaseModel):
             tool=request.tool.model_copy(deep=True),
             parameters_digest=request.parameters_digest,
             decided_at=decided_at,
-            step_id=request.step_id,
-            execution_id=request.execution_id,
             intended_action=request.intended_action,
             resolves=resolves,
             expires_at=expires_at,
@@ -20927,15 +20591,14 @@ class PermissionDecision(BaseModel):
         clock, no store and no seam, and performs no I/O.
 
         It exists because the resuming constructor needs a request no trail row can
-        supply. :meth:`from_request` transcribes ``tool``, ``parameters_digest``,
-        ``step_id`` and ``execution_id`` from an :class:`ActionRequest`, which
-        carries the call's ``parameters``; a recorded decision carries a
-        ``parameters_digest`` and nothing to rebuild them from, so a caller holding
-        a trail row and nothing else has no route through that constructor
-        (ADR-0235 §3).
+        supply. :meth:`from_request` transcribes ``tool`` and ``parameters_digest`` from
+        an :class:`ActionRequest`, which carries the call's ``parameters``; a recorded
+        decision carries a ``parameters_digest`` and nothing to rebuild them from, so a
+        caller holding a trail row and nothing else has no route through that
+        constructor (ADR-0235 §3).
 
-        **It accepts no ``tool``, no ``parameters_digest``, no ``egress_binding``,
-        no ``step_id``, no ``execution_id`` and no ``resolves`` from its caller**, so
+        **It accepts no ``tool``, no ``parameters_digest``, no ``egress_binding``
+        and no ``resolves`` from its caller**, so
         a caller has no parameter through which to substitute a subject or point the
         answer at a different question. That removes the capability rather than
         forbidding it, which is ADR-0021 §3's move and ADR-0193 §2's after it — and
@@ -20960,8 +20623,8 @@ class PermissionDecision(BaseModel):
 
         Args:
             confirmed: The recorded ``CONFIRM`` being answered. Its ``tool``,
-                ``parameters_digest``, ``egress_binding``, ``step_id`` and
-                ``execution_id`` are transcribed by value, and its ``id`` becomes
+                ``parameters_digest`` and ``egress_binding`` are transcribed by
+                value, and its ``id`` becomes
                 this decision's ``resolves``.
             ruling: What the policy said, from ``ActionPolicy.resolve``.
             id: This decision's own id, minted by the caller that records.
@@ -20975,7 +20638,6 @@ class PermissionDecision(BaseModel):
 
         Raises:
             ValueError: If ``confirmed``'s ruling was not a ``CONFIRM``; if
-                ``confirmed`` carries a ``step_id`` or an ``execution_id``; if
                 ``decided_at`` is before ``confirmed.decided_at``; or if the record
                 the transcription produces fails any of this model's own validators.
         """
@@ -20983,20 +20645,6 @@ class PermissionDecision(BaseModel):
             msg = (
                 f"a resolving decision answers a recorded CONFIRM; decision "
                 f"{confirmed.id!r} ruled {confirmed.ruling.outcome} (ADR-0235 §4)"
-            )
-            raise ValueError(msg)
-        if confirmed.step_id is not None or confirmed.execution_id is not None:
-            # **The refusal that keeps this constructor off every path that
-            # executes a call** (ADR-0235 §4). A confirmation carrying either field
-            # belongs to a step of an execution, and its answer must be built from a
-            # rebound request through :meth:`from_request` (ADR-0152 §7, ADR-0148
-            # §1); a confirmation carrying neither belongs to no step, so there is
-            # nothing to rebind and nothing to run.
-            msg = (
-                f"decision {confirmed.id!r} belongs to a step of an execution "
-                f"(step_id={confirmed.step_id!r}, execution_id={confirmed.execution_id!r}), so "
-                f"its answer is the resuming one and is built from a rebound request "
-                f"(ADR-0235 §4)"
             )
             raise ValueError(msg)
         if decided_at < confirmed.decided_at:
@@ -21013,13 +20661,11 @@ class PermissionDecision(BaseModel):
             tool=confirmed.tool.model_copy(deep=True),
             parameters_digest=confirmed.parameters_digest,
             decided_at=decided_at,
-            step_id=confirmed.step_id,
-            execution_id=confirmed.execution_id,
             # **Transcribed with the rest of the subject, and accepted from no
             # caller** (ADR-0235 §4, ADR-0266 §7): a resolving decision that lost the
             # act the question was asked about would answer a request that is an
-            # attempt at another, which is the substitution `authorises`' sixth
-            # conjunct exists to refuse.
+            # attempt at another, which is the substitution `authorises`'
+            # ``intended_action`` conjunct exists to refuse.
             intended_action=confirmed.intended_action,
             resolves=confirmed.id,
             expires_at=None,
@@ -21056,20 +20702,10 @@ class PermissionDecision(BaseModel):
         referenced record is in hand, rather than at every later read where it
         is not.
 
-        **``execution_id`` is the fourth conjunct, and it is load-bearing rather
-        than symmetry** (ADR-0044 §1). This is the check the executor runs before
-        it claims a step, so it is where a decision is bound to *what it may run*.
-        Without it, a decision resolved (or auto-granted) for execution A — same
-        tool, same digest, same step id as B's — would answer ``True`` for a
-        request naming execution B, and an executor handed B's state and that
-        decision would run B under A's approval, never resolving B's own parked
-        question. That is the cross-execution substitutability #253 closes, at the
-        seam that runs the tool rather than the one that records a resolution. It
-        still meets ADR-0016 §2's test for living on the type — computable from
-        the two values alone, independent of policy, config, context and clock —
-        because an execution id is a value on both records, not a decision.
+        **No step and no execution is compared** (ADR-0318 §6:1): plan executions
+        retired with the old path (ADR-0309 §5), so neither record carries one.
 
-        **``egress_binding`` is the fifth conjunct, compared whole and by value**
+        **``egress_binding`` is compared whole and by value**
         (ADR-0150 §9). Not field by field, not by its derived canonical
         destination set, not by its account, and by nothing weaker than equality
         of the whole value. Comparing the whole value is strictly stronger than
@@ -21114,17 +20750,17 @@ class PermissionDecision(BaseModel):
         None`` is ``True``, so every request and decision in the tree today
         compares exactly as it did before this conjunct existed.
 
-        **``intended_action`` is the sixth conjunct, and it is the one value the
+        **``intended_action`` is compared too, and it is the one value the
         coverage was proved *through*** (ADR-0266 §7). Without it a decision taken
         for one act would authorise a later request differing **only** in the act it
         is an attempt at — and the whole of ADR-0266's proof is that the amount was
         quoted *for that act*, so the value selecting the evidence would be the one
         value the trail could not compare. It meets ADR-0016 §2's test for living on
-        the type exactly as ``execution_id`` does: an identifier on both records,
-        not a decision. It is ``None``-safe in both directions on that conjunct's own
-        reading — a **stored** decision written before this field decodes carrying
-        ``None`` and then authorises only a request carrying none, which is the
-        fail-closed direction and needs no migration to be true.
+        the type: an identifier on both records, not a decision. It is ``None``-safe in
+        both directions on that conjunct's own reading — a **stored** decision written
+        before this field decodes carrying ``None`` and then authorises only a request
+        carrying none, which is the fail-closed direction and needs no migration to be
+        true.
 
         **``effect`` is not compared** (ADR-0306 §6). It names acting's record of the
         call, which the recorder mints and the request never carries, so it says
@@ -21134,8 +20770,6 @@ class PermissionDecision(BaseModel):
             self.ruling.outcome is PermissionOutcome.ALLOW
             and request.tool == self.tool
             and request.parameters_digest == self.parameters_digest
-            and request.step_id == self.step_id
-            and request.execution_id == self.execution_id
             and request.egress_binding == self.egress_binding
             and request.intended_action == self.intended_action
         )
@@ -21203,15 +20837,20 @@ class PermissionDecision(BaseModel):
 class GrantScope(StrEnum):
     """A use of a source that a grant authorises (ADR-0097 §2, ADR-0133 §1).
 
-    **Three members, and none is speculative.** The axis is ADR-0093 §3's,
+    **Two members, and none is speculative.** The axis is ADR-0093 §3's,
     promoted to something the user can answer — one scope per consumer of a
-    reading — and each member is a sentence a person actually means. ``FACET`` is
-    transient, advisory and never stored (ADR-0008 §4, ADR-0096 §4); ``INGEST``
+    reading — and each member is a sentence a person actually means. ``INGEST``
     writes durable beliefs that outlive the turn and reach ``export``; ``NOTIFY``
     is reading the source so that a producer may conclude a
     :class:`NotificationCandidate` about what it read (ADR-0133 §1), which for a
     kept candidate is a durable, exportable record proposing to tell the user
     something they did not ask for (ADR-0130 §1, §7, §8).
+
+    **``facet`` left** (ADR-0318 §6:2): no read is gated on it since the request
+    path's facets left, so a grant naming it promised a use nothing honours. A new
+    grant names ``NOTIFY`` alone, ``INGEST`` staying for the grants that name it
+    (ADR-0294 §4:4). Its removal is a recorded exception to *added to and never
+    renamed*: the data directory is fresh, so nothing stored names it (§5:5).
 
     **ADR-0133 partially supersedes ADR-0097 §2 — its enumeration of the uses,
     and nothing else of it.** This docstring used to say "exactly two members",
@@ -21222,7 +20861,7 @@ class GrantScope(StrEnum):
     revocation revokes a grant whole.
 
     **No member implies, ranks or subsumes another** (ADR-0133 §2). A scope names
-    any non-empty subset of the three and authorises exactly the uses it names;
+    any non-empty subset of the members and authorises exactly the uses it names;
     nothing may infer one from another. ``NOTIFY`` in particular authorises a
     **read** and no contact, disposition, delivery or channel — it names the use
     a reading is put to, exactly as ``INGEST`` authorises *proposing* beliefs
@@ -21252,7 +20891,6 @@ class GrantScope(StrEnum):
     *use* is not a step toward a sub-source selector.
     """
 
-    FACET = "facet"
     INGEST = "ingest"
     NOTIFY = "notify"
 
@@ -21276,8 +20914,8 @@ def _grant_scope(value: tuple[GrantScope, ...]) -> tuple[GrantScope, ...]:
       one-live-grant-per-source slot, so the real grant could not be recorded
       until it was revoked. ADR-0097 §2 refuses it at construction for that
       reason.
-    * **A repeated member is refused**, not silently folded away. ``(FACET,
-      FACET)`` is a caller that has lost track of what it is asking for, and
+    * **A repeated member is refused**, not silently folded away. ``(NOTIFY,
+      NOTIFY)`` is a caller that has lost track of what it is asking for, and
       ADR-0097 §10 spells the outcome as a refusal.
     * **Order is normalised** rather than refused. ADR-0097 §10 gives one reason
       for the ordering — "so two implementations serialise one grant
@@ -26006,86 +25644,6 @@ class ReadCancellation(StrEnum):
     general case is deferred by name to issue #2173's L7 obligation."""
 
 
-class StepOutcome(BaseModel):
-    """What became of the one step a turn drove (ADR-0042 §3, §4; ADR-0084 §8).
-
-    **The disposition is the gate's verdict; the named step's ``status`` and
-    ``failure`` are the outcome.** A client that renders success from
-    :attr:`disposition` alone is wrong — ``EXECUTED`` says the permission gate
-    let the call through and the executor committed *something*, not that the
-    something succeeded. :attr:`step_id` is what turns "read ``state`` too" from
-    advice into an addressable operation::
-
-        next(s for s in outcome.state.steps if s.step_id == outcome.step_id)
-
-    That rule is a contract clause on the Protocol rather than commentary here,
-    because #531's defect was an adapter reading the disposition and discarding
-    the state, and every future spoke will have the same two fields in front of
-    it.
-
-    Attributes:
-        disposition: Which :class:`Disposition` the step reached — the gate's
-            verdict, and not the step's own result. The members are that enum's
-            to enumerate; a count written here goes stale the next time one is
-            added.
-        state: The durable execution state after the last transition committed.
-        step_id: The plan step this pass drove. Required and never ``None``: a
-            turn whose plan had no step returns ``TurnOutcome(step=None)`` and
-            constructs no :class:`StepOutcome` at all, so an optional field would
-            be an optionality nothing can produce and every client would carry a
-            ``None`` branch it can never reach. It is the key that addresses
-            :attr:`ExecutionState.steps`, whose elements carry
-            :attr:`StepExecution.step_id`, so it is the same
-            :data:`Identifier` type a client compares it against.
-        tool_id: The tool selected, or ``None`` where none was. **Not an
-            alternative to** :attr:`step_id`: two steps may bind the same tool, so
-            a tool id cannot identify a step (ADR-0084 §8).
-        confirmation: Present **iff** :attr:`disposition` is
-            :attr:`Disposition.AWAITING_CONFIRMATION` — the content and token the
-            adapter renders and relays.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    disposition: Disposition = Field(description="Which Disposition the step reached.")
-    state: ExecutionState = Field(
-        description="Durable execution state after the last transition committed."
-    )
-    step_id: Identifier = Field(description="The plan step this pass drove.")
-    tool_id: Identifier | None = Field(
-        default=None, description="The tool selected, or ``None`` where none was."
-    )
-    confirmation: Confirmation | None = Field(
-        default=None,
-        description="Present iff the disposition is AWAITING_CONFIRMATION.",
-    )
-
-    @model_validator(mode="after")
-    def _confirmation_matches_disposition(self) -> StepOutcome:
-        """A parked step carries its confirmation, and nothing else does (ADR-0085 §4b).
-
-        **This is the invariant a wire client cannot work around.** ADR-0042 §4
-        obliges a parked step's result to carry the confirmation content and the
-        opaque token the adapter renders and relays; a nullable field with no
-        invariant permits an ``AWAITING_CONFIRMATION`` outcome carrying neither,
-        and a client handed one has nothing to resume with and no contract
-        violation to point at. Stated in both directions, because a confirmation
-        on a disposition that did not park is a prompt for an action nobody is
-        waiting on.
-        """
-        parked = self.disposition is Disposition.AWAITING_CONFIRMATION
-        if parked and self.confirmation is None:
-            msg = "an AWAITING_CONFIRMATION outcome must carry the confirmation to resume with"
-            raise ValueError(msg)
-        if not parked and self.confirmation is not None:
-            msg = (
-                f"a {self.disposition.name} outcome must not carry a confirmation: "
-                "nothing is waiting on an answer"
-            )
-            raise ValueError(msg)
-        return self
-
-
 class TurnResult(BaseModel):
     """What one conversational turn produced (ADR-0022 §2).
 
@@ -27048,41 +26606,6 @@ _CONFIRM_OWED_OPERATIONS: Final[frozenset[RoutableOperation]] = frozenset(
 )
 
 
-#: The outcomes that carry :attr:`RoutedOperation.listing` whatever the operation's
-#: tag. ``PERFORMED`` joins them only on a **read-only** operation, which the
-#: validator adds rather than folding in here: a confirm-owed ``PERFORMED`` is a
-#: destruction or a withdrawal and has no listing to show.
-_LISTING_OUTCOMES: Final[frozenset[RouteOutcome]] = frozenset(
-    {RouteOutcome.AMBIGUOUS, RouteOutcome.AMBIGUOUS_TRUNCATED}
-)
-
-#: ADR-0197 §8's closed set of admissible outcomes, per §3 tag: ``True`` is
-#: confirm-owed and ``False`` is read-only. Spelled as a set per tag rather than as
-#: the exclusions the pipeline happens to notice, which is what keeps it complete
-#: when a ninth member is added to :class:`RouteOutcome`.
-_ADMITTED_OUTCOMES: Final[Mapping[bool, frozenset[RouteOutcome]]] = {
-    False: frozenset({RouteOutcome.PERFORMED, RouteOutcome.UNRECORDED, RouteOutcome.FAILED}),
-    True: frozenset(RouteOutcome),
-}
-
-
-def admitted_route_outcomes(operation: RoutableOperation) -> frozenset[RouteOutcome]:
-    """Return the outcomes ``operation``'s §3 tag admits (ADR-0197 §8).
-
-    The rule itself rather than an implementation detail of the validator below: a
-    surface deciding what it may be handed reads it here rather than restating three
-    member names it would then have to keep in step.
-
-    Args:
-        operation: The routed operation whose admissible outcomes are wanted.
-
-    Returns:
-        Exactly three for a read-only operation — ``PERFORMED``, ``UNRECORDED`` and
-        ``FAILED`` — and all eight for a confirm-owed one.
-    """
-    return _ADMITTED_OUTCOMES[operation.confirm_owed]
-
-
 type RoutedListing = (
     tuple[Belief, ...]
     | tuple[Question, ...]
@@ -27229,127 +26752,6 @@ class OperationConfirmation(BaseModel):
                 f"{arm.__name__}, got {type(self.subject[0]).__name__}: the operation is "
                 "the discriminator, and a card describing a record of another kind is "
                 "not a description of this route (ADR-0197 §8)"
-            )
-            raise ValueError(msg)
-        return self
-
-
-class RoutedOperation(BaseModel):
-    """What one routed pass did, and the whole of what a client reads off it (§8).
-
-    Carried on :attr:`TurnOutcome.routed`, and **unable to describe a pass that did
-    not happen**: the validator below states five invariants in both directions, as
-    :meth:`StepOutcome._confirmation_matches_disposition` states its own.
-
-    **An adapter renders this in addition to any composed reply, never instead of
-    it** (ADR-0197 §10). Where the two disagree the routed account is correct by
-    construction, and no adapter, setting or later ADR resolves that disagreement in
-    the reply's favour or suppresses the account to remove it. That is ADR-0170 §6's
-    rule and it binds here for ADR-0170 §6's reason — sharpened, because on a routed
-    pass the model saw two enum values and never the record, so the listing beside the
-    prose is typed data from the store that no prompt influenced.
-
-    Attributes:
-        operation: Which operation the ask was routed to. It is the **discriminator**
-            for :attr:`listing` and for a confirmation's subject alike, and §3's tag
-            is derivable from it, which is what lets this type state the tag-to-outcome
-            rule without a second field.
-        outcome: What became of it.
-        listing: The records the pass carries — the candidates of an ambiguous lookup,
-            or a read-only operation's own result. Present **iff** :attr:`outcome` is
-            ``AMBIGUOUS``, is ``AMBIGUOUS_TRUNCATED``, or is ``PERFORMED`` on a
-            read-only operation. No surface renders fewer candidates than this carries
-            or summarises in place of them (ADR-0186 §7's rule for a trail row,
-            applied to a candidate listing).
-        confirmation: The card and token a routed park is answered with. Present
-            **iff** :attr:`outcome` is ``AWAITING_CONFIRMATION``.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    operation: RoutableOperation = Field(description="Which operation the ask was routed to.")
-    outcome: RouteOutcome = Field(description="What became of it.")
-    listing: RoutedListing | None = Field(
-        default=None, description="The candidates, or a read-only operation's own result."
-    )
-    confirmation: OperationConfirmation | None = Field(
-        default=None, description="Present iff the outcome is AWAITING_CONFIRMATION."
-    )
-
-    @model_validator(mode="after")
-    def _describes_one_route(self) -> RoutedOperation:
-        """State ADR-0197 §8's five invariants, each in both directions.
-
-        The fourth is the one an inner-model validator cannot reach: a card is valid
-        on its own terms while describing a *different* operation from the route that
-        produced it, and a user reading "revoke this grant?" would be approving a
-        ``forget``. One discriminator per value is §8's rule, and two values carrying
-        it must agree or the pair is not a description of one route.
-
-        The fifth is stated as a **closed set per tag** rather than as the exclusions
-        the pipeline happens to notice, which is what keeps this type's claim true
-        when a ninth member is added to :class:`RouteOutcome` — a list of exclusions
-        would silently admit it on both tags. A read-only operation admits exactly
-        three, because §5 gives it nothing to be ambiguous about: it takes no query
-        and resolves no argument, so ``AMBIGUOUS``, ``AMBIGUOUS_TRUNCATED`` and
-        ``NOT_FOUND`` are statements about a lookup that never ran, and
-        ``AWAITING_CONFIRMATION`` and ``REFUSED`` are statements about a confirmation
-        §7 never offers it.
-
-        Raises:
-            ValueError: If any of the five is broken, in either direction.
-        """
-        admitted = admitted_route_outcomes(self.operation)
-        if self.outcome not in admitted:
-            tag = "confirm-owed" if self.operation.confirm_owed else "read-only"
-            allowed = ", ".join(sorted(member.value for member in admitted))
-            msg = (
-                f"a {tag} operation ({self.operation.value}) admits only {allowed}, got "
-                f"{self.outcome.value} (ADR-0197 §8)"
-            )
-            raise ValueError(msg)
-        parked = self.outcome is RouteOutcome.AWAITING_CONFIRMATION
-        if parked and self.confirmation is None:
-            msg = (
-                "an AWAITING_CONFIRMATION route must carry the confirmation to answer it "
-                "with: a client handed one without has nothing to resume with"
-            )
-            raise ValueError(msg)
-        if not parked and self.confirmation is not None:
-            msg = (
-                f"a {self.outcome.value} route must not carry a confirmation: nothing is "
-                "waiting on an answer"
-            )
-            raise ValueError(msg)
-        if self.confirmation is not None and self.confirmation.operation is not self.operation:
-            msg = (
-                f"this route is about {self.operation.value} and its confirmation is about "
-                f"{self.confirmation.operation.value}: a user reading the card would be "
-                "approving a different operation from the one that was routed (ADR-0197 §8)"
-            )
-            raise ValueError(msg)
-        carries = self.outcome in _LISTING_OUTCOMES or (
-            self.outcome is RouteOutcome.PERFORMED and not self.operation.confirm_owed
-        )
-        if carries and self.listing is None:
-            msg = (
-                f"a {self.outcome.value} route on {self.operation.value} must carry its "
-                "listing: it is what the adapter renders, and the outcome alone says "
-                "nothing about what was found (ADR-0197 §8)"
-            )
-            raise ValueError(msg)
-        if not carries and self.listing is not None:
-            msg = (
-                f"a {self.outcome.value} route on {self.operation.value} must carry no "
-                "listing: nothing was resolved and nothing was performed (ADR-0197 §8)"
-            )
-            raise ValueError(msg)
-        arm = routed_listing_arm(self.operation)
-        if self.listing is not None and not all(isinstance(row, arm) for row in self.listing):
-            msg = (
-                f"a routed {self.operation.value} listing holds only {arm.__name__} rows: "
-                "the operation is the discriminator, never the value's shape, because an "
-                "empty tuple is a legal value of every arm (ADR-0197 §8)"
             )
             raise ValueError(msg)
         return self
@@ -28142,1031 +27544,6 @@ class DriveWithheld(StrEnum):
 
     A correction replaced what the user asked for (ADR-0249 §1, §8), so the plan no
     longer matches what the goal now asks and asking again plans afresh."""
-
-
-class TurnOutcome(BaseModel):
-    """One unit of what a turn call produced (ADR-0042 §3).
-
-    Attributes:
-        turn: The turn's goal, context, retrieved memories, plan, and — obliged to
-            be surfaced, not swallowed — whether retrieval degraded. ``None`` on a
-            resume driven from a **recovered** park (ADR-0052 §3): a confirmation
-            reconstructed from durable state after a restart has no live turn —
-            context and retrieved memories are ephemeral and were never persisted —
-            so a fabricated :class:`TurnResult` would misrepresent what the turn
-            saw. The :attr:`step` — the resolution — is what a resume is for and is
-            always present.
-        step: The disposition of the step the engine drove, or ``None`` when the
-            plan had no step to drive. On a resumption this is the resolved step.
-        conversation_id: The conversation this turn ran under (ADR-0074 §2), which
-            a client keeps and presents to continue. ``None`` only on a resumption
-            whose parked binding no longer resolves to a turn — a park predating
-            capture, or one whose conversation the user deleted — which ADR-0074 §3
-            ratifies as "not captured at all, and no conversation invented".
-        capture_degraded: Whether the exchange went **unrecorded** (ADR-0074 §9
-            item 6). The answer is still the answer: capture failure degrades a
-            turn rather than failing it, because failing would throw away an answer
-            the user already has because the record of it could not be written. But
-            it is reported beside :attr:`TurnResult.memory_degraded` and not
-            swallowed, because a user whose turns are silently not being recorded
-            will not find out until they try to continue.
-        reply: The natural-language answer the turn composed, and **the only place
-            an answer is carried** (ADR-0170 §3). ``None`` on exactly three shapes
-            (§4): a pass whose step parked for confirmation, where what the user
-            must answer is :attr:`StepOutcome.confirmation`; a pass whose
-            :attr:`turn` is ``None``, a resume driven from a *recovered* park, where
-            context and memories were never persisted and there is nothing to
-            compose from; and a pass on which composition failed **before anything
-            was published**, which is the one of the three that sets
-            :attr:`reply_degraded`. Non-``None`` on every other outcome the two turn
-            calls return.
-
-            **On a streamed turn it is also the join of the chunks**, in the order
-            they were written (ADR-0173 §3), and where a chunk sequence and this
-            value disagree *this value is the answer* — no client, adapter, setting
-            or later ADR resolves that disagreement in the chunks' favour.
-
-            :data:`NonBlankEncodableText` rather than :data:`EncodableText` because
-            ``None`` has the precise meaning above and a blank string would be a
-            third state meaning the same thing less legibly — the reasoning
-            :attr:`NotificationCandidate.summary` already applies to the one line a
-            user is told.
-        reply_degraded: Whether composing that answer **did not complete** on a turn
-            that otherwise ran (ADR-0170 §3, §8; ADR-0173 §6). The third of a set:
-            :attr:`TurnResult.memory_degraded` says retrieval failed and
-            :attr:`capture_degraded` says the record could not be written, and each
-            says the same kind of thing — a late stage failed, the turn is still
-            worth returning, and the user is told rather than left to infer it. It
-            is what makes §4's third shape legible: without it a composition failure
-            would be a ``None`` no client could tell from the other two.
-
-            Note the asymmetry with :attr:`reply`: a composition failure is a
-            *classified* one, so ``True`` here means the model call raised a
-            ``ModelError`` or returned a completion unusable as an answer. A defect
-            in the composing stage's own code propagates instead of degrading
-            (ADR-0170 §8), because a stage that could be wholly broken while every
-            turn reported the same classified-looking degradation is the state
-            hardest to notice.
-
-            **ADR-0173 §6 adds a fourth shape and widens this flag to reach it**,
-            partially superseding ADR-0170 §4's clause that it is "never ``True``
-            beside a non-``None`` ``reply``". Streaming creates a shape ADR-0170
-            could not have — an answer that **began and did not finish** — and the
-            outcome then carries :attr:`reply` set to the text actually yielded with
-            this flag ``True``. So it means *composing this answer did not complete*,
-            whether because it failed or because it ran out of room, and a client
-            reads four states off two values: no answer was owed, one was owed and
-            none was produced, one was owed and part of it was produced, one was
-            owed and the whole of it was. Carrying the truncated text is what keeps
-            the authoritative value from contradicting prose already on the user's
-            screen (ADR-0173 §6).
-        routed: What the operation-routing stage did, or ``None`` on a pass that took
-            no route (ADR-0197 §8). ADR-0197 is the decision that added it, as
-            ADR-0170 §3 is :attr:`reply`'s.
-
-            **Its presence is the fact**, which is why there is no ``routed: bool``
-            beside it: two answers to one question is ADR-0084 §3's argument against
-            a second length and ADR-0173 §2's against a sequence number.
-
-            A routed pass ends the pipeline where it routed (ADR-0197 §1), so it
-            drove no step — :attr:`step` and this member are never both non-``None``
-            — and it produced no :class:`TurnResult`, so :attr:`turn` is ``None``
-            there. That last is where ADR-0197 §8 **partially supersedes ADR-0170
-            §4**: a ``None`` :attr:`turn` beside a non-``None`` ``routed`` may carry a
-            :attr:`reply`, and may carry :attr:`reply_degraded` ``True``. Nothing else
-            moves — an outcome carrying **no** ``routed`` is ruled exactly as ADR-0170
-            §4 and ADR-0173 §6 ruled it, and a *recovered* park is such an outcome, so
-            it refuses a reply after this decision as it did before.
-
-            A routed pass **owes an answer** exactly when ``routed.outcome`` is not
-            ``AWAITING_CONFIRMATION``; a routed park owes none, carries no reply and
-            leaves :attr:`reply_degraded` ``False``, for the reason a parked step
-            does — the confirmation is what the user must answer, and prose beside it
-            competes with the question (ADR-0197 §10).
-
-            An adapter renders this **in addition to** any composed reply, never
-            instead of it, and where the two disagree the routed account is correct
-            by construction (ADR-0197 §10).
-        recipient_grant: What became of a standing recipient request collected beside
-            an answer, or ``None`` on a call that collected none (ADR-0235 §4, §6).
-            ADR-0235 is the decision that added it, as ADR-0197 is :attr:`routed`'s
-            and ADR-0170 §3 is :attr:`reply`'s.
-
-            **``None`` on every outcome of a call that performed no establishing
-            act** — every ``converse``, every ``resume`` supplying no
-            ``remember_recipients_until``, and ADR-0198 §1's **restatement**, which
-            drives nothing and therefore establishes nothing. That adds a value to
-            ADR-0198 §2's enumeration without changing any value it fixes.
-
-            **A widening rather than a change**, which is ADR-0197's move exactly:
-            ADR-0170 §4 fixes the three shapes on which :attr:`reply` is ``None`` and
-            the one on which :attr:`reply_degraded` is ``True``, and a
-            ``None``-defaulting member alters neither, so no clause of ADR-0170 is
-            superseded, narrowed or read more widely.
-
-            **A surface states the standing outcome from this member and from
-            nothing else** (ADR-0235 §6). It asserts no grant this does not carry,
-            it does not stay silent on a refusal — a user told nothing about a
-            request they made concludes it was granted — and it never derives the
-            answer from a ``standing_recipient_grants`` read taken afterwards or
-            from ``resume`` having returned normally.
-        outbound_statement: What this turn did about reaching outside this system,
-            or ``None`` on a pass that **neither established a contact nor composed a
-            reply** (ADR-0264 §7). ADR-0264 is the decision that added it, as ADR-0242
-            is :attr:`search_not_serviced`'s.
-
-            **It carries the value ADR-0264 §6 computed, by value, and never a second
-            computation** (§7). No surface derives it from a plan, a supply, a latency,
-            a reply, an audit or a store read of its own, and no component recomputes it
-            downstream.
-
-            **It is** ``None`` **on exactly two shapes**: a **routed park**, on which
-            ADR-0197 §10 rules "the composing stage is not reached", and every other
-            pass ADR-0170 §4 composes nothing for that established no contact. It is
-            **not** ``None`` on an ordinary turn that reached nothing — ADR-0198 §1's
-            restatement, ADR-0250 §3's ``UNDECIDED`` turn and every ``converse`` whose
-            planner asked for no search each carry
-            :attr:`OutboundReach.NOT_REACHED`, which is the value issue #2365 needed and
-            did not have, and a routed pass that is not a park carries it too. That adds
-            a value to ADR-0198 §2's enumeration without changing any value it fixes.
-
-            **A widening and not a change** (§7), which is :attr:`recipient_grant`'s
-            move and :attr:`search_not_serviced`'s: ADR-0170 §4's three ``reply``-``None``
-            shapes and its one :attr:`reply_degraded` shape are untouched, no new
-            outcome shape is minted, and no member is derived from another. In
-            particular **this fact does not set** :attr:`reply_degraded`.
-
-            **A rendering surface renders one statement composed from the value** —
-            the terminal today, the browser when #2237's lane runs — **beside the reply
-            where one exists and never in place of it** (§7, §9). The **spoken surface
-            is expressly not one**: ADR-0200 §4 makes ``spoken`` the rendering of
-            :attr:`reply` and of nothing else, so a spoken turn carries this member and
-            no code-composed statement stands beside what that user hears, which
-            ADR-0264 §12 books as a stated cost rather than a gap.
-
-            **Both statements ride together** (§8). A turn may carry this member and
-            :attr:`search_not_serviced`, and where it does both are rendered, each in
-            its own statement and neither read off the other: one says this turn reached
-            outside itself, the other says what act would change what a lookup produced.
-        forecast_not_read: Which class of act would have let a forecast read this
-            turn did **not** make happen, or ``None`` where the servicing recorded no
-            ``ForecastDisposition`` at all (ADR-0260 §10). ADR-0260 is the decision
-            that added it, as ADR-0242 is :attr:`search_not_serviced`'s.
-
-            **``None`` means the servicing recorded no disposition, and means nothing
-            else**: a turn that serviced no forecast read, **and** a read the provider
-            answered — records or none. It is never read as "the provider answered",
-            and the outbound contact is never derived from it: this member is a
-            non-injective fold, so a site holding only it cannot compute the contact
-            and does not try (ADR-0264 §1).
-
-            **It carries the member the servicing computed, by value, and never a
-            second computation** (§10). No surface derives it from the plan, the
-            supply's length, the reply, the audit or a store read of its own, and no
-            component recomputes it downstream.
-
-            **Where a revising turn serviced more than one forecast read** the field
-            carries the **earliest-declared** member any servicing of the turn
-            recorded — :class:`ForecastNotRead`'s declaration order is that precedence
-            order (ADR-0242 §7). **A later read does not clear an earlier one's
-            member**: a turn that was denied and then answered still reports
-            :attr:`ForecastNotRead.DECLINED`.
-
-            **A widening rather than a change**, which is :attr:`recipient_grant`'s
-            move and :attr:`search_not_serviced`'s: a ``None``-defaulting member
-            alters neither ADR-0170 §4's three ``reply``-``None`` shapes nor its one
-            :attr:`reply_degraded` shape. In particular **this fact does not set**
-            :attr:`reply_degraded`: a turn that could not read a forecast still
-            composed the reply it composed.
-
-            **It rides beside** :attr:`search_not_serviced` **and beside**
-            :attr:`outbound_statement`, and none is read off another: a turn that
-            searched and read a forecast may carry all three, each in its own
-            statement (ADR-0264 §8, ADR-0260 §10).
-
-            **``SpokenTurn`` gains nothing**, and no lane adds a second field for this
-            fact anywhere (§10).
-        search_not_serviced: Which class of act would have let a search this turn did
-            **not** make happen, or ``None`` where it serviced every search it asked
-            for and where it asked for none (ADR-0242 §9). ADR-0242 is the decision
-            that added it, as ADR-0235 is :attr:`recipient_grant`'s.
-
-            **It carries the same member the servicing site computed, by value, and
-            never a second computation** (ADR-0242 §7, §9). No surface derives it
-            from the plan, the supply's length, the reply, the audit or a store read
-            of its own, and no component recomputes it downstream.
-
-            **``None`` on every outcome of a turn that serviced no search or serviced
-            every search it asked for** — every such ``converse`` and
-            ``resume``, and ADR-0198 §1's
-            **restatement**, which drives nothing and searches nothing. That adds a
-            value to ADR-0198 §2's enumeration without changing any value it fixes.
-
-            **A widening rather than a change**, which is ADR-0197's move and
-            :attr:`recipient_grant`'s: ADR-0170 §4 fixes the three shapes on which
-            :attr:`reply` is ``None`` and the one on which :attr:`reply_degraded` is
-            ``True``, and a ``None``-defaulting member alters neither. In particular
-            **this fact does not set** :attr:`reply_degraded` (ADR-0242 §6): a turn
-            that could not search still composed the reply it composed.
-
-            **The field exists so that a surface names the act deterministically**,
-            and that is the whole of what it is for. A surface renders, beside the
-            reply and never in place of it, one **fixed statement per member**, and
-            the command name is in that statement and never in the model's reply:
-            a command name in a composed reply would reach a browser and a voice
-            channel where no terminal exists, and would be a string a model may
-            paraphrase, truncate or invent. The model says *what was not done* and
-            the surface says *what would enable it* (ADR-0242 §9).
-
-            **A surface that renders no statement for a member has not implemented
-            ADR-0242 §9**, and is not permissibly degraded — except the browser,
-            which until its own lane renders the turn exactly as it does today and
-            ignores this field (ADR-0242 §5, §9).
-        read_confirmation: The :class:`Confirmation` for a read **this turn parked**,
-            so the question appears in the exchange that raised it, or ``None`` on
-            every turn that parked no read (ADR-0244 §9). ADR-0244 is the decision
-            that added it, as ADR-0242 is :attr:`search_not_serviced`'s.
-
-            **The turn that carries it is not parked.** What parks is the *read*: the
-            turn composes, answers and returns, its :attr:`reply` is present and
-            ADR-0170 §4's three ``reply``-``None`` shapes are untouched. A surface
-            renders this question **beside** the reply and never in place of it.
-        read_answer: What became of an answer to a parked read, or ``None`` on every
-            outcome that answered none (ADR-0244 §9).
-
-            **Mutually exclusive with** :attr:`read_confirmation`, and the type states
-            it rather than the prose: a model validator refuses an outcome carrying
-            both.
-
-            **A widening rather than a change**, which is ADR-0197's move and
-            :attr:`recipient_grant`'s and :attr:`search_not_serviced`'s: a
-            ``None``-defaulting member alters neither ADR-0170 §4's three
-            ``reply``-``None`` shapes nor its one :attr:`reply_degraded` shape. The one
-            member on which a ``resume`` returns a **real** ``TurnResult`` and a
-            composed reply is :attr:`ReadAnswerOutcome.DISPATCHED`, which ADR-0244 §8
-            records as a partial supersession of ADR-0052 §3 scoped to exactly that
-            case.
-
-            **It states what became of the answer and never why a ruling went the way
-            it did**, and no statement rendered for a member carries a destination, a
-            query or any fragment of one, a figure, a budget, a ``Settings`` field name
-            or a ``SearchDisposition`` value (ADR-0242 §9's bar, ADR-0244 §9).
-        goal_engagement: What this turn did with a goal, or ``None`` on an outcome
-            that engaged none (ADR-0250 §5). ADR-0250 is the decision that added it,
-            as ADR-0244 is :attr:`read_confirmation`'s.
-
-            ``None`` on a routed operation (ADR-0197 §7), on a restated settled
-            binding (ADR-0198 §1), and on the ``UNDECIDED`` turn of ADR-0250 §3, which
-            engaged nothing by §1.
-
-            **One of four members, one per fact, on ADR-0244 §9's own rule**, and the
-            four come apart in the cases that actually occur: a turn raises a
-            clarification on a goal it also engaged and revised; a turn whose
-            reference named nothing still associates by §3 and may then come back
-            ``UNDECIDED``, where there is **no** engagement to hang the reference on;
-            and a disambiguation exists only on a turn that engaged nothing at all. A
-            reference nested inside :class:`GoalEngagement` would therefore be
-            unreportable in exactly the case a user most needs told.
-        clarification: The question **this turn raised**, so it appears in the exchange
-            that raised it, or ``None`` on every turn that raised none (ADR-0250 §10).
-            A turn carries at most one, and **a question exists only where the store
-            accepted it**: a ``record_question`` that answered ``False`` leaves this
-            ``None``, the attempt's state unmoved and nothing durable outstanding.
-
-            **The goal it is about is what** :attr:`goal_engagement` **names**, which
-            is why a :class:`Clarification` carries "no goal id, no attempt id, no
-            subject and no disposition" — so an outcome carrying one and no engagement
-            is refused by the type, leaving nothing to say which goal a durable
-            question paused.
-        reference: What became of the turn's :class:`TurnReference`, or ``None`` on a
-            turn that carried none **and** on a ``goal_id`` reference that resolved
-            (ADR-0250 §11). A resolved goal reference has nothing to report beyond the
-            engagement itself, which ``goal_engagement.disposition`` already carries as
-            ``RESUMED`` or ``REOPENED``; a ``goal_id`` naming no goal this store holds
-            is :attr:`ReferenceOutcome.UNKNOWN`.
-
-            **A member of its own and never nested in** :attr:`goal_engagement`, so
-            that an ``UNKNOWN`` is reported even where nothing was engaged.
-        disambiguation: The goals an ``UNDECIDED`` turn is asking between, or ``None``
-            on every other outcome (ADR-0250 §5). **No other outcome carries one at
-            all**, and the shape it appears on is the one this decision adds beside
-            ADR-0170 §4's: ``turn`` ``None``, a non-``None`` ``reply``,
-            ``reply_degraded`` ``False``.
-
-            **A widening of the** ``turn``-``None`` **count and of nothing else**,
-            which is ADR-0197 §8's move exactly — that decision admitted the first such
-            shape for a routed pass and this admits the second for an undecided
-            association. ``reply``'s three-shape enumeration is untouched, because this
-            turn carries one: an undecided turn with no reply would answer a **spoken**
-            request with silence, since ADR-0200 §4 makes ``spoken`` the rendering of
-            ``outcome.reply`` and of nothing else.
-        attempt_report: What the turn's own comparison produced for the attempt it
-            **ended**, or ``None`` on every other returned outcome (ADR-0262 §6).
-            ADR-0262 is the decision that added it, as ADR-0261 is
-            :attr:`drive_withheld`'s.
-
-            **Non-``None`` exactly on a turn that ended an attempt under ADR-0262
-            §4**, and ``None`` on every other outcome — a turn that engaged no goal, a
-            routed operation (ADR-0197 §7), ADR-0198 §1's restatement, and every turn
-            whose attempt stayed live. **A refused ``commit_attempt`` leaves it
-            absent**, which ADR-0262 §6 books as the stated cost of that refusal: the
-            reply the composing stage already produced stands as composed and is not
-            falsified, and what the user does not get is the outcome word beside it — a
-            silence rather than a false claim, the fail-closed direction. The next turn
-            that engages the goal compares afresh and renders the statement for what is
-            then true; **no lane re-renders the refused turn's statement, stores it for
-            a later turn, retracts the reply or appends a second message.**
-
-            **A surface renders one fixed statement for each of the six**
-            :class:`AttemptOutcome` **members ADR-0262 §4's limbs yield, beside the
-            reply and never in place of it** (§6), and a surface that renders no
-            statement for a member it was given has not implemented that section and is
-            not permissibly degraded (ADR-0242 §9's bar). **Six and not seven**:
-            ``CANCELLED`` *"is reached by no limb"* of that comparison — a cancelled
-            attempt is ADR-0261 §2's act — so no report a turn carries names it and no
-            surface owes prose for it. **The
-            offer to continue is in the reply and not here**: the composing stage is
-            given both of this value's fields and its instruction requires the answer
-            to end with an offer where :attr:`AttemptReport.continues` is set, because
-            an offer a surface printed would reach neither the browser's transcript nor
-            the spoken channel as part of what was said.
-
-            **This is not ADR-0250 §5's announcement and neither displaces the other**:
-            that sentence is about *which goal a turn is about* and this is about *what
-            the attempt produced*. A turn may owe both, one or neither, and **no lane
-            derives either from the other or collapses them.**
-
-            **A widening rather than a change**, which is :attr:`drive_withheld`'s move
-            and :attr:`recipient_grant`'s: a ``None``-defaulting member alters neither
-            ADR-0170 §4's three ``reply``-``None`` shapes nor its one
-            :attr:`reply_degraded` shape, so no clause of ADR-0170 is superseded, and
-            the value it adds to ADR-0198 §2's enumeration changes no value that fixes.
-        drive_withheld: Where this turn's goal stands, on a turn that returned after a
-            store refused its claim, and ``None`` on every other returned outcome
-            (ADR-0261 §7). See the field for the whole of the rule — what makes it
-            non-``None``, why a propagating refusal is outside the invariant rather
-            than a case of it, and why a driver *skip* never sets it.
-
-            **A widening rather than a change**, which is ADR-0197's move and
-            ADR-0235's: a ``None``-defaulting member alters neither ADR-0170 §4's
-            three ``reply``-``None`` shapes nor its one ``reply_degraded`` shape, so
-            no clause of ADR-0170 is superseded, narrowed or read more widely, and the
-            value it adds to ADR-0198 §2's enumeration changes no value that fixes.
-        stopped: Whether this is the outcome of a ``resume`` whose control activation
-            the user stopped (ADR-0297 §4). ``True`` exactly there, and ``False`` on
-            every other outcome. **The fourth shape on which** :attr:`reply` **is**
-            ``None``, beside ADR-0170 §4:1's three — ADR-0297 partially supersedes
-            that clause, in the addition alone: a stopped resume composes nothing
-            once the mark is set and carries no reply even where one had been
-            composed, and :attr:`reply_degraded` stays ``False`` (§4:2's flag rule is
-            untouched). Every other member is as the resume established it — the
-            step's outcome and the recipient-grant outcome among them — because the
-            answer was recorded before the resume acted (ADR-0235 §6:10). This member
-            is what lets a client tell the fourth shape from the other three from the
-            value alone. A turn call awaiting a stopped pass returns no outcome at
-            all: it raises :class:`~ai_assistant.core.errors.ActivationStoppedError`.
-
-    Note:
-        ADR-0085 §4's Group A table lists this type's four fields as promoted; the
-        tree has seven. ADR-0170 §3 added :attr:`reply` and :attr:`reply_degraded`
-        and ADR-0197 §8 added :attr:`routed`, each on its own authority and each
-        recording no supersession, which is the practice ADR-0145 §4 and ADR-0152 §9
-        already set for :class:`Disposition`: the record of a member belongs with the
-        ADR that decided it, not with the one that moved the type into ``core``.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    turn: TurnResult | None = Field(
-        description="What the turn produced, or ``None`` on a recovered resume."
-    )
-    step: StepOutcome | None = Field(
-        default=None, description="The step the engine drove, or ``None`` where there was none."
-    )
-    conversation_id: Identifier | None = Field(
-        default=None, description="The conversation this turn ran under."
-    )
-    capture_degraded: bool = Field(
-        default=False, description="Whether the exchange went unrecorded."
-    )
-    reply: NonBlankEncodableText | None = Field(
-        default=None, description="The natural-language answer the turn composed (ADR-0170 §3)."
-    )
-    reply_degraded: bool = Field(
-        default=False, description="Whether composing that answer failed (ADR-0170 §3)."
-    )
-    routed: RoutedOperation | None = Field(
-        default=None, description="What the operation-routing stage did (ADR-0197 §8)."
-    )
-    recipient_grant: RecipientGrantOutcome | None = Field(
-        default=None,
-        description="What became of a standing recipient request, if one was made (ADR-0235 §4).",
-    )
-    search_not_serviced: SearchNotServiced | None = Field(
-        default=None,
-        description=(
-            "Which class of act would have let a search this turn did not make happen, "
-            "or ``None`` where every search the turn asked for was serviced and where it "
-            "asked for none (ADR-0242 §9)."
-        ),
-    )
-    read_confirmation: Confirmation | None = Field(
-        default=None,
-        description=(
-            "The confirmation for a read this turn parked, or ``None`` on every turn "
-            "that parked none (ADR-0244 §9)."
-        ),
-    )
-    read_answer: ReadAnswerOutcome | None = Field(
-        default=None,
-        description=(
-            "What became of an answer to a parked read, or ``None`` on every outcome "
-            "that answered none (ADR-0244 §9)."
-        ),
-    )
-    goal_engagement: GoalEngagement | None = Field(
-        default=None,
-        description=(
-            "What this turn did with a goal, or ``None`` on an outcome that engaged "
-            "none (ADR-0250 §5)."
-        ),
-    )
-    clarification: Clarification | None = Field(
-        default=None,
-        description=(
-            "The question this turn raised, or ``None`` on every turn that raised none "
-            "(ADR-0250 §10)."
-        ),
-    )
-    reference: ReferenceOutcome | None = Field(
-        default=None,
-        description=(
-            "What became of the turn's reference, or ``None`` where it carried none and "
-            "on a goal_id reference that resolved (ADR-0250 §11)."
-        ),
-    )
-    disambiguation: GoalDisambiguation | None = Field(
-        default=None,
-        description=(
-            "The goals an UNDECIDED turn is asking between, and ``None`` on every other "
-            "outcome (ADR-0250 §5)."
-        ),
-    )
-    outbound_statement: OutboundStatement | None = Field(
-        default=None,
-        description=(
-            "What this turn did about reaching outside this system, or ``None`` on a "
-            "pass that neither established a contact nor composed a reply (ADR-0264 §7)."
-        ),
-    )
-    forecast_not_read: ForecastNotRead | None = Field(
-        default=None,
-        description=(
-            "Which class of act would have let a forecast read this turn did not "
-            "make happen, or ``None`` where the servicing recorded no "
-            "``ForecastDisposition`` at all — a turn that serviced no forecast read, "
-            "and a read the provider answered (ADR-0260 §10)."
-        ),
-    )
-    authorizations: tuple[AuthorizationView, ...] = Field(
-        default=(),
-        description=(
-            "One view per :class:`Authorization` **opened without a question** during "
-            "this turn — ADR-0254 §1's path (iii) — in the order the rows were written, "
-            "and **empty** on every turn that opened none (ADR-0254 §11).\n\n"
-            "**A tuple, because one act can open two authorities that are not the same "
-            "authority**: *\u201cup to fifty pounds for the train and a hundred for the "
-            "hotel\u201d* reaches two declarations whose price argument may each be named "
-            "``amount``, and merging them would authorise an eighty-pound train booking "
-            "or refuse an eighty-pound hotel one. Each authority is announced as itself.\n\n"
-            "**The trigger is that the row was written**, with no materiality judgement "
-            "anywhere in it — which is why this is a member of its own and does not ride "
-            "ADR-0250 §5's ``goal_engagement`` rule, whose *\u201ca grounding-only revision "
-            "is recorded and not announced\u201d* is explicitly silent about an opening act "
-            "that re-grounds an existing constraint. §5's four members are untouched and "
-            "this is a fifth beside them, on ADR-0244 §9's shape: no member is derived "
-            "from another and a client renders each on its own.\n\n"
-            "**It carries the row's ``id`` as the revocation handle** and no other "
-            "identifier, so the withdrawal is in front of the user at the moment the "
-            "authority comes into being rather than only afterwards. The confirmation's "
-            "no-identifier rule is stated over a row the user has **not** established "
-            "and is not read onto this member."
-        ),
-    )
-    attempt_report: AttemptReport | None = Field(
-        default=None,
-        description=(
-            "What the turn's own comparison produced for the attempt it **ended**, or "
-            "``None`` on every other returned outcome (ADR-0262 §6).\n\n"
-            "**Non-``None`` exactly on a turn that ended an attempt under ADR-0262 §4** "
-            "\u2014 so ``None`` on a turn that engaged no goal, on a routed operation "
-            "(ADR-0197 §7), on ADR-0198 §1's restatement, on every turn whose attempt "
-            "stayed live, and on the turn whose ``commit_attempt`` was refused after "
-            "the reply was composed. **It carries the value the comparison computed, by "
-            "value, and never a second computation**: no surface derives it from a "
-            "plan, an attempt, a store read of its own or the reply, and no component "
-            "recomputes it downstream.\n\n"
-            "**A widening rather than a change**, which is ``drive_withheld``'s move "
-            "and ``recipient_grant``'s: a ``None``-defaulting member alters neither "
-            "ADR-0170 §4's three ``reply``-``None`` shapes nor its one "
-            "``reply_degraded`` shape. In particular **this fact does not set** "
-            "``reply_degraded``."
-        ),
-    )
-    drive_withheld: DriveWithheld | None = Field(
-        default=None,
-        description=(
-            "Where this turn's goal stands, on a turn that **returned after a store "
-            "refused its claim** and the post-refusal read established one of "
-            ":class:`DriveWithheld`'s seven states, and ``None`` on every other "
-            "returned outcome (ADR-0261 §7).\n\n"
-            "**Non-``None`` on exactly the turns ADR-0261 §7 composes**: a "
-            ":class:`~ai_assistant.core.errors.ClaimRefused` ended the walk, nothing "
-            "further was dispatched, the claim was not retried, no second "
-            "``Planner.plan`` call was taken, and the turn composed a reply anyway "
-            "because a refused claim is **not a fault** \u2014 every cause is *the user "
-            "changed something*. ``None`` on every turn that dispatched, that stopped "
-            "on one of ADR-0255 \u00a72's five, that drove nothing at all, and on "
-            "ADR-0198 \u00a71's restatement.\n\n"
-            "**A refusal that *propagates* returns no outcome at all**, so it is "
-            "outside this invariant rather than a case of it \u2014 which is why the "
-            "invariant is stated over turns that returned and not over walks that met "
-            "a refusal. Every exception that is not a ``ClaimRefused`` propagates "
-            "unchanged, and so does a ``ClaimRefused`` whose state the read cannot "
-            "see: a turn reporting one of those as a withheld drive would assert "
-            "something about the step that nothing established.\n\n"
-            "**It says where the goal stands and never why the store refused**, and it "
-            "asserts nothing about the step \u2014 not that it would have succeeded, not "
-            "that its effect did not happen, and not that no step of this plan was "
-            "ever started. **It is never written for a driver *skip***, which reaches "
-            "composing through the undriven set instead (ADR-0255 \u00a711)."
-        ),
-    )
-    satisfied_from_earlier: tuple[DurableIdentifier, ...] | None = Field(
-        default=None,
-        description=(
-            "The steps this turn committed ``\u2192 SUCCEEDED`` from an effect the goal "
-            "had already completed, **in walk order** (ADR-0259 §2). ``None`` on every "
-            "turn that satisfied no step this way, and carried by value from what the "
-            "stage computed \u2014 never a second computation.\n\n"
-            "**“Once” is at most once per *step*, and it is best-effort.** A step is "
-            "satisfied at most once, because satisfaction commits it ``SUCCEEDED`` and "
-            "ADR-0014 §4 admits no move out, so the turn that satisfies a step reports "
-            "it and no later turn reports that step again; a later turn that satisfies "
-            "a **different** step from the same effect reports that one, which is "
-            "different work completed rather than a repetition. **No effect row carries "
-            "an announced flag and no lane adds one**: the step's own one-way "
-            "transition is what meets ADR-0250 §5's announcement discipline.\n\n"
-            "**The window in which a satisfaction is never announced is named rather "
-            "than closed.** A failure after the ``\u2192 SUCCEEDED`` commit and before "
-            "the turn returns leaves the step durably terminal and unreported, and no "
-            "later walk reconstructs the announcement, because ADR-0255 §5 passes over "
-            "a ``SUCCEEDED`` step. So the guarantee is **at most once and not at least "
-            "once**, which is ADR-0014 §4's *“We do not claim exactly-once execution”* "
-            "applied to the report rather than to the act, and no lane reads this as a "
-            "delivery guarantee. What the window does not cost is the fact: "
-            "``StepExecution.satisfied_by_execution`` and ``satisfied_by_step`` are "
-            "committed in the same write, so the record always says the step was "
-            "satisfied and names the act it was satisfied from."
-        ),
-    )
-    stopped: bool = Field(
-        default=False,
-        strict=True,
-        description=(
-            "Whether this is the outcome of a resume whose control activation the user "
-            "stopped (ADR-0297 §4): the fourth shape on which reply is None, never "
-            "beside reply_degraded."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def _a_satisfaction_report_is_never_empty(self) -> TurnOutcome:
-        """Refuse an empty non-``None`` :attr:`satisfied_from_earlier` (ADR-0259 §2).
-
-        ``None`` is the one spelling of *nothing was satisfied* and ``()`` is
-        unconstructable: the type is unchanged and the degenerate value is removed,
-        because two spellings of one fact let an implementation and a client disagree
-        about whether a satisfaction occurred.
-
-        Raises:
-            ValueError: If the member is present and empty.
-        """
-        if self.satisfied_from_earlier is not None and not self.satisfied_from_earlier:
-            msg = "satisfied_from_earlier is None when nothing was satisfied, never empty"
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _at_most_one_read_fact(self) -> TurnOutcome:
-        """ADR-0244 §9: the two read members are mutually exclusive.
-
-        A ``converse`` outcome may carry
-        :attr:`read_confirmation` and never :attr:`read_answer`; a ``resume``
-        answering a parked read carries the second and never the first; ADR-0198 §1's
-        restatement and ADR-0197 §7's routed park carry neither.
-
-        **Refused by the type rather than documented**, in
-        :meth:`StepOutcome._confirmation_matches_disposition`'s own spirit: a shape a
-        caller cannot reach is better refused than described. The two are two facts and
-        a turn holds at most one of them, which is also why they are two members rather
-        than one — collapsing them would give a single field a ``Confirmation`` on one
-        path and an enum on another, a union a client must discriminate before it can
-        render either.
-
-        Raises:
-            ValueError: If the outcome carries both.
-        """
-        if self.read_confirmation is not None and self.read_answer is not None:
-            msg = (
-                "an outcome carries the question a turn parked or what became of an "
-                "answer to one, never both: a turn that parked a read answered none, "
-                "and a resume answering one parks none (ADR-0244 §9)"
-            )
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _a_clarification_belongs_to_a_turn_that_planned(self) -> TurnOutcome:
-        """ADR-0250 §10: :attr:`clarification` carries the question **this turn raised**.
-
-        **Stated once over every shape rather than shape by shape**, because the ground
-        is one fact and not three. §6's first condition for putting a question is that
-        "the planner reported the interpretation ambiguous — it returned a
-        ``ProposedQuestion`` (§7) **on this call**", so a pass that made no
-        ``Planner.plan`` call has nothing to carry. All three shapes on which
-        :attr:`turn` is ``None`` are exactly such passes:
-
-        * a **recovered park**, where "context and retrieved memories are ephemeral and
-          were never persisted" (ADR-0170 §4, ADR-0052 §3);
-        * a **routed pass**, which "mints no goal, assembles no context and makes no
-          plan" (ADR-0197 §8); and
-        * an **undecided turn**, which takes "no relevance read, no episodic supplement
-          and no ``Planner.plan`` call, because association precedes all three"
-          (ADR-0250 §3) — and which in any case has no goal to bind a question to,
-          since "a turn that could not find a goal has none to bind one to".
-
-        **And a turn that raised one drove nothing**, which is §10's other half in
-        terms: "A turn that raised a question drives no step of its plan and produces
-        no effect … it is not driven, no execution is started, and no ``ToolCall`` is
-        constructed." So a clarification beside a driven step is an outcome describing
-        a turn that both declined to act and acted.
-
-        **And the outcome names the goal the question is about**, which is what makes
-        §10's own account of :class:`Clarification` true: it "carries **no goal id, no
-        attempt id, no subject and no disposition**: the subject is what the question
-        text is about and the user reads it there, and **the goal is what
-        ``goal_engagement`` names**". A clarification beside no engagement is therefore
-        unattributable — the one member that was to name its goal says nothing — and
-        the type refuses it rather than leaving a reader to wonder which goal a durable
-        question paused.
-
-        **What it does not test is** :attr:`GoalEngagement.revised`, and that is §5's
-        rule rather than an omission: "**No member is derived from another and a client
-        renders each on its own**", and "**``revised`` says a revision was recorded, and
-        nothing more**". Computing a clarification's admissibility from ``revised``
-        would be one member derived from another and would read that flag as more than
-        what it says; that a raising turn will in practice also have recorded a revision
-        is a property of the loop ADR-0250 §19's M3 writes, not a shape this type is
-        asked to close.
-
-        Raises:
-            ValueError: If a clarification is carried by a pass that could not have
-                raised one, or by an outcome that names no goal for it to be about.
-        """
-        if self.clarification is None:
-            return self
-        if self.turn is None:
-            msg = (
-                "this pass raised no question, so the outcome must carry no "
-                "clarification: it produced no TurnResult, which means it made no "
-                "Planner.plan call — a recovered park persisted nothing to plan from, a "
-                "routed pass ends the pipeline before planning, and an undecided turn "
-                "has no goal to bind a question to (ADR-0250 §6, §10)"
-            )
-            raise ValueError(msg)
-        if self.step is not None:
-            msg = (
-                "a turn that raised a question drives no step of its plan and produces "
-                "no effect, so this outcome carries a clarification or a driven step "
-                "and never both: the plan is persisted and not driven (ADR-0250 §10)"
-            )
-            raise ValueError(msg)
-        if self.goal_engagement is None:
-            msg = (
-                "a clarification carries no goal id, no attempt id, no subject and no "
-                "disposition, so the goal it is about is what goal_engagement names: an "
-                "outcome carrying a question and no engagement leaves that question "
-                "unattributable (ADR-0250 §10)"
-            )
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _reply_matches_the_shape_of_the_pass(self) -> TurnOutcome:
-        """State ADR-0170 §4's invariants, as ADR-0173 §6 widened them, both ways.
-
-        **Both directions, for** :meth:`StepOutcome._confirmation_matches_disposition`
-        **'s own reason.** A silent ``None`` on a turn that ran is an answer the user
-        never got and nobody can point at a contract violation for; a :attr:`reply`
-        beside a parked confirmation is prose competing with the yes/no question the
-        user must answer, and the prose is what they will read.
-
-        The three ``None`` shapes are a park, a recovered resume, and a composition
-        failure that published nothing — and only the third sets
-        :attr:`reply_degraded`, which is what lets a client tell "no answer was
-        owed" from "an answer was owed and could not be composed" from the value
-        alone. So the flag is refused on a park and where :attr:`turn` is ``None``;
-        and where both of those are absent and the flag is clear, an answer is owed
-        and a bare ``None`` is refused.
-
-        **What it is no longer refused beside is a non-``None`` reply**, and that is
-        ADR-0173 §6's fourth shape rather than a relaxation: a streamed answer that
-        began and did not finish carries the text actually yielded *and* the flag,
-        because discarding prose the user has already read would make the wire's
-        authoritative value contradict their screen. The widening is exact — the
-        flag is admitted beside a reply on **that** shape and no other, so a park
-        and a turn-less outcome are refused in both directions exactly as before.
-
-        **The first two shapes are refused in the ``reply`` direction as well as the
-        flag direction**, which is what "in both directions" costs on each of them
-        rather than only on the last. §4 says ``reply`` is ``None`` on *exactly*
-        three shapes, so a park or a turn-less outcome carrying prose is a contract
-        violation and not merely an oddity: on a recovered park nothing was
-        persisted to compose from, so any answer there is about a turn the outcome
-        cannot show, and an adapter would render it beside a step account with no
-        turn behind it.
-
-        **A routed pass is ruled separately, and that separation is the whole of
-        ADR-0197 §8's supersession.** ADR-0170 §4's reason for refusing a reply
-        beside a ``None`` turn is stated in the message below — "a recovered park
-        persisted no context and no memories, so there was nothing to compose from"
-        — and that reason is true of a recovered park and **false** of a routed pass,
-        where there is something to compose from: the operation and its outcome,
-        which the :attr:`routed` member the prose is about is carrying. So the clause
-        is not relaxed; it is scoped to the shape its own argument reaches, and every
-        other shape refuses a reply exactly as before.
-
-        **An undecided association is ruled separately too, and that separation is
-        the whole of ADR-0250 §5's supersession.** ADR-0170 §4's reason for refusing a
-        reply beside a ``None`` turn is that "a recovered park persisted no context and
-        no memories, so there was nothing to compose from" — true of a recovered park
-        and **false** of a turn that could not decide which goal it was about, where
-        there is something to compose from: the typed
-        :class:`GoalDisambiguation` the prose is built from. So the clause is not
-        relaxed; it is scoped to the shape its own argument reaches, for the second
-        time, and every other shape refuses a reply exactly as before.
-
-        **A stopped resume is the fourth shape, and it is stated in both directions
-        too** (ADR-0297 §4): :attr:`stopped` requires :attr:`reply` ``None`` and
-        :attr:`reply_degraded` ``False``, and a ``None`` reply with the flag clear on
-        a pass that has a :attr:`turn` and did not park — or on a routed pass that
-        did not park — requires :attr:`stopped`.
-
-        Raises:
-            ValueError: If the outcome describes a pass that could not have happened.
-        """
-        if self.stopped and (self.reply is not None or self.reply_degraded):
-            msg = (
-                "a stopped resume composes nothing once the stop is taken in, so it "
-                "carries no reply and composing one cannot have degraded (ADR-0297 §4)"
-            )
-            raise ValueError(msg)
-        if self.disambiguation is not None:
-            return self._undecided_pass_is_coherent()
-        if self.routed is not None:
-            return self._routed_pass_is_coherent()
-        parked = self.step is not None and self.step.confirmation is not None
-        if parked and self.reply is not None:
-            msg = (
-                "a parked outcome must carry no reply: what the user must answer is the "
-                "confirmation, and prose beside it competes with the question"
-            )
-            raise ValueError(msg)
-        if self.turn is None and self.reply is not None:
-            msg = (
-                "an outcome with no turn must carry no reply: a recovered park persisted "
-                "no context and no memories, so there was nothing to compose from and any "
-                "prose here is about a turn this outcome cannot show"
-            )
-            raise ValueError(msg)
-        if self.reply_degraded:
-            if parked:
-                msg = "a parked outcome owes no answer, so composing one cannot have degraded"
-                raise ValueError(msg)
-            if self.turn is None:
-                msg = (
-                    "an outcome with no turn owes no answer — a recovered park persisted no "
-                    "context to compose from — so composing one cannot have degraded"
-                )
-                raise ValueError(msg)
-        elif self.reply is None and not parked and self.turn is not None and not self.stopped:
-            msg = (
-                "this outcome owed an answer and carries none: set reply, set "
-                "reply_degraded to say composing one failed, or set stopped to say the "
-                "user stopped the resume (ADR-0297 §4)"
-            )
-            raise ValueError(msg)
-        return self
-
-    def _undecided_pass_is_coherent(self) -> TurnOutcome:
-        """State ADR-0250 §5's invariants for a turn that asked which goal.
-
-        Split from :meth:`_reply_matches_the_shape_of_the_pass` for
-        :meth:`_routed_pass_is_coherent`'s own reason: the undecided shape and the
-        ordinary ones share no clause, so one method holding both would be two
-        rulesets behind one name.
-
-        The turn "opens no goal, records no revision, engages nothing, takes **no**
-        relevance read, no episodic supplement and no ``Planner.plan`` call, drives no
-        plan and produces no effect" — so it has no :class:`TurnResult` and no
-        :class:`StepOutcome`, and it engaged nothing, so it carries no
-        :class:`GoalEngagement`. What it does carry is a **reply**, composed by
-        ``orchestration`` from the typed value, which is what keeps a spoken request
-        from being answered with silence (ADR-0200 §4).
-
-        **It carries no** :attr:`clarification` **either**, and that follows from the
-        same absent planner call rather than from a separate rule: §6's first condition
-        for putting a question is that "the planner reported the interpretation
-        ambiguous … on this call", and this turn made no call. §3 states the
-        consequence directly — "a ``GoalQuestion`` is bound to a goal, and a turn that
-        could not find a goal has none to bind one to. The two are different questions
-        and this decision keeps them apart."
-
-        **And its** :attr:`reference` **is absent or** ``UNKNOWN`` **and never one of
-        the other three.** §11 admits exactly the first pair here — "an ``UNKNOWN``
-        reference is reported whatever the association then does … so it may come back
-        ``UNDECIDED``" — and forecloses the rest: ``ANSWERED``, ``EXPIRED`` and
-        ``ALREADY_SETTLED`` are each "read **off the question's own disposition**",
-        so reaching one means a record was found, which means "the reference resolves
-        to a goal in every case, and the turn **engages that goal**". A reference that
-        resolves wins §3's first step "outright and costs no model call", so no
-        ``associate`` call is made and no undecided verdict exists to carry.
-
-        Raises:
-            ValueError: If the outcome describes an undecided pass that could not have
-                happened.
-        """
-        for name, value in (("routed", self.routed), ("step", self.step), ("turn", self.turn)):
-            if value is not None:
-                msg = (
-                    f"an undecided turn took no route, drove no step and produced no "
-                    f"TurnResult, so this outcome must carry no {name}: it made no "
-                    f"relevance read, no episodic supplement and no Planner.plan call, "
-                    f"because association precedes all three (ADR-0250 §3, §5)"
-                )
-                raise ValueError(msg)
-        if self.goal_engagement is not None:
-            msg = (
-                "an undecided turn engaged no goal, so this outcome must carry no "
-                "goal_engagement: no implementation constructs one in order to carry a "
-                "reference outcome, because that value asserts a goal was engaged "
-                "(ADR-0250 §5, §11)"
-            )
-            raise ValueError(msg)
-        if self.reference is not None and self.reference is not ReferenceOutcome.UNKNOWN:
-            msg = (
-                f"an undecided turn's reference resolved to nothing or was absent, so "
-                f"{self.reference.value} is unreachable here: ANSWERED, EXPIRED and "
-                f"ALREADY_SETTLED are each read off a question's own disposition, which "
-                f"means the reference found a record — and a reference that resolves "
-                f"engages its goal outright and costs no associate call, so the turn "
-                f"cannot come back undecided (ADR-0250 §3, §11)"
-            )
-            raise ValueError(msg)
-        if self.reply is None:
-            msg = (
-                "an undecided turn's answer is the question it asks, so this outcome "
-                "must carry a reply: orchestration composes it from the disambiguation, "
-                "and a silent one would answer a spoken request with nothing "
-                "(ADR-0250 §5)"
-            )
-            raise ValueError(msg)
-        if self.reply_degraded:
-            msg = (
-                "an undecided turn's reply is composed deterministically from the typed "
-                "value and no model call is made for it, so composing one cannot have "
-                "degraded (ADR-0250 §5)"
-            )
-            raise ValueError(msg)
-        return self
-
-    def _routed_pass_is_coherent(self) -> TurnOutcome:
-        """State ADR-0197 §8's invariants for a pass that took a route.
-
-        Split from :meth:`_reply_matches_the_shape_of_the_pass` rather than nested
-        inside it: the routed shapes and the unrouted ones share no clause — §8
-        supersedes ADR-0170 §4 exactly where ``routed`` is present and nowhere else —
-        so one method holding both would be two rulesets behind one name, and the
-        branch count would say so.
-
-        **It carries no** :attr:`goal_engagement` **either** (ADR-0250 §5). That
-        section rules the member ``None`` "on an outcome that engaged none — a routed
-        operation (ADR-0197 §7), a restated settled binding (ADR-0198 §1), and the
-        ``UNDECIDED`` turn of §3", and the first of those is structural rather than a
-        convention: §7 ends the pipeline where it routed, before any association, so
-        there is no goal to engage and nothing to announce. The third is not a shape
-        this type can see — a restatement is not distinguishable from its members — so
-        it stays a rule about the site that builds one.
-
-        Raises:
-            ValueError: If the outcome describes a routed pass that could not have
-                happened.
-        """
-        routed = self.routed
-        if routed is None:  # pragma: no cover - the caller tests this before delegating
-            return self
-        if self.goal_engagement is not None:
-            msg = (
-                "a routed pass engaged no goal, so this outcome must carry no "
-                "goal_engagement: a taken route ends the pipeline before any goal work, "
-                "so there is no association, no revision and nothing to announce "
-                "(ADR-0250 §5, ADR-0197 §7)"
-            )
-            raise ValueError(msg)
-        if self.step is not None:
-            msg = (
-                "an outcome carries a routed operation or a driven step, never both: a "
-                "taken route ends the pipeline before any step is driven, so an outcome "
-                "carrying both would be describing two passes (ADR-0197 §8)"
-            )
-            raise ValueError(msg)
-        if self.turn is not None:
-            msg = (
-                "a routed pass mints no goal, assembles no context and makes no plan, so "
-                "it produces no TurnResult and this outcome must carry none: the only "
-                "ActionPlan it could supply is one nobody planned (ADR-0197 §8)"
-            )
-            raise ValueError(msg)
-        if routed.outcome is not RouteOutcome.AWAITING_CONFIRMATION:
-            if self.reply is None and not self.reply_degraded and not self.stopped:
-                msg = (
-                    "this routed pass owed an answer and carries none: set reply, set "
-                    "reply_degraded to say composing one failed, or set stopped to say "
-                    "the user stopped the resume (ADR-0197 §8, §10, ADR-0297 §4)"
-                )
-                raise ValueError(msg)
-            return self
-        if self.reply is not None:
-            msg = (
-                "a routed park must carry no reply: what the user must answer is the "
-                "confirmation, and prose beside it competes with the question "
-                "(ADR-0197 §10)"
-            )
-            raise ValueError(msg)
-        if self.reply_degraded:
-            msg = (
-                "a routed park owes no answer — the composing stage is not reached and "
-                "originates no model call — so composing one cannot have degraded "
-                "(ADR-0197 §10)"
-            )
-            raise ValueError(msg)
-        return self
-
-
-def is_live_confirmation_park(outcome: TurnOutcome | None) -> bool:
-    """Whether ``outcome`` is one of ADR-0207 §1's two live confirmation parks.
-
-    **Two shapes and no others**: an outcome whose :attr:`TurnOutcome.step` reached
-    :attr:`Disposition.AWAITING_CONFIRMATION`, and an outcome whose
-    :attr:`TurnOutcome.routed` reached :attr:`RouteOutcome.AWAITING_CONFIRMATION`.
-    A step park is the permission gate's ruling (ADR-0037 §4); a routed park is the
-    routing stage's (ADR-0197 §7). Both mint a confirmation the user must answer on
-    a screen, and both leave :attr:`TurnOutcome.reply` ``None``.
-
-    **Decided from those two recorded enum members and from nothing else** — not
-    from ``reply`` being ``None``, not from the confirmation's content, and not from
-    the tool, the operation or the subject. That is what keeps ADR-0199 §2's
-    decision procedure satisfied by construction wherever this predicate is read:
-    the two members are recorded outcomes of stages that already ran, so no caller
-    of this function inspects content to reach its answer.
-
-    **Deciding it here rather than from** ``reply is None`` **is what keeps the
-    other two silences intact.** A composition failure and a resume recovered from
-    durable state both leave ``reply`` ``None``; neither is a park, and ADR-0207 §3
-    keeps ADR-0200 §4's silence over both of them word for word.
-
-    **One definition.** ``SpokenTurn``'s validator read it to decide which shapes the
-    type admitted (ADR-0207 §6) until ADR-0313 §3:1 retired that type, and
-    ``orchestration`` reads it — a second spelling of it would be a rule that can
-    drift. It is a module
-    function over values the type already carries rather than a member of one: no
-    type, field, enum member, Protocol or method signature moves for it, exactly as
-    :func:`rests_on_recorded_external_content` reads a :class:`Provenance`.
-
-    Args:
-        outcome: The turn, or ``None`` where the call ran none.
-
-    Returns:
-        Whether it is a live confirmation park.
-    """
-    if outcome is None:
-        return False
-    if outcome.step is not None and outcome.step.disposition is Disposition.AWAITING_CONFIRMATION:
-        return True
-    return outcome.routed is not None and outcome.routed.outcome is (
-        RouteOutcome.AWAITING_CONFIRMATION
-    )
 
 
 class GrantableSource(BaseModel):

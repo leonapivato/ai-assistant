@@ -71,13 +71,11 @@ def request_for(
     definition: ToolDefinition | None = None,
     *,
     parameters: Mapping[str, FrozenJson] | None = None,
-    step_id: str | None = "step-1",
 ) -> ActionRequest:
     """Build a request about ``definition``."""
     return ActionRequest(
         tool=definition or tool(),
         parameters=parameters or {"to": "someone@example.com"},
-        step_id=step_id,
     )
 
 
@@ -141,14 +139,6 @@ def test_a_substituted_definition_makes_the_call_unconstructable() -> None:
 
     with pytest.raises(ValidationError, match="does not authorise"):
         ToolCall(request=request_for(tool(risk_level=RiskLevel.LOW)), decision=decision)
-
-
-def test_a_mismatched_step_id_makes_the_call_unconstructable() -> None:
-    """An approval belongs to the step it was asked about."""
-    decision = decision_for(request_for(step_id="step-1"))
-
-    with pytest.raises(ValidationError, match="does not authorise"):
-        ToolCall(request=request_for(step_id="step-2"), decision=decision)
 
 
 def test_a_tool_call_forbids_extra_fields() -> None:

@@ -17,7 +17,6 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ai_assistant.core.types import (
-    ActivationLinks,
     ChannelContext,
     EpisodeProcessingRecord,
     EpisodicMemory,
@@ -36,20 +35,18 @@ from ai_assistant.testing.activation import ended_pass
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import MemoryStore
-    from ai_assistant.core.types import ParkedBinding
 
 #: The instant a seeded episode carries unless a case says otherwise.
 SEEDED_AT = datetime(2026, 7, 28, 9, 0, tzinfo=UTC)
 
 
-def conversation_episode(  # noqa: PLR0913 — one keyword per axis a seeding case varies
+def conversation_episode(
     conversation_id: str,
     episode_id: str,
     *,
     content: str | None = None,
     occurred_at: datetime = SEEDED_AT,
     completed: bool = True,
-    parks: ParkedBinding | None = None,
     **fields: Any,
 ) -> EpisodicMemory:
     """An episode on ``conversation_id``'s channel, as ADR-0283 §3 reads one.
@@ -63,7 +60,6 @@ def conversation_episode(  # noqa: PLR0913 — one keyword per axis a seeding ca
         completed: Whether the pass completed. ``False`` records a failed pass, which
             no read filters out (ADR-0284 §6:2): the episode is on the channel and read
             like any other.
-        parks: The binding the activation's step parked (§3:4), for a resume case.
         **fields: Further ``EpisodicMemory`` fields, applied last (``expires_at``,
             ``validity``, ``placement`` ...).
 
@@ -94,7 +90,6 @@ def conversation_episode(  # noqa: PLR0913 — one keyword per axis a seeding ca
             reason=ProcessingReason.RETURNED if completed else ProcessingReason.PROCESSING_FAILED,
             understanding_omitted=UnderstandingOmission.NOT_REACHED,
             stages=ended_pass(occurred_at),
-            links=ActivationLinks(parks=parks),
         ),
     )
     return record.model_copy(update=fields) if fields else record

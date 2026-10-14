@@ -418,163 +418,6 @@ async def test_the_single_resolution_rule_is_also_a_database_constraint(
         )
 
 
-async def test_the_per_binding_resolution_rule_is_also_a_database_constraint(
-    ephemeral: SqliteAuditTrail,
-) -> None:
-    """ADR-0044 §2b's partial unique index holds even if the checked read were bypassed.
-
-    Asserted by inserting a second resolution of the same concrete binding —
-    naming a *different* CONFIRM, so the ``decisions_resolves`` index does not
-    catch it — straight into the table, past the store's own validation. Only the
-    ``decisions_binding_resolution`` index constrains this, which is the whole
-    point of having it beneath the check.
-    """
-    bind: dict[str, object] = {"execution_id": "exec-a"}  # step_id defaults to "step-1"
-    await ephemeral.record(decision("c-1", request=action(**bind)))
-    await ephemeral.record(decision("c-2", request=action(**bind)))
-    answer = decision(
-        "r-1",
-        request=action(**bind),
-        ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-1"),
-        resolves="c-1",
-    )
-    await ephemeral.record(answer)
-    sibling = decision(
-        "r-2", request=action(**bind), ruled=ruling(PermissionOutcome.DENY), resolves="c-2"
-    )
-
-    with pytest.raises(sqlite3.IntegrityError):
-        ephemeral._conn.execute(
-            "INSERT INTO decisions("
-            "id, decided_at_us, resolves, execution_id, step_id, outcome, data"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("r-2", 0, "c-2", "exec-a", "step-1", "deny", sibling.model_dump_json()),
-        )
-
-
-@pytest.mark.integration
-async def test_a_pre_binding_database_is_migrated_and_stays_usable(tmp_path: Path) -> None:
-    """A trail written before ADR-0044 grows the binding columns on reopen (§1).
-
-    ``step_id`` and ``outcome`` are backfilled from each row's JSON so the
-    per-binding indexes see them; ``execution_id`` stays ``NULL``, since a
-    pre-ADR-0044 decision belongs to no execution — a non-concrete binding §2b
-    never constrains. The legacy record stays readable, and the reopened trail
-    records and reads back a new concrete binding, proving the migrated schema is
-    fully functional.
-    """
-    path = tmp_path / "audit.db"
-    legacy = sqlite3.connect(str(path))
-    try:
-        legacy.execute(
-            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
-            "resolves TEXT, data TEXT NOT NULL)"
-        )
-        old = decision("c-old", request=action(step_id="step-old"))
-        raw = json.loads(old.model_dump_json())
-        del raw["execution_id"]  # a genuinely pre-ADR-0044 record had no such key
-        legacy.execute(
-            "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
-            ("c-old", 0, None, json.dumps(raw)),
-        )
-        legacy.commit()
-    finally:
-        legacy.close()
-
-    reopened = SqliteAuditTrail(path=path)
-    try:
-        assert await reopened.get("c-old") == old  # readable, execution_id defaults to None
-        row = reopened._conn.execute(
-            "SELECT execution_id, step_id, outcome FROM decisions WHERE id = ?", ("c-old",)
-        ).fetchone()
-        assert row == (None, "step-old", "confirm")  # step_id/outcome backfilled, execution_id NULL
-
-        # The migrated schema supports the new binding features end to end.
-        await reopened.record(decision("c-new", request=action(execution_id="exec-a")))
-        found = await reopened.get("c-new")
-        assert found is not None
-        assert (found.execution_id, found.step_id) == ("exec-a", "step-1")
-    finally:
-        reopened.close()
-
-
-@pytest.mark.integration
-async def test_a_corrupt_legacy_row_is_reported_as_an_audit_error_not_a_raw_json_error(
-    tmp_path: Path,
-) -> None:
-    """A malformed blob in a pre-ADR-0044 table is reported, not left to escape.
-
-    Migration reads each legacy row's JSON to backfill the binding columns. A
-    blob that is not JSON must surface as this layer's ``AuditError`` — the same
-    "reported, not returned" rule ``_decode`` applies at read time — rather than a
-    bare ``JSONDecodeError`` leaking past ``_setup``'s ``sqlite3``/``OSError``
-    boundary and aborting construction with a foreign exception.
-    """
-    path = tmp_path / "audit.db"
-    legacy = sqlite3.connect(str(path))
-    try:
-        legacy.execute(
-            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
-            "resolves TEXT, data TEXT NOT NULL)"
-        )
-        legacy.execute(
-            "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
-            ("c-bad", 0, None, "{not valid json"),
-        )
-        legacy.commit()
-    finally:
-        legacy.close()
-
-    with pytest.raises(AuditError):
-        SqliteAuditTrail(path=path)
-
-
-@pytest.mark.integration
-async def test_a_second_trail_opens_a_migrated_legacy_database_without_failing(
-    tmp_path: Path,
-) -> None:
-    """Concurrent upgrade is serialised, so a second opener does not double-ALTER.
-
-    ``_setup`` takes the write lock (``BEGIN IMMEDIATE``) before it inspects the
-    schema, so two processes upgrading one pre-ADR-0044 file cannot both run
-    ``ALTER TABLE ... ADD COLUMN`` — the loser waits and re-reads the migrated
-    columns, its ``missing`` set coming back empty. Exercised sequentially here
-    (the observable outcome of that serialisation): a second trail opens the
-    already-migrated file cleanly, and both read the legacy record and drive the
-    new binding features.
-    """
-    path = tmp_path / "audit.db"
-    legacy = sqlite3.connect(str(path))
-    try:
-        legacy.execute(
-            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
-            "resolves TEXT, data TEXT NOT NULL)"
-        )
-        old = decision("c-old", request=action(step_id="step-1"))
-        raw = json.loads(old.model_dump_json())
-        del raw["execution_id"]
-        legacy.execute(
-            "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
-            ("c-old", 0, None, json.dumps(raw)),
-        )
-        legacy.commit()
-    finally:
-        legacy.close()
-
-    first = SqliteAuditTrail(path=path)
-    second = SqliteAuditTrail(path=path)  # the already-migrated file opens cleanly
-    try:
-        assert await first.get("c-old") == old
-        assert await second.get("c-old") == old
-        await first.record(decision("c-a", request=action(execution_id="exec-a")))
-        found = await second.get("c-a")
-        assert found is not None
-        assert (found.execution_id, found.step_id) == ("exec-a", "step-1")
-    finally:
-        first.close()
-        second.close()
-
-
 # --- the schema version marker ----------------------------------------------
 
 
@@ -592,15 +435,38 @@ def _stored_schema_version(path: Path) -> str | None:
     return None if row is None else str(row[0])
 
 
-def _write_legacy_trail(path: Path, decision_id: str) -> PermissionDecision:
-    """Seed ``path`` with a pre-marker database holding one decision.
+async def test_a_fresh_trail_records_the_schema_version(ephemeral: SqliteAuditTrail) -> None:
+    """A database created here is labelled, so a future migration has a marker to read.
 
-    The pre-ADR-0044 table shape, which is what a real database predating the
-    version marker looks like: no ``meta`` table, and no binding columns either.
+    The marker ``SqlitePlanStore`` writes from day one (ADR-0049 §1), which this
+    store had none of. Exactly one row, so the label is unambiguous. Version 5 is
+    the record without a step or an execution, in a table without their columns
+    (ADR-0318 §6:1), which is what this code writes.
     """
-    old = decision(decision_id, request=action(step_id="step-old"))
-    raw_record = json.loads(old.model_dump_json())
-    del raw_record["execution_id"]
+    rows = ephemeral._conn.execute(
+        "SELECT key, value FROM meta WHERE key = 'schema_version'"
+    ).fetchall()
+
+    assert rows == [("schema_version", "5")]
+
+
+async def test_a_fresh_trail_keeps_no_step_no_execution_and_no_binding_index(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """ADR-0318 §6:1: the trail stores and compares no ``step_id`` or ``execution_id``.
+
+    The columns ADR-0044 kept them in left with them, with the ``outcome`` column and
+    the two indexes only its per-binding rule read.
+    """
+    columns = {row[1] for row in ephemeral._conn.execute("PRAGMA table_info(decisions)")}
+    indexes = {row[1] for row in ephemeral._conn.execute("PRAGMA index_list(decisions)")}
+
+    assert columns.isdisjoint({"execution_id", "step_id", "outcome"})
+    assert indexes.isdisjoint({"decisions_binding_resolution", "decisions_binding"})
+
+
+def _write_premarker_trail(path: Path) -> None:
+    """Seed ``path`` with a ``decisions`` table and no marker, as code before it wrote."""
     legacy = sqlite3.connect(str(path))
     try:
         legacy.execute(
@@ -609,96 +475,29 @@ def _write_legacy_trail(path: Path, decision_id: str) -> PermissionDecision:
         )
         legacy.execute(
             "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
-            (decision_id, 0, None, json.dumps(raw_record)),
+            ("c-old", 0, None, '{"id": "c-old"}'),
         )
         legacy.commit()
     finally:
         legacy.close()
-    return old
-
-
-async def test_a_fresh_trail_records_the_schema_version(ephemeral: SqliteAuditTrail) -> None:
-    """A database created here is labelled, so a future migration has a marker to read.
-
-    The marker ``SqlitePlanStore`` writes from day one (ADR-0049 §1), which this
-    store had none of. Exactly one row, so the label is unambiguous. Version 4 is
-    the charged tool declaration and the pinned quote inside the stored record
-    (ADR-0271 §8), which is what this code writes.
-    """
-    rows = ephemeral._conn.execute(
-        "SELECT key, value FROM meta WHERE key = 'schema_version'"
-    ).fetchall()
-
-    assert rows == [("schema_version", "4")]
 
 
 @pytest.mark.integration
-async def test_a_pre_marker_database_is_stamped_rather_than_refused(tmp_path: Path) -> None:
-    """An existing audit trail with no marker still opens, and gains one.
+async def test_a_pre_marker_database_is_refused_rather_than_migrated(tmp_path: Path) -> None:
+    """A trail holding decisions and no marker predates it, and nothing reads it.
 
-    The marker arrives after this store had users, so every trail already on disk
-    carries none. Refusing them would make a Tier 1 record the user is entitled to
-    keep unopenable by the code that wrote it. Backfilling is sound because
-    ``_migrate`` is additive and keyed on column presence, and
-    ``CREATE TABLE IF NOT EXISTS`` adds the invocation table to any file at all:
-    together they bring a pre-marker file to exactly the shape the current version
-    names, so the stamp records what this open established rather than an
-    assumption about what was there before.
+    No reader is written for a store from before the cutover (ADR-0309 §6:4), so it is
+    refused at open — inside the setup transaction, before any create — and the file
+    is left exactly as it arrived: no ``meta`` table, no marker, no new table.
     """
     path = tmp_path / "audit.db"
-    old = _write_legacy_trail(path, "c-old")
-    assert _stored_schema_version(path) is None  # the state every existing trail is in
+    _write_premarker_trail(path)
 
-    reopened = SqliteAuditTrail(path=path)
-    try:
-        assert await reopened.get("c-old") == old  # the history survives the stamping
-        # ...and the migrated, now-labelled schema is fully functional.
-        await reopened.record(decision("c-new", request=action(execution_id="exec-a")))
-        found = await reopened.get("c-new")
-        assert found is not None
-        assert (found.execution_id, found.step_id) == ("exec-a", "step-1")
-    finally:
-        reopened.close()
+    with pytest.raises(AuditError, match="predates the marker"):
+        SqliteAuditTrail(path=path)
 
-    assert _stored_schema_version(path) == "4"
-
-
-def _write_version_one_trail(path: Path, decision_id: str) -> PermissionDecision:
-    """Seed ``path`` with a version-1 database: decisions and a marker, no invocations.
-
-    The shape this store wrote between the marker landing (ADR-0049 §1's pattern)
-    and ADR-0192 — every binding column present, so ``_migrate`` has nothing to do,
-    and the ``invocations`` table absent, which is the whole of the step to
-    version 2.
-    """
-    old = decision(decision_id, request=action(step_id="step-old"))
-    legacy = sqlite3.connect(str(path))
-    try:
-        legacy.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        legacy.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')")
-        legacy.execute(
-            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
-            "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
-            "expires_at_us INTEGER, data TEXT NOT NULL)"
-        )
-        legacy.execute(
-            "INSERT INTO decisions(id, decided_at_us, resolves, execution_id, step_id, "
-            "outcome, expires_at_us, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                decision_id,
-                0,
-                None,
-                old.execution_id,
-                old.step_id,
-                old.ruling.outcome.value,
-                None,
-                old.model_dump_json(),
-            ),
-        )
-        legacy.commit()
-    finally:
-        legacy.close()
-    return old
+    assert _stored_schema_version(path) is None
+    assert _tables(path) == {"decisions"}
 
 
 def _tables(path: Path) -> set[str]:
@@ -710,47 +509,8 @@ def _tables(path: Path) -> set[str]:
         raw.close()
 
 
-@pytest.mark.integration
-async def test_a_version_one_database_is_opened_and_restamped(tmp_path: Path) -> None:
-    """A pre-ADR-0192 trail opens, gains the invocation shape, and says so.
-
-    Both halves are the decision. **Opened**, because refusing would strand every
-    audit trail written before ADR-0192 — the same Tier 1 record the pre-marker
-    case is about, and ``CREATE TABLE IF NOT EXISTS`` is all the migration this
-    step needs. **Restamped**, because a file that has grown invocation rows is no
-    longer one the previous version of this code may open: its ``clear()`` knows
-    only ``decisions``, so it would leave the invocation rows behind and make
-    ADR-0192 §6's total erasure silently partial, and its uniqueness check sees
-    only ``decisions``, so it could record a decision under an id an invocation
-    already holds. ADR-0049 §1 rules that a downgrade is a fault to report; the
-    marker is what lets it be reported.
-    """
-    path = tmp_path / "audit.db"
-    old = _write_version_one_trail(path, "c-old")
-    assert _stored_schema_version(path) == "1"
-    assert "invocations" not in _tables(path)
-
-    reopened = SqliteAuditTrail(path=path)
-    try:
-        assert await reopened.get("c-old") == old  # the history survives the upgrade
-        assert await reopened.export_invocations() == []  # ...and the new table is readable
-    finally:
-        reopened.close()
-
-    assert _stored_schema_version(path) == "4"
-    assert "invocations" in _tables(path)
-
-
 def _downstamp(path: Path, version: str) -> None:
-    """Relabel an existing trail, leaving every table and every row alone.
-
-    A version-2 and a version-3 trail are each *schema*-identical to a version-4
-    one: the steps ADR-0262 §8 and ADR-0271 §8 make are to the record a
-    ``decisions`` row holds, not to any table. So the honest way to seed one is to
-    let this code write the file and then move the marker back — which is also what
-    a real older file on disk is, a file this store wrote before the declaration
-    widened.
-    """
+    """Relabel an existing trail, leaving every table and every row alone."""
     raw = sqlite3.connect(str(path))
     try:
         raw.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (version,))
@@ -760,46 +520,24 @@ def _downstamp(path: Path, version: str) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("stored", ["2", "3"])
-async def test_an_older_openable_database_is_opened_and_restamped(
+@pytest.mark.parametrize("stored", ["1", "2", "3", "4"])
+async def test_an_older_marker_is_refused_rather_than_restamped(
     tmp_path: Path, stored: str
 ) -> None:
-    """A pre-ADR-0262 or pre-ADR-0271 trail opens, keeps its history, and is relabelled 4.
+    """Every version before 5 was openable and restamped; none is now (ADR-0309 §6:4).
 
-    **Opened**, because every previously openable value stays openable: nothing
-    about the file is wrong, and refusing would strand every trail written before
-    ADR-0262 or before ADR-0271 — the Tier 1 record ADR-0004 §7 entitles the user
-    to keep. **Restamped**, because the marker is the only thing that will stop
-    code at the older version opening it afterwards. That code cannot decode a
-    ``decisions`` row whose embedded ``ToolDefinition`` carries ``charged_output``
-    or whose transcribed ``PermissionRuling`` carries ``proved_quote`` —
-    ``extra="forbid"`` — so left where it was the file would be accepted and then
-    fail at the first such row, which is precisely the deferred, unreportable fault
-    ADR-0049 §1 rules out.
-
-    Both older values are driven, because both are in the openable set and the
-    restamp has to reach 4 from each. No table work is involved and none is
-    asserted: each step is the record shape.
+    A version-4 row carries ``step_id`` and ``execution_id`` and does not decode as the
+    record this code writes (ADR-0318 §6:1), and no reader is written for a store from
+    before the cutover, so an older marker is refused at open and left as it was.
     """
     path = tmp_path / "audit.db"
-    trail = SqliteAuditTrail(path=path)
-    try:
-        await trail.record(decision("c-old", request=action(step_id="step-old")))
-        old = await trail.get("c-old")
-    finally:
-        trail.close()
+    SqliteAuditTrail(path=path).close()
     _downstamp(path, stored)
+
+    with pytest.raises(AuditError, match="can open only version 5"):
+        SqliteAuditTrail(path=path)
+
     assert _stored_schema_version(path) == stored
-
-    reopened = SqliteAuditTrail(path=path)
-    try:
-        assert await reopened.get("c-old") == old  # the history survives the restamp
-        await reopened.record(decision("c-new", request=action(execution_id="exec-a")))
-        assert len(await reopened.export()) == 2
-    finally:
-        reopened.close()
-
-    assert _stored_schema_version(path) == "4"
 
 
 @pytest.mark.integration
@@ -822,18 +560,18 @@ async def test_the_current_marker_is_refused_at_open_by_code_at_the_previous_one
     path = tmp_path / "audit.db"
     trail = SqliteAuditTrail(path=path)
     try:
-        await trail.record(decision("c-1", request=action(step_id="step-old")))
+        await trail.record(decision("c-1"))
         kept = await trail.get("c-1")
     finally:
         trail.close()
-    assert _stored_schema_version(path) == "4"
+    assert _stored_schema_version(path) == "5"
 
-    monkeypatch.setattr(audit, "_OPENABLE_VERSIONS", frozenset({1, 2, 3}))
-    with pytest.raises(AuditError, match="can open only version 1, 2, 3"):
+    monkeypatch.setattr(audit, "_OPENABLE_VERSIONS", frozenset({4}))
+    with pytest.raises(AuditError, match="can open only version 4"):
         SqliteAuditTrail(path=path)
 
     monkeypatch.undo()
-    assert _stored_schema_version(path) == "4", "a refused open leaves the marker alone"
+    assert _stored_schema_version(path) == "5", "a refused open leaves the marker alone"
     reopened = SqliteAuditTrail(path=path)
     try:
         assert await reopened.get("c-1") == kept  # ...and leaves the records alone
@@ -856,69 +594,39 @@ async def test_the_current_marker_is_refused_before_a_decisions_table_is_made(
     raw = sqlite3.connect(str(path))
     try:
         raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '4')")
+        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '5')")
         raw.commit()
     finally:
         raw.close()
 
-    monkeypatch.setattr(audit, "_OPENABLE_VERSIONS", frozenset({1, 2, 3}))
-    with pytest.raises(AuditError, match="schema_version=4"):
+    monkeypatch.setattr(audit, "_OPENABLE_VERSIONS", frozenset({4}))
+    with pytest.raises(AuditError, match="schema_version=5"):
         SqliteAuditTrail(path=path)
 
     assert "decisions" not in _tables(path)
-    assert _stored_schema_version(path) == "4"
-
-
-@pytest.mark.integration
-async def test_a_version_one_database_holding_a_foreign_invocations_table_is_refused(
-    tmp_path: Path,
-) -> None:
-    """``CREATE TABLE IF NOT EXISTS`` is not a migration, and this is where that bites.
-
-    A file arriving with an ``invocations`` table of ordinary columns keeps it: the
-    create is a no-op against a table of that name whatever shape it has. Every
-    projection then inserts as ``NULL``, because ``_append`` writes only ``seq``,
-    ``recorded_at_us`` and ``data`` — so the per-decision scan ADR-0192 §1's consume
-    is decided over finds no claims at all, and a spent authorisation admits a second
-    act. That is the failure the ``GENERATED ALWAYS`` columns exist to make
-    impossible, walked around rather than through.
-
-    Refused, and refused **before** the restamp: the marker still reads ``1``, the
-    foreign table is untouched, and no version-2 label is left over a version-1
-    shape.
-    """
-    path = tmp_path / "audit.db"
-    _write_version_one_trail(path, "c-old")
-    foreign = sqlite3.connect(str(path))
-    try:
-        foreign.execute(
-            "CREATE TABLE invocations(seq INTEGER NOT NULL, recorded_at_us INTEGER NOT NULL, "
-            "data TEXT NOT NULL, id TEXT, decision_id TEXT, completes TEXT, outcome TEXT)"
-        )
-        foreign.commit()
-    finally:
-        foreign.close()
-
-    with pytest.raises(AuditError):
-        SqliteAuditTrail(path=path)
-
-    assert _stored_schema_version(path) == "1", "a refused open leaves the marker alone"
+    assert _stored_schema_version(path) == "5"
 
 
 _STORE_SHAPE = (
     "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
-    "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
-    "expires_at_us INTEGER, data TEXT NOT NULL)"
+    "resolves TEXT, expires_at_us INTEGER, data TEXT NOT NULL)"
+)
+
+#: The current marker, so an open reaches the shape checks rather than refusing an
+#: unmarked file that already holds a ``decisions`` table (ADR-0309 §6:4).
+_MARKED = (
+    "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    "INSERT INTO meta(key, value) VALUES ('schema_version', '5')",
 )
 
 
 def _seed(path: Path, *statements: str) -> None:
     """Run ``statements`` against ``path`` on a connection of somebody else's.
 
-    Used two ways: to write a whole ``decisions`` table this store never made — with
-    no ``meta`` marker, the pre-ADR-0049 file this store still opens, so what the
-    open goes on to refuse is the table's own shape and nothing else — and to attach
-    something to a file a previous open left behind.
+    Used two ways: to write a whole ``decisions`` table this store never made — behind
+    the current marker, so what the open goes on to refuse is the table's own shape
+    and nothing else — and to attach something to a file a previous open left
+    behind.
     """
     raw = sqlite3.connect(str(path))
     try:
@@ -939,7 +647,7 @@ def _seed(path: Path, *statements: str) -> None:
         # resolves an id then answers from whichever it met first.
         pytest.param(
             "CREATE TABLE decisions(id TEXT, decided_at_us INTEGER NOT NULL, "
-            "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
+            "resolves TEXT, "
             "expires_at_us INTEGER, data TEXT NOT NULL)",
             id="no primary key",
         ),
@@ -948,17 +656,15 @@ def _seed(path: Path, *statements: str) -> None:
         # column differs.
         pytest.param(
             "CREATE TABLE decisions(id TEXT, decided_at_us INTEGER NOT NULL, "
-            "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
+            "resolves TEXT, "
             "expires_at_us INTEGER, data TEXT NOT NULL, PRIMARY KEY (id, decided_at_us))",
             id="a composite primary key",
         ),
-        # A retyped column. `_migrate` heals a *missing* one by `ALTER TABLE ... ADD
-        # COLUMN`, so a dropped column is not the exposure; a column of the wrong
-        # declared type is, because nothing rewrites it and the blob every read
-        # decodes would come back as whatever INTEGER affinity made of it.
+        # A retyped column: nothing rewrites it, and the blob every read decodes
+        # would come back as whatever INTEGER affinity made of it.
         pytest.param(
             "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
-            "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
+            "resolves TEXT, "
             "expires_at_us INTEGER, data INTEGER NOT NULL)",
             id="a retyped data column",
         ),
@@ -967,7 +673,7 @@ def _seed(path: Path, *statements: str) -> None:
         # open rather than at the first record.
         pytest.param(
             "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
-            "resolves TEXT NOT NULL, execution_id TEXT, step_id TEXT, outcome TEXT, "
+            "resolves TEXT NOT NULL, "
             "expires_at_us INTEGER, data TEXT NOT NULL)",
             id="a resolves column that is NOT NULL",
         ),
@@ -979,7 +685,7 @@ def _seed(path: Path, *statements: str) -> None:
         pytest.param(
             "CREATE TABLE decisions(id TEXT COLLATE NOCASE PRIMARY KEY, "
             "decided_at_us INTEGER NOT NULL, "
-            "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
+            "resolves TEXT, "
             "expires_at_us INTEGER, data TEXT NOT NULL)",
             id="a case-insensitive id",
         ),
@@ -987,7 +693,7 @@ def _seed(path: Path, *statements: str) -> None:
         # resolution naming "A" would resolve the confirmation recorded as "a".
         pytest.param(
             "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
-            "resolves TEXT COLLATE NOCASE, execution_id TEXT, step_id TEXT, outcome TEXT, "
+            "resolves TEXT COLLATE NOCASE, "
             "expires_at_us INTEGER, data TEXT NOT NULL)",
             id="a case-insensitive resolves",
         ),
@@ -1005,16 +711,15 @@ async def test_a_foreign_decisions_table_is_refused(create: str, tmp_path: Path)
     than written into (issue #1575).
 
     Refused with nothing left behind: the check shares the setup transaction with
-    the creates and the migration, so the ``meta`` table this open would have made
-    rolls back with it and the file is exactly what it was.
+    the creates, so the file is exactly what it was.
     """
     path = tmp_path / "audit.db"
-    _seed(path, create)
+    _seed(path, *_MARKED, create)
 
     with pytest.raises(AuditError, match="decisions table"):
         SqliteAuditTrail(path=path)
 
-    assert _tables(path) == {"decisions"}, "a refused open leaves the file as it arrived"
+    assert _tables(path) == {"decisions", "meta"}, "a refused open leaves the file as it arrived"
 
 
 @pytest.mark.integration
@@ -1027,17 +732,16 @@ async def test_a_decisions_index_that_is_not_the_defined_one_is_refused(tmp_path
     confirmation rule loses the net beneath its checked read, which is exactly what
     a second process racing the check would then walk through.
 
-    Held by comparing the stored definition rather than by introspection, because
-    the same argument reaches ``decisions_binding_resolution``'s ``WHERE`` (ADR-0044
-    §2b) and no ``PRAGMA`` reports one.
+    Held by comparing the stored definition rather than by introspection, because a
+    partial index's ``WHERE`` is reported by no ``PRAGMA``.
     """
     path = tmp_path / "audit.db"
-    _seed(path, _STORE_SHAPE, "CREATE INDEX decisions_resolves ON decisions(resolves)")
+    _seed(path, *_MARKED, _STORE_SHAPE, "CREATE INDEX decisions_resolves ON decisions(resolves)")
 
     with pytest.raises(AuditError, match="'decisions_resolves'"):
         SqliteAuditTrail(path=path)
 
-    assert _tables(path) == {"decisions"}
+    assert _tables(path) == {"decisions", "meta"}
 
 
 @pytest.mark.integration
@@ -1078,6 +782,7 @@ async def test_a_foreign_trigger_on_a_differently_cased_table_is_refused(tmp_pat
     path = tmp_path / "audit.db"
     _seed(
         path,
+        *_MARKED,
         _STORE_SHAPE.replace("CREATE TABLE decisions", "CREATE TABLE Decisions"),
         "CREATE TRIGGER discard BEFORE INSERT ON Decisions BEGIN SELECT RAISE(IGNORE); END",
     )
@@ -1090,14 +795,13 @@ async def test_a_foreign_trigger_on_a_differently_cased_table_is_refused(tmp_pat
 async def test_a_decisions_table_carrying_an_extra_column_still_opens(tmp_path: Path) -> None:
     """Tolerant of what a later version of this store would add, and only of that.
 
-    Every column beside ``data`` arrived by ``ALTER TABLE ... ADD COLUMN`` for some
-    file (ADR-0044's three, ADR-0059's one), so a check that refused an unknown
-    column would refuse this store's own next shape read by this store's own
-    previous code. What it must not tolerate is a *key* it does not know about,
+    A later version may add a column by ``ALTER TABLE ... ADD COLUMN``, so a check
+    that refused an unknown column would refuse this store's own next shape read by
+    this store's own previous code. What it must not tolerate is a *key* it does not know about,
     which is why the primary key is checked whole rather than only at ``id``.
     """
     path = tmp_path / "audit.db"
-    _seed(path, _STORE_SHAPE, "ALTER TABLE decisions ADD COLUMN whatever_comes_next TEXT")
+    _seed(path, *_MARKED, _STORE_SHAPE, "ALTER TABLE decisions ADD COLUMN whatever_comes_next TEXT")
 
     trail = SqliteAuditTrail(path=path)
     try:
@@ -1108,39 +812,11 @@ async def test_a_decisions_table_carrying_an_extra_column_still_opens(tmp_path: 
 
 
 @pytest.mark.integration
-async def test_a_version_one_database_that_fails_to_migrate_keeps_its_marker(
-    tmp_path: Path,
-) -> None:
-    """A refused upgrade must not relabel a database it did not manage to bring up.
-
-    The restamp shares the setup transaction with the create and the migration, so
-    a corrupt legacy row rolls it back with everything else. The alternative is a
-    file labelled 2 whose invocation table was never created — which the *next*
-    open would then trust and never try to build again.
-    """
-    path = tmp_path / "audit.db"
-    _write_version_one_trail(path, "c-old")
-    legacy = sqlite3.connect(str(path))
-    try:
-        legacy.execute("ALTER TABLE decisions DROP COLUMN step_id")  # forces `_migrate` to run
-        legacy.execute("UPDATE decisions SET data = ? WHERE id = ?", ("{not valid json", "c-old"))
-        legacy.commit()
-    finally:
-        legacy.close()
-
-    with pytest.raises(AuditError):
-        SqliteAuditTrail(path=path)
-
-    assert _stored_schema_version(path) == "1"
-
-
-@pytest.mark.integration
 async def test_reopening_a_labelled_trail_keeps_the_one_marker(tmp_path: Path) -> None:
     """A second open neither re-stamps nor trips over the marker already there.
 
-    The stamp is written only where none was found and the restamp only where an
-    older openable version was, so reopening cannot lose the primary-key race a
-    blind insert would.
+    The stamp is written only where none was found, so reopening cannot lose the
+    primary-key race a blind insert would.
     """
     path = tmp_path / "audit.db"
     SqliteAuditTrail(path=path).close()
@@ -1151,37 +827,7 @@ async def test_reopening_a_labelled_trail_keeps_the_one_marker(tmp_path: Path) -
     finally:
         reopened.close()
 
-    assert rows == [("schema_version", "4")]
-
-
-@pytest.mark.integration
-async def test_a_failed_migration_leaves_no_marker_behind(tmp_path: Path) -> None:
-    """A refused upgrade must not label a database it did not manage to migrate.
-
-    The stamp shares the setup transaction with the create and the migration, so a
-    corrupt legacy row rolls back the marker — and the ``meta`` table itself — with
-    everything else. The alternative is a database falsely labelled current, which
-    the *next* open would then trust and never try to migrate again.
-    """
-    path = tmp_path / "audit.db"
-    legacy = sqlite3.connect(str(path))
-    try:
-        legacy.execute(
-            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
-            "resolves TEXT, data TEXT NOT NULL)"
-        )
-        legacy.execute(
-            "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
-            ("c-bad", 0, None, "{not valid json"),
-        )
-        legacy.commit()
-    finally:
-        legacy.close()
-
-    with pytest.raises(AuditError):
-        SqliteAuditTrail(path=path)
-
-    assert _stored_schema_version(path) is None
+    assert rows == [("schema_version", "5")]
 
 
 @pytest.mark.integration
@@ -1223,7 +869,7 @@ async def test_a_newer_marker_on_a_populated_trail_is_refused_rather_than_read(
 
     The same rule the trail applies to a row that no longer validates: a database
     this code cannot account for is a fault to report, not records to hand on. The
-    marker is moved past the current version rather than to it: ``'4'`` would name
+    marker is moved past the current version rather than to it: ``'5'`` would name
     the shape this code writes, and the refusal under test is for the one it does
     not know.
     """
@@ -1236,7 +882,7 @@ async def test_a_newer_marker_on_a_populated_trail_is_refused_rather_than_read(
 
     raw = sqlite3.connect(str(path))
     try:
-        raw.execute("UPDATE meta SET value = '5' WHERE key = 'schema_version'")
+        raw.execute("UPDATE meta SET value = '6' WHERE key = 'schema_version'")
         raw.commit()
     finally:
         raw.close()
@@ -1303,19 +949,17 @@ async def test_a_marker_of_the_wrong_type_is_reported_as_an_audit_error(
 
 @pytest.mark.integration
 async def test_an_integer_marker_of_the_supported_version_is_accepted(tmp_path: Path) -> None:
-    """A marker stored as INTEGER 1 rather than '1' still names version 1.
+    """A marker stored as INTEGER 5 rather than '5' still names version 5.
 
     The type guard refuses what cannot be read as a version; it must not refuse a
     version legibly stored in the other of SQLite's two integral forms, which is
-    what an untyped ``meta`` column yields for an unquoted literal. Version 1 is
-    openable and restamped, so the parse is observable in both the open and the
-    label left behind.
+    what an untyped ``meta`` column yields for an unquoted literal.
     """
     path = tmp_path / "audit.db"
     raw = sqlite3.connect(str(path))
     try:
         raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value)")
-        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', 1)")
+        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', 5)")
         raw.commit()
     finally:
         raw.close()
@@ -1327,7 +971,7 @@ async def test_an_integer_marker_of_the_supported_version_is_accepted(tmp_path: 
     finally:
         trail.close()
 
-    assert _stored_schema_version(path) == "4"
+    assert _stored_schema_version(path) == "5"
 
 
 @pytest.mark.integration
@@ -1347,7 +991,7 @@ async def test_conflicting_markers_are_refused_rather_than_resolved_by_row_order
     raw = sqlite3.connect(str(path))
     try:
         raw.execute("CREATE TABLE meta(key TEXT, value TEXT NOT NULL)")  # no primary key
-        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')")
+        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '5')")
         raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '999')")
         raw.commit()
     finally:
@@ -1381,7 +1025,7 @@ async def test_clearing_the_trail_leaves_it_openable(tmp_path: Path) -> None:
     finally:
         trail.close()
 
-    assert _stored_schema_version(path) == "4"
+    assert _stored_schema_version(path) == "5"
     reopened = SqliteAuditTrail(path=path)
     try:
         assert await reopened.export() == []
@@ -1439,59 +1083,6 @@ async def test_a_decision_with_no_lifetime_stores_a_null_deadline(
         "SELECT expires_at_us FROM decisions WHERE id = ?", ("d-1",)
     ).fetchone()
     assert row[0] is None
-
-
-@pytest.mark.integration
-async def test_a_pre_0059_database_grows_the_deadline_column(tmp_path: Path) -> None:
-    """A table with the ADR-0044 columns but no deadline column grows it ``NULL`` (§1).
-
-    ``expires_at`` did not exist before ADR-0059, so a legacy row is left ``NULL``
-    — "no lifetime", the same shape the ADR-0044 ``execution_id`` migration used —
-    and stays readable. The reopened trail then records and reads a new deadline
-    end to end, proving the migrated schema is fully functional.
-    """
-    path = tmp_path / "audit.db"
-    legacy = sqlite3.connect(str(path))
-    try:
-        legacy.execute(
-            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
-            "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, data TEXT NOT NULL)"
-        )
-        old = decision("c-old", request=action(step_id="step-1"))
-        raw = json.loads(old.model_dump_json())
-        del raw["expires_at"]  # a genuinely pre-ADR-0059 record had no such key
-        legacy.execute(
-            "INSERT INTO decisions("
-            "id, decided_at_us, resolves, execution_id, step_id, outcome, data"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("c-old", 0, None, None, "step-1", "confirm", json.dumps(raw)),
-        )
-        legacy.commit()
-    finally:
-        legacy.close()
-
-    reopened = SqliteAuditTrail(path=path)
-    try:
-        assert await reopened.get("c-old") == old  # readable, expires_at defaults to None
-        row = reopened._conn.execute(
-            "SELECT expires_at_us FROM decisions WHERE id = ?", ("c-old",)
-        ).fetchone()
-        assert row == (None,)  # a legacy row has no deadline
-
-        deadline = AT + timedelta(hours=1)
-        await reopened.record(
-            decision(
-                "c-new",
-                request=action(execution_id="exec-a"),
-                ruled=ruling(PermissionOutcome.CONFIRM),
-                expires_at=deadline,
-            )
-        )
-        found = await reopened.get("c-new")
-        assert found is not None
-        assert found.expires_at == deadline
-    finally:
-        reopened.close()
 
 
 @pytest.mark.integration
@@ -1558,8 +1149,7 @@ def test_a_journal_opened_during_setup_is_owner_only(
     for it, so restricting the file after the schema is built and migrated leaves
     every journal opened in between carrying the process umask — and an interrupted
     write leaves that journal on disk holding Tier 1 pages beside a ``0600`` base
-    file. Setup's ``BEGIN IMMEDIATE`` is exactly such a write, and :meth:`_migrate`
-    inside it can rewrite the whole ``decisions`` table.
+    file. Setup's ``BEGIN IMMEDIATE`` is exactly such a write.
 
     Observed **inside** ``_setup`` rather than after it, because that is the only
     place the difference is visible: by the time the constructor returns the
@@ -1866,7 +1456,6 @@ def _egress_decision(decision_id: str = "d-egress", **overrides: object) -> Perm
     )
     fields: dict[str, object] = {
         "parameters": {"to": "a@example.com"},
-        "execution_id": "exec-a",
         "egress_binding": binding,
     }
     fields.update(overrides)
@@ -2163,9 +1752,11 @@ async def test_one_legacy_row_no_longer_denies_the_user_every_other_row(
     implementation that still failed the whole list, and would not satisfy the
     clause.
     """
-    await ephemeral.record(_egress_decision("d-before", execution_id="exec-before"))
+    await ephemeral.record(_egress_decision("d-before"))
     await _record_as_legacy(ephemeral, _egress_decision())
-    await ephemeral.record(decision("d-after", request=action(execution_id="exec-after")))
+    await ephemeral.record(
+        decision("d-after", request=action(parameters={"to": "after@example.com"}))
+    )
 
     exported = await ephemeral.export()
     recent = await ephemeral.recent(limit=50)

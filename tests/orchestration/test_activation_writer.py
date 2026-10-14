@@ -17,7 +17,6 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     ActivationEnding,
-    ActivationLinks,
     ChannelContext,
     ChannelIdentity,
     ChannelInput,
@@ -29,7 +28,6 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     Modality,
     NewConversation,
-    ParkedBinding,
     PlacementReach,
     PlacementSetter,
     ProcessingReason,
@@ -151,7 +149,6 @@ class Wiring:
         *,
         captured: bool = True,
         standalone: bool = False,
-        parked: ParkedBinding | None = None,
         delivery: SpokenDelivery | None = None,
     ) -> ActivationState:
         """One admitted text activation, optionally with canonical conversational facts."""
@@ -174,7 +171,6 @@ class Wiring:
                 modality=Modality.TEXT,
                 supplied_withheld=False,
                 derived_from_external=False,
-                parked=parked,
                 delivery=delivery,
             )
             state.response = "the complete reply"
@@ -459,19 +455,6 @@ async def test_a_write_known_not_to_have_committed_reaches_nothing_else() -> Non
     assert await wiring.last_turn_at(state) is None
 
 
-async def test_the_parked_binding_is_recorded_as_the_episode_s_own_park() -> None:
-    """§3:4: ``links.parks`` is the binding this activation's own step parked."""
-    binding = ParkedBinding(execution_id="execution-1", step_id="step-1")
-    wiring = Wiring()
-    state = await wiring.state(parked=binding)
-    assert (await wiring.write(state)).state == "recorded"
-    episode = await wiring.memory.get(_ADDRESS)
-    assert isinstance(episode, EpisodicMemory)
-    assert episode.processing_record is not None
-    assert episode.processing_record.links.parks == binding
-    assert episode.processing_record.links.parked is None
-
-
 async def test_a_spoken_capture_writes_its_unknown_delivery_row() -> None:
     """§10: capture passes ``UNKNOWN`` through ``record_turn``."""
     unknown = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
@@ -531,7 +514,7 @@ async def test_admission_writes_an_open_episode_each_append_extends_and_the_end_
     assert opened.placement.set_at == opened.occurred_at == _AT
     stages = (
         (ControllerStage.BEGIN_CONVERSATION, ControllerRule.CONVERSATION_UNRESOLVED),
-        (ControllerStage.ASSOCIATE_GOAL, ControllerRule.ASSOCIATION_DUE),
+        (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
     )
     for count, (stage, due) in enumerate(stages, start=1):
         state.stages.append(_entry(stage, due))
@@ -565,7 +548,7 @@ async def test_a_stored_record_other_than_the_one_written_is_a_mismatch_and_leav
     moved = stored.model_copy(
         update={
             "processing_record": stored.processing_record.model_copy(
-                update={"links": ActivationLinks(goal_id="someone-else")}
+                update={"output_degraded": True}
             )
         }
     )
@@ -675,8 +658,8 @@ async def test_a_close_under_a_lowered_stage_limit_still_extends_the_stored_reco
     await wiring.admit(state)
     stored = (
         _entry(ControllerStage.BEGIN_CONVERSATION, ControllerRule.CONVERSATION_UNRESOLVED),
-        _entry(ControllerStage.ASSOCIATE_GOAL, ControllerRule.ASSOCIATION_DUE),
-        _entry(ControllerStage.COMPOSE, ControllerRule.REPLY_OWED),
+        _entry(ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
+        _entry(ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
     )
     for entry in stored:
         state.stages.append(entry)

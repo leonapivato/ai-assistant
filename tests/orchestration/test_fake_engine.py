@@ -365,7 +365,7 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         """A tiny-limit fake whose live set does not fit that limit."""
         engine = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
         for index in range(_OVERFULL_GRANTS):
-            engine.hold_grant(f"source-{index}", scope=(GrantScope.FACET,))
+            engine.hold_grant(f"source-{index}", scope=(GrantScope.NOTIFY,))
         return engine
 
     @pytest.fixture

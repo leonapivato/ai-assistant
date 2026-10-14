@@ -29,7 +29,6 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.controller import (
     ACTIVATION_RULES,
     ActivationController,
-    PassFacts,
     Rule,
     Stage,
     StageRecord,
@@ -51,9 +50,6 @@ class _Facts:
     conversation_turn: bool = False
     informational_event: bool = False
     conversation_resolved: bool = False
-    routing_wired: bool = False
-    route_decided: bool = False
-    route_taken: bool = False
     windows_decided: bool = False
     recall_wired: bool = False
     recall_decided: bool = False
@@ -63,19 +59,6 @@ class _Facts:
     understanding_recorded: bool = False
     story_links_wired: bool = False
     story_links_decided: bool = False
-    event_summarized: bool = False
-    associated: bool = False
-    asks_which_goal: bool = False
-    disambiguation_asked: bool = False
-    continues_goal: bool = False
-    reconciliation_wired: bool = False
-    reconciled: bool = False
-    turn_decided: bool = False
-    turn_raised_question: bool = False
-    plan_has_steps: bool = False
-    drive_decided: bool = False
-    parked: bool = False
-    reply_composed: bool = False
     phases: _Phases | None = None
 
 
@@ -98,94 +81,24 @@ class _Phases:
     latest_calls_beyond_tidy_ups: bool = False
 
 
-def _turn_asks_nothing(facts: PassFacts) -> bool:
-    return facts.conversation_turn and facts.associated and not facts.asks_which_goal
-
-
-#: The controller's mechanism cases' own table: the rows the old path's table ran
-#: before the switch (ADR-0309 §2:6), kept here so those cases exercise the mechanism —
+#: The controller's mechanism cases' own table: the rows of §3's table that answer
+#: without the phases' working set, kept here so those cases exercise the mechanism —
 #: the first answer decides, the loop guard, tolerance, deadlines, the stop mark and the
-#: record — over stages a case can fake without the phases' working set. The
-#: controller's own table is §3's, :data:`ACTIVATION_RULES`, pinned below.
+#: record — over stages a case can fake. The old path's rows the cases used to run over
+#: left with its stages and rules (ADR-0309 §3:6). The controller's own table is §3's,
+#: :data:`ACTIVATION_RULES`, pinned below.
 _MECHANISM_RULES: Final[tuple[Rule, ...]] = (
-    Rule(
-        ControllerRule.CONVERSATION_UNRESOLVED,
-        lambda f: f.conversation_turn and not f.conversation_resolved,
-        ControllerStage.BEGIN_CONVERSATION,
-    ),
-    Rule(
-        ControllerRule.ROUTE_UNCHECKED,
-        lambda f: f.conversation_turn and f.routing_wired and not f.route_decided,
-        ControllerStage.ROUTING,
-    ),
-    Rule(ControllerRule.ROUTE_TAKEN, lambda f: f.route_taken, ControllerStage.END),
-    # ADR-0282 §3: the windows are assembled before recall, wherever understanding is.
-    Rule(
-        ControllerRule.WINDOWS_UNASSEMBLED,
-        lambda f: f.understanding_wired and not f.windows_decided,
-        ControllerStage.WINDOWS,
-    ),
-    # ADR-0281 §2: recall runs before understanding, and only where both are wired.
-    Rule(
-        ControllerRule.NOT_RECALLED,
-        lambda f: f.recall_wired and f.understanding_wired and not f.recall_decided,
-        ControllerStage.RECALL,
-    ),
-    Rule(
-        ControllerRule.NOT_UNDERSTOOD,
-        lambda f: f.understanding_wired and not f.understanding_decided,
-        ControllerStage.UNDERSTANDING,
-    ),
-    # ADR-0300 §6:11: the understanding's story links are recorded once it is a
-    # recorded version, before anything the pass does with the input.
-    Rule(
-        ControllerRule.STORY_LINKS_UNRECORDED,
-        lambda f: f.story_links_wired and f.understanding_recorded and not f.story_links_decided,
-        ControllerStage.STORY_LINKS,
-    ),
-    Rule(
-        ControllerRule.EVENT_UNSUMMARIZED,
-        lambda f: (
-            f.informational_event
-            and not f.event_summarized
-            and (f.understanding_decided or not f.understanding_wired)
-        ),
-        ControllerStage.EVENT_SUMMARY,
-    ),
-    Rule(
-        ControllerRule.ASSOCIATION_DUE,
-        lambda f: f.conversation_turn and not f.associated,
-        ControllerStage.ASSOCIATE_GOAL,
-    ),
-    Rule(
-        ControllerRule.DISAMBIGUATION_RAISED,
-        lambda f: f.asks_which_goal and not f.disambiguation_asked,
-        ControllerStage.ASK_DISAMBIGUATION,
-    ),
-    Rule(
-        ControllerRule.CONTINUING_UNRECONCILED,
-        lambda f: f.continues_goal and f.reconciliation_wired and not f.reconciled,
-        ControllerStage.RECONCILE,
-    ),
-    Rule(
-        ControllerRule.UNPLANNED,
-        lambda f: _turn_asks_nothing(f) and not f.turn_decided,
-        ControllerStage.TURN_LOOP,
-    ),
-    Rule(
-        ControllerRule.PLAN_HAS_STEPS,
-        lambda f: (
-            f.turn_decided
-            and not f.turn_raised_question
-            and f.plan_has_steps
-            and not f.drive_decided
-        ),
-        ControllerStage.DRIVE,
-    ),
-    Rule(
-        ControllerRule.REPLY_OWED,
-        lambda f: f.turn_decided and not f.parked and not f.reply_composed,
-        ControllerStage.COMPOSE,
+    *(
+        rule
+        for rule in ACTIVATION_RULES
+        if rule.name
+        in {
+            ControllerRule.CONVERSATION_UNRESOLVED,
+            ControllerRule.WINDOWS_UNASSEMBLED,
+            ControllerRule.NOT_RECALLED,
+            ControllerRule.NOT_UNDERSTOOD,
+            ControllerRule.STORY_LINKS_UNRECORDED,
+        }
     ),
     Rule(ControllerRule.NOTHING_DUE, lambda _: True, ControllerStage.END),
 )
@@ -197,11 +110,18 @@ def _due(facts: _Facts) -> Rule:
 
 _TURN: Final = _Facts(conversation_turn=True)
 _RESOLVED: Final = replace(_TURN, conversation_resolved=True)
-_ASSOCIATED: Final = replace(_RESOLVED, associated=True)
-_PLANNED: Final = replace(_ASSOCIATED, turn_decided=True)
 _UNDERSTOOD: Final = replace(
     _RESOLVED, understanding_wired=True, windows_decided=True, understanding_decided=True
 )
+
+
+def _linked() -> _Facts:
+    """A pass on which the story links are due and nothing before them.
+
+    The one stage the mechanism cases run where any stage would do. A new value each
+    call, since a stage writes its decision onto the working set it is handed.
+    """
+    return _Facts(informational_event=True, story_links_wired=True, understanding_recorded=True)
 
 
 # --- §4: the table, over constructed states ---------------------------------------
@@ -214,16 +134,6 @@ _UNDERSTOOD: Final = replace(
             _TURN,
             ControllerRule.CONVERSATION_UNRESOLVED,
             ControllerStage.BEGIN_CONVERSATION,
-        ),
-        (
-            replace(_RESOLVED, routing_wired=True),
-            ControllerRule.ROUTE_UNCHECKED,
-            ControllerStage.ROUTING,
-        ),
-        (
-            replace(_RESOLVED, routing_wired=True, route_decided=True, route_taken=True),
-            ControllerRule.ROUTE_TAKEN,
-            ControllerStage.END,
         ),
         # ADR-0282 §3: the windows first, wherever understanding is wired.
         (
@@ -263,11 +173,6 @@ _UNDERSTOOD: Final = replace(
             ControllerStage.UNDERSTANDING,
         ),
         (
-            replace(_RESOLVED, routing_wired=True, understanding_wired=True, recall_wired=True),
-            ControllerRule.ROUTE_UNCHECKED,
-            ControllerStage.ROUTING,
-        ),
-        (
             _Facts(
                 informational_event=True,
                 understanding_wired=True,
@@ -277,28 +182,13 @@ _UNDERSTOOD: Final = replace(
             ControllerRule.NOT_RECALLED,
             ControllerStage.RECALL,
         ),
+        # Recall is wired only beside understanding (ADR-0281 §2).
         (
             _Facts(informational_event=True, recall_wired=True),
-            ControllerRule.EVENT_UNSUMMARIZED,
-            ControllerStage.EVENT_SUMMARY,
+            ControllerRule.NOTHING_DUE,
+            ControllerStage.END,
         ),
-        (
-            _Facts(
-                informational_event=True,
-                understanding_wired=True,
-                windows_decided=True,
-                understanding_decided=True,
-            ),
-            ControllerRule.EVENT_UNSUMMARIZED,
-            ControllerStage.EVENT_SUMMARY,
-        ),
-        (
-            _Facts(informational_event=True),
-            ControllerRule.EVENT_UNSUMMARIZED,
-            ControllerStage.EVENT_SUMMARY,
-        ),
-        # ADR-0300 §6:11: the story links once understanding is a recorded version,
-        # ahead of everything a turn or an event does with its input.
+        # ADR-0300 §6:11: the story links once understanding is a recorded version.
         (
             replace(_UNDERSTOOD, story_links_wired=True, understanding_recorded=True),
             ControllerRule.STORY_LINKS_UNRECORDED,
@@ -323,74 +213,23 @@ _UNDERSTOOD: Final = replace(
                 understanding_recorded=True,
                 story_links_decided=True,
             ),
-            ControllerRule.ASSOCIATION_DUE,
-            ControllerStage.ASSOCIATE_GOAL,
+            ControllerRule.NOTHING_DUE,
+            ControllerStage.END,
         ),
         # Wired, but no version recorded: the rule does not answer.
         (
             replace(_UNDERSTOOD, story_links_wired=True),
-            ControllerRule.ASSOCIATION_DUE,
-            ControllerStage.ASSOCIATE_GOAL,
+            ControllerRule.NOTHING_DUE,
+            ControllerStage.END,
         ),
         # A version recorded, and no stage wired: the rule does not answer.
         (
             replace(_UNDERSTOOD, understanding_recorded=True),
-            ControllerRule.ASSOCIATION_DUE,
-            ControllerStage.ASSOCIATE_GOAL,
-        ),
-        (_RESOLVED, ControllerRule.ASSOCIATION_DUE, ControllerStage.ASSOCIATE_GOAL),
-        (
-            replace(_ASSOCIATED, asks_which_goal=True),
-            ControllerRule.DISAMBIGUATION_RAISED,
-            ControllerStage.ASK_DISAMBIGUATION,
-        ),
-        (
-            replace(_ASSOCIATED, continues_goal=True, reconciliation_wired=True),
-            ControllerRule.CONTINUING_UNRECONCILED,
-            ControllerStage.RECONCILE,
-        ),
-        (_ASSOCIATED, ControllerRule.UNPLANNED, ControllerStage.TURN_LOOP),
-        (
-            replace(_ASSOCIATED, continues_goal=True, reconciliation_wired=True, reconciled=True),
-            ControllerRule.UNPLANNED,
-            ControllerStage.TURN_LOOP,
-        ),
-        (
-            replace(_PLANNED, plan_has_steps=True),
-            ControllerRule.PLAN_HAS_STEPS,
-            ControllerStage.DRIVE,
-        ),
-        (_PLANNED, ControllerRule.REPLY_OWED, ControllerStage.COMPOSE),
-        (
-            replace(_PLANNED, plan_has_steps=True, turn_raised_question=True),
-            ControllerRule.REPLY_OWED,
-            ControllerStage.COMPOSE,
-        ),
-        (
-            replace(_PLANNED, plan_has_steps=True, drive_decided=True),
-            ControllerRule.REPLY_OWED,
-            ControllerStage.COMPOSE,
-        ),
-        (
-            replace(_PLANNED, plan_has_steps=True, drive_decided=True, parked=True),
             ControllerRule.NOTHING_DUE,
             ControllerStage.END,
         ),
-        (
-            replace(_PLANNED, reply_composed=True),
-            ControllerRule.NOTHING_DUE,
-            ControllerStage.END,
-        ),
-        (
-            replace(_ASSOCIATED, asks_which_goal=True, disambiguation_asked=True),
-            ControllerRule.NOTHING_DUE,
-            ControllerStage.END,
-        ),
-        (
-            _Facts(informational_event=True, event_summarized=True),
-            ControllerRule.NOTHING_DUE,
-            ControllerStage.END,
-        ),
+        (_RESOLVED, ControllerRule.NOTHING_DUE, ControllerStage.END),
+        (_Facts(informational_event=True), ControllerRule.NOTHING_DUE, ControllerStage.END),
     ],
 )
 def test_the_first_rule_that_answers_decides(
@@ -447,13 +286,13 @@ def _shape(record: StageRecord) -> list[tuple[ControllerStage, ControllerRule, S
 
 async def test_the_controller_runs_what_is_due_until_nothing_is() -> None:
     record = await _run(
-        _Facts(informational_event=True, understanding_wired=True, windows_decided=True),
+        replace(_linked(), understanding_wired=True, windows_decided=True),
         _FakeStage(ControllerStage.UNDERSTANDING, "understanding_decided"),
-        _FakeStage(ControllerStage.EVENT_SUMMARY, "event_summarized"),
+        _FakeStage(ControllerStage.STORY_LINKS, "story_links_decided"),
     )
     assert _shape(record) == [
         (ControllerStage.UNDERSTANDING, ControllerRule.NOT_UNDERSTOOD, StageOutcome.DONE),
-        (ControllerStage.EVENT_SUMMARY, ControllerRule.EVENT_UNSUMMARIZED, StageOutcome.DONE),
+        (ControllerStage.STORY_LINKS, ControllerRule.STORY_LINKS_UNRECORDED, StageOutcome.DONE),
         (ControllerStage.END, ControllerRule.NOTHING_DUE, StageOutcome.DONE),
     ]
     first, second, end = record.entries
@@ -463,11 +302,11 @@ async def test_the_controller_runs_what_is_due_until_nothing_is() -> None:
 
 async def test_a_rule_naming_a_stage_already_run_ends_the_pass_on_the_loop_guard() -> None:
     """§4's M38 loop guard: a stage that decides nothing is due again, and is not rerun."""
-    stuck = _FakeStage(ControllerStage.EVENT_SUMMARY)
-    record = await _run(_Facts(informational_event=True), stuck)
+    stuck = _FakeStage(ControllerStage.STORY_LINKS)
+    record = await _run(_linked(), stuck)
     assert stuck.runs == 1
     assert _shape(record) == [
-        (ControllerStage.EVENT_SUMMARY, ControllerRule.EVENT_UNSUMMARIZED, StageOutcome.DONE),
+        (ControllerStage.STORY_LINKS, ControllerRule.STORY_LINKS_UNRECORDED, StageOutcome.DONE),
         (ControllerStage.END, ControllerRule.STAGE_REPEATED, StageOutcome.DONE),
     ]
 
@@ -486,15 +325,15 @@ async def test_a_stage_that_did_not_end_done_ends_the_pass_and_reraises_its_erro
     _, now = _clock()
     record = StageRecord()
     controller = ActivationController(
-        stages=(_FakeStage(ControllerStage.EVENT_SUMMARY, result=StageResult(outcome, error)),),
+        stages=(_FakeStage(ControllerStage.STORY_LINKS, result=StageResult(outcome, error)),),
         clock=now,  # type: ignore[arg-type]  # a plain callable
         rules=_MECHANISM_RULES,
     )
     with pytest.raises(type(error)) as caught:
-        await controller.run(_Facts(informational_event=True), record)
+        await controller.run(_linked(), record)
     assert caught.value is error
     assert _shape(record) == [
-        (ControllerStage.EVENT_SUMMARY, ControllerRule.EVENT_UNSUMMARIZED, outcome),
+        (ControllerStage.STORY_LINKS, ControllerRule.STORY_LINKS_UNRECORDED, outcome),
         (ControllerStage.END, ending, StageOutcome.DONE),
     ]
 
@@ -530,12 +369,10 @@ async def test_a_tolerated_result_is_recorded_and_understanding_follows(
         replace(_EVENT_WIRED),
         _tolerated(outcome, error),
         _FakeStage(ControllerStage.UNDERSTANDING, "understanding_decided"),
-        _FakeStage(ControllerStage.EVENT_SUMMARY, "event_summarized"),
     )
     assert _shape(record) == [
         (ControllerStage.RECALL, ControllerRule.NOT_RECALLED, outcome),
         (ControllerStage.UNDERSTANDING, ControllerRule.NOT_UNDERSTOOD, StageOutcome.DONE),
-        (ControllerStage.EVENT_SUMMARY, ControllerRule.EVENT_UNSUMMARIZED, StageOutcome.DONE),
         (ControllerStage.END, ControllerRule.NOTHING_DUE, StageOutcome.DONE),
     ]
 
@@ -675,11 +512,11 @@ async def test_a_pass_cancelled_inside_a_stage_ends_interrupted() -> None:
     _, now = _clock()
     record = StageRecord()
     controller = ActivationController(
-        stages=(Stage(ControllerStage.EVENT_SUMMARY, hang),),
+        stages=(Stage(ControllerStage.STORY_LINKS, hang),),
         clock=now,  # type: ignore[arg-type]  # a plain callable
         rules=_MECHANISM_RULES,
     )
-    task = asyncio.create_task(controller.run(_Facts(informational_event=True), record))
+    task = asyncio.create_task(controller.run(_linked(), record))
     await entered.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -701,7 +538,7 @@ async def test_a_wrapped_method_is_classified_by_what_it_raised(
     async def body(_: _Facts) -> None:
         raise raised
 
-    result = await Stage(ControllerStage.COMPOSE, body).run(_Facts())
+    result = await Stage(ControllerStage.PLANNING, body).run(_Facts())
     assert result == StageResult(outcome, raised)
 
 
@@ -727,7 +564,7 @@ async def test_a_wrapped_method_that_returns_is_done() -> None:
     async def body(_: _Facts) -> None:
         return None
 
-    assert await Stage(ControllerStage.COMPOSE, body).run(_Facts()) == StageResult(
+    assert await Stage(ControllerStage.PLANNING, body).run(_Facts()) == StageResult(
         StageOutcome.DONE
     )
 
@@ -738,8 +575,8 @@ async def test_a_wrapped_method_that_returns_is_done() -> None:
 def _entry(second: int) -> StageEntry:
     at = _AT + timedelta(seconds=second)
     return StageEntry(
-        stage=ControllerStage.COMPOSE,
-        due=ControllerRule.REPLY_OWED,
+        stage=ControllerStage.PLANNING,
+        due=ControllerRule.ROUND_DUE,
         started_at=at,
         ended_at=at,
         outcome=StageOutcome.DONE,
@@ -778,7 +615,7 @@ def test_a_supplied_ending_past_the_bound_is_kept_as_the_last_entry() -> None:
     record = StageRecord([_entry(second) for second in range(5)])
     kept, elided = record.bounded(2, ending=(ControllerRule.INTERRUPTED, _AT))
     assert elided == 4
-    assert [entry.stage for entry in kept] == [ControllerStage.COMPOSE, ControllerStage.END]
+    assert [entry.stage for entry in kept] == [ControllerStage.PLANNING, ControllerStage.END]
 
 
 def test_nothing_is_appended_after_the_end_entry() -> None:
@@ -830,10 +667,10 @@ def _stoppable(mark: _Mark, *stages: _FakeStage) -> ActivationController[_Facts]
 async def test_a_mark_set_before_the_controller_runs_no_stage_and_ends_stopped() -> None:
     """§4:1-§4:3: read before the rules are evaluated, so nothing is due and nothing runs."""
     mark = _Mark(stopped=True)
-    stage = _FakeStage(ControllerStage.EVENT_SUMMARY, "event_summarized")
+    stage = _FakeStage(ControllerStage.STORY_LINKS, "story_links_decided")
     record = StageRecord()
 
-    await _stoppable(mark, stage).run(_Facts(informational_event=True), record)
+    await _stoppable(mark, stage).run(_linked(), record)
 
     assert stage.runs == 0
     assert _shape(record) == [(ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE)]
@@ -843,7 +680,7 @@ async def test_a_mark_set_during_a_stage_ends_the_pass_before_the_next() -> None
     """§4:1: read again once the stage's result is in hand; the next stage never starts."""
     mark = _Mark()
     first = _StoppingStage(ControllerStage.UNDERSTANDING, "understanding_decided", mark=mark)
-    second = _FakeStage(ControllerStage.EVENT_SUMMARY, "event_summarized")
+    second = _FakeStage(ControllerStage.STORY_LINKS, "story_links_decided")
     record = StageRecord()
 
     await _stoppable(mark, first, second).run(
@@ -870,14 +707,14 @@ async def test_a_stage_failing_after_the_mark_ends_stopped_and_is_not_reraised(
     """§4:4: the stop was taken in first, so it is what ended the pass."""
     mark = _Mark()
     failing = _StoppingStage(
-        ControllerStage.EVENT_SUMMARY, result=StageResult(outcome, error), mark=mark
+        ControllerStage.STORY_LINKS, result=StageResult(outcome, error), mark=mark
     )
     record = StageRecord()
 
-    await _stoppable(mark, failing).run(_Facts(informational_event=True), record)
+    await _stoppable(mark, failing).run(_linked(), record)
 
     assert _shape(record) == [
-        (ControllerStage.EVENT_SUMMARY, ControllerRule.EVENT_UNSUMMARIZED, outcome),
+        (ControllerStage.STORY_LINKS, ControllerRule.STORY_LINKS_UNRECORDED, outcome),
         (ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE),
     ]
 
@@ -895,12 +732,12 @@ async def test_a_cancellation_reaching_a_marked_pass_propagates_with_the_stops_e
     record = StageRecord()
     _, now = _clock()
     controller = ActivationController(
-        stages=(Stage(ControllerStage.EVENT_SUMMARY, hang),),
+        stages=(Stage(ControllerStage.STORY_LINKS, hang),),
         clock=now,  # type: ignore[arg-type]  # a plain callable
         rules=_MECHANISM_RULES,
         stopped=mark,
     )
-    task = asyncio.create_task(controller.run(_Facts(informational_event=True), record))
+    task = asyncio.create_task(controller.run(_linked(), record))
     await entered.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -913,7 +750,7 @@ async def test_a_pass_ended_by_a_rule_is_not_moved_by_a_later_mark() -> None:
     mark = _Mark()
     record = StageRecord()
 
-    await _stoppable(mark).run(_Facts(informational_event=True, event_summarized=True), record)
+    await _stoppable(mark).run(replace(_linked(), story_links_decided=True), record)
     mark.stopped = True
 
     assert _shape(record) == [(ControllerStage.END, ControllerRule.NOTHING_DUE, StageOutcome.DONE)]
@@ -933,11 +770,11 @@ def _raising_after_the_mark(mark: _Mark, error: Exception | None) -> ActivationC
         mark.stopped = True
         if error is not None:
             raise error
-        state.event_summarized = True
+        state.story_links_decided = True
 
     _, now = _clock()
     return ActivationController(
-        stages=(Stage(ControllerStage.EVENT_SUMMARY, body),),
+        stages=(Stage(ControllerStage.STORY_LINKS, body),),
         clock=now,  # type: ignore[arg-type]  # a plain callable
         rules=_MECHANISM_RULES,
         stopped=mark,
@@ -955,17 +792,15 @@ async def test_a_defect_a_stop_keeps_from_being_reraised_is_logged_by_class_and_
     record = StageRecord()
 
     with capture_logs() as logs:
-        await _raising_after_the_mark(mark, ValueError(_PRIVATE)).run(
-            _Facts(informational_event=True), record
-        )
+        await _raising_after_the_mark(mark, ValueError(_PRIVATE)).run(_linked(), record)
 
     assert _shape(record) == [
-        (ControllerStage.EVENT_SUMMARY, ControllerRule.EVENT_UNSUMMARIZED, StageOutcome.FAILED),
+        (ControllerStage.STORY_LINKS, ControllerRule.STORY_LINKS_UNRECORDED, StageOutcome.FAILED),
         (ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE),
     ]
     (line,) = _errors(logs)
     assert line["event"] == "stopped_stage_failed"
-    assert line["stage"] == ControllerStage.EVENT_SUMMARY.value
+    assert line["stage"] == ControllerStage.STORY_LINKS.value
     assert line["activation_id"] == "a-1"
     assert line["error"] == "ValueError"
     assert "in body" in line["traceback"]
@@ -985,7 +820,7 @@ async def test_an_expected_error_a_stop_keeps_from_being_reraised_logs_nothing(
     record = StageRecord()
 
     with capture_logs() as logs:
-        await _raising_after_the_mark(mark, error).run(_Facts(informational_event=True), record)
+        await _raising_after_the_mark(mark, error).run(_linked(), record)
 
     assert record.entries[-1].due is ControllerRule.STOPPED
     assert _errors(logs) == []
@@ -997,10 +832,10 @@ async def test_a_stage_that_ends_done_once_the_mark_is_set_logs_nothing() -> Non
     record = StageRecord()
 
     with capture_logs() as logs:
-        await _raising_after_the_mark(mark, None).run(_Facts(informational_event=True), record)
+        await _raising_after_the_mark(mark, None).run(_linked(), record)
 
     assert _shape(record) == [
-        (ControllerStage.EVENT_SUMMARY, ControllerRule.EVENT_UNSUMMARIZED, StageOutcome.DONE),
+        (ControllerStage.STORY_LINKS, ControllerRule.STORY_LINKS_UNRECORDED, StageOutcome.DONE),
         (ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE),
     ]
     assert logs == []
@@ -1015,7 +850,7 @@ async def test_a_defect_on_an_unmarked_pass_is_reraised_and_left_to_its_caller_t
 
     _, now = _clock()
     controller = ActivationController(
-        stages=(Stage(ControllerStage.EVENT_SUMMARY, body),),
+        stages=(Stage(ControllerStage.STORY_LINKS, body),),
         clock=now,  # type: ignore[arg-type]  # a plain callable
         rules=_MECHANISM_RULES,
         stopped=_Mark(),
@@ -1023,7 +858,7 @@ async def test_a_defect_on_an_unmarked_pass_is_reraised_and_left_to_its_caller_t
     )
 
     with capture_logs() as logs, pytest.raises(ValueError, match=_PRIVATE) as caught:
-        await controller.run(_Facts(informational_event=True), StageRecord())
+        await controller.run(_linked(), StageRecord())
 
     assert caught.value is error
     assert logs == []
@@ -1049,8 +884,8 @@ def _phase_due(phases: _Phases, facts: _Facts = _PHASE_PASS) -> Rule:
 def test_the_controllers_one_table_is_section_3s_rows_in_order() -> None:
     """ADR-0309 §3's thirteen rows, in order, the last always answering (§2:6, §7:1).
 
-    The old path's rows are gone from it (§3:6): no routing, event summary, goal, turn
-    loop, drive or compose row answers on any pass.
+    The old path's rows are gone from it, and its stages and rules from ``core`` (§3:6):
+    no routing, event summary, goal, turn loop, drive or compose stage or rule remains.
     """
     assert [rule.name for rule in ACTIVATION_RULES] == [
         ControllerRule.CONVERSATION_UNRESOLVED,
@@ -1068,30 +903,30 @@ def test_the_controllers_one_table_is_section_3s_rows_in_order() -> None:
         ControllerRule.NOTHING_DUE,
     ]
     assert ACTIVATION_RULES[-1].answers(_Facts())
-    kept = {rule.name for rule in ACTIVATION_RULES}
-    assert kept.isdisjoint(
+    assert {rule.value for rule in ControllerRule}.isdisjoint(
         {
-            ControllerRule.ROUTE_UNCHECKED,
-            ControllerRule.ROUTE_TAKEN,
-            ControllerRule.EVENT_UNSUMMARIZED,
-            ControllerRule.ASSOCIATION_DUE,
-            ControllerRule.DISAMBIGUATION_RAISED,
-            ControllerRule.CONTINUING_UNRECONCILED,
-            ControllerRule.UNPLANNED,
-            ControllerRule.PLAN_HAS_STEPS,
-            ControllerRule.REPLY_OWED,
+            "route_unchecked",
+            "route_taken",
+            "event_unsummarized",
+            "association_due",
+            "disambiguation_raised",
+            "continuing_unreconciled",
+            "unplanned",
+            "plan_has_steps",
+            "reply_owed",
+            "park_answered",
         }
     )
-    assert {rule.makes_due for rule in ACTIVATION_RULES}.isdisjoint(
+    assert {stage.value for stage in ControllerStage}.isdisjoint(
         {
-            ControllerStage.ROUTING,
-            ControllerStage.EVENT_SUMMARY,
-            ControllerStage.ASSOCIATE_GOAL,
-            ControllerStage.ASK_DISAMBIGUATION,
-            ControllerStage.RECONCILE,
-            ControllerStage.TURN_LOOP,
-            ControllerStage.DRIVE,
-            ControllerStage.COMPOSE,
+            "routing",
+            "event_summary",
+            "associate_goal",
+            "ask_disambiguation",
+            "reconcile",
+            "turn_loop",
+            "drive",
+            "compose",
         }
     )
 
@@ -1611,9 +1446,9 @@ async def test_each_entry_the_controller_appends_is_written_as_a_step() -> None:
 
     await _diagnosed(
         _FakeStage(ControllerStage.UNDERSTANDING, "understanding_decided"),
-        _FakeStage(ControllerStage.EVENT_SUMMARY, "event_summarized"),
+        _FakeStage(ControllerStage.STORY_LINKS, "story_links_decided"),
         sink=sink,
-    ).run(_Facts(informational_event=True, understanding_wired=True, windows_decided=True), record)
+    ).run(replace(_linked(), understanding_wired=True, windows_decided=True), record)
 
     steps = sink.of(DiagnosticSource.CONTROLLER, DiagnosticKind.STEP)
     assert [dict(step.body) for step in steps] == [
@@ -1625,9 +1460,9 @@ async def test_each_entry_the_controller_appends_is_written_as_a_step() -> None:
 async def test_every_stage_runs_under_the_activation_the_controller_binds() -> None:
     """§5:4: a stage's own entries are written for the activation, with no argument."""
     sink = FakeDiagnosticSink()
-    stage = _Diagnosing(ControllerStage.EVENT_SUMMARY, "event_summarized", sink)
+    stage = _Diagnosing(ControllerStage.STORY_LINKS, "story_links_decided", sink)
 
-    await _diagnosed(stage, sink=sink).run(_Facts(informational_event=True), StageRecord())
+    await _diagnosed(stage, sink=sink).run(_linked(), StageRecord())
 
     assert stage.seen == [_ACTIVATION]
     assert [one.activation_id for one in sink.of(DiagnosticSource.UNDERSTANDING)] == [_ACTIVATION]
@@ -1638,12 +1473,12 @@ async def test_a_failed_step_is_written_with_its_failure() -> None:
     error = PlanningError("the store is down")
     sink = FakeDiagnosticSink()
     controller = _diagnosed(
-        _FakeStage(ControllerStage.EVENT_SUMMARY, result=StageResult(StageOutcome.FAILED, error)),
+        _FakeStage(ControllerStage.STORY_LINKS, result=StageResult(StageOutcome.FAILED, error)),
         sink=sink,
     )
 
     with pytest.raises(PlanningError):
-        await controller.run(_Facts(informational_event=True), StageRecord())
+        await controller.run(_linked(), StageRecord())
 
     failed, ended = sink.of(DiagnosticSource.CONTROLLER)
     assert failed.body["outcome"] == "failed"
@@ -1654,13 +1489,11 @@ async def test_a_failed_step_is_written_with_its_failure() -> None:
 async def test_a_pass_with_no_admitted_activation_or_no_sink_writes_nothing() -> None:
     """§5:4: nothing is written where none is bound; §2:1: nor where the record is off."""
     sink = FakeDiagnosticSink()
-    unbound = _Diagnosing(ControllerStage.EVENT_SUMMARY, "event_summarized", sink)
+    unbound = _Diagnosing(ControllerStage.STORY_LINKS, "story_links_decided", sink)
 
-    await _diagnosed(unbound, sink=sink, activation_id=None).run(
-        _Facts(informational_event=True), StageRecord()
-    )
-    await _diagnosed(_FakeStage(ControllerStage.EVENT_SUMMARY, "event_summarized"), sink=None).run(
-        _Facts(informational_event=True), StageRecord()
+    await _diagnosed(unbound, sink=sink, activation_id=None).run(_linked(), StageRecord())
+    await _diagnosed(_FakeStage(ControllerStage.STORY_LINKS, "story_links_decided"), sink=None).run(
+        _linked(), StageRecord()
     )
 
     assert unbound.seen == [None]
@@ -1678,9 +1511,7 @@ async def test_a_cancelled_pass_awaits_no_write_on_its_way_out() -> None:
 
     record = StageRecord()
     running = asyncio.ensure_future(
-        _diagnosed(Stage(ControllerStage.EVENT_SUMMARY, hang), sink=sink).run(
-            _Facts(informational_event=True), record
-        )
+        _diagnosed(Stage(ControllerStage.STORY_LINKS, hang), sink=sink).run(_linked(), record)
     )
     await entered.wait()
     running.cancel()

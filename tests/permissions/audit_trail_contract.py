@@ -249,16 +249,16 @@ class _ClearOp:
         assert await trail.export() == []
 
 
-#: The two executions every read op below is seeded with and answers from. Their
-#: step is ``step-1``, ``action``'s default, so each pair is a concrete binding.
-_EXEC_A = "exec-read-a"
-_EXEC_B = "exec-read-b"
+#: The two requests every read op below is seeded with and answers from, told apart
+#: by their arguments.
+_EXEC_A = "read-a@example.com"
+_EXEC_B = "read-b@example.com"
 
 
 class _ReadOp:
     """A locked ``AuditTrail`` read, driven against a trail seeded the same way (#397).
 
-    The two calls are the *same* read against independent bindings, because what
+    The two calls are the *same* read against independent requests, because what
     distinguishes a read op is its lock site and both calls have to enter it.
     Nothing is asserted about the cancelled read's answer — it has none, its task
     was cancelled — so :meth:`verify` pins the state the second call had to see,
@@ -268,14 +268,14 @@ class _ReadOp:
     name = ""
 
     async def prepare(self, trail: AuditTrail) -> None:
-        """Seed an unresolved ``CONFIRM`` on one binding and a resolved one on the other."""
-        await trail.record(decision("c-a", request=action(execution_id=_EXEC_A)))
-        confirmed = decision("c-b", request=action(execution_id=_EXEC_B))
+        """Seed an unresolved ``CONFIRM`` on one request and a resolved one on the other."""
+        await trail.record(decision("c-a", request=action(parameters={"to": _EXEC_A})))
+        confirmed = decision("c-b", request=action(parameters={"to": _EXEC_B}))
         await trail.record(confirmed)
         await trail.record(
             decision(
                 "r-b",
-                request=action(execution_id=_EXEC_B),
+                request=action(parameters={"to": _EXEC_B}),
                 ruled=ruling(PermissionOutcome.ALLOW, authorised_by=confirmed.id),
                 resolves=confirmed.id,
             )
@@ -291,7 +291,7 @@ class _ReadOp:
 
     async def verify(self, trail: AuditTrail) -> None:
         """A read cancelled mid-flight leaves the trail whole and still readable."""
-        expected = decision("c-a", request=action(execution_id=_EXEC_A))
+        expected = decision("c-a", request=action(parameters={"to": _EXEC_A}))
         assert await trail.get("c-a") == expected
         assert {entry.id for entry in await trail.export()} == {"c-a", "c-b", "r-b"}
 
@@ -1757,9 +1757,8 @@ class AuditTrailContract:
             action(tool=tool("other-tool")),
             action(tool=tool(risk_level=RiskLevel.CRITICAL)),
             action(parameters={"to": "someone-else@example.com"}),
-            action(step_id="step-2"),
         ],
-        ids=["a different tool", "a tampered definition", "different arguments", "another step"],
+        ids=["a different tool", "a tampered definition", "different arguments"],
     )
     async def test_a_resolution_must_answer_the_question_that_was_asked(
         self, trail: AuditTrail, substituted: ActionRequest
@@ -1769,7 +1768,8 @@ class AuditTrailContract:
         It would let an ``ALLOW`` for tool B claim to be the user's answer to a
         ``CONFIRM`` shown for tool A — the substitution the embedded definition
         closes, reintroduced through the one path where a human was actually
-        consulted. The subject is compared on tool, payload digest *and* step.
+        consulted. The subject is compared on tool and payload digest; no step is
+        compared, since neither record carries one (ADR-0318 §6:1).
         """
         answer = await _resolved(trail, request=substituted)
 
@@ -1813,28 +1813,7 @@ class AuditTrailContract:
 
         await _refuses(trail, unbacked)
 
-    # --- the execution binding (ADR-0044 §2) -----------------------------
-
-    async def test_a_resolution_must_share_the_confirmations_execution(
-        self, trail: AuditTrail
-    ) -> None:
-        """ADR-0044 §2a: B's answer may not resolve A's confirmation.
-
-        Two executions of one plan, both parked on the same step, produce two
-        CONFIRMs identical in tool, digest and step but differing in
-        ``execution_id``. Without the added conjunct a resolution built for B
-        could name A's confirmation and pass every earlier check — the
-        cross-execution substitutability #253 closes at the resolution seam.
-        """
-        await trail.record(decision("c-a", request=action(execution_id="exec-a")))
-        answer_for_b = decision(
-            "r-b",
-            request=action(execution_id="exec-b"),
-            ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-a"),
-            resolves="c-a",
-        )
-
-        await _refuses(trail, answer_for_b)
+    # --- the intended action (ADR-0266 §7) ---------------------------------
 
     async def test_a_resolution_must_share_the_confirmations_intended_action(
         self, trail: AuditTrail
@@ -1890,49 +1869,17 @@ class AuditTrailContract:
             ),
         )
 
-    async def test_a_concrete_binding_carries_at_most_one_resolution(
+    async def test_identical_confirmations_are_resolved_independently(
         self, trail: AuditTrail
     ) -> None:
-        """ADR-0044 §2b: one step of one execution has one answer, across siblings.
+        """No step and no execution couples two confirmations (ADR-0318 §6:1).
 
-        ADR-0037 §2 leaves a second unresolved CONFIRM under one binding (a
-        compare-and-swap loser), and the two are the same action. The
-        per-*confirmation* rule alone would let the sibling be answered the other
-        way while the first stood — the #257 window. This is the per-*binding*
-        rule layered on top: once the binding is decided, no sibling may be
-        resolved. The refused answer names a *different* CONFIRM, so only the
-        binding rule — not the ``resolves`` index — can catch it.
+        ADR-0044's per-binding rule left with the step and the execution, so two
+        confirmations of one request are two questions: resolving one must not decide
+        the other. Only the per-confirmation rule applies, and it keeps them
+        independent.
         """
-        bind = {"execution_id": "exec-a"}  # step_id defaults to "step-1": a concrete binding
-        await trail.record(decision("c-1", request=action(**bind)))
-        await trail.record(decision("c-2", request=action(**bind)))
-        await trail.record(
-            decision(
-                "r-1",
-                request=action(**bind),
-                ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-1"),
-                resolves="c-1",
-            )
-        )
-
-        sibling_answer = decision(
-            "r-2",
-            request=action(**bind),
-            ruled=ruling(PermissionOutcome.DENY),
-            resolves="c-2",
-        )
-        await _refuses(trail, sibling_answer)
-
-    async def test_direct_confirmations_are_not_coupled_by_a_binding(
-        self, trail: AuditTrail
-    ) -> None:
-        """§2b fires only for a *concrete* binding (ADR-0044 §2b).
-
-        Two direct confirmations — no execution, no step — share the ``(None,
-        None)`` non-binding, so resolving one must not decide the other. Only the
-        per-confirmation rule applies, and it keeps them independent.
-        """
-        direct: dict[str, object] = {"step_id": None, "execution_id": None}
+        direct: dict[str, object] = {}
         await trail.record(decision("c-1", request=action(**direct)))
         await trail.record(decision("c-2", request=action(**direct)))
         await trail.record(

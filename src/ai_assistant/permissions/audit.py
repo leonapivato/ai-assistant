@@ -9,12 +9,10 @@ ADR-0036 §2 records why an in-process one would have satisfied the Protocol and
 not the decisions behind it.
 
 The on-disk schema carries a ``meta("schema_version")`` marker, the same shape
-:mod:`ai_assistant.planning.sqlite_store` writes (ADR-0049 §1). The *marker* is
-shared; the *mechanism* is not — evolution here stays the additive,
-column-presence ``ALTER`` of :meth:`SqliteAuditTrail._migrate`, which is what an
-append-only trail with existing rows can afford. A database predating the marker
-is stamped once this code has migrated it, and one at any older openable version is
-restamped, never refused; see :meth:`SqliteAuditTrail._check_schema_version`.
+:mod:`ai_assistant.planning.sqlite_store` writes (ADR-0049 §1). A file at any other
+version, or one predating the marker, is refused rather than migrated: nothing
+stored before the cutover is read (ADR-0309 §6:4); see
+:meth:`SqliteAuditTrail._check_schema_version`.
 
 Local-first (ADR-0002), and **locally only**: ADR-0021 §4 applies ADR-0004 §2's
 residency clause to this store by name, so nothing here may reach a remote
@@ -27,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
-import json
 import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
@@ -190,6 +187,13 @@ _MIN_SQLITE_INT = -(2**63)
 #: reader has a marker to judge the file by — the seam ADR-0049 §1 describes and
 #: the ``SqlitePlanStore`` pattern this follows.
 #:
+#: **Version 5 is the record without a step or an execution** (ADR-0318 §6:1): a
+#: ``PermissionDecision`` carries neither ``step_id`` nor ``execution_id``, and the
+#: ``decisions`` table loses the columns and the two indexes ADR-0044 kept them in,
+#: with the ``outcome`` column only those indexes read. A version-4 row carries both
+#: fields and does not decode here, and nothing stored before the cutover is read
+#: (ADR-0309 §6:4), so no migration brings an older file up: it is refused at open.
+#:
 #: **Version 4 is the record carrying a charged tool declaration and a pinned
 #: quote** (ADR-0271 §8). Nothing about the *tables* changes at this step either:
 #: what changes is again the JSON a ``decisions`` row holds. ``ToolDefinition``
@@ -228,19 +232,13 @@ _MIN_SQLITE_INT = -(2**63)
 #: requires to be total, silently partial — and its uniqueness check sees only
 #: ``decisions``, so it can record a decision under an id an invocation already
 #: holds, which the joined reads then resolve to two rows under one identifier.
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
-#: The versions this code can *open*. Anything else is refused, newer or older
-#: (ADR-0049 §1). Every previously openable value stays openable: a version-1,
-#: version-2 or version-3 file is opened and brought to :data:`_SCHEMA_VERSION` by
-#: the same additive create-and-migrate every open runs, then restamped — so no
-#: trail already on disk becomes unopenable, which is the failure
-#: :meth:`SqliteAuditTrail._check_schema_version` exists to avoid. Neither the step
-#: to version 3 nor the step to version 4 needs any table work at all (each is the
-#: record shape, not the schema), and each gets the restamp regardless, because the
-#: restamp is what stops code at the older version opening the file afterwards and
-#: failing on the first row it cannot decode (ADR-0262 §8, ADR-0271 §8).
-_OPENABLE_VERSIONS: Final[frozenset[int]] = frozenset({1, 2, 3, _SCHEMA_VERSION})
+#: The versions this code can *open*: the current one alone. Anything else is
+#: refused, newer or older (ADR-0049 §1). The older versions were openable and
+#: restamped until version 5, whose record an older row does not decode as, and no
+#: reader is written for a store from before the cutover (ADR-0309 §6:4).
+_OPENABLE_VERSIONS: Final[frozenset[int]] = frozenset({_SCHEMA_VERSION})
 
 #: Created first and on its own, so a database labelled with a schema this code
 #: cannot read is refused *before* the ``decisions`` table is created, migrated or
@@ -252,27 +250,20 @@ _READ_SCHEMA_VERSION = "SELECT value FROM meta WHERE key = 'schema_version'"
 
 _WRITE_SCHEMA_VERSION = "INSERT INTO meta(key, value) VALUES ('schema_version', ?)"
 
-#: Move an openable older marker up to :data:`_SCHEMA_VERSION`, in the same
-#: transaction as the create-and-migrate that earned it.
-_RESTAMP_SCHEMA_VERSION = "UPDATE meta SET value = ? WHERE key = 'schema_version'"
-
 #: The epoch the sort key counts from. Any fixed instant would do; this one is
 #: conventional.
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # The columns beside the ``data`` blob exist only so SQLite can order and
-# constrain; the blob is the record. ``execution_id``, ``step_id`` and
-# ``outcome`` (ADR-0044) are what the per-binding rule and its indexes read
-# (the recovery query that also read them retired under ADR-0309 §5);
-# ``expires_at_us`` (ADR-0059 §1) is the durable confirmation deadline as
-# whole microseconds since the epoch (the ``decided_at_us`` shape), a queryable
-# projection of the value the blob already carries. All are kept nullable so an
-# existing older table can grow them by ``ALTER`` (:meth:`_migrate`), identical
-# to a table created fresh here.
+# constrain; the blob is the record. ``expires_at_us`` (ADR-0059 §1) is the durable
+# confirmation deadline as whole microseconds since the epoch (the ``decided_at_us``
+# shape), a queryable projection of the value the blob already carries. The
+# ``execution_id``, ``step_id`` and ``outcome`` columns ADR-0044's per-binding rule
+# read left with the step and the execution (ADR-0318 §6:1).
 _CREATE_TABLE = (
     "CREATE TABLE IF NOT EXISTS decisions("
     "id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
-    "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
+    "resolves TEXT, "
     "expires_at_us INTEGER, "
     "data TEXT NOT NULL)"
 )
@@ -283,21 +274,17 @@ _CREATE_TABLE = (
 #: ``CREATE ... IF NOT EXISTS`` is a no-op against an object already there under
 #: that name *whatever it is*. A file arriving with a non-unique
 #: ``decisions_resolves`` keeps it, and one confirmation can then carry two
-#: resolutions (ADR-0036 §2); one arriving with a ``decisions_binding_resolution``
-#: whose ``WHERE`` matches nothing keeps that, and the per-binding net beneath the
-#: checked read in :meth:`SqliteAuditTrail._check_binding_undecided` is gone
-#: (ADR-0044 §2b).
+#: resolutions (ADR-0036 §2).
 #:
 #: SQLite stores a definition verbatim but for ``IF NOT EXISTS``, so what it holds
 #: is compared against these very statements rather than a second copy written out
 #: by hand — and comparing the text is what reaches a partial index's ``WHERE`` at
 #: all, which no ``PRAGMA`` reports.
 #:
-#: The *table* is deliberately not held this way, and :data:`_DECISION_COLUMNS` is
-#: why: :meth:`SqliteAuditTrail._migrate` reshapes it with
-#: ``ALTER TABLE ... ADD COLUMN``, which rewrites the text SQLite stores, so it has
-#: no single definition to compare against. An index has one — nothing here alters
-#: an index, and ``ADD COLUMN`` rewrites only the table's own statement — so the
+#: The *table* is deliberately not held this way, and :data:`_DECISION_COLUMNS` is why:
+#: a table reshaped with ``ALTER TABLE ... ADD COLUMN`` has its stored text rewritten,
+#: so it has no single definition to compare against. An index has one — nothing here
+#: alters an index, and ``ADD COLUMN`` rewrites only the table's own statement — so the
 #: weaker introspection is spent only where it must be (issue #1575).
 _INDEXES: Final[dict[str, str]] = {
     # A *unique* index, so the per-*confirmation* single-resolution rule (ADR-0036
@@ -310,33 +297,14 @@ _INDEXES: Final[dict[str, str]] = {
     "decisions_order": (
         "CREATE INDEX IF NOT EXISTS decisions_order ON decisions(decided_at_us DESC, id ASC)"
     ),
-    # ADR-0044 §2b: a *concrete* ``(execution_id, step_id)`` binding carries at
-    # most one resolution — the per-*binding* rule layered on top of the
-    # per-confirmation one. Partial, over resolving rows with a concrete binding
-    # only; NULLs being distinct leaves non-concrete (direct) bindings
-    # unconstrained. This is the safety net beneath the checked read in
-    # :meth:`_check_binding_undecided`.
-    "decisions_binding_resolution": (
-        "CREATE UNIQUE INDEX IF NOT EXISTS decisions_binding_resolution "
-        "ON decisions(execution_id, step_id) "
-        "WHERE resolves IS NOT NULL AND execution_id IS NOT NULL AND step_id IS NOT NULL"
-    ),
-    # ADR-0044 §3's index over a binding's CONFIRMs. Its reader retired with the old
-    # path (ADR-0309 §5); it stays, unchanged, as one of the indexes the collation
-    # check reads ``outcome``'s collating sequence from.
-    "decisions_binding": (
-        "CREATE INDEX IF NOT EXISTS decisions_binding ON decisions(execution_id, step_id, outcome)"
-    ),
 }
 
 #: **What the ``decisions`` table must be**: declared type, ``NOT NULL``, and
-#: position in the primary key, per column — the shape :data:`_CREATE_TABLE` and
-#: :meth:`SqliteAuditTrail._migrate` between them arrive at, whichever of the two
-#: got there. Checked by introspection at open, because the table has no single
+#: position in the primary key, per column — the shape :data:`_CREATE_TABLE`
+#: arrives at. Checked by introspection at open, because the table has no single
 #: stored definition to compare against (:data:`_INDEXES` says why). Extra columns
-#: are tolerated: a future ``_migrate`` adds one exactly as the ADR-0044 and
-#: ADR-0059 columns were added, and a file already carrying it is this store's own
-#: newer shape rather than a foreign one.
+#: are tolerated: a later version may add one by ``ALTER``, and a file already
+#: carrying it is this store's own newer shape rather than a foreign one.
 #:
 #: ``id`` carries ``pk`` 1 and every other column 0: SQLite reports the *position*
 #: in the key, so a composite ``PRIMARY KEY (id, decided_at_us)`` would leave ``id``
@@ -349,9 +317,6 @@ _DECISION_COLUMNS: Final[dict[str, tuple[str, bool, int]]] = {
     "id": ("TEXT", False, 1),
     "decided_at_us": ("INTEGER", True, 0),
     "resolves": ("TEXT", False, 0),
-    "execution_id": ("TEXT", False, 0),
-    "step_id": ("TEXT", False, 0),
-    "outcome": ("TEXT", False, 0),
     "expires_at_us": ("INTEGER", False, 0),
     "data": ("TEXT", True, 0),
 }
@@ -372,9 +337,6 @@ _DECISION_COLUMNS: Final[dict[str, tuple[str, bool, int]]] = {
 _DECISION_COMPARED: Final[tuple[str, ...]] = (
     "id",
     "resolves",
-    "execution_id",
-    "step_id",
-    "outcome",
 )
 
 #: **Every trigger this store defines, by the table it is attached to.** Holding the
@@ -420,15 +382,10 @@ _ORDERED = "SELECT data FROM decisions ORDER BY decided_at_us DESC, id ASC"
 # transaction as the insert, from the table's own maximum.
 #
 # **This table is what version 2 was** (:data:`_SCHEMA_VERSION` has since moved on).
-# ``CREATE TABLE IF NOT EXISTS`` is additive and idempotent exactly as
-# :meth:`SqliteAuditTrail._migrate`'s ``ALTER``s are, so a version-1 file opens and
-# gains it — and is then *restamped* to the current version rather than left at 1.
-# Leaving the marker alone would cost nothing here and everything to the next
-# reader: version-1 code accepts a version-1 marker, and its ``clear()`` and its
-# id-uniqueness check both know only ``decisions``, so it erases half of what
-# ADR-0192 §6 says is one record and can mint a decision over an invocation's id.
-# The restamp is what makes that downgrade the reported fault ADR-0049 §1 already
-# calls for.
+# Version-1 code's ``clear()`` and its id-uniqueness check both know only
+# ``decisions``, so it would erase half of what ADR-0192 §6 says is one record and
+# could mint a decision over an invocation's id; the marker is what makes that
+# downgrade the reported fault ADR-0049 §1 calls for.
 # **Four of the six columns are `GENERATED ALWAYS ... VIRTUAL` over the blob, and
 # that is the whole of their integrity.** A stored projection is a second copy of a
 # value the record already carries, and a filter narrowing by one decides on a value
@@ -541,8 +498,8 @@ _INVOCATIONS_APPEND_ONLY = (
 #: written out by hand.
 #:
 #: The ``decisions`` table is **not** here, and that is a division of labour rather
-#: than a gap: ``_migrate`` reshapes it with ``ALTER TABLE ... ADD COLUMN``, which
-#: rewrites the stored text, so it has no single definition to compare against.
+#: than a gap: a table reshaped with ``ALTER TABLE ... ADD COLUMN`` has its stored
+#: text rewritten, so it has no single definition to compare against.
 #: :data:`_DECISION_COLUMNS` holds it by introspection instead, and its indexes —
 #: which no ``ALTER`` touches, so they do have one each — are held the way these
 #: are, by :data:`_INDEXES`.
@@ -630,18 +587,6 @@ _IDENTIFIER: Final[TypeAdapter[str]] = TypeAdapter(DurableIdentifier)
 def _utc_now() -> datetime:
     """The default clock: the real one, read in UTC."""
     return datetime.now(UTC)
-
-
-#: Whether a concrete binding already carries a resolution. A resolution's own
-#: ``(execution_id, step_id)`` equals its confirmation's (ADR-0044 §2a and the
-#: ``step_id`` check enforce it at record time), so a resolving row with this
-#: binding *is* a resolution of one of its CONFIRMs. Answers §2b's checked
-#: refusal, and matches exactly what the ``decisions_binding_resolution`` partial
-#: unique index constrains.
-_BINDING_HAS_RESOLUTION = (
-    "SELECT 1 FROM decisions "
-    "WHERE resolves IS NOT NULL AND execution_id = ? AND step_id = ? LIMIT 1"
-)
 
 
 def _sort_key(instant: datetime) -> int:
@@ -795,25 +740,20 @@ class SqliteAuditTrail:
             # rollback journal it creates for it, so a journal opened while the
             # file still carried the process umask is world-readable too — and an
             # interrupted write leaves it on disk holding Tier 1 pages (ADR-0004
-            # §1, §4). The `BEGIN IMMEDIATE` below is exactly such a write, and
-            # `_migrate` inside it can rewrite the whole table. `connect` creates
+            # §1, §4). The `BEGIN IMMEDIATE` below is exactly such a write.
+            # `connect` creates
             # the file, so there is something to restrict by the time this runs
             # (#489; the four other SQLite stores have the same ordering).
             self._restrict_permissions()
             # `BEGIN IMMEDIATE` takes the write lock before the schema is
-            # inspected, so the whole of create/migrate/index is **serialised
-            # against another process opening the same file** — the same guard
-            # `_record_sync` uses, applied to setup. Without it, two processes
-            # upgrading a pre-ADR-0044 database could both read the old columns,
-            # and the second's `ALTER TABLE ... ADD COLUMN` would then fail with a
-            # duplicate-column error; the lock makes the loser wait and re-read
-            # the migrated schema instead (its `missing` set comes back empty).
+            # inspected, so the whole of create/index is **serialised against
+            # another process opening the same file** — the same guard
+            # `_record_sync` uses, applied to setup.
             with conn:  # commits on success, rolls back on any exception
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute(_META_SCHEMA)
                 stored = self._check_schema_version(conn)
                 conn.execute(_CREATE_TABLE)
-                self._migrate(conn)
                 conn.execute(_CREATE_INVOCATIONS)
                 for statement in (*_INDEXES.values(), *_INVOCATION_INDEXES.values()):
                     conn.execute(statement)
@@ -822,22 +762,15 @@ class SqliteAuditTrail:
                 self._check_invocation_schema(conn)
                 self._check_no_foreign_triggers(conn)
                 if stored is None:
-                    # Stamped *after* the create/migrate above, so the marker is
-                    # only written for a file this open has actually brought to
-                    # `_SCHEMA_VERSION`. Both are in the one transaction, so a
-                    # migration that raises rolls the marker — and the `meta` table
-                    # itself — back with it, leaving an untouched legacy database
-                    # rather than one falsely labelled current.
+                    # Stamped *after* the creates above, so the marker is only
+                    # written for a file this open has actually built at
+                    # `_SCHEMA_VERSION`. Both are in the one transaction, so a check
+                    # that refuses rolls the marker — and the `meta` table itself —
+                    # back with it, rather than leaving a file falsely labelled.
                     conn.execute(_WRITE_SCHEMA_VERSION, (str(_SCHEMA_VERSION),))
-                elif stored != _SCHEMA_VERSION:
-                    # An openable older marker, moved up by the same rule and in
-                    # the same transaction: the file now *has* every shape the
-                    # current version names, so it says so. Restamping before the
-                    # create would label a file this open had not yet brought up.
-                    conn.execute(_RESTAMP_SCHEMA_VERSION, (str(_SCHEMA_VERSION),))
         except AuditError:
-            # A migration reporting a corrupt legacy row is already this layer's
-            # error; it still leaves a connection to close before it propagates.
+            # A refusal is already this layer's error; it still leaves a connection
+            # to close before it propagates.
             conn.close()
             raise
         except (sqlite3.Error, OSError) as exc:
@@ -856,8 +789,8 @@ class SqliteAuditTrail:
 
         The **indexes** have a stored definition each and are held to it
         (:data:`_INDEXES`), which is the only thing that reaches a partial index's
-        ``WHERE``. The **table** does not, because :meth:`_migrate` rewrites its text
-        with ``ALTER TABLE ... ADD COLUMN``, so its columns are introspected against
+        ``WHERE``. The **table** does not, because ``ALTER TABLE ... ADD COLUMN``
+        rewrites its stored text, so its columns are introspected against
         :data:`_DECISION_COLUMNS` instead: present, of the declared type this store
         writes, nullable as this store writes them, and with ``id`` as the whole of
         the primary key. Extra columns are tolerated; an extra column *in the key* is
@@ -1095,38 +1028,16 @@ class SqliteAuditTrail:
         """Refuse a labelled schema this code cannot open; say which one is labelled.
 
         Runs inside the setup transaction, after ``meta`` exists and **before** the
-        ``decisions`` table is created, migrated or read.
+        ``decisions`` table is created or read.
 
         Returns:
             The stored ``schema_version``, or ``None`` where the database carries
-            none. :meth:`_setup` stamps an unmarked file and restamps an openable
-            older one, in both cases *after* the create-and-migrate has brought it
-            to :data:`_SCHEMA_VERSION`.
+            none and holds no ``decisions`` table: a new file, which :meth:`_setup`
+            stamps *after* the creates have built it at :data:`_SCHEMA_VERSION`.
 
-        **An unmarked database is backfilled, not refused.** The marker arrives
-        after this store already had users, so the oldest audit trails on disk
-        carry none — refusing them would make a Tier 1 record the user is
-        entitled to keep (ADR-0004 §7) unopenable by the code that wrote it, which
-        is a far worse failure than the one a marker exists to prevent. It is also
-        sound rather than merely lenient: :meth:`_migrate` is additive and
-        idempotent, keyed on column presence, so it brings *any* pre-marker file to
-        exactly the shape this code maintains. The stamp records what this open has
-        just established, not an assumption about what was there before.
-
-        **An older openable database is opened and restamped, for the same
-        reason.** The step from 1 to 2 is the ``invocations`` table, which
-        ``CREATE TABLE IF NOT EXISTS`` adds to any file at all, so the migration is
-        the open — and refusing here would strand every trail written before
-        ADR-0192 landed. Neither of the later steps needs any table work whatever:
-        what version 3 names is the *record* a ``decisions`` row holds, a
-        ``ToolDefinition`` carrying ``postconditions`` (ADR-0262 §8), and what
-        version 4 names is that same record again, a declaration carrying
-        ``charged_output`` and a ruling carrying ``proved_quote`` (ADR-0271 §8). The
-        restamp is not decoration in any of the three cases: it is what stops a
-        *previous* version of this code from opening the file afterwards —
-        maintaining neither ADR-0192 §6's total erasure nor §2's single identifier
-        space over both row kinds at the oldest step, and at each newer one failing
-        to decode an ``extra="forbid"`` record it was still told it could read.
+        **An unmarked database already holding a ``decisions`` table is refused**: it
+        predates the marker, so its rows are records from before the cutover, which
+        no reader is written for (ADR-0309 §6:4).
 
         **Any other stored version is refused**, newer or older, matching
         ``SqlitePlanStore`` (ADR-0049 §1). A stored value outside
@@ -1142,6 +1053,15 @@ class SqliteAuditTrail:
         """
         rows = conn.execute(_READ_SCHEMA_VERSION).fetchall()
         if not rows:
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'decisions'"
+            ).fetchone():
+                msg = (
+                    f"the audit trail at {self._path!r} holds decisions but no "
+                    f"schema_version, so it predates the marker; nothing stored before "
+                    f"the cutover is read (ADR-0309 §6:4), so it is not opened"
+                )
+                raise AuditError(msg)
             return None
         if len(rows) > 1:
             # `meta`'s primary key makes this unreachable for a table *this* code
@@ -1183,61 +1103,6 @@ class SqliteAuditTrail:
             )
             raise AuditError(msg)
         return stored
-
-    @staticmethod
-    def _migrate(conn: sqlite3.Connection) -> None:
-        """Add and backfill the ADR-0044 binding columns, and the ADR-0059 deadline.
-
-        Rows written before ADR-0044 carry their ``step_id`` and ``outcome`` only
-        inside the JSON blob and no ``execution_id`` at all — that field did not
-        exist, so a pre-ADR-0044 decision belongs to no execution and its column
-        is correctly left ``NULL`` (a non-concrete binding, which §2b never
-        constrains). ``step_id`` and ``outcome`` are backfilled from each row's
-        stored value so the per-binding indexes see them.
-        Read straight from the JSON rather than through a full model validation
-        (the MemoryStore precedent, ADR-0045 §9): a migration must not fail on a
-        record an unrelated future field made momentarily unvalidatable. Runs
-        inside the setup transaction, before the indexes that depend on the
-        columns are created; the partial unique index is safe to build over old
-        data because every legacy resolution has ``execution_id`` ``NULL`` and is
-        excluded by its ``WHERE``.
-
-        ``expires_at_us`` (ADR-0059 §1) is added the same way ``execution_id``
-        was — ``ALTER TABLE ... ADD COLUMN`` defaulting ``NULL`` — and, like
-        ``execution_id``, is **not** backfilled: no pre-ADR-0059 record carries a
-        deadline (the field did not exist), so every legacy row is correctly left
-        ``NULL`` = "no lifetime". New rows populate it in :meth:`_record_sync`.
-        """
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(decisions)")}
-        if "expires_at_us" not in columns:
-            conn.execute("ALTER TABLE decisions ADD COLUMN expires_at_us INTEGER")
-        missing = {"execution_id", "step_id", "outcome"} - columns
-        if not missing:
-            return
-        if "execution_id" in missing:
-            conn.execute("ALTER TABLE decisions ADD COLUMN execution_id TEXT")
-        if "step_id" in missing:
-            conn.execute("ALTER TABLE decisions ADD COLUMN step_id TEXT")
-        if "outcome" in missing:
-            conn.execute("ALTER TABLE decisions ADD COLUMN outcome TEXT")
-        for decision_id, data in conn.execute("SELECT id, data FROM decisions").fetchall():
-            try:
-                payload = json.loads(data)
-                execution_id = payload.get("execution_id")
-                step_id = payload.get("step_id")
-                outcome = (payload.get("ruling") or {}).get("outcome")
-            except (ValueError, TypeError, AttributeError) as exc:
-                # A blob that is not JSON, or not the object shape a decision
-                # serialises to, is a corrupt row. Reported as this layer's error
-                # rather than left to escape as a bare ``JSONDecodeError`` past
-                # ``_setup``'s ``sqlite3``/``OSError`` boundary — the same
-                # "reported, not returned" rule ``_decode`` applies at read time.
-                msg = f"a legacy audit record {decision_id!r} could not be migrated: {exc}"
-                raise AuditError(msg) from exc
-            conn.execute(
-                "UPDATE decisions SET execution_id = ?, step_id = ?, outcome = ? WHERE id = ?",
-                (execution_id, step_id, outcome, decision_id),
-            )
 
     def _transaction(
         self, what: str, *, immediate: bool = True
@@ -1462,23 +1327,22 @@ class SqliteAuditTrail:
                 self._check_resolution(snapshot)
             conn.execute(
                 "INSERT INTO decisions("
-                "id, decided_at_us, resolves, execution_id, step_id, outcome, "
-                "expires_at_us, data"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "id, decided_at_us, resolves, expires_at_us, data"
+                ") VALUES (?, ?, ?, ?, ?)",
                 (
                     snapshot.id,
                     _sort_key(snapshot.decided_at),
                     snapshot.resolves,
-                    snapshot.execution_id,
-                    snapshot.step_id,
-                    snapshot.ruling.outcome.value,
                     None if snapshot.expires_at is None else _sort_key(snapshot.expires_at),
                     snapshot.model_dump_json(),
                 ),
             )
 
     def _check_resolution(self, decision: PermissionDecision) -> None:
-        """Enforce ADR-0021 §1 and ADR-0044 §2's invariant on a resolving decision.
+        """Enforce ADR-0021 §1's invariant on a resolving decision.
+
+        No step and no execution is compared (ADR-0318 §6:1): neither record carries
+        one, and every other field the invariant compares is compared still.
 
         **The referenced ``CONFIRM`` is read through :func:`_decode`, so since
         ADR-0184 a pre-ADR-0181 one is legible here rather than raising.** No clause
@@ -1494,10 +1358,8 @@ class SqliteAuditTrail:
 
         Raises:
             InvalidResolutionError: If the referenced decision is absent, was not
-                a ``CONFIRM``, is already resolved, describes a different subject
-                (including a different ``execution_id``, ADR-0044 §2a), postdates
-                the answer, resolves a concrete binding a sibling already settled
-                (ADR-0044 §2b), or if the authorisation pointer does not match.
+                a ``CONFIRM``, is already resolved, describes a different subject,
+                postdates the answer, or if the authorisation pointer does not match.
         """
         row = self._conn.execute(
             "SELECT data FROM decisions WHERE id = ?", (str(decision.resolves),)
@@ -1523,8 +1385,6 @@ class SqliteAuditTrail:
         if (
             confirmed.tool != decision.tool
             or confirmed.parameters_digest != decision.parameters_digest
-            or confirmed.step_id != decision.step_id
-            or confirmed.execution_id != decision.execution_id
             # **The act the question was asked about is part of that subject**
             # (ADR-0266 §7). ``from_confirmation`` transcribes it, so a conforming
             # caller cannot differ — and this check exists for the one that does not:
@@ -1540,7 +1400,6 @@ class SqliteAuditTrail:
                 f"different action; a confirmation must answer the question that was asked"
             )
             raise InvalidResolutionError(msg)
-        self._check_binding_undecided(decision)
         if decision.decided_at < confirmed.decided_at:
             msg = (
                 f"decision {decision.id!r} is timestamped before the confirmation "
@@ -1548,38 +1407,6 @@ class SqliteAuditTrail:
             )
             raise InvalidResolutionError(msg)
         _check_authorisation(decision)
-
-    def _check_binding_undecided(self, decision: PermissionDecision) -> None:
-        """Refuse a resolution of a concrete binding a sibling already settled (§2b).
-
-        Fires **only** when the resolving decision's ``execution_id`` and
-        ``step_id`` are both present — a concrete ``(execution_id, step_id)``
-        binding. ADR-0037 §2 accepts several unresolved ``CONFIRM``s under one
-        binding (a compare-and-swap loser's ``CONFIRM`` stays recorded), and they
-        are the same action, so they must share one fate: once *any* of them is
-        resolved the binding is decided, and no second resolution — of that
-        confirmation *or a sibling* — may be recorded. Layered on top of the
-        per-confirmation ``resolves`` rule above, which alone would let a
-        ``DENY``'d step keep an ``ALLOW``'d sibling orphan (the #257 window). The
-        ``decisions_binding_resolution`` partial unique index is the durable
-        safety net beneath this read; the read exists to give the friendlier
-        error before the index raises a bare ``IntegrityError``.
-
-        Raises:
-            InvalidResolutionError: If a resolution for this concrete binding is
-                already recorded.
-        """
-        if decision.execution_id is None or decision.step_id is None:
-            return
-        if self._conn.execute(
-            _BINDING_HAS_RESOLUTION, (decision.execution_id, decision.step_id)
-        ).fetchone():
-            msg = (
-                f"decision {decision.id!r} resolves the binding "
-                f"({decision.execution_id!r}, {decision.step_id!r}), which is already "
-                f"settled; one step of one execution has one answer"
-            )
-            raise InvalidResolutionError(msg)
 
     # --- the read path ----------------------------------------------------
 

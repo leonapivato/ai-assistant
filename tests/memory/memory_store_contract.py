@@ -58,7 +58,6 @@ from ai_assistant.core.types import (
     ControllerRule,
     ControllerStage,
     DigestOutcome,
-    Disposition,
     EpisodeProcessingRecord,
     EpisodicMemory,
     EvidenceItem,
@@ -87,7 +86,6 @@ from ai_assistant.core.types import (
     RecallOutcome,
     RecallProvenance,
     RecordedChannelTrigger,
-    RecordedResumeTrigger,
     RecordedTextInput,
     SemanticMemory,
     StageEntry,
@@ -1028,21 +1026,16 @@ def _on_channel(
 ) -> EpisodicMemory:
     """An activation episode on ``channel``, as ADR-0283 §3 reads one.
 
-    An ``informational_event`` channel rides a channel trigger; any other channel,
-    and ``None`` (an episode on no channel), ride a resume trigger, which is the one
-    trigger admitting an arbitrary channel.
+    The channel trigger targets ``channel`` and names it, or, for ``None`` (an
+    episode on no channel), targets a new conversation and names none.
     """
     base = _activation_episode(record_id, completed=completed)
     assert base.processing_record is not None
     record = base.processing_record
-    if channel is None or channel.channel_type != "informational_event":
-        record = record.model_copy(
-            update={"trigger": RecordedResumeTrigger(channel=channel, approved=True)}
-        )
-    else:
-        assert isinstance(record.trigger, RecordedChannelTrigger)
-        trigger = record.trigger.model_copy(update={"target": channel, "channel": channel})
-        record = record.model_copy(update={"trigger": trigger})
+    trigger = record.trigger.model_copy(
+        update={"target": channel or NewConversation(), "channel": channel}
+    )
+    record = record.model_copy(update={"trigger": trigger})
     return base.model_copy(
         update={
             "processing_record": record,
@@ -1107,8 +1100,8 @@ def _open_episode(
 def _stage_entry(at: datetime) -> StageEntry:
     """One ended stage, the entry an append adds (ADR-0286 §3)."""
     return StageEntry(
-        stage=ControllerStage.TURN_LOOP,
-        due=ControllerRule.UNPLANNED,
+        stage=ControllerStage.PLANNING,
+        due=ControllerRule.ROUND_DUE,
         started_at=at,
         ended_at=at,
         outcome=StageOutcome.DONE,
@@ -1499,7 +1492,7 @@ class MemoryStoreContract:
         got = await store.get("understood")
         assert isinstance(got, EpisodicMemory)
         assert got.processing_record is not None
-        assert got.processing_record.schema_version == 10
+        assert got.processing_record.schema_version == 11
         assert got.processing_record.understanding == (version,)
         assert got.processing_record.understanding[0].meaning_referents[0].id == " "
         assert got.processing_record.understanding_omitted is None
@@ -1560,9 +1553,8 @@ class MemoryStoreContract:
     ) -> None:
         """ADR-0280 §7: the record carries its stage record whole.
 
-        Pinned on a channel activation whose entries end in exactly one ``end`` entry,
-        with an elided count, and on a resume whose stages carry a verdict (ADR-0284
-        §5:4) — because a store that dropped or reordered entries would not fail on
+        Pinned on an activation whose entries end in exactly one ``end`` entry, with
+        an elided count — because a store that dropped or reordered entries would not fail on
         write: the record's own validator would refuse what it read back, so the loss
         would surface as a read error on a record that was written whole.
         """
@@ -1581,39 +1573,12 @@ class MemoryStoreContract:
         channel_record = channel.processing_record.model_copy(
             update={"stages": entries, "stages_elided": 2}
         )
-        resumed_entries = (
-            StageEntry(
-                stage=ControllerStage.DRIVE,
-                due=ControllerRule.PARK_ANSWERED,
-                started_at=_STORE_NOW,
-                ended_at=_IN_WINDOW,
-                outcome=StageOutcome.DONE,
-                step_disposition=Disposition.EXECUTED,
-            ),
-            *ended_pass(_IN_WINDOW),
-        )
-        resume_record = channel.processing_record.model_copy(
-            update={
-                "trigger": RecordedResumeTrigger(channel=None, approved=True),
-                "stages": resumed_entries,
-            }
-        )
         await store.add(channel.model_copy(update={"processing_record": channel_record}))
-        await store.add(
-            channel.model_copy(update={"id": "resume", "processing_record": resume_record})
-        )
 
         got = await store.get("channel")
         assert isinstance(got, EpisodicMemory)
         assert got.processing_record is not None
         assert (got.processing_record.stages, got.processing_record.stages_elided) == (entries, 2)
-        resumed = await store.get("resume")
-        assert isinstance(resumed, EpisodicMemory)
-        assert resumed.processing_record is not None
-        assert (resumed.processing_record.stages, resumed.processing_record.stages_elided) == (
-            resumed_entries,
-            0,
-        )
 
     async def test_a_processing_records_recall_result_survives_the_round_trip(
         self, store: MemoryStore

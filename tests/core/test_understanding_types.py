@@ -83,9 +83,7 @@ def test_the_three_enumerations_carry_exactly_the_members_the_adr_lists() -> Non
     """ADR-0276 §2's tables are complete; a member is valued by its lower-cased name."""
     assert {member.value for member in UnderstandingGround} == {"stated", "supplied", "inferred"}
     assert {member.value for member in UnderstandingOmission} == {
-        "routed",
         "no_text",
-        "no_input",
         "failed",
         "not_reached",
     }
@@ -312,7 +310,7 @@ def test_recorded_understanding_round_trips_through_its_dump() -> None:
 def test_the_record_carries_three_understanding_fields_at_the_current_schema_version() -> None:
     """§7's three fields; the literal is ADR-0280 §7's ``3``, which superseded §7's ``2``."""
     record = _record()
-    assert record.schema_version == 10
+    assert record.schema_version == 11
     assert record.understanding == ()
     assert record.understanding_omitted is UnderstandingOmission.NOT_REACHED
     assert record.understanding_elided == 0
@@ -407,7 +405,7 @@ def test_a_record_with_a_story_referent_round_trips_at_the_same_schema_version()
         understanding=(_understanding(meaning_referents=(_INPUT, _STORY)),),
         understanding_omitted=None,
     )
-    assert record.schema_version == 10
+    assert record.schema_version == 11
     assert EpisodeProcessingRecord.model_validate_json(record.model_dump_json()) == record
 
 

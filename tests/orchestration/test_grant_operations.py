@@ -165,7 +165,7 @@ async def test_granting_a_reader_whose_declared_name_is_not_canonical_is_refused
     """
     operations = _operations([HeldSource("  calendar  ", location="/srv/one.ics")])
     with pytest.raises(UngrantableSourceError, match="calendar"):
-        await operations.grant("  calendar  ", scope=[GrantScope.FACET])
+        await operations.grant("  calendar  ", scope=[GrantScope.NOTIFY])
     assert await operations.recent_grants(limit=50) == ()
 
 
@@ -180,7 +180,7 @@ async def test_a_refusal_for_an_unknown_source_names_no_value_at_all() -> None:
     """
     operations = _operations([HeldSource("calendar", location="/srv/one.ics")])
     with pytest.raises(UngrantableSourceError) as caught:
-        await operations.grant("alice@example.com", scope=[GrantScope.FACET])
+        await operations.grant("alice@example.com", scope=[GrantScope.NOTIFY])
     assert "alice@example.com" not in str(caught.value)
 
 
@@ -212,7 +212,7 @@ async def test_a_source_whose_location_has_no_encoding_cannot_be_granted() -> No
     """
     operations = _operations([HeldSource("calendar", location=UNWRITABLE_PATH)])
     with pytest.raises(UngrantableSourceError, match="calendar"):
-        await operations.grant("calendar", scope=[GrantScope.FACET])
+        await operations.grant("calendar", scope=[GrantScope.NOTIFY])
     assert await operations.recent_grants(limit=50) == ()
 
 
@@ -225,7 +225,7 @@ async def test_the_refusal_for_an_unshowable_location_carries_no_path() -> None:
     """
     operations = _operations([HeldSource("calendar", location=UNWRITABLE_PATH)])
     with pytest.raises(UngrantableSourceError) as caught:
-        await operations.grant("calendar", scope=[GrantScope.FACET])
+        await operations.grant("calendar", scope=[GrantScope.NOTIFY])
     assert "/srv/" not in str(caught.value)
 
 
@@ -260,7 +260,7 @@ async def test_the_location_reaches_no_recorded_grant() -> None:
     for is exactly the one this forbids.
     """
     operations = _operations([HeldSource("calendar", location="/srv/one.ics")])
-    recorded = await operations.grant("calendar", scope=[GrantScope.FACET])
+    recorded = await operations.grant("calendar", scope=[GrantScope.NOTIFY])
     assert "/srv/one.ics" not in recorded.model_dump_json()
     page = await operations.recent_grants(limit=50)
     assert all("/srv/one.ics" not in record.model_dump_json() for record in page)

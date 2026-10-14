@@ -549,9 +549,6 @@ async def test_a_quick_question_is_answered_in_one_round() -> None:
     assert effect.outcome is ToolOutcome.SUCCEEDED
     assert effect.position == 2
     assert effect.place == f"conversation:{conversation}"
-    # No old-path stage ran.
-    ran = {stage for stage, _ in _stages(episode)}
-    assert not ran & {ControllerStage.ASSOCIATE_GOAL, ControllerStage.COMPOSE}
     # It answered, so the state says done (ADR-0293 §8:3).
     assert _classified(episode) == (ProcessingStatus.COMPLETED, ProcessingReason.RETURNED)
     assert await _last_ended(harness, conversation) is ActivationEnding.DONE

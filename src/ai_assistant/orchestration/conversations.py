@@ -132,13 +132,11 @@ def _utcnow() -> datetime:
 
 
 #: How the last activation started from a conversation ended, read off its episode's
-#: status (ADR-0293 §8:3). An activation that answered, asked a question (ADR-0295 §1:
-#: "an activation that asked the user a question has ended") or heard no words is done;
-#: one that failed could not finish; one cut short — a restart's close among them
-#: (ADR-0286 §7) — was interrupted.
+#: status (ADR-0293 §8:3). An activation that answered or heard no words is done; one
+#: that failed could not finish; one cut short — a restart's close among them (ADR-0286
+#: §7) — was interrupted. No status waits since ADR-0318 §5:1 retired ``waiting``.
 _ENDINGS: Final[dict[ProcessingStatus, ActivationEnding]] = {
     ProcessingStatus.COMPLETED: ActivationEnding.DONE,
-    ProcessingStatus.WAITING: ActivationEnding.DONE,
     ProcessingStatus.FAILED: ActivationEnding.COULDNT_FINISH,
     ProcessingStatus.INTERRUPTED: ActivationEnding.INTERRUPTED,
 }

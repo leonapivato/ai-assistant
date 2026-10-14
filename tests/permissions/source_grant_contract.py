@@ -163,7 +163,7 @@ class _RecordOp:
 
     async def verify(self, store: SourceGrantStore) -> None:
         """The second record is durable; the first is absent-or-whole; reads work."""
-        assert await store.live(source="cancel-b", use=GrantScope.FACET) is not None
+        assert await store.live(source="cancel-b", use=GrantScope.NOTIFY) is not None
         assert {held.id for held in await store.export()} >= {"cancel-2"}
 
 
@@ -218,8 +218,8 @@ class _ReadOp:
 
     async def verify(self, store: SourceGrantStore) -> None:
         """A read cancelled mid-flight leaves the store whole and still readable."""
-        assert await store.live(source="read-a", use=GrantScope.FACET) is not None
-        assert await store.live(source="read-b", use=GrantScope.FACET) is None
+        assert await store.live(source="read-a", use=GrantScope.NOTIFY) is not None
+        assert await store.live(source="read-b", use=GrantScope.NOTIFY) is None
         assert {held.id for held in await store.export()} == {
             "read-a-1",
             "read-b-1",
@@ -234,11 +234,11 @@ class _LiveOp(_ReadOp):
 
     def first(self, store: SourceGrantStore) -> Coroutine[Any, Any, object]:
         """Look up the live source — the call that is cancelled."""
-        return store.live(source="read-a", use=GrantScope.FACET)
+        return store.live(source="read-a", use=GrantScope.NOTIFY)
 
     def second(self, store: SourceGrantStore) -> Coroutine[Any, Any, object]:
         """Look up the revoked one concurrently."""
-        return store.live(source="read-b", use=GrantScope.FACET)
+        return store.live(source="read-b", use=GrantScope.NOTIFY)
 
 
 class _RecentOp(_ReadOp):
@@ -370,7 +370,7 @@ class SourceGrantsContract:
         """
         await self.given(grants, source_grant(SOURCE))
 
-        assert await grants.live(source=queried, use=GrantScope.FACET) is None
+        assert await grants.live(source=queried, use=GrantScope.NOTIFY) is None
 
     # --- a grant covers the uses it names, and no others (ADR-0097 §2) ------
 
@@ -401,19 +401,20 @@ class SourceGrantsContract:
         what I am asking now, but do not remember it" is the sentence this clause
         makes true.
         """
-        await self.given(grants, source_grant(SOURCE, scope=(GrantScope.FACET,)))
+        await self.given(grants, source_grant(SOURCE, scope=(GrantScope.NOTIFY,)))
 
-        assert await grants.live(source=SOURCE, use=GrantScope.FACET) is not None
+        assert await grants.live(source=SOURCE, use=GrantScope.NOTIFY) is not None
         assert await grants.live(source=SOURCE, use=GrantScope.INGEST) is None
 
     async def test_notify_implies_no_other_use_and_no_other_use_implies_it(
         self, grants: SourceGrants
     ) -> None:
-        """The third use is independent in **both** directions (ADR-0133 §2, §6).
+        """``NOTIFY`` is independent in **both** directions (ADR-0133 §2, §6).
 
         "``NOTIFY`` implies neither ``FACET`` nor ``INGEST``, and neither of them
         implies ``NOTIFY``… No implementation may infer one member from another,
-        **rank** them, or treat any of them as a superset of another."
+        **rank** them, or treat any of them as a superset of another." ``FACET`` has
+        since left (ADR-0318 §6:2); the independence of the two that stay holds.
 
         The sibling case above already holds "a use a grant does not name is not
         authorised by it" over the original pair, and this one is asked for by
@@ -432,13 +433,12 @@ class SourceGrantsContract:
         await self.given(grants, source_grant(SOURCE, scope=(GrantScope.NOTIFY,)))
 
         assert await grants.live(source=SOURCE, use=GrantScope.NOTIFY) is not None
-        assert await grants.live(source=SOURCE, use=GrantScope.FACET) is None
         assert await grants.live(source=SOURCE, use=GrantScope.INGEST) is None
 
     async def test_neither_original_use_carries_notify_with_it(self, grants: SourceGrants) -> None:
         """The other half of ADR-0133 §2's independence, and §3's inertness.
 
-        A store full of ``(FACET, INGEST)`` grants predates the member entirely,
+        A store full of ``INGEST`` grants predates the member entirely,
         and ADR-0133 §3 rules that arrival changes none of them: "A grant recorded
         before ``NOTIFY`` existed names the uses it names, so it does not authorise
         ``NOTIFY``". That is the property that makes an append-only consent store
@@ -449,9 +449,8 @@ class SourceGrantsContract:
         wide one, and a single case asserting both would report either as the same
         defect.
         """
-        await self.given(grants, source_grant(SOURCE, scope=(GrantScope.FACET, GrantScope.INGEST)))
+        await self.given(grants, source_grant(SOURCE, scope=(GrantScope.INGEST,)))
 
-        assert await grants.live(source=SOURCE, use=GrantScope.FACET) is not None
         assert await grants.live(source=SOURCE, use=GrantScope.INGEST) is not None
         assert await grants.live(source=SOURCE, use=GrantScope.NOTIFY) is None
 
@@ -477,22 +476,22 @@ class SourceGrantsContract:
 
         The concrete bypass is worth naming because ``frozen=True`` does not close
         it — it refuses ``grant.scope = …`` and not
-        ``grant.__dict__["scope"] = …``. A caller granted ``FACET`` alone widens
+        ``grant.__dict__["scope"] = …``. A caller granted ``NOTIFY`` alone widens
         ``scope`` on the object ``live`` returned to include ``INGEST``, and the
         driver's next check authorises ingestion the user never granted.
         """
-        await self.given(grants, source_grant(SOURCE, scope=(GrantScope.FACET,)))
-        leaked = await grants.live(source=SOURCE, use=GrantScope.FACET)
+        await self.given(grants, source_grant(SOURCE, scope=(GrantScope.NOTIFY,)))
+        leaked = await grants.live(source=SOURCE, use=GrantScope.NOTIFY)
         assert leaked is not None
 
-        object.__setattr__(leaked, "scope", (GrantScope.FACET, GrantScope.INGEST))
+        object.__setattr__(leaked, "scope", (GrantScope.INGEST, GrantScope.NOTIFY))
         object.__setattr__(leaked, "source", "somewhere-else")
 
         assert await grants.live(source=SOURCE, use=GrantScope.INGEST) is None
-        refetched = await grants.live(source=SOURCE, use=GrantScope.FACET)
+        refetched = await grants.live(source=SOURCE, use=GrantScope.NOTIFY)
         assert refetched is not None
         assert refetched.source == SOURCE
-        assert refetched.scope == (GrantScope.FACET,)
+        assert refetched.scope == (GrantScope.NOTIFY,)
 
     # --- input observation (ADR-0065) ---------------------------------------
 
@@ -566,7 +565,7 @@ class SourceGrantStoreContract(SourceGrantsContract):
         returned = await store.record(granted)
 
         assert returned == "g-1"
-        found = await store.live(source=SOURCE, use=GrantScope.FACET)
+        found = await store.live(source=SOURCE, use=GrantScope.NOTIFY)
         assert found == granted
 
     async def test_recording_a_known_id_is_refused_rather_than_upserted(
@@ -579,13 +578,13 @@ class SourceGrantStoreContract(SourceGrantsContract):
         can be rewritten by replaying a write, which is the one property it exists
         to deny (ADR-0097 §4).
         """
-        await store.record(source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,)))
+        await store.record(source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.NOTIFY,)))
 
         await _refuses(store, source_grant("elsewhere", grant_id="g-1"))
 
-        held = await store.live(source=SOURCE, use=GrantScope.FACET)
+        held = await store.live(source=SOURCE, use=GrantScope.NOTIFY)
         assert held is not None
-        assert held.scope == (GrantScope.FACET,)
+        assert held.scope == (GrantScope.NOTIFY,)
 
     # --- at most one live grant per source (ADR-0097 §4) --------------------
 
@@ -599,7 +598,7 @@ class SourceGrantStoreContract(SourceGrantsContract):
         rather than the revoke-then-grant pair ADR-0097 §2 requires, which is the
         pair that leaves both records on file.
         """
-        await store.record(source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,)))
+        await store.record(source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.NOTIFY,)))
 
         await _refuses(store, source_grant(SOURCE, grant_id="g-2"))
 
@@ -613,7 +612,7 @@ class SourceGrantStoreContract(SourceGrantsContract):
         into a permanent refusal, which is the same lockout ADR-0097 §4 refuses on
         the timestamp.
         """
-        granted = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,))
+        granted = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.NOTIFY,))
         await store.record(granted)
         await store.record(revocation_of(granted, grant_id="r-1"))
 
@@ -709,7 +708,7 @@ class SourceGrantStoreContract(SourceGrantsContract):
         withdrew ``INGEST`` while the store went on treating the whole grant as
         gone, or worse, kept it live (ADR-0097 §2).
         """
-        granted = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET, GrantScope.INGEST))
+        granted = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.INGEST, GrantScope.NOTIFY))
         await store.record(granted)
         narrowed = SourceGrant(
             id="r-1",
@@ -765,7 +764,7 @@ class SourceGrantStoreContract(SourceGrantsContract):
         between a check and a write is an interleaving point.
         """
         results = await asyncio.gather(
-            store.record(source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,))),
+            store.record(source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.NOTIFY,))),
             store.record(source_grant(SOURCE, grant_id="g-2", scope=(GrantScope.INGEST,))),
             return_exceptions=True,
         )
@@ -891,7 +890,7 @@ class SourceGrantStoreContract(SourceGrantsContract):
         assert await store.recent() == []
         assert await store.export() == []
         assert await store.standing() == []
-        assert await store.live(source=SOURCE, use=GrantScope.FACET) is None
+        assert await store.live(source=SOURCE, use=GrantScope.NOTIFY) is None
 
     # --- the live enumeration (ADR-0139 §2) ----------------------------------
 
@@ -1026,14 +1025,16 @@ class SourceGrantStoreContract(SourceGrantsContract):
         canonical order, so the scope's order has to survive the round trip or two
         implementations serialise one grant differently.
         """
-        original = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET, GrantScope.INGEST))
+        original = source_grant(
+            SOURCE, grant_id="g-1", scope=(GrantScope.INGEST, GrantScope.NOTIFY)
+        )
         await store.record(original)
 
         exported = (await store.export())[0]
         reloaded = SourceGrant.model_validate(exported.model_dump(mode="json"))
 
         assert reloaded == original
-        assert reloaded.scope == (GrantScope.FACET, GrantScope.INGEST)
+        assert reloaded.scope == (GrantScope.INGEST, GrantScope.NOTIFY)
 
     async def test_clear_erases_everything_and_reports_how_much(
         self, store: SourceGrantStore
@@ -1047,7 +1048,7 @@ class SourceGrantStoreContract(SourceGrantsContract):
 
         assert removed == 2
         assert await store.recent() == []
-        assert await store.live(source=SOURCE, use=GrantScope.FACET) is None
+        assert await store.live(source=SOURCE, use=GrantScope.NOTIFY) is None
 
     # --- the store owns what it holds (ADR-0097 §4) --------------------------
 
@@ -1056,7 +1057,7 @@ class SourceGrantStoreContract(SourceGrantsContract):
         [
             pytest.param("decided_at", datetime(2026, 7, 20, 12, 0), id="naive-timestamp"),  # noqa: DTZ001
             pytest.param("scope", (), id="emptied-scope"),
-            pytest.param("scope", (GrantScope.FACET, GrantScope.FACET), id="duplicated-scope"),
+            pytest.param("scope", (GrantScope.NOTIFY, GrantScope.NOTIFY), id="duplicated-scope"),
             pytest.param("id", "", id="blank-identifier"),
         ],
     )
@@ -1144,17 +1145,17 @@ class SourceGrantStoreContract(SourceGrantsContract):
         one that matters most: widening it after the fact would authorise a use
         the user never granted, with the store's own history saying they did.
         """
-        held = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,))
+        held = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.NOTIFY,))
         await store.record(held)
 
-        object.__setattr__(held, "scope", (GrantScope.FACET, GrantScope.INGEST))
+        object.__setattr__(held, "scope", (GrantScope.INGEST, GrantScope.NOTIFY))
         object.__setattr__(held, "source", "somewhere-else")
         object.__setattr__(held, "revokes", "g-nobody")
 
         assert await store.live(source=SOURCE, use=GrantScope.INGEST) is None
-        stored = await store.live(source=SOURCE, use=GrantScope.FACET)
+        stored = await store.live(source=SOURCE, use=GrantScope.NOTIFY)
         assert stored is not None
-        assert stored.scope == (GrantScope.FACET,)
+        assert stored.scope == (GrantScope.NOTIFY,)
         assert stored.source == SOURCE
         assert stored.revokes is None
         assert [each.id for each in await store.export()] == ["g-1"]
@@ -1196,25 +1197,25 @@ class SourceGrantStoreContract(SourceGrantsContract):
                 return {
                     "id": self.id,
                     "source": self.source,
-                    "scope": (GrantScope.FACET, GrantScope.INGEST),
+                    "scope": (GrantScope.INGEST, GrantScope.NOTIFY),
                     "decided_at": self.decided_at,
                     "revokes": self.revokes,
                 }
 
-        original = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,))
+        original = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.NOTIFY,))
         sticky = _Sticky.model_construct(**dict(original))
         await store.record(sticky)
 
         assert await store.live(source=SOURCE, use=GrantScope.INGEST) is None, (
             "the store kept a wider grant than the record it was handed"
         )
-        stored = await store.live(source=SOURCE, use=GrantScope.FACET)
+        stored = await store.live(source=SOURCE, use=GrantScope.NOTIFY)
         assert stored is not None
-        object.__setattr__(stored, "scope", (GrantScope.FACET, GrantScope.INGEST))
+        object.__setattr__(stored, "scope", (GrantScope.INGEST, GrantScope.NOTIFY))
 
-        reread = await store.live(source=SOURCE, use=GrantScope.FACET)
+        reread = await store.live(source=SOURCE, use=GrantScope.NOTIFY)
         assert reread is not None
-        assert reread.scope == (GrantScope.FACET,)
+        assert reread.scope == (GrantScope.NOTIFY,)
 
     async def test_a_returned_list_is_a_detached_snapshot(self, store: SourceGrantStore) -> None:
         """``recent``, ``export`` and ``standing`` return ``list``, and a list is mutable."""
@@ -1241,11 +1242,11 @@ class SourceGrantStoreContract(SourceGrantsContract):
         ``held.scope = …`` and refuses this not at all — which is the one route
         ADR-0097 §4's detachment obligation exists to close.
         """
-        await store.record(source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,)))
+        await store.record(source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.NOTIFY,)))
 
         async def fetch() -> SourceGrant:
             if query == "live":
-                one = await store.live(source=SOURCE, use=GrantScope.FACET)
+                one = await store.live(source=SOURCE, use=GrantScope.NOTIFY)
                 assert one is not None
                 return one
             if query == "recent":
@@ -1259,7 +1260,7 @@ class SourceGrantStoreContract(SourceGrantsContract):
         object.__setattr__(leaked, "revokes", "g-nobody")
 
         refetched = await fetch()
-        assert refetched.scope == (GrantScope.FACET,)
+        assert refetched.scope == (GrantScope.NOTIFY,)
         assert refetched.revokes is None
 
     # --- cancellation (ADR-0060) ---------------------------------------------

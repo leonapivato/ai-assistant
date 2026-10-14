@@ -206,7 +206,7 @@ async def test_a_refused_write_leaves_the_store_untouched(
         await ephemeral.record(source_grant(SOURCE, grant_id="g-2"))
 
     assert [held.id for held in await ephemeral.export()] == ["g-1"]
-    live = await ephemeral.live(source=SOURCE, use=GrantScope.FACET)
+    live = await ephemeral.live(source=SOURCE, use=GrantScope.NOTIFY)
     assert live is not None
     assert live.id == "g-1"
 
@@ -379,7 +379,7 @@ async def test_a_row_the_model_no_longer_accepts_is_reported_not_returned(
     with pytest.raises(GrantError) as export_error:
         await ephemeral.export()
     with pytest.raises(GrantError):
-        await ephemeral.live(source=SOURCE, use=GrantScope.FACET)
+        await ephemeral.live(source=SOURCE, use=GrantScope.NOTIFY)
 
     assert not isinstance(export_error.value, InvalidGrantError)
 
@@ -395,7 +395,7 @@ async def test_two_live_grants_for_one_source_are_refused_rather_than_picked_fro
     reporting fails the read **closed**, which is the same outcome as no grant and
     the one an operator can see.
     """
-    first = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,))
+    first = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.NOTIFY,))
     await ephemeral.record(first)
     second = source_grant(SOURCE, grant_id="g-2", scope=(GrantScope.INGEST,))
     ephemeral._conn.execute(
@@ -404,7 +404,7 @@ async def test_two_live_grants_for_one_source_are_refused_rather_than_picked_fro
     )
 
     with pytest.raises(GrantError, match="corrupt"):
-        await ephemeral.live(source=SOURCE, use=GrantScope.FACET)
+        await ephemeral.live(source=SOURCE, use=GrantScope.NOTIFY)
 
 
 async def test_a_fresh_store_records_the_schema_version(
@@ -592,16 +592,16 @@ async def test_a_grant_survives_the_process_that_made_it(tmp_path: Path) -> None
     path = tmp_path / "grants.db"
     first = SqliteSourceGrantStore(path=path)
     try:
-        await first.record(source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,)))
+        await first.record(source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.NOTIFY,)))
     finally:
         first.close()
 
     second = SqliteSourceGrantStore(path=path)
     try:
-        live = await second.live(source=SOURCE, use=GrantScope.FACET)
+        live = await second.live(source=SOURCE, use=GrantScope.NOTIFY)
         assert live is not None
         assert live.id == "g-1"
-        assert live.scope == (GrantScope.FACET,)
+        assert live.scope == (GrantScope.NOTIFY,)
         assert await second.live(source=SOURCE, use=GrantScope.INGEST) is None
     finally:
         second.close()
@@ -651,7 +651,7 @@ async def test_the_live_enumeration_still_answers_after_a_restart(tmp_path: Path
     withdrawn = source_grant("gone", grant_id="g-2")
     first = SqliteSourceGrantStore(path=path)
     try:
-        await first.record(source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,)))
+        await first.record(source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.NOTIFY,)))
         await first.record(withdrawn)
         await first.record(revocation_of(withdrawn, grant_id="r-1"))
     finally:
@@ -661,7 +661,7 @@ async def test_the_live_enumeration_still_answers_after_a_restart(tmp_path: Path
     try:
         standing = await second.standing()
         assert [held.id for held in standing] == ["g-1"]
-        assert standing[0].scope == (GrantScope.FACET,)
+        assert standing[0].scope == (GrantScope.NOTIFY,)
     finally:
         second.close()
 

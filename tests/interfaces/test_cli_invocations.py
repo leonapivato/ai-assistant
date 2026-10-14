@@ -1029,7 +1029,7 @@ def _tool() -> ToolDefinition:
 def _allowed(decision_id: str) -> PermissionDecision:
     """One recorded ``ALLOW``, built through the sanctioned construction path."""
     return PermissionDecision.from_request(
-        ActionRequest(tool=_tool(), parameters={"to": "a@example.com"}, step_id="step-1"),
+        ActionRequest(tool=_tool(), parameters={"to": "a@example.com"}),
         PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="within policy"),
         id=decision_id,
         decided_at=_AT,
