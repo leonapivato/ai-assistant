@@ -1,0 +1,477 @@
+"""No Tier 0 value can reach the phases' model calls (ADR-0221 §7, carried to the phases).
+
+ADR-0221 §7: capture "stores the reply without inspecting it for a Tier 0 value, and no
+implementation adds such an inspection on this path". The reliance is that whatever
+writes the reply is supplied nothing holding a Tier 0 value, which ADR-0004 §3 secures
+by residency: Tier 0 secrets live in the OS keyring, are read through ``SecretStore`` by
+``models/`` and ``tools/`` alone, and are in no record the reply's author is given.
+
+§11 test 13 stated that reliance at the composing stage, by walking every model
+reachable from ``ComposingStage.compose``. The composing stage retired at the cutover
+(ADR-0309 §5) and that test went with it (#2935). Since the switch the reply is
+planning's round text, and two more model calls write what the episode captures
+beside it: understanding's record and a digest's evidence. So the same reliance is
+stated here **at every seam where a phase hands a model its input, or captures what a
+model wrote**, and the walk crosses dataclasses as well as pydantic models, because
+the phases hand their inputs over in orchestration-local dataclasses (ADR-0309 §2:3).
+
+Residency is not a property a test can assert directly, so what is asserted is the
+**whole object graph** at those seams. Two assertions, failing for different reasons:
+the **roster** fails when the graph grows, so a new type reaching a model is judged by
+the lane that adds it rather than assumed; the **carrier** check fails when any field
+of any type in it admits a Tier 0 carrier. Nothing here claims the fields are safe on
+some other ground; it claims the set cannot grow, and no carrier can enter it, without
+someone noticing.
+"""
+
+from __future__ import annotations
+
+import collections.abc
+import dataclasses
+import datetime
+import decimal
+import sys
+import typing
+from collections.abc import Callable, Mapping, Sequence
+from enum import Enum
+from typing import (
+    Annotated,
+    Any,
+    ForwardRef,
+    Literal,
+    TypeAliasType,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
+
+from pydantic import BaseModel, SecretBytes, SecretStr
+
+from ai_assistant.core import protocols as core_protocols
+from ai_assistant.core import types as core_types
+from ai_assistant.core.protocols import (
+    ModelProvider,
+    Secrets,
+    SecretStore,
+    ToolCallingCompleter,
+)
+from ai_assistant.orchestration import (
+    digesting,
+    disclosure,
+    held_results,
+    story_links,
+    understanding,
+)
+from ai_assistant.orchestration.digesting import DigestingStage, DigestRecorder
+from ai_assistant.orchestration.planning import PlanningStage, RoundRecorder
+from ai_assistant.orchestration.understanding import UnderstandingStage
+from ai_assistant.secret_store.backend import KeyringBackend
+from ai_assistant.secret_store.store import KeyringSecretStore
+
+#: Every type a Tier 0 value is held in or read through: pydantic's two secret types,
+#: which :data:`~ai_assistant.core.types.SecretValue` is built on, the keyring seam's
+#: two faces, and ``secret_store/``'s backend and store behind them.
+_CARRIERS: frozenset[object] = frozenset(
+    {SecretStr, SecretBytes, Secrets, SecretStore, KeyringBackend, KeyringSecretStore}
+)
+
+#: The leaf types a walked field may name besides an enumeration and a type the walk
+#: crosses. A type outside them is one the walk cannot see into, so it is refused rather
+#: than passed: a third-party object could carry anything.
+_LEAVES: frozenset[type] = frozenset(
+    {
+        str,
+        int,
+        float,
+        bool,
+        type(None),
+        datetime.datetime,
+        datetime.timedelta,
+        decimal.Decimal,
+    }
+)
+
+#: Where the seams' annotations resolve. They are written under ``from __future__
+#: import annotations`` with names imported under ``TYPE_CHECKING``, so each owner's
+#: own module namespace is laid over these.
+_NAMES: dict[str, Any] = (
+    vars(typing)
+    | vars(collections.abc)
+    | vars(core_types)
+    | vars(core_protocols)
+    | vars(disclosure)
+    | vars(held_results)
+    | vars(story_links)
+)
+
+
+def _hints(owner: Callable[..., object] | type) -> dict[str, object]:
+    """``owner``'s resolved annotations, in its own module's namespace over ``_NAMES``."""
+    return get_type_hints(owner, globalns=_NAMES | vars(sys.modules[owner.__module__]))
+
+
+#: The seams, each a function whose parameters and return are read: so the roots are
+#: read off the code rather than restated from memory.
+#:
+#: - **Understanding's request** — what :meth:`UnderstandingStage.understand` is handed,
+#:   and the record it returns, which the episode captures; ``ModelProvider.complete``,
+#:   which its request goes through; and the parse of its reply.
+#: - **Planning's request** — :meth:`PlanningStage.plan`'s inputs, from which the
+#:   rendered request is built, and its decision; ``ToolCallingCompleter.respond``,
+#:   which takes the rendered messages and the offered tools and returns the round; and
+#:   ``RoundRecorder.record``, which captures the round into the episode.
+#: - **Digesting's request, recall's digest among them** — the three entry points of
+#:   :class:`DigestingStage`, ``ModelProvider.complete`` again, the parse of a part's
+#:   reply, and ``DigestRecorder.record``, which captures the digest.
+_SEAMS: tuple[Callable[..., object], ...] = (
+    UnderstandingStage.understand,
+    ModelProvider.complete,
+    understanding._parsed,  # the parse of understanding's reply
+    PlanningStage.plan,
+    ToolCallingCompleter.respond,
+    RoundRecorder.record,
+    DigestingStage.digest_result,
+    DigestingStage.digest_records,
+    DigestingStage.digest_recall,
+    DigestRecorder.record,
+    digesting._parsed,  # the parse of a digest part's reply
+)
+
+
+def _annotation_types(annotation: object, seen: set[int] | None = None) -> list[object]:
+    """Every type this annotation names, at any depth, with aliases followed.
+
+    A PEP 695 alias is opaque to ``get_args`` — ``SecretValue`` is ``type SecretValue =
+    Annotated[SecretStr, …]`` — so ``__value__`` is resolved; a union, a tuple element, a
+    mapping value and an ``Annotated`` origin are all type arguments; a ``Callable``'s
+    parameters arrive as a list, which ``get_args`` does not descend; and ``FrozenJson``
+    names itself, so the walk stops at a cycle rather than at a recursion limit. A
+    ``Literal``'s arguments are values and an ``Annotated``'s metadata is not a type, so
+    neither is descended: a string found is then a forward reference and nothing else.
+    """
+    seen = set() if seen is None else seen
+    while isinstance(annotation, TypeAliasType):
+        annotation = annotation.__value__
+    if id(annotation) in seen:
+        return []
+    seen.add(id(annotation))
+    if isinstance(annotation, list):
+        return [found for one in annotation for found in _annotation_types(one, seen)]
+    found: list[object] = [annotation]
+    origin = get_origin(annotation)
+    if origin is Literal:
+        return found
+    arguments = get_args(annotation)[:1] if origin is Annotated else get_args(annotation)
+    for argument in arguments:
+        found.extend(_annotation_types(argument, seen))
+    return found
+
+
+def _crossed(found: object) -> bool:
+    """Whether the walk crosses ``found``: a type of this system's, or of this module's."""
+    return (
+        isinstance(found, type)
+        and not issubclass(found, Enum)
+        and (found.__module__.startswith("ai_assistant.") or found.__module__ == __name__)
+    )
+
+
+def _fields(found: type) -> dict[str, object]:
+    """What ``found`` holds, by field: a model's fields, a dataclass's, or a constructor's.
+
+    A Protocol is a handle rather than data and holds nothing the walk can read, so it is
+    a leaf, named on the roster. A plain class is read by what its constructor takes,
+    which is the only way data enters it.
+    """
+    if issubclass(found, BaseModel):
+        # Resolve legitimate forward declarations before reading the fields, so this
+        # guard does not depend on which model an earlier test instantiated.
+        found.model_rebuild()
+        return {name: field.annotation for name, field in found.model_fields.items()}
+    if dataclasses.is_dataclass(found):
+        hints = _hints(found)
+        return {one.name: hints[one.name] for one in dataclasses.fields(found)}
+    if getattr(found, "_is_protocol", False):
+        return {}
+    return {name: hint for name, hint in _hints(found.__init__).items() if name != "return"}
+
+
+def _reachable(annotations: Sequence[object]) -> dict[str, type]:
+    """Every type the walk crosses from ``annotations``, closed over their fields."""
+    queue = [found for one in annotations for found in _annotation_types(one)]
+    reached: dict[str, type] = {}
+    while queue:
+        found = queue.pop()
+        if not _crossed(found):
+            continue
+        assert isinstance(found, type)
+        name = found.__qualname__
+        if name in reached:
+            assert reached[name] is found, (
+                f"two types named {name} reach the phases' models; the roster names "
+                f"types by name, so qualify one here"
+            )
+            continue
+        reached[name] = found
+        queue.extend(named for one in _fields(found).values() for named in _annotation_types(one))
+    return reached
+
+
+def _seams_reach() -> dict[str, type]:
+    """Every type reachable from the seams' parameters and returns."""
+    return _reachable([one for seam in _SEAMS for one in _hints(seam).values()])
+
+
+def _holes(annotations: Mapping[str, object]) -> list[str]:
+    """Each annotation among ``annotations`` the walk cannot see through, and why."""
+    holes: list[str] = []
+    for where, annotation in annotations.items():
+        for found in _annotation_types(annotation):
+            if isinstance(found, ForwardRef | str):
+                holes.append(f"{where} carries the unresolved forward reference {found!r}")
+            elif (
+                isinstance(found, type)
+                and found not in _CARRIERS
+                and not _crossed(found)
+                and not issubclass(found, Enum)
+                and found not in _LEAVES
+            ):
+                holes.append(f"{where} names {found!r}, which the walk cannot see into")
+    return holes
+
+
+def _carriers(reached: Mapping[str, type]) -> list[str]:
+    """Each field of a reached type that admits a Tier 0 carrier, with the carriers."""
+    return [
+        f"{name}.{field_name} admits {carriers}"
+        for name, model in sorted(reached.items())
+        for field_name, annotation in _fields(model).items()
+        if (carriers := [one for one in _annotation_types(annotation) if one in _CARRIERS])
+    ]
+
+
+def test_every_seam_resolves_and_names_what_it_is_handed() -> None:
+    """A seam whose annotations named nothing would make the walk below vacuous."""
+    for seam in _SEAMS:
+        hints = _hints(seam)
+        assert hints, f"{seam.__qualname__} has no annotations to read"
+        assert not _holes({f"{seam.__qualname__}.{name}": one for name, one in hints.items()})
+
+
+def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() -> None:
+    """ADR-0221 §7's reliance, stated at the phases' seams rather than assumed.
+
+    **The records** (carried from ADR-0221 §11 test 13, judged there and still true of
+    their fields). ``EpisodicMemory``, ``SemanticMemory``, ``PreferenceMemory`` and
+    ``ProceduralMemory`` with ``Provenance``, ``Attestation``, ``ReportedExtent``,
+    ``Validity``, ``Placement`` and ``Capture`` hold Tier 1 memory text, identifiers,
+    clocks and closed values. ``EpisodeProcessingRecord`` (ADR-0275) holds identifiers,
+    closed values and clocks, the trigger it recorded — ``RecordedChannelTrigger`` and
+    ``RecordedResumeTrigger`` with their inputs, channels, context items and reply kinds,
+    the user's own words among them, which ADR-0004 §1 puts in Tier 1 — and
+    ``ActivationLinks`` and ``ParkedBinding``, which are identifiers. Its
+    ``understanding`` (ADR-0276 §7), ``stages`` (ADR-0280 §7), ``recall`` (ADR-0281 §6),
+    ``story_links`` (ADR-0300 §6:7), ``rounds`` and ``labels`` (ADR-0307 §10) and
+    ``digests`` (ADR-0308 §7) each close their fields with ``extra="forbid"``: prose this
+    system's own models wrote, excerpts cut from records already in this graph, labels,
+    identifiers, clocks and closed values. Those collections were empty on every record
+    when test 13 judged them; since the switch planning, understanding and digesting fill
+    them, and what fills them is what this test walks.
+
+    **What a model call is and returns.** ``Message`` is a role, text and a name.
+    ``OfferedTool`` is a capability's name, its description and its argument schema as
+    frozen JSON. ``RoundResponse`` is planning's text, its ``ProposedCall``s — a provider
+    id, a capability name and arguments as frozen JSON — and its notes.
+    ``ProposedActivationUnderstanding`` with ``ProposedReference`` and
+    ``ProposedRelationship``, and digesting's ``_Proposed`` and ``_ProposedItem``, are
+    the parse of a reply: prose the model wrote and labels it was shown.
+
+    **The capabilities planning is offered.** ``ToolDefinition`` with ``ToolCost``,
+    ``BoundedArgument``, ``QuotedOutput``, ``ChargedOutput`` and ``StepVerification`` is
+    what a tool declares of itself: identifiers, closed values, the tiers it reaches as
+    members of ``DataTier`` (a label, not a value of that tier), descriptions, a JSON
+    schema, a ``Decimal`` and currency names. ``system_supplied`` names arguments the hub
+    fills after the round is recorded; it holds names, never values. A credential a tool
+    needs is read through ``Secrets`` inside ``tools/`` and is in no declaration.
+
+    **Planning's own shapes** (ADR-0309 §2:3). ``PlanningInputs``, ``PlaceWindow``,
+    ``PlaceItem``, ``CallOutcome``, ``DigestedEvidence``, ``DigestItem``,
+    ``PlanningStories``, ``PlanningStory``, ``PlannedRound``, ``PlannedCall`` and
+    ``RefusedCall`` hold identifiers, clocks, closed values, counts, the place's own
+    text, prose the models wrote and the types above. **One field is worth naming**:
+    ``CallOutcome.result``, with ``HeldResult.content`` on digesting's side, is what a
+    tool returned, as frozen JSON. Its type admits no carrier, and a string inside it is
+    text an integration answered, which residency keeps free of the credential the tool
+    read to ask: the type check stops at that string, as test 13's did at the user's own
+    words.
+
+    **The story views** (ADR-0300 §6, §8; ADR-0307 §6:1). ``ShortView`` and
+    ``Candidates``, with ``StoryNote``, ``StorySummaryLine``, ``StoryStanding``,
+    ``StoryHeader``, ``StoryStandingEffect``, ``StoryStandingEpisode``,
+    ``StoryStandingEarlier`` and ``StoryRelated``, hold identifiers, clocks, counts,
+    closed values, notes planning or the user wrote, and summary lines the tidy-up's
+    model wrote. That is why the tidy-up is not a seam of its own here: what its model
+    writes reaches planning only as these lines, which this walk already crosses.
+
+    **Understanding's windows** (ADR-0276 §3, ADR-0293 §6:4). ``SuppliedWindow``,
+    ``ConversationWindow`` and ``TranscriptWindow``, with ``TranscriptMessage`` and
+    ``DeletedMessage``, are the channel's own material: the messages people wrote,
+    their positions, authors and identifiers, and the records above.
+
+    **The audience** (ADR-0203, ADR-0204). ``UnboundedAudienceSupply`` and
+    ``BoundedAudienceSupply`` filter what is rendered and are never rendered: a set of
+    source names and a flag.
+
+    **Digesting's own shapes** (ADR-0308 §4). ``HeldResult`` is identifiers and a
+    result, judged above; ``Digested`` is the recorded digest, its labels and a
+    code-owned failure word; ``ActivationLabels`` takes nothing but ``PlanningLabel``s.
+
+    **Recall is not a seam.** :class:`~ai_assistant.orchestration.recall.RecallStage`
+    calls no model (ADR-0281 §3); what it decides reaches a model as
+    ``ActivationRecall`` through understanding's ``recall`` and as records through
+    planning's ``recalled``, both walked here.
+    """
+    reachable = _seams_reach()
+
+    assert set(reachable) == {
+        "ActivationDigest",
+        "ActivationLabels",
+        "ActivationLinks",
+        "ActivationRecall",
+        "ActivationUnderstanding",
+        "Attestation",
+        "BoundedArgument",
+        "BoundedAudienceSupply",
+        "CallOutcome",
+        "Candidates",
+        "Capture",
+        "ChannelContext",
+        "ChannelContextItem",
+        "ChannelIdentity",
+        "ChargedOutput",
+        "ConversationWindow",
+        "DeletedMessage",
+        "DigestItem",
+        "Digested",
+        "DigestedEvidence",
+        "EpisodeProcessingRecord",
+        "EpisodicMemory",
+        "EvidenceItem",
+        "HeldResult",
+        "Message",
+        "NewConversation",
+        "OfferedTool",
+        "ParkedBinding",
+        "PlaceItem",
+        "PlaceWindow",
+        "Placement",
+        "PlannedCall",
+        "PlannedRound",
+        "PlanningInputs",
+        "PlanningLabel",
+        "PlanningRound",
+        "PlanningStories",
+        "PlanningStory",
+        "PreferenceMemory",
+        "ProceduralMemory",
+        "ProposedActivationUnderstanding",
+        "ProposedCall",
+        "ProposedReference",
+        "ProposedRelationship",
+        "Provenance",
+        "QuotedOutput",
+        "RecalledItem",
+        "RecordedChannelTrigger",
+        "RecordedResumeTrigger",
+        "RecordedSpeechInput",
+        "RecordedTextInput",
+        "RefusedCall",
+        "ReportedExtent",
+        "RoundResponse",
+        "SemanticMemory",
+        "ShortView",
+        "SpokenReply",
+        "StageEntry",
+        "StepVerification",
+        "StoryHeader",
+        "StoryMember",
+        "StoryNote",
+        "StoryRelated",
+        "StoryStanding",
+        "StoryStandingEarlier",
+        "StoryStandingEffect",
+        "StoryStandingEpisode",
+        "StorySummaryLine",
+        "StreamingTextReply",
+        "SuppliedWindow",
+        "ToolCost",
+        "ToolDefinition",
+        "TranscriptMessage",
+        "TranscriptWindow",
+        "UnboundedAudienceSupply",
+        "UnderstandingReference",
+        "UnderstandingReferent",
+        "UnderstandingRelationship",
+        "UnresolvedMatter",
+        "Validity",
+        "WholeTextReply",
+        "_Proposed",
+        "_ProposedItem",
+    }, (
+        "the whole graph the phases hand a model, or capture from one: a type that "
+        "joined it is one ADR-0221 §7's reliance now rests on, so judge it and add it here"
+    )
+
+    holes = _holes(
+        {
+            f"{name}.{field_name}": annotation
+            for name, model in reachable.items()
+            for field_name, annotation in _fields(model).items()
+        }
+    )
+    assert not holes, (
+        "a field the walk cannot see through could carry a secret past it unseen; "
+        "rebuild the model, name the type where it is defined, or judge the new leaf: "
+        f"{holes}"
+    )
+
+    assert not _carriers(reachable), (
+        "ADR-0221 §7's reliance is that no model the phases call is supplied anything "
+        "holding a Tier 0 value, and capture stores what they write without inspecting "
+        f"it: {_carriers(reachable)}"
+    )
+
+
+# --- the walk sees what it guards ----------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class _Aliased:
+    held: Mapping[str, tuple[core_types.SecretValue, ...]]
+
+
+class _Handed:
+    def __init__(self, read: Callable[[Secrets], None]) -> None:
+        self.read = read
+
+
+class _Nested(BaseModel):
+    inner: tuple[_Aliased, ...] | None = None
+    raw: list[SecretBytes] | None = None
+
+
+def test_the_walk_finds_a_carrier_behind_an_alias_a_container_and_a_constructor() -> None:
+    """Each way a carrier could hide from a shallower walk is a way this one finds it.
+
+    An alias over ``SecretStr`` inside a mapping of tuples, on a dataclass reached only
+    through a model; a ``Secrets`` handle in a ``Callable``'s parameter list, on a plain
+    class read by its constructor; and ``SecretBytes`` in a list on a model.
+    """
+    reached = _reachable([_Nested | None, Sequence[_Handed]])
+
+    assert set(reached) == {"Secrets", "_Aliased", "_Handed", "_Nested"}
+    assert _carriers(reached) == [
+        f"_Aliased.held admits {[SecretStr]}",
+        f"_Handed.read admits {[Secrets]}",
+        f"_Nested.raw admits {[SecretBytes]}",
+    ]
