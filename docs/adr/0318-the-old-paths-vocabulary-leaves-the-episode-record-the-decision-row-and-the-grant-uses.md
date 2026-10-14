@@ -1,6 +1,6 @@
 # 318. The old path's vocabulary leaves the episode record, the decision row and the grant uses
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-14
 - Scope: the phases after understanding, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)), the cutover's stores-and-types residue: the decision [ADR-0309](0309-the-phases-are-built-beside-the-old-path-and-one-cutover-switches-the-controller-over-deletes-the-old-path-and-goes-live-in-one-deploy.md) §5:11 asks for on the `AssistantEngine` members that stay and whose results still carry what only the old path produced, which [ADR-0313](0313-spoken-conversation-retires-at-the-cutover-an-event-returns-how-it-ended-and-the-establishing-act-leaves-the-engine.md) did not reach: the episode record `episode_chunk` carries, the processing status `episodes` and `story` carry, the decision row `recent_decisions` and `export_decisions` return, and the grant uses the grant and read members take and return.
 - Dependency: ADR-0309 and ADR-0313, both Accepted.
