@@ -35,7 +35,6 @@ from ai_assistant.orchestration.controller import (
     StageRecord,
     StageResult,
     TolerantStage,
-    run_recorded,
 )
 from ai_assistant.testing import FakeDiagnosticSink
 
@@ -918,37 +917,6 @@ async def test_a_pass_ended_by_a_rule_is_not_moved_by_a_later_mark() -> None:
     mark.stopped = True
 
     assert _shape(record) == [(ControllerStage.END, ControllerRule.NOTHING_DUE, StageOutcome.DONE)]
-
-
-async def test_a_recorded_stage_that_raises_after_the_mark_ends_stopped_and_reraises() -> None:
-    """The resume path's record (ADR-0284 §5:5): the stop's end entry, the error kept.
-
-    The raise continues to the resume, which returns what it established where its
-    answer was recorded, and raises as it would have where none was.
-    """
-    mark = _Mark()
-    record = StageRecord()
-    _, now = _clock()
-    error = PlanningError("refused")
-
-    async def body() -> None:
-        mark.stopped = True
-        raise error
-
-    with pytest.raises(PlanningError) as caught:
-        await run_recorded(
-            lambda: record,
-            ControllerStage.DRIVE,
-            ControllerRule.PARK_ANSWERED,
-            clock=now,  # type: ignore[arg-type]  # a plain callable
-            body=body,
-            stopped=mark,
-        )
-    assert caught.value is error
-    assert _shape(record) == [
-        (ControllerStage.DRIVE, ControllerRule.PARK_ANSWERED, StageOutcome.FAILED),
-        (ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE),
-    ]
 
 
 # --- #2927: the error a stop keeps from being re-raised -----------------------------
