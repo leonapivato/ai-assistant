@@ -1,12 +1,11 @@
 """Closing an async iterator a contract handed back (ADR-0060, ADR-0173 §5).
 
 A contract in :mod:`ai_assistant.core.protocols` that returns an async iterator —
-``StreamingCompleter.stream``, and any streaming method on ``AssistantEngine``
-(ADR-0173 §4) — places the same obligation on the caller in the same words:
-*stopping early is the caller's to declare*. Python does not close an abandoned
-async iterator at the point of abandonment, so a consumer that breaks out of its
-loop — a composing stage that has run out of room, a hub whose peer sent a second
-request — leaves the resource behind it open and still being paid for.
+any streaming method on ``AssistantEngine`` (ADR-0173 §4) — places the same obligation
+on the caller in the same words: *stopping early is the caller's to declare*. Python
+does not close an abandoned async iterator at the point of abandonment, so a consumer
+that breaks out of its loop — a hub whose peer sent a second request — leaves the
+resource behind it open and still being paid for.
 
 :func:`contextlib.aclosing` is exactly the right shape and its typeshed signature
 will not take an ``AsyncIterator``: it is bound to a protocol declaring

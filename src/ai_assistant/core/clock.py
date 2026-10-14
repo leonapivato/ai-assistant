@@ -192,8 +192,8 @@ def checked_clock(now: Callable[[], datetime], *, owner: str) -> Clock:
     Wrapped **once, where the clock is stored** — ``self._now =
     checked_clock(now, owner=...)`` — rather than at each read, which a call site
     cannot forget. Per-call guarding is what produced the state ADR-0026 §2
-    describes: ``orchestration/loop.py`` remembered and ``memory/ingest.py`` did
-    not, on the same write into the same field.
+    describes: the old turn loop remembered and ``memory/ingest.py`` did not, on
+    the same write into the same field.
 
     Checked **per reading, not once at construction**: a clock is a callable
     whose readings change, and a fixture that is aware on its first reading and
