@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from ai_assistant.core.types import ConversationDigest
+
 pytestmark = pytest.mark.integration
 
 
@@ -48,6 +50,36 @@ async def composed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIter
 def _cleared(output: StringIO) -> None:
     output.truncate(0)
     output.seek(0)
+
+
+def _flat(rendered: str) -> str:
+    """The rendered text with its wrapping undone, so a sentence reads as one line."""
+    return " ".join(rendered.replace("↳", " ").split())
+
+
+def _assert_prompt_shown(rendered: str, expected: ConversationDigest, turns: int) -> None:
+    """ADR-0074 §8's count and span and ADR-0293 §5:7's disclosure are already on screen.
+
+    Called from inside ``confirm``, so what it reads is what the person saw before
+    answering. The span's ends are the digest read before the command ran, rendered as
+    the surface renders an instant; the count is the exact line, not any ``2`` the
+    output happens to carry (a date has several).
+    """
+    assert expected.last_turn_at is not None
+    lines = [line.strip() for line in rendered.splitlines()]
+    assert "About to forget this conversation" in lines
+    assert expected.id in lines
+    assert f"Started: {cli._when(expected.started_at)}" in lines
+    assert f"Turns recorded: {turns}, the last at {cli._when(expected.last_turn_at)}" in lines
+    # ADR-0293 §5:7: what forgetting removes, that the conversation is still read,
+    # and that only deleting removes it — said before the answer is taken.
+    flat = _flat(rendered)
+    assert "Forgetting removes its episodes from the assistant's memory" in flat
+    assert "so it no longer recalls them anywhere else" in flat
+    assert "the assistant still reads it while you keep talking there" in flat
+    assert "only deleting removes it." in flat
+    assert "Forgotten." not in flat
+    assert "Left alone" not in flat
 
 
 async def test_the_conversations_listing_shows_what_a_person_chooses_from(
@@ -85,21 +117,31 @@ async def test_forget_conversation_shows_the_count_and_span_before_destroying(
     """§8: the ceremony is the count and span, not every turn — what a person can judge."""
     existing = (await composed.say("hello")).conversation_id
     await composed.say("again", existing)
+    expected = await composed.engine.conversation(existing)
+    assert expected is not None
     _cleared(output)
+    asked: list[ConversationDigest | None] = []
 
-    code = await cli._drive_forget_conversation(
-        composed.engine, existing, confirm=lambda _digest: True
-    )
+    def confirm(digest: ConversationDigest | None) -> bool:
+        # ADR-0074 §8: shown before consent is taken, so pinned here, not at the end.
+        asked.append(digest)
+        assert digest is not None
+        assert digest.recorded_turns == 2
+        assert digest == expected
+        _assert_prompt_shown(output.getvalue(), expected, turns=2)
+        return True
+
+    code = await cli._drive_forget_conversation(composed.engine, existing, confirm=confirm)
 
     assert code == 0
+    assert len(asked) == 1
     rendered = output.getvalue()
     assert "About to forget this conversation" in rendered
-    assert "Turns recorded:" in rendered
-    assert "2" in rendered
+    assert "Turns recorded: 2," in rendered
     assert "Forgotten." in rendered
     # ADR-0293 §5:7's plain disclosure, before and after: what forgetting removes,
     # that the conversation is still read, and that only deleting removes it.
-    flat = " ".join(rendered.replace("↳", " ").split())
+    flat = _flat(rendered)
     assert "removes its episodes from the assistant's memory" in flat
     assert "still reads it while you keep talking there" in flat
     assert "only deleting removes them." in flat
@@ -114,12 +156,24 @@ async def test_forget_conversation_leaves_it_alone_when_the_answer_is_no(
 ) -> None:
     """A refusal is a valid outcome, and it exits 0 — nothing went wrong."""
     existing = (await composed.say("hello")).conversation_id
+    expected = await composed.engine.conversation(existing)
+    assert expected is not None
+    _cleared(output)
+    asked: list[ConversationDigest | None] = []
 
-    code = await cli._drive_forget_conversation(
-        composed.engine, existing, confirm=lambda _digest: False
-    )
+    def confirm(digest: ConversationDigest | None) -> bool:
+        # The refusal is to something shown: the prompt is on screen before the no.
+        asked.append(digest)
+        assert digest is not None
+        assert digest.recorded_turns == 1
+        assert digest == expected
+        _assert_prompt_shown(output.getvalue(), expected, turns=1)
+        return False
+
+    code = await cli._drive_forget_conversation(composed.engine, existing, confirm=confirm)
 
     assert code == 0
+    assert len(asked) == 1
     assert "Left alone" in output.getvalue()
     assert await composed.conversations.get(existing) is not None
     assert len(await composed.held(existing)) == 1
