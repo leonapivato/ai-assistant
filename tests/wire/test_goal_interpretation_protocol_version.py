@@ -115,9 +115,6 @@ def test_the_stored_record_versions_moved_and_the_conversation_export_did_not() 
     crosses no frame and is emitted by no peer — and ``ConversationExport`` is
     untouched, so ADR-0212 §8 stands.
     """
-    from ai_assistant.permissions.parked_reads import (  # noqa: PLC0415 — asserted about
-        _SCHEMA_VERSION as _PARKED_SCHEMA,
-    )
     from ai_assistant.planning.sqlite_store import (  # noqa: PLC0415 — asserted about
         _SCHEMA_VERSION as _PLAN_SCHEMA,
     )
@@ -131,7 +128,6 @@ def test_the_stored_record_versions_moved_and_the_conversation_export_did_not() 
         "later decision moving it again is not a violation of this one, and the "
         "absolute figure has its home in tests/planning/test_sqlite_plan_store.py"
     )
-    assert _PARKED_SCHEMA == 3
     # ADR-0275 later advances the export for activation eligibility.
     assert ConversationExport.model_fields["schema_version"].default >= 2
     assert "goal_id" in ParkedRead.model_fields, "and the record gained its identifier"

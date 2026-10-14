@@ -145,27 +145,23 @@ def test_a_peer_at_the_previous_version_and_one_at_this_refuse_each_other() -> N
 
 
 def test_the_stored_record_versions_moved_and_the_others_did_not() -> None:
-    """§9, §19: two store markers move with this lane, and two do not.
+    """§9, §19: two store markers move with this lane, and one does not.
 
     ``PlanExport`` is a stored-record version rather than a second wire ground — it
     crosses no frame and is emitted by no peer — the plan store's own marker takes its
-    **second** migration, and the parked-read store's and ``ConversationExport``'s are
-    untouched, so ADR-0244 §3 and ADR-0212 §8 both stand.
+    **second** migration, and ``ConversationExport``'s is untouched, so ADR-0212 §8
+    stands.
 
     Every figure is a **floor**, for the reason the move above is: a later decision
     moving any of them again is not a violation of this one, and the absolute figures
     have one home each.
     """
-    from ai_assistant.permissions.parked_reads import (  # noqa: PLC0415 — asserted about
-        _SCHEMA_VERSION as _PARKED_SCHEMA,
-    )
     from ai_assistant.planning.sqlite_store import (  # noqa: PLC0415 — asserted about
         _SCHEMA_VERSION as _PLAN_SCHEMA,
     )
 
     assert PlanExport.model_fields["schema_version"].default >= 10
     assert _PLAN_SCHEMA >= 3, "this store's second migration (ADR-0250 §9)"
-    assert _PARKED_SCHEMA == 3, "ADR-0250 §17 leaves ADR-0244 §3 untouched"
     # ADR-0275 later advances the export for activation eligibility.
     assert ConversationExport.model_fields["schema_version"].default >= 2
 

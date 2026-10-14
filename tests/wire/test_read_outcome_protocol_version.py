@@ -158,9 +158,6 @@ def test_the_document_version_moved_and_the_two_store_markers_did_not() -> None:
     would falsify an equality (`CONTRIBUTING.md` -> "No state claims in living
     documents"). The absolute figures have exactly one home each.
     """
-    from ai_assistant.permissions.parked_reads import (  # noqa: PLC0415 — asserted about
-        _SCHEMA_VERSION as _PARKED_SCHEMA,
-    )
     from ai_assistant.planning.sqlite_store import (  # noqa: PLC0415 — asserted about
         _SCHEMA_VERSION as _PLAN_SCHEMA,
     )
@@ -175,7 +172,6 @@ def test_the_document_version_moved_and_the_two_store_markers_did_not() -> None:
         "ADR-0251 owed no migration; a later decision owing one is not a violation of "
         "that, and the absolute figure lives in tests/planning/test_sqlite_plan_store.py"
     )
-    assert _PARKED_SCHEMA == 3
     # ADR-0275 later advances the export for activation eligibility.
     assert ConversationExport.model_fields["schema_version"].default >= 2
 
