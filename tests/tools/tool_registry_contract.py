@@ -133,7 +133,7 @@ class ToolRegistryContract:
     async def test_unsatisfied_capability_is_empty_not_an_error(
         self, registry: PopulatableToolRegistry
     ) -> None:
-        """A plan may name a capability nothing implements (SkipReason.NO_CAPABLE_TOOL)."""
+        """A plan may name a capability nothing implements."""
         given(registry, tool())
 
         assert await registry.find("launch_rocket") == []
@@ -173,8 +173,7 @@ class ToolRegistryContract:
     ) -> None:
         """A query must not hand back the registry's own collection.
 
-        These methods return ``list`` to match ``MemoryStore.search`` and
-        ``PlanStore.active_executions``, and a list is mutable — so an
+        These methods return ``list``, and a list is mutable — so an
         implementation returning its backing collection would let a caller's
         ``result.clear()`` deregister every tool through a *query*, routing
         around the registration lifecycle and the spent-id rule with it.

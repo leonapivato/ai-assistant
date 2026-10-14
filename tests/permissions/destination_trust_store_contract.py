@@ -420,7 +420,7 @@ class DestinationTrustStoreContract:
 
         Both refused on the record rather than in the store, so no producer, decode,
         test double or later lane can build one — the discipline
-        :class:`~ai_assistant.core.types.Placement` and ``QueryOutcome`` already carry.
+        :class:`~ai_assistant.core.types.Placement` already carries.
         """
         with pytest.raises(ValueError, match="at least one canonical destination"):
             trust_record(destinations=())

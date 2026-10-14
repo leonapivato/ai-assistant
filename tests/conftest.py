@@ -243,7 +243,7 @@ def structlog_configuration_is_this_test_s_own() -> Iterator[None]:
     modules handing the configuration on changed: ``tests/core/test_logging.py``
     (whose subject *is* the configuration, including a case that leaves
     ``cache_logger_on_first_use`` on), ``tests/models/test_routing.py``,
-    ``tests/context/test_context_provider.py``,
+    ``tests/context/test_context_provider.py`` (since retired with ``context``),
     ``tests/permissions/test_action_policy.py``,
     ``tests/tools/test_egress_channel.py`` and ``tests/interfaces/test_cli.py``.
     None of them is wrong: each installs a configuration because that is what it is
@@ -654,8 +654,10 @@ def _is_satisfactory(report: pytest.TestReport, *, optional: bool) -> bool:
     Only a call-phase pass is evidence that a contract's assertions ran. A skip
     counts *only* where the suite itself marked the test ``optional_obligation``
     and the test's own body then chose to bow out -- see
-    ``ContextProviderContract``'s ``serves_a_fixed_instant``, an obligation that
-    genuinely does not apply to a provider serving a fixed instant.
+    ``TraceSinkContract``'s
+    ``test_a_cancelled_emit_holds_its_resource_until_the_work_finishes``, an
+    obligation that genuinely does not apply to a sink that acquires nothing whose
+    safety outlives the coroutine.
 
     Any other skip is an obligation that did not happen, whatever its cause: a
     ``pytest.skip("not implemented")`` in an unmarked contract test, or a mark

@@ -1707,10 +1707,11 @@ async def test_one_legacy_row_no_longer_denies_the_user_every_other_row(
 async def test_get_returns_the_legacy_row_by_id(ephemeral: SqliteAuditTrail) -> None:
     """§5's first clause for the one reader with a production consumer today.
 
-    ``StepRunner._recorded`` reads through ``get``, so this is the read that decides
-    whether a named legacy decision is legible at all. It answers as history; the
-    runner then narrows the union and refuses to *resume* it (ADR-0184 §8's fourth
-    clause), which is a different question from whether it can be read.
+    ``StepRunner._recorded`` read through ``get`` until the runner retired (ADR-0309
+    §5), and ``get`` is still the read that decides whether a named legacy decision is
+    legible at all. It answers as history; the runner then narrowed the union and
+    refused to *resume* it (ADR-0184 §8's fourth clause), which is a different question
+    from whether it can be read.
     """
     await _record_as_legacy(ephemeral, _egress_decision())
 

@@ -1183,8 +1183,9 @@ async def test_both_audit_reads_are_served_on_the_remote_listener(
     accepted-disclosure list does not cover. A ``PermissionDecision`` carries none:
     its ``tool`` is Tier 2 configuration declared by code, ``parameters_digest``
     exists to "bind the payload without storing it", and the binding's account
-    identity, occurrences and payload description **already cross this hop today**
-    inside a ``Confirmation``'s ``ConfirmationEgress``. What is new is quantity, and
+    identity, occurrences and payload description **already crossed this hop**
+    inside a ``Confirmation``'s ``ConfirmationEgress``, until the confirmation path
+    retired (ADR-0309 §5). What is new is quantity, and
     §5 answers that with ADR-0124's posture and §3's ceiling rather than by leaving
     a user on their own second machine unable to read their own audit trail.
     """

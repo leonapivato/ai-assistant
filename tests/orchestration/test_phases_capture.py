@@ -1,6 +1,6 @@
 """What an activation the phases run captures (ADR-0221, ADR-0223, ADR-0286).
 
-``test_engine_capture`` drives these cases through ``converse``, which retires at the
+``test_engine_capture`` drove these cases through ``converse``, which retired at the
 cutover (ADR-0309 §5:1). The phases' own capture — the outcome kept whole, the rounds,
 the placement — is ``test_engine_phases``'s; each case here is one of today's that
 reaches the same capture path from a chat activation: a typed message captures

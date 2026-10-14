@@ -600,8 +600,8 @@ def test_only_a_confirmation_may_carry_a_lifetime(outcome: PermissionOutcome) ->
 def test_a_deadline_not_after_the_ask_instant_is_refused(deadline: datetime) -> None:
     """A deadline at or before ``decided_at`` expires the question the moment it is asked.
 
-    The same shape as ``confirmation_ttl``'s strictly-positive check — refused at
-    construction, not silently normalised.
+    The same shape the retired ``confirmation_ttl`` setting's strictly-positive check
+    had — refused at construction, not silently normalised.
     """
     with pytest.raises(ValidationError, match="strictly after decided_at"):
         PermissionDecision.from_request(

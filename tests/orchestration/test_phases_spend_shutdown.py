@@ -1,9 +1,9 @@
 """Shutdown reaching the spend holder while acting's invocation's admission is wedged.
 
-``test_engine_spend_shutdown`` holds ADR-0194 §11's shutdown clause — "a real gate whose
+``test_engine_spend_shutdown`` held ADR-0194 §11's shutdown clause — "a real gate whose
 store read is wedged, reached through ``ToolInvoker.invoke`` … and the same holder taken
 through shutdown while that read is outstanding" — over a parked confirmation resumed,
-which retires at the cutover with ``resume`` (ADR-0309 §5:1). The clause survives it:
+which retired at the cutover with ``resume`` (ADR-0309 §5:1). The clause survives it:
 on the phases the call is invoked by acting, and acting runs inside the activation the
 façade drains. So here the invocation is acting's, in an activation the chat's reader
 runs on a message: planning proposes the call, authorizing allows it, and acting reaches

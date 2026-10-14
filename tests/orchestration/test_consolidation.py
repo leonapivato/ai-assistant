@@ -1285,8 +1285,8 @@ async def test_a_reply_that_breaks_the_decoder_is_counted_rather_than_raised(rep
     Letting either escape turns malformed output into a raised run — the cursor
     unadvanced, the same reply re-derived every run, forever — which is the
     permanent stall this lane already fixed once by another route.
-    ``ModelBackedObserver`` and ``planning.planner`` both catch the pair; this
-    asserts the third extractor does too.
+    ``ModelBackedObserver`` and ``planning.planner`` both caught the pair until they
+    retired (ADR-0285, ADR-0309 §5); this asserts the third extractor does too.
     """
     store = await _seeded([_record("r1"), _record("r2")])
     writes = _gated(store)
@@ -1307,9 +1307,9 @@ async def test_a_decoy_object_before_the_envelope_does_not_lose_the_beliefs() ->
     as one unusable envelope, and advance the walk having silently lost every
     belief in it: a consolidation that never happened and that nothing reports.
 
-    ``ModelBackedObserver`` and ``planning.planner`` both prefer the envelope and
-    keep the first object only as a fallback; this is the third extractor and it
-    now matches.
+    ``ModelBackedObserver`` and ``planning.planner`` both preferred the envelope and
+    kept the first object only as a fallback until they retired (ADR-0285, ADR-0309
+    §5); this is the third extractor and it matches.
     """
     store = await _seeded([_record("r1"), _record("r2")])
     writes = _gated(store)

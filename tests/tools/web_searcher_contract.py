@@ -7,12 +7,12 @@ supplies the ``searcher`` fixture, and overrides the six hooks below.
 **Here rather than under ``tests/core/``**, beside ``tool_invoker_contract.py`` and
 ``egress_binder_contract.py``: ADR-0231 §17 puts the production searcher in
 ``ai_assistant.tools.egress`` — the module ADR-0154 §1 designates — and this package
-is where the suite sits beside it, exactly as the ``QueryComposer`` suite sits beside
-the composer in ``tests/planning/``. The ``Fetcher`` suite made the other choice for
-a reason that does not hold here: its implementation lives in ``ai_assistant.readers``,
-"a package no subsystem may import".
+is where the suite sits beside it, exactly as the ``QueryComposer`` suite sat beside
+the composer in ``tests/planning/`` until both retired (ADR-0309 §5). The ``Fetcher``
+suite made the other choice for a reason that does not hold here: its implementation
+lives in ``ai_assistant.readers``, "a package no subsystem may import".
 
-**The hooks are ``async``**, unlike the ``QueryComposer`` suite's: preparing a
+**The hooks are ``async``**, unlike the retired ``QueryComposer`` suite's: preparing a
 subject here means arranging a connected account and a keyring, and a keyring is
 written to through an ``async`` seam. A sync hook would have to drive a loop of its
 own inside the one the case is already running on.
@@ -272,8 +272,8 @@ class WebSearcherContract:
     ) -> None:
         """§17: "Both value parameters are **positional-only**".
 
-        For :meth:`~ai_assistant.core.protocols.QueryComposer.compose`'s reason, one
-        seam further out: no keyword name of either exists for a caller to pass a
+        For the reason the retired ``QueryComposer.compose`` gave, one seam further
+        out: no keyword name of either exists for a caller to pass a
         second value under, so an implementation that wanted a supply, a record or a
         listing would have to acquire it out of band — a different defect in a
         different place, and one a reviewer of ``tools/`` is looking straight at.

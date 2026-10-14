@@ -182,8 +182,8 @@ _NAMESPACE: Final = {
 #: ``RoutedOperationRecord`` and ``RouteApproval`` are **not** here, and their absence
 #: is ADR-0197 §9 rather than an omission: that section mints the routing trail's row
 #: and gives ``AssistantEngine`` **no method** for it, so nothing on this surface
-#: returns one and the walk is right not to reach it. They are ``core`` surface the
-#: read-surface ADR §11 defers will promote when it gives them a door.
+#: returns one and the walk is right not to reach it. Both have since left ``core``
+#: with the routing trail (ADR-0309 §5).
 #:
 #: The two after those are ADR-0200's — the ``SpokenAudio`` and ``SpokenAudioFormat``
 #: a recording and a rendering are carried as. ``SpokenTurn``, which ``converse_spoken``
@@ -286,8 +286,8 @@ _NAMESPACE: Final = {
 #: ``GoalEngagement``, ``EngagementDisposition``, ``ReferenceOutcome`` and
 #: ``GoalDisambiguation``, ADR-0264 §7's three outbound types, ADR-0261 §7's
 #: ``DriveWithheld``, ``TextChannelResult``, or the two text reply declarations, which
-#: only ``TextChannelResult``'s ``TurnOutcome`` reached. They stay in ``core`` until the
-#: types lanes retire them; they are no longer contract surface.
+#: only ``TextChannelResult``'s ``TurnOutcome`` reached. They are no longer contract
+#: surface, and the types lanes have since retired them from ``core``.
 #:
 #: **ADR-0309 §5:1 and ADR-0313 §5:1 take eleven more off it.** ``goals``,
 #: ``withdraw_clarification`` and ``abandon_goal`` were the only members carrying
@@ -298,8 +298,8 @@ _NAMESPACE: Final = {
 #: ``SuccessorLink``. ``standing_authorizations`` and ``revoke_authorization``
 #: carried ``AuthorizationView`` and ``AuthorizationSettlement``, which this roster
 #: never named, and ``grantable_decisions`` and ``establish_recipient_grant`` carried
-#: nothing a member that stays does not. The eleven types stay in ``core`` until the
-#: types lanes retire them.
+#: nothing a member that stays does not. The types lanes have since retired the eleven
+#: from ``core``.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
         "EpisodeCaptureReport",
@@ -1232,7 +1232,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``extra="forbid"`` to refuse, and the closed enumeration is the whole of the
     break. ADR-0231 §17's Lane 4 adds no Protocol, no method and no gateway route,
     which is why the first limb is not reached — and the two Protocols ADR-0231
-    decides, :class:`~ai_assistant.core.protocols.QueryComposer` and
+    decides, ``QueryComposer`` (since retired, ADR-0309 §5) and
     :class:`~ai_assistant.core.protocols.WebSearcher`, are on neither the promoted
     surface nor any earlier bump's ground.
 

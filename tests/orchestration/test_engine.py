@@ -236,7 +236,7 @@ CAPABILITY = "send_email"
 
 
 def tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
-    """A declaration ``FakeActionPolicy`` allows outright (mirrors test_runner)."""
+    """A declaration ``FakeActionPolicy`` allows outright (as the retired test_runner's did)."""
     fields: dict[str, object] = {
         "id": tool_id,
         "capability": CAPABILITY,

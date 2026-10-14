@@ -656,9 +656,9 @@ class ActionPolicyContract:
         one that treats consent as sufficient. Asserting both is what stops the case
         being satisfied by the pre-existing obligation.
 
-        A **floor rather than a route that exists**: ``AuditTrail.pending_confirmation``
-        never offers such a park and ``StepRunner.resume`` refuses one before any
-        ruling is sought, so no conforming caller reaches this today. ADR-0021 §5's
+        A **floor rather than a route that exists**: nothing offers or resumes such a
+        park since ``AuditTrail.pending_confirmation`` and ``StepRunner.resume`` retired
+        (ADR-0309 §5), so no conforming caller reaches this today. ADR-0021 §5's
         "fail-closed twice over" is why it is stated anyway — a floor is worth having
         because it holds when a route appears, and this one is checkable on any
         implementation without knowing its rules.

@@ -56,10 +56,11 @@ def test_the_entry_records_what_did_not_move() -> None:
     """ADR-0124 §9's **first** limb, stated as not reached rather than left silent.
 
     ADR-0251's L1 mints two further types and changes a Protocol, and none of them is a
-    ground for this bump: ``ReadOutcomeKind`` and the outcome model exist only as an
-    in-process argument to ``Planner.plan``, and ``Planner`` is on neither promoted
-    surface. The plan store's own ``schema_version`` does not move either, and the entry
-    says why — a version 2 ``attempts`` row decodes under this contract unchanged.
+    ground for this bump: ``ReadOutcomeKind`` and the outcome model existed only as an
+    in-process argument to ``Planner.plan``, and ``Planner`` was on neither promoted
+    surface (all three retired with the old path, ADR-0309 §5). The plan store's own
+    ``schema_version`` does not move either, and the entry says why — a version 2
+    ``attempts`` row decodes under this contract unchanged.
     """
     entry = _entry_for(_MOVED_TO)
 
@@ -90,14 +91,15 @@ def test_the_two_halves_of_the_handshake_name_both_versions_when_they_disagree()
     assert envelope.VERSION_MISMATCH, "and the refusal carries its own code (ADR-0124 §6)"
 
 
-def test_the_document_version_moved_and_the_two_store_markers_did_not() -> None:
+def test_the_export_and_store_versions_are_at_least_this_decisions_figures() -> None:
     """§16: one stored-record version moves, and it is not one of this wire's.
 
-    ``PlanExport`` carries ``tuple[GoalAttempt, ...]`` and every attempt in it now emits
-    ``kind``. The **plan store's** own marker did not move *for this decision*: ADR-0249
-    §12 moved it 1 → 2 because a version 1 ``goals`` row "no longer decodes", and a
-    version 2 ``attempts`` row decodes under this contract unchanged — ``kind`` defaults
-    to ``None``, which is what makes no migration owed rather than merely convenient.
+    ``PlanExport`` carried ``tuple[GoalAttempt, ...]`` then, and every attempt in it
+    emitted ``kind`` (attempts left the export with the old path, ADR-0309 §5). The
+    **plan store's** own marker did not move *for this decision*: ADR-0249 §12 moved
+    it 1 → 2 because a version 1 ``goals`` row "no longer decodes", and a version 2
+    ``attempts`` row decodes under this contract unchanged — ``kind`` defaulted to
+    ``None``, which is what made no migration owed rather than merely convenient.
 
     **The two figures are floors rather than equalities**, and that is what keeps this
     a statement about ADR-0251 rather than about whatever landed after it: a later

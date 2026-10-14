@@ -3,7 +3,7 @@
 The stage alone, over the canonical fakes: which kept records are looked up, what each
 item carries, how a story store failure and recall's budget bound the lookups, and the
 order :meth:`Recalled.stories` hands the stories to the candidates in (§6:1). The engine
-wiring is in ``test_engine_recall_stories.py``.
+wiring is in ``test_phases_before_planning.py``.
 """
 
 from __future__ import annotations

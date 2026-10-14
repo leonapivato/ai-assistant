@@ -1,4 +1,4 @@
-"""The ``core`` addition the establishing act needs (ADR-0235 §4).
+"""The ``core`` addition the establishing act needed (ADR-0235 §4).
 
 :meth:`~ai_assistant.core.types.PermissionDecision.from_confirmation` — the
 transcribing constructor that authors the *answer* a recorded ``CONFIRM`` no park
@@ -7,7 +7,7 @@ one, ``RecipientGrantOutcome``, left ``core`` with the establishing act (ADR-031
 ADR-0309 §5).
 
 **It is pure**: nothing here touches a store, a clock or a seam, which is why it is
-pinned in ``tests/core`` rather than beside the operations that use it.
+pinned in ``tests/core`` rather than beside the operations that used it.
 """
 
 from __future__ import annotations

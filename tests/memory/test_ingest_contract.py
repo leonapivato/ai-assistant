@@ -2,8 +2,8 @@
 
 The triad check demands only the *fake's* binding, so this file is what ADR-0028
 §8 adds on top: a suite bound only to the double certifies the double while the
-production writer drifts, and ``MemoryIngestor`` is what ``LearningLoop``
-delegates to. ``test_ingest.py`` stays implementation tests and is not this
+production writer drifts, and ``MemoryIngestor`` is the writer the composition
+root wires. ``test_ingest.py`` stays implementation tests and is not this
 binding.
 """
 

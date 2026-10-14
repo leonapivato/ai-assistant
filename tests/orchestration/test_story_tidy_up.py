@@ -6,8 +6,9 @@ no note. Its reply is lines and flags and nothing else (§5:2).
 
 Each case runs :class:`StoryTidyUp` over the canonical fake story and memory stores
 with a scripted provider, and asserts the prompt it rendered, the one completion it
-made and what the story store then holds. The engine's interim run is in
-``test_engine_story_tidy_up.py``.
+made and what the story store then holds. The engine's interim run, and
+``test_engine_story_tidy_up.py`` with it, is gone with the switch (ADR-0309 §5:8);
+planning's tidy-up call runs the operation through the phases' story calls.
 """
 
 from __future__ import annotations

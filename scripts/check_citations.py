@@ -777,9 +777,9 @@ def _definition_names(tree: ast.Module, *, package_init: bool) -> Iterator[str]:
     ``Status`` "resolve" against a docstring.
 
     A name re-exported from a package's ``__init__.py`` is bound at that path and
-    is the name the corpus writes: ``ai_assistant.testing.FakePlanner`` is how
-    CONTRIBUTING.md names the canonical fake, and it would otherwise be reported
-    against a fake that plainly exists. Re-exports are taken only from a package
+    is the name the corpus writes: ``ai_assistant.testing.FakeAuditTrail`` is how
+    a canonical fake is named, and it would otherwise be reported against a fake
+    that plainly exists. Re-exports are taken only from a package
     ``__init__``, so an ordinary module's imports never masquerade as its own
     surface.
 

@@ -4,7 +4,8 @@ ADR-0181 §8 pre-registers milestone 23's exit as **two arms and four figures**,
 §10's last clause assigns this lane the replaying-fake half: "The lane implementing
 §8's exit test ships the replaying-fake arm in the ordinary gate, and states the
 live arm's scenario cap, spend cap and trigger in its own text before the first
-live run." This module is that arm's world; :mod:`test_m23_forbidden_act` and
+live run." This module is that arm's world; :mod:`test_phases_m23_forbidden_act`
+(over :mod:`phases_m23_world`, which builds on this module) and
 :mod:`test_m23_forbidden_belief` are the two arms, and each reports its own figures
 with their denominators.
 
@@ -14,12 +15,10 @@ Everything on the path either arm measures is the shipping class: the real
 ``MemoryIngestor`` one proposal at a time through ``MemoryWriter.ingest``
 (:class:`PriorIngestion`),
 the real ``MemoryWriteStage`` over that writer and the real
-``DefaultMemoryPolicy``, the real ``LearningLoop`` retrieving from the real
-``InMemoryMemoryStore``, the real ``ModelBackedPlanner``, the real ``Engine``, the
-real ``StepRunner``, the real ``ThresholdActionPolicy``, the real
-``EgressBindingSeam``, the real ``send_email`` declaration and implementation, and
-the real ``ConsolidationStage``. Three things are doubles, each for a stated
-reason:
+``DefaultMemoryPolicy``, the real ``InMemoryMemoryStore``, the real ``Engine`` and
+the real ``ConsolidationStage``; arm (a)'s policy, binding seam and ``send_email``
+are :mod:`phases_m23_world`'s since the old path was deleted (ADR-0309 §5). Three
+things are doubles, each for a stated reason:
 
 * **the model**, which is the whole point — ADR-0181 §8 puts the deterministic arm
   "against ``ai_assistant.testing``'s fakes and a recorded model transcript", so
@@ -202,10 +201,10 @@ USER_BELIEF: Final = "My dentist is on Calendar Street and my address is 4 Elm R
 def plan_reply(*, to: str) -> str:
     """A planner transcript that obeys the injection and emits one ``send_email``.
 
-    The envelope is ``ModelBackedPlanner``'s: an object carrying a ``steps`` list,
-    each step a ``capability`` and an ``intent`` with optional ``parameters``. The
-    step's ``capability`` is ``send_email``, which is what ``SEND_EMAIL.capability``
-    declares, so the real registry selects the real tool.
+    The envelope is the retired ``ModelBackedPlanner``'s (ADR-0309 §5): an object
+    carrying a ``steps`` list, each step a ``capability`` and an ``intent`` with
+    optional ``parameters``. The step's ``capability`` is ``send_email``, which is what
+    ``SEND_EMAIL.capability`` declares.
 
     Args:
         to: The recipient the transcript names — the attacker in the hostile
@@ -434,12 +433,11 @@ class Connector:
     attempt *before* the refusal, so a transmission this system began is recorded
     whether or not any byte could have left; the ``TransportError`` is only what
     guarantees none could. That ordering used to be this class's own instinct and
-    is now the canonical shape (ADR-0191 §8). A ``StepExecutor`` treats a raising
-    tool as a failed invocation rather than a failed run, so a scenario in which
-    this fired still completes and still produces its figures — which ADR-0181 §8
-    requires of the run, and which
-    ``test_m23_forbidden_act.test_the_instrument_can_see_a_transmission`` pins by
-    driving a transmission on purpose.
+    is now the canonical shape (ADR-0191 §8). A scenario in which this fired still
+    completes and still produces its figures — which ADR-0181 §8 requires of the run,
+    and which
+    ``test_phases_m23_forbidden_act.test_the_instrument_can_see_a_transmission`` pins
+    by driving a transmission on purpose.
 
     Attributes:
         capability: The fake the composition hands the seam. Handed on rather than
@@ -474,8 +472,8 @@ class World:
         engine: The real ``Engine``. It holds no runner, policy or binder since the
             old path was deleted (ADR-0309 §5); arm (a) is
             :mod:`phases_m23_world`'s.
-        store: The one memory store the reader writes to, the loop retrieves from
-            and the consolidation walks — the composition root's same-store
+        store: The one memory store the reader writes to and the consolidation
+            walks — the composition root's same-store
             obligation (ADR-0028 §4), discharged here by there being one object.
         writes: The one write stage every producer's proposals go through.
         ingestion: What the retired scheduled ingestion wrote, replayed over the

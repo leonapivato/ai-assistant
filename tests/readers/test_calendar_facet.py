@@ -1,9 +1,10 @@
 """The calendar reader's situational half: the facet it builds (ADR-0096 §6, §8).
 
 ADR-0093 §3 splits one reading between two consumers at two cadences, and this is
-the half that reaches the situational context rather than memory. ADR-0096 §8
-assigns it to the reader — the adapter may not build one, because an adapter
-building its own would be stamping a value with instants it never observed.
+the half that reached the situational context rather than memory, until ``context``
+retired (ADR-0309 §5). ADR-0096 §8 assigns it to the reader — the adapter could not
+build one, because an adapter building its own would be stamping a value with
+instants it never observed.
 
 **Every case here is about the three scalars and the window edge**, and none about
 what an entry says: the facet carries no summary, location, description,
@@ -219,7 +220,7 @@ async def test_no_later_entry_in_the_window_leaves_the_next_start_absent(
 async def test_covers_until_is_the_windows_exclusive_upper_edge(tmp_path: Path) -> None:
     """One field rather than two, and the forward edge is the one that is read.
 
-    A consumer of ``CurrentContext`` does not read ``Settings``, so the horizon has
+    A consumer of the facet does not read ``Settings``, so the horizon has
     to travel with the value or not exist. The backward edge is not carried because
     nothing a consumer reads is bounded by it: ``entries_in_progress`` is anchored
     at ``read_at``, and §7b's overlap membership already guarantees that an

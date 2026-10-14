@@ -15,9 +15,9 @@ approximation of one.
 
 **§11's clause itself is discharged elsewhere, and this is its root-level
 counterpart.** That clause names a read "reached through ``ToolInvoker.invoke``",
-and ``tests/orchestration/test_engine_spend_shutdown.py`` drives exactly that — a
-resumed confirmation whose step reaches the real invoker and the real gate, parked
-inside its admission, with shutdown started on top of it. What that case cannot
+and ``tests/orchestration/test_phases_spend_shutdown.py`` drives exactly that —
+acting's invocation reaching the real invoker and the real gate, wedged inside its
+admission, with shutdown started on top of it. What that case cannot
 say is anything about the **composition root**, because it wires its own engine:
 whether ``build_engine`` puts this holder among the façade's closers at all, and
 whether the operation this change added to the tracked set is drained before it,

@@ -1,7 +1,7 @@
 """How an activation ends where a stage before planning fails or runs out of time.
 
 ``test_engine_stage_record``, ``test_engine_understanding``, ``test_engine_recall`` and
-``test_engine_windows`` drive these cases through ``converse``, which the switch refuses
+``test_engine_windows`` drove these cases through ``converse``, which the switch refused
 (ADR-0309 §2:6, §5:1). The stages they hold are the same ones on the phases: the
 windows, recall and understanding run first on every activation (ADR-0309 §3's rows 2 to
 4), and a stage that fails or outlasts the activation's deadline ends it on the

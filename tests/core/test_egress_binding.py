@@ -828,8 +828,7 @@ def test_a_decision_transcribes_the_binding_without_the_signature_growing() -> N
     """§9's transcription clause: carried by `core`, never supplied by a caller.
 
     A caller with no parameter for it cannot make a decision name a binding the
-    policy did not see, which is the same property ``tool`` and ``execution_id``
-    already have.
+    policy did not see, which is the same property ``tool`` already has.
     """
     binding = _binding(_span("to", extent=17, destination=_destination(_RECIPIENT)))
     request = _request({"to": _RECIPIENT}, binding)

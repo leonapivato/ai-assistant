@@ -138,7 +138,7 @@ class SqliteLedgerHarness:
 
         Every later statement then meets ``sqlite3`` and has to be translated —
         the same lever ``test_resolution_of_reports_an_unreadable_trail_as_an_audit_error``
-        already uses on the decision reads.
+        used on the decision reads until it retired with ``resolution_of``.
         """
         trail = subject
         assert isinstance(trail, SqliteAuditTrail)

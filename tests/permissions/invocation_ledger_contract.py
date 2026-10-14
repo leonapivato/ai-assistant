@@ -824,9 +824,9 @@ class InvocationCompleterContract:
         A subclass overriding it — or an instance shadowing it through ``__dict__``
         — hands back a valid-but-false mapping, and an implementation that rebuilds
         from *that* records a price nobody submitted while every detachment case
-        above still passes. ``orchestration/executor.py`` states the same reasoning
-        for ``ToolResult``: the class serializer reads field values and consults no
-        instance attribute.
+        above still passes. ``orchestration/executor.py`` stated the same reasoning
+        for ``ToolResult`` until it was deleted (ADR-0309 §5): the class serializer
+        reads field values and consults no instance attribute.
         """
 
         class _Lying(ToolCost):

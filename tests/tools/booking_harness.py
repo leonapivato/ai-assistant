@@ -362,10 +362,10 @@ def authorised(  # noqa: PLR0913 — one keyword per fact a ruling fixes; a case
         parameters: The call's arguments.
         binding: The binding the seam derived.
         decision_id: The decision's id, which a case varies to make two dispatches.
-        step_id: The step the request serves.
-        execution_id: The execution the step belongs to, where a case drives the real
-            executor — which refuses a call authorised for another execution, so the two
-            have to agree (ADR-0044 §1, #253).
+        step_id: Unused: the step the request served, until the old path's steps
+            retired (ADR-0309 §5).
+        execution_id: Unused: the execution the step belonged to, which the retired
+            executor required to agree with the call's (ADR-0044 §1, #253).
         decided_at: When the ruling was taken.
 
     Returns:
@@ -390,8 +390,8 @@ async def recorded(registry: InMemoryToolRegistry, call: ToolCall) -> ToolResult
 
     ADR-0192 §1 makes the claim the consume: the ledger requires the decision it is
     handed to **equal the decision the store holds under that id**, so a call whose
-    ruling the trail never saw is refused before the callable is reached. That is the
-    runner's job in production and the arrangement's here — the registry is handed the
+    ruling the trail never saw is refused before the callable is reached. That is
+    authorizing's job in production and the arrangement's here — the registry is handed the
     one object a composition root wires as ``AuditTrail``, ``InvocationLedger`` and
     ``InvocationCompleter``, so recording through ``registry.ledger`` is recording
     through exactly that object.

@@ -2516,7 +2516,7 @@ class AssistantEngineContract(
         """§5's sweep, and the wrong version passes every other test here.
 
         ``SourceGrants.live`` takes a ``use``, so an implementation querying only
-        ``FACET`` resolves a ``FACET``-scoped grant and silently fails to find an
+        ``NOTIFY`` resolves a ``NOTIFY``-scoped grant and silently fails to find an
         ``INGEST``-only one — leaving it unrevokable while ``revoke`` reports
         success by returning ``None``. ADR-0102 §5 marks the sweep for exactly that
         reason: the wrong implementation is silent and generous-looking.
@@ -4504,13 +4504,14 @@ class AssistantEngineContract(
         """§1's first availability condition, and the type §1 names for every refusal.
 
         ``UntrustableDestinationError`` and **not** ``UngrantableActError`` reused: that
-        class's ratified meaning is ADR-0235 §3's ordered seven and a caller catching it
-        means *the recipient-grant act was unavailable*. "Two acts with different
+        class's ratified meaning was ADR-0235 §3's ordered seven and a caller catching it
+        meant *the recipient-grant act was unavailable*, until it retired at the
+        cutover. "Two acts with different
         recourses answering to one handler is what ADR-0235 §7's two-vocabulary rule
         refuses one noun over."
 
-        And an ``AssistantError`` rather than a bare ``ValueError``, for
-        ``UngrantableActError``'s own stated reason: a ``ValueError`` escapes a command's
+        And an ``AssistantError`` rather than a bare ``ValueError``, for the reason
+        ``UngrantableActError`` stated: a ``ValueError`` escapes a command's
         ``except (AssistantError, TransportError)`` boundary as an uncaught traceback
         with no controlled exit code, which ADR-0042 §7 forbids.
         """
@@ -4655,11 +4656,12 @@ def _sample_for(parameter: str, annotation: object = None) -> object:
 
     **A closed vocabulary is read off the annotation rather than from a name
     table**, which is the same rule-over-list discipline the caller's docstring
-    states: ADR-0200 §4's ``TranscriptionFailedError`` carries a
-    :class:`~ai_assistant.core.types.SpeechFailure`, and a string that happens not
-    to be one of its values is refused by the enum before the round trip can say
-    anything about it. Taking the first member covers every enum-typed keyword this
-    hierarchy grows, including the ones nobody has written yet.
+    states: ADR-0200 §4's ``TranscriptionFailedError`` carried a
+    :class:`~ai_assistant.core.types.SpeechFailure` until ADR-0313 §3:1 retired it,
+    and a string that happens not to be one of an enum's values is refused by the
+    enum before the round trip can say anything about it. Taking the first member
+    covers every enum-typed keyword this hierarchy grows, including the ones nobody
+    has written yet.
 
     Args:
         parameter: The keyword's name.

@@ -414,7 +414,8 @@ class ForecasterContract:
     ) -> None:
         """§4: ``read`` takes a ``ToolCall`` positionally and a ``timeout`` keyword.
 
-        Positional-only for :meth:`QueryComposer.compose`'s reason one seam further out:
+        Positional-only for the reason the retired ``QueryComposer.compose`` gave, one
+        seam further out:
         no keyword name of it exists for a caller to pass a second value under, so an
         implementation that wanted a supply, a record or a listing would have to acquire
         it out of band — a different defect in a different place, and one a reviewer of

@@ -759,7 +759,8 @@ def test_the_refusal_enumeration_did_not_grow() -> None:
     ADR-0232 §4's ruling that the class does not disclose which of the three bounds
     refused now reads over four. ADR-0232 §7's audit is untouched by that — no field, no
     event, no key and no emission point — so nothing in this diff reaches it, and the
-    audit half of this arm is ``tests/orchestration/test_loop_fetch.py``'s.
+    audit half of this arm was ``tests/orchestration/test_loop_fetch.py``'s, which
+    retired with the old loop (ADR-0309 §5).
     """
     assert len(FetchRefusal) == 5
     assert FetchRefusal.TOO_LARGE in set(FetchRefusal)

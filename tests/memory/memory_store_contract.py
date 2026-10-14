@@ -1781,7 +1781,7 @@ class MemoryStoreContract:
         ``0/0``. sqlite-vec hands SQLite that ``NaN`` and SQLite renders it
         ``NULL``, which ``SqliteMemoryStore`` then subtracted from ``1.0``:
         ``TypeError``, not ``MemoryStoreError``, so not the class
-        ``LoopEngine._retrieve`` and ``_supplement`` catch, and the turn aborted
+        ``LoopEngine._retrieve`` and ``_supplement`` caught, and the turn aborted
         rather than degrading (#2355).
 
         What the contract can require of every implementation is only this: the
@@ -3820,8 +3820,7 @@ class MemoryStoreContract:
     #: invariant by overriding :meth:`store_suspended_mid_write` — so a new
     #: durable backend that reintroduces ADR-0054's bug fails here rather than
     #: passing a suite that never looked. Opting out is a visible declaration in
-    #: the subclass, exactly as ``serves_a_fixed_instant`` is for the context
-    #: provider.
+    #: the subclass.
     acquires_no_shared_resource: bool = False
 
     def store_suspended_mid_write(

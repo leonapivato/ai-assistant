@@ -1,7 +1,7 @@
 """What a conversational activation's episode carries, through the root, on the phases.
 
-``test_episode_retention_default`` and ``test_transcript_archive_retired`` drive these
-cases through ``converse``'s admission and today's table, which the cutover retires
+``test_episode_retention_default`` and ``test_transcript_archive_retired`` drove these
+cases through ``converse``'s admission and the old table, which the cutover retired
 (ADR-0309 §2:6, §5:1). Each case here is one of them with the root's phases wired and
 the activation started by a message the chat's reader takes in: the episode's expiry
 follows ``episode_retention`` (ADR-0287 §1, §6), and capture, forgetting and deleting a

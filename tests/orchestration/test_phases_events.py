@@ -1,7 +1,7 @@
 """An event ``receive`` admits, run by the phases: its lifetime and its record (ADR-0313 §4).
 
 ``test_channel_receiver``, ``test_activation_channels`` and ``test_engine_stage_record``
-drive these cases through today's event path, whose summary stage retires at the cutover
+drove these cases through the old event path, whose summary stage retired at the cutover
 (ADR-0309 §5:5). On the phases an event is one activation whose place takes no message,
 and one that cannot finish returns *couldn't finish* rather than raising (ADR-0313
 §4:5); what it shares with today's path is pinned here: a caller's cancellation and the

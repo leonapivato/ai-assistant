@@ -305,7 +305,7 @@ async def test_the_snapshot_survives_a_subclass_that_forges_its_own_dict() -> No
     """The last dispatch path between a record and its snapshot, closed here.
 
     A ``SourceGrant`` subclass can override ``__getattribute__`` to hand back a
-    forged ``__dict__`` while its real field state stays ``FACET``-only, so a
+    forged ``__dict__`` while its real field state stays ``NOTIFY``-only, so a
     store reading ``grant.__dict__`` would append a wider grant than it was given.
     Reading through ``object.__getattribute__`` dispatches no user code and closes
     it.

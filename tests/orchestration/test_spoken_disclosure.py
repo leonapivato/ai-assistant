@@ -301,5 +301,5 @@ def test_a_guarded_record_is_withheld_from_a_channel_wider_than_the_owner() -> N
         )
 
     # And the episode is retrieved in this exact shape when it is *not* stamped —
-    # `test_milestone_19s_exit_test_is_unaffected` asserts precisely that — so the
+    # `test_milestone_19s_exit_test_is_unaffected` asserted precisely that — so the
     # absence above is the withholding rather than a retrieval that found nothing.

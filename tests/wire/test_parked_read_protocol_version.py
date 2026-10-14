@@ -3,8 +3,8 @@
 §17 rules that "``PROTOCOL_VERSION`` moves 34 → 35, once, for this whole decision, and
 ``wire/envelope.py``'s log gains one entry naming this ADR and this reason". The rest of
 §17's clauses — that ``PlanExport.schema_version`` does not move, and that
-``SearchDisposition`` and its nine neighbours do not either — are asserted where those
-values live.
+``SearchDisposition`` and its nine neighbours do not either — were asserted where those
+values lived, until they retired with the old path (ADR-0309 §5).
 
 **Both halves matter and neither substitutes for the other**, which is
 ``test_web_search_protocol_version.py``'s reasoning two decisions on: ADR-0124 §9 makes

@@ -206,7 +206,7 @@ def test_a_successful_result_constructs() -> None:
 
 @pytest.mark.parametrize("outcome", [ToolOutcome.FAILED, ToolOutcome.INDETERMINATE])
 def test_a_non_successful_result_requires_a_failure(outcome: ToolOutcome) -> None:
-    """Otherwise the executor writes ``StepExecution.error`` with nothing to write."""
+    """Otherwise an outcome short of success would carry no account of why."""
     with pytest.raises(ValidationError, match="requires a failure"):
         ToolResult(outcome=outcome)
 
@@ -258,7 +258,7 @@ def test_a_failure_message_is_stored_stripped() -> None:
 
 
 def test_a_result_round_trips_through_json() -> None:
-    """``output`` lands in a durable ``StepExecution``, so it must survive the trip."""
+    """``output`` is frozen JSON, so it must survive the trip."""
     result = ToolResult(
         outcome=ToolOutcome.SUCCEEDED,
         output={"ids": ["m-1", "m-2"], "count": 2, "nested": {"ok": True}},
@@ -277,11 +277,11 @@ def test_a_failed_result_round_trips_through_json() -> None:
 
 
 # --- ToolResult.output with no JSON encoding (issue #121, #409) -------------
-# output is a FrozenJsonValue holder, matching StepExecution.output exactly, so
-# it inherits _freeze_json's refusal of a value that satisfies its Python type
-# but has no portable encoding. #401 pinned that for PlanStep.parameters and
-# StepExecution.output; this carrier carries the same guarantee and had no
-# field-specific regression until #409.
+# output is a FrozenJsonValue holder, as StepExecution.output was, so it
+# inherits _freeze_json's refusal of a value that satisfies its Python type but
+# has no portable encoding. #401 pinned that for PlanStep.parameters and
+# StepExecution.output, both since retired (ADR-0309 §5); this carrier carries
+# the same guarantee and had no field-specific regression until #409.
 
 
 def test_a_successful_result_output_with_a_lone_surrogate_is_rejected() -> None:

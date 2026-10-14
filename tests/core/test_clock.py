@@ -102,12 +102,12 @@ def test_the_owner_label_names_the_seam_that_read_the_clock() -> None:
     as it is today.
     """
     naive = _clock(datetime(2026, 1, 2, 9))  # noqa: DTZ001 — one naive fixture, two seams
-    source = checked_clock(naive, owner="ClockContextSource")
-    execution = checked_clock(naive, owner="PlanExecution")
+    source = checked_clock(naive, owner="UpcomingEventStage")
+    execution = checked_clock(naive, owner="SqlitePlanStore")
 
-    with pytest.raises(ValueError, match="injected into ClockContextSource"):
+    with pytest.raises(ValueError, match="injected into UpcomingEventStage"):
         source()
-    with pytest.raises(ValueError, match="injected into PlanExecution"):
+    with pytest.raises(ValueError, match="injected into SqlitePlanStore"):
         execution()
 
 
@@ -244,9 +244,10 @@ def test_a_hostile_tzinfo_failure_becomes_the_owner_labelled_error() -> None:
 def test_a_reading_outside_the_localizable_range_is_rejected(boundary: datetime) -> None:
     """ADR-0026 §3: "localizable", not merely "convertible to UTC".
 
-    ``ClockContextSource`` localizes the reading to the configured zone to derive
-    ``time_of_day``; a value that converts to UTC without overflowing can still
-    overflow that *second* ``astimezone``. Rejected here rather than left to
+    A consumer may localize the reading to the configured zone, as
+    ``ClockContextSource`` did to derive ``time_of_day`` until it retired with
+    ``context`` (ADR-0309 §5); a value that converts to UTC without overflowing can
+    still overflow that *second* ``astimezone``. Rejected here rather than left to
     surface as an ``OverflowError`` from whichever localization reaches it first.
     """
     with pytest.raises(ValueError, match="outside the localizable range"):
@@ -301,8 +302,8 @@ def test_the_guard_depends_on_nothing_but_the_standard_library_and_core_types() 
     *No configured zone.* The range asks "representable under **any**
     localization", a fact about ``datetime`` arithmetic that is computable from
     the type's own bounds and identical for every consumer. Had it read
-    ``Settings.timezone`` it would be `context`'s rule wearing `core`'s coat, and
-    it would belong in `context`.
+    ``Settings.timezone`` it would be a consumer's rule wearing `core`'s coat, and
+    it would belong with that consumer.
 
     *Golden rule 2 as written.* `core` depends on nothing else in
     ``ai_assistant``, and the one intra-package import is the ADR-0030 §4
