@@ -1,11 +1,8 @@
-"""What this page does with an answer it cannot read (#1622, #2006, #2008, ADR-0216 §2).
+"""What this page does with an answer it cannot read (#1622, #2008, ADR-0216 §2).
 
-``renderOutcome`` reads the outcome's members from its first lines, so a ``2xx``
-that carries no ``outcome`` throws at the call site. The consent entry folds its own
-throw into the shared guard (#2006), and getting that wrong resolves a park nothing
-read — so the ending is driven here rather than only read. The Ask and push-to-talk
-entries this module also drove retired with the Ask panel and push-to-talk (ADR-0309
-§5:4, ADR-0313 §3:4), and their cases with them.
+The Ask, push-to-talk and consent entries this module also drove retired with their
+panels (ADR-0309 §5, ADR-0313 §3:4), and their cases with them; what is left is the
+delivery stream's.
 
 **That is what no reading of the file decides.** ``test_bundle.py`` can pin that the
 guard is written at the call site and that the ending names the right sentence; what
@@ -14,10 +11,9 @@ it cannot say is where an exception raised four lines inside another function
 here — "behaviour a reading of the file cannot decide" — so the cases below run the
 page and read what the owner reads.
 
-**One case here is not about an answer, and it is here because it is not a second
-condition.** ``streamValues`` once read an answer stream as well as the delivery stream,
-and #2008's misframed-line ending was two sentences at one condition; ADR-0293 §11
-retired the answer stream, and the delivery stream's sentence is driven here still.
+``streamValues`` once read an answer stream as well as the delivery stream, and
+#2008's misframed-line ending was two sentences at one condition; ADR-0293 §11 retired
+the answer stream, and the delivery stream's sentence is driven here still.
 
 **The gateway's own answer, with only the body replaced.** Each case lets the
 request reach the gateway, takes the response it wrote, and substitutes the body —
@@ -30,7 +26,6 @@ loaded from that gateway and no other origin.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -77,19 +72,6 @@ _HEADER_HALF = "assistant.session.header-half"
 #: the gateway answered, the turn ran, and nothing about the session ended.
 _GATEWAY_GONE = "may have stopped"
 
-#: An outcome that renders **part way** and then throws: ``capture_degraded`` and
-#: ``reply`` are read and written into the panel, and ``steps.length`` is where the
-#: renderer stops. It is what makes "it renders or it reports, and never leaves half"
-#: an observation rather than a claim — a body carrying no ``outcome`` at all throws on
-#: the first member read and leaves nothing behind to clear.
-_HALF_RENDERABLE_BODY = {
-    "outcome": {"capture_degraded": True, "reply": "your calendar is clear today"}
-}
-
-#: The half-rendered panel's own first line, quoted from the page: what has to be gone
-#: from the screen once the ending says the outcome is not known.
-_HALF_WRITTEN = "This turn was not recorded"
-
 
 async def test_a_misframed_delivery_stream_is_not_reported_as_a_gateway_that_had_gone(
     gateway_browser: Browser, tmp_path: Path
@@ -132,55 +114,6 @@ async def test_a_misframed_delivery_stream_is_not_reported_as_a_gateway_that_had
         # The control is handed back, which is the whole of the way on from this ending.
         await expect(drive.page.locator("#watch-button")).to_be_visible()
         await _still_admitted(drive)
-        assert thrown == []
-        assert complaints == []
-
-
-async def test_a_parks_answer_that_cannot_be_rendered_leaves_no_half_answer_behind(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """#2006: the consent surface's ending, driven across the fold into the guard.
-
-    The ending itself is unchanged — the token is stranded, the park's row given up and
-    ``PARK_REPLY_UNREADABLE`` named — and what the fold adds is the half of the rule that
-    was stated and not performed: the inline ``catch`` hid the answer panel and left what
-    the renderer had already written inside it. So the outcome here renders part way and
-    *then* throws, which is the only way to tell a panel that was cleared from one that
-    was merely hidden, and the ``2xx`` really is the gateway's own — the resume reached
-    the engine and resolved the park before its body was replaced.
-    """
-    thrown: list[str] = []
-    complaints: list[str] = []
-    async with driving(gateway_browser, tmp_path) as drive:
-        drive.page.on("pageerror", lambda error: thrown.append(str(error)))
-        drive.page.on("console", lambda message: _note(message, complaints))
-        drive.engine.park("h-1")
-        await drive.page.click("#confirmations-button")
-        approve = drive.page.locator("#confirmation-list button", has_text="Yes, do it")
-        await approve.wait_for(state="visible")
-        await _substitute(
-            drive, path="/confirmation/resume", body=json.dumps(_HALF_RENDERABLE_BODY)
-        )
-        await approve.click()
-
-        # The account is in the node that owns it and not in the panel's fault slot,
-        # which every listing read clears on its way in (adversarial review's round 8).
-        said = drive.page.locator("#answer-said")
-        await said.wait_for(state="visible")
-        stated = await said.inner_text()
-        assert "could not read an outcome from" in stated
-        assert "what became of the park is not known" in stated
-        assert "the action may have been carried out" in stated
-        assert _GATEWAY_GONE not in await drive.page.inner_text("#confirmations")
-        # Nothing half-rendered left behind the hidden panel, which is what the fold
-        # adds: the renderer had written two lines before it threw. Read as
-        # ``textContent`` rather than ``innerText``, because a hidden node's
-        # ``innerText`` is empty whether it was cleared or not — which would pass over
-        # exactly the state this case exists to read.
-        await expect(drive.page.locator("#answer")).to_be_hidden()
-        left = await drive.page.locator("#answer-body").text_content()
-        assert _HALF_WRITTEN not in (left or ""), left
-        assert left == "", left
         assert thrown == []
         assert complaints == []
 
@@ -263,11 +196,6 @@ async def _substitute(drive: Drive, *, path: str, body: str, drain: bool = True)
     )
 
 
-async def _stop_substituting(drive: Drive) -> None:
-    """Let every path's own body through again, the hold still recording."""
-    await drive.page.evaluate("() => { window.__held = null; }")
-
-
 async def _still_admitted(drive: Drive) -> None:
     """The session this page was admitted on is still the one it holds.
 
@@ -292,9 +220,8 @@ async def _fault(drive: Drive, *, panel: str = "console") -> str:
 
     Args:
         drive: The gateway, engine and page under test.
-        panel: Which panel's fault slot to read. Every ending here writes into the
-            console's except the consent surface's, which writes beside the park it
-            is about — ``fault``'s own second argument, read back.
+        panel: Which panel's fault slot to read — ``fault``'s own second argument,
+            read back.
 
     Returns:
         The condition the panel is displaying.

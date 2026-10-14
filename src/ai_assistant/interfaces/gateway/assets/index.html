@@ -67,7 +67,6 @@
           <button type="button" id="chat-button">Chat</button>
         </p>
         <button type="button" id="conversations-button">Conversations</button>
-        <button type="button" id="confirmations-button">What is waiting for your answer</button>
       </section>
 
       <!--
@@ -198,8 +197,8 @@
 
       <!--
         The index of what is on screen (#1429), built by `app.js` from the open panels'
-        own headings and empty in this document for the reason the confirmation prompt
-        is: a name written here would be a second place a panel is called something,
+        own headings and empty in this document: a name written here would be a second
+        place a panel is called something,
         and the interesting thing about it would be which of the two had gone stale.
 
         It sits here, immediately under the console, because the console is where a
@@ -207,77 +206,6 @@
         that produced it, rather than at the foot of everything it points at.
       -->
       <nav id="panel-index" class="panel-index" aria-label="Panels on this page" hidden></nav>
-
-      <section id="answer" class="panel" hidden>
-        <h2>What happened</h2>
-        <div id="answer-body"></div>
-      </section>
-
-      <!--
-        The CONFIRM prompt (ADR-0177 §8, ADR-0178 §7). This panel is the **recovery**
-        route and nothing else: `pending_confirmations` is the one way a browser that
-        was closed and reopened, or a gateway that was restarted, gets back to a park
-        (ADR-0052 §1). A confirmation raised by a turn this page just drove is rendered
-        with that turn, in the panel above.
-
-        There is no markup for the prompt itself here, and its absence is deliberate:
-        every part of a confirmation is a value the hub returned, so all of it is built
-        by `app.js` through text nodes (ADR-0168 §6, ADR-0175 §9). A template in this
-        document would be a second place a value could be put, and the one interesting
-        thing about it would be that it parses markup.
-      -->
-      <section id="confirmations" class="panel" hidden>
-        <h2>Waiting for your answer</h2>
-        <p class="hint">
-          Actions the assistant has parked. Each one is shown whole before you answer
-          it — what it would run, and, where it would send something, whose account it
-          would send from and where it would go. Answering one here is the same act as
-          answering it at a terminal.
-        </p>
-        <!--
-          What the cancellation act did (ADR-0244 §11), and it is **outside**
-          `confirmation-list` on purpose.
-
-          §11 makes `cancel_read`'s own answer the whole of what tells the user: "the
-          cancellation is a teardown and is converted into neither an outcome nor a
-          refusal … what tells the user is `cancel_read`'s own answer, which is the act
-          they performed". Every other place this page could say it is swept by
-          something: a row goes when the listing is re-read, and a park that was
-          withdrawn or settled is not in the listing; the panel's fault slot is cleared
-          by every listing read, and the answer this act interrupted starts one on its
-          way out, whether it ends in a rejected request, a refusal, a reply that cannot
-          be rendered, or a perfectly good `ALREADY_SETTLED` (§6).
-
-          So the act's answer gets a node of its own, which nothing but the act and the
-          owner's own press of **What is waiting for your answer** writes. It is a
-          statement and not a fault, and it survives the refresh the answer triggers —
-          adversarial review found the same result being wiped by a different path on
-          three consecutive rounds, and this is the place that ends the class rather
-          than the third guard against it.
-        -->
-        <p id="cancellation-said" class="hint" hidden></p>
-        <!--
-          What became of an answer this page sent and never read a reply for
-          (ADR-0177 §7's fourth clause), in a node of its own and for the reason the
-          act's answer above has one.
-
-          One park now carries two acts, and each of them starts the listing read that
-          clears the panel's fault slot — so an account written into that slot is
-          erased by whichever of the two replies lands second, and which one that is
-          is the network's choice. Adversarial review found seven orderings of that one
-          fact over eight rounds, and the answer's account was the half still living in
-          the swept slot. It gets its own node here, both are written by one function
-          over the pair of states, and nothing but that function and the owner's own
-          press of **What is waiting for your answer** writes either.
-
-          It is `.account` and not `.fault` on purpose: it carries the fault's ink,
-          because an outcome that is not known is what it reports, but it is not in the
-          panel's fault slot and must not answer to the selector that asks whether that
-          slot is showing.
-        -->
-        <p id="answer-said" class="account" hidden></p>
-        <div id="confirmation-list"></div>
-      </section>
 
       <!--
         Notifications are rendered here and by no other means (ADR-0175 §9). No
@@ -331,16 +259,6 @@
           <button type="button" id="standing-button">What I may read now</button>
           <button type="button" id="history-button">Grant history</button>
           <button type="button" id="beliefs-button">Beliefs</button>
-          <button type="button" id="questions-button">Questions</button>
-          <!--
-            ADR-0250 §15's listing, and it sits beside "Questions" rather than inside
-            it: §15 forbids presenting a goal's clarification and an ADR-0078 deferred
-            memory question "in the same list, the same command or the same
-            vocabulary". One asks *may I believe this about you* and is answered yes or
-            no; the other asks *which of two things did you mean* and is answered in
-            words. Two buttons, two panels, two vocabularies.
-          -->
-          <button type="button" id="goals-button">What I am working on</button>
         </p>
         <!--
           The notification review surface (ADR-0177 §10). Two buttons and two panels
@@ -423,87 +341,6 @@
           </label>
         </p>
         <div id="belief-list"></div>
-      </section>
-
-      <section id="questions" class="panel" hidden>
-        <h3>Questions waiting for you</h3>
-        <div id="question-list"></div>
-        <h3>Answers that were begun and never recorded</h3>
-        <div id="interrupted-list"></div>
-      </section>
-
-      <!--
-        The goal surface (ADR-0250 §15). The listing "from which a user learns what is
-        outstanding" — so each row carries the act that withdraws its question and the
-        acts on the goal, and the ids are on screen because the acts take them (§15).
-        Answering and taking a goal up were turns on the Ask form, which retired with
-        the Ask panel (ADR-0309 §5:4).
-      -->
-      <section id="goals" class="panel" hidden>
-        <h3>What I am working on</h3>
-        <p class="hint">
-          One line of work per entry, most recently taken up first. A goal waiting on
-          you shows the question it is waiting on.
-        </p>
-        <!--
-          What the last act on this panel did, in the vocabulary's own words (ADR-0250
-          §12). It is not a fault slot: every member of both vocabularies is something
-          the hub *established*, the two that moved nothing included, so a withdrawal
-          that took nothing back is the act working and not the act failing.
-
-          **`notice` and not `account`**, which driving the page is what settled: the
-          `account` class is deliberately the alarm's ink and the alarm's frame, because
-          the node it was written for reports an act whose reply this browser never read
-          (ADR-0177 §7's fourth clause). Every sentence here reports a settled fact, so
-          borrowing that frame would render "there was nothing here for this to take"
-          as a failure — which is exactly what it is not. `cancellation-said` holds the
-          quiet position one panel over for the same reason.
-        -->
-        <p id="goal-said" class="notice" hidden></p>
-        <div id="goal-list"></div>
-      </section>
-
-      <!--
-        The goal-authorization surface (ADR-0254 §11). "The surfaces this decision owes
-        are a listing and a revocation", per goal — which is why this panel has no
-        button of its own in the choice row above: it is opened from the goal it is
-        about, and §11 adds no cross-goal listing for a button to open.
-
-        Each row renders the goal by its **statement** and never by its id, the
-        declaration, every value the act fixed or bounded with the owner's own words
-        beneath it, the horizon (ADR-0256), whether it still stands, and the record's
-        id — which is on screen because it is the revocation handle and "a listing that
-        named no id would state an act and withhold the means to perform it".
-      -->
-      <section id="authorizations" class="panel" hidden>
-        <h3>What this authorises</h3>
-        <p class="hint">
-          One entry per act of yours, for the piece of work named below. What has
-          lapsed is here too, so you can still withdraw it. This is a record of what you
-          authorised and not a promise about the next call: I check every call against
-          everything else at the moment I make it.
-        </p>
-        <!--
-          There is no shared "what the last act did" slot here, and its absence is the
-          decision: a withdrawal is an act on **one record**, and four review rounds
-          converged on an entry of its own keyed by that record — a panel slot is
-          invisible to an owner who reached the row through a reply, it attributes the
-          act to whatever listing the panel holds when the answer lands, dropping the
-          sentence when the panel has moved on is silence about an act that happened,
-          and a node inside the row is detached the moment the listing is cleared. The
-          entries are built by `actResult` into a region the listing does not own, in
-          the quiet `notice` ink for `goal-said`'s stated reason one panel over: every
-          member of this vocabulary is something the hub established, the two that moved
-          nothing included.
-        -->
-        <!--
-          The piece of work this listing is about, and the settlements of acts taken on
-          it. **Both outside the list**, which `listAuthorizations` clears: a goal line
-          inside it would be replaced along with the rows, and a settlement inside it
-          would be detached from the DOM before the owner could read it.
-        -->
-        <p id="authorization-goal" class="reply" hidden></p>
-        <div id="authorization-list"></div>
       </section>
 
       <section id="review" class="panel" hidden>

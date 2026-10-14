@@ -146,7 +146,7 @@ def encode(value: Mapping[str, Any]) -> bytes:
 def notification(delivery: NotificationDelivery) -> dict[str, Any]:
     """One delivery, as a browser renders it — and without its token (ADR-0175 §5).
 
-    **The enumeration is the point**, exactly as ``_outcome_view``'s is: what may
+    **The enumeration is the point** (ADR-0168 §6): what may
     reach the page is decided here rather than by whatever a
     :class:`~ai_assistant.core.types.NotificationCandidate` happens to carry. Two
     members cross — the summary and the detail ADR-0130 §2 makes "the only free
