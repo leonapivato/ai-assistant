@@ -1,4 +1,4 @@
-"""ADR-0213 §12.18 at the two concrete readers (issue #1836).
+"""ADR-0213 §12.18 at the concrete reader (issue #1836).
 
 §6: "A ``Reader`` states no topics, and no proposal reaching ``IngestionStage`` carries
 any. A source's own categories, folder, labels, tags or headers are **not** a route by
@@ -17,36 +17,30 @@ a later "forget everything about X" destroys.
 
 **What this pins.** PR #1832 discharged §12.18 at the stage §6 words it at, over a
 ``FakeReader`` carrying label-shaped text, and that arm left with the stage. A fake
-states whatever the case hands it, so it pinned the *stage*, not the producers: neither
-``CalendarReader`` nor ``EmailReader`` passes a ``topics=`` argument today, and nothing
-said so but the source. A later lane routing a source's own categories, folder, labels,
-tags or headers into that field would pass every check this project ran before this
-file.
+states whatever the case hands it, so it pinned the *stage*, not the producer:
+``CalendarReader`` passes no ``topics=`` argument today, and nothing said so but the
+source. A later lane routing a source's own categories, folder, labels, tags or
+headers into that field would pass every check this project ran before this file.
 
-**One module for both readers, not a case appended to each reader's own suite.** The
-clause is one rule over the set of producers, and the two readers' modules are each
-organised around a different ADR — the calendar's around ADR-0093/0096/0117, the
-mail's around ADR-0140 §5's header rules. Stating it once, over both, is what makes a
-*third* reader's omission visible here rather than discovered by its absence.
+**One module for the clause, not a case appended to the reader's own suite.** The
+clause is one rule over the set of producers, and the calendar's module is organised
+around ADR-0093/0096/0117 rather than around it. Stating it here is what makes a
+*next* reader's omission visible rather than discovered by its absence.
 
-Every field below is one a careless reader would lift: the calendar's ``CATEGORIES``
-is RFC 5545's own label list, the message's ``Keywords`` is RFC 5322's, and both
-carry a folder property and a literal ``topics:`` line besides. The rendered content
+Every field below is one a careless reader would lift: ``CATEGORIES`` is RFC 5545's
+own label list, and the entry carries a folder property and a literal ``topics:``
+line besides. The rendered content
 is asserted too, so a reader that simply skipped the entry could not pass by
 proposing nothing.
 """
 
 from __future__ import annotations
 
-from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from ics_fixtures import NOW as CALENDAR_NOW
 from ics_fixtures import calendar, source, utc, vevent
 from ics_fixtures import reader as calendar_reader
-from mbox_fixtures import NOW as EMAIL_NOW
-from mbox_fixtures import envelope, store
-from mbox_fixtures import reader as email_reader
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -85,30 +79,3 @@ async def test_a_calendar_entry_whose_own_fields_are_named_like_labels_states_no
     assert [proposal.proposed.topics for proposal in reading.proposals] == [()]
     content = reading.proposals[0].proposed.content
     assert "Tags: sleep" in content, "the label-shaped entry must have been read, not skipped"
-
-
-async def test_an_email_whose_own_headers_are_named_like_labels_states_no_topics(
-    tmp_path: Path,
-) -> None:
-    """``EmailReader._proposal`` passes no ``topics=``, pinned rather than read.
-
-    The message carries RFC 5322's own ``Keywords`` header, a folder header of the
-    kind every mail store adds, a tag-shaped ``Subject`` and the literal field name
-    in the body — which this reader does not even read, and which is here because a
-    lane widening it to would meet the clause on the way. Delivered an hour before
-    ``NOW`` so it lands inside the fixtures' ``[10:00, 12:00)`` window; the subject
-    is asserted in the content for the same reason the calendar case asserts its
-    summary.
-    """
-    message = envelope(
-        subject="Tags: sleep",
-        delivered_at=EMAIL_NOW - timedelta(hours=1),
-        body=_LITERAL,
-        extra=("Keywords: health, sleep", "X-Folder: Health/Sleep"),
-    )
-
-    reading = await email_reader(store(tmp_path, message)).read()
-
-    assert [proposal.proposed.topics for proposal in reading.proposals] == [()]
-    content = reading.proposals[0].proposed.content
-    assert "Tags: sleep" in content, "the label-shaped message must have been read, not skipped"

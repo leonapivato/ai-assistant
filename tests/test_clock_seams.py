@@ -1494,7 +1494,6 @@ UNTABLED: Final[dict[str, str]] = {
         "ADR-0093 §8's blanket wrapper collapses the clock's *own* failure into the "
         "same type — so it fails ``test_no_seam_steals_a_failure_of_the_clock_itself``"
     ),
-    "EmailReader": "#1963: the second reader, with ``CalendarReader``'s clause verbatim",
 }
 
 

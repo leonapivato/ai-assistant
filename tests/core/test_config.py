@@ -867,16 +867,6 @@ def test_every_integer_setting_is_discovered() -> None:
         "scheduler_chunk_size",
         "calendar_max_expansion",
         "calendar_max_content_bytes",
-        # ADR-0140 §12's three caps, acknowledged here for the reason ADR-0093
-        # §7a's four are. The ``bool`` guard earns its place on each:
-        # ``email_max_messages=True`` is a store of one message accepted and every
-        # larger one refused, and ``email_max_bytes=True`` a one-byte store cap —
-        # both of which "refuse rather than truncate" correctly while reading
-        # nothing, which is the shape ADR-0093 §5's rule exists to prevent from
-        # wearing the clothes of a quiet week (ADR-0140 §12).
-        "email_max_messages",
-        "email_max_bytes",
-        "email_max_content_bytes",
         # ADR-0230 §6's three integer bounds on the local-file fetch, and ADR-0232
         # §2's fourth, acknowledged here for every reader figure's reason and with
         # the same ``bool`` argument. §6 states the domain in as many words —
@@ -1276,13 +1266,6 @@ def test_every_duration_setting_is_discovered() -> None:
         # below refuse a zero, negative or ``bool`` one at load. It admits no
         # disable sentinel: the record has no spelling for keep forever.
         "diagnostic_retention",
-        # ADR-0140 §12's durations, less the ingestion interval ADR-0294 §5
-        # retires. The window is the model's third duration bounded *above*, and it
-        # is the one bounded **open** at the bottom: ``calendar_window_past`` may be
-        # zero and its own test asserts so, while a zero email window is a reader
-        # that reads nothing while reporting health (ADR-0140 §12).
-        "email_window_past",
-        "email_read_timeout",
         # ADR-0230 §4's listing expiry, acknowledged here for the same reason: it is
         # strictly positive by §6's domain clause and "refused at load rather than at
         # the first fetch".
@@ -2719,3 +2702,43 @@ class TestTheSearchBudgetSettings:
         """
         assert "web_search_incurred_cost" not in Settings.model_fields
         assert "web_search_reported_cost" not in Settings.model_fields
+
+
+#: The variables an operator configured the retired email reader with, each set to
+#: a value its field refused at load: a relative path, a zero window, a zero cap. A
+#: field still declared under any of these names would fail the load rather than
+#: pass it, so the case cannot pass on a field that merely accepted the value.
+_RETIRED_EMAIL_VARIABLES: Final = {
+    "ASSISTANT_EMAIL_SOURCE_PATH": "mail/inbox.mbox",
+    "ASSISTANT_EMAIL_WINDOW_PAST": "PT0S",
+    "ASSISTANT_EMAIL_MAX_MESSAGES": "0",
+    "ASSISTANT_EMAIL_MAX_BYTES": "0",
+    "ASSISTANT_EMAIL_READ_TIMEOUT": "PT0S",
+    "ASSISTANT_EMAIL_MAX_CONTENT_BYTES": "0",
+}
+
+
+@pytest.mark.parametrize("carrier", ["environment", "dotenv"])
+def test_a_deployment_still_setting_the_retired_email_variables_starts(
+    carrier: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0320 §3: email left the grantable sources, and its six settings with it.
+
+    An operator whose environment or ``.env`` still configures the email reader is
+    not refused at load: ``Settings`` ignores a variable that names no field, so the
+    hub starts, and nothing in it reads those variables again.
+    """
+    monkeypatch.chdir(tmp_path)
+    if carrier == "dotenv":
+        lines = (f"{name}={value}" for name, value in _RETIRED_EMAIL_VARIABLES.items())
+        (tmp_path / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        for name, value in _RETIRED_EMAIL_VARIABLES.items():
+            monkeypatch.setenv(name, value)
+
+    settings = load_settings()
+
+    for name in _RETIRED_EMAIL_VARIABLES:
+        field = name.removeprefix("ASSISTANT_").lower()
+        assert field not in Settings.model_fields, field
+        assert not hasattr(settings, field), field

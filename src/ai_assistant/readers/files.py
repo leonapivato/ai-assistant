@@ -806,8 +806,8 @@ def _refuse_out_of_domain(  # noqa: PLR0913 — one keyword per configured figur
 def _checked_root(value: object) -> Path:
     """The configured root as an absolute built-in ``Path``, or a refusal naming it.
 
-    **Typed before it is called into**, which the other two readers' ``_checked_path``
-    guards have stated since #1057 and this constructor did not: ``root.is_absolute()``
+    **Typed before it is called into**, which the calendar reader's ``_checked_path``
+    guard has stated since #1057 and this constructor did not: ``root.is_absolute()``
     was the first thing reached, so a ``str`` root — the value a second composition
     root actually writes, because it looks correct — escaped as an ``AttributeError``
     naming a *method* rather than as the ``ConfigurationError`` ADR-0230 §6 documents

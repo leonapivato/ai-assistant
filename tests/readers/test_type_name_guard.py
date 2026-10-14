@@ -5,7 +5,7 @@ their own copy of this function, and each was proved only *through* its own
 guards — so its branches were asserted many times over at the seams and never
 once against the function. #2110 collapsed the three into
 ``readers/_guards.py``; this is that module's own suite, and the seam arms in the
-three reader suites stay exactly where they are, because what they prove is that
+reader suites stay exactly where they are, because what they prove is that
 each reader still routes its refusals through this read.
 
 **Two branches reach no seam at all**, which is what a shared home buys: a

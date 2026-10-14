@@ -39,11 +39,10 @@ unchanged — and ADR-0230 §4 records why reusing ``Reader`` was never availabl
 ADR-0093 §10 gives ``read()`` no arguments *by decision*, and an address is exactly
 what a fetch needs.
 
-The readers here are :class:`~ai_assistant.readers.calendar.CalendarReader` and
-:class:`~ai_assistant.readers.email.EmailReader` — two implementations of one
-behaviour, which ADR-0095 §3 named as "precisely and only what a shared
-conformance suite is for" and as the condition under which that suite starts
-paying. Each source may have **more than one consumer, each reading at its own
+The reader here is :class:`~ai_assistant.readers.calendar.CalendarReader`. Email
+is not a source this package reads: it left the grantable sources with its reader
+(ADR-0320 §3), and returns only through the channel model's design of an email
+capability. Each source may have **more than one consumer, each reading at its own
 cadence** (ADR-0093 §3): the ``context/`` facet reads at assembly time, the
 calendar's upcoming-event producer reads on its schedule (ADR-0132), and neither
 derives its answer from the other's reading. Nothing reads a source into memory on
@@ -79,18 +78,6 @@ from ai_assistant.readers.calendar import (
     MAX_CALENDAR_WINDOW,
     CalendarReader,
 )
-from ai_assistant.readers.email import (
-    DEFAULT_EMAIL_MAX_BYTES,
-    DEFAULT_EMAIL_MAX_CONTENT_BYTES,
-    DEFAULT_EMAIL_MAX_MESSAGES,
-    DEFAULT_EMAIL_READ_TIMEOUT,
-    DEFAULT_EMAIL_WINDOW_PAST,
-    DELIVERED_AT_HEADER,
-    EMAIL_READER_NAME,
-    MAX_EMAIL_COUNT,
-    MAX_EMAIL_WINDOW,
-    EmailReader,
-)
 from ai_assistant.readers.files import (
     DEFAULT_FETCH_LISTING_MAX_ENTRIES,
     DEFAULT_FETCH_LISTING_TTL,
@@ -111,25 +98,15 @@ __all__ = [
     "DEFAULT_CALENDAR_READ_TIMEOUT",
     "DEFAULT_CALENDAR_WINDOW_FUTURE",
     "DEFAULT_CALENDAR_WINDOW_PAST",
-    "DEFAULT_EMAIL_MAX_BYTES",
-    "DEFAULT_EMAIL_MAX_CONTENT_BYTES",
-    "DEFAULT_EMAIL_MAX_MESSAGES",
-    "DEFAULT_EMAIL_READ_TIMEOUT",
-    "DEFAULT_EMAIL_WINDOW_PAST",
     "DEFAULT_FETCH_LISTING_MAX_ENTRIES",
     "DEFAULT_FETCH_LISTING_TTL",
     "DEFAULT_FETCH_MAX_CHARACTER_MAPPINGS",
     "DEFAULT_FETCH_MAX_CONTENT_BYTES",
     "DEFAULT_FETCH_MAX_DECODED_BYTES",
     "DEFAULT_FETCH_MAX_FILE_BYTES",
-    "DELIVERED_AT_HEADER",
-    "EMAIL_READER_NAME",
     "FILE_FETCHER_NAME",
     "MAX_CALENDAR_COUNT",
     "MAX_CALENDAR_WINDOW",
-    "MAX_EMAIL_COUNT",
-    "MAX_EMAIL_WINDOW",
     "CalendarReader",
-    "EmailReader",
     "LocalFileFetcher",
 ]

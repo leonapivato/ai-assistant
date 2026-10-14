@@ -1,4 +1,4 @@
-"""The one shape rule both readers apply to the text they compose (#1449).
+"""The one shape rule a reader applies to the text it composes (#1449).
 
 **The rule.** A reader's composed ``content`` is **one line**. Every character the
 source supplies that would end a line is removed; **every other byte is preserved
@@ -36,33 +36,22 @@ tidier face — a partial filter that reads as a control-character defence while
 being none. So they are preserved, and the property this module does guarantee is
 narrow enough to state honestly: one line, and nothing else.
 
-**Why it is here rather than twice.** #1449's divergence was that
-``EmailReader._unfolded`` removed CR and LF from a header value and the calendar
+**Why it is a module of its own.** #1449's divergence was that the email reader
+(retired since, ADR-0320 §3) removed CR and LF from a header value and the calendar
 path removed nothing equivalent, with nothing in the corpus saying which was
-right. Converging them buys no consumer anything — neither output is safer than
-the other — and that is not the reason. The reason is that two readers rendering
-equivalent source shapes differently leaves a third reader nothing to copy, and
+right. Converging them bought no consumer anything — neither output was safer than
+the other — and that was not the reason. The reason is that two readers rendering
+equivalent source shapes differently leaves the next reader nothing to copy, and
 ADR-0183's consequences put "what it renders" among the four questions a new
 reader must answer in its own text. One function is one answer.
 
-**Email's behaviour is unchanged for a folded header.** RFC 5322 unfolding removes
-the break and keeps the whitespace, which is why a folded ``Subject`` still arrives
-as ``"…runs on  and is folded…"`` with both spaces. Substituting a space for the
-break, rather than removing it, would have changed that and would have put a
-character in the span that the source did not write.
-
 **Applied to what becomes composed text, and to nothing else, which is a boundary
 rather than an oversight.** The calendar applies it to ``SUMMARY`` and
-``LOCATION``; the email reader applies it to ``From`` and ``Subject``. It is
-deliberately **not** applied to a field carrying an **instant** — ADR-0140 §5's
-own division of a message's fields into two classes — because a removal in the
-middle of a delivery stamp would hand the subset check a value the store never
-wrote: an hour and a minute separated by a vertical tab would arrive as ``11:00``,
-and §5's closed subset would accept a spelling it excludes, which §5 forbids in as
-many words. A rule about the shape of
-a *rendering* has no business running over a value nothing renders. Adversarial
-review found the breach on round 1 (PR #1464); ``tests/readers/test_composed_content.py``
-pins the rejection for every boundary a stamp can carry.
+``LOCATION``. It is deliberately **not** applied to a field carrying an
+**instant**, because a removal in the middle of a stamp would hand the stamp's
+parser a value the source never wrote: an hour and a minute separated by a
+vertical tab would arrive as ``11:00``. A rule about the shape of a *rendering*
+has no business running over a value nothing renders.
 """
 
 from __future__ import annotations
