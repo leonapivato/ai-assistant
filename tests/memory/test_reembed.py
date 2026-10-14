@@ -109,6 +109,10 @@ async def _seed(path: Path, records: Sequence[MemoryRecord], *, dimensions: int 
         store.close()
 
 
+#: The epoch ``occurred_at`` is stored against, as exact integer microseconds.
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
 def _read(path: Path, sql: str, *params: object) -> list[tuple[object, ...]]:
     conn = sqlite3.connect(str(path))
     try:
@@ -336,21 +340,14 @@ async def test_a_not_yet_live_record_stays_hidden_across_a_re_embed(tmp_path: Pa
         opened.close()
 
 
-async def test_the_instant_column_and_the_label_index_survive_a_re_embed(
-    tmp_path: Path,
-) -> None:
-    """The instant column and the label index cross the swap (ADR-0237 §1).
+async def test_the_instant_column_survives_a_re_embed(tmp_path: Path) -> None:
+    """``occurred_at`` crosses the swap holding the record's own instant.
 
-    The same class of quiet failure as the window column above, one decision on and
-    twice over. ``occurred_at`` is a column and ``record_labels`` is a derived
-    index; neither is in the blob, and the store's own backfill for the index runs
-    only on the open that *creates* the table — which the work store's schema
-    already has, empty. So a rebuild that carried every record faithfully and wrote
-    neither would swap in a store whose column and index were silently empty.
-
-    Asserted through the tables, since no read queries the label index once
-    ``select`` and ``search``'s structured axes have left; ``occurred_at`` is still
-    the episode read's order.
+    The same class of quiet failure as the window column above. ``occurred_at`` is
+    a column the episode read orders by and is not read from the blob, so a rebuild
+    that carried every record faithfully and wrote the column ``NULL``, or wrote a
+    wrong instant into it, would swap in a store whose episode order was silently
+    wrong. The column is asserted to hold the instant itself (#3043).
     """
     store = tmp_path / "memory.db"
     when = _WHEN + timedelta(days=60)
@@ -375,18 +372,8 @@ async def test_the_instant_column_and_the_label_index_survive_a_re_embed(
         assert {r.id for r in found.records} == {"captured", "other"}
     finally:
         opened.close()
-    occurred = _read(store, "SELECT id FROM records WHERE occurred_at IS NOT NULL")
-    assert occurred == [("captured",)]
-    labels = _read(
-        store,
-        "SELECT r.id, l.axis, l.value FROM record_labels l "
-        "JOIN records r ON r.rowid = l.record_rowid ORDER BY l.axis",
-    )
-    assert labels == [
-        ("captured", "participant", "alex"),
-        ("captured", "subject", "alex"),
-        ("captured", "topic", "renovation"),
-    ]
+    occurred = _read(store, "SELECT id, occurred_at FROM records WHERE occurred_at IS NOT NULL")
+    assert occurred == [("captured", (when - _EPOCH) // timedelta(microseconds=1))]
 
 
 async def test_an_interrupted_run_leaves_the_live_store_untouched(tmp_path: Path) -> None:
@@ -892,7 +879,6 @@ async def test_a_work_store_from_an_older_schema_is_discarded_rather_than_resume
     conn = sqlite3.connect(str(work))
     try:
         conn.execute("ALTER TABLE records DROP COLUMN occurred_at")
-        conn.execute("DROP TABLE record_labels")
         conn.commit()
     finally:
         conn.close()
@@ -915,9 +901,9 @@ async def test_a_work_store_from_an_older_schema_is_discarded_rather_than_resume
     assert outcome.embedded == 4
     assert outcome.swapped
     assert len(_read(store, "SELECT rowid FROM records")) == 4
-    assert _read(store, "SELECT count(*) FROM record_labels") == [(0,)], (
-        "the swapped store carries the current schema — the table the discarded work "
-        "file had lost is back, holding the no labels these records carry"
+    assert "occurred_at" in {row[1] for row in _read(store, "PRAGMA table_info(records)")}, (
+        "the swapped store carries the current schema — the column the discarded work "
+        "file had lost is back"
     )
 
 

@@ -73,7 +73,6 @@ from ai_assistant.core.types import (
     TraceKind,
     TraceRecordSet,
     band_of,
-    caseless_key,
 )
 from ai_assistant.memory import traces
 from ai_assistant.memory._channel_reads import (
@@ -320,47 +319,6 @@ def _to_micros(instant: datetime) -> int:
 type _PreparedWrite = tuple[MemoryRecord, MemoryWriteMode, int | None, Embedding | None]
 
 
-#: The three label axes ADR-0237 §1 added that are matched by an equality, and the
-#: ``axis`` value each is stored under in ``record_labels``. Named here so the
-#: writer and the migration cannot spell one of them differently. No read queries
-#: the index since ``select`` and ``search``'s structured axes left (ADR-0309 §5:1);
-#: it is still written, and carried by ``memory/reembed.py``, until a change of its
-#: own retires it.
-_TOPIC_AXIS = "topic"
-_PARTICIPANT_AXIS = "participant"
-_SUBJECT_AXIS = "subject"
-
-
-def _labels_of(record: MemoryRecord) -> list[tuple[str, str]]:
-    """The ``(axis, value)`` rows ``record`` contributes to the label index.
-
-    One derivation, used by the write path and by the migration alike (ADR-0237
-    §1's "the filters bind on the record's own stored value and on nothing
-    derived"): nothing here reads ``content``, ``outcome`` or any other span, and
-    nothing infers a label a producer did not write.
-
-    ``participant`` and ``subject`` values are folded to ADR-0101 §2's canonical
-    caseless key, because that is the comparison and SQLite cannot perform it;
-    ``topic`` values are the label's own characters, because equality of those is
-    the only relation :data:`~ai_assistant.core.types.TopicLabel` has (ADR-0213 §3)
-    and the type is already canonical.
-
-    Args:
-        record: The record about to be stored, or one decoded during a migration.
-
-    Returns:
-        Its rows, possibly empty. A record stating no subject, carrying no topic
-        and naming no participant contributes none — and is then reached by no
-        filter on any of those axes (ADR-0237 §6).
-    """
-    rows = [(_TOPIC_AXIS, label) for label in record.topics]
-    if isinstance(record, EpisodicMemory):
-        rows.extend((_PARTICIPANT_AXIS, caseless_key(person)) for person in record.participants)
-    if record.about_person is not None:
-        rows.append((_SUBJECT_AXIS, caseless_key(record.about_person)))
-    return rows
-
-
 def _selects_nothing(*axes: frozenset[object] | None) -> bool:
     """Whether any applied sequence axis is **empty**, and so selects nothing.
 
@@ -573,10 +531,6 @@ class SqliteMemoryStore:
             )
             self._migrate_records(conn)
             self._migrate_walk_key(conn)
-            # After both rebuilds: each carries every original ``rowid`` forward, so
-            # the label rows this keys on stay valid, and building them before a
-            # rebuild would key them on a table about to be dropped.
-            self._migrate_labels(conn)
             self._index_channels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
@@ -929,98 +883,6 @@ class SqliteMemoryStore:
                 "SELECT rowid, data FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
                 (chunk[-1][0], _BACKFILL_CHUNK),
             ).fetchall()
-
-    def _migrate_labels(self, conn: sqlite3.Connection) -> None:
-        """Create the label index the three label axes bind through, and fill it.
-
-        **A child table rather than three columns** (ADR-0237 §9 item 4 leaves the
-        mechanism here). ``topics`` and ``participants`` are *tuples* on a record,
-        so neither is a column at all; putting all three label axes in one table
-        gives them one lookup shape and one index, and keeps a filter over them
-        expressible as a ``rowid IN (SELECT ...)`` restriction the KNN can carry —
-        which is what §1's before-the-cut clause requires and what a post-fetch
-        comprehension over the blob could not give.
-
-        **The stored value is the comparison key, not the label.** ``participant``
-        and ``subject`` rows hold ADR-0101 §2's canonical caseless key, because
-        SQLite has no case folding and a fold applied in Python at read time could
-        not be pushed into the restriction. ``topic`` rows hold the label's own
-        characters, because :data:`~ai_assistant.core.types.TopicLabel` is already
-        canonical and equality of the stored characters is the only relation it has
-        (ADR-0213 §3). The blob stays the truth and this is a derived index, exactly
-        as the lifecycle columns are: every read decodes the record from ``data``.
-
-        The verbatim ``about_person`` column is **not** what the subject axis
-        queries and is left as it is (ADR-0100 §8 put it there and nothing has ever
-        read it): a column holding the label as written cannot answer a caseless
-        comparison, and rewriting it into a folded form would destroy the value the
-        blob and the column are supposed to agree on.
-
-        **Backfilled once, on the open that creates the table**, decoding each row
-        through :meth:`_decode` so that one function — :func:`_labels_of` — derives
-        the rows at write time and at migration time alike. Two derivations of one
-        index is how a migrated store and a freshly-written one come to disagree
-        about what a filter reaches. The chunking and the unbounded first page are
-        :meth:`_backfill_valid_from`'s, for its reasons.
-
-        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE`` and after both rebuilds, so
-        the ``rowid``s it keys on are the ones the store will keep — each rebuild
-        carries every original ``rowid`` forward explicitly — and the table, its
-        index and its rows commit together or not at all.
-        """
-        existing = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'record_labels'"
-        ).fetchone()
-        conn.execute(
-            # ``WITHOUT ROWID`` with the axis and value leading the key: the primary
-            # key *is* the lookup index a filter needs, and it collapses a record
-            # that names one person twice, or two people whose labels fold to one
-            # key, into a single row — the set semantics ADR-0237 §2 gives every
-            # sequence axis, held by the schema rather than by the writer.
-            "CREATE TABLE IF NOT EXISTS record_labels("
-            "record_rowid INTEGER NOT NULL, axis TEXT NOT NULL, value TEXT NOT NULL, "
-            "PRIMARY KEY (axis, value, record_rowid)) WITHOUT ROWID"
-        )
-        conn.execute(
-            # The reverse direction the primary key cannot serve: every write
-            # rewrites one record's rows and every delete drops them, both by
-            # ``record_rowid``, which the key above orders last.
-            "CREATE INDEX IF NOT EXISTS record_labels_by_record ON record_labels(record_rowid)"
-        )
-        if existing is not None:
-            return
-        chunk = conn.execute(
-            "SELECT rowid, data FROM records ORDER BY rowid LIMIT ?", (_BACKFILL_CHUNK,)
-        ).fetchall()
-        while chunk:
-            for rowid, data in chunk:
-                self._index_labels(conn, int(rowid), self._decode(str(data)))
-            chunk = conn.execute(
-                "SELECT rowid, data FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
-                (chunk[-1][0], _BACKFILL_CHUNK),
-            ).fetchall()
-
-    @staticmethod
-    def _index_labels(conn: sqlite3.Connection, rowid: int, record: MemoryRecord) -> None:
-        """Replace ``rowid``'s label rows with the ones ``record`` carries.
-
-        Delete-then-insert rather than a diff: a write may have dropped a label as
-        easily as added one, and the row count per record is a handful. Runs inside
-        the caller's transaction, so the record, its vector and its labels commit
-        together — a record whose labels landed without it would be reachable by a
-        filter and by nothing else.
-
-        ``INSERT OR IGNORE`` because two of a record's own values can collapse to
-        one key: two participants differing only in case fold to the same string,
-        and the primary key holds the set semantics rather than the writer.
-        """
-        conn.execute("DELETE FROM record_labels WHERE record_rowid = ?", (rowid,))
-        rows = [(rowid, axis, value) for axis, value in _labels_of(record)]
-        if rows:
-            conn.executemany(
-                "INSERT OR IGNORE INTO record_labels(record_rowid, axis, value) VALUES (?, ?, ?)",
-                rows,
-            )
 
     def _migrate_walk_key(self, conn: sqlite3.Connection) -> None:
         """Adopt the never-reissued walk key over an existing table (ADR-0114 §1).
@@ -1468,8 +1330,8 @@ class SqliteMemoryStore:
             conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
         if rowid is None:  # pragma: no cover — sqlite3 sets lastrowid on every INSERT
             # Narrowed rather than assumed: ``lastrowid`` is typed ``int | None``,
-            # and the two rows keyed on it — the vector and the label index — would
-            # otherwise be written at ``NULL`` and reachable by nothing.
+            # and the vector keyed on it would otherwise be written at ``NULL`` and
+            # reachable by nothing.
             msg = f"sqlite reported no rowid for the write of {record.id!r}"
             raise MemoryStoreError(msg)
         if vector is not None:
@@ -1477,11 +1339,6 @@ class SqliteMemoryStore:
                 "INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)",
                 (rowid, sqlite_vec.serialize_float32(list(vector))),
             )
-        # The label index is rewritten in the same transaction as the row and the
-        # vector: a record whose labels landed without it would be reachable by a
-        # filter and by nothing else, and one whose labels did not land would be
-        # reachable by no filter while every read that decodes the blob shows them.
-        self._index_labels(conn, rowid, record)
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
         """Apply every write in one SQLite transaction — all commit, or none do.
@@ -2684,7 +2541,6 @@ class SqliteMemoryStore:
                 return False
             rowid = row[0]
             conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
-            conn.execute("DELETE FROM record_labels WHERE record_rowid = ?", (rowid,))
             conn.execute("DELETE FROM records WHERE rowid = ?", (rowid,))
         return True
 
@@ -2704,10 +2560,6 @@ class SqliteMemoryStore:
         with self._transaction("clear the memory store") as conn:
             (count,) = conn.execute("SELECT COUNT(*) FROM records").fetchone()
             conn.execute("DELETE FROM vec_records")
-            # Discarded with the records, like the vectors: a label row naming a
-            # ``rowid`` no record holds would be matched by a filter and resolve to
-            # nothing, and ``AUTOINCREMENT`` reissues no key it could later name.
-            conn.execute("DELETE FROM record_labels")
             conn.execute("DELETE FROM records")
             # Discarded with the records rather than left to be detected later: a
             # position naming rows this call removed is exactly the cursor-disagrees
@@ -2770,9 +2622,6 @@ class SqliteMemoryStore:
                 # transaction rather than abandoning it on the shared connection.
                 return 0
             conn.executemany("DELETE FROM vec_records WHERE rowid = ?", [(r,) for r in rowids])
-            conn.executemany(
-                "DELETE FROM record_labels WHERE record_rowid = ?", [(r,) for r in rowids]
-            )
             conn.executemany("DELETE FROM records WHERE rowid = ?", [(r,) for r in rowids])
         return len(rowids)
 

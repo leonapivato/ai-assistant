@@ -93,10 +93,9 @@ pytestmark = pytest.mark.integration
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
-#: The half-open period ADR-0237 §2's window cases here filter on, and an instant
-#: inside it, all comfortably before ``_NOW`` so nothing is accidentally unreadable.
+#: When the instant-column cases' episode occurred, comfortably before ``_NOW`` so
+#: nothing is accidentally unreadable.
 _MARCH = datetime(2026, 3, 1, tzinfo=UTC)
-_APRIL = datetime(2026, 4, 1, tzinfo=UTC)
 #: How long ``_GatedEmbedder`` waits for a call to arrive before declaring the
 #: scenario broken. Generous — only reached when a case has already hung.
 _GATE_SECONDS = 5.0
@@ -1415,16 +1414,14 @@ async def test_purge_expired_removes_only_expired_and_returns_count(
     assert await store.purge_expired() == 0
 
 
-# --- ADR-0237's storage: the instant column and the label index ---------------
-# ADR-0237 §9 item 4 leaves the mechanism to this lane under §1's observable
-# obligation, and these are the cases that hold the mechanism itself rather than
-# the behaviour the shared suite already runs against all three implementations:
-# the migration onto a store written before it, the deletes that must take the
-# index with them, and the rewrite that must replace it rather than accumulate.
+# --- the instant column, and a store that still holds the retired label index ---
+# ``occurred_at`` is a column so the episode read orders by it (ADR-0283 §1). The
+# label index ADR-0237 §1 added retired with its last reader (ADR-0320 §5), and no
+# migration drops it from a store that holds it (§5:2, ADR-0309 §6:4).
 
 
-def _episode_with_every_axis(record_id: str, content: str = "coffee") -> MemoryRecord:
-    """An episode carrying a value on all four of ADR-0237 §1's axes."""
+def _captured_episode(record_id: str, content: str = "coffee") -> MemoryRecord:
+    """An episode at :data:`_MARCH`, carrying the labels the retired index once held."""
     return EpisodicMemory(
         id=record_id,
         content=content,
@@ -1436,38 +1433,27 @@ def _episode_with_every_axis(record_id: str, content: str = "coffee") -> MemoryR
     )
 
 
-def _strip_the_filter_index(path: Path) -> None:
-    """Put a current store back on the schema that immediately precedes ADR-0237.
-
-    Surgery on a store the current writer built, rather than a hand-rolled legacy
-    table: every other column, the revision issuer and the vector table are then
-    exactly what a deployment carries today, and the *only* difference is the two
-    things this decision adds. Building the whole prior schema by hand would test
-    the fixture as much as the migration.
-
-    ``DROP COLUMN`` is available because nothing indexes ``occurred_at`` — the
-    label axes are indexed through ``record_labels``, which goes whole.
-    """
+def _stored_occurred_at(path: Path, record_id: str) -> object:
+    """The ``occurred_at`` column of one row, as the store wrote it."""
     conn = sqlite3.connect(str(path))
     try:
-        conn.execute("ALTER TABLE records DROP COLUMN occurred_at")
-        conn.execute("DROP TABLE record_labels")
-        conn.commit()
+        row = conn.execute("SELECT occurred_at FROM records WHERE id = ?", (record_id,)).fetchone()
     finally:
         conn.close()
+    assert row is not None
+    return row[0]
 
 
-async def test_a_store_written_before_the_filter_index_gains_it_on_the_next_open(
+async def test_a_store_written_before_the_instant_column_gains_it_on_the_next_open(
     tmp_path: Path,
 ) -> None:
-    """The migration backfills both, or the column and the index come out empty.
+    """The migration backfills ``occurred_at`` from the blob, to the instant itself.
 
     The quiet failure ADR-0128's own ``valid_from`` migration names, one decision
-    on: a store that carried every blob faithfully and left ``occurred_at``
-    ``NULL`` and ``record_labels`` empty would round-trip every record intact and
-    pass every count check. No read queries the label index since ``select`` and
-    ``search``'s structured axes left, so the assertion is made through the column
-    and the index themselves.
+    on: a store that carried every blob faithfully and left the column ``NULL``, or
+    wrote a wrong instant into it, would round-trip every record intact and pass
+    every count check while the episode read ordered by nothing. So the column is
+    asserted to hold the record's own instant (#3043).
     """
     path = tmp_path / "memory.db"
     embedder = HashingEmbedder(dimensions=8)
@@ -1475,10 +1461,18 @@ async def test_a_store_written_before_the_filter_index_gains_it_on_the_next_open
         traces_sink=FakeTraceSink(), path=path, embedder=embedder, now=_fixed_now
     )
     try:
-        await before.add(_episode_with_every_axis("captured"))
+        await before.add(_captured_episode("captured"))
     finally:
         before.close()
-    _strip_the_filter_index(path)
+    conn = sqlite3.connect(str(path))
+    try:
+        # Nothing indexes the column, so it can be dropped in place: every other
+        # column, the revision issuer and the vector table stay exactly what the
+        # current writer built.
+        conn.execute("ALTER TABLE records DROP COLUMN occurred_at")
+        conn.commit()
+    finally:
+        conn.close()
 
     after = SqliteMemoryStore(
         traces_sink=FakeTraceSink(), path=path, embedder=embedder, now=_fixed_now
@@ -1488,94 +1482,52 @@ async def test_a_store_written_before_the_filter_index_gains_it_on_the_next_open
         assert {r.id for r in found.records} == {"captured"}
     finally:
         after.close()
-    conn = sqlite3.connect(str(path))
-    try:
-        occurred = conn.execute("SELECT occurred_at FROM records WHERE id = 'captured'").fetchone()
-    finally:
-        conn.close()
-    assert occurred is not None
-    assert occurred[0] is not None, "occurred_at was not backfilled from the blob"
-    assert sorted((axis, value) for _, axis, value in _label_rows(path)) == [
-        ("participant", "alex"),
-        ("subject", "alex"),
-        ("topic", "renovation"),
-    ]
-
-
-def _label_rows(path: Path) -> list[tuple[object, ...]]:
-    """Every row of the label index, for the cases that assert it is emptied."""
-    conn = sqlite3.connect(str(path))
-    try:
-        return [
-            tuple(row)
-            for row in conn.execute("SELECT record_rowid, axis, value FROM record_labels")
-        ]
-    finally:
-        conn.close()
-
-
-@pytest.mark.parametrize("erase", ["delete", "clear", "purge_expired"])
-async def test_erasing_a_record_takes_its_label_rows_with_it(
-    make_store: Callable[..., SqliteMemoryStore], tmp_path: Path, erase: str
-) -> None:
-    """Every door that removes a row removes its index rows in the same transaction.
-
-    An orphaned label row is matched by a filter and resolves to nothing, which on
-    a read that joins by ``rowid`` is either a silently short answer or a row that
-    no longer exists being counted as a candidate. The three doors are asserted
-    separately because they are three statements: ``delete`` names one row,
-    ``clear`` empties the table, and ``purge_expired`` names a set.
-    """
-    store = make_store(dimensions=8)
-    record = _episode_with_every_axis("gone")
-    if erase == "purge_expired":
-        record = record.model_copy(update={"expires_at": _WHEN - timedelta(days=1)})
-    await store.add(record)
-    assert _label_rows(tmp_path / "memory.db"), "the premise: the write indexed the record"
-
-    if erase == "delete":
-        assert await store.delete("gone") is True
-    elif erase == "clear":
-        assert await store.clear() == 1
-    else:
-        assert await store.purge_expired() == 1
-
-    assert _label_rows(tmp_path / "memory.db") == [], (
-        f"{erase} left the record's label rows behind, so a filter still names a "
-        "row the store no longer holds (ADR-0237 §1)"
+    assert _stored_occurred_at(path, "captured") == _micros(_MARCH), (
+        "occurred_at was not backfilled from the blob's own instant"
     )
 
 
-async def test_rewriting_a_record_replaces_its_label_rows_rather_than_adding_to_them(
-    make_store: Callable[..., SqliteMemoryStore], tmp_path: Path
+async def test_a_store_holding_the_retired_label_index_opens_and_never_touches_it(
+    tmp_path: Path,
 ) -> None:
-    """An upsert's index is the new record's, not the union of both versions.
+    """ADR-0320 §5: no migration, so an older file keeps its table and nothing reads it.
 
-    The accumulating failure is the one a delete-then-insert exists to prevent and
-    an insert-only writer would produce: a record relabelled from ``renovation`` to
-    ``garden`` would go on carrying ``renovation`` in the index for ever, which is
-    ADR-0237 §1's "a comparison against a stored field" quietly becoming a
-    comparison against a stored *history*.
+    A store written while the index was maintained still holds ``record_labels``.
+    It opens, writes and deletes as any other, and the table is left exactly as it
+    was: nothing writes it, nothing deletes from it and nothing drops it.
     """
-    store = make_store(dimensions=8)
-    await store.add(_episode_with_every_axis("relabelled"))
-    relabelled = EpisodicMemory(
-        id="relabelled",
-        content="coffee",
-        provenance=_provenance(),
-        occurred_at=_MARCH,
-        participants=("Bob",),
-        topics=("garden",),
-        about_person="Bob",
+    path = tmp_path / "memory.db"
+    embedder = HashingEmbedder(dimensions=8)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=embedder, now=_fixed_now
     )
+    store.close()
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            "CREATE TABLE record_labels(record_rowid INTEGER NOT NULL, axis TEXT NOT NULL, "
+            "value TEXT NOT NULL, PRIMARY KEY (axis, value, record_rowid)) WITHOUT ROWID"
+        )
+        conn.execute("INSERT INTO record_labels VALUES (1, 'topic', 'renovation')")
+        conn.commit()
+    finally:
+        conn.close()
 
-    await store.add(relabelled)
-
-    assert sorted((axis, value) for _, axis, value in _label_rows(tmp_path / "memory.db")) == [
-        ("participant", "bob"),
-        ("subject", "bob"),
-        ("topic", "garden"),
-    ], "a rewritten record still carries a value only its previous version carried (ADR-0237 §1)"
+    reopened = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=embedder, now=_fixed_now
+    )
+    try:
+        await reopened.add(_captured_episode("new"))
+        assert await reopened.delete("new") is True
+        assert await reopened.clear() == 0
+    finally:
+        reopened.close()
+    conn = sqlite3.connect(str(path))
+    try:
+        rows = conn.execute("SELECT record_rowid, axis, value FROM record_labels").fetchall()
+    finally:
+        conn.close()
+    assert rows == [(1, "topic", "renovation")]
 
 
 def _write_legacy_db(
