@@ -10,12 +10,11 @@ alone are in ``test_controller.py``.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 from test_activation_state import _admitted
-from test_engine import AT, Harness
-from understanding_support import STATED_PROPOSAL, recall_stage, understanding_stage
+from test_engine import Harness
 
 from ai_assistant.core.types import (
     ChannelInput,
@@ -27,8 +26,6 @@ from ai_assistant.core.types import (
     TextChannelPayload,
 )
 from ai_assistant.orchestration.activation_state import ActivationScope
-from ai_assistant.orchestration.composing import ComposingStage
-from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, FakeStreamingCompleter
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import EpisodeProcessingRecord
@@ -37,17 +34,6 @@ if TYPE_CHECKING:
 _S = ControllerStage
 _R = ControllerRule
 _DONE = StageOutcome.DONE
-
-
-def _harness(**knobs: Any) -> Harness:
-    memory = knobs.pop("memory", None) or FakeMemoryStore(now=lambda: AT)
-    knobs.setdefault(
-        "composing",
-        ComposingStage(model=FakeModelProvider("Yes."), streaming=FakeStreamingCompleter()),
-    )
-    understanding = knobs.pop("understanding_model", FakeModelProvider(STATED_PROPOSAL))
-    knobs.setdefault("recall", recall_stage(memory))
-    return Harness(memory=memory, understanding=understanding_stage(model=understanding), **knobs)
 
 
 def _text(text: str = "book the campsite") -> ChannelInput:

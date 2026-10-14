@@ -159,7 +159,6 @@ from ai_assistant.orchestration.digesting import ActivationLabels, DigestingStag
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
-from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
 from ai_assistant.orchestration.parked_reads import ParkedReadOperations
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, PhaseWorking
@@ -199,7 +198,6 @@ from ai_assistant.testing import (
     FakeAssistantEngine,
     FakeAuditTrail,
     FakeConnectionProvisioner,
-    FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
     FakeDestinationTrustStore,
@@ -415,22 +413,6 @@ async def _fake_writer(now: Clock) -> None:
         policy=FakeMemoryPolicy(MemoryDecisionKind.STORE_TEMPORARY),
         now=now,
     ).ingest(_proposal())
-
-
-async def _learning_loop(now: Clock) -> None:
-    memory = FakeMemoryStore(now=lambda: _AWARE)
-    await LearningLoop(
-        context=FakeContextProvider(),
-        memory=memory,
-        writes=MemoryWriteStage(
-            writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: _AWARE),
-            deferrals=FakeDeferralStore(now=lambda: _AWARE),
-        ),
-        planner=FakePlanner(now=lambda: _AWARE),
-        feedback=FakeFeedbackProcessor(),
-        now=now,
-        registry=FakeToolRegistry(),
-    ).respond("book the flight")
 
 
 async def _acting_stage(now: Clock) -> None:
@@ -1405,7 +1387,6 @@ SEAMS = [
     Seam("InMemoryMemoryStore", _in_memory_store, MemoryStoreError),
     Seam("SqliteMemoryStore", _sqlite_store, MemoryStoreError),
     Seam("MemoryIngestor", _ingestor, MemoryStoreError),
-    Seam("LearningLoop", _learning_loop, PlanningError),
     # ADR-0231 §6's recorder clock, propagating rather than translating for the
     # reason `PROPAGATED` records — `Fetcher`'s clause above, one seam over.
     Seam("SearchServicer", _search_servicer, ClockReadingError),

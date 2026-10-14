@@ -92,10 +92,6 @@ from ai_assistant.memory import deferral_store as deferral_store_module
 from ai_assistant.models import BoundedEmbedder, HashingEmbedder
 from ai_assistant.orchestration import Engine
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
-from ai_assistant.orchestration.loop import (
-    _DEFAULT_EPISODIC_LIMIT,
-    _DEFAULT_RETRIEVAL_LIMIT,
-)
 from ai_assistant.orchestration.retrieval import assemble_by_band
 from ai_assistant.orchestration.upcoming import (
     NOTIFICATION_CLASS as UPCOMING_NOTIFICATION_CLASS,
@@ -2864,26 +2860,6 @@ def test_the_episodic_supplement_is_bounded_at_thirty_and_never_above_the_belief
     """
     assert composition_module.EPISODIC_SUPPLEMENT_LIMIT == 30
     assert composition_module.EPISODIC_SUPPLEMENT_LIMIT <= composition_module.RETRIEVAL_LIMIT
-
-
-def test_the_roots_two_budgets_are_held_equal_to_orchestrations_own_defaults() -> None:
-    """ADR-0162 §9's "held equal to", made checkable rather than asserted twice.
-
-    ``orchestration`` may not import this module and this module does not import
-    ``orchestration``'s private defaults in production — the root passes its own
-    figures explicitly (ADR-0119 §9), which is what makes a *direct* construction's
-    default a separate number that has to be kept in step by a rule. A rule stated
-    only in two comments is one a later edit moves by half, and the half that moves
-    silently is ``orchestration``'s: every deployment gets the root's value, so a
-    stale default here fails nothing until someone constructs a loop without one.
-
-    This is a test and not an import in either direction on purpose. Reading the
-    root's constant off ``orchestration`` would make a subsystem's default the
-    deployment figure, which §9's placement and ADR-0158 §5 both refuse; reading the
-    other way round would be an import ``lint-imports`` exists to stop.
-    """
-    assert composition_module.RETRIEVAL_LIMIT == _DEFAULT_RETRIEVAL_LIMIT
-    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT == _DEFAULT_EPISODIC_LIMIT
 
 
 class TestBuildMeasureReader:
