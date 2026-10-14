@@ -120,7 +120,7 @@ class FakeEngine:
         _marker.info("fake_engine_purged")
         # ``traces=None`` is "the horizon is keep-forever, so no trace sweep ran"
         # (ADR-0119 §10) — the honest report for a stand-in that holds no store.
-        return PurgeReport(records=0, questions=0, traces=None)
+        return PurgeReport(records=0, traces=None)
 
     async def consolidate(self) -> None:
         # Leg 7's chunked walk (ADR-0106, ADR-0111). Present whether or not a

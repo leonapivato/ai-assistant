@@ -5,9 +5,8 @@ in-process engine and the canonical fake are held to *one* suite, so a clause
 either binds both or binds neither.
 
 The wiring below is the composition root's, in miniature — the same instances
-shared where ADR-0028 §4 and ADR-0078 §3 say they must be (one memory store behind
-the writer, the lifecycle stage and the observation stage; one deferral queue
-behind the write stage and the question stage). It is written out here rather than
+shared where ADR-0028 §4 says they must be (one memory store behind the writer,
+the lifecycle stage and the observation stage). It is written out here rather than
 imported from ``test_engine``'s harness because that harness carries knobs for
 that module's own cases; what a conformance binding needs is the smallest engine
 that is really wired.
@@ -124,7 +123,6 @@ from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeConversationStore,
-    FakeDeferralStore,
     FakeDestinationTrustStore,
     FakeEgressBinder,
     FakeMemoryStore,
@@ -414,7 +412,6 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         retention=RETENTION,
         now=conversation_clock,
     )
-    deferrals = FakeDeferralStore(now=lambda: AT)
     return Engine(
         closers=closers,
         plans=store,
@@ -422,7 +419,6 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         spend=audit,
         reads=read_trail,
         memory=records,
-        deferrals=deferrals,
         # The narrow deletion seam (ADR-0119 §7), with the horizon the composition
         # root would pass. The contract suite exercises the request surface rather
         # than the maintenance one, so nothing here sweeps; the engine still cannot

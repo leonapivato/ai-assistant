@@ -90,7 +90,6 @@ from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeConversationStore,
-    FakeDeferralStore,
     FakeDestinationTrustStore,
     FakeModelProvider,
     FakePlanStore,
@@ -231,8 +230,7 @@ def build_phases_world(
     writer = MemoryIngestor(
         store=store, policy=DefaultMemoryPolicy(), traces_sink=FakeTraceSink(), now=lambda: NOW
     )
-    deferrals = FakeDeferralStore(now=lambda: NOW)
-    writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
+    writes = MemoryWriteStage(writer=writer)
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     source = tmp_path / "calendar.ics"
@@ -303,7 +301,6 @@ def build_phases_world(
         spend=trail,
         reads=FakeSourceReadTrail(),
         memory=store,
-        deferrals=deferrals,
         traces=FakeTraceRetention(),
         trace_sink=FakeTraceSink(),
         trace_retention=timedelta(days=365),

@@ -6,7 +6,6 @@ by bytes, leased, at-least-once, and surviving a hub restart.
 
 **Why it lives in ``memory/`` rather than beside the listener.** Every peer
 durable store in this tree does: :mod:`~ai_assistant.memory.notification_store`,
-:mod:`~ai_assistant.memory.deferral_store`,
 :mod:`~ai_assistant.memory.conversation_store`. The composition root wires it, and
 ``app`` may name ``memory`` and may not name ``service`` — so this is the only
 home from which ADR-0131 §3b's Protocol can reach both the producer that offers

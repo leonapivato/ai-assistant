@@ -24,8 +24,8 @@ reason:
   "against ``ai_assistant.testing``'s fakes and a recorded model transcript", so
   every model call is a :class:`~ai_assistant.testing.FakeModelProvider` replaying
   a transcript written to *obey* the injected instruction;
-* **the durable stores that neither arm rules on** — plans, audit trail, deferral
-  queue, conversations, traces — which are ``ai_assistant.testing``'s canonical
+* **the durable stores that neither arm rules on** — plans, audit trail,
+  conversations, traces — which are ``ai_assistant.testing``'s canonical
   fakes, each conformance-tested against its own Protocol;
 * **the socket**, which is never opened: the outbound-transport capability is the
   canonical :class:`~ai_assistant.testing.FakeOutboundTransport`, armed to refuse,
@@ -119,7 +119,6 @@ from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeConversationStore,
-    FakeDeferralStore,
     FakeDestinationTrustStore,
     FakeModelProvider,
     FakeOutboundTransport,
@@ -554,8 +553,7 @@ def build_world(tmp_path: Path, *, plan: str, consolidation: str) -> World:
         traces_sink=FakeTraceSink(),
         now=lambda: NOW,
     )
-    deferrals = FakeDeferralStore(now=lambda: NOW)
-    writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
+    writes = MemoryWriteStage(writer=writer)
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     source = tmp_path / "calendar.ics"
@@ -581,7 +579,6 @@ def build_world(tmp_path: Path, *, plan: str, consolidation: str) -> World:
         spend=trail,
         reads=reads,
         memory=store,
-        deferrals=deferrals,
         traces=FakeTraceRetention(),
         trace_sink=FakeTraceSink(),
         trace_retention=timedelta(days=365),

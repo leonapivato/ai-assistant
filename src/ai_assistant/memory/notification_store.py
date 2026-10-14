@@ -14,8 +14,8 @@ decision an ADR makes rather than a side effect of an implementation lane. Every
 top-level package this tree has gained was minted by a clause of its own ADR
 naming the ``lint-imports`` edit — ``readers`` by ADR-0093 §2, ``evaluation`` by
 ADR-0119 §6, ``secret_store`` by ADR-0125 §8 — and ADR-0130 §9 mints none. It is
-therefore the placement ``conversation_store.py`` and ``deferral_store.py``
-already have, for the reason ``memory/__init__.py`` already records.
+therefore the placement ``conversation_store.py`` already has, for the reason
+``memory/__init__.py`` already records.
 
 The database file is created with owner-only permissions (ADR-0004 §4): a
 candidate carries free text a producer wrote to be shown to a person, so this is
@@ -110,9 +110,9 @@ if TYPE_CHECKING:
 _OWNER_ONLY = 0o600
 
 #: The sidecars SQLite may keep beside a database file, each holding the same
-#: Tier 1 pages the database does (ADR-0004 §4, #490). Duplicated from
-#: ``deferral_store`` rather than shared, for the reason ``_transactions.py``
-#: records about ``_restrict_permissions`` (#506).
+#: Tier 1 pages the database does (ADR-0004 §4, #490). Duplicated in each store
+#: rather than shared, for the reason ``_transactions.py`` records about
+#: ``_restrict_permissions`` (#506).
 _SIDECARS = ("-journal", "-wal", "-shm")
 
 #: One past the largest value a paging argument accepts: the signed 64-bit
@@ -125,9 +125,8 @@ _PAGE_BOUND = 2**63
 _DEFAULT_CAP = 100
 
 #: How long a record is kept after it ceases to be actionable (ADR-0130 §7).
-#: Deliberately shorter than the deferral queue's thirty days: a question keeps
-#: its value until it is answered, a notification about a thing that already
-#: happened does not.
+#: Deliberately short: a notification about a thing that already happened does
+#: not keep its value.
 _DEFAULT_RETENTION = timedelta(days=7)
 
 #: The longest retention this store can **persist**: it stamps a duration as
@@ -190,9 +189,9 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     policy between them: a cancellation absorbed anywhere but at the physical
     completion of the running hop would unwind the rollback's own transaction.
 
-    Deliberately duplicated from :mod:`ai_assistant.memory.deferral_store` rather
-    than shared. ADR-0060 refuses a common home for this helper precisely so that
-    subsystems depend on the *obligation* and not on one way of meeting it, and
+    Deliberately duplicated in each store rather than shared. ADR-0060 refuses a
+    common home for this helper precisely so that subsystems depend on the
+    *obligation* and not on one way of meeting it, and
     reaching into another module for a private name would be the wrong way to
     spell "the same shape" in any case.
 
@@ -757,8 +756,10 @@ class SqliteNotificationStore:
         time. A *symlink* under a sidecar's name is skipped rather than followed:
         ``chmod`` follows links, so restricting one would silently narrow a file
         that holds none of this store's data. SQLite does not follow such a link
-        either, so nothing is stranded by skipping it; the argument is
-        ``SqliteDeferralStore._restrict_permissions``' in full.
+        either, so nothing is stranded by skipping it: a symlinked ``-journal`` is
+        unlinked and replaced by a real file, which inherits the owner-only mode set
+        on the database, and a symlinked ``-wal`` is refused rather than written
+        through.
 
         A no-op in memory, where there is no file to restrict.
         """
@@ -958,8 +959,7 @@ class SqliteNotificationStore:
         remaining case in terms — under ``retention is None`` "the storage the
         non-actionable tail occupies is bounded by retention and emptied by §9's
         delete surface", which is the user's own choice and the user's own
-        remedy. ``SqliteDeferralStore._answerable_count`` reads its population
-        the same way.
+        remedy.
         """
         rows = self._fetch(
             conn,

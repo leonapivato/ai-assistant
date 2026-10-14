@@ -65,10 +65,9 @@ conversation-scoped deletion, reclaiming what retention has emptied, and
 composing the export a user receives. ADR-0074 §9's coordinator ruling puts those
 here precisely because neither store may hold the other (golden rule 1).
 
-``MemoryWriteStage`` is the **write stage** (ADR-0078 §3): the one place a
-producer's proposal reaches memory. It holds the ratified ``MemoryWriter`` *and*
-the ``DeferralStore``, so an ``ASK_USER`` ruling's question is parked durably
-instead of vanishing when the proposal goes out of scope.
+``MemoryWriteStage`` is the **write stage**: the one place a producer's proposal
+reaches memory. It holds the ratified ``MemoryWriter``, and an ``ASK_USER`` ruling
+writes nothing and is logged by the proposal's id (ADR-0309 §5).
 
 ``ConsolidationStage`` is the **consolidation stage** (ADR-0106, ADR-0111,
 ADR-0114), a producer's stage, and the only one that is also its own

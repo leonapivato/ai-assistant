@@ -223,7 +223,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
         AuditTrail,
-        DeferralStore,
         DiagnosticRetention,
         DiagnosticSink,
         MemoryStore,
@@ -400,20 +399,17 @@ class DrainPhase(StrEnum):
 class PurgeReport:
     """What one retention sweep physically reclaimed (ADR-0083 §7, §8).
 
-    The result of :meth:`Engine.purge_expired`, which is **one** job over **three**
-    stores because ADR-0078 §10 item 8 says so in as many words: the deferral
-    queue's purge "is wired wherever ``purge_expired`` is wired and inherits the
-    same fate", and "inventing a second sweeping mechanism for one store would be
-    the thing that has to be undone at leg 5". ADR-0119 §10 sends the trace store
-    to the same place — "the trace purge becomes the third call behind that same
-    operation" — rather than giving the seventh database a job of its own.
+    The result of :meth:`Engine.purge_expired`, which is **one** job over every
+    store swept on a horizon, never a sweeping mechanism per store (ADR-0083 §7).
+    ADR-0119 §10 sends the trace store to the same place rather than giving the
+    seventh database a job of its own.
 
-    The first two counts are reclamation, not visibility: both Tier 1 stores
-    already hide what is past its deadline at *read* time (ADR-0007 §2, ADR-0078
-    §6), so a sweep that never runs costs the exposure cap ADR-0078 §1 names and
-    costs nothing else. The third is different, and ADR-0119 §10 says why: "the
-    horizon is enforced by deletion only… there is no read-time retention filter",
-    so what this sweep does not delete is what a walk still returns.
+    The memory count is reclamation, not visibility: the memory store already
+    hides what is past its deadline at *read* time (ADR-0007 §2), so a sweep that
+    never runs leaves expired rows on disk and changes no answer. The trace count
+    is different, and ADR-0119 §10 says why: "the horizon is enforced by deletion
+    only… there is no read-time retention filter", so what this sweep does not
+    delete is what a walk still returns.
 
     The counts are here so the job can say what it did — a sweep whose log line is
     indistinguishable from a sweep that found nothing is the shape #559 objects to
@@ -427,8 +423,6 @@ class PurgeReport:
 
     #: Expired :class:`~ai_assistant.core.types.MemoryRecord` rows removed.
     records: int
-    #: Purgeable deferred-question rows removed.
-    questions: int
     #: :class:`~ai_assistant.core.types.EvaluationTrace` rows past the horizon
     #: removed, or ``None`` where the horizon is "keep forever" and the sweep was
     #: therefore **not run** (ADR-0119 §10). ``None`` rather than ``0`` for the
@@ -589,7 +583,6 @@ def _purged(report: PurgeReport) -> Observation:
     """
     metrics: dict[str, int | float | bool] = {
         "records": report.records,
-        "questions": report.questions,
     }
     if report.traces is not None:
         metrics["traces"] = report.traces
@@ -1485,7 +1478,6 @@ class Engine:
         spend: SpendLedger,
         reads: SourceReadTrail,
         memory: MemoryStore,
-        deferrals: DeferralStore,
         traces: TraceRetention,
         trace_sink: TraceSink,
         trace_retention: timedelta | None,
@@ -1579,16 +1571,6 @@ class Engine:
                 the store. Wired to a *second* store, a listing would show beliefs
                 the assistant does not use and ``forget`` would destroy nothing the
                 user was shown.
-            deferrals: The durable deferred-question queue — the **same** instance
-                the write stage enqueues into, a composition-root single-instance
-                obligation of the same shape as ``plans`` and ``trail``. Held
-                directly, and for exactly one reason: :meth:`purge_expired` is *one*
-                job over *both* stores because ADR-0078 §10 item 8 forbids a second
-                sweeping mechanism, so the façade has to be able to reach this one;
-                nothing else on this surface touches this handle. Wired to a second
-                queue, the sweep would reclaim rows nobody can see while the rows the
-                write stage enqueues kept growing — which is ADR-0078 §1's cap
-                reported as kept and not kept.
             traces: The trace store's **deletion seam** — a
                 :class:`~ai_assistant.core.protocols.TraceRetention` and never a
                 ``TraceStore``, because ADR-0119 §7 gives the pipeline the purge and
@@ -1962,7 +1944,6 @@ class Engine:
         self._spend = spend
         self._reads = reads
         self._memory = memory
-        self._deferrals = deferrals
         self._traces = traces
         self._trace_retention = trace_retention
         self._diagnostics = diagnostics
@@ -2296,7 +2277,7 @@ class Engine:
             self._leases_recovered = True
 
     async def purge_expired(self) -> PurgeReport:
-        """Physically reclaim what the two Tier 1 stores and the trace store owe.
+        """Physically reclaim what the stores swept on a horizon owe.
 
         The **maintenance surface** ADR-0083 §8 says this façade grows: "new
         *concrete* surface on a class in ``orchestration``, not ``core`` contract
@@ -2306,25 +2287,19 @@ class Engine:
         makes ADR-0076 §5's "a scheduler is a second caller of the same read"
         literally true rather than approximately.
 
-        **One operation over three stores, deliberately.** ADR-0078 §10 item 8:
-        the deferral queue's purge "is wired wherever ``purge_expired`` is wired and
-        inherits the same fate… Inventing a second sweeping mechanism for one store
-        would be the thing that has to be undone at leg 5." One method calling both
-        is that instruction taken literally, and it is why
-        ``tests/app/test_composition.py``'s sweep guard now names *this* method's
-        body as the one place either name may be called (ADR-0083 §11). ADR-0119
-        §10 applies the same instruction to the seventh database rather than
-        re-deciding it — "the trace purge becomes the third call behind that same
-        operation. The scheduler's job table does not change, no job acquires new
-        store surface" — so this method grew a third call and nothing else did.
+        **One operation over every swept store, deliberately**: never a sweeping
+        mechanism per store, which is why ``tests/app/test_composition.py``'s sweep
+        guard names *this* method's body as the one place a sweep may be called
+        (ADR-0083 §11). ADR-0119 §10 applies that to the seventh database rather
+        than re-deciding it: "the trace purge becomes the third call behind that
+        same operation. The scheduler's job table does not change, no job acquires
+        new store surface".
 
-        **Correctness does not depend on the first two running.** Both Tier 1 stores
-        exclude what is past its deadline at *read* time — ADR-0007 §2 ("This holds
-        regardless of whether ``purge_expired`` has run, so the privacy guarantee
-        does not depend on a background job") and ADR-0078 §6 — so a missed or late
-        sweep is never a correctness bug. What it buys is ADR-0078 §1's *exposure
-        cap*: unswept, a lapsed question's proposal is the user's own words sitting
-        on disk indefinitely.
+        **Correctness does not depend on the memory sweep running.** The memory
+        store excludes what is past its deadline at *read* time — ADR-0007 §2 ("This
+        holds regardless of whether ``purge_expired`` has run, so the privacy
+        guarantee does not depend on a background job") — so a missed or late sweep
+        is never a correctness bug.
 
         **The trace sweep is the exception, and it is a disk-space one.** ADR-0119
         §10 enforces that horizon "by deletion only… there is no read-time retention
@@ -2342,8 +2317,8 @@ class Engine:
 
         Tracked like every other public method, so shutdown drains it before
         closing the connections it is writing through (ADR-0042 §2). The order is
-        memory, then questions, then traces, and nothing depends on it: no sweep
-        reads another's rows.
+        memory, then traces, and nothing depends on it: no sweep reads another's
+        rows.
 
         Returns:
             How many rows each store reclaimed, and ``None`` for the traces where
@@ -2353,12 +2328,10 @@ class Engine:
             RuntimeError: If the engine is shutting down. The scheduler treats this
                 as *stop* rather than as a job failure (ADR-0083 §8), which is what
                 :data:`ENGINE_SHUTTING_DOWN` exists for.
-            MemoryStoreError: If the memory store could not be swept. The two later
+            MemoryStoreError: If the memory store could not be swept. The later
                 sweeps do **not** run in that case: nothing sequences them, so the
-                next tick simply re-runs all three, and swallowing the first failure
+                next tick simply re-runs them all, and swallowing the first failure
                 to reach the rest would report a sweep that half happened.
-            DeferralStoreError: If the deferral queue could not be swept. The trace
-                sweep does not run in that case, for the same reason.
             TraceStoreError: If the trace store could not be swept, or the clock the
                 horizon is measured back from returned a non-conforming reading
                 (ADR-0026 §4, :meth:`_now`). The store failure *does* reach the
@@ -2376,14 +2349,14 @@ class Engine:
         return await self._tracked(self._purge_expired(), "purge_expired", _purged)
 
     async def _purge_expired(self) -> PurgeReport:
-        """Sweep all three stores — **the only place any purge is called**.
+        """Sweep every store — **the only place any purge is called**.
 
         ADR-0083 §11 pins that claim mechanically rather than by convention: the
         composition-root guard scans the whole package for a call to ``purge``,
         ``purge_expired`` or ``purge_before`` by those bare attribute names,
-        receiver-blind, and requires the set it finds to be *exactly* these three
-        lines (plus the canonical fakes' own delegations, which implement a seam
-        rather than schedule a sweep). A sweep added anywhere else — under a
+        receiver-blind, and requires the set it finds to be *exactly* the calls in
+        this method (plus the canonical fakes' own delegations, which implement a
+        seam rather than schedule a sweep). A sweep added anywhere else — under a
         different name, over a different store, by a second timer — still fails it.
         ADR-0119 §10 extends that instruction to the trace store by name, so the
         third name joined the scan with the third call.
@@ -2394,7 +2367,6 @@ class Engine:
         configuration this system accepts (:func:`_horizon`).
         """
         records = await self._memory.purge_expired()
-        questions = await self._deferrals.purge()
         traces = (
             None
             if self._trace_retention is None
@@ -2413,7 +2385,6 @@ class Engine:
         )
         return PurgeReport(
             records=records,
-            questions=questions,
             traces=traces,
             notifications=held,
             diagnostics=diagnostics,
@@ -2574,7 +2545,6 @@ class Engine:
                 re-processed on the next run (ADR-0111 §3).
             ModelError: Propagated unwrapped from the provider, its classification
                 intact (ADR-0013 §5). Same disposition: nothing is recorded as done.
-            DeferralStoreError: If a deferred question could not be parked.
         """
         self._reject_if_closing()
         if self._consolidation is None:

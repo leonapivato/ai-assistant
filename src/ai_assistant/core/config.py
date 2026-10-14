@@ -37,8 +37,7 @@ from ai_assistant.core.types import Reversibility, RiskLevel, describe_untrusted
 #: The string an operator sets a setting to in the environment to select its
 #: ``None`` value — "disable this entirely". Environment variables arrive as
 #: strings, so any nullable setting whose *default* is not ``None``
-#: (``confirm_at_risk``, ``confirm_at_reversibility``, ``deferral_ttl``,
-#: ``trace_retention``)
+#: (``confirm_at_risk``, ``confirm_at_reversibility``, ``trace_retention``)
 #: would otherwise be un-disable-able from the environment: omitting the variable
 #: restores the default, and neither a scale member nor a duration literal spells
 #: ``None``. ``episode_retention`` opts in too although its default is now ``None``:
@@ -254,7 +253,7 @@ def _exactly_an_integer(value: object) -> object:
 
     **Reachable only from untyped code constructing** :class:`Settings`
     **directly**, the same reachability :func:`_split_model_specs`' guard was
-    written for (#359): ``ASSISTANT_DEFERRAL_QUEUE_LIMIT=True`` already fails
+    written for (#359): ``ASSISTANT_NOTIFICATION_QUEUE_LIMIT=True`` already fails
     int parsing at load, so no environment or ``.env`` value reaches this.
 
     Args:
@@ -634,8 +633,8 @@ def _only_a_duration(value: object) -> object:
       sentinel through to :func:`_disabled_if_sentinel` on the fields that opt in.
     - ``None``, passed through for the field's **own** annotation to judge, which
       is the only thing that knows whether this duration has a ``None`` spelling:
-      it does for ``episode_retention``, ``deferral_ttl`` and
-      ``trace_retention`` (ADR-0074 §7, ADR-0078 §6, ADR-0119 §10), and
+      it does for ``episode_retention`` and ``trace_retention`` (ADR-0074 §7,
+      ADR-0119 §10), and
       deliberately does not for
       ``conversation_tombstone_grace``, where ADR-0074 §8 declines to offer one.
       Deciding that here would duplicate — and could contradict — the annotation.
@@ -2641,72 +2640,6 @@ class Settings(BaseSettings):
         ),
     )
 
-    # --- Deferred questions (ADR-0078) -----------------------------------
-    # The two tunings the deferral queue is built with. Both reach the store's
-    # **constructor** and are validated there in the `_check_tuning` shape
-    # (ADR-0022 §4a), so each is read once per store and never per operation — which
-    # is the other half of ADR-0078 §2's rule that live configuration never reaches
-    # back into a question already asked. `deferral_ttl` is stamped onto each record
-    # as its `retention`/`expires_at` at admission; nothing consults the setting
-    # again, so shortening it tomorrow cannot drop a rejected key 29 days early and
-    # re-ask a question the user already declined.
-    #
-    # `deferral_ttl` is parsed from an ISO-8601 duration or `HH:MM:SS` string
-    # (`ASSISTANT_DEFERRAL_TTL=P7D`), and **defaults to a finite 30 days, which is
-    # the whole decision** (ADR-0078 §6). The codebase holds both shapes and the
-    # choice between them is the mistake ADR-0074 §7 warned about: a `None`
-    # default here would mean a never-expiring queue of machine-asked questions —
-    # precisely the undignified pile §7 exists to prevent. A memory deferral is
-    # generated *by the system*, at whatever rate the observer runs. So this
-    # belongs with `episode_retention`, and
-    # 30 days is deliberately that field's horizon: a deferred question is about a
-    # belief, and for an observed one the *evidence* is episodes on that clock, so a
-    # question outliving them would ask the user to adjudicate something the system
-    # can no longer explain. `None` — reachable only through the disable sentinel —
-    # is the user's deliberate "ask me forever": the question never lapses and its
-    # record is never purged, in the same words `episode_retention` already uses.
-    # ADR-0287 §1 has since moved `episode_retention`'s default to `None` and left
-    # this one at 30 days, so a deferred question now lapses before the episodes it
-    # is about rather than after them (ADR-0287's Consequences).
-    #
-    # `deferral_queue_limit` bounds the **answerable** queue (`PENDING` and before
-    # its deadline); lapsed and resolved rows awaiting a sweep do not count against
-    # it, so a queue cannot be held shut by questions nobody can answer. At the cap
-    # `defer` refuses the new question rather than evicting an old one, and the
-    # refusal is reported to whoever proposed. It is **strictly positive with no
-    # "unlimited" spelling**: a cap of 0 is at capacity before its first admission,
-    # so every `ASK_USER` proposal is refused and the drop ADR-0078 exists to end
-    # returns in full, by configuration, while the system reports health — exactly
-    # the class of value ADR-0022 §4a refuses at construction, and the reason
-    # `conversation_tombstone_grace` carries its own positive bound. An *uncapped*
-    # queue is what §7 exists to prevent, and `deferral_ttl`'s `None` is already
-    # the deliberate escape at the other axis.
-    # The default matches the bounded default page size of `DeferralStore.pending`,
-    # so the whole answerable queue fits one page and §7's "the cap is legible from
-    # the first page" is true in the strongest sense — and fifty unanswered
-    # machine-asked questions is already past dignified. `lt=2**63` keeps it inside
-    # the integer domain every count in these backends lives in, as
-    # the retired `observation_batch_size` did for its own.
-    deferral_ttl: _OptionalDuration = Field(
-        default=timedelta(days=30),
-        gt=timedelta(0),
-        description=(
-            "How long a deferred memory question stays answerable, stamped onto each "
-            "question at admission (ADR-0078 §6). Finite by default; set it to 'none' to "
-            "be asked forever, which also stops those questions ever being purged."
-        ),
-    )
-    deferral_queue_limit: _IntegerSetting = Field(
-        default=50,
-        gt=0,
-        lt=2**63,
-        description=(
-            "The most answerable deferred questions the queue holds; beyond it a new "
-            "question is refused rather than an old one evicted (ADR-0078 §7). Positive, "
-            "with no unlimited spelling."
-        ),
-    )
-
     # --- Proactive notification (ADR-0130 §5, §7, §9) ---------------------
     # Three deployment tunings, and **only** three: §9 is explicit that no
     # standing setting of §6 becomes a `Settings` field. Reach levels, quiet
@@ -2715,22 +2648,18 @@ class Settings(BaseSettings):
     # tuning surface has to work on the first day from an empty store — and a
     # value the user edits in a config file is not that.
     #
-    # `notification_queue_limit` and `notification_retention` are the pair
-    # ADR-0078 §7 already decided for the deferral queue, taking its shapes and
-    # its reasons: a cap that "refuses new questions and keeps old ones", strictly
-    # positive because "a cap of `0` is at capacity before its first admission",
-    # with no "unlimited" spelling because the duration axis is where the
-    # deliberate escape lives. `lt=2**63` keeps a configured value inside the
-    # domain a store's own count can hold, as `deferral_queue_limit`'s does.
+    # `notification_queue_limit` and `notification_retention` are a cap that
+    # refuses new records and keeps old ones, strictly positive because a cap of
+    # `0` is at capacity before its first admission, with no "unlimited" spelling
+    # because the duration axis is where the deliberate escape lives (ADR-0130
+    # §7). `lt=2**63` keeps a configured value inside the domain a store's own
+    # count can hold.
     #
-    # **The figures differ from the deferral queue's, and both differences are
-    # decisions ADR-0130 §7 argues.** The cap is 100 rather than 50 because it
-    # bounds a *reading list* rather than a queue of questions blocking each
-    # other. Seven days is shorter than the deferral queue's thirty on purpose: a
-    # question keeps its value until it is answered, a notification about a thing
-    # that already happened does not, and the whole of this ADR is that proactive
-    # contact is about a moment rather than a backlog. `None` is the user's
-    # deliberate "keep them", in the same words `deferral_ttl` uses.
+    # **Both figures are decisions ADR-0130 §7 argues.** The cap bounds a
+    # *reading list*, and seven days is short on purpose: a notification about a
+    # thing that already happened does not keep its value, and the whole of this
+    # ADR is that proactive contact is about a moment rather than a backlog.
+    # `None` is the user's deliberate "keep them".
     #
     # The cap counts **actionable** records only, so dismissing one frees capacity
     # at once and an expired one holds none; and the retention is stamped onto

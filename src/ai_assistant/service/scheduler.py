@@ -148,8 +148,7 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
     """Build ADR-0083 §7's job table for one engine, in the ADR's own order.
 
     **Only enabled jobs are returned.** §7 makes "disabled" ``None`` and never
-    ``0``, following ``confirmation_ttl``'s and ``deferral_ttl``'s existing
-    convention, so that "off" and "as fast as possible" cannot be confused by a
+    ``0``, so that "off" and "as fast as possible" cannot be confused by a
     value — which is the one confusion a scheduler cannot afford, because the two
     look identical in a config file. A disabled job is therefore absent from the
     table rather than present and skipped, and ``hub_ready`` reports the names that
@@ -157,11 +156,8 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
 
     Each row is a decision an ADR argues rather than describes:
 
-    * **Retention purge** — ``MemoryStore.purge_expired`` *and*
-      ``DeferralStore.purge``, as **one** job, because ADR-0078 §10 item 8 says the
-      deferral queue's purge "is wired wherever ``purge_expired`` is wired and
-      inherits the same fate" and that "inventing a second sweeping mechanism for
-      one store would be the thing that has to be undone at leg 5" (#493).
+    * **Retention purge** — ``Engine.purge_expired``, **one** job over every store
+      swept on a horizon, never a sweeping mechanism per store (ADR-0083 §7, #493).
     * **Conversation sweep** — the same pair ``Engine.start()`` already runs, at the
       third of the three positions ADR-0074 §8 ratified. It is idempotent and "can
       run any number of times", and ADR-0076 §5 is explicit that the scheduler
