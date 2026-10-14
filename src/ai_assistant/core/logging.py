@@ -682,9 +682,9 @@ class _Unsaid:
             # Each text argument and note on its own: a group's ``str`` adds a count
             # of its members to its message, and a call site can print either alone.
             texts = [arg for arg in failure.args if isinstance(arg, str)]
-            texts.extend(
-                note for note in getattr(failure, "__notes__", ()) if isinstance(note, str)
-            )
+            notes = getattr(failure, "__notes__", ())
+            if isinstance(notes, (list, tuple)):  # assigned by hand, it could be a string
+                texts.extend(note for note in notes if isinstance(note, str))
             said: list[str] = []
             if _affordable(failure):
                 texts.append(str(failure))
@@ -834,7 +834,10 @@ def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
         if key not in _RECORD_FIELDS and not (wrapped and key in _STRUCTLOG_PLUMBING)
     }
     args = record.args
-    arguments = list(args.values()) if isinstance(args, Mapping) else list(args or ())
+    # A sole mapping argument is the record's ``args`` itself: printed whole by ``%s``,
+    # or read by name by ``%(name)s``. Either way its keys are printed or matched, so
+    # it is walked, and made plain, as one value, keys and all.
+    arguments = [args] if isinstance(args, Mapping) else list(args or ())
     message: list[object] = [] if wrapped else [record.msg]
     unsaid = _Unsaid(_held(_carried([raised, *message, *arguments, *extras.values()])))
     done: set[int] = set()
@@ -852,7 +855,7 @@ def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
         named = copy.copy(record)
         named.msg = _plain(record.msg, unsaid, done)
         if isinstance(args, Mapping):
-            named.args = {key: _plain(value, unsaid, done) for key, value in args.items()}
+            named.args = cast("dict[str, object]", _plain(args, unsaid, done))
         elif args:
             named.args = tuple(_plain(value, unsaid, done) for value in args)
         text = named.getMessage()
