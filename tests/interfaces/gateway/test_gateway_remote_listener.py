@@ -57,6 +57,7 @@ from gateway_tls import browser_context, issue_pair
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.core.types import DEFAULT_PAGE_SIZE
 from ai_assistant.interfaces.gateway.server import Gateway, _hold_what_the_peer_sent_for_tls
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire.errors import OverlayIdentityUnavailableError
@@ -65,7 +66,7 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from ai_assistant.core.types import EncodableText, Identifier, TurnOutcome, TurnReference
+    from ai_assistant.core.types import ConversationSummary
 
 pytestmark = pytest.mark.integration
 
@@ -189,7 +190,7 @@ def _named(identity: str | None, refusal: str) -> str:
 
 
 class _Blocking(FakeAssistantEngine):
-    """An engine that holds every turn open until a test releases it."""
+    """An engine that holds every listing open until a test releases it."""
 
     def __init__(self) -> None:
         """Start with nothing released and nothing in flight."""
@@ -197,18 +198,13 @@ class _Blocking(FakeAssistantEngine):
         self.release = asyncio.Event()
         self.occupied = asyncio.Event()
 
-    async def converse(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> TurnOutcome:
+    async def recent_conversations(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[ConversationSummary, ...]:
         """Occupy a hub connection until released, so the ceiling can be reached."""
         self.occupied.set()
         await self.release.wait()
-        return await super().converse(utterance, timeout=timeout, conversation_id=conversation_id)
+        return await super().recent_conversations(limit=limit, offset=offset)
 
 
 @dataclass
@@ -464,13 +460,15 @@ async def _start_session(one: Remote) -> tuple[str, str]:
     return cookie.split(";")[0].partition("=")[2], answer.payload["header_half"]
 
 
-def _ask(one: Remote, *, header_half: str | None, cookie_half: str | None) -> tuple[str, bytes]:
-    """Frame one `/ask` at the remote listener's own authority."""
-    body = json.dumps(
-        {"utterance": "what is on today", "reference": {"goal_id": "goal-1"}}
-    ).encode()
+def _request(one: Remote, *, header_half: str | None, cookie_half: str | None) -> tuple[str, bytes]:
+    """Frame one request asking the assistant for something, at the remote authority.
+
+    The conversations listing stands for any such request since the Ask route retired
+    (ADR-0309 §5:4): it reaches the engine, and nothing about it is the listener's.
+    """
+    body = json.dumps({}).encode()
     lines = [
-        "POST /ask HTTP/1.1",
+        "POST /conversations HTTP/1.1",
         "Host: {host}",
         f"Origin: {one.origin}",
         "Content-Type: application/json",
@@ -923,12 +921,12 @@ async def test_a_listed_device_exchanges_and_then_reaches_the_assistant(
     """§4's two facts held together, which is the whole path the exit test walks."""
     cookie_half, header_half = await _start_session(remote)
 
-    head, body = _ask(remote, header_half=header_half, cookie_half=cookie_half)
+    head, body = _request(remote, header_half=header_half, cookie_half=cookie_half)
     answer = await remote.send(head, body)
 
     assert answer.status == 200
     assert remote.engine.calls
-    assert answer.payload["outcome"]["conversation_id"]
+    assert answer.payload == {"conversations": []}
 
 
 async def test_a_session_alone_does_not_admit_an_unlisted_device() -> None:
@@ -943,7 +941,7 @@ async def test_a_session_alone_does_not_admit_an_unlisted_device() -> None:
     async with _remote(agent=agent) as one:
         cookie_half, header_half = await _start_session(one)
 
-        head, body = _ask(one, header_half=header_half, cookie_half=cookie_half)
+        head, body = _request(one, header_half=header_half, cookie_half=cookie_half)
         answer = await one.send(head, body)
 
         assert answer.status == 403
@@ -953,7 +951,7 @@ async def test_a_session_alone_does_not_admit_an_unlisted_device() -> None:
 
 async def test_a_listed_device_without_a_session_is_still_refused(remote: Remote) -> None:
     """The other half of "neither fact admits a request on its own"."""
-    head, body = _ask(remote, header_half=None, cookie_half=None)
+    head, body = _request(remote, header_half=None, cookie_half=None)
 
     answer = await remote.send(head, body)
 
@@ -1137,9 +1135,9 @@ async def test_one_session_ceiling_spans_both_listeners() -> None:
         cookie_half, header_half = await _start_session(one)
 
         reader, writer = await one.connect_loopback()
-        body = json.dumps({"utterance": "hello", "reference": {"goal_id": "goal-1"}}).encode()
+        body = json.dumps({}).encode()
         head = (
-            f"POST /ask HTTP/1.1\r\nHost: {one.loopback_authority}\r\n"
+            f"POST /conversations HTTP/1.1\r\nHost: {one.loopback_authority}\r\n"
             f"Origin: http://{one.loopback_authority}\r\n"
             f"X-Assistant-Session: {header_half}\r\n"
             f"Cookie: assistant_session={cookie_half}\r\n"
@@ -1155,7 +1153,7 @@ async def test_one_session_ceiling_spans_both_listeners() -> None:
 async def test_one_hub_connection_ceiling_spans_both_listeners() -> None:
     """§8: "the gateway's hub connections are counted once across both".
 
-    A turn held open on the overlay door occupies the gateway's only hub connection,
+    A listing held open on the overlay door occupies the gateway's only hub connection,
     and the loopback door then refuses one naming the limit rather than opening a
     second — which is the whole of "a second listener is the natural place to double
     a budget by accident".
@@ -1163,15 +1161,15 @@ async def test_one_hub_connection_ceiling_spans_both_listeners() -> None:
     engine = _Blocking()
     async with _remote(engine=engine, gateway_max_hub_connections=1) as one:
         cookie_half, header_half = await _start_session(one)
-        head, body = _ask(one, header_half=header_half, cookie_half=cookie_half)
+        head, body = _request(one, header_half=header_half, cookie_half=cookie_half)
         held = asyncio.create_task(one.send(head, body))
         await asyncio.wait_for(engine.occupied.wait(), timeout=5)
 
         reader, writer = await one.connect_loopback()
-        second = json.dumps({"utterance": "and now", "reference": {"goal_id": "goal-1"}}).encode()
+        second = json.dumps({}).encode()
         writer.write(
             (
-                f"POST /ask HTTP/1.1\r\nHost: {one.loopback_authority}\r\n"
+                f"POST /conversations HTTP/1.1\r\nHost: {one.loopback_authority}\r\n"
                 f"Origin: http://{one.loopback_authority}\r\n"
                 f"X-Assistant-Session: {header_half}\r\n"
                 f"Cookie: assistant_session={cookie_half}\r\n"
@@ -1196,7 +1194,8 @@ async def test_the_request_bound_binds_a_request_on_either_listener() -> None:
         body = b"x" * 500
 
         answer = await one.send(
-            f"POST /ask HTTP/1.1\nHost: {{host}}\nContent-Length: {len(body)}", body
+            f"POST /conversations HTTP/1.1\nHost: {{host}}\nContent-Length: {len(body)}",
+            body,
         )
 
         assert answer.status == 413

@@ -57,7 +57,6 @@
 "use strict";
 
 const STORAGE_KEY = "assistant.session.header-half";
-const CONVERSATION_KEY = "assistant.session.conversation-id";
 
 // The response header a delivery stream states its own keep-alive cadence in, as a
 // decimal count of microseconds (#1442, ADR-0175 §4, §8).
@@ -90,66 +89,6 @@ const SESSION_HEADER = "X-Assistant-Session";
 // the hub shutting down, with the cursor to follow again from (ADR-0298 §7) — the same
 // partition as `streams.TERMINAL_KINDS`, stated on both halves of one distribution.
 const TERMINAL_KINDS = new Set(["fault", "end"]);
-
-// The conversation the last turn ran under. The hub owns the conversation; this is
-// the id it handed back, held so the next question continues the same one rather than
-// starting a fresh one the owner never asked for — the same thing
-// `assistant ask --conversation` does at the terminal.
-//
-// **It is persisted, under the session's own scoping argument** (ADR-0168 §6, #1429).
-// Web storage is scoped to scheme, host and port, which is exactly the property that
-// makes it fit to hold the header half: the id at `127.0.0.1:8422` is unreadable from
-// `127.0.0.1:9000`. An earlier draft of this file kept it in page state alone, and the
-// milestone-14 phone QA found what that costs — a reload silently started a
-// conversation the owner never asked for, and the page could not say which one the
-// next question would land in (#1371's first clause).
-//
-// **In `sessionStorage`, which is the tab's, and deliberately not beside the header
-// half.** The two values want opposite scopes, and §6 names the difference: the header
-// half is "shared across that origin's tabs", because it admits the browser. Which
-// conversation you are reading is not — it is what *this view* is looking at, and two
-// tabs are two views. Put in `localStorage` it would be one selection for the origin,
-// so a second tab choosing a thread would silently retarget the first one's next
-// question at its own reload; adversarial review raised that on round 1 and it is
-// right. The tab's own storage survives a reload, which is the whole of what was
-// asked, and stops there.
-//
-// The lifetime is also the closer match. The cookie half is a session cookie, so
-// closing the browser generally strands the session anyway (ADR-0168 §6's own note on
-// what a restoring browser does) — a thread outliving the tab would point into a
-// session that is gone.
-//
-// **It is an id and not a capability.** It admits nothing on its own: every request
-// carrying it is admitted by ADR-0168 §6's two values and by nothing else, so a
-// conversation id read out of storage without them reaches no conversation.
-//
-// **Which is why clearing it is tidiness rather than a guarantee, and this comment
-// says so rather than claiming the stronger thing.** It goes when *this view* forgets
-// its session half and when the conversation itself is forgotten, and that is the
-// whole of it. A second tab that bootstraps a replacement session clears its own
-// selection and no other, so this tab's next question can continue the thread it was
-// already reading under the new session — which is not a fault to engineer against: a
-// conversation is the hub's, it outlives every gateway session by construction, and
-// `assistant ask --conversation` at a terminal does exactly the same thing. The hint
-// says which conversation it is, so nothing about it is silent. Adversarial review
-// raised it on round 2 against an earlier draft of this paragraph that overclaimed;
-// what was wrong was the sentence, and this is the correction.
-let conversationId = storedConversation();
-
-// How many times the selection has been changed by anything other than a turn's own
-// answer. A turn carries the count it was sent under, and the conversation the hub
-// names is adopted only if that count still stands.
-//
-// **Without it the owner's act loses a race to a slow answer.** Ask under `C`, then
-// press "Start a new conversation" while that request is still out: the selection
-// clears, the answer arrives, and `renderOutcome` puts `C` back — so the next question
-// continues the thread the owner had just, explicitly, left. The Ask button is
-// disabled for the duration and this control is not, deliberately: leaving a thread is
-// not something to make the owner wait for. Adversarial review found it on round 4.
-//
-// It is the questions listing's own device (`runs`) and the confirmations listing's
-// (`pendingRun`), at the third place in this file where two acts race over one value.
-let chose = 0;
 
 // How many disclosed cadences of silence end a delivery stream (#1442).
 //
@@ -374,264 +313,6 @@ function forgetHeaderHalf() {
   } catch (_) {
     // Nothing to do: a browser that will not store will not have stored.
   }
-  // The conversation goes with the session, in one place rather than at each of the
-  // callers: a thread carried into a session the owner started afresh would be this
-  // page continuing something the hub was never asked to continue.
-  changeConversation(null);
-}
-
-function storedConversation() {
-  try {
-    return window.sessionStorage.getItem(CONVERSATION_KEY);
-  } catch (_) {
-    return null;
-  }
-}
-
-// Which conversation the next question lands in, held and said (#1371's first clause).
-//
-// **"None yet" is said rather than left blank.** The hint used to be empty until a
-// turn came back, and an empty line is what left the owner unable to tell a fresh
-// thread from a continued one on the phone.
-// Every route that changes the selection **except** a turn's own answer: the owner
-// leaving a thread or continuing one, a session starting or ending, and a selection
-// the gateway has told this page is stale. Each of them outranks an answer that was
-// already in flight, and bumping the count in one place is what says so.
-function changeConversation(id) {
-  chose += 1;
-  setConversation(id);
-}
-
-// --- the reference this next turn carries (ADR-0250 §11, §13) ----------------
-//
-// **Answering a clarification and taking a goal up are one thing here**, because they
-// are one thing in the decision: §11 makes answering "a turn and not an operation of
-// its own, and that is the whole reason `converse` gains a keyword rather than the
-// surface gaining a fifth verb", and §13 performs the cross-conversation resumption by
-// the same keyword carrying a goal instead of a question. So this page has one form for
-// both, beside the goals, and it sends a turn only with a reference attached: since
-// ADR-0293 §11 the ordinary turn is a message in the chat, and this is the one the chat
-// cannot yet carry.
-//
-// **It holds the object the gateway takes and not two fields**, so that the shape sent
-// is the shape the type admits: "a `question_id` and no `goal_id`, or a `goal_id` and
-// no `question_id`" — and it holds the sentence that was put on screen beside it, so a
-// turn that never reached the assistant can put the same words back rather than inventing
-// new ones for the same fact.
-let reference = null;
-
-// What the hint says once the reference has gone out with a turn (adversarial review,
-// round 2, `major`).
-//
-// **The control cannot take it back by then, so it stops being offered and this says
-// why.** The body was serialised at submission, so a "never mind" pressed while that
-// request is in flight would hide the hint while the reference still reached the
-// assistant — a page claiming to have withdrawn something it had already sent, which is
-// the silent refusal this surface spends the most words preventing.
-//
-// **And it does not say the turn can be stopped**, because that is a different control
-// with a different meaning: `Stop waiting` ends this browser's wait and ADR-0173 §9 is
-// explicit that abandoning the stream does not abandon the turn.
-const REFERENCE_SENT =
-  "That went out with the question now running, so it can no longer be taken back. " +
-  "What became of it is in the answer.";
-
-// Attach one, say what the next turn will be about, and put the cursor where the answer
-// goes.
-function setReference(value, note) {
-  reference = { value, note };
-  showReference(note, true);
-  el("utterance").focus();
-}
-
-// Put the hint and the control into one state, which is the only place either moves.
-function showReference(note, offered) {
-  const hint = el("referencing");
-  hint.textContent = note;
-  hint.hidden = note === "";
-  el("clear-reference").hidden = !offered;
-  showAskForm();
-}
-
-// The form sends only a turn carrying a reference (ADR-0293 §11), so it is on screen
-// while one is attached — **and while a turn it sent is still out**, whatever is
-// attached by then (adversarial review, round 1, `major`). Its `Stop waiting` lives
-// inside it, so a reference given up while an earlier turn's request was pending would
-// otherwise hide the one control that ends that wait. `releaseAsk` re-reads this when
-// the wait ends, which is what puts the form away once nothing holds it open.
-function showAskForm() {
-  el("ask-form").hidden = reference === null && awaited === null;
-}
-
-// Say that the attached reference has gone out, where it is still the attached one.
-function referenceSent(sent) {
-  if (sent !== null && reference === sent) {
-    showReference(REFERENCE_SENT, false);
-  }
-}
-
-// Put an unsent reference back on offer, after a turn that never reached the assistant.
-//
-// **The words are the ones it carried**, held on the value for that reason: a second
-// sentence for the same fact is a second place for one of them to go stale.
-function restoreReference(sent) {
-  if (sent !== null && reference === sent) {
-    showReference(sent.note, true);
-  }
-}
-
-// Drop a reference that names a record one of the goal acts has just acted on.
-//
-// **An act on the record takes the reference to it, whatever the act's member said**
-// (adversarial review, round 4, `major`). Without this, pressing "Answer this" and then
-// "Give this up" left the question's id attached: the next question — about anything at
-// all — would carry it, and ADR-0250 §11 makes a settled question's `goal_id` resolve
-// "in every case", so the turn engages that goal and §13 **reopens** it. The owner gave
-// the work up and their next sentence silently took it back.
-//
-// **It is total over both vocabularies rather than keyed on the acting member**, because
-// what the hint promises after either act is something the page can no longer stand
-// behind: there is no open question to answer, or no goal that is still being worked on.
-// And keying it on `WITHDRAWN`/`ABANDONED` alone would leave the reopen reachable
-// through `ALREADY_CLOSED`, which establishes exactly that the goal is closed.
-//
-// **The later of the owner's two acts is the one that stands** (round 5, `major`). An
-// act's request can still be out when the owner presses "Take this up here" on the same
-// row, and matching by record id alone would let the answer erase a selection they made
-// *after* it — §13 makes taking a closed goal up by explicit reference a legitimate act,
-// so the newer press is a decision and not a leftover. `held` is the value that was
-// attached when the act started, and the identity comparison is what tells the two
-// apart; `setReference` installs a fresh object every time, which is what makes it
-// decisive. The id test stays beside it, because a reference to a **different** goal was
-// never this act's to take.
-//
-// **Nothing is lost by dropping it** (§11): the handle is a durable record's own id and
-// is read again from the listing this act is about to re-read, at no cost.
-function forgetReferenceTo(held, goalId, questionId) {
-  if (held === null || reference !== held) {
-    return;
-  }
-  const named = held.value;
-  if (named.goal_id === goalId || (questionId !== null && named.question_id === questionId)) {
-    clearReference();
-  }
-}
-
-// Give it up.
-//
-// **Nothing is lost by giving one up**, which is why this page drops it after a turn
-// rather than keeping it for a retry: "the handle is the question's own durable `id`
-// and needs no re-minting" (§11), so it is read again from the listing at no cost —
-// where a consent token is process-scoped and is the thing `answerConfirmation` spends
-// so carefully. Keeping one attached across turns would be the worse failure: a second
-// question answered against a record the owner had stopped meaning.
-//
-// **`ask` decides whether it may run rather than passing a sentinel in**, which is the
-// arrangement a click listener forces: `addEventListener("click", clearReference)` hands
-// the handler a `MouseEvent`, so a parameter meaning "only if it is still this one"
-// would be compared against an event object and would refuse the owner's own control.
-// The condition lives at `ask`'s one call site instead, where the value it sent is in
-// scope.
-function clearReference() {
-  reference = null;
-  showReference("", false);
-}
-
-function setConversation(id) {
-  conversationId = id;
-  try {
-    if (id === null) {
-      window.sessionStorage.removeItem(CONVERSATION_KEY);
-    } else {
-      window.sessionStorage.setItem(CONVERSATION_KEY, id);
-    }
-  } catch (_) {
-    // A browser that will not store still holds the id for this page's life. What it
-    // loses is the thread surviving a reload, and nothing else.
-  }
-  el("conversation").textContent =
-    id === null
-      ? "No conversation yet. Your next question starts one."
-      : `Conversation ${id}. Your next question continues it.`;
-  el("new-conversation").hidden = id === null;
-  // **What was already in the thread is cleared here and written in exactly one
-  // place** (#1371's second clause). Every route into this function invalidates the
-  // digest that line carries: a different conversation makes it about the wrong one,
-  // and a turn's own answer — which reaches here through `renderOutcome` and not
-  // through `changeConversation` — makes its count short by the turn that just
-  // landed. A stale count is worse than no count, because a reader cannot tell it is
-  // stale. Only `resumeConversation` writes it, and only having just read it.
-  sayResumed(null);
-}
-
-// How many times the resumed line has been invalidated, and the whole of what a
-// digest read has to still be true about before it may write one.
-//
-// **It is not `chose`, and adversarial review round 1 is why.** `chose` counts the
-// changes of selection that are *not* a turn's answer, which is exactly right for
-// what it guards — an answer must not put back a thread the owner has left — and
-// exactly wrong here. Continue `A`, ask a question in `A` while the digest read is
-// still out, and let the answer land first: `renderOutcome` reaches
-// `setConversation` without touching `chose`, the line is cleared, and the digest
-// then arrives with `chose` unchanged and re-renders a count that is short by the
-// turn that just landed. The two guards are counting different things, and the one
-// this line needs is the one bumped by **every** route that clears it — which is
-// this function, wherever it was reached from.
-let described = 0;
-
-// The digest read this view is waiting on, or `null`.
-//
-// **Held so that a read nobody is waiting for is stopped rather than ignored**
-// (adversarial review round 2, `major`). A guard on the *rendering* path is not
-// enough, because a refusal is not rendered by the caller: `relay` classifies it and
-// writes it into the panel's fault slot itself, at nineteen call sites, before any
-// caller sees a value. So a stale digest for a thread the owner has left — one
-// destroyed from a terminal while its read was in flight — reported "There is no
-// conversation of that name" over a panel whose selection and resumed line were
-// about something else entirely, and no comparison after the `await` could take it
-// back without also erasing a fault the *current* act had legitimately written.
-//
-// Aborting is what makes the whole question go away: a request that never settles
-// classifies nothing, writes nothing and needs no guard. It also costs nothing,
-// because this read is a courtesy — the thread was continued the moment the owner
-// pressed, and ADR-0175 §6's `conversation` is a pure read with nothing to undo.
-let describing = null;
-
-// What the thread being continued already holds, or nothing (#1371's second clause).
-//
-// **Clearing the line is also the moment the read behind it stops being wanted**, so
-// the two happen together and in one place. Every route that invalidates the line
-// comes through here — another conversation chosen, the thread left, a turn's own
-// answer, the session ending — and each of them is equally a reason to stop waiting
-// on a digest about what is no longer on screen.
-function sayResumed(text) {
-  described += 1;
-  if (describing !== null) {
-    const stopping = describing;
-    describing = null;
-    stopping.abort();
-  }
-  const held = el("resumed");
-  held.textContent = text === null ? "" : text;
-  held.hidden = text === null;
-}
-
-// Leave the thread this view is reading, and do nothing else.
-//
-// **It sends nothing.** Which conversation the next question lands in is this page's
-// own selection, and dropping it is a local act — the hub is not told, nothing is
-// destroyed, and the conversation it was reading is untouched and still in the
-// listing. Forgetting a conversation is the other control and it is a different act.
-//
-// **It is the escape a persisted selection owes.** Before this file kept one, a
-// reload started a fresh thread; now it does not, so a thread the hub will no longer
-// accept has to have a way out that does not depend on the page being able to tell
-// *why* — and it cannot: the gateway reports a declined turn as `assistant-declined`
-// whatever the hub declined it for, so a page clearing the selection on that name
-// would drop the owner's thread on any refusal at all.
-function startFresh() {
-  fault(null, "console");
-  changeConversation(null);
 }
 
 function show(id, visible) {
@@ -1122,28 +803,6 @@ function refused(panelId, body, status) {
   report(panelId, body, describe(body, status));
 }
 
-// A refusal that means the conversation **this view is holding** is gone. The
-// conversation half of `sessionLost`, and it exists for the same reason: forgetting
-// the value is the only thing a page can do about it.
-//
-// **It is the cost of keeping the selection across a reload, and it has to be paid
-// here.** A thread destroyed from a terminal or from another tab used to cost this
-// page nothing, because a reload dropped the id; now the id comes back, is re-sent on
-// every question, and is refused every time — with no control on screen to clear it,
-// because the conversations listing cannot offer "Continue" for a conversation that is
-// not in it. Adversarial review found it on round 3 and it is a real regression rather
-// than a pre-existing edge.
-//
-// **`sent` is what the request actually carried**, and the comparison is what keeps
-// this narrow: forgetting some *other* conversation from the listing and being told it
-// was already gone says nothing about the one this view is reading, and must not clear
-// it.
-function conversationLost(body, sent) {
-  if (body.fault === "no-such-conversation" && conversationId !== null && sent === conversationId) {
-    changeConversation(null);
-  }
-}
-
 // The one thing `streamValues` throws of its own motion, and it has its own type so
 // that a reader can tell it from everything else a read can reject with — an abort the
 // owner asked for, a connection that failed, a body the browser gave up on. Each of
@@ -1213,7 +872,7 @@ async function* streamValues(response) {
   }
 }
 
-function renderOutcome(outcome, chosenAt, provenance) {
+function renderOutcome(outcome, provenance) {
   const body = el("answer-body");
   clearNode(body);
   // The other container a park row is rendered into, pruned where it is replaced for
@@ -1227,7 +886,7 @@ function renderOutcome(outcome, chosenAt, provenance) {
   // (ADR-0198 §§1-2). It is written first because it qualifies everything below it, and
   // it is passed rather than derived because deriving it would mean reading a
   // restatement off the members the outcome does *not* carry — the inference from
-  // absence ADR-0139 §4 refuses. `ask` passes none and gets none.
+  // absence ADR-0139 §4 refuses.
   if (provenance) {
     line(body, provenance, "notice");
   }
@@ -1406,17 +1065,6 @@ function renderOutcome(outcome, chosenAt, provenance) {
   renderOpenedAuthorizations(body, outcome.authorizations);
   renderDisambiguation(body, outcome.disambiguation);
   renderClarification(body, outcome.clarification);
-  // `null` only where nothing could be resolved (a recovered park, a deleted
-  // conversation), and the last known id is then kept rather than cleared: the
-  // hub decides which conversation a turn ran under, and forgetting one on an
-  // answer that names none would silently start a new one on the next question.
-  // `chose === chosenAt` is the owner not having chosen since this turn was sent.
-  // Where they have, the hub's answer is still rendered whole — it is only the
-  // *selection* that is not moved, because moving it would undo an act the owner took
-  // after asking.
-  if (outcome.conversation_id && chose === chosenAt) {
-    setConversation(outcome.conversation_id);
-  }
   show("answer", true);
 }
 
@@ -1427,8 +1075,9 @@ function renderOutcome(outcome, chosenAt, provenance) {
 // ones this page renders, throws there.
 //
 // **Left unguarded that throw does not escape, and where it lands is what makes each
-// entry's ending wrong in its own way.** `ask` and `sendRecording` await theirs inside
-// a `try` whose `catch` says `GATEWAY_GONE` — "The gateway did not answer, so it may
+// entry's ending wrong in its own way.** The Ask and push-to-talk entries, since retired
+// (ADR-0309 §5:4, ADR-0313 §3:4), awaited theirs inside a `try` whose `catch` said
+// `GATEWAY_GONE` — "The gateway did not answer, so it may
 // have stopped", with a restart and a fresh bootstrap value as the remedy — said of a
 // gateway that answered, about a turn that ran. `answerConfirmation`'s throw left a
 // consent token `spent` and never `unresolved`, so every row of the park read "That
@@ -1458,9 +1107,8 @@ function renderOutcome(outcome, chosenAt, provenance) {
 //
 // **What it does *not* decide is the ending**, which is why it reports rather than
 // announces: each caller's is its own and they differ in what the evidence licenses and
-// in what else has to be given up. `askWhole`'s head proves the turn ran and
-// `renderSpokenTurn` withholds a transcript and plays no
-// rendering; `answerConfirmation` strands a consent token and gives up the park's row —
+// in what else has to be given up. `answerConfirmation` strands a consent token and
+// gives up the park's row —
 // the shape #1612 spent rounds 9 and 10 reaching, folded in here whole (#2006) rather
 // than replaced by one this function chose.
 //
@@ -1468,11 +1116,10 @@ function renderOutcome(outcome, chosenAt, provenance) {
 // records against it: it is what the *caller* knows about where the outcome came from,
 // and one caller has such a fact. A guard that dropped it would render a re-answered
 // park's outcome without the caveat that qualifies everything under it, so this passes
-// what it is given and derives nothing. `ask` and `renderSpokenTurn`
-// pass none and get none.
-function couldRenderOutcome(outcome, chosenAt, provenance) {
+// what it is given and derives nothing.
+function couldRenderOutcome(outcome, provenance) {
   try {
-    renderOutcome(outcome, chosenAt, provenance);
+    renderOutcome(outcome, provenance);
   } catch (_) {
     clearNode(el("answer-body"));
     show("answer", false);
@@ -4772,9 +4419,6 @@ async function answerConfirmation(token, approved, stopping) {
   // Claimed before the first `await`, so two clicks in one turn of the event loop —
   // the two rows of one park, or one row twice — cannot both get past the guard.
   spent.add(token);
-  // A resumed park answers with a turn outcome exactly as an ask does, so it carries
-  // the same count for the same reason.
-  const chosenAt = chose;
   let body = null;
   // What the gateway refused with, where it refused — kept because `relay` displays the
   // condition and returns a bare `null`, and this is the one caller for which the
@@ -4927,7 +4571,7 @@ async function answerConfirmation(token, approved, stopping) {
   // it, and it does not withhold the account either, which would be silence about a step
   // that ran.
   if (
-    !couldRenderOutcome(body.outcome, chosenAt, unaccounted ? PARK_SETTLED_AFTER_UNKNOWN : null)
+    !couldRenderOutcome(body.outcome, unaccounted ? PARK_SETTLED_AFTER_UNKNOWN : null)
   ) {
     // The ending, in the order every other not-known arm of this function uses: the
     // token back, the park's row given up, and only then the account.
@@ -5405,7 +5049,6 @@ async function startSession(event) {
     return;
   }
   el("bootstrap-value").value = "";
-  changeConversation(null);
   if (!rememberHeaderHalf(body.header_half)) {
     fault("This browser will not store the session, so it cannot hold one.", "bootstrap");
     return;
@@ -5467,1982 +5110,6 @@ function sessionLost(body, said) {
     return true;
   }
   return false;
-}
-
-// **The same two conditions, named by the response head alone.**
-//
-// `sessionLost` reads the condition out of the *body*, which is right everywhere a body
-// was read — and is exactly what a request whose body read the owner stopped does not
-// have. For these two conditions the head is enough on its own, and reading it is a read
-// rather than a guess: `server.py`'s `_REFUSAL_STATUS` gives every refusal condition
-// "its own status", because ADR-0168 §6 requires the cookie-half fault "reported to the
-// owner as its own condition, and never flattened into an expiry, a ceiling refusal or
-// an ordinary absent session" — and "a status shared with another condition is that
-// flattening performed by the response rather than by the record". So `401` names
-// `NO_LIVE_SESSION` and `409` names `COOKIE_HALF_MISMATCH`, and nothing else answers
-// with either.
-//
-// **A status is in this table only where it names one condition**, which is the whole of
-// what the table is for. `403` is deliberately absent: `_REFUSAL_STATUS` gives it to
-// `ORIGIN_NOT_OWN` and to `DEVICE_NOT_LISTED` both, so a `403` head says the gateway
-// refused and does not say why — and mapping it here would be this page performing the
-// flattening §6 forbids the response to perform.
-const SESSION_LOST_STATUS = new Map([
-  [401, "no-live-session"],
-  [409, "cookie-half-mismatch"],
-]);
-
-// --- an ask that never answers, and the wait the owner can end (#1500) -------
-//
-// `fetch` carries no deadline of its own, so a socket that dies without settling — a
-// phone whose network went away without an RST, a black-holed connection — leaves the
-// `await` below pending for ever. `ask` disables `#ask-button` before the request goes
-// out and re-enables it in a `finally`, so that `finally` never ran: the owner's one
-// way into the assistant stayed greyed out until the page was reloaded. It is #1474's
-// failure on a different request, and it is closed differently, because a different
-// clause of ADR-0182 §7 governs.
-//
-// **Which clause, and what it does and does not say.** #1474 is a *delivery stream*,
-// and §7's third clause is about those: it permits a re-establishment "only while it
-// holds none", which is a rule about concurrency, so a bound on how long a head-less
-// one may be held closes a gap the clause is silent on. An `ask` is reached by §7's
-// **fifth** clause instead — "The page re-issues **no other request** of its own
-// motion. Every request that asks the assistant for something — each of ADR-0177 §6's
-// operations — is re-issued only on an act by the owner" — and by the paragraph that
-// grounds it: re-issuing an ask "is a turn the owner may already have had executed",
-// so "offering the owner a visible retry costs one control and removes the class".
-// Nothing here re-issues anything, so the fifth clause is not breached; what §7 does
-// supply is the *shape* of the remedy, and it is a control.
-//
-// **So the wait is bounded by the owner's own act and by no clock of this page's**,
-// which is a decision rather than the easier half of one. An automatic deadline was
-// considered and is declined on three grounds:
-//
-// - **Any figure would pace something the gateway paces, and no head discloses it.**
-//   `server.py`'s `_TURN_BUDGET` gives every turn sixty seconds — `_ask` passes it —
-//   and it reaches the browser in no header, in no value
-//   and in no setting. A page-side deadline would therefore be a second number that
-//   can silently disagree with it, which is `SILENT_CADENCES`' own argument one
-//   surface out, and deriving one from `usableCadence`'s figure would be exactly the
-//   substitution that rule refuses: `gateway_notification_budget` paces a delivery
-//   stream and says nothing about a turn.
-// - **`HEAD_DEADLINE_MILLISECONDS`' argument does not transfer.** That figure is
-//   defensible because what it bounds is "a round trip and an in-process table read,
-//   and nothing else" — the delivery head is written before the poll is awaited. An
-//   `/ask` head is written *after* the whole turn: `_ask` awaits `converse` and
-//   answers with the outcome. A thirty-second bound there would abandon a healthy
-//   turn that was thinking, and announce that its outcome was not known — true, and
-//   useless.
-// - **It would cover one of the places the socket can die anyway.** A black hole before
-//   the head and one mid-body are one failure to the owner, and only a control the
-//   owner can press at any moment ends both.
-//
-// The honest cost is the one thing a control cannot do: an owner who never looks is
-// never recovered. That is bounded by where the control sits — beside the greyed-out
-// button, which is the thing the owner is looking at when they wonder why they cannot
-// ask — and by the page saying, while it waits, that it is waiting and that no deadline
-// of its own will end it.
-
-// The ask this page is waiting on an answer to, or `null` while nothing is outstanding.
-// One at a time, because `#ask-button` is disabled for exactly that window.
-//
-// **It carries what was observed and not only the abort**, because ADR-0177 §7's fourth
-// clause is conditioned on what was *read*: it makes an outcome not known where "the
-// request was sent and no response was read", and a page that said that after reading
-// half an answer would be announcing a state it is not in. So the record holds two
-// facts, each set at the moment its evidence arrives:
-//
-// - `heard` — this turn's own answer reached this browser, so the question
-//   demonstrably got past the gateway to the assistant: `/ask` answers only once
-//   `converse` has returned, so its response head is proof the turn ran.
-// - `refusedWith` — the status of a refusal head, or `null` where none came back. The
-//   head is read whole before the body is touched, so a status is in hand even where the
-//   body then stalls, and for two of them the status alone names the condition
-//   (`SESSION_LOST_STATUS`). Kept because discarding it is discarding an outcome this
-//   browser *did* read: adversarial review found round 2's fix announcing an unknown
-//   outcome for a `401` whose body the owner stopped waiting on, which is both false and
-//   the one shape that strands a browser holding a header half the gateway will refuse
-//   every future request from.
-//
-// `heard` and `refusedWith` are mutually exclusive by construction — a successful head
-// sets the one and a refusal head the other — so the pairing has not to be reasoned
-// about below.
-let awaited = null;
-
-// Said while a question is out. **It does not promise a deadline**, because there is
-// none here: what it does is tell the owner that the page cannot tell a turn that is
-// taking a while from one whose answer will never arrive, which is the fact that makes
-// the control beside it the owner's to use rather than a button that ought to be
-// unnecessary.
-const ASKING =
-  "Waiting for an answer. This browser puts no deadline on a turn and cannot tell one " +
-  "that is taking a while from one whose answer will never arrive, so stopping the " +
-  "wait is yours to do.";
-
-// What stopping the wait did, and — the whole of why this sentence is long — what it
-// did **not**.
-//
-// ADR-0177 §7's fourth clause is the rule: "A failure of the **browser's own** request
-// to the gateway — the request was sent and no response was read — is an outcome that
-// is **not known**, whatever the gateway did", and "no front end resolves it by
-// assuming either of the other two". A page that handed the button back saying nothing
-// would be assuming one of them by omission, because a control that comes back looks
-// like an act that finished. So the three things the owner cannot otherwise know are
-// each said: the turn may have run, nothing was cancelled at the assistant, and asking
-// again is a new question rather than a retry of that one — which is ADR-0182 §7's own
-// "the page re-asks only when the owner asks it to", said where the owner is.
-//
-// The route back, shared by both endings because it does not depend on how far the
-// answer got. **It points rather than promises**, and adversarial review was right on
-// round 2 that the first wording promised: a turn that ran is not thereby a turn that
-// was recorded. `TurnOutcome.capture_degraded` is precisely that shape — the exchange
-// "went **unrecorded**" while "the answer is still the answer", because ADR-0074 §9
-// item 6 degrades a turn rather than failing it — so an owner told the listing *will*
-// show their turn would be told something the contract explicitly allows to be false.
-// It is stated as the place to look, with the one case it does not cover named, which
-// is this page's rule everywhere: state no state you have not read (ADR-0177 §7).
-const WHERE_TO_LOOK =
-  "The conversations listing is where to look for it — though a turn whose record " +
-  "could not be written does not appear there, however completely it ran.";
-
-// What stopping the wait says where **no response head came back at all** — which is the
-// only state its opening clause is true in. A refusal head is a reply this browser read,
-// so the two branches above take every wait that saw one, and what is left here is the
-// black hole #1500 is about: a socket that produced nothing.
-const ASK_ABANDONED =
-  "You stopped waiting for that answer, so this browser is no longer listening for it. " +
-  "What became of the turn is not known: the question was sent and nothing here read a " +
-  "reply, so the assistant may have carried it out and may never have received it. " +
-  "Nothing was re-sent and nothing was cancelled — the assistant was not told to stop. " +
-  "Asking again asks a new question rather than retrying that one. " +
-  WHERE_TO_LOOK;
-
-// **The same act, said where some of it is already known.** Adversarial review found
-// the sentence above being used for a wait ended *after* part of the answer had
-// arrived, where two of its clauses are false: something here had read a reply, and the
-// assistant demonstrably had received the question. ADR-0177 §7's fourth clause is
-// conditioned on "no response was read", so applying its words to a state where one was
-// is not caution — it is an inaccurate announcement, which ADR-0182 §7 requires the page
-// not to make.
-//
-// So what is unresolved is stated narrowly: the turn reached the assistant, and its
-// *ending* is what nobody here read. Everything else is the same act and says the same
-// things — nothing re-sent, nothing cancelled, a fresh question rather than a retry —
-// because none of that changes with how far the answer got.
-const ASK_ABANDONED_MIDWAY =
-  "You stopped waiting for that answer, so this browser is no longer listening for it. " +
-  "Part of that turn had already reached this browser, so the assistant did receive the " +
-  "question and had begun on it; how it ended is what is not known. Nothing was re-sent " +
-  "and nothing was cancelled — the assistant was not told to stop. Asking again asks a " +
-  "new question rather than retrying that one. " +
-  WHERE_TO_LOOK;
-
-// **An answer this browser read and cannot put on screen** (#1622), which is
-// `PARK_REPLY_UNREADABLE`'s condition arriving on the ask surface. `readBody` answers an
-// unreadable `2xx` with `{}`, a well-formed object may still be missing `outcome`, and an
-// `outcome` that is present may still not carry what `renderOutcome` reads —
-// `couldRenderOutcome` is where all three are found, and this is what is said about them.
-// The reachable case is `relay`'s own: a truncated, reassembled or proxy-substituted
-// `200`, the class round 6 of PR #1612 admitted for a refusal. Every `2xx` the gateway
-// writes goes through `_json_response`, so a well-formed gateway produces none of it.
-//
-// **Cause-neutral about which of the three shapes it was**, for `PARK_REPLY_UNREADABLE`'s
-// reason: naming the one that happened would be a distinction drawn from a body this page
-// has just found it cannot read, and the owner's position is the same in all of them.
-//
-// **And it says the turn ran, because on this entry that is read rather than assumed.**
-// `_ask` awaits `converse` and answers with the outcome, so a `200` cannot come back
-// until the assistant has finished with the question — the same fact `askWhole` sets
-// `heard` from, and the one that lets `ASK_ABANDONED_MIDWAY` say the assistant received
-// it. Announcing a turn that demonstrably ran as one that may never have happened is
-// ADR-0139 §4 breached in the direction adversarial review found on rounds 3 and 5, and
-// the head is intact evidence here: it is the *body* this page could not read.
-const ANSWER_UNREADABLE =
-  "The gateway answered that question and this browser could not read an outcome from " +
-  "the answer, so what the turn did is not known. The turn itself ran: this entry " +
-  "answers only once the assistant has finished with the question. Nothing was re-sent " +
-  "and nothing was cancelled. " +
-  WHERE_TO_LOOK;
-
-// **And the ending where the outcome is not unknown at all**, which adversarial review
-// found on round 3. A head this page already read can name the outcome: an expired
-// session or a mismatched cookie half is answered by `_session_bound` — `401` and `409`
-// respectively — and the body stalling after it changes nothing about what the head
-// said. Announcing `ASK_ABANDONED` there would be wrong in every clause that matters:
-// the outcome *is* known, the assistant never received the question, and there is no
-// turn that may have run. ADR-0177 §7's fourth clause is conditioned on "no response was
-// read", and one was.
-//
-// **What such a refusal means is re-entry** (ADR-0182 §6): "A browser presenting a
-// header half the gateway does not admit is shown the bootstrap entry, presented as
-// re-entry rather than as a fault." That is the behaviour `sessionLost` performs, and
-// stopping the wait must reach it by the same route a refusal read to the end does —
-// otherwise the one way an owner has of ending a stalled wait is also the one way they
-// can be left holding a dead header half, staring at a console the gateway will refuse
-// every request from.
-//
-// This sentence is what the *act* did, added to the condition's own words rather than
-// replacing them: `describe` says which of the two conditions the head named, so this
-// says nothing about which — it says only what is true of both. `_session_bound` decides
-// both of them before `_assistant` is reached, so "never reached the assistant" is read
-// off the gateway's own ordering rather than assumed.
-const REFUSED_AT_THE_DOOR =
-  "The question you were waiting on never reached the assistant: the gateway refused it " +
-  "at the door, so no turn ran and nothing was left half-done. Asking it again once you " +
-  "are back in costs nothing.";
-
-// **And a refusal that is not a session's ending**, which adversarial review found on
-// round 5. `ASK_ABANDONED` opens by saying "the question was sent and nothing here read
-// a reply" — false of *every* refusal head, because a status line is a reply — and goes
-// on to say the assistant "may have carried it out", which for most of those statuses is
-// known to be false. ADR-0139 §4 is the rule in both directions: an act is reported as
-// one of exactly three outcomes "and never as either of the other two", so a known
-// not-landed act announced as not known breaches it exactly as the reverse does. This
-// page already says so of itself, one surface over, in `relay`: "reporting a landed act
-// as 'not known' is forbidden by the same clause that forbids the reverse".
-//
-// **What separates the sentences is whether the engine could have been reached, and the
-// small set is the one that says yes.** The first draft of this enumerated the statuses
-// decided *before* the engine and let everything else fall through to "not known".
-// Adversarial review then spent two rounds handing back statuses that list had missed —
-// `503` on round 5, `413` on round 7, the latter written by `read_request`'s parser and
-// so absent from `_REFUSAL_STATUS` entirely, which is where the list had been derived
-// from. That is a table this page cannot keep in step with a file it does not import,
-// and the fix is to stop keeping it.
-//
-// **So the page enumerates the other side, which is closed and stays closed.** A refusal
-// head is written after the relay began only by `_relay_fault`, the one function
-// ADR-0168 §9 makes responsible for a failed relay — "a transport failure
-// distinguishable from a request the hub received and declined" — and it writes exactly
-// three statuses. Everything else the two ask paths can answer with is decided before
-// `_relayed` awaits `call()`: the door's `421` and `403`, the parser's `413` and
-// `malformed-request`, `_ceiling`'s `503`, and any status a later lane refuses with
-// before it relays. So the default is "no turn ran", and it is right by construction
-// rather than by a list being complete.
-//
-// **The one coupling this keeps is nameable and tested.** A lane adding a *post*-relay
-// status would add it to `_relay_fault`, because that is what §9 makes that function
-// for, and `test_bundle.py` reads these three back out of it by calling it — so the two
-// halves cannot drift without the gate saying so. `400` is here because `_relay_fault`
-// writes it for a `ValueError` out of the call, even though the parser writes the same
-// status before one: shared, therefore not proof, therefore not claimed.
-const RELAY_FAULT_STATUS = new Set([400, 422, 502]);
-
-// **And the one status that proves the opposite half**, which adversarial review found
-// on round 6. `422` is `assistant-declined`, and ADR-0168 §9 defines it as "a request
-// the hub **received** and declined" — the very distinction §9 requires the gateway to
-// keep. So it is the one member of `RELAY_FAULT_STATUS` that is not ambiguous at all:
-// it is proof the assistant was reached, and is taken before that set is consulted.
-// Grouping it with `400` and `502` said the status said nothing, and it says a great
-// deal.
-//
-// It is decisive on these two paths only. `server.py` writes `422` in one other place —
-// `_connection_fault`'s `identity-unusable` — and that serves ADR-0151's connection
-// surface, which neither ask path is.
-const DECLINED_BY_THE_ASSISTANT = 422;
-
-// The refusal whose reason went unread, and all that is known of the turn.
-const ASK_REFUSED_UNREAD =
-  "You stopped waiting for that answer, so this browser is no longer listening for it. " +
-  "The gateway had already answered that question with a refusal, and this browser " +
-  "stopped before reading which one — so no answer came back, and whether the assistant " +
-  "ever acted on the question is not something a refusal on its own says. " +
-  "Nothing was re-sent and nothing was cancelled — the assistant was not told to stop. " +
-  "Asking again asks a new question rather than retrying that one. " +
-  WHERE_TO_LOOK;
-
-// The same, where the status settles it. **`WHERE_TO_LOOK` is deliberately absent**: it
-// points at the conversations listing for a turn that may have run, and here none did —
-// sending an owner to look for something that cannot be there is the same wrong
-// explanation in a friendlier register.
-const ASK_REFUSED_UNRUN =
-  "You stopped waiting for that answer, so this browser is no longer listening for it. " +
-  "The gateway refused that question before the assistant was reached, so no turn ran " +
-  "and there is nothing to look for — though this browser stopped before reading which " +
-  "refusal it was. Nothing was re-sent and nothing was cancelled. Asking again is a " +
-  "fresh question, and worth trying once whatever the gateway refused it for has passed.";
-
-// The same act where the status says the assistant was reached and said no.
-//
-// **It points at no listing and denies none either.** A declined turn produced no answer
-// to record, so promising the conversations listing would be `WHERE_TO_LOOK` used where
-// it is not true; but a decline is the hub's own act and this page did not read what it
-// said about it, so declaring there is nothing to find would be asserting a state it has
-// not read — the rule this file keeps everywhere (ADR-0177 §7). Saying neither is the
-// accurate option, and the missing sentence is what an unread reason costs.
-const ASK_REFUSED_DECLINED =
-  "You stopped waiting for that answer, so this browser is no longer listening for it. " +
-  "The assistant did receive that question and declined it, so no answer was produced — " +
-  "and this browser stopped before reading the reason it gave. " +
-  "Nothing was re-sent and nothing was cancelled — the assistant was not told to stop. " +
-  "Asking again asks a new question rather than retrying that one.";
-
-// Which of the three a refusal head earns, and the whole enumeration in one place.
-// `401` and `409` never arrive here — the re-entry branch above takes them, because
-// ADR-0182 §6 gives them a remedy as well as a sentence.
-function refusalAbandoned(status) {
-  if (status === DECLINED_BY_THE_ASSISTANT) {
-    return ASK_REFUSED_DECLINED;
-  }
-  if (RELAY_FAULT_STATUS.has(status)) {
-    return ASK_REFUSED_UNREAD;
-  }
-  return ASK_REFUSED_UNRUN;
-}
-
-// The control, and the line beside it. Built here rather than shipped in `index.html`
-// because it belongs to a request and not to the surface — the page already builds a
-// fault's Dismiss (`offerDismiss`), a park's pair (`offerApproval`) and the credential
-// field this way — and because the sheet reaches it wherever it is created: `button` is
-// the one rule every control on this page comes through, so the 44px touch floor and
-// the `max-width: 100%` that keeps a long label inside a phone's width are not this
-// function's to remember.
-function offerStopWaiting() {
-  const said = document.createElement("p");
-  said.className = "hint";
-  said.id = "ask-state";
-  said.hidden = true;
-  const stop = document.createElement("button");
-  // Inside the ask form, where a button with no type is a submit button — which would
-  // ask the question again, on the one control whose entire purpose is that it sends
-  // nothing (ADR-0182 §7's fifth clause).
-  stop.type = "button";
-  stop.id = "stop-waiting";
-  stop.textContent = "Stop waiting";
-  stop.hidden = true;
-  stop.addEventListener("click", abandonAsk);
-  const form = el("ask-form");
-  form.appendChild(said);
-  form.appendChild(stop);
-}
-
-// Whether a question is out, said and offered in one place so the sentence and the
-// control cannot get out of step with each other.
-function askWaiting(is) {
-  el("ask-state").textContent = is ? ASKING : "";
-  el("ask-state").hidden = !is;
-  el("stop-waiting").hidden = !is;
-}
-
-// The control handed back and the wait ended, whatever ended it. This is the invariant
-// #1500 is about: it runs on every exit an ask has, the ones that never settle
-// included, and it is the only thing that re-enables the button.
-function releaseAsk() {
-  awaited = null;
-  askWaiting(false);
-  el("ask-button").disabled = false;
-  showAskForm();
-}
-
-// The owner's act, and the only thing on this page that ends a turn's wait early.
-//
-// **It aborts and it announces, and it sends nothing.** The abort is what makes the
-// pending `fetch` settle, so the promise this page is waiting on stops being one that
-// never resolves; the sentence is what keeps the restored control from reading as an
-// act that finished. A control that quietly re-ran the question would be the silent
-// retry ADR-0168 §9 forbids wearing a button's clothes — `offerDismiss` says the same
-// of itself, one surface over.
-function abandonAsk() {
-  const waiting = awaited;
-  if (waiting === null) {
-    return;
-  }
-  // Released before the abort, so the rejection it provokes finds this ask already
-  // settled and `ask`'s own `finally` leaves the control alone.
-  releaseAsk();
-  // **Which is why the reference is reconciled here and not only there** (round 3,
-  // `major`): `ask`'s `finally` is about to find `awaited !== waiting` and leave every
-  // shared thing alone, so an ending that stopped here would leave the hint reading
-  // `REFERENCE_SENT` for good — a page claiming a turn was still running on the very
-  // act that says this browser stopped listening — with the control hidden. This site
-  // knows it is the live ask, having just read `awaited`, so the guard `ask` needs is
-  // one this call does not.
-  reconcileReference(waiting);
-  waiting.stopping.abort();
-  // **A refusal the head already named is not an unknown outcome, and re-entry is what
-  // it means.** Taken before everything below, because everything below is the wording
-  // and the tidying of a wait whose outcome nobody read — and this is a wait whose
-  // outcome was read off the status line before the body ever stalled.
-  const ended = SESSION_LOST_STATUS.get(waiting.refusedWith);
-  if (ended !== undefined) {
-    const named = { fault: ended };
-    // The screen a refusal read to the end leaves, left the same way by a refusal whose
-    // body the owner stopped reading: both turn entries hide the answer panel before
-    // reporting one, and this is the same refusal reported through a different door.
-    show("answer", false);
-    sessionLost(named, `${describe(named, waiting.refusedWith)} ${REFUSED_AT_THE_DOOR}`);
-    return;
-  }
-  // **Every other refusal head, which is a reply this browser read and did not
-  // understand.** It is not re-entry — nothing about the session ended — so the control
-  // simply comes back, with the two things the status does say and without the sentence
-  // below, whose opening clause a refusal head makes false.
-  if (waiting.refusedWith !== null) {
-    // The screen an ordinary refusal leaves, for the reason the branch above leaves it.
-    show("answer", false);
-    fault(refusalAbandoned(waiting.refusedWith), "goals");
-    return;
-  }
-  // Which sentence is which fact: a successful head read before the wait was stopped is
-  // the assistant having taken the question, and no head is nothing read at all.
-  fault(waiting.heard ? ASK_ABANDONED_MIDWAY : ASK_ABANDONED, "goals");
-}
-
-async function ask(event) {
-  event.preventDefault();
-  // The ordinary turn is the chat's (ADR-0293 §11); this form sends only a turn that
-  // answers a clarification or takes a goal up, and it is on screen only while one of
-  // the goal acts has attached the reference that says which.
-  if (reference === null) {
-    return;
-  }
-  fault(null, "goals");
-  const half = headerHalf();
-  if (half === null) {
-    showBootstrap();
-    return;
-  }
-  const button = el("ask-button");
-  button.disabled = true;
-  // Read before the request goes out, so that what is compared on the way back is the
-  // selection this turn was sent under and not the one it is landing into.
-  const chosenAt = chose;
-  // The record of this one ask: what can stop it, and what has been observed of it.
-  // Every observation starts empty and is set only by its own evidence arriving.
-  const waiting = {
-    stopping: new AbortController(),
-    heard: false,
-    ran: false,
-    refusedWith: null,
-    // ADR-0250 §11's reference, held on the record of *this* ask so that whichever site
-    // ends it can reconcile it: `abandonAsk` ends a wait without `ask`'s `finally` ever
-    // reaching its guard, and a reconciliation that lived only in `ask` would leave that
-    // ending mid-sentence. Round 3, `major`.
-    reference: null,
-  };
-  awaited = waiting;
-  askWaiting(true);
-  // ADR-0250 §11's keyword, recorded on this ask **before** the try so that every exit
-  // can reconcile it — an abort leaves through `abandonAsk` and a rejected fetch through
-  // the catch, and neither reaches a line written after the await (adversarial review,
-  // round 3, `major`). Nothing between here and the body's construction touches
-  // `reference`, so recording it here is recording it at submission.
-  waiting.reference = reference;
-  try {
-    const asked = { utterance: el("utterance").value };
-    if (conversationId !== null) {
-      asked.conversation_id = conversationId;
-    }
-    // The browser's own argument, relayed whole. It is the value read above rather than
-    // whatever is attached by the time this turn ends: what a turn may give up is the
-    // reference it *sent*. `ask` runs only with one attached, which is what the gateway
-    // requires of `/ask` since ADR-0293 §11 (the form is shown only while one is).
-    asked.reference = waiting.reference.value;
-    // From here the body is serialised and the control can no longer take it back, so
-    // the page stops offering it and says so (round 2, `major`).
-    referenceSent(waiting.reference);
-    // One entry, answered whole: ADR-0293 §11 retired the streamed turn with the
-    // conversation it carried, and what is left here is the turn that carries a
-    // reference (ADR-0250 §11).
-    await askWhole(half, asked, chosenAt, waiting);
-  } catch (_) {
-    // An abort this owner asked for is not the gateway having gone, and saying it was
-    // would be a wrong explanation rather than a missing one — `readDeliveries`' own
-    // catch keeps the same distinction. `abandonAsk` has already said what happened, in
-    // the one place that knows it was an act rather than a failure, so this branch
-    // stays silent for it. Whatever the abort provoked lands here — the `fetch`
-    // rejecting, the stream's reader erroring, a body half-read — and one check covers
-    // them all, because what makes them one condition is the signal and not the throw.
-    if (!waiting.stopping.signal.aborted) {
-      // `fetch` rejects when the connection itself failed — the gateway is gone,
-      // which is a different fault from the hub being gone and is said as one.
-      show("answer", false);
-      fault(GATEWAY_GONE, "goals");
-    }
-  } finally {
-    // **Only while this ask is still the one being waited on.** An owner who stopped
-    // waiting and then asked afresh leaves this promise to settle *after* the next
-    // question has taken the control, and a `finally` that re-enabled the button then
-    // would hand it back in the middle of a live turn — and hide that turn's own way
-    // out. The comparison is against the controller rather than a flag, so it is the
-    // identity of the ask that decides it.
-    if (awaited === waiting) {
-      releaseAsk();
-      reconcileReference(waiting);
-    }
-  }
-}
-
-// What becomes of the reference this ask sent, on **every** ending it can have.
-//
-// **In the `finally` and not after the await** (adversarial review, round 3, `major`).
-// An abort and a rejected `fetch` leave through the `catch`, so a reconciliation written
-// after the await ran on exactly one of three endings: pressing `Stop waiting` left the
-// hint reading `REFERENCE_SENT` for good — a page claiming a turn was still running
-// after it had said the opposite two lines up — with the control hidden, so the owner
-// could neither take the reference back nor see what it was for, and the next question
-// silently carried it.
-//
-// **Only while this ask is still the one being waited on**, which is `releaseAsk`'s own
-// guard and for its reason one state over: a superseded ask that settles late must not
-// move what the live one is holding. The `reference === sent` test is the second half of
-// it — a goal chosen while this turn was out is a value this turn never sent.
-//
-// **Dropped where the question reached the assistant, kept where it did not** (round 2).
-// `waiting.ran` is set exactly where an entry establishes that the assistant took the
-// question; a refusal the gateway took before `_assistant`, and a wait the owner ended
-// before anything arrived, establish nothing — so the same words go back on the screen
-// and the control comes back with them.
-//
-// **The conservative direction is to keep it**, which is what an ending that cannot tell
-// does: a stream cut before its first chunk, and an abandoned wait, may each have run a
-// turn — ADR-0173 §9 is explicit that abandoning the stream does not abandon it — and a
-// second send of the same reference is answered `ALREADY_SETTLED` and rendered as its
-// own fixed statement (§11). That is an honest sentence, where the other way round is an
-// answer that silently went nowhere.
-function reconcileReference(waiting) {
-  const sent = waiting.reference;
-  if (sent === null || reference !== sent) {
-    return;
-  }
-  if (waiting.ran) {
-    clearReference();
-  } else {
-    restoreReference(sent);
-  }
-}
-
-async function askWhole(half, asked, chosenAt, waiting) {
-  const response = await fetch("/ask", {
-    method: "POST",
-    headers: admitted(half, true),
-    body: JSON.stringify(asked),
-    signal: waiting.stopping.signal,
-  });
-  // **A successful head on this entry is proof the turn ran**: `_ask` awaits `converse` and
-  // answers with the outcome, so a `200` cannot come back until the assistant has
-  // finished with the question. The status is carried in the head, so this is known
-  // before the body — which is the read an abort lands in.
-  //
-  // **A refusal is not proof of anything**, and adversarial review found round 1's fix
-  // treating it as some: an expired session, a malformed payload or the connection
-  // ceiling is answered by `_check_door` or `_session_bound` *before* `_assistant` is
-  // reached, so a refusal head whose body then stalls says only that the gateway
-  // replied. Announcing that the assistant had begun on the question there would be
-  // exactly the inaccuracy this pair of sentences exists to avoid.
-  //
-  // **What a refusal head is proof of is itself**, and that is worth keeping rather than
-  // discarding: two of the statuses name their condition on their own, and a wait
-  // stopped during the stalled body is announced from the status rather than from the
-  // body that never arrived (`SESSION_LOST_STATUS`, `abandonAsk`).
-  if (response.ok) {
-    waiting.heard = true;
-    // And on this entry that is also proof the turn **ran**: `_ask` awaits `converse`
-    // and answers with the outcome, so a `200` cannot come back until the assistant has
-    // finished with the question. A refusal is proof of nothing.
-    waiting.ran = true;
-  } else {
-    waiting.refusedWith = response.status;
-  }
-  const body = await readBody(response);
-  // **A body abandoned part-way through is not a body this page can read**, and
-  // `readBody` cannot tell the difference: it answers anything unreadable with an empty
-  // object, which is the right rule for a body the gateway wrote badly and the wrong
-  // one for a read the owner stopped. Rendering `{}` here would put an answer-shaped
-  // nothing on screen for a turn whose outcome is not known; reporting it as a refusal
-  // below would be worse. The owner has already been told what happened.
-  if (waiting.stopping.signal.aborted) {
-    return;
-  }
-  if (response.ok) {
-    // **An outcome that could not be put on screen is one this page has not read**
-    // (#1622). `readBody` answers an unreadable `2xx` with `{}`, so `body.outcome` is
-    // `undefined` and the render threw here — into `ask`'s catch, which called it
-    // `GATEWAY_GONE` for a gateway that had just answered. The abort above has already
-    // taken the read the owner stopped, so what is left for this branch is a body the
-    // gateway did not write.
-    if (!couldRenderOutcome(body.outcome, chosenAt)) {
-      fault(ANSWER_UNREADABLE, "goals");
-    }
-    return;
-  }
-  show("answer", false);
-  conversationLost(body, asked.conversation_id);
-  refused("goals", body, response.status);
-}
-
-// --- push to talk (ADR-0200 §10) ---------------------------------------------
-//
-// **This page runs no speech engine.** It records with `MediaRecorder` and plays what
-// the hub sent back, and it calls neither `SpeechRecognition` nor `speechSynthesis` —
-// §10 forbids both by name, and `test_bundle.py` asserts the shipped script mentions
-// neither. Recognition here would make the edge decide what a submission means
-// (ADR-0094 §6, §7); synthesis here would speak text the hub's disclosure ruling never
-// saw (ADR-0199), which is the failure milestone 19's exit test is written to catch.
-//
-// **One request, answered whole.** The press ends before the request begins, so there
-// is nothing to stream: the recording goes up complete and the rendering comes back on
-// that request's response. No socket, no upgrade, no `EventSource`, no chunked upload
-// (ADR-0175 §1).
-//
-// **And it is a third entry, never a fallback from either other one** (ADR-0168 §9,
-// ADR-0200 §10). A spoken turn that fails is a spoken turn that failed; the typed form
-// is above it and the owner uses it or does not.
-
-// The container-and-codec members `SpokenAudioFormat` carries, in this page's own
-// preference order. Two facts are read off it and they are different questions: what
-// this browser can *encode* decides what is recorded, and what it can *decode* is what
-// `plays` tells the hub. A browser can be able to do one and not the other.
-//
-// Spelled as the enum's own values, parameters included, because that is what crosses:
-// `audio/webm` alone names a container two codecs can fill, and `MediaRecorder` wants
-// the codec named.
-const TALK_FORMATS = ["audio/webm;codecs=opus", "audio/mp4"];
-
-// **The bitrate this page asks its encoder for**, and the reason it asks at all.
-// ADR-0200 §6's own arithmetic is written against it — "512 KiB is about three minutes
-// of speech at a 24 kbit/s Opus bitrate" — and a `MediaRecorder` given no figure picks
-// its own, which on some browsers is five times that. A page taking the default would
-// hit `hub_max_spoken_audio_bytes` in half a minute where the ADR's arithmetic says
-// three, and would do it silently: the refusal is the gateway's, and the ceiling it
-// names says nothing about the bitrate that reached it. It is a hint rather than a
-// setting — an encoder may honour it approximately or not at all — which is exactly why
-// the bound below is on the *press* and not on this.
-const TALK_BITS_A_SECOND = 24000;
-
-// **The most this page will hold of one recording.** A press with no bound accumulates
-// for as long as a finger is down, and nothing discovers it until the upload — where the
-// answer is a size refusal after the owner has spoken for minutes. Adversarial review
-// found the class in round 3.
-//
-// **A bound on what this page holds, and not a copy of a bound that refuses.**
-// `hub_max_spoken_audio_bytes` and `gateway_max_request_bytes` are the hub's and the
-// gateway's, this page is told neither, and a guess at either here would be a second
-// place a figure lives with nothing keeping the two in step. What is chosen here is a
-// browser-memory question, which is this page's own — and it is chosen to sit inside
-// ADR-0200 §6's *default* arithmetic rather than to reproduce it: 384 KiB of audio is
-// under §6's 512 KiB default and its base64 is under `gateway_max_request_bytes`' 1 MiB
-// default with room for the head. Where an operator has set either lower, their refusal
-// still governs and is reported as itself.
-//
-// **It is asked before a chunk is kept, so what is held never exceeds it** — not by one
-// slice, not by a final chunk arriving after the release, and not by a browser that
-// hands over one very large block instead of the slices it was asked for. Asking about
-// the *prospective* total rather than the running one answers all three with one
-// comparison.
-//
-// **And a press that crosses it sends nothing at all**, which is the second half and the
-// one two rounds of review arrived at together. A recording is a container, and its last
-// chunk is where a `MediaRecorder` writes what finishes one; keeping the chunks before it
-// and uploading them is uploading a clip that may not decode — so the hub would be handed
-// something it cannot read, having been told the recording was sent. There is no
-// container-aware middle: this page does not parse WebM or MP4 and must not learn to.
-// Discarding is also the honest reading of what happened — the question ran past what
-// this page will hold, so there is no complete question to ask — and at this size it is a
-// runaway press rather than an ordinary one: two minutes of speech at the bitrate below.
-//
-// **And it is not a clock.** ADR-0182 §7 makes an owner's wait the owner's to end, and
-// this file keeps exactly one `setTimeout` for that reason — a page-side deadline over a
-// request would abandon a healthy turn and announce that its outcome was not known. This
-// bounds a *recording*, before any request exists and with no turn to be wrong about;
-// what measures it is the recorder handing over what it has, not a timer.
-const LONGEST_RECORDING_BYTES = 384 * 1024;
-
-// How often the recorder hands over what it has. Without an argument `MediaRecorder`
-// delivers everything once, at `stop` — which is exactly too late to bound anything, and
-// is why this figure exists rather than a clock.
-const RECORDING_SLICE_MILLISECONDS = 1000;
-
-const LISTENING = "Listening — let go when you have finished.";
-const SENDING = "Sending what you said…";
-
-// **Disabled and explained, rather than absent** (ADR-0200 §10, ADR-0202). A browser
-// withholds a microphone from a page whose origin it does not consider trustworthy,
-// and it gives no legible account of why — so a control that simply was not there
-// would leave an owner with nothing to act on. The two origins that work are named,
-// because naming them is the whole remedy.
-const NO_MICROPHONE =
-  "This browser will not hand this page a microphone. That is a property of the " +
-  "origin rather than of the assistant: a microphone is offered on the gateway's own " +
-  "machine at its http://127.0.0.1 address, and on another device at the https:// " +
-  "address docs/guide/phone.md sets up. Typing works everywhere.";
-
-// The two ways `getUserMedia` says no that an owner can do something about, and a
-// third for everything else. Read off the error's `name`, which is the one member the
-// specification fixes — its `message` is the browser's own prose and differs between
-// them.
-const MICROPHONE_DENIED =
-  "This browser did not give the page the microphone. Nothing was recorded and " +
-  "nothing was sent. The permission is the browser's, not the assistant's: allow the " +
-  "microphone for this site and hold the button again.";
-const NO_MICROPHONE_DEVICE =
-  "This device has no microphone the browser will offer. Nothing was recorded and " +
-  "nothing was sent.";
-const MICROPHONE_UNAVAILABLE =
-  "The microphone could not be opened, so nothing was recorded and nothing was sent. " +
-  "Something else may be holding it.";
-
-// The recorder refusing what the microphone gave it, which is a **third** condition and
-// not either of the two above: the browser handed the page a track and then would not
-// encode it. Found by driving the page — a `MediaRecorder` handed a track that had
-// already ended throws `NotSupportedError` out of `start`, and without the guard below
-// that throw escaped `startTalking` and left the control saying "Listening" with no
-// press it would ever accept again.
-//
-// **It advises what is known, and a retry is not it** (#1694). The milestone-19 QA run
-// met this line in a build whose refusal is *permanent* — `chromium_headless_shell`,
-// which recognises both formats and has an encoder for neither — where "holding the
-// button again is the thing to try" is advice an owner follows several times before
-// giving up. Nothing here can tell that browser from the transient case: `start()`
-// throws the same `NotSupportedError` for a track that has just ended and for a build
-// that will never encode anything. So the sentence says which two conditions it cannot
-// distinguish, and offers the one route that works under either.
-const RECORDER_REFUSED =
-  "This browser would not start recording, so nothing was recorded and nothing was " +
-  "sent. The microphone was opened and the recorder would not take it. Whether that " +
-  "was this press or is this browser, the page cannot tell: pressing again may work, " +
-  "and a browser with no encoder for either format this page records refuses every " +
-  "press the same way. Typing works either way.";
-
-// The press that reached :data:`LONGEST_RECORDING_BYTES`. Said rather than silent,
-// because a recording that stopped while the owner was still speaking is a question with
-// its end missing, and an owner who is not told will read the answer as the assistant
-// having misunderstood them. **Stopped and sent, not stopped and discarded**: what they
-// said up to here is a real question, and throwing it away to enforce a bound this page
-// chose would cost them the whole press.
-const RECORDING_TOO_LONG =
-  "That press ran past the longest recording this page holds, so it was stopped and " +
-  "nothing was sent: a recording cut off part-way through is not one the assistant can " +
-  "read, and sending it would ask a question this browser had already broken. Hold the " +
-  "button for a shorter question, ask it in parts, or type it.";
-
-// A press that produced no bytes at all — a tap rather than a hold, or a recorder that
-// was stopped before it had written anything. Said rather than sent: an empty
-// recording is not a question, and posting one would spend a turn to be told so.
-const NOTHING_RECORDED =
-  "That press was too short to record anything, so nothing was sent. Hold the button " +
-  "down while you speak, and let go when you have finished.";
-
-// ADR-0200 §4's no-words shape, which is **not** an error: "nothing was asked, so
-// nothing was answered, no turn ran, no episode was captured and no conversation was
-// created". So it is said in the page's own hint rather than in the fault surface,
-// where it would teach an owner that a quiet room is something going wrong.
-const HEARD_NOTHING =
-  "I heard nothing in that recording, so nothing was asked and nothing was answered.";
-
-// ADR-0200 §4's fourth degradation: an answer existed and speaking it did not
-// complete. **A statement rather than a fault**, for ADR-0170 §6's reason applied one
-// stage further on — the answer is on screen and is the whole of what was said, so
-// what is missing is the audio and nothing else.
-const NOT_SPOKEN =
-  "That answer is shown here and was not spoken: composing it worked and rendering it " +
-  "as speech did not. Nothing of the answer is missing — what is above is all of it.";
-
-// The rendering arrived and this browser could not play it. Distinct from the line
-// above, and the difference is where the failure was: the hub rendered speech and sent
-// it, and it is this browser that could not turn it back into sound.
-const COULD_NOT_PLAY =
-  "That answer was spoken and this browser could not play the audio. The answer above " +
-  "is the same words, complete.";
-
-// The press that ended an answer's playback (#1696). Said rather than silent, because an
-// answer that stopped sounding part-way through is otherwise indistinguishable from one
-// that finished: the words stay on screen either way, so an owner who is not told will
-// read the truncation as the whole of what was spoken aloud.
-//
-// **A statement and not a fault**, for `NOT_SPOKEN`'s reason — the interruption is the
-// owner's own act and the answer above it is complete, so what it reports is where the
-// sound stopped and nothing more.
-const PLAYBACK_INTERRUPTED =
-  "You pressed to talk, so this answer stopped being spoken. Nothing of the answer is " +
-  "missing — what is above is all of it.";
-
-// The press that ended a playback and then asked nothing (#1701, the owner's direction
-// of 2026-08-28). Written into the slot the sentence above was written into, because it
-// **replaces** it: an answer that picked up where it stopped did not stop being spoken,
-// and leaving the earlier sentence standing would be the page's account of the sound
-// disagreeing with the sound.
-const PLAYBACK_RESUMED =
-  "That press asked nothing, so this answer picked up where the sound stopped. It is " +
-  "the same answer, played on from there rather than started again — nothing was " +
-  "re-asked and no new turn ran.";
-
-// What stopping a spoken wait says. #1500's condition on the third entry, and the
-// wording is `ASK_ABANDONED`'s because the state is the same one: the request went out
-// and no response was read, so the turn may have run and was certainly never called
-// back. It is **not** `ASK_ABANDONED_MIDWAY` — a spoken turn streams nothing, so there
-// is no partial reply this browser could have read.
-const SPOKEN_ABANDONED =
-  "You stopped waiting for that answer, so this browser is no longer listening for it. " +
-  "What became of the turn is not known: the recording was sent and nothing here read a " +
-  "reply, so the assistant may have carried it out and may never have received it. " +
-  "Nothing was re-sent and nothing was cancelled — the assistant was not told to stop. " +
-  "Holding the button again asks a new question rather than retrying that one. " +
-  WHERE_TO_LOOK;
-
-// **A spoken answer this browser read a `2xx` for and cannot put on screen** (#2005),
-// which is `ANSWER_UNREADABLE`'s condition arriving on the third entry that renders a
-// turn. `readBody` answers an unreadable `2xx` with `{}`, so the `turn` member may be
-// absent; a `turn` that is there may carry no `outcome`; and an `outcome` that is there
-// may still not carry what `renderOutcome` reads. `couldRenderOutcome` finds all three,
-// and ADR-0200 §4's `=== null` pairing check is not one of them — that check is for the
-// recording that carried no words, and an absent member is not that pair.
-//
-// **It says the turn ran, which on this entry is read rather than assumed** —
-// `ANSWER_UNREADABLE`'s clause for `ANSWER_UNREADABLE`'s reason. `_ask_spoken` awaits
-// `converse_spoken` and renders the turn afterwards, so a `200` cannot come back until
-// the assistant has finished with the recording: the head is intact evidence, and it is
-// the *body* this browser could not read.
-//
-// **And it says that nothing of the turn is on screen or in the air**, which is this
-// surface's own half and the thing the two ask entries have no equivalent of. §4 makes
-// `heard` and `spoken` members of the same answer this browser has just found it cannot
-// read, so the transcript is not disclosed and the rendering is not played — an owner
-// who has just spoken is otherwise left reading a fault beside a silence they cannot
-// account for, and told nothing about why the sound they were waiting for never came.
-const SPOKEN_ANSWER_UNREADABLE =
-  "The gateway answered that recording and this browser could not read an outcome from " +
-  "the answer, so what the turn did is not known. The turn itself ran: this entry " +
-  "answers only once the assistant has finished with the recording. Nothing of it is " +
-  "shown or spoken here — what was heard and the answer's own speech are parts of the " +
-  "same answer this browser could not read. Nothing was re-sent and nothing was " +
-  "cancelled. " +
-  WHERE_TO_LOOK;
-
-// **One audio context for the page, built and resumed inside the press.**
-//
-// Adversarial review found the fix for a defect this replaces: a context created after
-// the upload had settled is created *outside* the gesture that led to it, and a browser
-// enforcing transient activation for Web Audio starts it suspended and refuses the
-// `resume` — so a perfectly good rendering came back and was reported as one this
-// browser could not play. That is not a hypothetical on the browser milestone 19's exit
-// test names: WebKit's rule is the strict one, and the exit test is a phone.
-//
-// So it is built where the activation is: `startTalking` runs inside the `pointerdown`
-// or `keydown` handler, and `readyToPlay` is its first act, before any `await`. It is
-// then held for the life of the page rather than closed after a rendering, because
-// closing it would put the next playback back outside a gesture — which is the defect.
-let listeningContext = null;
-
-// The resume the press started, or `null` where no resume was owed. **Held rather than
-// dropped** (#1690): a `resume()` whose promise nobody observes is a failure nobody hears
-// about, and the caller that needs the answer is `playSpoken`, one `await` later.
-let resuming = null;
-
-function readyToPlay() {
-  try {
-    if (listeningContext === null) {
-      listeningContext = new AudioContext();
-    }
-    // **Every state that is not `"running"`, rather than `"suspended"` alone** (#1690).
-    // `AudioContextState` has a third member some browsers use — `"interrupted"`, which
-    // is where WebKit puts a context when a call arrives or another application takes
-    // the audio session — and a context left in it fails silently in *both* directions:
-    // `decodeAudioData` still succeeds, `start()` produces no sound, and nothing throws,
-    // so the notice saying the audio was lost is never reached either. Which is the
-    // worst of the three outcomes: an answer the page believes it spoke.
-    if (listeningContext.state !== "running") {
-      resuming = Promise.resolve(listeningContext.resume());
-      // Observed here as well as awaited there, because a press need not produce a
-      // spoken answer at all — a rejection nothing is waiting on is an unhandled
-      // rejection in the console, which is noise this page does not make. Attaching a
-      // handler does not consume the rejection: the `await` in `playSpoken` still sees
-      // it, and still says so.
-      void resuming.catch(() => {});
-    }
-  } catch (_) {
-    // A browser with no Web Audio at all. The recording still goes up and the answer is
-    // still shown and read; what is lost is hearing it, which `playSpoken` says.
-    listeningContext = null;
-    resuming = null;
-  }
-}
-
-// **The playback this page has in the air**, or `null` when nothing is sounding and
-// nothing is on its way to sounding. A record rather than the source itself, because the
-// interrupt has to reach a playback that has no source yet: `playSpoken` awaits a resume
-// and a decoder before it has anything to stop, and a press landing in that window must
-// leave nothing behind that will start afterwards.
-//
-// **What a record carries**, beside the source and the slot the notices go into: the
-// decoded `buffer`, the `offset` into it the current source started at, the audio
-// context's `startedAt` instant it started on, and `played` — where the sound had
-// reached when the playback ended, stamped by whichever ending got there. Together they
-// answer "how much of this answer sounded" from the record alone, which is what
-// `playedSoFar` reads and what #1705 needs answered in the window a second `ended`
-// listener cannot reach.
-//
-// **And two names, so the report has a subject** (ADR-0205 §1, §7): `episode`, the
-// `episode_id` the response carrying this rendering disclosed, and `conversation`, the
-// conversation that response named. Both are carried on the record rather than read off
-// the page's current selection when the playback ends, because by then the owner may
-// have chosen another conversation — and a report is about the turn it names, which is
-// a fact settled when the answer arrived and not when the sound stopped.
-let playing = null;
-
-// **The playback a press ended that may turn out to have been an accident** (#1701), or
-// `null` where there is none. Held from the press until the answer to it comes back,
-// because whether the press asked anything is not known until then: ADR-0200 §4's
-// no-words release is the one ending that resumes it, and every other ending drops it —
-// which `interruptPlayback` does at the top of every press, before anything decides to
-// keep one.
-let held = null;
-
-// **The reports the next spoken request may carry, one per conversation** (ADR-0205
-// §7). Each says how much of one earlier answer this device played, and names that
-// answer by the `episode_id` the response carrying it disclosed — never by a position,
-// an ordinal or anything this page counted, which is what makes a report that arrives
-// after another turn has been captured land on the turn it is actually about rather
-// than on whichever turn is newest.
-//
-// **Keyed by conversation, because §7 says "the playback it last had in the air **for
-// the conversation it is sending**".** Adversarial review, round 2, `blocker`: a single
-// slot let a completed playback in conversation B overwrite an unsent report for
-// conversation A, so returning to A sent nothing and left a turn the owner had
-// certainly heard — or certainly cut off — `UNKNOWN` for ever. A `Map` is what makes
-// the qualifier in that clause mean something rather than describing a filter that
-// usually discards.
-//
-// **Written where a playback ends and nowhere else**: `soundFrom`'s `ended` listener
-// for a source that ran to its end, and `interruptPlayback` for one a press cut short.
-// Both readings come off the record `stopPlaying` stamps, so there is one arithmetic
-// for "how much sounded" and not two.
-//
-// **Held rather than sent at once.** There is no route for it and ADR-0205 §1 declines
-// to add one: the fact's only reader is the composing stage of the *next* turn, so it
-// rides the request that turn already makes. The honest cost is the owner who
-// interrupts and never speaks again — that report is never sent and the hub's record
-// stays `UNKNOWN`, which is the correct account of it rather than a gap.
-// **Nothing is evicted, and a measured report is kept until it is sent.** Both review
-// lenses, round 3, `blocker`, on a bound this page had put here of its own accord:
-// ADR-0205 §7 admits exactly one case for reporting nothing — "where it holds no such
-// pair" — and an eviction manufactures a second, leaving a turn the page had genuinely
-// measured `UNKNOWN` when the owner comes back to it. The growth this guarded against
-// does not survive arithmetic: an entry is five short strings, one per conversation
-// this page has played an answer in and not yet spoken in again, so a session would
-// need thousands of such conversations to hold what a single rendered turn already
-// holds in the DOM. The ADR-visible behaviour is worth more than the bound.
-const pendingDeliveries = new Map();
-
-// **A press is an interrupt** (#1696, the owner's ruling of 2026-08-28, from a real
-// iPhone). Pressing to talk over an answer that is still being spoken is the same act as
-// speaking over a person: it ends what was being said. Two things made it necessary, and
-// either alone would have — the page opens the microphone into a room its own
-// loudspeaker is filling, so the recording hears the assistant's own voice; and an owner
-// who had read the answer had no way to stop it short of leaving the page.
-//
-// **It reaches the decode as well as the source.** Stopping only a live
-// `AudioBufferSourceNode` would leave a rendering whose decode was still pending to
-// start a moment later — the same defect one beat on, and the harder one to see.
-//
-// **And it is the activation's, not the recording's.** It runs before every one of
-// `startTalking`'s guards, so a press that goes on to record nothing still stops the
-// sound: what the owner asked for by pressing is the silence, and a page that gave it to
-// them only on the presses that happened to record would be answering a different act.
-function interruptPlayback() {
-  const ended = stopPlaying();
-  // **Dropped on every press, before anything decides to keep one.** What `held` names
-  // is this press's playback or it is nothing: a press that goes on to ask a question,
-  // or that never reaches a recorder at all, must not leave a buffer behind for some
-  // later press's silence to resume.
-  held = null;
-  if (ended === null) {
-    return;
-  }
-  // **A notification's playback is ended and nothing else** (ADR-0206 §8, §9). The
-  // press interrupts it — "a press to talk always interrupts a notification's
-  // playback… a notification is the interruptible one of the two" — and that is the
-  // whole of what happens. Three things this deliberately does *not* do:
-  //
-  // * **It reports nothing.** §9: "No component sends, records or infers whether a
-  //   page had a context, was playing, played, finished playing or was interrupted."
-  //   `reportDelivery` would refuse this record anyway — a notification has no
-  //   `episode_id` and no conversation — but refusing it by accident is not the same
-  //   as refusing it on purpose, and §9 is a clause a later lane must not be able to
-  //   defeat by giving the record two names it does not have.
-  // * **It writes no notice.** A notification has no answer panel to write one into,
-  //   and "That answer stopped being spoken" under a notification would name the
-  //   wrong subject.
-  // * **It is never held for a resume.** #1701's resume is for an *answer* an
-  //   accidental press cut off, and §8 forbids the page holding a rendering for
-  //   later in terms: "The page holds no rendering for later, queues nothing behind
-  //   a playback, and plays no notification after the delivery that carried it has
-  //   been rendered on screen." The notification is on the page either way, which
-  //   under §5 is the channel that carries it.
-  if (ended.notification) {
-    return;
-  }
-  // **A playback that had already elapsed was not interrupted** (#1705). `ended` is a
-  // queued task and not a synchronous callback, so a source that reached its natural end
-  // still names itself in `playing` for the moments between the two — and a press
-  // landing there found a record, stopped a source that had already finished, and wrote
-  // "this answer stopped being spoken" under an answer that had been heard in full. The
-  // sentence was wrong about a few milliseconds of the world, which is a small thing to
-  // be wrong about and the page's own account of the sound to be wrong in.
-  //
-  // Decided from where the sound had reached, which `stopPlaying` has just stamped, and
-  // not from a second listener: the whole of the window is *before* the queued one runs.
-  if (playbackElapsed(ended)) {
-    // It played out, so that is what is reported — the press is not what ended it
-    // (ADR-0205 §7). The `ended` listener cannot do it here: `stopPlaying` has already
-    // cleared the record, so the queued task finds `playing !== mine` and returns.
-    reportDelivery(ended, "complete");
-    return;
-  }
-  reportDelivery(ended, "interrupted");
-  playbackInterrupted(ended.slot);
-  // Kept for the release that turns out to have asked nothing (#1701). Nothing here
-  // resumes it — this runs inside the press, and whether that press was an accident is
-  // not known until its answer comes back.
-  held = ended;
-}
-
-// End whatever is in the air, let go of the record, and hand back what it named — or
-// `null` where there was nothing. **It says nothing of its own**, because what is owed
-// depends on *why* the playback ended and only the caller knows that: a press is an
-// interruption the owner is told about, and an answer taking the record over is not.
-function stopPlaying() {
-  const mine = playing;
-  if (mine === null) {
-    return null;
-  }
-  // Cleared first, so a decode this overtook finds the record already gone and starts
-  // nothing — see `playSpoken`, where that comparison is made.
-  playing = null;
-  // **Where the sound had reached, stamped before the source is stopped.** After `stop()`
-  // there is no clock left to read it from, and both callers that need it run afterwards:
-  // the notice this ending may owe (#1705) and the resume that may follow it (#1701).
-  mine.played = playedSoFar(mine);
-  if (mine.source !== null) {
-    try {
-      mine.source.stop();
-    } catch (_) {
-      // A source that has already finished. Stopping one is not a failure worth
-      // reporting to anybody: what this asked for is what is already true.
-    }
-    mine.source = null;
-  }
-  return mine;
-}
-
-// How much of a playback's buffer has sounded, in seconds: what was already behind its
-// source when that source started, plus what the audio context's clock has advanced
-// since.
-//
-// **The context's clock and not the page's.** `currentTime` advances with the audio the
-// context is playing, so a context the browser suspended part-way through accrues no
-// playback nobody heard — which a wall clock would. Clamped to the buffer, because a
-// source that has run past its end goes on advancing `currentTime` and what is being
-// asked about is the answer and not the clock.
-//
-// **One value whatever ended the playback, and one across a resume.** A resumed playback
-// starts with the interrupted one's reading as its `offset` (#1701), so an answer taken
-// up again and allowed to finish reads as the whole buffer rather than as the remainder
-// — which is what "played N of M s" has to mean for the report ADR-0205 §7 defines to be
-// able to say `COMPLETE` of it.
-function playedSoFar(mine) {
-  if (mine.buffer === null) {
-    return 0;
-  }
-  if (mine.source === null || listeningContext === null) {
-    return mine.offset;
-  }
-  const sounded = mine.offset + (listeningContext.currentTime - mine.startedAt);
-  return Math.min(Math.max(sounded, 0), mine.buffer.duration);
-}
-
-// Whether a playback reached the end of its buffer, read off the two values its record
-// carries. **Answerable in the window a second `ended` listener cannot reach** (#1705):
-// the whole of that window is between the natural end and the queued task, so what
-// decides it has to be arithmetic over the clock rather than another event.
-//
-// A record with no buffer has not elapsed and cannot have: it is a playback whose decode
-// the press overtook, which never sounded at all and is an interruption exactly as one
-// cut off mid-sentence is.
-function playbackElapsed(mine) {
-  return mine.buffer !== null && mine.played >= mine.buffer.duration;
-}
-
-// **Record what this device played of one answer, for the next request to carry**
-// (ADR-0205 §7). `state` is `"complete"` where the source ended of its own accord and
-// `"interrupted"` where a press ended it — a distinction this page already draws, and
-// one it never invents: nothing here guesses at a state from a duration.
-//
-// **Reported only where there is a pair to report**: an answer this page holds an
-// `episode_id` for, in a conversation the hub named, whose buffer it actually decoded.
-// A playback whose decode a press overtook has no measurement to report and produces
-// no report at all, which ADR-0205 §3 names as the ordinary case rather than a gap —
-// and a turn nobody reports on stays `UNKNOWN`, which is the true account of it.
-//
-// **The durations are whole microseconds**, `timedelta`'s own resolution and the
-// spelling this gateway reads every duration in.
-//
-// **An interruption that cannot be spelled is not reported at all, and is never
-// spelled `complete`.** Architecture review, round 1, `blocker`. A press landing
-// within a microsecond of the buffer's end rounds both numbers equal, and
-// `interrupted` with two equal numbers is a value ADR-0205 §2's partition refuses —
-// but the answer to that is silence, not the other state. §7 says this page "reports
-// `COMPLETE` where the source ended of its own accord and `INTERRUPTED` where a press
-// ended it… and it invents neither", so rewriting a press's state into `complete`
-// would be the page inventing exactly the one §7 forbids it to. It would also fail in
-// the direction the whole decision exists to close: the composing stage would treat an
-// answer the owner cut off as fully heard. Omitting leaves the turn `UNKNOWN`, which
-// §4 calls the conservative reading and which no stage ever renders as heard.
-function reportDelivery(mine, state) {
-  if (mine.episode === null || mine.conversation === null || mine.buffer === null) {
-    return;
-  }
-  const rendered = Math.round(mine.buffer.duration * MICROSECONDS);
-  if (!Number.isFinite(rendered) || rendered <= 0) {
-    return;
-  }
-  const played = state === "complete" ? rendered : Math.round(mine.played * MICROSECONDS);
-  if (!Number.isFinite(played) || played < 0) {
-    return;
-  }
-  // The partition ADR-0205 §2 fixes, checked here so that what this page sends is
-  // always a value the promoted surface admits: `complete` is the two equal, and
-  // `interrupted` is `played` strictly below `rendered`. An interruption that does not
-  // satisfy it is dropped rather than restated as the other state.
-  if (state === "interrupted" && played >= rendered) {
-    return;
-  }
-  // One report per conversation, and the later playback is the one that stands: what
-  // §7 asks for is "the playback it **last** had in the air" for that conversation, so
-  // a second answer played there replaces the first rather than joining it.
-  pendingDeliveries.set(mine.conversation, {
-    episode_id: mine.episode,
-    delivery: {
-      state,
-      played_microseconds: String(played),
-      rendered_microseconds: String(rendered),
-    },
-  });
-}
-
-// The report to send with a request against `conversation`, or `null` (ADR-0205 §7).
-//
-// **Only the one about the conversation being sent.** A report names a turn, and the
-// hub discards one naming a turn the conversation does not carry — but sending it there
-// would be this page asserting a pairing it has no reason to assert, and §7 says it
-// reports "the playback it last had in the air **for the conversation it is sending**".
-//
-// **Taken rather than read**: a report that goes out is let go of, so a second press
-// does not re-send it. Every *other* conversation's report is left where it is, because
-// the fact stays true and the hub applies it to the turn it names however many turns
-// have been captured since (§1) — so returning to a conversation still carries what was
-// measured there.
-function takeDelivery(conversation) {
-  if (conversation === null) {
-    return null;
-  }
-  const report = pendingDeliveries.get(conversation);
-  if (report === undefined) {
-    return null;
-  }
-  pendingDeliveries.delete(conversation);
-  return report;
-}
-
-// The one refusal after which a report is let go of rather than kept (ADR-0205 §7).
-//
-// **The page stopped guessing which side a failure happened on**, which is the class of
-// bug adversarial review found twice — first on the refusals the gateway decides before
-// it relays, then on `assistant-declined`, which `Engine.converse_spoken` can raise for
-// an oversized recording *before* it records the report. A fault name is not a witness
-// to whether the turn was stamped, and enumerating the ones that are was always going
-// to be a list one case short.
-//
-// So the rule is the asymmetry instead. §1 makes a resend **idempotent** — a report
-// names its turn, so it "either finds it unstamped and stamps it, or finds it stamped
-// and does nothing" — while dropping a live measurement loses it for ever. Keeping a
-// report that turns out to have landed costs one redundant field on one request;
-// dropping one that did not costs the fact. So the report is let go of on exactly two
-// answers: a call that **returned**, where the engine recorded it before the recording
-// was even transcribed, and this one.
-//
-// `delivery-unusable` is the gateway saying it could not parse the report itself, which
-// is deterministic by construction: an identical resend earns an identical refusal, so
-// keeping it would put the same doomed value on every later request for that
-// conversation and wall the owner out of speaking there at all.
-const DELIVERY_REFUSED = "delivery-unusable";
-
-// **Put back a report whose request the hub cannot have seen** (ADR-0205 §7).
-//
-// Adversarial review, round 4, `blocker`. `takeDelivery` lets go of the report before
-// `fetch`, because the body needs it — so a request that never arrives took a measured
-// delivery fact with it, and the turn stayed `UNKNOWN` although this page had measured
-// it. Resending is safe rather than merely tolerable: §1 makes a report name its turn,
-// so a resend "either finds it unstamped and stamps it, or finds it stamped and does
-// nothing", and it "can never be applied to a turn captured since".
-//
-// **A newer measurement wins.** If a playback in that conversation ended while the
-// failed request was out, the report now held is about a later answer — which is the
-// one §7 asks for, "the playback it **last** had in the air" — so this puts the old one
-// back only where nothing has taken its place.
-function restoreDelivery(conversation, report) {
-  if (!report || !conversation || pendingDeliveries.has(conversation)) {
-    return;
-  }
-  pendingDeliveries.set(conversation, report);
-}
-
-// Microseconds in a second, so the two conversions read as arithmetic.
-const MICROSECONDS = 1000000;
-
-// The press being served, or `null` between presses.
-//
-// **A record rather than a flag**, because a release can land before the browser has
-// answered the permission prompt: the release marks *that* press abandoned, and the
-// code that resumes after the prompt checks that it is still the press it started as
-// rather than that some press is in flight.
-let press = null;
-
-// What this browser says it can encode, or `null` where it names none of them. Asked of
-// `MediaRecorder` rather than assumed from the user agent, which is as close to an
-// honest answer as the platform offers.
-//
-// **It is an answer about recognition and not about encoding** (#1694). The method
-// promises only that the type is one the browser *recognises*; it does not promise an
-// encoder for it. Driving the page found the gap rather than reasoning to it:
-// `chromium_headless_shell` answers `true` for both members of `TALK_FORMATS`, then
-// throws `NotSupportedError: no encoder` out of `start()` — on a live track, and
-// identically with no options at all. So `start()` is the only real test, which is why
-// `startTalking` guards it and says what happened rather than trusting this call.
-function recordableFormat() {
-  if (typeof window.MediaRecorder !== "function") {
-    return null;
-  }
-  if (typeof MediaRecorder.isTypeSupported !== "function") {
-    return null;
-  }
-  return TALK_FORMATS.find((one) => MediaRecorder.isTypeSupported(one)) ?? null;
-}
-
-// What this browser can decode, which is what `plays` says (ADR-0200 §3): "what the
-// caller can *render*, not who can *hear*". In preference order, because the hub
-// renders in "the **first** member of `plays` that the synthesizer's `formats` property
-// also names" — so the order here is a real choice and not a formality.
-//
-// **The recorded format is the floor.** `canPlayType` answers about the media element's
-// decoders and can be empty on a browser that plainly has the codec, since it just
-// encoded with it; sending an empty `plays` is refused by the promoted surface, and
-// sending nothing at all would silence a turn this browser could have heard.
-function playableFormats(recorded) {
-  const probe = document.createElement("audio");
-  const playable = TALK_FORMATS.filter((one) => probe.canPlayType(one) !== "");
-  return playable.length > 0 ? playable : [recorded];
-}
-
-// What the page says about the microphone, in one place so the sentence and the
-// control cannot get out of step.
-function saying(text) {
-  el("talk-state").textContent = text;
-  el("talk-state").hidden = text === "";
-}
-
-// What the hub heard, disclosed on every call that produced a transcript (ADR-0200 §4).
-// Inserted as text like every other value the hub returns (ADR-0168 §6): a transcript
-// is model output.
-function heardWas(text) {
-  el("heard").textContent = text === null ? "" : `Heard: ${text}`;
-  el("heard").hidden = text === null;
-}
-
-// Whether this browser will let the page record at all, decided on load and said on
-// screen either way. Three things have to be true and each is a different question:
-// the page must be able to *ask* for a microphone, it must have a recorder, and that
-// recorder must be able to produce a format this surface carries.
-function offerTalk() {
-  const button = el("talk-button");
-  const usable =
-    navigator.mediaDevices !== undefined &&
-    typeof navigator.mediaDevices.getUserMedia === "function" &&
-    recordableFormat() !== null;
-  button.hidden = false;
-  button.disabled = !usable;
-  el("stop-talking").hidden = true;
-  saying(usable ? "" : NO_MICROPHONE);
-}
-
-// Which of `getUserMedia`'s refusals this was, from the one member the specification
-// fixes. The browser's own `message` is never rendered: it is prose this project did
-// not author, and a page that relayed it would be saying something it cannot stand
-// behind about a device the owner has to act on.
-function microphoneRefused(error) {
-  const named = error && typeof error.name === "string" ? error.name : "";
-  if (named === "NotAllowedError" || named === "SecurityError") {
-    return MICROPHONE_DENIED;
-  }
-  if (named === "NotFoundError" || named === "OverconstrainedError") {
-    return NO_MICROPHONE_DEVICE;
-  }
-  return MICROPHONE_UNAVAILABLE;
-}
-
-// Give the microphone back the moment the recording ends. A track left live is a
-// browser still showing the recording indicator over a page that has stopped
-// listening, which is a claim about this page that would not be true.
-function releaseMicrophone(stream) {
-  if (stream === null) {
-    return;
-  }
-  stream.getTracks().forEach((track) => track.stop());
-}
-
-async function startTalking() {
-  // **First of all, and before the guards**: the owner's press ends the answer that is
-  // still being spoken (#1696). See `interruptPlayback` for why it is the activation
-  // that carries this rather than the recording that may follow it.
-  interruptPlayback();
-  const button = el("talk-button");
-  if (press !== null || button.disabled) {
-    return;
-  }
-  const format = recordableFormat();
-  if (format === null) {
-    return;
-  }
-  // **First, and before any `await`**: this function is running inside the press, and
-  // the audio context has to be built where that activation is.
-  readyToPlay();
-  fault(null, "console");
-  heardWas(null);
-  const mine = {
-    format,
-    released: false,
-    recorder: null,
-    stream: null,
-    chunks: [],
-    held: 0,
-    overran: false,
-    stopping: null,
-  };
-  press = mine;
-  saying(LISTENING);
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch (refusal) {
-    press = null;
-    saying("");
-    fault(microphoneRefused(refusal), "console");
-    return;
-  }
-  // **The release that landed while the prompt was up.** The owner let go, and what
-  // they let go of was this press: the microphone is handed straight back and nothing
-  // is recorded or sent. Checking the identity rather than a flag is what keeps a
-  // *later* press from being abandoned by an earlier one's release.
-  if (press !== mine || mine.released) {
-    releaseMicrophone(stream);
-    if (press === mine) {
-      press = null;
-      saying("");
-    }
-    return;
-  }
-  mine.stream = stream;
-  // **Guarded, because the failure here is the one that wedges the control.** Both the
-  // constructor and `start` throw synchronously — an unsupported type at the first, a
-  // track the browser will not encode at the second — and an escaping throw would leave
-  // this press in flight for the life of the page: `press` stays set, so every later
-  // press returns at the top, and the line on screen still says "Listening". The
-  // microphone goes back at the same time, because a page that has stopped listening
-  // must not leave the browser's recording indicator up.
-  let recorder;
-  try {
-    recorder = new MediaRecorder(stream, {
-      mimeType: format,
-      audioBitsPerSecond: TALK_BITS_A_SECOND,
-    });
-  } catch (_) {
-    releaseMicrophone(stream);
-    press = null;
-    saying("");
-    fault(RECORDER_REFUSED, "console");
-    return;
-  }
-  mine.recorder = recorder;
-  recorder.addEventListener("dataavailable", (event) => {
-    if (event.data.size === 0) {
-      return;
-    }
-    // **The prospective total, before the chunk is kept.** Asking about the running
-    // total after appending bounds nothing: the chunk that crosses is already held, and
-    // a browser handing over one very large block crosses by as much as that block is.
-    // So the chunk that would cross is not kept, and the press ends.
-    //
-    // **The size check is unconditional and only the stopping is not.** A final chunk
-    // arrives *after* the release, when there is no recorder left to stop, and a check
-    // that skipped it would leave exactly the unbounded upload this bound exists to
-    // prevent. `stopTalking` is the same act the release performs, so it is one ending
-    // of the press rather than a second path through it.
-    if (mine.held + event.data.size > LONGEST_RECORDING_BYTES) {
-      mine.overran = true;
-      // Let go of what was kept at the moment it stops being worth keeping, rather than
-      // holding a recording nothing will send until the press record is collected.
-      mine.chunks = [];
-      mine.held = 0;
-      fault(RECORDING_TOO_LONG, "console");
-      if (!mine.released) {
-        stopTalking();
-      }
-      return;
-    }
-    mine.chunks.push(event.data);
-    mine.held += event.data.size;
-  });
-  // The upload is hung off `stop` rather than off the release, because the recorder
-  // writes its last block as it stops: sending from the release would send a recording
-  // missing its own ending.
-  recorder.addEventListener("stop", () => {
-    void sendRecording(mine);
-  });
-  try {
-    recorder.start(RECORDING_SLICE_MILLISECONDS);
-  } catch (_) {
-    mine.recorder = null;
-    releaseMicrophone(stream);
-    press = null;
-    saying("");
-    fault(RECORDER_REFUSED, "console");
-    return;
-  }
-  // **The release that landed while the recorder was being built.** `stopTalking` marks
-  // the press released and stops a recorder only if there is one in `state`
-  // `"recording"`, and until this line there was not — so a press let go in that window
-  // would record until the page was closed. Taken after `start` rather than before,
-  // because a recorder that has not started cannot be stopped, and taken through
-  // `stopTalking` rather than around it so the bound above is disarmed with it.
-  if (mine.released) {
-    stopTalking();
-  }
-}
-
-function stopTalking() {
-  const mine = press;
-  if (mine === null) {
-    return;
-  }
-  mine.released = true;
-  if (mine.recorder !== null && mine.recorder.state === "recording") {
-    mine.recorder.stop();
-  }
-}
-
-// The control handed back and the press ended, whatever ended it — including the
-// endings that never settle, which is why this is a function and not a `finally` body.
-// It is the invariant #1500 is about, on the third entry: it runs on every exit a spoken
-// turn has, and it is the only thing that re-enables the button.
-function releaseTalk() {
-  press = null;
-  el("talk-button").disabled = false;
-  el("stop-talking").hidden = true;
-  // **Only the sentences that describe a press still happening.** `NOTHING_RECORDED` and
-  // `HEARD_NOTHING` are written on the way out and are the answer rather than a state, so
-  // clearing them would take the reply off the screen.
-  //
-  // `LISTENING` belongs here as well as `SENDING`, which driving the page is what found:
-  // a press that ran past `LONGEST_RECORDING_BYTES` never reaches `SENDING`, so a release
-  // that cleared only that one left "Listening — let go when you have finished." on
-  // screen beside a fault saying the recording had been stopped and the button handed
-  // back.
-  const said = el("talk-state").textContent;
-  if (said === LISTENING || said === SENDING) {
-    saying("");
-  }
-}
-
-// The owner's act, and the only thing that ends a spoken turn's wait early (#1500,
-// ADR-0182 §7's fifth clause).
-//
-// **It aborts and it announces, and it sends nothing.** The abort is what makes the
-// pending `fetch` settle, so the promise this page is waiting on stops being one that
-// never resolves; the sentence is what keeps the restored control from reading as an act
-// that finished. A control that quietly re-recorded would be the silent retry ADR-0168 §9
-// forbids wearing a button's clothes — `abandonAsk` says the same of itself one entry
-// over, and this is that entry's copy because the two waits are different waits: an owner
-// with a question out and a recording out has two things to stop and one control each.
-function abandonSpoken() {
-  const mine = press;
-  if (mine === null || mine.stopping === null) {
-    return;
-  }
-  // Released before the abort, so the rejection it provokes finds this press already
-  // settled and `sendRecording`'s own `finally` leaves the control alone.
-  releaseTalk();
-  mine.stopping.abort();
-  show("answer", false);
-  fault(SPOKEN_ABANDONED, "console");
-}
-
-async function sendRecording(mine) {
-  releaseMicrophone(mine.stream);
-  const half = headerHalf();
-  if (half === null) {
-    releaseTalk();
-    showBootstrap();
-    return;
-  }
-  const asked = {};
-  // **Declared outside the `try`, because the `catch` is one of the two places that
-  // put it back** (ADR-0205 §7): a request the hub never saw must not take a measured
-  // delivery fact with it, and a `const` inside the block would be out of scope
-  // exactly where the restore is owed.
-  let played = null;
-  try {
-    // **A press that ran past the bound sends nothing**, and the fault slot has already
-    // said so — at the moment it happened, while the owner was still holding the button.
-    // Taken before everything below, because everything below is about a recording there
-    // is something to do with.
-    if (mine.overran) {
-      return;
-    }
-    const recording = new Blob(mine.chunks, { type: mine.format });
-    if (recording.size === 0) {
-      saying(NOTHING_RECORDED);
-      return;
-    }
-    saying(SENDING);
-    el("talk-button").disabled = true;
-    // Read before the request goes out, so what is compared on the way back is the
-    // selection this turn was sent under and not the one it is landing into — `ask`'s
-    // own rule, and the reason is the same on either entry.
-    const chosenAt = chose;
-    asked.utterance = { content: await base64Of(recording), media_type: mine.format };
-    asked.plays = playableFormats(mine.format);
-    if (conversationId !== null) {
-      asked.conversation_id = conversationId;
-    }
-    // **The report about the answer this press interrupted, or nothing** (ADR-0205
-    // §7). It rides the request this turn already makes: there is no route for it and
-    // ADR-0205 §1 declines to add one, because its only reader is the composing stage
-    // of the very turn this request is asking for.
-    played = takeDelivery(conversationId);
-    if (played !== null) {
-      asked.delivery = played;
-    }
-    // **The way out, armed with nothing awaited between here and the request.**
-    // `fetch` carries no deadline of its own, so a socket that dies without settling
-    // leaves the `await` below pending for ever and the `finally` never runs: without
-    // this the owner's one way into the assistant by voice stays greyed out until the
-    // page is reloaded, which is #1500 exactly.
-    //
-    // **After the encoding rather than before it**, which adversarial review found the
-    // second round: `SPOKEN_ABANDONED` says the recording was sent and that the turn may
-    // have run, and offering it while the base64 was still being made would have said
-    // that of a press no request had yet gone out for. The window is closed rather than
-    // given a second sentence, because there is nothing there worth a control — encoding
-    // half a megabyte is arithmetic, and it cannot stall the way a socket can.
-    mine.stopping = new AbortController();
-    el("stop-talking").hidden = false;
-    const response = await fetch("/ask/spoken", {
-      method: "POST",
-      headers: admitted(half, true),
-      body: JSON.stringify(asked),
-      signal: mine.stopping.signal,
-    });
-    const body = await readBody(response);
-    // **A body abandoned part-way through is not a body this page can read**, and
-    // `readBody` cannot tell the difference: it answers anything unreadable with an
-    // empty object, which is the right rule for a body the gateway wrote badly and the
-    // wrong one for a read the owner stopped. The owner has already been told what
-    // happened.
-    if (mine.stopping.signal.aborted) {
-      // The owner stopped the read, so what the hub did with the report is unknown to
-      // this page. Put it back (ADR-0205 §1: a resend is idempotent, because a report
-      // names its turn and a stamped turn performs nothing).
-      restoreDelivery(asked.conversation_id, played);
-      return;
-    }
-    if (!response.ok) {
-      // **Kept on every refusal but the one about the report itself.** No refusal
-      // proves the turn was stamped — see `DELIVERY_REFUSED` — and §1 makes a resend
-      // idempotent, so keeping is the cheap direction and dropping is the lossy one.
-      if (body.fault !== DELIVERY_REFUSED) {
-        restoreDelivery(asked.conversation_id, played);
-      }
-      show("answer", false);
-      conversationLost(body, asked.conversation_id);
-      refused("console", body, response.status);
-      return;
-    }
-    renderSpokenTurn(body.turn, chosenAt);
-  } catch (_) {
-    // `fetch` rejected, so nothing reached the hub: the connection failed, the page is
-    // offline, or the request was aborted before a response existed. The measurement
-    // stands and the next request for that conversation carries it.
-    restoreDelivery(asked.conversation_id, played);
-    // An abort this owner asked for is not the gateway having gone, and saying it was
-    // would be a wrong explanation rather than a missing one; `abandonSpoken` has
-    // already said what happened, in the one place that knows it was an act rather than
-    // a failure. Everything else lands here — `fetch` rejecting because the connection
-    // itself failed, which is a different fault from the hub being gone and is said as
-    // one, exactly as `ask`'s own catch draws the line.
-    if (mine.stopping === null || !mine.stopping.signal.aborted) {
-      show("answer", false);
-      fault(GATEWAY_GONE, "console");
-    }
-  } finally {
-    // **Only while this press is still the one being waited on.** An owner who stopped
-    // waiting leaves this promise to settle afterwards, and a `finally` that re-enabled
-    // the button then could hand it back in the middle of a later press — and hide that
-    // press's own way out. The comparison is against the record rather than a flag, so
-    // it is the identity of the press that decides it (`ask`'s own rule).
-    if (press === mine) {
-      releaseTalk();
-    }
-  }
-}
-
-// The four members of a `SpokenTurn`, each rendered as ADR-0200 §4 describes it.
-//
-// **The turn inside is rendered by `renderOutcome` and by nothing else.** §4 makes it
-// "an ordinary `TurnOutcome`… This call composes a turn; it does not create a second
-// kind of one" — so a spoken answer and a typed one are the same rendering, and a
-// member added to one reaches both. Reached through `couldRenderOutcome` since #2005,
-// which changes nothing about that: the guard runs the same renderer and reports
-// whether it got the answer onto the screen.
-function renderSpokenTurn(read, chosenAt) {
-  // **The four members are read off a turn this page has one of**, which a `2xx` it
-  // could not read does not give it: `readBody` answers an unreadable body with `{}`, so
-  // `body.turn` is absent and the pairing check below would throw on it rather than
-  // decide anything (#2005). `asObject` is the normalisation every entry's body already
-  // goes through, applied to the member this one renders from — and it is the same rule
-  // for the same reason: an unreadable member has to arrive as an absent one, not as an
-  // exception.
-  const turn = asObject(read);
-  // §4: "`heard` is `None` **exactly when** `outcome` is `None`, and that pair is the
-  // recording that carried no words". Not an error, and said where the page says
-  // things about the microphone rather than in the fault surface.
-  //
-  // **A check for `null` and for nothing else**, which is what §4 states and what the
-  // guard below is here to stop it being asked to do: an absent outcome is not a quiet
-  // room, and reporting one as the other would tell an owner the assistant heard
-  // nothing about a turn it had in fact just run.
-  if (turn.outcome === null) {
-    heardWas(null);
-    saying(HEARD_NOTHING);
-    // The press ended a playback and then asked nothing, which is the accident #1701 is
-    // about: the answer that was sounding is still the answer, so it is given back where
-    // it stopped rather than left stopped. Here rather than in `sendRecording`, because
-    // this is the one place that knows the release carried no words.
-    resumeInterrupted();
-    return;
-  }
-  // **An answer this page cannot put on screen is not one it has read** (#2005), on the
-  // third of the entries that render a turn. Left unguarded the throw does not escape
-  // here either: `sendRecording` awaits this inside its own `try`, whose `catch` puts
-  // the delivery report back and says `GATEWAY_GONE` — "The gateway did not answer, so
-  // it may have stopped", with a restart and a fresh bootstrap value as the remedy —
-  // about a gateway that had just answered and a turn a `200` says ran.
-  //
-  // **Before the transcript rather than after it.** `heard` comes from the body this
-  // page has just found it cannot read an outcome in, and §4 pairs the two members; so
-  // it is not disclosed, and disclosing it anyway would mean deciding member by member
-  // what of an unreadable body to trust — the enumeration rounds 9 and 10 of PR #1612
-  // refuted. What that costs is a transcript beside a sentence saying the turn's
-  // outcome is unknown, and what it buys is that the page states nothing it read out of
-  // a body it has called unreadable.
-  //
-  // **And nothing is played.** `playSpoken` below reads `turn.outcome.conversation_id`
-  // for the report the playback will owe (ADR-0205 §7), so a rendering started past
-  // this point would be sound this page could not name a conversation for afterwards —
-  // and, one line earlier, the read itself is the throw this guard exists to stop.
-  //
-  // **The delivery report is not put back**, which is where this ending departs from the
-  // `catch` it replaces. `restoreDelivery` is for a request the hub may never have
-  // received, and a `2xx` from this entry is the hub having run the turn the report rode
-  // in on — the same reading `!response.ok` above states in the other direction.
-  if (!couldRenderOutcome(turn.outcome, chosenAt)) {
-    heardWas(null);
-    fault(SPOKEN_ANSWER_UNREADABLE, "console");
-    return;
-  }
-  heardWas(turn.heard);
-  if (turn.spoken !== null) {
-    // **A place kept by this turn for a notice this turn's playback may owe.**
-    // `playSpoken` awaits the decoder, and while it is pending the owner can ask
-    // again — `renderOutcome` clears `#answer-body`, so a rejection landing after that
-    // would append "could not play" under an answer whose audio played perfectly.
-    // Adversarial review found it the second round. The node is detached by the next
-    // render, so `isConnected` is the whole test, which is `abandonAsk`'s own device for
-    // the same question about the same panel.
-    const slot = line(el("answer-body"), "", "notice");
-    slot.hidden = true;
-    // The two names the report will need (ADR-0205 §7), taken from **this** response
-    // rather than from the page's current selection: the id is "the one the response
-    // carrying that rendering disclosed and never one it derived, counted or guessed",
-    // and where it disclosed `null` there is nothing to report about this turn.
-    void playSpoken(turn.spoken, slot, turn.episode_id, turn.outcome.conversation_id);
-    return;
-  }
-  // Carried rather than inferred from the `null` above it: §4 gives `spoken` two `null`
-  // shapes and only one of them is an answer that could not be spoken.
-  if (turn.spoken_degraded) {
-    line(el("answer-body"), NOT_SPOKEN, "notice");
-  }
-}
-
-// Play the rendering the hub sent, and nothing else — the browser's ordinary audio
-// decoding of bytes this system produced (ADR-0200 §10). No `speechSynthesis`: the
-// words that reach a loudspeaker are the ones ADR-0199's disclosure ruling composed
-// for that channel, rendered by the hub's own synthesizer.
-//
-// **Through the Web Audio decoder rather than an `<audio>` element**, and the reason is
-// a ratified clause rather than a preference: ADR-0168 §6 serves every response under a
-// policy permitting media "from its own origin alone", and `media-src 'self'` does not
-// match a `blob:` or a `data:` URL — the only two ways to get bytes the page is holding
-// into a media element. So element playback of a hub-supplied rendering is refused by
-// the browser, and the alternative was widening a ratified security clause to make one
-// control work. `decodeAudioData` takes the octets directly, engages no fetch and no
-// URL, and is subject to no directive at all.
-//
-// **The context is `readyToPlay`'s and is never built here**, because here is after the
-// upload and outside the gesture that led to it — see that function for the defect this
-// arrangement exists to avoid.
-async function playSpoken(spoken, slot, episode, conversation) {
-  const context = listeningContext;
-  if (context === null) {
-    couldNotPlay(slot);
-    return;
-  }
-  // **One playback in the air, and taking the record over ends the one it named.**
-  // Adversarial review, round 1, `major`. The sequence the finding describes — a second
-  // spoken answer arriving over a first one still sounding — is unreachable through the
-  // control, because every spoken answer arrives from a press and the press has already
-  // interrupted; and that is exactly why the invariant is held here rather than left to
-  // be inferred from the only caller there happens to be today.
-  stopPlaying();
-  const mine = {
-    source: null,
-    slot,
-    buffer: null,
-    offset: 0,
-    startedAt: 0,
-    played: 0,
-    episode,
-    conversation,
-    // An answer, which is the reportable kind and the resumable one (ADR-0205 §7,
-    // #1701). `playNotification` builds the other kind and says why.
-    notification: false,
-  };
-  playing = mine;
-  try {
-    // **The press's resume, awaited rather than assumed** (#1690). `readyToPlay` starts
-    // it where the activation is, which is the only place it can be started; what it
-    // cannot do from there is know whether it worked.
-    if (resuming !== null) {
-      await resuming;
-    }
-    // **And a state entered after that press** — the call that arrives while the turn is
-    // out, the other application that takes the audio session. One more resume, awaited
-    // like the first, because a context this page has not looked at since the press is a
-    // context it knows nothing about.
-    if (context.state !== "running") {
-      await context.resume();
-    }
-    if (context.state !== "running") {
-      // A context that will not run decodes perfectly and sounds nothing, so this is the
-      // one place the silence can be caught: after here, nothing throws and nothing is
-      // heard. Said as what it is — a rendering this browser could not play.
-      forgetPlaying(mine);
-      couldNotPlay(slot);
-      return;
-    }
-    const decoded = await context.decodeAudioData(bytesOf(spoken.content).buffer);
-    // **The press that landed while this was decoding** (#1696). `interruptPlayback`
-    // cleared the record, and starting a source now would be the answer the owner
-    // interrupted beginning to speak *after* they had begun — which is the failure the
-    // interrupt exists to remove, arriving a moment late.
-    if (playing !== mine) {
-      return;
-    }
-    mine.buffer = decoded;
-    soundFrom(context, mine, 0);
-  } catch (_) {
-    // **Only while this is still the playback in the air.** An interrupt has already
-    // said what happened, in the one place that knows it was an act rather than a
-    // failure — `sendRecording` draws the same line one entry over.
-    if (playing === mine) {
-      forgetPlaying(mine);
-      couldNotPlay(slot);
-    }
-  }
-}
-
-// Start the record's buffer sounding from `offset` seconds in, and take the source onto
-// the record.
-//
-// **The one place a playback begins.** Where it started and how much of the buffer is
-// already behind it are written where the source is started, so the two cannot drift
-// apart — a first playing passes zero, and a resume passes what the press it is
-// recovering from had already sounded (#1701).
-function soundFrom(context, mine, offset) {
-  const source = context.createBufferSource();
-  source.buffer = mine.buffer;
-  source.connect(context.destination);
-  // Cleared where the playback ends of its own accord, so the next press does not report
-  // an answer that finished as one it interrupted. `ended` fires on `stop()` too, where
-  // the record has already moved on and been stamped — the identity check is what tells
-  // the two apart. A source that ended by itself played the whole buffer, and the record
-  // says so before it is let go, so `played` reads the same however the playback ended.
-  source.addEventListener("ended", () => {
-    if (playing !== mine) {
-      return;
-    }
-    mine.played = mine.buffer.duration;
-    // **A notification that finished is reported nowhere** (ADR-0206 §9). ADR-0205
-    // §7's report is about a turn the owner asked for, and this is a delivery nobody
-    // asked for: "no component sends, records or infers whether a page … finished
-    // playing". Said here rather than left to `reportDelivery`'s own refusal, for the
-    // reason `interruptPlayback` gives at the other ending — a clause §9 states in
-    // terms should not depend on a record happening to lack two members.
-    if (!mine.notification) {
-      // A source that ended of its own accord played the buffer, so the buffer's own
-      // duration is both numbers — which is what ADR-0205 §2's equality requires of
-      // `COMPLETE` and what it costs the device to say it: nothing.
-      reportDelivery(mine, "complete");
-    }
-    forgetPlaying(mine);
-  });
-  mine.offset = offset;
-  mine.startedAt = context.currentTime;
-  source.start(0, offset);
-  // After `start`, because a source that has not started cannot be stopped and a record
-  // naming one would have `interruptPlayback` throw rather than interrupt.
-  mine.source = source;
-}
-
-// **The answer an accidental press ended, taken up where the sound stopped** (#1701, the
-// owner's direction of 2026-08-28). ADR-0200 §4's no-words release is the one ending
-// this runs on: nothing was asked, no turn ran, nothing was captured and no conversation
-// was created — so the press turned out to be an accident, and the answer on screen is
-// still the answer.
-//
-// **Page-locally, with no hub call.** The decoded buffer is still held and where it
-// stopped is still on the record, so the whole of this is one more source: nothing is
-// re-sent, nothing is re-rendered, and the interruption never reaches the hub as a gap
-// in a delivery it is told about — ADR-0205 §8 names this sibling and says why that is
-// legible, "a resume that never left the page produces no report".
-//
-// **A record of its own rather than the one the press ended.** The stopped source's
-// `ended` listener still names the old record, and a resume that reused it would hand
-// that queued task a live playback to let go of — the identity check that makes
-// `forgetPlaying` and the listener safe is exactly what a reused record defeats.
-//
-// **And where it cannot resume it leaves the interruption's own sentence standing**: a
-// context that is not running, a slot the next render detached, a source this browser
-// will not start. That sentence is true in each of those cases, which is why it is the
-// fallback rather than something to clear first.
-function resumeInterrupted() {
-  const mine = held;
-  held = null;
-  if (mine === null || mine.buffer === null || !mine.slot.isConnected) {
-    return;
-  }
-  const context = listeningContext;
-  if (context === null || context.state !== "running") {
-    return;
-  }
-  stopPlaying();
-  const resumed = {
-    source: null,
-    slot: mine.slot,
-    buffer: mine.buffer,
-    offset: 0,
-    startedAt: 0,
-    played: mine.played,
-    // The same answer, so the same subject: a resume that runs to its end reports
-    // `COMPLETE` of the turn the press already reported `INTERRUPTED` of, and the hub
-    // performs nothing on the second — a turn is stamped once (ADR-0205 §1), and the
-    // page needs no rule of its own to keep that true.
-    episode: mine.episode,
-    conversation: mine.conversation,
-    // Only an answer is ever held for a resume, so only an answer ever reaches here.
-    notification: false,
-  };
-  playing = resumed;
-  try {
-    soundFrom(context, resumed, mine.played);
-  } catch (_) {
-    forgetPlaying(resumed);
-    return;
-  }
-  playbackResumed(resumed.slot);
-}
-
-// Let go of a playback that is over, and only where it is still the one being held: a
-// record the next press or the next answer has already replaced belongs to neither.
-function forgetPlaying(mine) {
-  if (playing === mine) {
-    playing = null;
-  }
-}
-
-// The notice, written into the turn that owed it **or nowhere**. A slot the next render
-// detached belongs to an answer that is no longer on screen, and saying its audio failed
-// under the answer that replaced it would attribute one turn's silence to another.
-function couldNotPlay(slot) {
-  if (!slot.isConnected) {
-    return;
-  }
-  slot.textContent = COULD_NOT_PLAY;
-  slot.hidden = false;
-}
-
-// The interruption, under the same rule and for the same reason: a slot the next render
-// detached belongs to an answer that is no longer on screen, and saying *that* one was
-// interrupted under the answer that replaced it would attribute one turn's silence to
-// another. Its own function rather than a shared writer taking the sentence as an
-// argument, so each notice reaches the panel through exactly one place and a check can
-// say so of each.
-function playbackInterrupted(slot) {
-  if (!slot.isConnected) {
-    return;
-  }
-  slot.textContent = PLAYBACK_INTERRUPTED;
-  slot.hidden = false;
-}
-
-// The resume, under the same rule and for the same reason, and its own function for the
-// same one: each notice reaches this panel through exactly one place, so a check can say
-// so of each. It writes over the interruption's sentence rather than beside it, because
-// the two are accounts of the same sound and only the later one is true.
-function playbackResumed(slot) {
-  if (!slot.isConnected) {
-    return;
-  }
-  slot.textContent = PLAYBACK_RESUMED;
-  slot.hidden = false;
-}
-
-// The recording as `SpokenAudio.content` wants it: standard RFC 4648 §4 base64, padded
-// and canonical, which is exactly what `btoa` produces. Never normalised afterwards —
-// what this sends is what the hub validates and what `decoded()` reverses (ADR-0200
-// §9).
-//
-// Chunked because `String.fromCharCode.apply` takes its bytes as arguments, and a
-// second of audio is more arguments than a stack frame holds.
-const BASE64_STRIDE = 0x8000;
-
-async function base64Of(recording) {
-  const bytes = new Uint8Array(await recording.arrayBuffer());
-  let binary = "";
-  for (let at = 0; at < bytes.length; at += BASE64_STRIDE) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(at, at + BASE64_STRIDE));
-  }
-  return btoa(binary);
-}
-
-// The reverse, for the rendering. `atob` is the pair of `btoa` and neither normalises.
-function bytesOf(content) {
-  const binary = atob(content);
-  const bytes = new Uint8Array(binary.length);
-  for (let at = 0; at < binary.length; at += 1) {
-    bytes[at] = binary.charCodeAt(at);
-  }
-  return bytes;
 }
 
 // --- notifications, in the open page and by no other means (ADR-0175 §9) -----
@@ -7602,95 +5269,6 @@ function renderNotification(value) {
   source.textContent = `Notification: ${value.notification_class}`;
   item.appendChild(source);
   list.insertBefore(item, list.firstChild);
-}
-
-// **Speak a notification, but only into an idle device** (ADR-0206 §8).
-//
-// "Idle" is a conjunction of facts about the **device** and never about the room: the
-// page holds a running audio context established by a user gesture in this document,
-// and it holds no playback in the air. It is not an audience fact — nothing here asks
-// or infers who is present, and no clause of ADR-0206 is conditioned on it.
-//
-// **The context is the constraint that decides this, and it is a property of browsers
-// rather than of this design.** `readyToPlay` builds and resumes the decoding context
-// inside the press gesture because that is the only place a browser will let it, so a
-// page that has had no gesture since load holds no running context and cannot make
-// one. Nothing here resumes: a `resume()` outside a gesture is the defect #1690
-// records, and an unprompted utterance is possible exactly on a page the owner has
-// already spoken to. The honest statement of the milestone is that the device speaks
-// *proactively* rather than *spontaneously*.
-//
-// **Where either fact does not hold it plays nothing and the notification is on the
-// page**, which is where §5 puts it either way — and the rendering is **dropped**,
-// not held: no queue behind the playback, no replay when the sound stops, nothing
-// aging against an artifact ADR-0130 says is about a moment.
-//
-// **A rendering never interrupts a playback in the air** (§8). The check is `playing
-// !== null` and not a check on what kind of playback it is: a notification yields to
-// an answer and to another notification alike, and the only thing that ever ends one
-// is a press.
-//
-// **And nothing about any of it is reported** (§9). No component sends, records or
-// infers whether this page had a context, played, finished or was interrupted;
-// playback is not an acknowledgement, and ADR-0175 §5's acknowledgement rides the
-// gateway's own next poll whatever happened here.
-function playNotification(spoken) {
-  // `null` is one of the two shapes §8 fixes, and the member is never absent — so a
-  // withheld, degraded or unrequested rendering arrives as a value read the same way
-  // a present one is. What is *not* here is why: `spoken_rendering` does not cross,
-  // and there is nothing for this page to do differently if it did.
-  if (!spoken) {
-    return;
-  }
-  const context = listeningContext;
-  if (context === null || context.state !== "running" || playing !== null) {
-    return;
-  }
-  // The record `stopPlaying`, `soundFrom` and `forgetPlaying` all read, with the three
-  // members that make it a notification's: no slot, because there is no answer panel
-  // this belongs under; no episode and no conversation, because there is no turn this
-  // is about; and the flag `interruptPlayback` reads.
-  const mine = {
-    source: null,
-    slot: null,
-    buffer: null,
-    offset: 0,
-    startedAt: 0,
-    played: 0,
-    episode: null,
-    conversation: null,
-    notification: true,
-  };
-  playing = mine;
-  void decodeNotification(context, mine, spoken);
-}
-
-// The decode and the start, off the delivery reader's own turn.
-//
-// **A browser that cannot decode this rendering plays nothing and says nothing**
-// (ADR-0206 §2). One delivery carries one rendering in one format — the engine picks
-// the first member of the gateway's `plays` the synthesizer also names, and the
-// gateway writes that one rendering to every open stream — so a browser whose decoder
-// covers only the other member is *intentionally* silent, exactly as one that could
-// decode neither is. It is not a failure to report: the notification is on the page,
-// and §9 forbids reporting the silence anywhere else.
-//
-// **The record is let go where the decode failed and kept where a press overtook it.**
-// `interruptPlayback` clears `playing` before it stops anything, so a press landing
-// while this was decoding leaves `playing !== mine` — and starting a source then would
-// be the utterance the owner interrupted beginning to speak *after* they had begun,
-// which is the failure the interrupt exists to remove arriving a moment late.
-async function decodeNotification(context, mine, spoken) {
-  try {
-    const decoded = await context.decodeAudioData(bytesOf(spoken.content).buffer);
-    if (playing !== mine) {
-      return;
-    }
-    mine.buffer = decoded;
-    soundFrom(context, mine, 0);
-  } catch (_) {
-    forgetPlaying(mine);
-  }
 }
 
 // One delivery stream (ADR-0175 §4). The gateway writes on it at least once per
@@ -7954,12 +5532,9 @@ async function readDeliveries(half, era) {
     for await (const value of streamValues(response)) {
       heard();
       if (value.kind === "notification") {
-        // Rendered first and played second, in that order and unconditionally: §8
-        // says the page "plays nothing and renders the notification on the page"
-        // wherever it cannot play, so the render is what always happens and the
-        // playback is what sometimes does.
+        // Shown as text and never played (ADR-0313 §3:5): the page's playback retired
+        // with push-to-talk, and `spoken` is `null` on every value (§3:6).
         renderNotification(value);
-        playNotification(value.spoken);
       } else if (TERMINAL_KINDS.has(value.kind)) {
         terminal = value;
         break;
@@ -8065,10 +5640,9 @@ async function readDeliveries(half, era) {
 // to have landed, and only the first of those may keep its continuation. So it is
 // handed the body this function already read, and every other caller is untouched.
 //
-// **The body and not the status**, which is a rule this file already keeps: a status is
-// in `SESSION_LOST_STATUS` only where it names one condition, because `403` "says the
-// gateway refused and does not say why" and mapping it would be the flattening
-// ADR-0168 §6 forbids. The `fault` name is where ADR-0168 §9's distinction actually
+// **The body and not the status**: a status names one condition only for some refusals,
+// and `403` "says the gateway refused and does not say why", so classifying by it would
+// be the flattening ADR-0168 §6 forbids. The `fault` name is where ADR-0168 §9's distinction actually
 // lives, so that is what a caller classifying an outcome is given — and handing the
 // status beside it would invite reading the condition off the wrong half.
 async function relay(half, path, payload, panelId, stopping, noticed) {
@@ -8109,7 +5683,7 @@ async function relay(half, path, payload, panelId, stopping, noticed) {
   // **A request the caller stopped classifies nothing, even once a head has arrived**
   // (adversarial review round 4, `major`). `readBody` swallows a rejection, which is
   // right for the refusal path it was written for — a proxy really can replace a
-  // condition — and wrong for an abort: the head lands, `sayResumed` aborts, the body
+  // condition — and wrong for an abort: the head lands, the caller aborts, the body
   // read rejects, `{}` comes back, and the panel is told "The gateway refused that
   // request (HTTP 404)" about a thread the owner left. That is the stale fault round 2
   // closed, arriving through the one window aborting the request does not shut.
@@ -8128,9 +5702,6 @@ async function relay(half, path, payload, panelId, stopping, noticed) {
   if (stopping !== undefined && stopping.signal.aborted) {
     throw stopping.signal.reason;
   }
-  // Every other request that names a conversation goes through here — the digest and
-  // the forget.
-  conversationLost(body, payload.conversation_id);
   // **A refusal answered to a request sent under a session this page no longer holds is
   // not reported at all** (#2404). Everywhere else the guard sits at the caller, after
   // this function returns; here it cannot, because `refused` renders *before* the return
@@ -8145,12 +5716,8 @@ async function relay(half, path, payload, panelId, stopping, noticed) {
   // form. A dead request ending a live session, from the one door a comparison after the
   // `await` cannot reach.
   //
-  // **`conversationLost` above it and `noticed` below are deliberately outside it**, and
-  // adversarial review's round 1 found the version where `noticed` was not. A
-  // conversation "belongs to the hub and outlives every session", which is what the
-  // re-entry sentence tells the owner, so `no-such-conversation` is as true of the
-  // conversation this view holds whichever session asked — and it guards itself anyway,
-  // on a selection `forgetHeaderHalf` has already cleared.
+  // **`noticed` below is deliberately outside it**, and adversarial review's round 1
+  // found the version where it was not.
   //
   // **`noticed` is a fact about the act, not about the panel**, and withholding it costs
   // the owner something rather than protecting them. It is the one caller being told
@@ -8193,15 +5760,14 @@ async function relay(half, path, payload, panelId, stopping, noticed) {
 // resuming one see that it is no longer the last word.
 let listed = 0;
 
-// The listing read in flight, or `null` — the digest read's `describing`, one panel
-// over, and for the same reason.
+// The listing read in flight, or `null`.
 //
 // **A superseded read must not render either half of what it came back with**
 // (adversarial review round 6). Two reads of this listing can overlap — a forget's
 // own refresh and the owner pressing "Conversations" — and the one that resumes last
 // wins the panel whether or not it is the newer. It re-renders a snapshot taken
 // before the newer one, so a conversation destroyed in between comes back as a row
-// with a "Continue" the hub will refuse; and its refusal, if it had one, is written
+// for a conversation that is gone; and its refusal, if it had one, is written
 // into the panel by `relay` before this function sees a value at all.
 //
 // Stopping the read closes both, which a comparison after the `await` closes only the
@@ -8260,8 +5826,7 @@ async function listConversations() {
       return mine;
     }
     // An abort is not a transport failure, and only the newest read is entitled to
-    // say the gateway has gone — the same comparison `resumeConversation` makes, for
-    // the same reason.
+    // say the gateway has gone.
     if (mine === listed) {
       fault(GATEWAY_GONE, "conversations");
     }
@@ -8277,8 +5842,7 @@ function renderConversation(list, summary) {
   // page names it — the indicator, the destroy ceremony, the outcome of a forget —
   // and the listing they all send the owner to named none of them: three rows of two
   // timestamps, and the sentence that appears after a tap names an id that was never
-  // on screen before the tap. Choosing which thread to continue was the one act this
-  // surface offered and the one it gave nothing to choose on.
+  // on screen before the tap.
   //
   // Its own line rather than a clause of the next one, because the id is what the
   // eye is looking for and a phone puts it behind two long instants otherwise.
@@ -8295,106 +5859,15 @@ function renderConversation(list, summary) {
       : `No turn yet — active ${summary.last_active_at}`,
     "hint"
   );
-  const resume = document.createElement("button");
-  resume.type = "button";
-  resume.textContent = "Continue";
-  resume.addEventListener("click", () => {
-    void resumeConversation(summary.id);
-  });
+  // **No "Continue" here** (ADR-0309 §5:4). It continued a conversation into the Ask
+  // form, which retired; the chat is where a conversation is continued, and its own
+  // listing — the same `/conversations` read — opens each one.
   const forget = document.createElement("button");
   forget.type = "button";
   forget.textContent = "Forget";
   forget.addEventListener("click", () => forgetConversation(summary.id));
-  item.appendChild(resume);
   item.appendChild(forget);
   list.appendChild(item);
-}
-
-// Continue a thread, and say what is already in it (#1371's second clause).
-//
-// **The selection changes first and unconditionally.** Continuing is the owner's act
-// and it is local — it sends nothing and needs nothing to succeed — so a digest read
-// that is slow, refused or unreachable must not cost the owner the thread they
-// pressed for. What a failed read costs is the sentence about what is in it, which
-// the panel's own fault slot then explains.
-//
-// **It is the count and the span, and it is not the transcript.** `conversation` is
-// one of ADR-0175 §6's five browser-reached operations and it answers with a
-// `ConversationDigest`: four scalars, fixed by ADR-0074 §8 as "the count and span
-// rather than every turn" on the ground that a transcript is "something nobody can
-// read". So the rendering is bounded by the operation rather than by a limit this
-// page chose, and it cannot grow with the conversation. What it does *not* do is show
-// what was said, which is the rest of #1371's second clause and needs an operation
-// the promoted surface does not carry — filed as #1818 rather than invented here.
-//
-// **`described` is what keeps a slow read off a line something has since cleared**,
-// and it is the device this file already uses at four other places where two acts
-// race over one value. Two orderings reach it and one guard has to answer both.
-// Press "Continue" on `A`, then "Start a new conversation" before the digest lands,
-// and the page would otherwise announce `A`'s turn count under a selection that is
-// now empty. Press "Continue" on `A`, ask a question in `A`, and let the *answer*
-// land before the digest, and it would otherwise re-render a count short by the turn
-// that had just been recorded — adversarial review round 1, and the reason the guard
-// is `described` rather than `chose`.
-//
-// **And the read is armed with a way to be stopped**, because `described` alone
-// guards only what this function renders and a refusal is written by `relay` before
-// this function sees anything (adversarial review round 2). `changeConversation`
-// above has already aborted whatever read the previous press left in flight — it
-// goes through `sayResumed`, which is where clearing the line and stopping the read
-// behind it are one act — so what is registered here is only ever this press's.
-async function resumeConversation(id) {
-  fault(null, "conversations");
-  changeConversation(id);
-  const mine = described;
-  const half = headerHalf();
-  if (half === null) {
-    showBootstrap();
-    return;
-  }
-  const stopping = new AbortController();
-  describing = stopping;
-  try {
-    const digest = await relay(
-      half,
-      "/conversation",
-      { conversation_id: id },
-      "conversations",
-      stopping
-    );
-    if (digest === null || described !== mine) {
-      return;
-    }
-    // Cleared before the write, because `sayResumed` aborts whatever is registered
-    // and this read is the thing it would abort.
-    describing = null;
-    sayResumed(describeHeld(digest.conversation));
-  } catch (_) {
-    // **An abort is not a transport failure**, and the comparison is what tells them
-    // apart: this rejection is either the socket giving up on a read the owner is
-    // still waiting for, or `sayResumed` having stopped one they are not. Only the
-    // first is news, and reporting the second would put the condition it exists to
-    // suppress back on screen under a different name.
-    if (described === mine) {
-      fault(GATEWAY_GONE, "conversations");
-    }
-  }
-}
-
-// How much is already in a conversation, in words, from its digest alone.
-//
-// **A conversation with no turn says so rather than borrowing the other reading**,
-// which is `renderConversation`'s own rule one line up: `last_turn_at` is `None` where
-// no turn was ever recorded, and a span printed with a missing end is a span nobody
-// can read.
-function describeHeld(held) {
-  if (held.last_turn_at === null) {
-    return `Nothing has been recorded in it yet. It was started ${held.started_at}.`;
-  }
-  return (
-    `It already holds ${held.recorded_turns} recorded turn(s), ` +
-    `from ${held.started_at} to ${held.last_turn_at}.`
-  );
 }
 
 // Read the conversation, then forget it — the CLI's own order, which ADR-0175 §6
@@ -8517,7 +5990,9 @@ function statedForget(id, held, destroyed) {
 // device of its own.
 
 // Which chat this tab has open, and which conversation it is reading. The tab's, in
-// `sessionStorage`, for `CONVERSATION_KEY`'s reason: two tabs are two views.
+// `sessionStorage` rather than beside the header half in `localStorage`: the header half
+// admits the browser and is shared across the origin's tabs, while which conversation is
+// open is what *this view* is looking at, and two tabs are two views.
 const CHAT_OPEN_KEY = "assistant.session.chat-open";
 const CHAT_CONVERSATION_KEY = "assistant.session.chat-conversation";
 
@@ -12075,12 +9550,10 @@ function renderGoalQuestion(item, clarification) {
 // answered honestly by the engine, rather than having the act silently withheld.
 const CLOSED_GOAL_STATUSES = ["achieved", "abandoned"];
 
-// The acts one row offers (ADR-0250 §11, §12, §13).
+// The acts one row offers (ADR-0250 §12).
 //
-// **Answering and taking up are the same control in two wordings**, because they are
-// the same mechanism: a reference attached to the ordinary composer. A row with an open
-// question offers the answer; every row offers taking the goal up here, which is the one
-// route by which a goal moves between conversations.
+// **Answering and taking up are not offered** (ADR-0309 §5:4): each attached a reference
+// to the Ask form's turn, and the Ask panel retired with that form.
 //
 // **Each statement carries every clause §12 gives it, which is what the round-9 parity
 // sweep settled.** `withdrawn` says what the act *buys* — §12: "withdrawing removes the
@@ -12089,11 +9562,6 @@ const CLOSED_GOAL_STATUSES = ["achieved", "abandoned"];
 // half that stops a no-op reading as damage. Both were on the command line's twin and
 // not here; a clause of the decision stated on one surface and not the other is the
 // defect rounds 7, 8 and 9 each were.
-//
-// **The withdrawal is offered beside the answer** and never instead of it, on ADR-0244
-// §13's clause one record kind over: an owner told only how to answer has not been told
-// everything they can do, and §12 pairs the two deliberately — withdrawing "removes the
-// question and not the pause".
 //
 // **Giving the goal up is offered on a goal that is still open and on no other**, which
 // is what the members say: §12 answers `ALREADY_CLOSED` on a goal that is `achieved` or
@@ -12104,16 +9572,6 @@ function offerGoalActs(item, goal) {
   const row = document.createElement("p");
   row.className = "choice";
   if (goal.clarification !== null) {
-    const answer = document.createElement("button");
-    answer.type = "button";
-    answer.textContent = "Answer this";
-    answer.addEventListener("click", () => {
-      setReference(
-        { question_id: goal.clarification.question_id },
-        "What you send below answers the clarification on this goal."
-      );
-    });
-    row.appendChild(answer);
     const withdraw = document.createElement("button");
     withdraw.type = "button";
     withdraw.textContent = "Take the question back";
@@ -12122,16 +9580,6 @@ function offerGoalActs(item, goal) {
     );
     row.appendChild(withdraw);
   }
-  const take = document.createElement("button");
-  take.type = "button";
-  take.textContent = "Take this up here";
-  take.addEventListener("click", () => {
-    setReference(
-      { goal_id: goal.id },
-      "What you send below is about this goal, in the conversation you are in now."
-    );
-  });
-  row.appendChild(take);
   // ADR-0254 §11's listing, reached from the goal it is about. **Offered on every row,
   // open or closed**: a closed goal may still hold a standing authority, and the
   // withdrawal is the owner's remedy — a control withheld there would leave an
@@ -12160,9 +9608,6 @@ function offerGoalActs(item, goal) {
 async function withdrawClarification(questionId) {
   fault(null, "goals");
   sayGoalAct(null);
-  // What was attached when this act started, so a selection the owner makes while it is
-  // out is theirs and not this answer's to take (round 5, `major`).
-  const held = reference;
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
@@ -12176,10 +9621,6 @@ async function withdrawClarification(questionId) {
     // Said as a fault rather than in the row, because the row is about to be replaced
     // by a fresh read and a sentence written into it would be gone before it was read.
     sayGoalAct(goalMemberWords(CLARIFICATION_WITHDRAWAL_WORDS, done.withdrawal));
-    // The question this act was about is no longer one to answer, so a reference naming
-    // it goes with it (round 4, `major`) — unless the owner has attached another since
-    // (round 5).
-    forgetReferenceTo(held, null, questionId);
     await listGoals();
   } catch (_) {
     fault(GATEWAY_GONE, "goals");
@@ -12194,11 +9635,6 @@ async function withdrawClarification(questionId) {
 // ADR-0250 §12 is the source of every clause in it — the goal leaves what is
 // considered, its open question is withdrawn, and nothing already done is undone.
 async function abandonGoal(goal) {
-  // Read before the ceremony, so what is forgotten afterwards is what this act was about
-  // rather than whatever the row holds by then.
-  const asking = goal.clarification === null ? null : goal.clarification.question_id;
-  // And what was attached when this act started, on `withdrawClarification`'s clause.
-  const held = reference;
   const asked = window.confirm(
     `About to give this up.\n\n${goal.outcome}\n\nI will not take it up again on my ` +
       "own and nothing more will be planned for it, and any question it has open is " +
@@ -12223,11 +9659,6 @@ async function abandonGoal(goal) {
       return;
     }
     sayGoalAct(goalMemberWords(GOAL_ABANDONMENT_WORDS, done.abandonment));
-    // The goal and its open question both, because a reference to either engages the
-    // goal (§11) and a closed goal a turn associates to is **reopened** (§13). The ids
-    // are the row's, read before the act rather than off a listing this is about to
-    // re-read. Round 4, `major`.
-    forgetReferenceTo(held, goal.id, asking);
     await listGoals();
   } catch (_) {
     fault(GATEWAY_GONE, "goals");
@@ -14165,10 +11596,6 @@ function showConsole() {
   el("reentry").textContent = "";
   show("bootstrap", false);
   show("console", true);
-  // Which conversation the next question lands in, said before the first one is asked
-  // — including after a reload, which now keeps the thread rather than starting one
-  // the owner never asked for (#1371's first clause).
-  setConversation(conversationId);
   // The notification panel is shown before anything has arrived, because what it
   // mostly says is whether this browser is watching at all — and a panel that
   // appeared only on the first delivery would leave the owner unable to tell "no
@@ -14179,11 +11606,6 @@ function showConsole() {
   // below them appears when it has been read, so a panel on screen is always a
   // panel showing an answer rather than an empty promise.
   show("control", true);
-  // Whether this browser will let the page record at all, asked once a session exists
-  // and said on screen either way (ADR-0200 §10). Here rather than at load, because the
-  // control lives in the console panel and there is nothing to offer while the
-  // bootstrap panel is up.
-  offerTalk();
   watchDeliveries();
   // A park outlives the page that raised it, so a browser opening onto one has to be
   // told without being asked (ADR-0177 §8). Quiet, because a load that finds nothing
@@ -14197,52 +11619,6 @@ function showConsole() {
 }
 
 el("bootstrap-form").addEventListener("submit", startSession);
-el("ask-form").addEventListener("submit", ask);
-// The way out of a wait, built once and hidden until there is a wait to leave (#1500).
-offerStopWaiting();
-// Push to talk, on the three ways a control is held down (ADR-0200 §10).
-//
-// **Pointer events cover mouse, pen and touch in one pair**, which is why there is no
-// `touchstart` handler beside them: a second set would double-fire on every browser
-// that sends both. `setPointerCapture` is what makes the release land here even when
-// the finger or the cursor has left the button by the time it lifts — without it a
-// press that drifts is a recording that never stops.
-//
-// **The keyboard is its own pair rather than a `click`**, because a click is the whole
-// press-and-release collapsed into one event and this control needs the two apart. The
-// default has to go with it: a native button treats Space and Enter as a click, so
-// leaving it would fire an activation on top of the pair. `repeat` is the key
-// auto-repeating while held, which is not a second press.
-const talkButton = el("talk-button");
-talkButton.addEventListener("pointerdown", (event) => {
-  // The recording first and the capture second, because the capture is an improvement
-  // on the mechanism rather than the mechanism: it is what makes the release land here
-  // after the pointer has drifted off the button, and a browser that will not give it
-  // should cost the drift case rather than the whole control.
-  void startTalking();
-  talkButton.setPointerCapture(event.pointerId);
-});
-talkButton.addEventListener("pointerup", stopTalking);
-talkButton.addEventListener("pointercancel", stopTalking);
-talkButton.addEventListener("keydown", (event) => {
-  if (event.key !== " " && event.key !== "Enter") {
-    return;
-  }
-  event.preventDefault();
-  if (event.repeat) {
-    return;
-  }
-  void startTalking();
-});
-talkButton.addEventListener("keyup", (event) => {
-  if (event.key !== " " && event.key !== "Enter") {
-    return;
-  }
-  event.preventDefault();
-  stopTalking();
-});
-el("stop-talking").addEventListener("click", abandonSpoken);
-el("new-conversation").addEventListener("click", startFresh);
 // Wrapped rather than passed, because the listener's argument is a `MouseEvent` and
 // `watchDeliveries` reads its first argument as the sentence to announce.
 el("watch-button").addEventListener("click", () => watchDeliveries());
@@ -14297,7 +11673,6 @@ el("goals-button").addEventListener("click", () => {
   sayGoalAct(null);
   return listGoals();
 });
-el("clear-reference").addEventListener("click", clearReference);
 el("review-button").addEventListener("click", listNotifications);
 el("tuning-button").addEventListener("click", listTuning);
 el("connections-button").addEventListener("click", listConnections);

@@ -41,7 +41,6 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from ai_assistant.core.errors import AssistantError, DeviceRefusedError, NotificationBudgetError
-from ai_assistant.core.types import SpokenAudioFormat
 from ai_assistant.interfaces.gateway import streams
 from ai_assistant.interfaces.gateway.refusals import REFUSAL_FAULTS, refusal_detail
 from ai_assistant.wire.errors import TransportError
@@ -51,7 +50,7 @@ if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
     from datetime import timedelta
 
     from ai_assistant.core.protocols import AssistantEngine
-    from ai_assistant.core.types import NotificationDelivery
+    from ai_assistant.core.types import NotificationDelivery, SpokenAudioFormat
     from ai_assistant.interfaces.gateway.sessions import Cancellable, Defer
 
 _log = structlog.get_logger(__name__)
@@ -70,49 +69,19 @@ _DECLINED: Final = "assistant-declined"
 #: anything if a third condition is not quietly reported as one of the two.
 _FAILED: Final = "delivery-failed"
 
-#: What the gateway asks the hub to render a notification in, in preference order
-#: (ADR-0206 §2). **The gateway's own value, fixed and identical on every poll**: no
-#: browser request carries it, no browser value reaches it, and no browser narrows,
-#: widens or reorders it. ADR-0177 §1's second clause and ADR-0175 §6's put
-#: ``next_notification`` outside the browser control surface entirely, and §2 records
-#: why a browser-supplied list is unavailable twice over — even without that clause,
-#: ADR-0175 §4's fan-out gives one answer to every open stream, so a list assembled
-#: from two browsers with different decoders has no value it could take.
+#: What the gateway asks the hub to render a notification in: **nothing**
+#: (ADR-0313 §3:6). The page plays no spoken notification — its playback retired with
+#: push-to-talk, and a notification is shown as text (§3:5) — so the poll asks for no
+#: rendering, the hub renders none for it (ADR-0206 §1:2), and the ``spoken`` member of
+#: every value written on a delivery stream is ``null`` (ADR-0206 §8:2).
 #:
-#: **It names every member of :class:`~ai_assistant.core.types.SpokenAudioFormat`**,
-#: so no format the synthesizer can produce is excluded by the caller. What naming
-#: the whole enumeration buys is stated exactly in §2 and is worth restating here,
-#: because the loose version of it is wrong: it guarantees the *synthesizer's* choice
-#: is never narrowed, not that every browser can play the result. The engine picks one
-#: member (ADR-0200 §3) and the gateway writes that one rendering to every stream, so a
-#: browser whose decoder covers only the other member plays nothing and renders the
-#: notification on the page — intentionally silent, because the alternative is a
-#: per-stream answer this carrier does not have.
-#:
-#: **The order is a measurement and not a taste**, and §2 lets a later lane change it
-#: on a further measurement without an ADR. Measured 2026-08-28 on the two engines this
-#: repository installs, by recording a 3 s 440 Hz tone through ``MediaRecorder`` and
-#: then handing every sample to ``decodeAudioData`` in each engine — which is the call
-#: the page actually plays a rendering through (``playSpoken``), not a media element:
-#:
-#: * Chromium 151.0.7922.34 — decodes ``audio/webm;codecs=opus`` (3.00 s) and
-#:   ``audio/mp4`` (2.92 s); produces both, at 48 597 and 49 092 bytes for the same
-#:   3 s tone, a 1.0% difference.
-#: * WebKit 26.5 — decodes both, at 3.00 s and 2.96 s; produces neither, because
-#:   Playwright's Linux WebKit ships no ``MediaRecorder`` for either type.
-#:
-#: So **decodability did not separate the two members on either engine and neither did
-#: size**, and the order below is the tie broken on the one figure that did differ:
-#: ``audio/webm;codecs=opus`` is what a browser on those engines *produces* first —
-#: ``TALK_FORMATS`` in ``assets/app.js`` picks it in the same order, measured the same
-#: way — so it is the member most likely to be the one a synthesizer and a page already
-#: agree on. The honest caveat, recorded rather than glossed: Playwright's Linux WebKit
-#: is not Safari on a phone, and milestone 19's exit test is a phone. A measurement on
-#: that device is what would move this constant, and moving it costs no ADR.
-GATEWAY_PLAYS: Final[tuple[SpokenAudioFormat, ...]] = (
-    SpokenAudioFormat.WEBM_OPUS,
-    SpokenAudioFormat.MP4,
-)
+#: **Still the gateway's own value, fixed and identical on every poll**, as ADR-0206 §2
+#: made it: no browser request carries it and no browser value reaches it, because
+#: ADR-0177 §1's second clause and ADR-0175 §6's put ``next_notification`` outside the
+#: browser control surface entirely. ``next_notification``'s rendering path is
+#: untouched (ADR-0313 §3:7): a caller that names formats here is rendered for as
+#: ADR-0206 decides, and this one names none.
+GATEWAY_PLAYS: Final[tuple[SpokenAudioFormat, ...]] = ()
 
 
 #: The fault for the one refusal ADR-0175 §8 names by hand: a

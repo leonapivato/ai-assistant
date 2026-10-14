@@ -19,16 +19,21 @@ nothing. The second half of this module pins that no path resolves to the four a
 the same.
 
 **Driven through a real socket** for ``test_gateway_confirmations.py``'s reason, on
-``test_gateway_streams``' own harness rather than a fourth copy of it.
+``test_gateway_streams``' own harness rather than a fourth copy of it — and through
+``/confirmation/resume``, which since the Ask route retired (ADR-0309 §5:4) is the one
+route that answers a browser with a turn's outcome. :class:`_Resuming` answers it with
+the outcome a case scripted, so the projection under test is ``_outcome_view``'s and
+the route is the one a routed park is answered through (ADR-0197 §7).
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from test_gateway import _Resuming
 from test_gateway_streams import Harness, _harness
 
 from ai_assistant.core.types import (
@@ -275,12 +280,15 @@ def _routed(
     )
 
 
+#: What every case answers a park with. :class:`_Resuming` answers it with the outcome
+#: the case scripted, whatever park the handle names.
+_RESUMED: Final = {"token": "h-1", "approved": True}
+
+
 async def _view(one: Harness, outcome: TurnOutcome) -> dict[str, Any]:
-    """Drive a turn that routed and return the routed view the page receives."""
+    """Answer a park with an outcome that routed and return the routed view."""
     one.engine.turn_outcome = outcome
-    status, body = await one.whole(
-        "POST", "/ask", {"utterance": "forget that", "reference": {"goal_id": "goal-1"}}
-    )
+    status, body = await one.whole("POST", "/confirmation/resume", _RESUMED)
     assert status == 200, body
     view: dict[str, Any] = body["outcome"]["routed"]
     return view
@@ -298,11 +306,9 @@ async def test_the_routed_account_crosses_whole_and_beside_the_reply() -> None:
     projection, so a member that stops being carried is as much a defect as one that
     starts being carried unreviewed.
     """
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         one.engine.turn_outcome = _routed(RoutableOperation.FORGET, RouteOutcome.PERFORMED)
-        status, body = await one.whole(
-            "POST", "/ask", {"utterance": "forget that", "reference": {"goal_id": "goal-1"}}
-        )
+        status, body = await one.whole("POST", "/confirmation/resume", _RESUMED)
 
         assert status == 200, body
         assert body["outcome"]["reply"] == "Here is what I did."
@@ -318,12 +324,11 @@ async def test_the_routed_account_crosses_whole_and_beside_the_reply() -> None:
 
 async def test_a_pass_that_routed_nothing_carries_a_null_account() -> None:
     """The absence is the fact (ADR-0197 §8's "the presence of the member is the
-    fact"), so an ordinary turn crosses with ``routed`` ``null`` rather than with an
+    fact"), so an outcome that routed nothing crosses with ``routed`` ``null`` rather than with an
     empty account the page would have to tell apart from a real one."""
-    async with _harness(FakeAssistantEngine()) as one:
-        status, body = await one.whole(
-            "POST", "/ask", {"utterance": "hello", "reference": {"goal_id": "goal-1"}}
-        )
+    async with _harness(_Resuming()) as one:
+        one.engine.turn_outcome = TurnOutcome(turn=None, conversation_id="c-1")
+        status, body = await one.whole("POST", "/confirmation/resume", _RESUMED)
 
         assert status == 200, body
         assert body["outcome"]["routed"] is None
@@ -333,7 +338,7 @@ async def test_a_listing_this_page_renders_crosses_as_its_records() -> None:
     """§10 on "the listing where one is carried", and §12's "with the renderer it
     already has for the operation" — which for a belief is the view the beliefs panel
     already receives, warrant included."""
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         view = await _view(
             one,
             _routed(
@@ -363,7 +368,7 @@ async def test_the_read_only_arms_this_page_renders_cross_as_records(
     """The other two arms this page has a view for, driven per operation because the
     arm is read off ``operation`` and a dispatch that guessed from the value's shape
     would pass on one of them by luck (ADR-0197 §8)."""
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         view = await _view(one, _routed(operation, RouteOutcome.PERFORMED, listing=listing))
 
         assert len(view["listing"]) == 1
@@ -396,7 +401,7 @@ async def test_the_arms_this_lane_added_cross_as_their_records(
     replaces was a listing that crossed as ``null`` beside a referral to the CLI.
     """
     listing: RoutedListing = _LISTINGS[operation]
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         view = await _view(one, _routed(operation, RouteOutcome.PERFORMED, listing=listing))
 
         assert view["listing"] is not None
@@ -411,7 +416,7 @@ async def test_a_routed_read_crosses_all_seven_of_its_fields() -> None:
     the one this view is most likely to have: a field quietly dropped because no case
     named it.
     """
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         view = await _view(
             one,
             _routed(RoutableOperation.RECENT_READS, RouteOutcome.PERFORMED, listing=(_read(),)),
@@ -438,7 +443,7 @@ async def test_a_routed_ruling_carries_no_tier_reach_and_no_authorises() -> None
     displays or implies :meth:`PermissionDecision.authorises`. An enumerating view is
     where both are kept out, so this is asserted over the member set.
     """
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         view = await _view(
             one,
             _routed(
@@ -484,7 +489,7 @@ async def test_a_routed_ruling_carries_the_two_facts_its_standing_route_is_read_
     is ADR-0193 §11's *third* state: a row saying the policy rested on no user decision
     at all, which is a different claim and a false one.
     """
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         view = await _view(
             one,
             _routed(
@@ -513,7 +518,7 @@ async def test_a_routed_ruling_that_names_a_grant_crosses_its_digest_and_its_eli
     branching on ``closed_loop`` alone would render that row as a configuration authority,
     so the case that would catch it is this one and not a row with the fact unset.
     """
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         view = await _view(
             one,
             _routed(
@@ -548,7 +553,7 @@ async def test_a_binding_whose_shape_holds_no_closed_loop_crosses_null_rather_th
         account=_SEARCH_ACCOUNT,
         transport_endpoint="https://search.example.com",
     )
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         view = await _view(
             one,
             _routed(
@@ -568,7 +573,7 @@ async def test_a_routed_total_crosses_its_amounts_as_text() -> None:
     would reach them changed — and a spend surface showing a figure the ledger did
     not hold is worse than one showing none.
     """
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         view = await _view(
             one,
             _routed(RoutableOperation.SPEND_TOTALS, RouteOutcome.PERFORMED, listing=(_total(),)),
@@ -584,7 +589,7 @@ async def test_an_operation_that_carried_no_listing_crosses_a_null_one() -> None
     """``listing`` ``null`` is a pass that carried none, and it is the only thing
     ``null`` means there now: no arm is withheld, so nothing has to be told apart
     from an absence."""
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         view = await _view(one, _routed(RoutableOperation.RECENT_READS, RouteOutcome.FAILED))
 
         assert view["listing"] is None
@@ -627,7 +632,7 @@ async def test_a_period_bound_crosses_rendered_from_its_own_offset(
     being read through the client's zone database, so doing it in the gateway is what
     makes that true of the browser rather than hoped of it.
     """
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         view = await _view(
             one,
             _routed(
@@ -664,7 +669,7 @@ async def test_a_ruling_that_answers_one_decision_and_rests_on_another_is_not_re
     fields cross beside it unchanged, because the mark is a fact about the row rather
     than a redaction of it.
     """
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         view = await _view(
             one,
             _routed(
@@ -690,7 +695,7 @@ async def test_a_listing_holding_one_unreadable_ruling_still_carries_the_others(
     returned — including the marked one — and the page renders every readable row
     beside a statement that one was not.
     """
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         view = await _view(
             one,
             _routed(
@@ -723,7 +728,7 @@ async def test_the_three_states_a_trail_does_accept_are_read_normally(
     ``authorised_by`` — is an ``ALLOW`` resting on no decision that nonetheless
     answers a question, which §11 reads as the third state and this must not refuse.
     """
-    async with _harness(FakeAssistantEngine()) as one:
+    async with _harness(_Resuming()) as one:
         view = await _view(
             one,
             _routed(
@@ -739,9 +744,17 @@ async def test_the_three_states_a_trail_does_accept_are_read_normally(
 # --- §7: the card and its token -----------------------------------------------
 
 
-def _parked(operation: RoutableOperation, subject: RoutedListing) -> FakeAssistantEngine:
-    """An engine holding one routed park, answerable by its own handle."""
-    engine = FakeAssistantEngine()
+def _parked(
+    operation: RoutableOperation,
+    subject: RoutedListing,
+    engine: FakeAssistantEngine | None = None,
+) -> FakeAssistantEngine:
+    """An engine holding one routed park, answerable by its own handle.
+
+    ``engine`` is the canonical fake unless a case reads the card through
+    :class:`_Resuming`, which answers with the outcome that carried it.
+    """
+    engine = FakeAssistantEngine() if engine is None else engine
     card = engine.park_routed("h-1", operation=operation, subject=subject)
     engine.turn_outcome = TurnOutcome(
         turn=None,
@@ -766,7 +779,7 @@ async def test_the_routed_card_crosses_with_its_subject_and_its_token() -> None:
     produced it, and a user reading 'revoke this grant?' would be approving a
     ``forget``".
     """
-    async with _harness(_parked(RoutableOperation.FORGET, (_belief(),))) as one:
+    async with _harness(_parked(RoutableOperation.FORGET, (_belief(),), _Resuming())) as one:
         view = await _view(one, one.engine.turn_outcome)  # type: ignore[arg-type]  # seeded above
 
         card = view["confirmation"]
@@ -786,10 +799,6 @@ async def test_the_routed_card_is_answered_through_the_resume_the_page_already_h
     resumed outcome carries ``REFUSED`` and the response is a ``200``, not a fault.
     """
     async with _harness(_parked(RoutableOperation.FORGET, (_belief(),))) as one:
-        await one.whole(
-            "POST", "/ask", {"utterance": "forget that", "reference": {"goal_id": "goal-1"}}
-        )
-
         status, body = await one.whole(
             "POST", "/confirmation/resume", {"token": "h-1", "approved": False}
         )
@@ -808,10 +817,6 @@ async def test_a_routed_park_is_not_offered_by_the_recovery_listing() -> None:
     cannot answer after a restart, which is the opposite of what §7 decided.
     """
     async with _harness(_parked(RoutableOperation.FORGET, (_belief(),))) as one:
-        await one.whole(
-            "POST", "/ask", {"utterance": "forget that", "reference": {"goal_id": "goal-1"}}
-        )
-
         status, body = await one.whole("POST", "/confirmations", {})
 
         assert status == 200, body

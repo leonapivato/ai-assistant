@@ -21,14 +21,12 @@ from typing import Final
 
 import pytest
 
-from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.types import (
     DEFAULT_NOTIFICATION_REACH,
     AttemptOutcome,
     BeliefBand,
     BeliefSummary,
     ClarificationWithdrawal,
-    ConversationDigest,
     DiscloserProvenance,
     DriveWithheld,
     EngagementDisposition,
@@ -46,19 +44,14 @@ from ai_assistant.core.types import (
     RoutableOperation,
     SearchNotServiced,
     SpanCoverage,
-    SpokenAudioFormat,
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.interfaces.gateway.records import RefusalCondition
 from ai_assistant.interfaces.gateway.server import (
-    _POLICY,
-    _REFUSAL_STATUS,
-    _relay_fault,
     packaged_bundle,
 )
 from ai_assistant.orchestration.reads import ForecastDisposition
 from ai_assistant.wire import GRANTABLE_SCOPES
-from ai_assistant.wire.errors import TransportError
 
 _ROOT = Path(__file__).resolve().parents[3] / "src" / "ai_assistant" / "interfaces" / "gateway"
 _ASSETS = _ROOT / "assets"
@@ -82,14 +75,6 @@ _TOUCH_FLOOR: Final = "min-height: 44px;"
 
 #: The one width below which the narrow layout applies (#1429).
 _NARROW: Final = "@media (max-width: 480px) {"
-
-
-#: The two statuses ``_REFUSAL_STATUS`` gives to a condition that ends this browser's
-#: session, and to no other condition — so the page may read the condition back off the
-#: head alone when the body it would otherwise read never arrives (ADR-0182 §6). Named
-#: once because two checks below turn on it: that the page maps exactly these, and that
-#: the *other* pre-engine table does not duplicate them.
-SESSION_REFUSAL_STATUSES: Final = frozenset({401, 409})
 
 
 def _asset(name: str) -> str:
@@ -417,10 +402,10 @@ def test_a_control_the_page_hides_is_hidden_by_the_sheet_as_well() -> None:
     assert stylesheet.count("display: none") == 1
     # The three controls that ship hidden and are un-hidden by the script alone. Each
     # carries the attribute in the document, so each was on screen at first paint.
-    for identifier in ("new-conversation", "watch-button", "panel-index"):
+    for identifier in ("chat-follow-again", "watch-button", "panel-index"):
         assert " hidden" in _tag(document, identifier), identifier
     script = _code("app.js")
-    assert 'el("new-conversation").hidden = id === null;' in script
+    assert 'el("chat-follow-again").hidden = !offer;' in script
     assert 'el("watch-button").hidden = watching;' in script
     assert "nav.hidden = open.length < PANEL_INDEX_FLOOR;" in script
 
@@ -695,13 +680,12 @@ def test_the_header_half_is_held_in_origin_scoped_storage_shared_across_tabs() -
 
     assert "localStorage" in script
     assert "window.localStorage.setItem(STORAGE_KEY, value)" in script
-    # The page now stores one other thing, and it is **not** a session half: which
-    # conversation this view is reading, which is the tab's rather than the origin's.
-    # So the clause is asserted where it is about — no half of a session is ever in
-    # tab-scoped storage — and the keys that are, are named: the conversation the ask
-    # continues, and whether this tab has the chat open and which conversation it reads.
+    # The page stores one other thing, and it is **not** a session half: the chat this
+    # view has open, which is the tab's rather than the origin's. So the clause is
+    # asserted where it is about — no half of a session is ever in tab-scoped storage —
+    # and the keys that are, are named: whether this tab has the chat open and which
+    # conversation it reads.
     assert set(re.findall(r"window\.sessionStorage\.\w+\((\w+)", script)) == {
-        "CONVERSATION_KEY",
         "CHAT_OPEN_KEY",
         "CHAT_CONVERSATION_KEY",
     }
@@ -720,97 +704,6 @@ def test_the_header_half_is_sent_as_a_header_and_never_in_a_url() -> None:
 
     assert "X-Assistant-Session" in script
     assert not re.search(r"[?&][A-Za-z_]*(session|token|half)", script)
-
-
-def test_the_front_end_continues_the_conversation_the_hub_named() -> None:
-    """The id the hub hands back is "what a client keeps and presents to continue"
-    (ADR-0074 §2), and a page that rendered it without sending it back would start
-    a fresh conversation on every question the owner asked.
-
-    Held in the session's own key family, which is the reversal #1429 asks for and
-    the milestone-14 phone QA is the evidence behind: an earlier draft kept it in page
-    state alone, so a reload silently started a conversation the owner never asked for
-    (#1371's first clause). Web storage is scoped to scheme, host and port — the
-    property ADR-0168 §6 relies on for the header half — so the id at
-    ``127.0.0.1:8422`` is unreadable from ``127.0.0.1:9000``.
-
-    It admits nothing on its own. Every request carrying it is admitted by §6's two
-    values and by nothing else, so an id read out of storage without them reaches no
-    conversation.
-    """
-    script = _code("app.js")
-
-    assert "conversationId" in script
-    assert "asked.conversation_id = conversationId" in script
-    assert "localStorage.setItem(STORAGE_KEY" in script
-    assert 'const CONVERSATION_KEY = "assistant.session.conversation-id";' in script
-    assert "let conversationId = storedConversation();" in script
-
-
-def test_the_conversation_a_view_is_reading_is_the_tabs_and_not_the_origins() -> None:
-    """ADR-0168 §6 names the difference the two values want. The header half is "shared
-    across that origin's tabs" because it admits the browser; which conversation you are
-    reading is not — it is what *this view* is looking at, and two tabs are two views.
-
-    In `localStorage` it would be one selection for the whole origin, so a second tab
-    choosing a thread would retarget the first tab's next question at its own reload.
-    Adversarial review raised that on round 1 and it is right; the tab's own storage
-    survives a reload, which is all that was asked, and stops there.
-    """
-    script = _code("app.js")
-
-    assert "window.sessionStorage.getItem(CONVERSATION_KEY)" in script
-    assert "window.sessionStorage.setItem(CONVERSATION_KEY, id)" in script
-    assert "localStorage" not in _functions(script)["setConversation"]
-    assert "localStorage" not in _functions(script)["storedConversation"]
-
-
-def test_the_conversation_is_destroyed_with_the_session_it_sits_beside() -> None:
-    """Two routes end one and both go through the same place: this view's session
-    half being forgotten, and a new bootstrap exchange.
-
-    Forgetting the conversation is no longer one: since ADR-0293 §11:4 it forgets the
-    conversation's episodes and leaves the conversation, which the owner can go on
-    talking in (§5:7).
-
-    **Tidiness rather than a guarantee, and the difference is worth stating.** A
-    conversation is the hub's and outlives every gateway session by construction —
-    ``assistant ask --conversation`` at a terminal reaches one under whatever session
-    is current — and the id admits nothing on its own (ADR-0168 §6's two values do).
-    So this asserts what the page does with its own selection, and claims nothing
-    about a second tab that bootstraps a replacement session: that tab clears its own
-    and no other, exactly as it did before this file stored one at all.
-    """
-    functions = _functions(_code("app.js"))
-
-    assert "changeConversation(null);" in functions["forgetHeaderHalf"]
-    assert "changeConversation(null);" in functions["startSession"]
-    assert "changeConversation(null);" not in functions["forgetConversation"]
-    assert "window.sessionStorage.removeItem(CONVERSATION_KEY);" in functions["setConversation"]
-
-
-def test_the_page_says_which_conversation_the_next_question_lands_in() -> None:
-    """#1371's first clause, which is the half of that issue #1429 puts in this lane.
-
-    "None yet" is said rather than left blank: the hint was empty until a turn came
-    back, and an empty line is what left the owner on the phone unable to tell a fresh
-    thread from a continued one.
-
-    That the button in the listing actually *moves* this line is a fact about a tap
-    and is asserted where ADR-0216 §2 puts it, in
-    ``test_browser_conversations.py``. The other two clauses of #1371 are taken
-    below, as far as the ratified contracts admit: the resumed thread's count and
-    span, and a stated outcome for a forget. What was *said* in a resumed thread is
-    #1818 and is on no operation a browser reaches.
-    """
-    script = _code("app.js")
-    setter = _functions(script)["setConversation"]
-
-    assert "No conversation yet. Your next question starts one." in setter
-    assert "Your next question continues it." in setter
-    # Said on load and not only after a turn, which is what makes the persisted id
-    # visible at all.
-    assert "setConversation(conversationId);" in _functions(script)["showConsole"]
 
 
 def test_every_row_of_the_listing_says_which_conversation_it_is() -> None:
@@ -834,65 +727,6 @@ def test_every_row_of_the_listing_says_which_conversation_it_is() -> None:
     # First, so the id is above the row rather than between its two facts.
     assert rendering.index("conversation-name") < rendering.index("Last turn")
     assert "flex: 1 1 100%;" in _rule(stylesheet, ".conversation-name")
-
-
-def test_the_page_says_what_a_resumed_thread_already_holds() -> None:
-    """#1371's second clause, in the half a reading can decide.
-
-    The line exists, ships hidden — a page that showed it empty on load would be
-    claiming something about a thread nobody has chosen — and is written from the
-    digest by the one function that reads one.
-    """
-    document = _asset("index.html")
-    functions = _functions(_code("app.js"))
-
-    assert '<p class="hint" id="resumed" hidden></p>' in document
-    assert "sayResumed(describeHeld(digest.conversation));" in functions["resumeConversation"]
-    resuming = functions["resumeConversation"]
-    assert '"/conversation",' in resuming
-    assert "{ conversation_id: id }," in resuming
-
-
-def test_the_resumed_line_is_built_from_the_digest_and_from_nothing_else() -> None:
-    """Derived from ``ConversationDigest`` rather than hardcoded against it.
-
-    ADR-0074 §8 fixed that shape as "the count and span rather than every turn", and
-    the page's rendering is bounded by *it* rather than by a limit the page chose —
-    which is the whole reason this clause could be answered without a contract
-    change. A member this page read that the digest does not carry would be the page
-    having invented one, and this is what says so.
-    """
-    held = _functions(_code("app.js"))["describeHeld"]
-    read = set(re.findall(r"\bheld\.(\w+)", held))
-
-    assert read
-    assert read <= set(ConversationDigest.model_fields)
-
-
-def test_a_resumed_count_is_cleared_by_every_route_that_could_make_it_stale() -> None:
-    """The invariant lives in ``setConversation``, which is why there is one clear.
-
-    Every route into that function invalidates the digest: a different conversation
-    makes the count about the wrong thread, and a turn's own answer — which arrives
-    through ``renderOutcome`` rather than through ``changeConversation`` — makes it
-    short by the turn that just landed. A stale count is worse than none, because a
-    reader cannot tell that it is stale.
-    """
-    script = _code("app.js")
-    functions = _functions(script)
-
-    assert "sayResumed(null);" in functions["setConversation"]
-    # Written in exactly one place and cleared in exactly one place, which is what
-    # makes the invariant checkable at all.
-    assert script.count("sayResumed(") == 3
-    assert "sayResumed(describeHeld" in functions["resumeConversation"]
-    # And the guard counts *that clearing* rather than the selection changing, which
-    # is the difference between the two orderings and what adversarial review round 1
-    # found: an answer reaches `setConversation` through `renderOutcome` without
-    # touching `chose`, so a guard written against `chose` lets the digest behind it
-    # through and puts back a count the answer had just made short.
-    assert "described += 1;" in functions["sayResumed"]
-    assert "chose" not in functions["resumeConversation"]
 
 
 def test_a_request_its_caller_stopped_classifies_nothing_even_after_a_head() -> None:
@@ -925,55 +759,6 @@ def test_a_request_its_caller_stopped_classifies_nothing_even_after_a_head() -> 
     # lands *during* the read is the case, so a check before it would miss it.
     assert relaying.index("await readBody(response)") < relaying.index("signal.aborted")
     assert relaying.index("signal.aborted") < relaying.index("refused(panelId")
-
-
-def test_a_digest_read_is_stopped_when_the_line_it_would_write_is_cleared() -> None:
-    """Adversarial review round 2: a guard on the rendering leaves the refusal open.
-
-    ``relay`` classifies a refusal and writes it into the panel's fault slot itself,
-    before any caller sees a value — so an abandoned digest for a thread destroyed
-    elsewhere reported "There is no conversation of that name" over a panel that was
-    about something else, and no comparison after the ``await`` could take that back
-    without also erasing a fault the current act had legitimately written.
-
-    Clearing the line and stopping the read behind it are therefore one act, in one
-    place, reached by every route that invalidates the line.
-    """
-    functions = _functions(_code("app.js"))
-    saying = functions["sayResumed"]
-    resuming = functions["resumeConversation"]
-
-    assert "stopping.abort();" in saying
-    # Cleared before the abort, so a `sayResumed` reached *from* the abort's own
-    # rejection cannot abort a controller a later press has since registered.
-    assert saying.index("describing = null;") < saying.index("stopping.abort();")
-    assert "const stopping = new AbortController();" in resuming
-    assert "describing = stopping;" in resuming
-    # An abort is not a transport failure, and reporting it would put back the very
-    # condition the abort exists to suppress.
-    assert "if (described === mine) {" in resuming
-
-
-def test_continuing_a_thread_is_not_conditional_on_the_read_that_describes_it() -> None:
-    """The selection changes first, and unconditionally.
-
-    Continuing is the owner's own act and it is local — ``startFresh``'s comment
-    already records that the page "sends nothing" to leave a thread, and joining one
-    is the same kind of act. So a digest read that is slow, refused or unreachable
-    costs the sentence about what is in the thread and never the thread itself.
-
-    ``described`` is the guard on the other side of that, and it counts the *line
-    being cleared* rather than the selection changing — because two orderings reach
-    it and one guard has to answer both. The owner can press "Start a new
-    conversation" while the read is out, and a turn's answer can land while it is
-    out; only the second of those reaches ``setConversation`` without touching
-    ``chose``, which is what adversarial review round 1 found.
-    """
-    resuming = _functions(_code("app.js"))["resumeConversation"]
-
-    assert resuming.index("changeConversation(id);") < resuming.index("await relay(")
-    assert "const mine = described;" in resuming
-    assert "described !== mine" in resuming
 
 
 def test_a_forget_states_what_the_hub_answered_rather_than_what_was_asked() -> None:
@@ -1023,7 +808,7 @@ def test_a_superseded_listing_read_renders_neither_a_list_nor_a_fault() -> None:
     Two reads of this listing can overlap — a forget's own refresh and the owner
     pressing "Conversations" — and the one that resumes last won the panel whether or
     not it was the newer, re-rendering a snapshot taken before it. A conversation
-    destroyed in between came back as a row with a "Continue" the hub would refuse.
+    destroyed in between came back as a row for a conversation that was gone.
 
     Both halves are closed and they close different things: stopping the read is what
     keeps ``relay`` from writing that read's *refusal* into the panel before this
@@ -1036,8 +821,7 @@ def test_a_superseded_listing_read_renders_neither_a_list_nor_a_fault() -> None:
     assert "const stopping = new AbortController();" in listing
     assert "listing = stopping;" in listing
     assert "if (body === null || mine !== listed) {" in listing
-    # And only the newest read is entitled to say the gateway has gone, which is the
-    # same comparison `resumeConversation` makes and for the same reason.
+    # And only the newest read is entitled to say the gateway has gone.
     assert "if (mine === listed) {" in listing
     # The stop is registered before the read and taken before the next one begins, so
     # a read can never abort the controller a later one registered.
@@ -1087,7 +871,6 @@ def test_the_forget_ceremony_is_unchanged_and_no_second_one_is_added() -> None:
     functions = _functions(_code("app.js"))
 
     assert functions["forgetConversation"].count("window.confirm(") == 1
-    assert "window.confirm(" not in functions["resumeConversation"]
     assert "window.confirm(" not in functions["listConversations"]
     assert "window.confirm(" not in functions["statedForget"]
 
@@ -1147,11 +930,10 @@ _NAMED_BY_SHOW_BOOTSTRAP: Final = frozenset(
 #:
 #: ``answer`` holds the reply to the owner's last question, which is Tier 1 content and
 #: on the face of it belongs in the sweep. It is left out **here** because hiding it is
-#: not the one line the other panels cost: it is written by the ask paths rather than by
-#: a listing — ``askStreaming`` and ``couldRenderOutcome``'s four callers, the spoken
-#: turn among them — and adding it to the sweep without carrying #2404's guard into
-#: those paths would hide it at session loss only for a reply still in flight to put it
-#: back. Filed as #2446 rather than taken here.
+#: not the one line the other panels cost: it is written by a park's answer through
+#: ``couldRenderOutcome`` rather than by a listing, and adding it to the sweep without
+#: carrying #2404's guard into that path would hide it at session loss only for a reply
+#: still in flight to put it back. Filed as #2446 rather than taken here.
 _OUTSIDE_THE_HIDE_SWEEP: Final = frozenset({"answer"})
 
 
@@ -1199,7 +981,6 @@ def test_every_panel_a_session_less_page_may_not_show_is_in_the_hide_sweep() -> 
 #: extension of this sweep. Filed as #2451, which names this set.
 _ACTS_THAT_ACCOUNT_FOR_THEMSELVES: Final = frozenset(
     {
-        "resumeConversation",
         "answerQuestion",
         "withdrawClarification",
         "abandonGoal",
@@ -1240,12 +1021,11 @@ _SEGMENTS_THAT_ACCOUNT_FOR_AN_ACT: Final = frozenset({("forgetBelief", 2)})
 #: which are the ones the census above cannot see because ``readDeliveries`` issues its
 #: own ``fetch``.
 #:
-#: What is left is the **ask** paths, named here rather than left invisible. They are
-#: #2446's, and not by deferral for its own sake: each carries its own outcome reasoning
-#: — ADR-0139 §4's three outcomes, ADR-0177 §7's not-known branch — that a guard has to be
-#: fitted to rather than dropped into, and that issue owes an arm per path. It empties
-#: this set when it lands, exactly as :data:`_OUTSIDE_THE_HIDE_SWEEP` is emptied.
-_REPORTS_WITHOUT_A_SESSION_GUARD: Final = frozenset({"askWhole", "sendRecording"})
+#: What was left were the **ask** paths, ``askWhole`` and ``sendRecording`` (#2446), and
+#: they retired with the Ask panel and push-to-talk (ADR-0309 §5:4, ADR-0313 §3:4). So
+#: the set is empty, and it is kept rather than dropped so that a later door reaching
+#: ``sessionLost`` unguarded has to be named here rather than slipping past the census.
+_REPORTS_WITHOUT_A_SESSION_GUARD: Final[frozenset[str]] = frozenset()
 
 
 def test_every_resumed_relay_that_displays_anything_compares_its_session() -> None:
@@ -1394,11 +1174,6 @@ def test_a_refusal_the_session_outlived_is_classified_but_not_displayed() -> Non
     assert relaying.index("const era = sessionEra;") < relaying.index("await fetch(")
     assert relaying.index("noticed(body);") < relaying.index("if (!sameSession(half, era)) {")
     assert relaying.index("if (!sameSession(half, era)) {") < relaying.index("refused(panelId")
-    # `conversationLost` is outside it as well, and above it: a conversation belongs to
-    # the hub and outlives every session, which is what the re-entry sentence says.
-    assert relaying.index("conversationLost(body") < relaying.index(
-        "if (!sameSession(half, era)) {"
-    )
 
 
 def test_every_ending_that_can_end_a_session_asks_whose_session_it_is() -> None:
@@ -1673,16 +1448,18 @@ def test_the_two_misframed_endings_are_not_one_message_either() -> None:
 
 
 def test_the_page_renders_the_outcome_whole_through_the_guard() -> None:
-    """The turn answers as one result since ADR-0293 §11 retired the streamed one, and
-    its outcome reaches the screen through ``couldRenderOutcome`` (#1622): the guard
-    runs the render, and ``renderOutcome`` clears the panel before rendering.
+    """A park's answer is the one entry that renders a turn's outcome since the Ask route
+    retired (ADR-0309 §5:4), and its outcome reaches the screen through
+    ``couldRenderOutcome`` (#1622): the guard runs the render, and ``renderOutcome`` clears
+    the panel before rendering.
     """
     script = _code("app.js")
+    caveated = "unaccounted ? PARK_SETTLED_AFTER_UNKNOWN : null"
 
-    assert "couldRenderOutcome(body.outcome, chosenAt)" in _functions(script)["askWhole"]
     assert (
-        "renderOutcome(outcome, chosenAt, provenance);" in _functions(script)["couldRenderOutcome"]
+        f"couldRenderOutcome(body.outcome, {caveated})" in _functions(script)["answerConfirmation"]
     )
+    assert "renderOutcome(outcome, provenance);" in _functions(script)["couldRenderOutcome"]
     assert "clearNode(body);" in script
 
 
@@ -1700,36 +1477,6 @@ def test_the_page_renders_a_partly_composed_answer_as_incomplete() -> None:
 
     assert "That answer is incomplete" in script
     assert "No answer could be composed for this turn" in script
-
-
-def test_the_page_offers_one_turn_entry_and_only_with_a_reference() -> None:
-    """ADR-0293 §11 retires the streamed turn and the free-text Ask box with it: the
-    ordinary turn is a message in the chat. What is left is ``/ask`` for the turn the
-    chat cannot yet carry — answering a clarification or taking a goal up (ADR-0250
-    §11, §13) — so the page sends one only with a reference attached, and the form is on
-    screen only while one is.
-    """
-    script = _code("app.js")
-    document = _markup("index.html")
-    asking = _functions(script)["ask"]
-
-    assert '"/ask/stream"' not in script
-    assert '"/ask"' in script
-    assert "stream-answer" not in document
-    # Named exactly twice — where it is defined, and at its one call site.
-    assert script.count("askWhole(") == 2
-    assert asking.index("if (reference === null) {") < asking.index("askWhole(")
-    assert "asked.reference = waiting.reference.value;" in asking
-    assert "showAskForm();" in _functions(script)["showReference"]
-    # Shown while a reference is attached **or a turn it sent is still out**, so giving a
-    # reference up mid-wait cannot hide the form's own `Stop waiting` (round 1, `major`),
-    # and re-read when the wait ends.
-    assert (
-        'el("ask-form").hidden = reference === null && awaited === null;'
-        in _functions(script)["showAskForm"]
-    )
-    assert "showAskForm();" in _functions(script)["releaseAsk"]
-    assert '<form id="ask-form" hidden>' in document
 
 
 #: The three browser speech APIs ADR-0200 §10 forbids by name, and the one that is a
@@ -1770,1032 +1517,17 @@ def test_the_front_end_runs_no_browser_speech_engine(api: str) -> None:
         assert api not in source, name
 
 
-def test_the_page_records_with_mediarecorder_and_uploads_one_whole_recording() -> None:
-    """§10: the front end "records with ``MediaRecorder``", and "the recording is
-    uploaded complete, in one request… No WebSocket, no protocol upgrade, no
-    ``EventSource`` and no chunked upload".
-
-    The negative half is what the enumeration buys: a page that opened a socket for the
-    upload would satisfy every other check in this file.
-    """
-    script = _code("app.js")
-
-    assert "new MediaRecorder(" in script
-    assert '"/ask/spoken"' in script
-    assert "WebSocket" not in script
-    assert "EventSource" not in script
-
-
-def test_the_page_sends_the_three_members_the_route_reads_and_no_deadline() -> None:
-    """ADR-0200 §10: the body carries "the **browser-owned** arguments of §3's signature
-    and no others — ``utterance``, ``plays`` and ``conversation_id``", and the gateway
-    supplies the deadline of its own.
-
-    A page that sent one would not be refused — §10 makes a body's ``timeout`` *never
-    read* rather than rejected — so nothing at run time would report it, and the front
-    end asserting a deadline it has no standing to choose would go unnoticed
-    (ADR-0177 §1's fifth clause).
-    """
-    sending = _functions(_code("app.js"))["sendRecording"]
-
-    assert "asked.utterance" in sending
-    assert "asked.plays" in sending
-    assert "asked.conversation_id" in sending
-    assert "timeout" not in sending
-
-
-def test_the_formats_the_page_names_are_the_vocabulary_the_surface_carries() -> None:
-    """ADR-0200 §9's ``SpokenAudioFormat`` is a closed vocabulary, and a page naming a
-    member it does not carry would be refused at the door with nothing to say about why.
-
-    Read against the enum rather than against a list in this file, so a member added on
-    a measurement (§9 permits that, and only that) fails here until the page names it.
-    """
-    declared = _declaration(_code("app.js"), "TALK_FORMATS")
-
-    for member in SpokenAudioFormat:
-        assert f'"{member.value}"' in declared, member
-    assert declared.count('"audio/') == len(SpokenAudioFormat)
-
-
-def test_the_rendering_is_played_without_a_url_the_policy_would_refuse() -> None:
-    """ADR-0168 §6 serves every response under a policy permitting media "from its own
-    origin alone", and `media-src 'self'` matches neither a ``blob:`` nor a ``data:``
-    URL — the only two ways to hand a media element bytes the page is holding.
-
-    So the rendering is decoded directly (ADR-0200 §10's "the browser's ordinary audio
-    playback", through the Web Audio decoder), and the two URL schemes are absent from
-    the script. A lane reaching for one of them would be widening a ratified security
-    clause to make one control work, which is the change this pins against.
-    """
-    script = _code("app.js")
-
-    assert "decodeAudioData(" in script
-    assert "createObjectURL(" not in script
-    assert "blob:" not in script
-    assert "data:audio" not in script
-    assert "media-src 'self'" in _POLICY
-
-
-def test_the_control_ships_hidden_and_is_offered_only_where_a_microphone_can_be() -> None:
-    """ADR-0200 §10 and ADR-0202: a browser withholds a microphone from a page whose
-    origin it does not consider trustworthy, and gives no legible account of why.
-
-    So the control ships ``hidden`` — whether the browser will hand this page a
-    microphone is a fact only a script can ask for — and where the answer is no it is
-    revealed **disabled beside the sentence saying why**, which is the legible state an
-    owner can act on. Absent and unexplained is not.
-    """
-    assert "hidden" in _tag(_markup("index.html"), "talk-button")
-    offering = _functions(_code("app.js"))["offerTalk"]
-
-    assert "navigator.mediaDevices" in offering
-    assert "button.disabled = !usable" in offering
-    assert 'saying(usable ? "" : NO_MICROPHONE)' in offering
-
-
-def test_the_press_is_held_by_pointer_and_by_keyboard_and_never_by_a_click() -> None:
-    """A control that is *held* needs the press and the release apart, and a ``click``
-    is the two collapsed into one event.
-
-    The pointer pair covers mouse, pen and touch together — a second ``touchstart``
-    listener would double-fire wherever a browser sends both — and ``setPointerCapture``
-    is what makes a release land here after the finger has drifted off the button.
-    ``preventDefault`` on the keyboard pair is what stops a native button turning Space
-    and Enter into an activation on top of it (#1429's accessibility floor: the control
-    is reachable and operable from the keyboard).
-    """
-    script = _code("app.js")
-
-    for event in ("pointerdown", "pointerup", "pointercancel", "keydown", "keyup"):
-        assert f'talkButton.addEventListener("{event}"' in script, event
-    assert "setPointerCapture(" in script
-    assert 'talkButton.addEventListener("click"' not in script
-    assert 'talkButton.addEventListener("touchstart"' not in script
-
-
-def test_the_held_control_keeps_the_gesture_the_browser_would_otherwise_take() -> None:
-    """A phone claims a press for a scroll or a double-tap zoom, which fires
-    ``pointercancel`` a moment in and ends a recording the owner is still speaking into;
-    a long press selects the label and raises the selection handles over the control
-    being held. Both are declarations rather than script, so they are pinned here."""
-    rule = _rule(_style("app.css"), "#talk-button")
-
-    assert "touch-action: none;" in rule
-    assert "user-select: none;" in rule
-
-
-def test_the_transcript_is_shown_outside_the_panel_the_next_turn_clears() -> None:
-    """ADR-0200 §4: "``heard`` is disclosed to the caller on every call that produced a
-    transcript. A push-to-talk surface that cannot show the user what it heard cannot be
-    corrected by them, and a transcript the hub acted on but never showed is the one part
-    of this path a user has no other way to inspect."
-
-    Outside ``#answer-body`` because ``renderOutcome`` clears that node on every turn —
-    including the typed one an owner asks *because* they read what was heard and it was
-    wrong.
-    """
-    document = _markup("index.html")
-    heard = _functions(_code("app.js"))["heardWas"]
-
-    assert 'id="heard"' in document
-    assert 'id="answer-body"' not in _tag(document, "heard")
-    assert 'el("heard").textContent' in heard
-
-
-def test_a_recording_with_no_words_and_an_unspoken_answer_are_neither_of_them_faults() -> None:
-    """ADR-0200 §4's two shapes a reader should be able to name from the four members.
-
-    A recording that carried no words "is not an error and no exception is raised for
-    it", so it is said in the page's own hint rather than in the fault surface, where it
-    would teach an owner that a quiet room is something going wrong. An answer that could
-    not be spoken is a **degradation**: the answer is on screen and complete, and what is
-    missing is the audio — ADR-0170 §6's rule that a degraded turn is a statement and
-    never silence, one stage further on.
-
-    **Neither of them, and one thing that is** (#2005). The entry does now write into the
-    fault surface, for an answer it could not put on screen at all — so what is pinned is
-    that this is the only condition it names there, rather than that it names none. A
-    quiet room and an unspoken answer becoming faults is the failure this case exists to
-    catch, and it still is one.
-    """
-    script = _code("app.js")
-    rendering = _functions(script)["renderSpokenTurn"]
-
-    assert "saying(HEARD_NOTHING)" in rendering
-    assert "turn.spoken_degraded" in rendering
-    assert 'line(el("answer-body"), NOT_SPOKEN, "notice")' in rendering
-    # Said in the page's own hint and in the panel, never in the fault slot.
-    for stated in ("HEARD_NOTHING", "NOT_SPOKEN"):
-        assert f"fault({stated}" not in script, stated
-    # And the one thing this entry does fault on is the answer it could not render.
-    assert _fault_calls(rendering) == ['SPOKEN_ANSWER_UNREADABLE, "console"']
-
-
-def test_a_spoken_answer_that_cannot_be_put_on_screen_is_not_played_either() -> None:
-    """#2005: the ``=== null`` pairing check is a check for ``null`` and not for shape.
-
-    ADR-0200 §4 pairs the members — "``heard`` is ``None`` **exactly when** ``outcome``
-    is ``None``, and that pair is the recording that carried no words" — and that is the
-    quiet room, which is not an error. An **absent** member is not that pair. ``readBody``
-    answers an unreadable ``2xx`` with ``{}``, so ``body.turn`` is gone before
-    ``turn.outcome`` is even read; a ``turn`` that survives may carry no ``outcome``; and
-    an ``outcome`` that is there may still not carry what ``renderOutcome`` reads. Each of
-    those walked past a check for ``null`` and threw, and the throw landed in
-    ``sendRecording``'s own ``catch``: the delivery report put back and ``GATEWAY_GONE``
-    announced — "The gateway did not answer, so it may have stopped" — about a gateway
-    that had just answered and a turn a ``200`` says ran.
-
-    **Three things the ending has to do, and each is a way of getting it wrong.** It says
-    the turn ran, which on this entry is read rather than assumed: ``_ask_spoken`` awaits
-    ``converse_spoken`` and renders afterwards, so the head is intact evidence and it is
-    the body that could not be read. It withholds the transcript, because ``heard`` comes
-    out of the same body and §4 pairs it with the outcome — disclosing it would mean
-    deciding member by member what of an unreadable body to trust, which is the
-    enumeration rounds 9 and 10 of PR #1612 refuted. And it plays nothing: ``playSpoken``
-    reads ``turn.outcome.conversation_id`` for the report a playback owes (ADR-0205 §7),
-    so a rendering started past this point would be sound the page cannot account for.
-    """
-    script = _code("app.js")
-    rendering = _functions(script)["renderSpokenTurn"]
-
-    # The member is normalised before it is read, so the pairing check decides a shape
-    # rather than throwing on an absent turn.
-    assert "const turn = asObject(read);" in rendering
-    assert rendering.index("const turn = asObject(read);") < rendering.index(
-        "turn.outcome === null"
-    )
-    # §4's pair still takes §4's branch, and it is still a check for `null` alone.
-    assert "if (turn.outcome === null) {" in rendering
-    quiet = rendering[rendering.index("if (turn.outcome === null) {") :]
-    quiet = quiet[: quiet.index("!couldRenderOutcome(")]
-    assert "saying(HEARD_NOTHING);" in quiet
-    assert "resumeInterrupted();" in quiet
-    for guessed in ("undefined", "typeof turn.outcome", "Array.isArray"):
-        assert guessed not in rendering, guessed
-    # The guard decides the rest, and it is reached **before** the transcript is
-    # disclosed rather than after it.
-    assert rendering.index("!couldRenderOutcome(turn.outcome, chosenAt)") < rendering.index(
-        "heardWas(turn.heard);"
-    )
-    ending = rendering[rendering.index("!couldRenderOutcome(turn.outcome, chosenAt)") :]
-    ending = ending[: ending.index("heardWas(turn.heard);")]
-    assert "heardWas(null);" in ending
-    assert 'fault(SPOKEN_ANSWER_UNREADABLE, "console");' in ending
-    # Nothing is played, nothing is resumed, and no delivery report is put back: the
-    # `2xx` is the hub having received the one this request carried.
-    for reached in ("playSpoken(", "resumeInterrupted()", "restoreDelivery("):
-        assert reached not in ending, reached
-
-    # What it says, and the clauses it is entitled to.
-    said = _joined(_constant(script, "SPOKEN_ANSWER_UNREADABLE"))
-    assert "could not read an outcome from the answer" in said
-    assert "what the turn did is not known" in said
-    assert "The turn itself ran" in said
-    assert "Nothing of it is shown or spoken here" in said
-    assert "Nothing was re-sent and nothing was cancelled." in said
-    assert _constant(script, "SPOKEN_ANSWER_UNREADABLE").rstrip().endswith("WHERE_TO_LOOK")
-    # And no cause it has not established: the owner stopped nothing, the gateway
-    # refused nothing, and the room was not quiet.
-    for attributed in ("You stopped waiting", "may have stopped", "I heard nothing"):
-        assert attributed not in said, attributed
-    # One declaration, one site.
-    assert script.count("SPOKEN_ANSWER_UNREADABLE") == 2
-
-
-def test_a_recorder_that_refuses_to_start_does_not_wedge_the_control() -> None:
-    """Found by driving the page, and the reason it is pinned here.
-
-    ``new MediaRecorder`` and ``recorder.start`` both throw **synchronously** — an
-    unsupported type at the first, a track the browser will not encode at the second —
-    and an escaping throw leaves that press in flight for the life of the page: ``press``
-    stays set, so every later press returns at the top of ``startTalking``, and the line
-    on screen still reads "Listening". The control is then dead until the page is
-    reloaded, which is #1500's failure on a different control.
-
-    Both guards give the microphone back as well, because a page that has stopped
-    listening must not leave the browser's recording indicator up.
-    """
-    starting = _functions(_code("app.js"))["startTalking"]
-
-    assert starting.count("} catch (") == 3
-    assert starting.count("fault(RECORDER_REFUSED,") == 2
-    assert starting.count("releaseMicrophone(stream)") == 3
-    assert starting.count("press = null") == 4
-
-
-def test_a_spoken_wait_that_never_settles_does_not_hold_the_owners_control_for_ever() -> None:
-    """Issue #1500's condition on the third turn entry, found by adversarial review.
-
-    ``sendRecording`` disables ``#talk-button`` before the request goes out and re-enables
-    it in a ``finally``; ``fetch`` carries no deadline of its own, so a socket that dies
-    without settling leaves that ``await`` pending for ever, the ``finally`` never runs,
-    and the owner's one way into the assistant by voice stays greyed out until the page is
-    reloaded.
-
-    **The remedy is a control and not a bound** — ADR-0182 §7's fifth clause has the page
-    re-issue no request of its own motion, so "offering the owner a visible retry costs
-    one control and removes the class". It sends nothing and cancels nothing: a control
-    that re-recorded would be the silent retry ADR-0168 §9 forbids wearing a button's
-    clothes.
-
-    **Its own control rather than a share of the Ask panel's**, because an owner with a
-    typed question out and a recording out has two waits to leave and needs one control
-    each.
-    """
-    script = _code("app.js")
-    sending = _functions(script)["sendRecording"]
-    abandoning = _functions(script)["abandonSpoken"]
-
-    assert "hidden" in _tag(_markup("index.html"), "stop-talking")
-    assert 'el("stop-talking").addEventListener("click", abandonSpoken)' in script
-    assert "new AbortController()" in sending
-    assert "signal: mine.stopping.signal" in sending
-    # **And it is armed with nothing awaited between there and the request** (round 2's
-    # first major). `SPOKEN_ABANDONED` says the recording was sent and the turn may have
-    # run; offering it while the base64 was still being made would have said that of a
-    # press no request had gone out for. The window is closed rather than given a second
-    # sentence — encoding is arithmetic and cannot stall the way a socket can.
-    assert sending.index("await base64Of(") < sending.index("new AbortController()")
-    assert sending.index('el("stop-talking").hidden = false') < sending.index("await fetch(")
-    armed = sending.index("new AbortController()")
-    assert "await" not in sending[armed : sending.index("await fetch(")]
-    assert "mine.stopping.abort()" in abandoning
-    assert "fault(SPOKEN_ABANDONED," in abandoning
-    # The control comes back through one function, which is what makes it come back on the
-    # endings that never settle as well as the ones that do.
-    assert "releaseTalk()" in abandoning
-    assert "if (press === mine) {" in sending
-    # And the wait that was stopped does not then report the gateway as gone: an abort the
-    # owner asked for is an act rather than a failure, and `abandonSpoken` has already
-    # said what happened.
-    assert "if (mine.stopping === null || !mine.stopping.signal.aborted) {" in sending
-
-
-def test_the_audio_context_is_built_inside_the_press_that_leads_to_the_playback() -> None:
-    """Adversarial review, round 1, major. A browser enforcing *transient* activation for
-    Web Audio starts a context created after the upload suspended and refuses the
-    ``resume`` — so a perfectly good rendering came back and was reported as one this
-    browser could not play.
-
-    That is not hypothetical on the browser milestone 19's exit test names: WebKit holds
-    the strict rule and the exit test is a phone. ``startTalking`` runs inside the
-    ``pointerdown`` or ``keydown`` handler, so the context is built there, **before any
-    await**, and held for the life of the page — closing it after a rendering would put
-    the next playback back outside a gesture, which is the defect.
-    """
-    script = _code("app.js")
-    starting = _functions(script)["startTalking"]
-    playing = _functions(script)["playSpoken"]
-
-    assert starting.index("readyToPlay()") < starting.index("await navigator.mediaDevices")
-    assert "new AudioContext()" not in playing
-    assert "const context = listeningContext" in playing
-    assert script.count("new AudioContext()") == 1
-    # Held rather than closed, which is the whole of what makes the *next* playback work.
-    assert ".close()" not in playing
-
-
-def test_a_late_playback_failure_cannot_land_under_a_later_answer() -> None:
-    """Adversarial review, round 2, major. ``playSpoken`` awaits the decoder, and while
-    that is pending the owner can ask again — ``renderOutcome`` clears ``#answer-body``,
-    so a rejection landing after that appended "could not play" under an answer whose
-    audio played perfectly, attributing one turn's silence to another.
-
-    The turn keeps a slot of its own for the notice it may owe, and the next render
-    detaches it, so ``isConnected`` is the whole test — ``abandonAsk``'s own device for
-    the same question about the same panel.
-    """
-    script = _code("app.js")
-    rendering = _functions(script)["renderSpokenTurn"]
-    writing = _functions(script)["couldNotPlay"]
-
-    assert 'const slot = line(el("answer-body"), "", "notice")' in rendering
-    assert "void playSpoken(turn.spoken, slot" in rendering
-    assert "if (!slot.isConnected) {" in writing
-    # The notice is written through that one function and nowhere else, so a later caller
-    # cannot reach the panel around the check.
-    assert script.count("COULD_NOT_PLAY") == 2
-
-
-def test_a_press_ends_the_answer_that_is_still_being_spoken() -> None:
-    """Issue #1696, the owner's ruling of 2026-08-28 from a real iPhone: push-to-talk
-    **is an interrupt**.
-
-    A buffer the page had already started kept playing well after the owner had read the
-    answer, and pressing to talk did not stop it — while the recording that press began
-    was hearing the assistant's own loudspeaker, which is #1318 design note 1 §3(c)'s
-    self-hearing case arriving at the page before it arrives at the hub.
-
-    **Ahead of every one of ``startTalking``'s guards**, because what the owner asked for
-    by pressing is the silence: a page that stopped the sound only on the presses that
-    went on to record something would be answering a different act.
-
-    **A statement and not a fault**, for ``NOT_SPOKEN``'s reason — the interruption is the
-    owner's own doing and the answer above it is complete, so what is said is where the
-    sound stopped and nothing more.
-    """
-    script = _code("app.js")
-    starting = _functions(script)["startTalking"]
-    interrupting = _functions(script)["interruptPlayback"]
-    stopping = _functions(script)["stopPlaying"]
-
-    assert starting.index("interruptPlayback()") < starting.index("if (press !== null")
-    assert starting.index("interruptPlayback()") < starting.index("readyToPlay()")
-    assert "mine.source.stop()" in stopping
-    assert "playbackInterrupted(ended.slot)" in interrupting
-    assert "fault(" not in interrupting
-    assert "fault(" not in stopping
-    # Written through that one function and nowhere else, which is `couldNotPlay`'s rule
-    # for the other notice this panel takes: a slot the next render detached belongs to an
-    # answer that is no longer on screen.
-    assert "if (!slot.isConnected) {" in _functions(script)["playbackInterrupted"]
-    assert script.count("PLAYBACK_INTERRUPTED") == 2
-
-
-def test_a_decode_the_press_overtook_starts_no_source() -> None:
-    """The half of #1696 that stopping a live ``AudioBufferSourceNode`` does not reach.
-
-    ``playSpoken`` awaits a resume and then a decoder before it has any source to stop, so
-    a press landing in that window has nothing to call ``stop`` on. Without the check the
-    rendering the owner interrupted would begin speaking a moment *after* they had begun
-    — the same defect one beat later, and the harder one to see.
-
-    The record is the identity: ``interruptPlayback`` clears it **before** it stops
-    anything, and the comparison after the decoder is what reads that. The source is put
-    into the record only once it has started, because a source that has not started cannot
-    be stopped and a record naming one would have the interrupt throw rather than
-    interrupt.
-    """
-    script = _code("app.js")
-    playing = _functions(script)["playSpoken"]
-    stopping = _functions(script)["stopPlaying"]
-
-    assert "playing = mine" in playing
-    assert stopping.index("playing = null") < stopping.index("mine.source.stop()")
-    assert playing.index("await context.decodeAudioData(") < playing.index("if (playing !== mine)")
-    assert playing.index("if (playing !== mine)") < playing.index("soundFrom(context, mine, 0)")
-    # A source is armed and started in one place, and taken onto the record only once it
-    # has started. A first playing and a resume both reach it (#1701), so neither can grow
-    # an order of its own and the check above reads for both.
-    sounding = _functions(script)["soundFrom"]
-    assert sounding.index("source.start(0, offset)") < sounding.index("mine.source = source")
-    assert script.count("createBufferSource()") == 1
-
-
-def test_one_playback_is_in_the_air_and_taking_the_record_over_ends_it() -> None:
-    """Adversarial review, round 1, ``major``.
-
-    The record names the playback this page has in the air, and writing a new one over it
-    without ending the old one is a page with two answers sounding at once — where a
-    press would then stop only the later of them, leaving the earlier audible into the
-    microphone the same press opens.
-
-    **The sequence the finding describes is unreachable through the control**: every
-    spoken answer arrives from a press, and the press interrupted before its request went
-    out, so there is never a first playback left for the second answer to land on. That
-    is why the invariant is stated where the record is taken over rather than left to be
-    inferred from the only caller there happens to be today — and it is stated silently,
-    because a replacement is not an interruption and the slot the old answer kept has
-    been detached by the render that replaced it.
-    """
-    script = _code("app.js")
-    playing = _functions(script)["playSpoken"]
-
-    assert playing.index("stopPlaying()") < playing.index("playing = mine")
-    assert playing.index("stopPlaying()") < playing.index("await ")
-    # Through the one function that ends a playback, so there is no second way to leave a
-    # source sounding with nothing holding it.
-    assert script.count("mine.source.stop()") == 1
-
-
-def test_a_press_landing_after_a_natural_end_does_not_say_it_interrupted_one() -> None:
-    """Issue #1705, deferred from PR #1702's adversarial review as a ``minor``.
-
-    ``ended`` is a **queued task** and not a synchronous callback, so a source that
-    reached its natural end still names itself in ``playing`` for the moments between the
-    two. A press landing in that window found the record, stopped a source that had
-    already finished — harmless, and the ``try`` around it exists for exactly that — and
-    then wrote "this answer stopped being spoken" under an answer whose audio had been
-    heard in full.
-
-    What tells the two apart is where the sound had reached, and it has to be arithmetic
-    over the audio context's own clock rather than a second listener: the whole of the
-    window is *before* the queued one runs, so there is no event to wait for inside it.
-    ``stopPlaying`` stamps the reading before it stops the source, because after ``stop()``
-    there is no clock left to read it from and both callers that need it run afterwards.
-    """
-    script = _code("app.js")
-    stopping = _functions(script)["stopPlaying"]
-    interrupting = _functions(script)["interruptPlayback"]
-    reading = _functions(script)["playedSoFar"]
-    elapsed = _functions(script)["playbackElapsed"]
-
-    assert stopping.index("mine.played = playedSoFar(mine)") < stopping.index("mine.source.stop()")
-    assert interrupting.index("if (playbackElapsed(ended)) {") < interrupting.index(
-        "playbackInterrupted(ended.slot)"
-    )
-    # The context's clock and not the page's: `currentTime` advances with the audio, so a
-    # context the browser suspended part-way through accrues no playback nobody heard.
-    assert "listeningContext.currentTime - mine.startedAt" in reading
-    assert "Date.now()" not in reading
-    assert "mine.buffer.duration" in reading
-    assert "mine.played >= mine.buffer.duration" in elapsed
-    # Read off the record, never from a second `ended` listener — which is what makes the
-    # question answerable inside the window at all. There is one such listener in the file.
-    assert "addEventListener" not in elapsed
-    assert script.count('addEventListener("ended"') == 1
-
-
-def test_a_press_that_asked_nothing_gives_the_answer_back_where_it_stopped() -> None:
-    """Issue #1701, the owner's direction of 2026-08-28.
-
-    A press is an interrupt (#1696), and an interrupt the owner did not mean to make is a
-    silence they did not ask for. ADR-0200 §4's no-words release is the one ending that
-    says so: "nothing was asked, so nothing was answered, no turn ran, no episode was
-    captured and no conversation was created". The answer that was sounding is still the
-    answer and the page is still holding its decoded buffer, so it is given back from
-    where the sound stopped.
-
-    **Page-locally, and that is the whole point.** One more source, no request, nothing
-    re-rendered — so the accident never reaches the hub as a gap in a delivery it is told
-    about. ADR-0205 §8 names this sibling and says what makes that legible: "a resume that
-    never left the page produces no report".
-
-    **A record of its own rather than the one the press ended**, because the stopped
-    source's ``ended`` listener still names the old record — and a resume that reused it
-    would hand that queued task a live playback to let go of, defeating the identity check
-    that makes the listener safe.
-
-    **And where it cannot resume, the interruption's own sentence stands.** A context that
-    is not running, a slot the next render detached, a source the browser will not start:
-    "this answer stopped being spoken" is true in each of those, so it is the fallback
-    rather than something to clear first.
-    """
-    script = _code("app.js")
-    rendering = _functions(script)["renderSpokenTurn"]
-    interrupting = _functions(script)["interruptPlayback"]
-    resuming = _functions(script)["resumeInterrupted"]
-
-    # Held by the press that ended it and dropped at the top of every press, before
-    # anything decides to keep one: what a release can resume is its own press's playback
-    # or nothing at all.
-    assert interrupting.index("held = null") < interrupting.index("held = ended")
-    # Consumed on the no-words release and on no other ending — the declaration and its
-    # one caller are the two occurrences in the file.
-    assert rendering.index("saying(HEARD_NOTHING)") < rendering.index("resumeInterrupted()")
-    assert script.count("resumeInterrupted()") == 2
-    # Nothing leaves the page.
-    assert "fetch(" not in resuming
-    assert "/ask/spoken" not in resuming
-    assert "fault(" not in resuming
-    # One playback in the air, which taking the record over is what ends (PR #1702).
-    assert resuming.index("stopPlaying()") < resuming.index("playing = resumed")
-    # From where the sound stopped, onto a record of its own.
-    assert "played: mine.played" in resuming
-    assert "soundFrom(context, resumed, mine.played)" in resuming
-    # The two conditions that leave the interruption's sentence standing instead.
-    assert "!mine.slot.isConnected" in resuming
-    assert 'context.state !== "running"' in resuming
-    # The notice replaces that sentence, through the one writer that owns it.
-    assert "playbackResumed(resumed.slot)" in resuming
-    assert "if (!slot.isConnected) {" in _functions(script)["playbackResumed"]
-    assert script.count("PLAYBACK_RESUMED") == 2
-
-
-def test_how_much_of_an_answer_sounded_is_one_value_across_a_resume() -> None:
-    """What #1701's resume owes #1700's report, so that the two do not disagree.
-
-    ADR-0205 §7 has the page report ``COMPLETE`` "where the source ended of its own
-    accord", with both durations "the decoded buffer's own", and ``INTERRUPTED`` "where a
-    press ended it", with "a measured elapsed ... read only where the playback was cut
-    short". A resume that measured only its own source would make an answer taken up again
-    and heard to its end report the *remainder* — an answer heard in full reported as
-    interrupted, which is the failure that ADR exists to remove arriving from the page.
-
-    So the reading is one value: the offset a source started from plus what the context's
-    clock has advanced since, carried across the resume as the new record's offset, and
-    stamped by whichever ending got there — the press through ``stopPlaying``, the natural
-    end through the buffer's own duration. This lane implements no report; what it owes is
-    a value the lane that does can read.
-    """
-    script = _code("app.js")
-    reading = _functions(script)["playedSoFar"]
-    sounding = _functions(script)["soundFrom"]
-    resuming = _functions(script)["resumeInterrupted"]
-
-    assert "mine.offset + (listeningContext.currentTime - mine.startedAt)" in reading
-    assert "Math.min(Math.max(sounded, 0), mine.buffer.duration)" in reading
-    # A source that ended by itself played the whole buffer, and the record says so.
-    assert "mine.played = mine.buffer.duration" in sounding
-    assert sounding.index("mine.offset = offset") < sounding.index("source.start(0, offset)")
-    assert "mine.startedAt = context.currentTime" in sounding
-    # Carried across the resume rather than restarted at zero: the new source begins at
-    # nothing behind it, and what is behind the *playback* is the reading it inherits.
-    assert "played: mine.played" in resuming
-    assert "offset: 0" in resuming
-    # The resumed record keeps the same subject, so a resume that runs to its end
-    # reports `COMPLETE` of the turn the press already reported `INTERRUPTED` of —
-    # which the hub answers by performing nothing, a turn being stamped once
-    # (ADR-0205 §1). The page needs no rule of its own to keep that true.
-    assert "episode: mine.episode" in resuming
-    assert "conversation: mine.conversation" in resuming
-    sending = _functions(script)["sendRecording"]
-    assert "asked.utterance" in sending
-    assert "asked.plays" in sending
-    assert "asked.delivery = played" in sending
-
-
-def test_a_recorder_that_would_not_start_is_advised_on_what_the_page_actually_knows() -> None:
-    """Issue #1694, found by the milestone-19 QA run (#1691) and filed rather than fixed.
-
-    Two claims around a guard that behaves correctly. ``MediaRecorder.isTypeSupported``
-    answers ``true`` for a type the browser *recognises*; it promises no encoder for it.
-    ``chromium_headless_shell`` answers ``true`` for both members of ``TALK_FORMATS`` and
-    then throws ``NotSupportedError: no encoder`` out of ``start()`` — on a live track, and
-    identically with no options at all. The comment calling that method "the browser's own
-    answer about its own encoder" claimed a guarantee the platform does not give, and the
-    claim was load-bearing: it is the stated reason the format is chosen from that call.
-
-    And "holding the button again is the thing to try" is right for a transient refusal and
-    wrong for a browser with no encoder, where every press fails identically. Nothing in
-    the page can tell those apart — ``start()`` throws the same error for both — so the
-    sentence names the two conditions it cannot distinguish instead of advising one of
-    them, and keeps the half that works either way.
-
-    **Read from the shipped file and not from :func:`_code`.** What was wrong here was a
-    *comment*, and the second of the two claims is one — so the check that it no longer
-    stands has to read the text that carries it, which the comment-stripped view by
-    construction cannot. The withdrawn phrase is asserted absent from the whole file for
-    the same reason: a claim moved into prose is a claim the page still makes.
-    """
-    script = _code("app.js")
-    document = _asset("app.js")
-    refused = _constant(script, "RECORDER_REFUSED")
-
-    assert "Holding the button again is the thing to try" not in document
-    assert "the page cannot tell" in refused
-    assert "Typing works either way." in refused
-    # The handling was never what was wrong: both guards stand, and both still say this.
-    assert _functions(script)["startTalking"].count("fault(RECORDER_REFUSED,") == 2
-    assert "the browser's own answer about its own encoder" not in document
-    assert "promises only that the type is one the browser *recognises*" in document
-    assert "`start()` is the only real test" in document
-
-
-def test_the_audio_context_is_resumed_from_every_state_that_is_not_running() -> None:
-    """Issue #1690, deferred from PR #1687's adversarial review as a ``minor``.
-
-    ``AudioContextState`` has a third member some browsers use — ``"interrupted"``, where
-    WebKit puts a context when a call arrives or another application takes the audio
-    session. A branch naming ``"suspended"`` alone leaves a context in it unresumed, and
-    the failure is silent in **both** directions: ``decodeAudioData`` still succeeds,
-    ``start()`` produces no sound, and nothing throws, so the "could not play" notice is
-    never reached either. The owner is left with an answer the page believes it spoke,
-    which is the worst of the three outcomes.
-
-    So the resume is fired on every state that is not ``"running"``; its promise is
-    awaited in ``playSpoken`` rather than dropped, since ``readyToPlay`` runs inside the
-    press and cannot know from there whether it worked; the state is asked again after
-    that, because a context can leave ``"running"`` after the press that built it; and a
-    context that will not run reaches the notice rather than the silence.
-    """
-    script = _code("app.js")
-    ready = _functions(script)["readyToPlay"]
-    playing = _functions(script)["playSpoken"]
-
-    assert 'listeningContext.state !== "running"' in ready
-    assert '=== "suspended"' not in ready
-    assert "resuming = Promise.resolve(listeningContext.resume())" in ready
-    # The rejection is observed where it is started as well as where it is awaited: a
-    # press need not produce a spoken answer at all, and a rejection nothing is waiting on
-    # is an unhandled rejection in the console — noise this page does not make. Attaching
-    # a handler does not consume it, so the `await` below still says so.
-    assert "void resuming.catch(() => {});" in ready
-    assert playing.index("await resuming") < playing.index("await context.decodeAudioData(")
-    assert playing.index("await context.resume()") < playing.index("await context.decodeAudioData(")
-    refusing = playing[
-        playing.index("await context.resume()") : playing.index("await context.decodeAudioData(")
-    ]
-    assert 'if (context.state !== "running") {' in refusing
-    assert "couldNotPlay(slot)" in refusing
-
-
-def test_the_recording_this_page_holds_is_bounded_and_bounded_without_a_clock() -> None:
-    """Adversarial review, round 3, major. A press with no bound accumulates for as long
-    as a finger is down, and nothing discovers it until the upload — where the answer is a
-    size refusal after the owner has spoken for minutes.
-
-    **The bound is on what this page holds, and is not a copy of a bound that refuses.**
-    ``hub_max_spoken_audio_bytes`` and ``gateway_max_request_bytes`` are the hub's and the
-    gateway's, this page is told neither, and a guess at either here would be a second
-    place a figure lives with nothing keeping the two in step. What is chosen is a
-    browser-memory question, which is this page's own.
-
-    **And it is not a clock**, which is what keeps ADR-0182 §7's own invariant intact:
-    this file has exactly one ``setTimeout`` because an owner's wait is the owner's to
-    end, and a page-side deadline over a request would abandon a healthy turn and announce
-    that its outcome was not known. This bounds a *recording*, before any request exists,
-    and what measures it is the recorder handing over what it has.
-    """
-    script = _code("app.js")
-    starting = _functions(script)["startTalking"]
-
-    assert "LONGEST_RECORDING_BYTES = 384 * 1024" in script
-    assert "recorder.start(RECORDING_SLICE_MILLISECONDS)" in starting
-    # **The prospective total, before the chunk is kept**, which is what makes the bound
-    # exact rather than exceeded by whatever the crossing chunk happened to be — a final
-    # chunk arriving after the release, or one very large block from a browser that
-    # ignored the slice it was asked for. Round 4's major.
-    assert "if (mine.held + event.data.size > LONGEST_RECORDING_BYTES) {" in starting
-    assert starting.index("LONGEST_RECORDING_BYTES") < starting.index("mine.chunks.push")
-    assert "fault(RECORDING_TOO_LONG," in starting
-    # **The size check is unconditional and only the stopping is not**: a final chunk
-    # arrives after the release, when there is no recorder left to stop, and a check
-    # skipped there is exactly the unbounded upload the bound exists to prevent.
-    assert "if (!mine.released) {\n        stopTalking();" in starting
-    # **And a press that crossed it sends nothing at all** (round 5's major). A recording
-    # is a container and its last chunk is where a `MediaRecorder` writes what finishes
-    # one, so keeping the chunks before it and uploading them uploads a clip that may not
-    # decode — the hub handed something it cannot read, having been told the recording was
-    # sent. There is no container-aware middle: this page parses no WebM and no MP4.
-    assert "mine.overran = true" in starting
-    assert "mine.chunks = []" in starting
-    assert "if (mine.overran) {" in _functions(script)["sendRecording"]
-    assert "nothing was sent" in _constant(script, "RECORDING_TOO_LONG")
-    # And the line that says a press is happening comes off with it. Found by driving:
-    # an overrun never reaches `SENDING`, so a release clearing only that one left
-    # "Listening" on screen beside a fault saying the press had been stopped.
-    assert "if (said === LISTENING || said === SENDING) {" in _functions(script)["releaseTalk"]
-    # No clock of its own reaches this control, and the file's one `setTimeout` is still
-    # the delivery stream's.
-    assert len(_page_clocks(script)) == 1
-    for name in ("startTalking", "stopTalking", "sendRecording", "abandonSpoken", "releaseTalk"):
-        body = _functions(script)[name]
-        for clock in ("setTimeout", "setInterval", "HEAD_DEADLINE_MILLISECONDS"):
-            assert clock not in body, (name, clock)
-
-
-def test_the_page_asks_its_encoder_for_the_bitrate_the_adrs_arithmetic_assumes() -> None:
-    """ADR-0200 §6 states its ceiling's meaning in seconds — "512 KiB is about three
-    minutes of speech at a 24 kbit/s Opus bitrate" — and a ``MediaRecorder`` given no
-    figure picks its own, which on some browsers is several times that.
-
-    A page taking the default would reach the hub's ceiling in a fraction of the time the
-    ADR's arithmetic says, and would do it opaquely: the refusal names a byte ceiling and
-    says nothing about the bitrate that reached it. It is a hint rather than a setting —
-    an encoder may honour it approximately or not at all — which is why the bound above is
-    on the bytes held and not on this.
-    """
-    script = _code("app.js")
-
-    assert "TALK_BITS_A_SECOND = 24000" in script
-    assert "audioBitsPerSecond: TALK_BITS_A_SECOND" in script
-
-
-def test_the_page_never_relays_the_browsers_own_words_about_a_microphone() -> None:
-    """``getUserMedia``'s refusals are read off the error's ``name``, the one member the
-    specification fixes — never off its ``message``, which is the browser's own prose.
-
-    A page that relayed one would be saying something it cannot stand behind about a
-    device the owner has to act on, and it is the same rule ADR-0200 §8 states one layer
-    in: nothing on this path writes an exception message it did not author.
-    """
-    refusing = _functions(_code("app.js"))["microphoneRefused"]
-
-    assert "error.name" in refusing
-    assert ".message" not in refusing
-    for named in ("MICROPHONE_DENIED", "NO_MICROPHONE_DEVICE", "MICROPHONE_UNAVAILABLE"):
-        assert named in refusing, named
-
-
-def test_the_spoken_turn_is_rendered_by_the_same_renderer_as_a_typed_one() -> None:
-    """ADR-0200 §4: the outcome "is an ordinary ``TurnOutcome``… This call composes a
-    turn; it does not create a second kind of one."
-
-    So a member added to ``renderOutcome`` reaches all three entries. A page with a
-    second renderer would be the front end's half of the failure #1337 records at the
-    gateway — an answer composed, returned, and dropped one layer short of the person who
-    asked for it, on one entry and not the others.
-    """
-    rendering = _functions(_code("app.js"))["renderSpokenTurn"]
-
-    assert "couldRenderOutcome(turn.outcome, chosenAt)" in rendering
-
-
-def test_an_ask_whose_answer_never_arrives_does_not_hold_the_owners_control_for_ever() -> None:
-    """Issue #1500. ``ask`` disables ``#ask-button`` before the request goes out and
-    re-enables it in a ``finally``; ``fetch`` carries no deadline of its own, so a socket
-    that dies without settling leaves that ``await`` pending for ever, the ``finally``
-    never runs, and the owner's one way into the assistant stays greyed out until the
-    page is reloaded. It is #1474's failure on a different request.
-
-    **A different clause of ADR-0182 §7 governs, and it supplies a control rather than a
-    bound.** #1474 turns on §7's *third* clause, which is about delivery streams and
-    about concurrency, so PR #1496 could bound a duration the clause is silent on. An
-    ``ask`` is reached by §7's **fifth** clause — "The page re-issues **no other
-    request** of its own motion. Every request that asks the assistant for something …
-    is re-issued only on an act by the owner" — and by the paragraph grounding it, which
-    names the remedy in terms: re-issuing an ask "is a turn the owner may already have
-    had executed", so "offering the owner a visible retry costs **one control** and
-    removes the class".
-
-    What is pinned here is the invariant #1500 is about: every exit an ask has, the ones
-    that never settle included, goes through the one function that hands the control
-    back — and the owner has an act that reaches it while the request is still out.
-    """
-    script = _code("app.js")
-    document = _markup("index.html")
-    asking = _functions(script)["ask"]
-    abandon = _functions(script)["abandonAsk"]
-
-    # One place re-enables the button, so a path that released the control without
-    # saying anything would have to go through the sentence too.
-    assert script.count('el("ask-button").disabled = false;') == 1
-    assert 'el("ask-button").disabled = false;' in _functions(script)["releaseAsk"]
-    # The wait is a controller and not a flag, so aborting it is what makes the pending
-    # `fetch` settle rather than merely marking it settled.
-    assert "stopping: new AbortController()," in asking
-    assert "waiting.stopping.abort();" in abandon
-    # Carried into the turn's one entry, which is what puts the abort on the socket
-    # rather than only on this page's own bookkeeping.
-    assert "await askWhole(half, asked, chosenAt, waiting);" in asking
-    assert script.count("signal: waiting.stopping.signal,") == 1
-    # The owner's act reaches it, from a control that ships nowhere in the document and
-    # is built beside the button it stands in for.
-    assert 'id="stop-waiting"' not in document
-    assert 'stop.addEventListener("click", abandonAsk);' in script
-    assert script.count("abandonAsk") == 2
-    assert "offerStopWaiting();" in script
-
-
-def test_stopping_a_wait_says_the_turns_outcome_is_not_known_and_claims_nothing_else() -> None:
-    """ADR-0177 §7's fourth clause, which is this surface's own addition to ADR-0139
-    §4's three outcomes, reaching the request that asks the assistant for something.
-
-    "A failure of the **browser's own** request to the gateway — the request was sent and
-    no response was read — is an outcome that is **not known**, whatever the gateway
-    did", and "no front end resolves it by assuming either of the other two". A control
-    that simply came back would assume one by omission: a restored control reads as an
-    act that finished.
-
-    So the three things the owner cannot otherwise know are each said — the turn may have
-    run, nothing was cancelled at the assistant, and asking again is a new question
-    rather than a retry of that one, which is ADR-0182 §7's "the page re-asks only when
-    the owner asks it to" said where the owner is. The route back is a read rather than
-    an assertion (ADR-0177 §7's last clause: no surface states a state it has not read).
-    """
-    script = _code("app.js")
-    abandon = _functions(script)["abandonAsk"]
-
-    assert 'fault(waiting.heard ? ASK_ABANDONED_MIDWAY : ASK_ABANDONED, "goals");' in abandon
-    assert "What became of the turn is not known" in script
-    assert "may have carried it out and may never have received it" in script
-    assert "Nothing was re-sent and nothing was cancelled" in script
-    assert "asks a new question rather than retrying that one" in script
-    assert "The conversations listing is where to look for it" in script
-    # And it sends nothing at all, which is what keeps a control that ends a wait from
-    # being the silent retry ADR-0168 §9 forbids wearing a button's clothes.
-    for sends in ("fetch(", "relay(", "act(", "watchDeliveries("):
-        assert sends not in abandon, sends
-    # Inside the ask form, where a button with no type is a submit button — which would
-    # ask the question again from the one control whose whole purpose is that it does not.
-    assert 'stop.type = "button";' in script
-    # Said while the question is out, too. The sentence promises no deadline, because
-    # there is none: what it tells the owner is that this page cannot tell a slow turn
-    # from one that will never answer, which is what makes the control theirs to use.
-    assert "askWaiting(true);" in _functions(script)["ask"]
-    assert "This browser puts no deadline on a turn" in script
-    assert "wait is yours to do." in script
-
-
-def test_the_wait_is_ended_by_the_owner_and_by_no_clock_of_the_pages_own() -> None:
-    """The decision #1500 asks a taker to make, pinned where changing it would have to
-    pass this test: an automatic deadline on an ask is **declined**, and the page's own
-    motion is left exactly as ADR-0182 §7 left it — two events and one clock.
-
-    **Any figure would pace something the gateway paces, and no head discloses it.**
-    ``server.py``'s ``_TURN_BUDGET`` gives every turn sixty seconds — ``_ask`` passes it
-    — and it reaches the browser in no header, no value and
-    no setting. A page-side deadline would be a second number that can silently disagree
-    with it, which is ``SILENT_CADENCES``' own argument one surface out, and deriving one
-    from ``usableCadence``'s figure would be the substitution that rule refuses.
-
-    **``HEAD_DEADLINE_MILLISECONDS``' argument does not transfer**, which is the trap
-    this test exists for. That bound is defensible because what it covers is "a round
-    trip and an in-process table read, and nothing else": ``_write_stream`` writes and
-    drains the delivery head *before* it awaits the body. An ``/ask`` head is written
-    after the whole turn, so the same thirty seconds there would abandon a healthy turn
-    that was thinking and announce that its outcome was not known — true, and useless.
-    """
-    script = _code("app.js")
-
-    # Still one clock, and still the delivery stream's. A second `setTimeout` would be
-    # the page taking motion over a request ADR-0182 §7 makes the owner's.
-    assert len(_page_clocks(script)) == 1
-    assert "setInterval" not in script
-    # And no deadline reaches the ask at all: neither the delivery bound nor a new one.
-    for function in ("ask", "abandonAsk", "askWhole", "releaseAsk"):
-        body = _functions(script)[function]
-        for clock in ("setTimeout", "HEAD_DEADLINE_MILLISECONDS", "SILENT_CADENCES", "cadence"):
-            assert clock not in body, (function, clock)
-    # The one clock there is cannot reach the abandonment either, so the wait is ended
-    # by the owner and by nothing this page schedules.
-    assert "abandonAsk" not in _page_clocks(script)[0]
-    assert "releaseAsk" not in _page_clocks(script)[0]
-
-
-def test_a_settled_ask_does_not_hand_back_a_control_a_later_question_took() -> None:
-    """The race the remedy creates, closed where it is created.
-
-    Stopping a wait re-enables ``#ask-button``, which is the point of it — so the owner
-    can ask again at once, while the abandoned request's promise is still unsettled. That
-    promise then rejects, and an unguarded ``finally`` would run `releaseAsk` on the
-    *live* turn: the button back in the middle of it, and that turn's own way out hidden.
-
-    The guard is an identity comparison against the controller rather than a flag,
-    because what has to be decided is *which ask* is being waited on, and the controller
-    is the only thing that is one per ask.
-    """
-    script = _code("app.js")
-    asking = _functions(script)["ask"]
-
-    assert "if (awaited === waiting) {" in asking
-    assert asking.index("if (awaited === waiting) {") < asking.index("releaseAsk();")
-    # Released before the abort, so the rejection it provokes finds this ask settled.
-    abandon = _functions(script)["abandonAsk"]
-    assert abandon.index("releaseAsk();") < abandon.index("waiting.stopping.abort();")
-    # `awaited` is written in exactly three places — taken, and given back in the one
-    # function that hands the control back with it.
-    assert len(re.findall(r"(?<!let )awaited = ", script)) == 2
-    assert "awaited = null;" in _functions(script)["releaseAsk"]
-
-
-def test_an_abandoned_ask_leaves_no_answer_shaped_nothing_on_screen() -> None:
-    """What an abort must not be allowed to render, on the paths it can land on.
-
-    ``readBody`` is the subtle half. It answers anything unreadable with an empty object
-    rather than throwing, which is the right rule for a body the gateway wrote badly and
-    the wrong one for a read the owner stopped: ``{}`` rendered as an outcome is an
-    answer-shaped nothing, and reported as a refusal it is a condition the gateway never
-    named. The entry checks the signal instead of trusting the throw.
-
-    And the guard in ``ask``'s own ``catch`` is the last one: an abort the owner asked
-    for is not the gateway having gone, and saying it was would be a wrong explanation
-    rather than a missing one — ``readDeliveries``' catch keeps the same distinction.
-    """
-    script = _code("app.js")
-    abandon = _functions(script)["abandonAsk"]
-
-    # Nothing this turn wrote is on screen while it waits — it answers whole — so
-    # abandoning it hides the panel only on the refusal endings and clears nothing.
-    assert 'clearNode(el("answer-body"));' not in abandon
-    # The read an abort can land in the middle of: the one body read, since ADR-0293 §11
-    # retired the streamed entry and its two.
-    assert script.count("if (waiting.stopping.signal.aborted) {") == 1
-    whole = _functions(script)["askWhole"]
-    assert whole.index("const body = await readBody(response);") < whole.index(
-        "if (waiting.stopping.signal.aborted) {"
-    )
-    # `rindex`, because the render branch is the *second* `if (response.ok)` in this
-    # function: the first is the guard that decides whether the turn was heard from.
-    assert whole.index("if (waiting.stopping.signal.aborted) {") < whole.rindex(
-        "if (response.ok) {"
-    )
-    # And the catch, which stays silent for an ending the owner already has words for.
-    asking = _functions(script)["ask"]
-    assert "if (!waiting.stopping.signal.aborted) {" in asking
-    assert asking.index("if (!waiting.stopping.signal.aborted) {") < asking.index(
-        'fault(GATEWAY_GONE, "goals");'
-    )
-
-
-def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> None:
-    """Adversarial review, round 1, blocker and major — both are one mistake: a single
-    sentence and a single clearing act, applied to states they are false in.
-
-    ADR-0177 §7's fourth clause makes an outcome not known where "the request was sent
-    and **no response was read**". Said after a chunk has been rendered it is factually
-    wrong twice over — something here *did* read a reply, and the assistant demonstrably
-    *did* receive the question — and ADR-0182 §7 requires the page's announcement to be
-    accurate rather than merely present.
-
-    **``heard`` says the question reached the assistant**: ``/ask`` answers only once
-    ``converse`` has returned (``_ask`` awaits it), so its response head is the proof.
-    The streamed entry, whose first chunk was the proof there and whose panel this turn
-    could own, went with ADR-0293 §11.
-    """
-    script = _code("app.js")
-    abandon = _functions(script)["abandonAsk"]
-    whole = _functions(script)["askWhole"]
-
-    # `/ask`: a **successful** head is the proof, and only that. A refusal is decided by
-    # `_check_door` or `_session_bound` before `_assistant` is reached, so a refusal head
-    # whose body then stalls says the gateway replied and nothing about the assistant.
-    # Stated as the branch each fact sits in rather than as a byte sequence: ADR-0250's
-    # lane added ``waiting.ran`` to the same ``if`` (the ok head is proof the turn *ran*
-    # on this entry), and a literal would have made that a failure of this clause rather
-    # than a change beside it. What the clause is about is that `heard` is set on the ok
-    # branch and on no other.
-    ok_branch = whole[whole.index("if (response.ok) {") : whole.index("  } else {")]
-    assert "waiting.heard = true;" in ok_branch
-    assert whole.index("waiting.heard = true;") < whole.index(
-        "const body = await readBody(response);"
-    )
-    assert script.count("waiting.heard = true;") == 1
-    # No answer panel is this turn's while it waits, so abandoning one clears nothing.
-    assert "waiting.composing" not in script
-    assert 'clearNode(el("answer-body"));' not in abandon
-    # And the two sentences differ in exactly the clauses the evidence decides. The one
-    # that claims nothing was received says so only where nothing was; the other says the
-    # question got there and narrows what is unknown to the ending.
-    assert "may have carried it out and may never have received it" in script
-    assert "the question was sent and nothing here read a " in script
-    assert "so the assistant did receive the " in script
-    assert "how it ended is what is not known" in script
-    # What none of them may drop: the act is the same act, so the three things about
-    # it that do not depend on how far the answer got are said in all of them.
-    #
-    # **Five rather than four since ADR-0200 §10**, and the arithmetic is the same one:
-    # each constant carries the clause once and is named once at its site, and the third
-    # abandonment sentence is `SPOKEN_ABANDONED` — the spoken entry's own, which is
-    # `ASK_ABANDONED`'s state rather than `ASK_ABANDONED_MIDWAY`'s because a spoken turn
-    # streams nothing and so has no partial reply this browser could have read.
-    assert script.count("nothing was cancelled — the assistant was not told to stop.") == 5
-    assert script.count("new question rather than retrying that one") == 5
-    # The route back is one constant read by all of them, so the endings cannot drift
-    # apart on it — and it points rather than promises, because a turn that ran is not
-    # thereby a turn that was recorded (`TurnOutcome.capture_degraded`, ADR-0074 §9
-    # item 6).
-    #
-    # **Seven rather than five since #1622**, and the two additions are not abandonments:
-    # ``ANSWER_UNREADABLE`` and ``STREAMED_ANSWER_UNREADABLE`` are what the two ask entries
-    # say where the answer came back and could not be put on screen. They carry this clause
-    # for the reason the five above do — the turn's ending is what nobody here read, so
-    # where to look for it is the whole of what is left to say — and they carry neither of
-    # the two counted above it, because nothing was abandoned and no act of the owner's is
-    # being explained. The declaration and its seven sites — the seventh being the spoken
-    # entry's unreadable-answer ending (#2005), which points at the listing for the same
-    # reason the other six do: the turn may have run and this browser cannot say.
-    #
-    # **Eight rather than seven since #2008**, and the eighth was the streamed entry's
-    # misframed-line ending. **Six since ADR-0293 §11**, which retired that entry with
-    # both of its endings, ``STREAMED_ANSWER_UNREADABLE`` and ``ANSWER_STREAM_MISFRAMED``.
-    assert script.count("WHERE_TO_LOOK") == 7
-    assert "though a turn whose record " in script
-    assert "could not be written does not appear there" in script
-
-
 def test_an_answer_that_cannot_be_put_on_screen_is_not_rendered_as_one() -> None:
     """#1622, #2005 and #2006: every ``renderOutcome`` caller reaches it through the guard.
 
     ``renderOutcome`` reads the outcome's members from its first lines, so
     ``renderOutcome(undefined, …)`` is a ``TypeError`` at the call site. It is not
     uncaught, and where it landed is what made each entry's ending wrong in its own way.
-    The two ask entries and the spoken one are awaited inside a ``try`` whose ``catch``
-    announces ``GATEWAY_GONE`` — "The gateway did not answer, so it may have stopped",
-    with a restart and a fresh bootstrap value as the remedy — said of a gateway that
-    answered and a turn that ran. ``answerConfirmation``'s throw left a consent token
+    The two ask entries and the spoken one, since retired (ADR-0309 §5:4, ADR-0313
+    §3:4), were awaited inside a ``try`` whose ``catch`` announced ``GATEWAY_GONE`` —
+    "The gateway did not answer, so it may have stopped", with a restart and a fresh
+    bootstrap value as the remedy — said of a gateway that answered and a turn that ran.
+    ``answerConfirmation``'s throw left a consent token
     ``spent`` and never ``unresolved``, so every row of the park read "That park has been
     answered from this page" for an outcome nothing had read. ADR-0139 §4 reports an act
     as one of exactly three outcomes and never as either of the other two, and those are
@@ -2817,8 +1549,8 @@ def test_an_answer_that_cannot_be_put_on_screen_is_not_rendered_as_one() -> None
     guard = functions["couldRenderOutcome"]
 
     # The render is inside the `try`, and the `catch` is what the callers read back.
-    assert guard.index("try {") < guard.index("renderOutcome(outcome, chosenAt, provenance);")
-    assert guard.index("renderOutcome(outcome, chosenAt, provenance);") < guard.index("catch (_) {")
+    assert guard.index("try {") < guard.index("renderOutcome(outcome, provenance);")
+    assert guard.index("renderOutcome(outcome, provenance);") < guard.index("catch (_) {")
     # It renders or it reports and never leaves half: what reached the screen before the
     # throw is not an answer, so it does not stay beside a line saying so.
     assert guard.index('clearNode(el("answer-body"));') < guard.index('show("answer", false);')
@@ -2831,263 +1563,16 @@ def test_an_answer_that_cannot_be_put_on_screen_is_not_rendered_as_one() -> None
     assert "if (outcome.capture_degraded) {" in render
     for tolerated in ("if (!outcome", "outcome === null", "outcome === undefined", "asOutcome"):
         assert tolerated not in render, tolerated
-    # Every entry reaches the render through it, and none calls it directly any more —
-    # which is #1622's "one check, shared" being literally every site rather than two of
-    # four. `answerConfirmation` is the one that passes a provenance (#1621), so its call
+    # The one entry left reaches the render through it, and nothing calls it directly —
+    # #1622's "one check, shared". The Ask and push-to-talk entries retired (ADR-0309
+    # §5:4, ADR-0313 §3:4). `answerConfirmation` passes a provenance (#1621), so its call
     # is matched on its opening rather than on the whole argument list.
-    for entry, passed in (
-        ("askWhole", "body.outcome, chosenAt"),
-        ("renderSpokenTurn", "turn.outcome, chosenAt"),
-        ("answerConfirmation", "body.outcome, chosenAt, unaccounted ?"),
-    ):
-        assert f"!couldRenderOutcome({passed}" in functions[entry], entry
+    assert "!couldRenderOutcome(body.outcome, unaccounted ?" in functions["answerConfirmation"]
     # Two occurrences of the renderer's own name with brackets in the whole file — its
     # declaration and the guard's call. `couldRenderOutcome(` carries a capital ``R`` and
     # is not one of them, so a caller that went back to calling the renderer directly
     # would be a third and would be read here whichever entry did it.
     assert script.count("renderOutcome(") == 2
-    # On the whole entry the abort is still decided first: a read the owner stopped is
-    # already answered, so what is left for the guard is a body the gateway did not write.
-    whole = functions["askWhole"]
-    assert whole.index("if (waiting.stopping.signal.aborted) {") < whole.index(
-        "couldRenderOutcome(body.outcome, chosenAt)"
-    )
-
-
-def test_an_unreadable_answer_says_the_turn_ran_because_that_was_read() -> None:
-    """The sentence #1622's ending needs, and the clause that makes it true.
-
-    ADR-0139 §4 is a rule in both directions — an act is reported as one of exactly three
-    outcomes "and never as either of the other two" — so a turn known to have run and
-    announced as one that may never have happened breaches it exactly as the reverse does.
-
-    ``/ask`` answers only once ``converse`` has returned, so a successful head is proof
-    the turn ran and the head is intact evidence here — it is the *body* this page could
-    not read. (The streamed entry, whose sentence claimed less for want of that proof,
-    went with ADR-0293 §11.)
-    """
-    script = _code("app.js")
-    functions = _functions(script)
-
-    said = _joined(_constant(script, "ANSWER_UNREADABLE"))
-
-    # What is not known is what the turn did, and the whole entry says the turn ran.
-    assert "could not read an outcome from the answer" in said
-    assert "what the turn did is not known" in said
-    assert "The turn itself ran" in said
-    assert "Nothing was re-sent and nothing was cancelled." in said
-    assert _constant(script, "ANSWER_UNREADABLE").rstrip().endswith("WHERE_TO_LOOK")
-    # Said at its own entry and nowhere else.
-    assert len(re.findall(r"(?<!_)ANSWER_UNREADABLE", script)) == 2, "one declaration, one site"
-    assert "STREAMED_ANSWER_UNREADABLE" not in script
-    assert 'fault(ANSWER_UNREADABLE, "goals");' in functions["askWhole"]
-    assert "ANSWER_UNREADABLE" not in functions["answerConfirmation"]
-
-
-def test_a_wait_stopped_after_a_session_refusal_is_re_entry_and_not_an_unknown_outcome() -> None:
-    """Adversarial review, round 3, blocker. A wait whose *head* already refused it is not
-    a wait whose outcome nobody read, and announcing one as the other is wrong twice.
-
-    **It is factually wrong.** ADR-0177 §7's fourth clause makes an outcome not known
-    where "the request was sent and **no response was read**"; a `401` head read before a
-    body that then stalls is a response read. ``Gateway._session_bound`` decides both
-    ``NO_LIVE_SESSION`` and ``COOKIE_HALF_MISMATCH`` *before* ``_assistant`` is reached,
-    so the assistant never received the question and there is no turn that may have run.
-
-    **And it strands the browser.** ADR-0182 §6: "A browser presenting a header half the
-    gateway does not admit is shown the bootstrap entry, presented as re-entry rather than
-    as a fault." A refusal read to the end reaches that through ``sessionLost``; before
-    this, stopping the wait during the stalled body took the generic path instead, leaving
-    the dead header half in storage and the console on screen — so the one act an owner
-    has for ending a stalled wait was also the one way to be left holding a session the
-    gateway will refuse every future request from.
-
-    **The status is enough, and reading it is a read rather than a guess.**
-    ``server.py``'s ``_REFUSAL_STATUS`` gives every condition "its own status", because
-    ADR-0168 §6 requires the cookie-half fault "never flattened into an expiry, a ceiling
-    refusal or an ordinary absent session" and "a status shared with another condition is
-    that flattening performed by the response rather than by the record". So this page may
-    map back exactly the statuses that name one condition — which is why ``403`` is
-    absent: ``_REFUSAL_STATUS`` gives it to two.
-    """
-    script = _code("app.js")
-    abandon = _functions(script)["abandonAsk"]
-    whole = _functions(script)["askWhole"]
-
-    # The table, and the two statuses in it, read off the gateway's own mapping rather
-    # than transcribed: a condition given a second condition's status would fail here as
-    # well as breaching §6, and a status this page mapped that the gateway shares would
-    # be this page performing the flattening §6 forbids.
-    statuses = dict(re.findall(r"\[(\d{3}), \"([a-z-]+)\"\],", script))
-    assert statuses == {"401": "no-live-session", "409": "cookie-half-mismatch"}
-    assert {int(one) for one in statuses} == SESSION_REFUSAL_STATUSES
-    for status, fault in statuses.items():
-        condition = RefusalCondition(fault)
-        assert _REFUSAL_STATUS[condition][0] == int(status), fault
-        shared = [one for one in _REFUSAL_STATUS if _REFUSAL_STATUS[one][0] == int(status)]
-        assert shared == [condition], (status, shared)
-    # And the conditions are the two `sessionLost` acts on, so the two doors into re-entry
-    # cannot come to disagree about what ends a session.
-    for fault in statuses.values():
-        assert f'body.fault === "{fault}"' in _functions(script)["sessionLost"]
-
-    # The head is recorded before the body is touched — which is the whole of why it
-    # survives a body that never arrives.
-    assert "waiting.refusedWith = response.status;" in whole
-    assert whole.index("waiting.refusedWith = response.status;") < whole.index(
-        "const body = await readBody(response);"
-    )
-    assert script.count("waiting.refusedWith = response.status;") == 1
-    # `heard` is the other branch of the same test, so no ask can ever carry a refusal
-    # status and a claim that the assistant was reached.
-    ok_branch = whole[whole.index("if (response.ok) {") : whole.index("  } else {")]
-    assert "waiting.heard = true;" in ok_branch
-    assert "waiting.heard" not in whole[whole.index("  } else {") :]
-
-    # Stopping the wait then takes re-entry, and takes it *before* the wording and the
-    # tidying of an outcome nobody read.
-    assert "const ended = SESSION_LOST_STATUS.get(waiting.refusedWith);" in abandon
-    assert "if (ended !== undefined) {" in abandon
-    assert abandon.index("if (ended !== undefined) {") < abandon.index("ASK_ABANDONED_MIDWAY")
-    # Through `sessionLost`, which is what forgets the half, stops the stream and shows
-    # the bootstrap entry — the three things §6 asks for, none of them re-implemented here.
-    assert "sessionLost(named, `${describe(named, waiting.refusedWith)}" in abandon
-    for reimplemented in ("forgetHeaderHalf(", "showBootstrap(", "stopWatching("):
-        assert reimplemented not in abandon, reimplemented
-    # And it is re-entry rather than a fault (§6), so this ending writes no fault at all —
-    # the one `fault(` call in the function is on the path this one returns before.
-    assert abandon.index("return;", abandon.index("if (ended !== undefined) {")) < abandon.index(
-        "fault("
-    )
-    # What the act says on top of the condition's own words: the same three claims
-    # `ASK_ABANDONED` makes are all false here, so none of them is made.
-    assert "REFUSED_AT_THE_DOOR" in abandon
-    assert "never reached the assistant" in script
-    assert "so no turn ran and nothing was left half-done" in script
-
-
-def test_a_wait_stopped_after_any_other_refusal_head_says_a_reply_was_read() -> None:
-    """Adversarial review, round 5, blocker. ``ASK_ABANDONED`` opens with "the question
-    was sent and nothing here read a reply", which is false of **every** refusal head — a
-    status line is a reply — and goes on to say the assistant "may have carried it out",
-    which some statuses make known to be false.
-
-    ADR-0139 §4 governs in both directions: an act is reported as one of exactly three
-    outcomes "and never as either of the other two". So a known **not landed** act
-    announced as *not known* breaches it exactly as reporting a landed one that way does,
-    which is the reading ``relay`` already states of itself one surface over.
-
-    **The status settles it on the two ask paths for exactly three of them.** ``421`` is
-    ``HOST_NOT_BOUND`` and ``403`` is ``ORIGIN_NOT_OWN`` or ADR-0174 §4's
-    ``DEVICE_NOT_LISTED``, all taken by ``_check_door`` before a session is looked up;
-    the other ``403``s ``server.py`` writes are ADR-0177 §3's connection refusals, gated
-    on ``_CONNECTION_PATHS``, which neither ask path is. ``503`` is
-    ``hub-connection-ceiling``, raised out of ``_take_hub_slot()`` *before* ``_relayed``
-    awaits ``call()``.
-
-    **And three are excluded because they are not proof.** ``400`` is shared between
-    ``malformed-request`` (before the call) and ``rejected`` (a ``ValueError`` out of it);
-    ``502`` is ``hub-unreachable``, and a ``TransportError`` can be raised after the
-    request was written; ``422`` is ``assistant-declined``, which ADR-0168 §9 defines as
-    "a request the hub **received** and declined". The excluded direction is the
-    expensive one: an owner told no turn ran when one did asks it again.
-    """
-    script = _code("app.js")
-    abandon = _functions(script)["abandonAsk"]
-
-    assert "const RELAY_FAULT_STATUS = new Set([400, 422, 502]);" in script
-    # **The set is read back out of `_relay_fault` by calling it**, which is the whole
-    # point of enumerating this side rather than the other: a lane adding a post-relay
-    # status adds it there, because ADR-0168 §9 makes that function what classifies a
-    # failed relay, and this fails until the page agrees.
-    declared = {int(one) for one in re.findall(r"\d+", _js_set(script, "RELAY_FAULT_STATUS"))}
-    assert declared == relayed_statuses()
-    # And the statuses decided *before* the relay are outside it — including the parser's
-    # `413`, which cost round 7 and which `_REFUSAL_STATUS` never holds at all. That is
-    # why deriving the other side from that table could not work, and why this test reads
-    # the parser's own status rather than a list.
-    assert 413 not in declared
-    for taken in SESSION_REFUSAL_STATUSES:
-        assert taken not in declared, taken
-
-    # Taken for every refusal head, after the session branch and before the black hole's.
-    assert "if (waiting.refusedWith !== null) {" in abandon
-    assert abandon.index("if (ended !== undefined) {") < abandon.index(
-        "if (waiting.refusedWith !== null) {"
-    )
-    assert abandon.index("if (waiting.refusedWith !== null) {") < abandon.index(
-        "ASK_ABANDONED_MIDWAY"
-    )
-    assert 'fault(refusalAbandoned(waiting.refusedWith), "goals");' in abandon
-    # It is a fault rather than re-entry: nothing about the session ended, so the control
-    # comes back into a console that is still the owner's.
-    for reentry in ("sessionLost(", "forgetHeaderHalf(", "showBootstrap("):
-        assert abandon.count(reentry) == (1 if reentry == "sessionLost(" else 0), reentry
-
-    # What each of the two says, and the clause neither may keep: a refusal head is a
-    # reply, so "nothing here read a reply" is false of both.
-    assert "The gateway had already answered that question with a refusal" in script
-    assert "ever acted on the question is not something a refusal on its own says" in script
-    assert "refused that question before the assistant was reached, so no turn ran" in script
-    assert script.count("the question was sent and nothing here read a ") == 1
-    # And the one that knows no turn ran does not send the owner looking for it: the route
-    # back points at the conversations listing, and nothing can be there.
-    assert "there is nothing to look for" in script
-    unrun = script[script.index("const ASK_REFUSED_UNRUN") :]
-    assert "WHERE_TO_LOOK" not in unrun[: unrun.index(";") + 1]
-
-
-def test_a_declined_turn_is_announced_as_one_the_assistant_did_receive() -> None:
-    """Adversarial review, round 6, blocker, and the other half of round 5's.
-
-    ``422`` is ``assistant-declined``, which ADR-0168 §9 defines as "a request the hub
-    **received** and declined" — the distinction §9 exists to keep. So it settles the
-    same question ``REFUSED_BEFORE_THE_ENGINE`` settles, in the opposite direction, and
-    grouping it with the ambiguous statuses said a status said nothing when it says a
-    great deal. ``server.py`` writes ``422`` once more, for ``_connection_fault``'s
-    ``identity-unusable``, and that serves ADR-0151's connection surface — not either ask
-    path.
-
-    **What it must not say in either direction.** A declined turn produced no answer to
-    record, so ``WHERE_TO_LOOK``'s pointer at the conversations listing would be a
-    promise that cannot hold; and this browser did not read what the hub said, so
-    declaring there is nothing to find would state a state it has not read (ADR-0177 §7).
-    It says neither, and the enumeration is complete: every status these two paths answer
-    with is decided here, taken by the re-entry branch, or deliberately left ambiguous.
-    """
-    script = _code("app.js")
-    choose = _functions(script)["refusalAbandoned"]
-
-    assert "const DECLINED_BY_THE_ASSISTANT = 422;" in script
-    assert _relay_fault(AssistantError("no")).status == 422
-    assert "if (status === DECLINED_BY_THE_ASSISTANT) {" in choose
-    assert "return ASK_REFUSED_DECLINED;" in choose
-    # The order is the argument. `422` is itself a member of `RELAY_FAULT_STATUS`, so it
-    # has to be taken first or the ambiguous sentence would swallow the one status in
-    # that set which is not ambiguous at all.
-    assert choose.index("status === DECLINED_BY_THE_ASSISTANT") < choose.index(
-        "RELAY_FAULT_STATUS.has(status)"
-    )
-    # And what falls past both is the default rather than a fourth case nobody wrote: a
-    # refusal written before the relay began, which is every status but these three.
-    assert choose.rstrip().endswith("return ASK_REFUSED_UNRUN;\n}")
-    assert choose.count("return ") == 3
-    assert script.count("refusalAbandoned(") == 2
-    # The two statuses that cost rounds 5 and 7 land on that default, and so does the
-    # parser's `413` — the one no table derived from `_REFUSAL_STATUS` could have held.
-    for unrun in (403, 421, 503, 413, 429, 404):
-        assert unrun not in relayed_statuses(), unrun
-    # `422` is in that set and is still not ambiguous, which is the case the ordering
-    # above exists for.
-    assert 422 in relayed_statuses()
-
-    # What it says, and the two things it may not say.
-    assert "The assistant did receive that question and declined it" in script
-    assert "so no answer was produced" in script
-    declined = script[script.index("const ASK_REFUSED_DECLINED") :]
-    said = declined[: declined.index(";") + 1]
-    assert "WHERE_TO_LOOK" not in said
-    assert "nothing to look for" not in said
 
 
 def test_the_page_renders_a_notification_in_the_open_page_and_by_no_other_means() -> None:
@@ -3303,8 +1788,8 @@ def test_the_cadence_is_read_off_the_streams_own_head_and_kept_nowhere() -> None
     **It is not a session value and is in no ``localStorage`` key at all.** It admits
     nothing
     and is spendable against nothing, so ADR-0172 §1's closed class of three values a
-    browser holds is untouched — and the two keys the page does store are the session's
-    header half and the conversation id, neither of which this touches.
+    browser holds is untouched — and the keys the page does store are the session's
+    header half and the chat's two, none of which this touches.
 
     **The exchange carries nothing of it either**, which is ADR-0168 §5: the bootstrap
     exchange "returns nothing but the two session values §6 requires".
@@ -3322,9 +1807,6 @@ def test_the_cadence_is_read_off_the_streams_own_head_and_kept_nowhere() -> None
         "CHAT_CONVERSATION_KEY",
         "CHAT_OPEN_KEY",
         "CHAT_OPEN_KEY",
-        "CONVERSATION_KEY",
-        "CONVERSATION_KEY",
-        "CONVERSATION_KEY",
         "STORAGE_KEY",
         "STORAGE_KEY",
         "STORAGE_KEY",
@@ -3740,98 +2222,6 @@ def test_the_page_re_issues_no_operation_of_its_own_motion() -> None:
             assert reissue not in block, block
 
 
-def test_the_page_offers_a_way_out_of_the_thread_it_is_reading() -> None:
-    """The escape a persisted selection owes, and the one the page did not have.
-
-    Until this file kept a conversation across a reload, a reload *was* how you
-    started a fresh one. Now the selection comes back — so a thread the hub will no
-    longer accept, destroyed from a terminal or expired, would be re-sent on every
-    question with no control on screen to clear it. The conversations listing cannot
-    offer one: it can only "Continue" a conversation it is showing, and this is about
-    one it is not. Adversarial review found it on round 3.
-
-    **It sends nothing**, which is what keeps it a local act rather than a thirty-first
-    operation: the hub is not told, nothing is destroyed, and the conversation it was
-    reading is untouched and still in the listing.
-    """
-    script = _code("app.js")
-    document = _asset("index.html")
-    fresh = _functions(script)["startFresh"]
-
-    assert 'id="new-conversation"' in document
-    assert 'el("new-conversation").addEventListener("click", startFresh);' in script
-    assert "changeConversation(null);" in fresh
-    for sends in ("fetch(", "relay(", "act("):
-        assert sends not in fresh, sends
-    # Hidden while there is nothing to leave, so it is never a control that does nothing.
-    assert 'el("new-conversation").hidden = id === null;' in _functions(script)["setConversation"]
-
-
-def test_an_answer_in_flight_cannot_undo_the_owners_own_choice() -> None:
-    """Ask under ``C``, then press "Start a new conversation" while that request is
-    still out: the selection clears, the answer arrives, and an unguarded
-    ``renderOutcome`` puts ``C`` back — so the next question continues the thread the
-    owner had just, explicitly, left.
-
-    The Ask button is disabled for the duration and this control deliberately is not:
-    leaving a thread is not something to make the owner wait for. So the turn carries
-    the count it was sent under instead, and the answer is still rendered whole — it is
-    only the *selection* that is not moved. Adversarial review found it on round 4.
-
-    It is this file's third use of the device: ``pendingRun`` for the confirmations
-    listing, ``runs`` for the questions listing, and now ``chose`` for the selection.
-    """
-    script = _code("app.js")
-    functions = _functions(script)
-
-    # Read before the request goes out, at both places a turn outcome comes back.
-    for entry in ("ask", "answerConfirmation"):
-        assert "const chosenAt = chose;" in functions[entry], entry
-    # Bumped in exactly one place, so a route that changes the selection cannot forget.
-    assert script.count("chose += 1;") == 1
-    assert "chose += 1;" in functions["changeConversation"]
-    assert "outcome.conversation_id && chose === chosenAt" in functions["renderOutcome"]
-    # Every outcome rendered carries a count; one that did not would silently stop
-    # continuing the conversation rather than fail.
-    #
-    # Read as the **second** argument rather than as the last one, which is what #1621
-    # made the difference: ``answerConfirmation`` now passes a third — the caveat a
-    # re-answered park carries — and a check anchored on the end of the call would have
-    # gone on passing while asking nothing.
-    rendered = re.findall(r"renderOutcome\(([^)]*)\)", script)
-    assert rendered
-    for call in rendered:
-        assert [one.strip() for one in call.split(",")][1] == "chosenAt", call
-    # And the guard the two ask entries reach it through (#1622), which the pattern above
-    # does not see — ``couldRenderOutcome`` capitalises the name it wraps, so a call to it
-    # is not a call to ``renderOutcome`` as far as that search is concerned, and an entry
-    # that stopped passing the count would go unread.
-    guarded = re.findall(r"couldRenderOutcome\(([^)]*)\)", script)
-    assert guarded
-    for call in guarded:
-        assert [one.strip() for one in call.split(",")][1] == "chosenAt", call
-
-
-def test_a_stale_selection_is_dropped_where_the_gateway_names_the_condition() -> None:
-    """The narrow half of the same fix. Only ``/conversation`` answers
-    ``no-such-conversation`` — a declined turn arrives as ``assistant-declined``
-    whatever the hub declined it for — so this is what the page can do mechanically,
-    and the control above is what covers the rest.
-
-    ``sent`` is what the request actually carried, and the comparison is what keeps it
-    narrow: forgetting some *other* conversation from the listing and being told it was
-    already gone says nothing about the one this view is reading.
-    """
-    script = _code("app.js")
-    lost = _functions(script)["conversationLost"]
-
-    assert 'body.fault === "no-such-conversation"' in lost
-    assert "sent === conversationId" in lost
-    assert "changeConversation(null)" in lost
-    assert "conversationLost(body, payload.conversation_id);" in _functions(script)["relay"]
-    assert "conversationLost(body, asked.conversation_id);" in _functions(script)["askWhole"]
-
-
 def test_the_page_says_why_a_session_ended_while_it_was_only_watching() -> None:
     """ADR-0175 §7: an open stream is **not** use of the session that admitted it.
     ``gateway_session_idle_timeout`` "is refreshed by a request the gateway admits and
@@ -4065,21 +2455,15 @@ def test_the_page_reads_a_conversation_before_it_forgets_one() -> None:
 
 #: Every top-level function that calls ``fetch``, and the entry point each is reached
 #: from. A `fetch` rejects where the gateway process has stopped, and the entry point
-#: is where that is caught — `ask` guards the two turn entries it chooses between, and
-#: `relay` is reached from both conversation entries — so the guard is asserted there
-#: rather than at the call.
+#: is where that is caught — `relay` is reached from both conversation entries — so the
+#: guard is asserted there rather than at the call.
 _FETCH_SITES: Final = {
     "startSession": "startSession",
-    "askWhole": "ask",
     "readDeliveries": "readDeliveries",
     # The change stream (ADR-0298 §7), its own `fetch` for `readDeliveries`' reason: a
     # stream is read value by value, which `relay` does not do.
     "followChat": "followChat",
     "relay": "listConversations",
-    # The spoken entry (ADR-0200 §10). Its own guard rather than one shared with `ask`,
-    # because it is not reached from there: a press is its own act and the page never
-    # falls back between the three entries (§10, ADR-0168 §9).
-    "sendRecording": "sendRecording",
 }
 
 #: The one ``fetch`` site that deliberately does **not** report a rejection as the
@@ -4132,7 +2516,6 @@ _RELAY_ENTRIES: Final = (
 _FAULT_PANELS: Final = frozenset(
     {
         "bootstrap",
-        "console",
         "conversations",
         "confirmations",
         "notifications",
@@ -4229,31 +2612,6 @@ def _catch_blocks(script: str) -> list[str]:
             index += 1
         blocks.append(script[opened.end() : index])
     return blocks
-
-
-def _js_set(script: str, name: str) -> str:
-    """The literal text a named ``new Set([...])`` declaration carries.
-
-    Read by name rather than by a bare digit search so that a second table appearing
-    in the file cannot answer a question asked about this one.
-    """
-    opened = script.index(f"const {name} = new Set([")
-    return script[opened : script.index("]);", opened)]
-
-
-def relayed_statuses() -> set[int]:
-    """Every status :func:`_relay_fault` writes, by calling it.
-
-    ADR-0168 §9 makes that function what classifies a failed relay, so this is the
-    closed set of statuses a refusal head can carry that were written *after* the
-    gateway began relaying the turn. The page enumerates this side precisely because
-    it is closed; the other side is not, and two review rounds were spent proving it.
-    """
-    return {
-        _relay_fault(TransportError("gone")).status,
-        _relay_fault(AssistantError("no")).status,
-        _relay_fault(ValueError("bad")).status,
-    }
 
 
 def _constant(script: str, name: str) -> str:
@@ -4427,17 +2785,10 @@ def test_a_body_that_is_not_an_object_reaches_no_caller_as_one() -> None:
     assert "!Array.isArray(parsed)" in shape
     # And both readers go through it, so the shape rule has one statement. Its own
     # declaration counts as a mention: ``_functions`` attributes it to itself.
-    #
-    # ``renderSpokenTurn`` is the third and is not a reader (#2005): the two above
-    # normalise a *body*, and the spoken entry renders from a member **of** one, so an
-    # unreadable ``2xx`` reaches it as ``body.turn`` absent rather than as a body it
-    # could re-read. Applying the same rule there is what keeps the failure an absent
-    # member rather than an exception, which is the whole of what this function is for.
     assert {name for name, body in functions.items() if "asObject(" in body} == {
         "asObject",
         "readBody",
         "relay",
-        "renderSpokenTurn",
     }
     # A refusal's body is still read as far as it can be read, because a refusal that
     # carries no readable condition is one the *caller* classifies (``act``'s rule).
@@ -7253,8 +5604,8 @@ def test_a_reply_this_page_cannot_render_resolves_nothing() -> None:
     # The render is guarded, and the guard is what decides the branch — not a `try` this
     # function keeps for it, and not a direct call.
     assert "renderOutcome(" not in answering
-    assert "!couldRenderOutcome(body.outcome, chosenAt, " in answering
-    guarded = answering[answering.index("!couldRenderOutcome(body.outcome, chosenAt, ") :]
+    assert "!couldRenderOutcome(body.outcome, " in answering
+    guarded = answering[answering.index("!couldRenderOutcome(body.outcome, ") :]
     assert guarded[: guarded.index("\n")].endswith("null)")
     # No shape check stands in front of it: enumerating members is the thing round 10
     # refuted, so a re-introduced list would be the same defect wearing a guard.
@@ -7395,12 +5746,12 @@ def test_a_re_answered_park_never_claims_the_record_is_the_answer_just_sent() ->
     # untouched — a guard that dropped it would render a re-answered park's outcome with
     # nothing above it saying which of the two answers is on screen.
     caveated = "unaccounted ? PARK_SETTLED_AFTER_UNKNOWN : null"
-    assert f"!couldRenderOutcome(body.outcome, chosenAt, {caveated})" in answering
+    assert f"!couldRenderOutcome(body.outcome, {caveated})" in answering
     guard = _functions(script)["couldRenderOutcome"]
-    assert "function couldRenderOutcome(outcome, chosenAt, provenance) {" in guard
-    assert "renderOutcome(outcome, chosenAt, provenance);" in guard
+    assert "function couldRenderOutcome(outcome, provenance) {" in guard
+    assert "renderOutcome(outcome, provenance);" in guard
     render = _functions(script)["renderOutcome"]
-    assert "function renderOutcome(outcome, chosenAt, provenance) {" in render
+    assert "function renderOutcome(outcome, provenance) {" in render
     assert render.index("clearNode(body);") < render.index("if (provenance) {")
     assert render.index("if (provenance) {") < render.index("if (outcome.capture_degraded) {")
     # It is passed and never derived: nothing in the renderer reads a member to decide
@@ -7461,369 +5812,7 @@ def test_a_rows_own_line_never_attributes_an_ending_to_the_owner() -> None:
         assert named in _functions(script)["answerConfirmation"], named
 
 
-def test_the_page_reports_the_playback_it_last_had_in_the_air() -> None:
-    """ADR-0205 §7: the page reports "the playback it last had in the air for the
-    conversation it is sending, **naming that answer's own ``episode_id``**".
-
-    Four claims, each one a separate way the report could be wrong. The subject is
-    the id the response disclosed — carried on the playback record rather than read
-    off the page's current selection when the sound stops, because by then the owner
-    may have chosen another conversation. The state is the distinction the front end
-    already draws, ``COMPLETE`` where the source ended of its own accord and
-    ``INTERRUPTED`` where a press ended it, and the page invents neither. The report
-    is *taken* rather than read, so a second press does not re-send one. And it rides
-    the request the next turn already makes: §1 declines a route for it, so there is
-    exactly one place it leaves this page.
-    """
-    script = _code("app.js")
-    functions = _functions(script)
-
-    # The subject travels on the record, from the response that carried the rendering.
-    assert "void playSpoken(turn.spoken, slot, turn.episode_id" in functions["renderSpokenTurn"]
-    assert "episode," in functions["playSpoken"]
-    assert "conversation," in functions["playSpoken"]
-
-    # `COMPLETE` where the source ended of its own accord — written where the source's
-    # own `ended` listener is, which is the one place that knows it ended by itself.
-    assert 'reportDelivery(mine, "complete")' in functions["soundFrom"]
-    # `INTERRUPTED` where a press ended it, and `COMPLETE` where the press arrived
-    # after the sound had already elapsed (#1705's window).
-    interrupting = functions["interruptPlayback"]
-    assert 'reportDelivery(ended, "complete")' in interrupting
-    assert 'reportDelivery(ended, "interrupted")' in interrupting
-
-    # Nothing else in the page writes one, so a state cannot be invented anywhere else.
-    assert script.count("reportDelivery(") == 4, "three call sites and one declaration"
-
-    # Taken rather than read, and only for the conversation being sent.
-    taking = functions["takeDelivery"]
-    assert "pendingDeliveries.get(conversation)" in taking
-    assert "pendingDeliveries.delete(conversation)" in taking
-    sending = functions["sendRecording"]
-    assert "takeDelivery(conversationId)" in sending
-    assert "asked.delivery = played" in sending
-    assert script.count("asked.delivery") == 1, "one place the report leaves this page"
-
-
-def test_the_report_carries_two_durations_and_a_state_and_nothing_else() -> None:
-    """ADR-0205 §2: "a subject, two durations and a state, and nothing else. No audio,
-    no fragment of one, no transcript, no span of what was heard, no word count, no
-    character offset, no sample position and no format."
-
-    Read off the object the page actually builds, because that is what crosses.
-    """
-    script = _code("app.js")
-    building = _functions(script)["reportDelivery"]
-
-    # Both spellings, because a shorthand property is still a member: `state,` and
-    # `episode_id: mine.episode` reach the body identically.
-    sent = set(re.findall(r"^\s*(\w+)[:,]$|^\s*(\w+):", building, re.MULTILINE))
-    named = {one for pair in sent for one in pair if one}
-    assert {"episode_id", "delivery", "state", "played_microseconds", "rendered_microseconds"} <= (
-        named
-    )
-    # And §2's "nothing else", as the enumeration it is rather than as a set equality
-    # that a refactor of the local variables would break: no audio, no rendering, no
-    # transcript, no word or character position, no sample offset, no format.
-    for forbidden in ("content", "media_type", "transcript", "heard", "words", "chars", "samples"):
-        assert forbidden not in building, f"§2 admits no {forbidden}"
-    # Derived from the decoded buffer the page already holds (§7), and from nothing it
-    # went and asked for.
-    assert "mine.buffer.duration * MICROSECONDS" in building
-    assert "mine.played * MICROSECONDS" in building
-
-
-def test_the_page_reports_nothing_where_it_holds_no_pair_to_report() -> None:
-    """ADR-0205 §7: it "reports nothing where it holds no such pair", and §3's clause
-    that in practice no report names a turn whose rendering never existed — "a page
-    that played nothing holds no measurement to report".
-
-    A response that disclosed ``null`` leaves nothing to name, and a playback whose
-    decode a press overtook has no buffer to measure.
-    """
-    building = _functions(_code("app.js"))["reportDelivery"]
-
-    assert "mine.episode === null" in building
-    assert "mine.conversation === null" in building
-    assert "mine.buffer === null" in building
-
-
-def test_the_page_obtains_the_report_from_no_new_browser_capability() -> None:
-    """ADR-0205 §7: "No lane adds a second audio API, a media element, a
-    ``speechSynthesis`` call or any other capability to obtain it; ADR-0200 §10's
-    front-end clauses bind unchanged."
-
-    The measurement comes off the decoded buffer and the audio context's own clock,
-    both of which the page already had for playing the answer at all.
-
-    Read from the **comment-stripped** view, because ADR-0200 §10's own clause is
-    named in the prose of the file — a check over the whole text would fail on the
-    sentence explaining the rule it enforces, which is :func:`_code`'s stated reason
-    for existing.
-    """
-    script = _code("app.js")
-
-    assert "speechSynthesis" not in script
-    assert "new Audio(" not in script
-    assert "createMediaElementSource" not in script
-    # **One decoder and one context, as before** — stated as the invariant rather than
-    # as a count of call sites, because ADR-0206 §8 gave the page a second thing to
-    # play (a notification's rendering) and a count would have read that as a new
-    # capability. What "no new capability" means is that every decode is the same
-    # `AudioContext`'s and there is still exactly one context, which `readyToPlay`
-    # builds inside the press gesture and holds for the life of the page.
-    assert script.count("decodeAudioData") == script.count("context.decodeAudioData(")
-    assert script.count("new AudioContext(") == 1
-
-
-def test_an_interruption_the_page_cannot_spell_is_reported_as_nothing() -> None:
-    """ADR-0205 §7: the page "invents neither" state.
-
-    Architecture review, round 1, ``blocker``. A press landing within a microsecond of
-    the buffer's end rounds both durations equal, and ``interrupted`` with two equal
-    numbers is outside §2's partition — but the answer to that is silence, not the
-    other state. Restating it as ``complete`` would have the composing stage treat an
-    answer the owner cut off as fully heard, which is the failure the whole decision
-    exists to close, arriving through the one function meant to prevent it. Omitting
-    leaves the turn ``UNKNOWN``, which §4 calls the conservative reading and which no
-    stage renders as heard.
-    """
-    building = _functions(_code("app.js"))["reportDelivery"]
-
-    assert 'state === "interrupted" && played >= rendered' in building, (
-        "an interruption that cannot be spelled is dropped"
-    )
-    assert "state," in building, "the state sent is the state the caller drew"
-    assert '? "complete"' not in building
-    assert '"complete" : state' not in building
-
-
-def test_a_report_for_one_conversation_survives_a_playback_in_another() -> None:
-    """ADR-0205 §7: "the playback it last had in the air **for the conversation it is
-    sending**".
-
-    Adversarial review, round 2, ``blocker``. With a single pending slot, letting an
-    answer finish in conversation B overwrote an unsent report for conversation A — so
-    coming back to A sent nothing, and a turn the owner had certainly heard, or
-    certainly cut off, stayed ``UNKNOWN`` for ever. The qualifier in that clause is
-    what makes the store per conversation rather than a filter that usually discards,
-    and the page's own comment already promised the retention the code did not have.
-
-    Read off the shipped script: a keyed store, a take that removes only the key it
-    answers, and a bound with an eviction — because a page left open across many
-    conversations would otherwise grow an entry per conversation for its whole life.
-    """
-    script = _code("app.js")
-    functions = _functions(script)
-
-    assert "const pendingDeliveries = new Map()" in script
-    assert "let pendingDelivery " not in script, "the single slot is gone"
-
-    writing = functions["reportDelivery"]
-    assert "pendingDeliveries.set(mine.conversation" in writing
-    # And nothing is evicted. Both lenses, round 3, `blocker`, on a bound this page had
-    # put here of its own accord: ADR-0205 §7 admits exactly one case for reporting
-    # nothing — "where it holds no such pair" — and an eviction manufactures a second,
-    # losing a report the page had genuinely measured.
-    assert "PENDING_DELIVERY_LIMIT" not in script
-    assert "keys().next().value" not in writing, "nothing is evicted"
-
-    taking = functions["takeDelivery"]
-    assert "pendingDeliveries.delete(conversation)" in taking
-    assert "clear()" not in taking, "taking one conversation's report keeps every other"
-
-
-def test_a_report_whose_request_the_hub_never_saw_is_put_back() -> None:
-    """ADR-0205 §7, and §1's idempotence as the reason it is safe.
-
-    Adversarial review, round 4, ``blocker``. ``takeDelivery`` lets go of the report
-    before ``fetch``, because the body needs it — so a request that never arrived took
-    a measured delivery fact with it and left the turn ``UNKNOWN`` although the page
-    had measured it. Resending is safe rather than merely tolerable: §1 makes a report
-    name its turn, so a resend "either finds it unstamped and stamps it, or finds it
-    stamped and does nothing".
-
-    **Restored on the three outcomes where the hub cannot have seen the request**, and
-    on no others: a rejected ``fetch``, a read the owner abandoned, and the gateway
-    saying it could not reach the hub. A refusal the gateway authored about the request
-    itself is deterministic, so putting the report back there would resend one refused
-    identically for ever.
-    """
-    script = _code("app.js")
-    functions = _functions(script)
-    sending = functions["sendRecording"]
-
-    assert "let played = null" in sending, "declared where the catch can reach it"
-    assert sending.count("restoreDelivery(asked.conversation_id, played)") == 3
-    assert "body.fault !== DELIVERY_REFUSED" in sending, (
-        "kept on every refusal but the one about the report itself"
-    )
-    # **The page reads no fault name as a witness that the turn was stamped**, which is
-    # the class adversarial review found twice — rounds 5 and 6, on two different faults
-    # that arise before `record_delivery` is reached. `assistant-declined` is the
-    # second: `Engine.converse_spoken` raises `OversizedValueError` for a recording over
-    # the bound *before* it records the report. Enumerating the faults that do witness a
-    # stamp was always going to be a list one case short, so the page enumerates none:
-    # §1 makes a resend idempotent, so keeping costs one redundant field and dropping
-    # costs the fact.
-    assert "DELIVERY_SETTLED" not in script, "no fault-name allowlist survives"
-    assert script.count("DELIVERY_REFUSED") == 2, "one constant, one use"
-    assert 'const DELIVERY_REFUSED = "delivery-unusable"' in script, (
-        "and the one exception is the refusal about the report itself, which repeats"
-    )
-
-    # A newer measurement wins: §7 asks for the playback last in the air.
-    restoring = functions["restoreDelivery"]
-    assert "pendingDeliveries.has(conversation)" in restoring
-
-
 # --- ADR-0206 §8: an idle device speaks a notification, and no other does -----
-
-
-def test_a_notification_is_rendered_first_and_played_only_second() -> None:
-    """§8: wherever the page cannot play, "it plays nothing and renders the
-    notification on the page".
-
-    So the render is what always happens and the playback is what sometimes does,
-    and the order in the reader says so: a page that played first and rendered on
-    the way out would lose the notification altogether on the throw the decoder can
-    make. ADR-0206 §5 is what makes that the right way round — the page "is the
-    channel that carries it", and the audio is the part that may be missing.
-    """
-    script = _code("app.js")
-    reading = _functions(script)["readDeliveries"]
-
-    assert reading.index("renderNotification(value)") < reading.index(
-        "playNotification(value.spoken)"
-    )
-    assert script.count("playNotification(") == 2, "one declaration, one call"
-
-
-def test_a_notification_plays_only_into_a_running_context_with_nothing_in_the_air() -> None:
-    """§8: "'Idle'… is a conjunction of facts about the **device** and never about the
-    room: the page holds a running audio context established by a user gesture in this
-    document, and it holds no playback in the air… The page plays a rendering only
-    while both hold."
-
-    **And it never resumes.** ``readyToPlay`` builds and resumes the context inside the
-    press gesture because that is the only place a browser will let it (#1690), so a
-    ``resume`` reached from a delivery — which arrives on no gesture at all — is the
-    defect that fix exists to remove. A page that has had no gesture since load holds
-    no running context and plays nothing, which is why §8's own prose calls this
-    *proactive* rather than *spontaneous*.
-
-    **Neither fact is an audience fact.** Nothing here asks or infers who is present:
-    §8 forbids conditioning any clause on the room, which is what keeps this out of
-    ADR-0199 §4's way.
-    """
-    script = _code("app.js")
-    playing = _functions(script)["playNotification"]
-
-    assert 'context.state !== "running"' in playing
-    assert "playing !== null" in playing
-    assert "context.resume()" not in playing
-    assert "new AudioContext(" not in playing, "the context is readyToPlay's alone"
-    # The record is built only after both facts hold, so a page that cannot play has
-    # taken nothing over and the answer's own playback is untouched.
-    assert playing.index("playing !== null") < playing.index("playing = mine")
-
-
-def test_a_rendering_the_page_does_not_play_is_dropped_and_never_queued() -> None:
-    """§8: "A rendering the page does not play is **dropped**. The page holds no
-    rendering for later, queues nothing behind a playback, and plays no notification
-    after the delivery that carried it has been rendered on screen."
-
-    A page that held renderings would be the buffer ADR-0175 §4 refuses, rebuilt in
-    JavaScript, bounded by nothing and aging against an artifact ADR-0130 says is
-    about a moment. So the refusal is a bare ``return`` and there is nowhere for a
-    rendering to be put: no array, no map and no field on any record but the decoded
-    buffer of the playback actually in the air.
-    """
-    script = _code("app.js")
-    playing = _functions(script)["playNotification"]
-
-    assert playing.count("return;") == 2, "the null rendering and the busy device"
-    for holder in ("push(", "unshift(", "setTimeout(", "pendingDeliveries", "held ="):
-        assert holder not in playing
-
-
-def test_a_browser_that_cannot_decode_the_rendering_plays_nothing_and_says_nothing() -> None:
-    """§2: "One delivery carries one rendering in one format, and a browser that cannot
-    decode that format is silent… A browser that could have decoded a member the engine
-    did not pick plays nothing and renders the notification on the page, exactly as one
-    that could decode neither does."
-
-    **And it is not reported** (§2, §9): "That a browser played nothing is a **device
-    fact**. No component reports it, records it, retries on it, or treats it as a
-    disclosure outcome." So the rejected decode lets the record go and writes nothing —
-    no notice, no fault, and nothing sent anywhere. That is the one place a notification
-    differs from an answer, whose ``playSpoken`` writes ``couldNotPlay`` into the turn
-    that owed it.
-    """
-    script = _code("app.js")
-    decoding = _functions(script)["decodeNotification"]
-
-    assert "await context.decodeAudioData(" in decoding
-    assert "catch (_)" in decoding
-    assert "forgetPlaying(mine)" in decoding
-    for reported in ("couldNotPlay(", "fault(", "reportDelivery(", "line(", "fetch("):
-        assert reported not in decoding
-
-
-def test_a_press_landing_during_the_decode_starts_no_notification() -> None:
-    """The half of §8's interrupt that stopping a live source does not reach, and the
-    same defect ``playSpoken`` carries for an answer (#1696).
-
-    ``interruptPlayback`` clears the record **before** it stops anything, so a press
-    that landed while this was decoding leaves ``playing !== mine`` — and starting a
-    source then would be the utterance the owner interrupted beginning to speak after
-    they had begun.
-    """
-    script = _code("app.js")
-    decoding = _functions(script)["decodeNotification"]
-
-    assert decoding.index("if (playing !== mine)") < decoding.index("soundFrom(context, mine, 0)")
-
-
-def test_a_press_interrupts_a_notification_and_reports_nothing_about_it() -> None:
-    """§8: "a press to talk always interrupts a notification's playback… a notification
-    is the interruptible one of the two"; §9: "No component sends, records or infers
-    whether a page had a context, was playing, played, finished playing or was
-    interrupted."
-
-    The interrupt itself is inherited whole — ``interruptPlayback`` runs ahead of every
-    one of ``startTalking``'s guards and ``stopPlaying`` ends whatever is in the air,
-    neither of which asks what kind of playback it is. What this pins is the three
-    things that must *not* follow for a notification: no ADR-0205 report at either
-    ending, no notice written under an answer this playback was not about, and no hold
-    for #1701's resume — §8 forbids the page holding a rendering for later in terms.
-
-    Refused explicitly rather than by ``reportDelivery``'s own guard on a missing
-    ``episode_id``: a clause §9 states in terms should not depend on a record happening
-    to lack two members.
-    """
-    script = _code("app.js")
-    functions = _functions(script)
-    interrupting = functions["interruptPlayback"]
-    sounding = functions["soundFrom"]
-    playing = functions["playNotification"]
-
-    assert "if (ended.notification) {" in interrupting
-    assert interrupting.index("held = null") < interrupting.index("if (ended.notification)")
-    assert interrupting.index("if (ended.notification)") < interrupting.index("reportDelivery(")
-    assert interrupting.index("if (ended.notification)") < interrupting.index(
-        "playbackInterrupted("
-    )
-    assert interrupting.index("if (ended.notification)") < interrupting.index("held = ended")
-    assert "if (!mine.notification) {" in sounding
-    assert sounding.index("if (!mine.notification)") < sounding.index('reportDelivery(mine, "com')
-    # The record says what it is, and says it in all three places a record is built, so
-    # neither reader has to infer the kind from what the record happens to lack.
-    assert "notification: true" in playing
-    assert script.count("notification: false") == 2
-    assert playing.count("episode: null") == 1
-    assert playing.count("conversation: null") == 1
-    assert "slot: null" in playing
 
 
 # --- ADR-0244 §13: what a read's question, its answer and its act may say ------
@@ -9231,69 +7220,6 @@ def test_every_settlement_member_has_a_sentence_on_the_page() -> None:
         assert f"  {member}:" in words, member
 
 
-def test_the_reference_is_given_up_only_by_a_turn_that_reached_the_assistant() -> None:
-    """A refusal the gateway took before the engine consumes nothing.
-
-    ADR-0168 §6 classifies a request "from its method and path alone", and the door takes
-    an expired session, a malformed body and the connection ceiling **before**
-    ``_assistant`` is reached — so such a turn settled no question and engaged no goal.
-    ``waiting.ran`` is set exactly where the entry establishes that the assistant took
-    the question: ``askWhole``'s ok head, which "is proof the turn ran". A refusal head is
-    not, and the flag is set on the ok branch alone. Adversarial review, round 2,
-    ``major``.
-    """
-    functions = _functions(_code("app.js"))
-
-    ask, reconcile = functions["ask"], functions["reconcileReference"]
-    assert "if (waiting.ran) {" in reconcile
-    assert "restoreReference(sent)" in reconcile
-    assert "referenceSent(waiting.reference)" in ask
-    # **In the `finally`, so every ending `ask` owns reaches it** (round 3, `major`): a
-    # rejected `fetch` leaves through the `catch`, so a reconciliation written after the
-    # await ran on one ending of three. Asserted as a position rather than as a byte
-    # sequence — what the clause is about is which block it sits in.
-    assert ask.index("reconcileReference(waiting);") > ask.index("} finally {")
-    # And under `releaseAsk`'s own guard, so a superseded ask settling late cannot move
-    # what the live one is holding.
-    assert ask.index("if (awaited === waiting) {") < ask.index("reconcileReference(")
-    # **And in `abandonAsk`, which is the ending `ask` does not own**: that site releases
-    # the ask before aborting, so `ask`'s `finally` finds `awaited !== waiting` and
-    # leaves every shared thing alone. It runs before the abort, beside the release, and
-    # it needs no guard of its own because it has just read `awaited`.
-    abandon = functions["abandonAsk"]
-    assert abandon.index("releaseAsk();") < abandon.index("reconcileReference(waiting);")
-    assert abandon.index("reconcileReference(waiting);") < abandon.index(
-        "waiting.stopping.abort();"
-    )
-    whole = functions["askWhole"]
-    assert whole.count("waiting.ran = true;") == 1
-    ok_branch = whole[whole.index("if (response.ok) {") : whole.index("  } else {")]
-    assert "waiting.ran = true;" in ok_branch
-
-
-def test_a_reference_already_sent_is_not_offered_as_one_that_can_be_taken_back() -> None:
-    """The control stops being offered once the body carrying it has gone out.
-
-    The reference is serialised at submission, so a "never mind" pressed while that
-    request is in flight would hide the hint while the value still reached the assistant
-    — a page claiming to have withdrawn something it had already sent. ``referenceSent``
-    is called at the submission site, after the body is built, and the sentence it writes
-    **does not say the turn can be stopped**: that is a different control with a
-    different meaning, and ADR-0173 §9 is explicit that abandoning the stream does not
-    abandon the turn. Adversarial review, round 2, ``major``.
-    """
-    script = _code("app.js")
-    ask = _functions(script)["ask"]
-    said = _constant(script, "REFERENCE_SENT")
-
-    assert ask.index("asked.reference = waiting.reference.value;") < ask.index(
-        "referenceSent(waiting.reference);"
-    )
-    assert "no longer be taken back" in said
-    for barred in ("stop", "cancel", "abandon", "undo"):
-        assert barred not in said.lower(), barred
-
-
 def test_the_chat_follows_the_stream_and_reopens_it_only_on_an_event() -> None:
     """ADR-0296 §4 and ADR-0182 §7, read together (the PR description records the reading).
 
@@ -9382,3 +7308,46 @@ def test_a_device_drops_what_it_held_on_removal_and_on_holding_no_role() -> None
     }
     # The hub's own machine reads every conversation, so it is never dropped from one.
     assert "named === HUB_DEVICE" in functions["readsHere"]
+
+
+# --- ADR-0309 §5:4 and ADR-0313 §3: what retired from the page -----------------
+
+
+def test_the_page_offers_no_ask_form_and_no_push_to_talk() -> None:
+    """ADR-0309 §5:4: "``ask`` and the gateway's Ask panel retire", and ADR-0313 §3:4:
+    "the ``POST /ask/spoken`` route, the 'Hold to talk' control, and the page script
+    that records, sends and renders a spoken turn" retire.
+
+    Read off both files: a control left in the document would be one the owner could
+    press, and a path left in the script would be a request the gateway answers with a
+    ``404``. The chat is the way to talk to the assistant (§5:4).
+    """
+    script = _code("app.js")
+    document = _markup("index.html")
+
+    for path in ('"/ask"', '"/ask/spoken"'):
+        assert path not in script, path
+    for identifier in ("ask-form", "utterance", "talk-button", "stop-talking", "heard"):
+        assert f'id="{identifier}"' not in document, identifier
+        assert f'el("{identifier}")' not in script, identifier
+    for recording in ("MediaRecorder", "getUserMedia"):
+        assert recording not in script, recording
+    assert 'id="chat-button"' in document
+
+
+def test_a_notification_is_shown_as_text_and_never_played() -> None:
+    """ADR-0313 §3:5: "The page plays no spoken notification: its playback retires with
+    push-to-talk, and a notification is shown as text."
+
+    So the reader renders every notification and does nothing else with it, and nothing
+    on the page decodes or plays audio: ``spoken`` is ``null`` on every value the gateway
+    writes (§3:6), and a page that still read it would be keeping a playback path alive
+    for a member that carries nothing.
+    """
+    script = _code("app.js")
+    reading = _functions(script)["readDeliveries"]
+
+    assert "renderNotification(value);" in reading
+    assert "value.spoken" not in script
+    for playback in ("AudioContext", "decodeAudioData", "playNotification", "AudioBuffer"):
+        assert playback not in script, playback

@@ -312,20 +312,21 @@ def test_no_token_no_reason_and_no_evidence_crosses_beside_the_rendering(
     assert b"event-1" not in framed
 
 
-def test_a_rendering_crosses_as_exactly_its_content_and_its_media_type() -> None:
-    """§8: "``spoken`` is… an object carrying exactly two members, ``content`` and
-    ``media_type``, projected from that value."
+def test_a_rendering_the_hub_returned_anyway_crosses_as_null() -> None:
+    """ADR-0313 §3:6: the ``spoken`` member of the value written on a delivery stream
+    "is ``null`` on every value".
 
-    The media type crosses as the string ADR-0200 §9 makes the member's value — "the
-    string value is the media type itself, parameters included, so a value that
-    reaches an HTTP header or a ``MediaRecorder`` constructor is the member rather
-    than a mapping of it" — so the page hands it to a decoder unchanged.
+    The gateway's poll asks for no rendering, so the hub renders none for it (ADR-0206
+    §1:2); the projection writes ``null`` whatever the delivery carries, so the clause
+    holds by the gateway's own construction rather than by the hub's answer, and no
+    rendering reaches a page that no longer plays one (§3:5). Checked on the encoded
+    value too, because what the browser receives is the bytes.
     """
     value = streams.notification(_rendered())
-    crossed = json.loads(streams.encode(value))
 
-    assert value["spoken"] == {"content": "QUJDRA==", "media_type": "audio/mp4"}
-    assert crossed["spoken"] == {"content": "QUJDRA==", "media_type": "audio/mp4"}
+    assert value["spoken"] is None
+    assert b'"spoken": null' in streams.encode(value)
+    assert b"QUJDRA==" not in streams.encode(value)
 
 
 def test_a_delivery_with_no_rendering_carries_the_member_as_null() -> None:

@@ -9,7 +9,7 @@ drops what it held. The engine is the canonical fake, whose change stream is the
 engine's own; the assistant's reply is written into the chat space the way the chat's
 writer writes one (ADR-0293 §6), so nothing about the reply is fabricated at the page.
 A conversation's current state is pushed onto the stream by the case
-(:meth:`SpeakingEngine.push_state`), as the engine pushes it when its activity changes.
+(:meth:`DriveEngine.push_state`), as the engine pushes it when its activity changes.
 """
 
 from __future__ import annotations

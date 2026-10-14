@@ -450,11 +450,8 @@ async def test_a_delivery_streams_head_states_the_cadence_it_will_be_written_at(
         assert engine.calls[-1] == (
             "next_notification",
             # ADR-0206 §2's fixed value, which the gateway supplies of its own on every
-            # poll. It is the module constant rather than a literal here, because what
-            # the constant *is* is pinned beside it in ``test_delivery.py`` — against
-            # ``SpokenAudioFormat``'s own membership, so a third member added on
-            # ADR-0200 §9's measurement clause fails there and not silently here.
-            {"acknowledging": None, "plays": GATEWAY_PLAYS, "budget": budget},
+            # poll, and which ADR-0313 §3:6 makes empty: the poll asks for no rendering.
+            {"acknowledging": None, "plays": (), "budget": budget},
         )
 
 
@@ -484,15 +481,13 @@ async def test_no_browser_value_reaches_the_poll_however_a_request_carries_one()
 async def test_the_cadence_is_stated_on_the_delivery_stream_and_on_nothing_else() -> None:
     """The header is a claim about §4's obligation, and §4 obliges nothing elsewhere.
 
-    A turn answered whole carries no keep-alive, and a page that read a cadence off it
+    A response answered whole carries no keep-alive, and a page that read a cadence off it
     would bound a response nobody promised to write on. So the header rides the one
     response §4 is about, which is also why it is a field on :class:`StreamHead` rather
     than a line :func:`render_stream_head` adds to every head.
     """
     async with _harness(_Delivering([None])) as one:
-        _, whole, status = await one.send(
-            "POST", "/ask", {"utterance": "what is on today", "reference": {"goal_id": "goal-1"}}
-        )
+        _, whole, status = await one.send("POST", "/conversations", {})
         _, delivered, _ = await one.send("GET", "/deliveries")
 
         assert status == 200
@@ -571,7 +566,8 @@ async def test_the_hub_ceiling_refuses_a_delivery_stream_naming_the_limit() -> N
     that would need one beyond that ceiling is refused naming the limit."
 
     At a ceiling of one, "a gateway can serve a delivery stream or a turn and not
-    both, refusing the other with a message naming the limit".
+    both, refusing the other with a message naming the limit" — read here with the
+    conversations listing as the other, since the Ask route retired (ADR-0309 §5:4).
     """
     engine = _Delivering([None])
     async with _harness(engine, gateway_max_hub_connections=1) as one:
@@ -579,9 +575,7 @@ async def test_the_hub_ceiling_refuses_a_delivery_stream_naming_the_limit() -> N
         assert status == 200
         await engine.polling.wait()
 
-        refused_status, body = await one.whole(
-            "POST", "/ask", {"utterance": "what is on today", "reference": {"goal_id": "goal-1"}}
-        )
+        refused_status, body = await one.whole("POST", "/conversations", {})
 
         assert refused_status == 503
         assert body == {"fault": "hub-connection-ceiling", "limit": "gateway_max_hub_connections"}
@@ -653,9 +647,7 @@ async def test_an_open_stream_is_not_use_of_the_session_and_dies_with_it() -> No
         await asyncio.sleep(0)
 
         assert await _read_all(reader) == [{"kind": "fault", "fault": "no-live-session"}]
-        status, body = await one.whole(
-            "POST", "/ask", {"utterance": "what is on today", "reference": {"goal_id": "goal-1"}}
-        )
+        status, body = await one.whole("POST", "/conversations", {})
         assert (status, body) == (401, {"fault": "no-live-session"})
 
 
@@ -1108,8 +1100,7 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
     Every operation §1 admits is served here. Thirty are §1's own — the CONFIRM pair
     joined those once ADR-0178's merge discharged §8's precondition — and each addition
     since arrived by the route §1's third clause fixes, a ratified decision's own text.
-    ADR-0200 §12(a) partially supersedes §1's enumeration for ``converse_spoken`` and
-    "nothing else", and §10 gives it the path; ADR-0244 §13 adds ``cancel_read`` — "the
+    ADR-0244 §13 adds ``cancel_read`` — "the
     command line and the browser each render the pending read, collect the answer, and
     **offer the cancellation act**"; and **ADR-0250's ``- Status:`` line records "§1's
     thirty-operation enumeration alone, which gains ``goals``,
@@ -1121,6 +1112,8 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
     last"**, which places ``stop_activation`` here by the governing decision's own text,
     as ADR-0244 §13 placed ``cancel_read``; the header record it owes ADR-0177 is issue
     #2714. Every other clause of §1 binds each of them exactly as it binds the thirty.
+    **``converse`` and ``converse_spoken`` are no longer among them**: ADR-0309 §5:4
+    retires the Ask panel and ADR-0313 §3:4 push-to-talk, with their routes.
 
     **The count is not written down here, and that is ADR-0177's own instruction rather
     than an omission.** Its third dated note retires the figure — "do not read that as
@@ -1140,10 +1133,8 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
     so does a lane that adds one this ADR admits *and* forgets it exists.
     """
     assert set(_ASSISTANT_PATHS.values()) == {
-        # ADR-0293 §11 retires `converse_streaming`; `converse` stays for the turn
-        # carrying a reference until question messages are built (ADR-0250 §11).
-        "converse",
-        "converse_spoken",
+        # ADR-0293 §11 retires `converse_streaming`, ADR-0309 §5:4 `converse` and
+        # ADR-0313 §3:4 `converse_spoken`.
         "recent_conversations",
         "conversation",
         "forget_conversation",
@@ -1297,15 +1288,13 @@ async def test_a_delivery_stream_whose_head_never_landed_leaves_no_poll_running(
     A stream registered and then never written to is a reader that never existed, and
     a poll held for it would take an entry, mint a ``delivery_id`` and start a lease
     (ADR-0131 §2a) on nobody's behalf. The ceiling is again the observable: at one, a
-    poll still running is a turn refused.
+    poll still running is a request refused.
     """
     engine = _Delivering([None])
     async with _harness(engine, gateway_max_hub_connections=1) as one:
         assert await _fail_the_head(one) is False
 
-        status, _ = await one.whole(
-            "POST", "/ask", {"utterance": "what is on today", "reference": {"goal_id": "goal-1"}}
-        )
+        status, _ = await one.whole("POST", "/conversations", {})
 
         assert status == 200
 
