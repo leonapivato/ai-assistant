@@ -21,7 +21,6 @@ from ai_assistant.core.types import (
     ActivationUnderstanding,
     Capture,
     ChannelIdentity,
-    ChannelResult,
     ControllerRule,
     ControllerStage,
     Disposition,
@@ -211,16 +210,6 @@ class FakeActivation:
             }
         )
 
-    def transcription(self, text: str) -> None:
-        """Keep the scripted transcript exactly, including no-words input."""
-        if isinstance(self.trigger, RecordedChannelTrigger) and isinstance(
-            self.trigger.payload, RecordedSpeechInput
-        ):
-            self.trigger = self.trigger.model_copy(
-                update={"payload": self.trigger.payload.model_copy(update={"transcript": text})}
-            )
-            self.no_words = not text.strip()
-
     def understand(self) -> None:
         """Mark that this fake pass reached the point the engine's stage runs (ADR-0276 §5).
 
@@ -232,15 +221,13 @@ class FakeActivation:
         """
         self.understood = True
 
-    def observe(self, result: TurnOutcome | ChannelResult) -> None:
-        """Observe the fake's produced result before a size check can refuse it."""
-        if isinstance(result, ChannelResult):
-            # ADR-0313 §4:3: an event's place takes no message, so it wrote none and
-            # nothing it wrote is returned; its episode keeps no outcome. An event is the
-            # one channel result (§4:6).
-            return
-        self.outcome = result
-        self.response = result.reply
+    def said(self, text: str) -> None:
+        """Keep a message the activation wrote, as its episode's ``outcome`` (ADR-0307 §10).
+
+        The messages written, joined by a blank line, as the phases keep them. An event's
+        place takes no message, so its episode keeps no outcome (ADR-0313 §4:3).
+        """
+        self.response = text if self.response is None else f"{self.response}\n\n{text}"
 
     def report(self) -> EpisodeCaptureReport:
         """Reserve a complete receipt at the address capture writes (ADR-0283 §2).

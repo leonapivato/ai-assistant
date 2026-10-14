@@ -97,25 +97,14 @@ from ai_assistant.core.types import (
     ACCOUNT_IDENTITY_MAX_BYTES,
     DEFAULT_PAGE_SIZE,
     SECRET_VALUE_MAX_BYTES,
-    ActionPlan,
     ActionRequest,
     BeliefBand,
     BeliefSummary,
     CapabilityEffect,
     CapabilityResult,
-    Confirmation,
-    ContinuationToken,
     CostBasis,
-    CurrentContext,
-    Disposition,
-    ExecutionState,
-    Goal,
-    GoalBrief,
-    GoalInterpretation,
     GrantScope,
-    Ground,
     Idempotency,
-    MemorySource,
     NotificationCandidate,
     NotificationDelivery,
     PermissionDecision,
@@ -124,7 +113,6 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
-    Provenance,
     ProvisioningState,
     RecordedInvocation,
     Reversibility,
@@ -133,13 +121,9 @@ from ai_assistant.core.types import (
     SpendPeriod,
     SpokenAudioFormat,
     SpokenRendering,
-    StepOutcome,
-    TimeOfDay,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
-    TurnOutcome,
-    TurnResult,
     UserMessage,
     secret_value,
 )
@@ -181,77 +165,6 @@ _PATIENT = timedelta(seconds=30)
 #: its result check entirely would still pass. At 512 the argument object of every
 #: setup call is comfortably inside the bound and only the *page* crosses it.
 _TINY_LIMIT = 512
-
-
-#: An instant every scripted outcome below is stamped at. Nothing here is about a
-#: clock; what these values are for is the *shape* ADR-0207 §1 names.
-_PARK_AT = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
-
-
-def _park_turn() -> TurnResult:
-    """One live turn, so a scripted step park is a park and not a recovered one.
-
-    A ``turn`` of ``None`` beside a parked step is the *recovered* park (ADR-0052 §3),
-    so the outcome a consumer scripts carries the turn a live park has.
-    """
-    goal = Goal(
-        id="g-park",
-        interpretation=(
-            GoalInterpretation(
-                revision=1,
-                outcome="what do I take in my coffee",
-                outcome_ground=Ground.USER_STATED,
-                outcome_span="what do I take in my coffee",
-                recorded_at=_PARK_AT,
-                raised_by="t-1",
-            ),
-        ),
-        provenance=Provenance(
-            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_PARK_AT
-        ),
-        created_at=_PARK_AT,
-    )
-    return TurnResult(
-        utterance=goal.statement,
-        goal=GoalBrief.of(goal),
-        context=CurrentContext(
-            now=_PARK_AT,
-            time_of_day=TimeOfDay.AFTERNOON,
-            is_weekend=False,
-            within_working_hours=True,
-        ),
-        memories=(),
-        plan=ActionPlan(id="p-park", goal_id=goal.id, steps=(), created_at=_PARK_AT),
-    )
-
-
-def spoken_step_park_outcome() -> TurnOutcome:
-    """ADR-0207 §1's first shape, for a consumer that scripts a turn with no reply.
-
-    A step the permission gate parked (ADR-0037 §4): ``AWAITING_CONFIRMATION``, the
-    card that answers it, and no composed reply. Its spoken fixture slot left with
-    ``converse_spoken`` (ADR-0313 §3:1); the shape stays for a test that needs a
-    reply-less outcome.
-    """
-    return TurnOutcome(
-        turn=_park_turn(),
-        step=StepOutcome(
-            disposition=Disposition.AWAITING_CONFIRMATION,
-            state=ExecutionState(id="e-park", plan_id="p-park", steps=(), updated_at=_PARK_AT),
-            step_id="s-park",
-            confirmation=Confirmation(
-                tool_id="recall_memory",
-                tool_description="look something up",
-                parameters={},
-                reason="it may disclose personal data off-device",
-                token=ContinuationToken(handle="park-1"),
-                egress=None,
-                read=None,
-                authorization=None,
-            ),
-        ),
-        conversation_id="c-park",
-    )
 
 
 #: The one grantable identity every ``granting_engine`` fixture holds. A declared

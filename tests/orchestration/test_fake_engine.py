@@ -53,7 +53,6 @@ from assistant_engine_contract import (
     seeded_read_trail,
     seeded_spend_ledger,
     seeded_trail,
-    spoken_step_park_outcome,
 )
 from chat_surface_contract import (
     CHAT_LIMIT,
@@ -75,7 +74,9 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActionRequest,
+    ActivationEnding,
     Attestation,
     BeliefBand,
     BeliefSummary,
@@ -1048,10 +1049,35 @@ async def test_the_fake_answers_with_a_composed_reply_naming_the_input() -> None
     assert "hello" in reply.text
 
 
-async def test_a_scripted_outcome_with_no_reply_writes_couldnt_finish() -> None:
-    """§10:2: a pass that ends without a reply — a park, here — writes *couldn't finish*."""
+async def test_a_reply_past_the_transcripts_bound_is_cut_and_says_so() -> None:
+    """§5:2, §6:16: cut to the bound and marked cut off, as the phases cut a message."""
     engine = FakeAssistantEngine()
-    engine.turn_outcome = spoken_step_park_outcome()
+    device = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
+    await engine.set_my_devices([device])
+    conversation = (await engine.start_conversation()).id
+    text = "x" * TRANSCRIPT_MESSAGE_MAX_CHARS
+    await engine.write_message(
+        conversation, message=UserMessage(device_id="phone", message_id="m-1", text=text)
+    )
+    await _settled(engine)
+    page = await engine.transcript(conversation)
+    assert page is not None
+    reply = page.entries[-1]
+    assert isinstance(reply, TranscriptMessage)
+    assert reply.author is MessageAuthor.ASSISTANT
+    assert len(reply.text) == TRANSCRIPT_MESSAGE_MAX_CHARS
+    assert reply.cut_off
+
+
+async def test_a_pass_that_fails_writes_couldnt_finish(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-0317 §3: what was taken in is consumed, so a failed pass says it could not finish."""
+    engine = FakeAssistantEngine()
+
+    def failing(*_: object) -> NewMessage:
+        msg = "the pass failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(engine, "_chat_message", failing)
     conversation = await _chat_with_one_message(engine)
     await _settled(engine)
     page = await engine.transcript(conversation)
@@ -1059,6 +1085,9 @@ async def test_a_scripted_outcome_with_no_reply_writes_couldnt_finish() -> None:
     reply = page.entries[-1]
     assert isinstance(reply, TranscriptMessage)
     assert (reply.author, reply.text) == (MessageAuthor.ASSISTANT, COULDNT_FINISH)
+    digest = await engine.conversation(conversation)
+    assert digest is not None
+    assert digest.state.last_ended is ActivationEnding.COULDNT_FINISH
 
 
 @pytest.mark.parametrize("by", ["constructor", "attribute"])
