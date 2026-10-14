@@ -203,8 +203,7 @@ class EmbedderContract:
     #: suite requires the implementation to prove it by overriding
     #: :meth:`embedder_suspended_mid_embed`, so an embedder that grows a handoff
     #: has to say something about what a cancellation does to it. Opting out is a
-    #: visible declaration in the subclass, exactly as
-    #: ``ContextProviderContract``'s ``serves_a_fixed_instant`` is.
+    #: visible declaration in the subclass.
     holds_nothing_across_an_await: bool = False
 
     def embedder_suspended_mid_embed(

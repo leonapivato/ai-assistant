@@ -152,7 +152,8 @@ def test_the_refusal_vocabulary_is_the_six_the_decision_admits() -> None:
     **There is no ``SPEND_REFUSED`` here and that is the design**, not an omission: this
     vocabulary names what a *read* produced, and §8 puts the stages the seam never sees
     — no registration, no budget, no derivable binding, no ``ALLOW`` — in the servicing's
-    own ``ForecastDisposition``, which is ``orchestration``'s.
+    own ``ForecastDisposition``, which was ``orchestration``'s until the old read path
+    retired (ADR-0309 §5).
     """
     assert {member.value for member in ForecastRefusal} == {
         "transport_failed",

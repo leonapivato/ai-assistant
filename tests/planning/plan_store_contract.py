@@ -10,8 +10,8 @@ records (ADR-0306 §6) independently — the fake cannot import the subsystem it
 in for — so this is what stops them drifting. It asserts only behaviour the
 *contract* guarantees, never how a given store keys its ids.
 
-It pins the members the phases use. The members ADR-0309 §5 retires are no longer
-pinned here, though every store still carries them until the Protocol narrows.
+It pins the members the phases use. The members ADR-0309 §5 retired have left the
+Protocol and every store, so nothing here pins them.
 
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
@@ -670,8 +670,7 @@ class PlanStoreContract:
     #: invariant by overriding :meth:`store_suspended_mid_write` — so a new
     #: durable backend that reintroduces ADR-0054's bug fails here rather than
     #: passing a suite that never looked. Opting out is a visible declaration in
-    #: the subclass, exactly as ``serves_a_fixed_instant`` is for the context
-    #: provider.
+    #: the subclass.
     acquires_no_shared_resource: bool = False
 
     def store_suspended_mid_write(

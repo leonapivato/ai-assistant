@@ -11,8 +11,8 @@ separates a whole-population read from a narrowed one is *unreachable through th
 Protocol*. §7 says so: the suite "could not pin it in any case, running as it does
 against the canonical fake".
 
-So the case lives beside the fake, exactly as ``test_engine_refusals.py`` holds the
-canonical engine to a property its own suite does not state, and it seeds the pair
+So the case lives beside the fake, exactly as ``test_engine_refusals.py`` held the
+canonical engine to a property its own suite did not state, and it seeds the pair
 through the fake's own dict — the injection §7 leaves as the only route, since it
 adds no member that would let a caller admit a chosen record. Its twin against the
 durable store is

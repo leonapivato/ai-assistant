@@ -1432,10 +1432,10 @@ class EgressBinderContract(ABC):
 
         **The real policy, deliberately, and it is the path's.**
         ``ThresholdActionPolicy`` is the only ``ActionPolicy``
-        ``ai_assistant.app.composition`` wires (its ``StepRunner`` takes
-        ``policy=ThresholdActionPolicy(...)`` with the four thresholds from
-        ``Settings``), so exercising this class across its whole threshold space is
-        exercising the gate in the path for every deployment — which is why 3 above
+        ``ai_assistant.app.composition`` wires (authorizing takes
+        ``ThresholdActionPolicy(...)`` with the four thresholds from ``Settings``),
+        so exercising this class across its whole threshold space is exercising the
+        gate in the path for every deployment — which is why 3 above
         is the assertion that answers "the gate in the path" and not merely "a
         gate". A fake ``ActionPolicy`` would make the clause vacuous: a double that
         never reads a tier proves only that the double does not.

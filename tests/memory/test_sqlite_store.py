@@ -317,7 +317,7 @@ async def test_a_record_with_no_direction_is_served_at_the_floor_and_never_leads
     Before this, ``max(0.0, 1.0 - distance)`` met the ``None`` the test above pins
     and raised ``TypeError: unsupported operand type(s) for -: 'float' and
     'NoneType'`` — not a ``MemoryStoreError``, so not the class
-    ``LoopEngine._retrieve`` and ``_supplement`` catch, and the turn aborted rather
+    ``LoopEngine._retrieve`` and ``_supplement`` caught, and the turn aborted rather
     than degrading (ADR-0158 §4). The two records here are the whole eligible set
     and ``limit`` is above it, which is the shape that lets the undefined row back
     out of the KNN at all.

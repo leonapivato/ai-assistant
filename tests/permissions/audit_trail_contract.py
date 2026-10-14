@@ -2309,8 +2309,7 @@ class AuditTrailContract:
     #: invariant by overriding :meth:`trail_suspended_mid_write` — so a new
     #: durable backend that reintroduces ADR-0054's bug fails here rather than
     #: passing a suite that never looked. Opting out is a visible declaration in
-    #: the subclass, exactly as ``serves_a_fixed_instant`` is for the context
-    #: provider.
+    #: the subclass.
     acquires_no_shared_resource: bool = False
 
     #: Operations this implementation acquires no coroutine-outliving resource for,

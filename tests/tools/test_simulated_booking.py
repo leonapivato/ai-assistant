@@ -228,7 +228,7 @@ async def test_the_booking_reports_the_charge_it_is_configured_with(
 
     **The three differ in configuration alone**, and the last two are independently
     configurable, which is §5's requirement. **A disagreeing charge is not a provider
-    whose ``quoted_output`` lies** (§2): a quote is prospective and a charge is
+    whose quote lies** (§2): a quote is prospective and a charge is
     retrospective, so the booking reports the charge it was configured with even where
     that is not the price its availability read stated. This provider offers no hold
     and no conditional execution **on purpose** (§7).

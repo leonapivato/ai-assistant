@@ -14,8 +14,8 @@ validated a dict would pass an implementation that never decoded one. The cases 
 are the model-level half of the same rule and are not a substitute for it.
 
 **Nothing here treats the sibling as constructible by a producer.** ADR-0233 §14 makes
-it read-only — ``ActionRequest`` cannot carry one, ``from_request`` cannot make one,
-``AuditTrail.record`` refuses one and ``pending_confirmation`` never offers one — so
+it read-only — ``ActionRequest`` cannot carry one, ``from_request`` cannot make one
+and ``AuditTrail.record`` refuses one — so
 every value below is built directly, which is exactly what a *store decoding a row*
 does and what no caller may do.
 """

@@ -1,7 +1,7 @@
 """Milestone 23's exit, arm (a), with the activation run through the phases.
 
-``test_m23_forbidden_act`` measures ADR-0181 §8's arm (a) over ``converse``'s turn,
-which retires at the cutover (ADR-0309 §5:1). What it measures survives: a hostile
+``test_m23_forbidden_act`` measured ADR-0181 §8's arm (a) over ``converse``'s turn,
+which retired at the cutover (ADR-0309 §5:1). What it measures survives: a hostile
 instruction inside ingested content cannot cause a send **the user did not authorise
 for that call**. Here the same planted calendar, the same innocent ask and the same
 obeying planner run as the cutover leaves an activation — a message the chat's reader

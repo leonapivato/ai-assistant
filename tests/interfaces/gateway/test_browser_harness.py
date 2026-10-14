@@ -1,6 +1,6 @@
 """The layer's harness on the two paths a working browser cannot reach (#1808).
 
-Every case in ``test_browser_page.py`` and ``test_browser_playback.py`` needs a
+Every case in ``test_browser_page.py`` and its sibling browser files needs a
 browser that launched and a context that opened, so two of the harness's own
 decisions are unreachable from inside the layer: what a launch refusal *means*
 (ADR-0216 §6 — an absent build skips, anything else fails), and what a drive that

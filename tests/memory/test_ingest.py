@@ -1388,7 +1388,7 @@ async def test_low_confidence_is_stored_temporarily_with_expiry() -> None:
 def test_tuning_that_would_silently_disable_a_stage_is_refused(
     kwargs: dict[str, float], match: str
 ) -> None:
-    """Relocated from ``LearningLoop`` with the values it guards (ADR-0028 §4a).
+    """Relocated from the retired ``LearningLoop`` with the values it guards (ADR-0028 §4a).
 
     ADR-0022 §4a's guarantee is moved, not retired: ``conflict_limit=0`` hands
     the policy no conflicts, so a duplicate is accepted while the caller reports

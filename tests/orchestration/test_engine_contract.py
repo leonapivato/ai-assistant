@@ -764,7 +764,7 @@ class TestEngineContract(AssistantEngineContract):
         """One wired engine over a store holding a belief the derivation placed.
 
         The record is written **into the store** rather than reached through the
-        surface, for :attr:`routed_park`'s reason with no turn to drive: ADR-0204 §2's
+        surface, with no turn to drive: ADR-0204 §2's
         evaluation runs between retrieval and planning and writes what a producer
         writes, and ADR-0217 §4's proposal is a producer's too, so no call on this
         engine produces setter ``DERIVED``.

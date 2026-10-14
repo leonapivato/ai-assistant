@@ -32,7 +32,7 @@ class _FrozenJsonHolder(BaseModel):
     ``FrozenJsonMapping`` and ``FrozenJsonValue`` are carried by live types —
     ``ProposedCall.arguments`` and ``ToolDefinition.parameters_schema`` among them — and
     the arms below pinned them through ``PlanStep.parameters`` and a step's ``output``,
-    which leave ``core`` with the old path (ADR-0309 §5). A holder with nothing else on
+    which left ``core`` with the old path (ADR-0309 §5). A holder with nothing else on
     it keeps each arm about the annotation and nothing besides.
     """
 

@@ -14,10 +14,9 @@ real-vendor-stack suite (``test_provider_vendors.py``), which are both
 ``PydanticAIProvider`` bindings whose input observation is identical and
 vendor-independent — it happens before the wire.
 
-:func:`rendered_turns` is public because the streaming seam reads a conversation
-the same way and records it in the same space (``test_streaming.py``): both
-render to pydantic-ai's ``ModelMessage`` list before their first await, so one
-reading of that list serves both.
+:func:`rendered_turns` was made public for the streaming seam, which read a
+conversation the same way until it was deleted (ADR-0309 §5); this module is now its
+only reader.
 """
 
 from __future__ import annotations

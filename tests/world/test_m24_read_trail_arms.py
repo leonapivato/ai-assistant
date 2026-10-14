@@ -250,8 +250,8 @@ async def test_arm_a_records_the_two_failed_shapes_indistinguishably(world: Worl
     whether the source was opened is **not determinable from the record**". The
     reason is a boundary rather than a choice: both shapes cross the seam as
     ``ReaderError`` because ADR-0093 §8 requires it, and the discriminating classes
-    live in ``readers/_source.py``, which ``orchestration`` and ``context`` may not
-    import under golden rule 1. A record that claimed either way would assert
+    live in ``readers/_source.py``, which ``orchestration`` may not import under
+    golden rule 1. A record that claimed either way would assert
     something nobody knew.
 
     The first shape is driven through the **real** ``OneWorker``, whose own contract

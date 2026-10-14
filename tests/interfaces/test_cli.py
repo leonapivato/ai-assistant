@@ -503,11 +503,11 @@ def test_the_cli_mints_no_ruling_and_authorises_nothing(output: StringIO) -> Non
 def test_a_recorded_ruling_reaches_the_audit_surface_and_nothing_else() -> None:
     """ADR-0178 §5's third clause, pinned where a source scan can no longer pin it.
 
-    §5 builds a ``ConfirmationEgress`` from the recorded decision *in `core`*, so the
-    card's facts reach this adapter as a member of ``Confirmation`` and the
-    confirmation path never holds a ruling. That used to be guaranteed by the module
-    naming no decision at all; since ADR-0186 §9 it has to be guaranteed by **where**
-    the decision goes instead.
+    §5 built a ``ConfirmationEgress`` from the recorded decision *in `core`*, so the
+    card's facts reached this adapter as a member of ``Confirmation`` and the
+    confirmation path, until it retired (ADR-0309 §5), never held a ruling. That used
+    to be guaranteed by the module naming no decision at all; since ADR-0186 §9 it has
+    to be guaranteed by **where** the decision goes instead.
 
     So the walk asserts the whole set rather than spot-checking: a decision, or either
     binding it may carry, is annotated on exactly the audit surface's functions and on

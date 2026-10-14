@@ -538,10 +538,10 @@ async def test_both_cost_configurations_reach_the_same_confirm_and_so_the_same_r
     """§8 item 10's behavioural half, at the ruling the disposition is taken from.
 
     "A ``CONFIRM`` with the pair unset and one with it set but no covering grant are
-    both recorded ``RULING_CONFIRM``." What decides that is the *ruling*: the
-    servicer maps a ``CONFIRM`` onto ``SearchDisposition.RULING_CONFIRM`` whatever
-    grounds produced it, and that mapping is unchanged by this lane and already
-    pinned in ``tests/orchestration/test_loop_search.py``. So what is asserted here
+    both recorded ``RULING_CONFIRM``." What decided that was the *ruling*: the
+    servicer mapped a ``CONFIRM`` onto ``SearchDisposition.RULING_CONFIRM`` whatever
+    grounds produced it, a mapping ``tests/orchestration/test_loop_search.py`` pinned
+    until both retired with the old loop (ADR-0309 §5). So what is asserted here
     is the fact the mapping reads — that both configurations produce a ``CONFIRM``,
     and that the two differ only in the grounds the reason renders.
 

@@ -3,8 +3,8 @@
 ADR-0309 §3's table keeps rows 1-5 as their own decisions placed them: the conversation,
 the windows, recall, understanding and the story links run before planning on the
 phases exactly as they do today. ``test_engine_understanding``, ``test_engine_windows``,
-``test_engine_story_links`` and ``test_engine_recall_stories`` drive these cases through
-today's table, which the switch lane retires; each case here is one of them run with
+``test_engine_story_links`` and ``test_engine_recall_stories`` drove these cases through
+the old table, which the switch lane retired; each case here is one of them run with
 the phases wired, so it stays pinned once the switch lands. Recall's own cases are in
 ``test_phases_recall.py``.
 """

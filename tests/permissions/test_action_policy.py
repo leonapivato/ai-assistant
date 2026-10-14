@@ -703,9 +703,9 @@ async def test_both_floors_retire_at_the_configured_provider_and_retire_together
 ) -> None:
     """§12's **Arms B and B'**, and §3's "both limbs are satisfied by one fact".
 
-    A query a ``QueryComposer`` composed over a supply carrying any record at all is a
-    model-composed span over covered content, so its ``SpanCoverage`` is
-    ``MODEL_ON_EVERY_PATH`` whenever the supply carries one. **Arm B' is the row a
+    A query the retired ``QueryComposer`` composed over a supply carrying any record at
+    all was a model-composed span over covered content, so its ``SpanCoverage`` was
+    ``MODEL_ON_EVERY_PATH`` whenever the supply carried one. **Arm B' is the row a
     lane that retired only the lineage limb fails**: with
     ``planned_with_external_content`` ``False`` and the coverage limb alone standing,
     the ruling is still the same ``ALLOW``.

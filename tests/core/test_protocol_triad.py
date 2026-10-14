@@ -886,8 +886,8 @@ def test_report_shapes_that_do_and_do_not_honour_an_obligation(shape: _Shape) ->
 
     The subtle one is the call-phase skip. It counts only where the suite
     marked the test ``optional_obligation`` and the body then bowed out --
-    ``ContextProviderContract`` does this for a provider serving a fixed
-    instant. An unmarked `pytest.skip("not implemented")` is an obligation that
+    ``TraceSinkContract`` does this for a sink that acquires no shared
+    resource. An unmarked `pytest.skip("not implemented")` is an obligation that
     did not happen, and a mark skipping at setup never ran the body at all.
     """
     report = _report(when=shape.when, outcome=shape.outcome, wasxfail=shape.wasxfail)

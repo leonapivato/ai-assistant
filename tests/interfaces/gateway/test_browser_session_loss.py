@@ -10,11 +10,11 @@ So the late ``200`` resumes, renders, and re-reveals its panel: the owner's rows
 screen beside a form asking them to start a session.
 
 PR #2393's adversarial review found it at round 9 in ``listAuthorizations`` and fixed it
-there; the arm it left is
-``test_browser_authorizations.py::test_a_listing_that_outlives_its_session_reveals_nothing``
-and it is the template every case here is written on. This module is the sweep #2404
-asked for: one arm per listing that calls ``show(...)`` after an ``await``, driven at
-both of ADR-0233 §15's widths.
+there; the arm it left was
+``test_browser_authorizations.py::test_a_listing_that_outlives_its_session_reveals_nothing``,
+retired with that panel (ADR-0309 §5), and it is the template every case here is
+written on. This module is the sweep #2404 asked for: one arm per listing that calls
+``show(...)`` after an ``await``, driven at both of ADR-0233 §15's widths.
 
 **Nothing here sleeps** (ADR-0216 §7). What is asserted is a state the page must *not*
 reach, and a bare retrying assertion would pass the instant before the reveal it is

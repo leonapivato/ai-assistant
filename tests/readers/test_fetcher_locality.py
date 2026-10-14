@@ -152,7 +152,7 @@ def test_a_deployment_with_no_root_reaches_no_arm() -> None:
 
     Asserted at the composition seam rather than here would be a different test; what
     this pins is the *settings* half, which is what makes the mechanism off by default
-    (``tests/app/test_fetcher_wiring.py`` asserts the wiring).
+    (the composition root wires no fetcher since the old path was deleted, ADR-0309 §5).
     """
     from ai_assistant.core.config import Settings  # noqa: PLC0415 — asserted about, not used by
 

@@ -1,8 +1,9 @@
 """ADR-0260's forecast seam, over the production forecaster.
 
-§13's arms marked L1, less the two its preamble puts elsewhere: arm (a) is at the
-``ReadAsk`` model and arm (j) at ``ForecastOutcome``, both in ``tests/core/``, because
-what they assert is a *type*'s refusal. Everything here has a production
+§13's arms marked L1, less the two its preamble puts elsewhere: arm (a) was at the
+``ReadAsk`` model, which retired with the old path (ADR-0309 §5), and arm (j) is at
+``ForecastOutcome`` in ``tests/core/``, because what they assert is a *type*'s refusal.
+Everything here has a production
 :class:`~ai_assistant.tools.forecast.ForecastEgress` as its subject, which is what §13's
 preamble requires — "the subject is the production type or component", with exactly one
 assertion admitted over the canonical fake, and that one is in

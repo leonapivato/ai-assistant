@@ -6,8 +6,8 @@ a stand-in for a searcher: it is held to the same contract the concrete one is
 does not reach — the half ADR-0231 §18's arms 3, 4a and 7 will drive at the servicer,
 and therefore the half that has to be right before they are written.
 
-**Here and not under ``tests/testing/``**, for the reason
-``tests/planning/test_fake_query_composer.py`` gives: the suite this binds lives
+**Here and not under ``tests/testing/``**, for the reason the retired
+``tests/planning/test_fake_query_composer.py`` gave: the suite this binds lives
 beside the production searcher in this package, and pytest's ``prepend`` import mode
 puts a test module's *own* directory on ``sys.path`` and no other's. A binding one
 directory over would import ``web_searcher_contract`` only in a whole-suite run, and
@@ -213,9 +213,10 @@ async def test_both_members_record_what_they_were_handed_on_entry() -> None:
 async def test_an_unconnected_searcher_records_the_query_it_could_not_propose_for() -> None:
     """``request`` answers ``None`` and still says it was asked (ADR-0231 §17).
 
-    A servicer's ``NOT_CONFIGURED`` disposition is a statement that the searcher was
-    reached and had no account, which a fake that recorded nothing could not
-    distinguish from one that was never called.
+    A servicer's ``NOT_CONFIGURED`` disposition was a statement that the searcher was
+    reached and had no account (the servicer retired with the old path, ADR-0309 §5),
+    which a fake that recorded nothing could not distinguish from one that was never
+    called.
     """
     searcher = FakeWebSearcher(origin=None)
 

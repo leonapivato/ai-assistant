@@ -62,7 +62,7 @@ def _wired(
 ) -> Engine:
     """A façade over ``harness``'s durable state, holding a notification store.
 
-    Built the way ``test_engine._fresh_facade`` builds one — the same stage
+    Built the way ``test_engine.Harness`` builds its engine — the same stage
     objects and the same fakes — with the two collaborators ADR-0130 §9 adds.
     """
     return Engine(

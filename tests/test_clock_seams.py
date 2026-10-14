@@ -202,13 +202,7 @@ if TYPE_CHECKING:
 
 
 def _goal_ids(prefix: str) -> Callable[[], str]:
-    """Distinct identifiers, ``<prefix>-1`` first (ADR-0249 §12).
-
-    ``save_goal`` is the opening write alone since ADR-0249 §12, so a loop wired with a
-    *constant* factory would refuse its second turn: a goal per turn needs an id per
-    turn, which is what production's ``uuid4`` already gives it. The first value is
-    unchanged, so a single-turn case reads exactly what it read before.
-    """
+    """Distinct identifiers, ``<prefix>-1`` first: an id per call, as ``uuid4`` gives."""
     count = 0
 
     def factory() -> str:

@@ -12,8 +12,8 @@ subsystem that implements it, and ADR-0097 §3 puts both implementations in
 ``permissions/`` — ``audit_trail_contract.py`` and ``action_policy_contract.py``
 are already here for the same reason. The Protocols themselves stay in ``core``
 (§3: "the contract's weight stays in ``core``"), which is what lets
-``orchestration`` and ``context`` hold the narrow seam by injection without
-either importing ``permissions``.
+``orchestration`` hold the narrow seam by injection without importing
+``permissions``.
 
 **Two suites, and the cost is named rather than discovered** (ADR-0097 §3). One
 Protocol would have cost one suite and one fake; the split costs two of each, and
@@ -28,7 +28,7 @@ absence from the contract (ADR-0097 §10). The test is whether a clause is
 decidable from the store's own surface:
 
 * **§5's caller-side gate and §5a's three clauses.** Obligations on
-  ``orchestration`` and ``context``, not on a store; no store implementation
+  ``orchestration`` (and, until it retired, ``context``), not on a store; no store implementation
   exhibits any of them. They belong to the ingestion stage's and the adapter's
   own tests, alongside the required ``SourceGrants`` constructor argument that
   makes omitting the gate a type error. All five driver cases §5 and §5a
@@ -1179,7 +1179,7 @@ class SourceGrantStoreContract(SourceGrantsContract):
         the subject here lies through both. ``model_copy`` returning ``self`` costs
         detachment; a ``model_dump`` that does not describe its own instance costs
         *fidelity* — a store that snapshots through it appends a **wider grant than
-        the one it was handed**, here a ``FACET``-only record stored as covering
+        the one it was handed**, here a ``NOTIFY``-only record stored as covering
         ``INGEST`` too, and the driver's next check authorises a use the user never
         granted. That is not the caller-falsifies-its-own-record case ADR-0018 §3
         puts outside a store's reach: the object presented is a valid narrow grant

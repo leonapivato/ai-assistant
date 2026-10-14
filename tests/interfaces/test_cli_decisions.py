@@ -1086,10 +1086,10 @@ def test_a_row_carries_no_answer_control_and_composes_no_confirmation(
     "It composes no ``Confirmation``, offers no answer or approval control on a
     history row, and routes no answer through this surface." The fixture is the one
     a card cannot even be built from — an unresolved ``CONFIRM`` whose binding
-    records no origin — because ADR-0184 §8 forbids a ``ConfirmationEgress`` for an
-    unrecorded origin and that model's ``planned_with_external_content`` is required
-    with no default, so composing the card would demand the fabrication ADR-0184
-    exists to avoid.
+    records no origin — because ADR-0184 §8 forbade a ``ConfirmationEgress`` for an
+    unrecorded origin and that model, retired since (ADR-0309 §5), required
+    ``planned_with_external_content`` with no default, so composing the card would
+    have demanded the fabrication ADR-0184 exists to avoid.
 
     Asserted against the confirmation card's own wording, so a renderer that reached for
     a card fails here rather than in a user's terminal, and against the runner having

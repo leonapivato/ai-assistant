@@ -5,10 +5,9 @@ tree.** ``AssistantEngine.cancel_read`` declared its token **positional-only**, 
 ``wire/server.py``'s one dispatch site called every promoted method by keyword splat,
 so the hub raised ``TypeError`` — not an ``AssistantError`` — and **the connection
 dropped with no reply**. ``cancel_read`` left the surface with the old path's turn
-(ADR-0309 §5:1); the kind of parameter that broke it did not. ``stop_activation``,
-``withdraw_clarification`` and ``abandon_goal`` each take their subject the same way,
-and ``wire/surface.py`` cites this module as the pin on the call shape, so it keeps
-its name and its subject moves to ``stop_activation``.
+(ADR-0309 §5:1); the kind of parameter that broke it did not. ``stop_activation``
+takes its subject the same way, and ``wire/surface.py`` cites this module as the pin
+on the call shape, so it keeps its name and its subject moves to ``stop_activation``.
 
 **Two kinds of binding, and the second is what keeps this from recurring.** The
 first drives a positional-only method over a real client, a real ``AF_UNIX`` socket

@@ -578,7 +578,8 @@ async def invoked(
 ) -> ToolResult:
     """Record ``call``'s authorisation if the trail has not got it, then invoke.
 
-    What ``StepRunner`` does in front of every execution, and what ADR-0192 §1 now
+    What ``StepRunner`` did in front of every execution until it retired (ADR-0309
+    §5), and what ADR-0192 §1 now
     makes a precondition of reaching the callable at all: the ledger requires the
     decision it is passed to equal the one the store holds under that id, so an
     unrecorded authorisation is refused before the tool. The cases *about* that
@@ -1348,9 +1349,9 @@ class ToolInvokerContract:
         ``authorises`` compares ``parameters_digest``, which canonicalises the
         mapping to JSON. Run before revalidation, a payload ``FrozenJson`` would
         never have accepted raises a raw serialisation error out of a method
-        whose contract is that it answers a question — after the executor has
-        already committed its ``→ RUNNING`` claim, leaving the step durably
-        ``RUNNING`` until recovery. Revalidating first turns it into a rejection,
+        whose contract is that it answers a question — after the caller has
+        already claimed the call; under the retired executor that left the step
+        durably ``RUNNING`` until recovery. Revalidating first turns it into a rejection,
         and the ``ValidationError`` cause is the evidence of which ran.
 
         A suite mutating only into *valid* states passes under either order.
@@ -1543,7 +1544,7 @@ class ToolInvokerContract:
         self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """Integration authors raise; a seam that let that propagate would leave
-        the step durably ``RUNNING`` with nothing recording why.
+        the caller's claim open with nothing recording why.
         """
         invoker.register(tool(), Raiser(RuntimeError("upstream said no")))
 
@@ -1641,9 +1642,9 @@ class ToolInvokerContract:
 
         ``core/logging.py`` redacts by *key* and names ``error=str(exc)`` as the
         Tier 1 leak it cannot see. ``message`` lands under precisely such a key,
-        in a log and in ``StepExecution.error``, so the rule has to hold at the
-        producer: a message the seam generates carries no content it did not
-        author.
+        in a log (and, until the old path retired, in ``StepExecution.error``), so
+        the rule has to hold at the producer: a message the seam generates carries
+        no content it did not author.
         """
         invoker.register(tool(), Raiser(RuntimeError("recipient alice@example.com rejected")))
 
@@ -1907,11 +1908,11 @@ class ToolInvokerContract:
     ) -> None:
         """The property that makes the key worth anything.
 
-        A restarted executor reads ``StepExecution.approval_ref``, loads *that*
-        decision from the durable trail, rebuilds the request, and derives the
-        identical key. A key held only in memory would be lost by precisely the
-        crash it exists to survive — so this reloads the decision through a JSON
-        round-trip rather than reusing the object.
+        A restarted executor read ``StepExecution.approval_ref``, loaded *that*
+        decision from the durable trail, rebuilt the request, and derived the
+        identical key, until the old path retired (ADR-0309 §5). A key held only in
+        memory would be lost by precisely the crash it exists to survive — so this
+        reloads the decision through a JSON round-trip rather than reusing the object.
         """
         spy = Spy()
         invoker.register(gated(), spy)
@@ -4688,8 +4689,8 @@ class ToolInvokerContract:
 
         Declining to log the message is not a mitigation and §5 says so: it lands
         in ``ToolResult.failure.message``, and its onward destinations are the
-        executor's — a log and a durable ``StepFailure`` when the outcome is
-        ``FAILED``.
+        caller's — a log, and, under the retired executor, a durable ``StepFailure``
+        when the outcome was ``FAILED``.
         """
         invoker.register(tool(), Raiser(carrier(ToolFailureKind.UNAVAILABLE)))
         call = call_for(tool())

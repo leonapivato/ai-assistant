@@ -963,10 +963,9 @@ def test_every_integer_setting_refuses_a_bool(name: str, value: bool) -> None:
     Pydantic's non-strict ``int`` coercion accepts ``True`` as ``1`` because
     ``bool`` is an ``int`` subclass, and ``1`` satisfies every bound these fields
     carry — so without this the flag loads as a plausible value and nothing
-    downstream can tell. The guards *below* settings already refuse it
-    (``_check_tuning`` in ``orchestration/loop.py`` and ``Engine.__init__``), but
-    ``Settings`` hands them an already-coerced integer, so on the settings path
-    they can never fire. This is the configuration layer stating the rule the
+    downstream can tell. The guard *below* settings already refuses it
+    (``Engine.__init__``), but ``Settings`` hands it an already-coerced integer, so
+    on the settings path it can never fire. This is the configuration layer stating the rule the
     layers under it already state (#471).
 
     The message is asserted, not just the refusal: ``False`` and ``True`` land on

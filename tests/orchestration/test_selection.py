@@ -11,8 +11,8 @@ What is here is everything observable without a pipeline: the six keys deciding
 in isolation, the lexicographic composition, the eligibility filter that binds
 ahead of all of them, and the construction-time snapshot. What can only be seen
 by running the stage — that nothing is committed, that no ruling is requested —
-is in ``test_runner.py``, which is where the durable half of ADR-0145 §13's
-evidence lives.
+was in ``test_runner.py``, which held the durable half of ADR-0145 §13's evidence
+until it retired with the runner (ADR-0309 §5).
 """
 
 from __future__ import annotations
@@ -378,10 +378,10 @@ def test_a_preference_naming_one_tied_candidate_resolves_the_tie() -> None:
 def test_selecting_from_an_empty_set_is_the_callers_to_dispose_of() -> None:
     """Emptiness means two different things and only the caller knows which.
 
-    ``find`` returning nothing is ``NO_CAPABLE_TOOL``; the fit filter emptying a
-    non-empty set is ``INVALID_PARAMETERS`` (ADR-0145 §4). Answering "no
-    selection" for both would let the runner report the falsehood ADR-0014 §4's
-    legal-skip table exists to prevent.
+    ``find`` returning nothing was ``NO_CAPABLE_TOOL``; the fit filter emptying a
+    non-empty set was ``INVALID_PARAMETERS`` (ADR-0145 §4), until the runner's skip
+    reasons retired (ADR-0309 §5). Answering "no selection" for both would let the
+    caller report the falsehood ADR-0014 §4's legal-skip table existed to prevent.
     """
     with pytest.raises(ValueError, match="at least one candidate"):
         select((), Preference())

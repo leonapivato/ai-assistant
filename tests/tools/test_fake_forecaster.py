@@ -260,9 +260,9 @@ async def test_request_answers_none_where_no_provider_is_configured() -> None:
 
     "It returns ``None`` where the deployment has configured no forecast provider, which
     is a configuration fact and never a failure." That value is what ``orchestration``
-    computes ``CarriedProvenance.forecast_reach`` from (§11) and what the servicing
-    records as ``NOT_CONFIGURED`` (§8) — so a fake that raised instead would make a
-    consumer's whole ``NOT_CONFIGURED`` branch unreachable.
+    computes ``CarriedProvenance.forecast_reach`` from (§11), and what the servicing
+    recorded as ``NOT_CONFIGURED`` (§8) until the old path retired (ADR-0309 §5) — so
+    a fake that raised instead would make a consumer's ``None`` branch unreachable.
     """
     forecaster = FakeForecaster(origin=None)
 

@@ -1,8 +1,8 @@
 """Reach the production receiver and the chat's reader through the root and a real hub
 socket, on the phases.
 
-``test_channel_composition`` drives these cases through ``ask``, ``converse``'s
-admission, a spoken turn and today's event stage, which the cutover retires (ADR-0309
+``test_channel_composition`` drove these cases through ``ask``, ``converse``'s
+admission, a spoken turn and the old event stage, which the cutover retired (ADR-0309
 §2:6, §5:1, ADR-0313). Each case here is one of them with the root's phases wired: a
 message written over the hub socket is taken in by the reader and answered there; an
 event over the socket runs the phases and starts no conversation; a message's and an

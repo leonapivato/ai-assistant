@@ -136,7 +136,7 @@ async def test_a_deregistered_id_cannot_be_reused() -> None:
 
     A reusable id could be rebound between approval and execution: the user
     approves a REVERSIBLE send, an IRREVERSIBLE definition takes the name, and
-    both the approval_ref and the bound_tool id still read as consistent.
+    both the recorded approval and the bound tool id still read as consistent.
     """
     registry = a_registry([(tool(reversibility=Reversibility.RECOVERABLE), succeeds)])
     assert registry.deregister("smtp") is True

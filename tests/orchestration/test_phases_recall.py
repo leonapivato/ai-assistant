@@ -1,7 +1,7 @@
 """Recall wired into the engine, on the phase path (ADR-0281, ADR-0309 §2:6).
 
-``test_engine_recall`` drives these cases through today's table, which the switch lane
-retires. Each case here is one of them run with the phases wired: the windows, recall
+``test_engine_recall`` drove these cases through the old table, which the switch lane
+retired. Each case here is one of them run with the phases wired: the windows, recall
 and understanding run before planning exactly as they do today, so what recall decides,
 what it records and what understanding is shown stay pinned once the switch lands.
 """
