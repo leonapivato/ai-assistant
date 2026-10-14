@@ -1038,6 +1038,15 @@ async def _settled(engine: FakeAssistantEngine) -> None:
             await asyncio.gather(*engine._chat_reads)
 
 
+async def _episode(engine: FakeAssistantEngine) -> EpisodicMemory:
+    """The one activation's episode the fake captured, read from its episode store."""
+    (episode,) = [
+        one for one in await engine.episode_memory.export() if one.id.startswith("activation:")
+    ]
+    assert isinstance(episode, EpisodicMemory)
+    return episode
+
+
 async def test_the_fake_answers_with_a_composed_reply_naming_the_input() -> None:
     """The canned reply, written once by the engine's own adapter (§10:1)."""
     engine = FakeAssistantEngine()
@@ -1049,6 +1058,8 @@ async def test_the_fake_answers_with_a_composed_reply_naming_the_input() -> None
     assert isinstance(reply, TranscriptMessage)
     assert reply.author is MessageAuthor.ASSISTANT
     assert "hello" in reply.text
+    # ADR-0307 §10: the episode keeps the message it wrote as its outcome.
+    assert (await _episode(engine)).outcome == reply.text
 
 
 async def test_a_reply_past_the_transcripts_bound_is_cut_and_says_so() -> None:
@@ -1069,6 +1080,8 @@ async def test_a_reply_past_the_transcripts_bound_is_cut_and_says_so() -> None:
     assert reply.author is MessageAuthor.ASSISTANT
     assert len(reply.text) == TRANSCRIPT_MESSAGE_MAX_CHARS
     assert reply.cut_off
+    # ADR-0307 §10: the text as the conversation holds it — the cut one, not the uncut.
+    assert (await _episode(engine)).outcome == reply.text
 
 
 async def test_a_pass_that_fails_writes_couldnt_finish(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1090,6 +1103,7 @@ async def test_a_pass_that_fails_writes_couldnt_finish(monkeypatch: pytest.Monke
     digest = await engine.conversation(conversation)
     assert digest is not None
     assert digest.state.last_ended is ActivationEnding.COULDNT_FINISH
+    assert (await _episode(engine)).outcome == COULDNT_FINISH
 
 
 async def test_a_cancellation_during_the_couldnt_finish_write_still_ends_the_activation(
@@ -1202,3 +1216,32 @@ async def test_a_reply_the_store_refuses_does_not_strand_what_waited() -> None:
     authors = [one.author for one in page.entries if isinstance(one, TranscriptMessage)]
     assert authors == [MessageAuthor.USER, MessageAuthor.USER, MessageAuthor.ASSISTANT]
     assert await engine.chat.untaken_messages(conversation) == ()
+
+
+async def test_a_reply_the_store_refuses_leaves_its_episode_without_an_outcome() -> None:
+    """ADR-0307 §10: an activation that wrote no message keeps no outcome.
+
+    The store refuses the reply's write, so the conversation holds no message from the
+    activation, and its episode records none.
+    """
+    engine = FakeAssistantEngine()
+    append = engine.chat.append_message
+    refused: list[NewMessage] = []
+
+    async def refusing(conversation_id: str, message: NewMessage) -> MessageReceipt:
+        if message.author is MessageAuthor.ASSISTANT:
+            refused.append(message)
+            msg = "the store is unavailable"
+            raise ConversationStoreError(msg)
+        return await append(conversation_id, message)
+
+    engine.chat.append_message = refusing  # type: ignore[method-assign]
+    conversation = await _chat_with_one_message(engine)
+    await _settled(engine)
+
+    assert len(refused) == 1
+    page = await engine.transcript(conversation)
+    assert page is not None
+    authors = [one.author for one in page.entries if isinstance(one, TranscriptMessage)]
+    assert authors == [MessageAuthor.USER]
+    assert (await _episode(engine)).outcome is None
