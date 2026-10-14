@@ -224,6 +224,14 @@ class PydanticAIToolCallingCompleter:
         try:
             chosen = infer_model(self._default_model if model is None else model)
             settings = _settings(self._thinking, chosen, summarised=self._diagnostics is not None)
+            # Where the record is on, the tools as prepared are taken here, with no await
+            # between this and the request preparing itself, so nothing else can change
+            # what either sees (#2910). `_offered` never raises.
+            offered_record = (
+                _offered(_Request(model=chosen, settings=settings, parameters=parameters))
+                if self._diagnostics is not None
+                else None
+            )
             response = await model_request(
                 chosen, history, model_settings=settings, model_request_parameters=parameters
             )
@@ -231,18 +239,17 @@ class PydanticAIToolCallingCompleter:
             # Broad on purpose: `_classify` is the taxonomy, and its default for an
             # unrecognised failure is the conservative bare `ModelError` (ADR-0063).
             raise _classify(exc) from exc
-        request = _Request(model=chosen, settings=settings, parameters=parameters)
         try:
             read = _round(response)
         except ModelResponseError as exc:
-            await self._returned(request, response, exc)
+            await self._returned(offered_record, response, exc)
             raise
-        await self._returned(request, response, None)
+        await self._returned(offered_record, response, None)
         return read
 
     async def _returned(
         self,
-        request: _Request,
+        offered: _Offered | None,
         response: ModelResponse,
         failure: ModelResponseError | None,
     ) -> None:
@@ -254,10 +261,19 @@ class PydanticAIToolCallingCompleter:
         provider (#2910); and where the response did not read as a round, why not.
         Where the tools as prepared cannot be computed they are kept as the round built
         them, and :data:`_UNPREPARED` says why.
+
+        Args:
+            offered: The tools as the record keeps them, taken before the request was
+                sent, or ``None`` where the record is off and nothing is written.
+            response: The provider's whole response.
+            failure: Why the response did not read as a round, or ``None``.
         """
+        if offered is None:
+            # Taken wherever a sink is: none is, so the record is off.
+            return
+        tools, unprepared = offered
 
         def body() -> dict[str, object]:
-            tools, unprepared = _offered(request)
             returned: dict[str, object] = {
                 "offered_tools": tools,
                 "response": ModelMessagesTypeAdapter.dump_python([response], mode="json")[0],
@@ -363,16 +379,23 @@ class _Request:
     parameters: ModelRequestParameters
 
 
-def _offered(request: _Request) -> tuple[list[dict[str, object]], dict[str, object] | None]:
+#: Every tool a request offered as the record keeps it, and why not as prepared, if so.
+type _Offered = tuple[list[dict[str, object]], dict[str, object] | None]
+
+
+def _offered(request: _Request) -> _Offered:
     """Every tool ``request`` offered as the record keeps it, and why not as prepared.
 
     Each tool's parameters are as the model's own request preparation gives them to its
     provider (#2910). The request prepares itself inside pydantic-ai, where nothing can
-    observe it, so the record prepares the same model, settings and parameters again.
-    pydantic-ai's own preparation is a function of those alone, built by replacement
-    over a deep copy, and pydantic-ai replays it itself (its fallback model prepares a
-    request apart from sending it), so that gives what the request carried without
-    touching what it sent. The name, the description and the order are the round's own.
+    observe it, so the record prepares the same model, settings and parameters again,
+    immediately before the request does: a model prepares at the top of its ``request``,
+    before anything it awaits, so with no await between the two nothing else on the event
+    loop can change what either sees. pydantic-ai's own preparation is a function of
+    those alone, built by replacement over a deep copy, and pydantic-ai replays it itself
+    (its fallback model prepares a request apart from sending it), so that gives what the
+    request carried without touching what it sent. The name, the description and the
+    order are the round's own.
 
     So the replay is made only where every piece of code the preparation runs is
     pydantic-ai's own: each model the request passes through is an instance of one of

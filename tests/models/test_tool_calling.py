@@ -755,6 +755,37 @@ async def test_an_openai_models_rewritten_schemas_are_recorded_as_sent() -> None
     assert recorded[0]["parameters"]["additionalProperties"] is False
 
 
+async def test_preparation_state_changed_while_the_request_is_out_does_not_reach_the_record() -> (
+    None
+):
+    """The round-3 review's probe: the profile changes while the request is pending.
+
+    The tools as prepared are taken before the request is sent, so the record is still
+    what the wire carried.
+    """
+    sink = FakeDiagnosticSink()
+    shared: list[Model] = []
+
+    def change_then_answer(request: httpx.Request) -> httpx.Response:
+        shared[0].profile["json_schema_transformer"] = None
+        return openai_success(request)
+
+    recorder = RequestRecorder(change_then_answer)
+    with network_denied(), diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(recorder)) as http_client:
+            client = AsyncOpenAI(api_key=_DUMMY_KEY, http_client=http_client, max_retries=0)
+            shared.append(OpenAIChatModel("gpt-4o", provider=OpenAIProvider(openai_client=client)))
+            await PydanticAIToolCallingCompleter(shared[0], diagnostics=sink).respond(
+                _request(), [_tool()]
+            )
+
+    assert shared[0].profile.get("json_schema_transformer") is None
+    recorded = _recorded_tools(sink)
+    wire = [tool["function"] for tool in cast("list[dict[str, Any]]", recorder.only["tools"])]
+    assert [tool["parameters"] for tool in wire] == [tool["parameters"] for tool in recorded]
+    assert recorded[0]["parameters"]["additionalProperties"] is False
+
+
 async def test_an_anthropic_models_tools_are_recorded_as_sent() -> None:
     """Planning's own model: the record and the wire carry the same definitions."""
     sink = FakeDiagnosticSink()
