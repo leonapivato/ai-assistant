@@ -94,10 +94,7 @@ from ai_assistant.orchestration.consolidation import (
     ConsolidationReport,
     ConsolidationStage,
 )
-from ai_assistant.orchestration.conversations import (
-    AssembledHistory,
-    ConversationLifecycle,
-)
+from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
 from ai_assistant.orchestration.engine import (
     Engine,
@@ -122,7 +119,6 @@ __all__ = [
     "DEFAULT_MAX_PAYLOAD_BYTES",
     "ENVELOPE_RESERVE_BYTES",
     "MIN_FRAME_BYTES",
-    "AssembledHistory",
     "ConnectionOperations",
     "ConsolidationReport",
     "ConsolidationStage",

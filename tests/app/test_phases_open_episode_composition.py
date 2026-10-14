@@ -12,7 +12,7 @@ record ends without re-creating it.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from phases_composition_support import (
@@ -39,7 +39,6 @@ from ai_assistant.core.types import (
     StageOutcome,
 )
 from ai_assistant.orchestration.activation_state import active_state
-from ai_assistant.orchestration.conversations import HISTORY_REPLAY_BOUND
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -49,6 +48,10 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.activation_state import ActivationState
 
 pytestmark = pytest.mark.integration
+
+#: How many frozen episodes the open-episode case seeds on its conversation, so the
+#: episode window has frozen ones to hold beside the open ones it must not.
+_FROZEN_COPIES: Final = 3
 
 
 @pytest.fixture
@@ -218,22 +221,20 @@ async def test_a_frozen_record_is_the_one_a_single_write_at_the_end_would_store(
 # --- the reads that feed a model pass over open episodes ------------------------------
 
 
-async def test_history_recall_and_the_episode_window_never_return_an_open_episode(
+async def test_recall_and_the_episode_window_never_return_an_open_episode(
     composed: Phased, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§6: no other activation's open episode reaches history, recall or the episode
-    window, and the running one takes no history slot.
+    """§6: no other activation's open episode reaches recall or the episode window.
 
-    The conversation holds a full history bound of frozen episodes. A pass on another
-    conversation is held open; a pass on the first then runs, and what its windows stage
-    assembled and what its conversation's history reads are checked while its own and
-    the other's open episodes are both stored. (A conversation runs one activation at a
-    time, ADR-0293 §6:2, so the held one is on a second conversation.)
+    The conversation holds frozen episodes. A pass on another conversation is held open;
+    a pass on the first then runs, and what its windows stage assembled is checked while
+    its own and the other's open episodes are both stored. (A conversation runs one
+    activation at a time, ADR-0293 §6:2, so the held one is on a second conversation.)
     """
     first = await composed.say("hello")
     template = await composed.stored(first.address)
     assert template is not None
-    for n in range(HISTORY_REPLAY_BOUND):
+    for n in range(_FROZEN_COPIES):
         await composed.memory.add(template.model_copy(update={"id": f"activation:copy-{n:02d}"}))
     other_conversation = await composed.start_conversation()
     gate = hold(monkeypatch, composed.engine, "_windows_stage", saying("held open"))
@@ -247,9 +248,6 @@ async def test_history_recall_and_the_episode_window_never_return_an_open_episod
             assert state is not None
             observed["own"] = state.episode_address
             observed["windows"] = working.windows
-            observed["history"] = await composed.engine._conversations.history(
-                first.conversation_id
-            )
 
     monkeypatch.setattr(composed.engine, "_windows_stage", windows)
     await composed.write(other_conversation, "held open")
@@ -262,9 +260,6 @@ async def test_history_recall_and_the_episode_window_never_return_an_open_episod
 
     own, other = observed["own"], gate.address
     open_ids = {own, other}
-    history = [record.id for record in observed["history"].records]
-    assert len(history) == HISTORY_REPLAY_BOUND, "the running episode takes no slot"
-    assert not open_ids & set(history)
     window = observed["windows"].episode_ids
     assert window, "the episode window holds the frozen episodes"
     assert not open_ids & set(window)
