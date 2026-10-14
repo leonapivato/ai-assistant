@@ -40,6 +40,7 @@ triad is concerned, and every other job of it did not.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
@@ -281,6 +282,52 @@ def structlog_configuration_is_this_test_s_own() -> Iterator[None]:
                 structlog.configure(**snapshot)
             else:
                 structlog.reset_defaults()
+
+
+@pytest.fixture(autouse=True)
+def root_logging_is_this_test_s_own() -> Iterator[None]:
+    """Give each test back the root logger's handlers and level, and their net, as found.
+
+    **The exposure** (issue #2958). ``core.logging.configure_logging`` attaches its
+    scrubbing filter to every handler on the root logger and to
+    ``logging.lastResort``, and wraps each root handler's ``handleError``. Under
+    pytest those handlers include its capture handlers, which are made once per
+    session and reused. So a test that configures logging — every CLI invocation does
+    — leaves every later test on the worker reading ``caplog.records`` through the
+    net: a record that carried an exception arrives replaced, and a test of a
+    disclosure check (``tests/core/test_fake_secrets.py``) finds nothing to catch.
+
+    **Autouse and unconditional**, for :func:`structlog_configuration_is_this_test_s_own`'s
+    reason. It *restores* rather than resets, so a test sees the configuration it made
+    for its own length. Save and restore only: a few list copies, no I/O, since it
+    runs for every test in the suite.
+
+    Yields:
+        Nothing; the root logger and its handlers are restored on the way out.
+    """
+    root = logging.getLogger()
+    handlers = list(root.handlers)
+    level = root.level
+    held = [one for one in (*handlers, logging.lastResort) if one is not None]
+    filters = [(one, list(one.filters)) for one in held]
+    reports = [(one, vars(one).get("handleError")) for one in held]
+    try:
+        yield
+    finally:
+        for one in list(root.handlers):
+            if one not in handlers:
+                root.removeHandler(one)
+        for one in handlers:
+            if one not in root.handlers:
+                root.addHandler(one)
+        root.setLevel(level)
+        for one, kept in filters:
+            one.filters[:] = kept
+        for one, report in reports:
+            if report is None:
+                vars(one).pop("handleError", None)
+            else:
+                one.handleError = report  # type: ignore[method-assign]
 
 
 #: What ADR-0216 §6 tells a developer to run when the browser build is absent.

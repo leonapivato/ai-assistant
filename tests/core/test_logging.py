@@ -32,7 +32,7 @@ from ai_assistant.core.logging import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, MutableMapping
+    from collections.abc import Callable, Mapping, MutableMapping
 
 
 def _redact(**event: object) -> dict[str, object]:
@@ -875,40 +875,10 @@ def test_a_host_that_formats_exceptions_upstream_has_the_rendering_masked(
 # fixed marker, and each exception's class and frames, never its message, its
 # arguments or its extras. "Carries" is shallow: ``exc_info``, or an exception passed
 # directly as the message, an argument or an extra. Every assertion is over what a
-# handler writes.
+# handler writes. The root logger and its handlers are given back after each test by
+# ``tests/conftest.py``'s ``root_logging_is_this_test_s_own``.
 
 _WITHHELD = "[message withheld: the record carries an exception]"
-
-
-@pytest.fixture(autouse=True)
-def root_logging_is_this_test_s_own() -> Iterator[None]:
-    """Give back the root logger's handlers, level, and handler filters and reports as found.
-
-    ``configure_logging`` attaches the scrubbing filter to every root handler, and
-    pytest's own capture handlers are made once per session and reused, so a filter
-    left on one would reach every later test on the worker.
-    """
-    root = logging.getLogger()
-    handlers = list(root.handlers)
-    level = root.level
-    held = [one for one in (*handlers, logging.lastResort) if one is not None]
-    filters = [(one, list(one.filters)) for one in held]
-    reports = [(one, vars(one).get("handleError")) for one in held]
-    yield
-    for one in list(root.handlers):
-        if one not in handlers:
-            root.removeHandler(one)
-    for one in handlers:
-        if one not in root.handlers:
-            root.addHandler(one)
-    root.setLevel(level)
-    for one, kept in filters:
-        one.filters[:] = kept
-    for one, report in reports:
-        if report is None:
-            vars(one).pop("handleError", None)
-        else:
-            one.handleError = report  # type: ignore[method-assign]
 
 
 def _ours() -> logging.StreamHandler[io.StringIO]:
