@@ -26,16 +26,12 @@ import pytest
 from booking_harness import (
     AVAILABLE_FROM,
     BOOKING_ACT,
-    BOOKING_ACT_ID,
     BOOKING_AVAILABILITY,
-    BOOKING_AVAILABILITY_ID,
     CURRENCY,
-    DECIDED_AT,
     ENDPOINT,
     IN_WINDOW,
     PRICE,
     REFERENCE,
-    TIMEOUT,
     UNAVAILABLE,
     UNCERTAIN,
     Records,
@@ -54,33 +50,13 @@ from booking_harness import (
 
 from ai_assistant.core.errors import ClassifiedToolError
 from ai_assistant.core.types import (
-    ActionPlan,
-    ActionRequest,
-    AttemptState,
-    EffectKey,
-    ExecutionState,
-    Goal,
-    GoalAttempt,
-    GoalInterpretation,
-    Ground,
-    IntendedAction,
-    IntendedActionMinting,
-    MemorySource,
-    PlanStep,
-    Provenance,
     ProvisioningState,
     SecretName,
     SecretScope,
-    StepExecution,
     StepFailure,
-    StepOutputRef,
-    StepStatus,
     ToolFailureKind,
     ToolOutcome,
 )
-from ai_assistant.orchestration.executor import Dispatch, StepExecutor
-from ai_assistant.orchestration.quotes import quote_read
-from ai_assistant.testing import FakeAuditTrail, FakePlanStore
 from ai_assistant.tools.booking import (
     AVAILABLE_KEY,
     BOOKED_KEY,
@@ -101,15 +77,8 @@ from ai_assistant.tools.booking import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from ai_assistant.core.types import FrozenJson, ToolCall, ToolResult
+    from ai_assistant.core.types import FrozenJson, ToolResult
     from ai_assistant.tools.builtin import SimulatedBookingIntegration
-    from ai_assistant.tools.registry import InMemoryToolRegistry
-
-#: The intended action a quote is read against, and the plan it sits in.
-_ACTION: Final = "act-1"
-_PLAN: Final = "plan-1"
-_GOAL: Final = "g-1"
-_STEP: Final = "step-1"
 
 
 # --------------------------------------------------------------------------- #
@@ -168,117 +137,6 @@ def _succeeded(result: ToolResult) -> Mapping[str, FrozenJson]:
     return result.output
 
 
-async def _seeded_execution(
-    plans: FakePlanStore, parameters: Mapping[str, FrozenJson]
-) -> ExecutionState:
-    """Seed one goal, plan and execution, and return the execution.
-
-    ADR-0259 §2's claim is keyed on an execution and a step as well as an effect key, so
-    a case about *"two dispatches … under one goal"* needs one of each. The store mints
-    the execution id, which is why it is returned rather than chosen.
-
-    Args:
-        plans: The plan store to seed.
-        parameters: The booking's arguments, carried onto the plan step.
-
-    Returns:
-        The execution as the store minted it. The store mints its id, which is why the
-        state is returned rather than an id the case chose.
-    """
-    await plans.save_goal(
-        Goal(
-            id=_GOAL,
-            interpretation=(
-                GoalInterpretation(
-                    revision=1,
-                    outcome="book the stay",
-                    outcome_ground=Ground.USER_STATED,
-                    outcome_span="book the stay",
-                    recorded_at=DECIDED_AT,
-                    raised_by="t-1",
-                ),
-            ),
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=DECIDED_AT
-            ),
-            created_at=DECIDED_AT,
-        )
-    )
-    # **The intended action is minted onto the goal before a plan step may name it**
-    # (ADR-0265 §4): the loop substitutes each action label for an id once, and the
-    # store closes that window. So a plan naming an action the goal does not carry is
-    # refused — which is what makes "one intended action under one goal" a fact the
-    # store holds rather than a label a test wrote.
-    await plans.record_intended_actions(
-        IntendedActionMinting(
-            goal_id=_GOAL,
-            actions=(IntendedAction(id=_ACTION, intent="book the stay"),),
-            expected_version=0,
-        )
-    )
-    # **Two steps naming one intended action**, which is what a replan looks like: the
-    # goal still intends one act, and a second step proposes it again. ADR-0259 §2's
-    # claim is what stands between that and a second booking, and a claim re-made by the
-    # step that already holds it is the *same* holder rather than a repeat — so a case
-    # driving one step twice would assert nothing.
-    steps = tuple(
-        PlanStep(
-            id=step_id,
-            intent="book it",
-            capability=BOOKING_ACT.capability,
-            parameters=parameters,
-            intended_action=_ACTION,
-        )
-        for step_id in ("s-book", "s-rebook")
-    )
-    plan = ActionPlan(
-        id="p-1", goal_id=_GOAL, steps=steps, created_at=DECIDED_AT, targets_revision=1
-    )
-    await plans.save_plan(plan)
-    return await plans.start_execution(plan.id)
-
-
-async def _record(registry: InMemoryToolRegistry, call: ToolCall) -> None:
-    """Record the call's ruling in the registry's own trail.
-
-    :func:`booking_harness.recorded` does this and then invokes; a case driving the real
-    executor needs the first half alone, because the executor performs the invocation
-    itself.
-
-    Args:
-        registry: The registry, whose ledger face is the trail this harness wired.
-        call: The authorised call.
-    """
-    ledger = registry.ledger
-    assert isinstance(ledger, FakeAuditTrail), "this harness claims through the trail it wired"
-    await ledger.record(call.decision)
-
-
-def _plan_step() -> PlanStep:
-    """The step a quote is minted against (ADR-0267 §4 requires an intended action)."""
-    return PlanStep(
-        id=_STEP,
-        intent="find out what the stay costs",
-        capability=BOOKING_AVAILABILITY.capability,
-        parameters=arguments(),
-        intended_action=_ACTION,
-    )
-
-
-def _recorded(output: Mapping[str, FrozenJson]) -> StepExecution:
-    """The step's record, as a store would have written it after a successful read."""
-    return StepExecution(
-        step_id=_STEP,
-        status=StepStatus.SUCCEEDED,
-        attempts=1,
-        bound_tool=BOOKING_AVAILABILITY_ID,
-        output=output,
-        approval_ref="d-1",
-        started_at=DECIDED_AT,
-        finished_at=DECIDED_AT,
-    )
-
-
 # --------------------------------------------------------------------------- #
 # arm 5: the quote is read, under and over a bound
 # --------------------------------------------------------------------------- #
@@ -288,34 +146,29 @@ def _recorded(output: Mapping[str, FrozenJson]) -> StepExecution:
     ("price", "under"),
     [("120.00", True), ("250.00", False)],
 )
-async def test_the_quote_mints_from_the_reads_own_output_under_and_over_a_bound(
+async def test_the_read_answers_the_configured_price_under_and_over_a_bound(
     price: str, under: bool
 ) -> None:
-    """Arm 5 (ADR-0267 §4, ADR-0273 §5).
+    """Arm 5's provider half (ADR-0273 §5, §10).
 
     *"Once from a configuration whose price is under a stated bound and once from one
     whose price is over it, the two differing in configuration alone."* The two cases
     below differ in exactly one configured field and in nothing else — no code path, no
     argument and no declaration — which is what §5's *"without a code change"* means.
 
-    The mint is ADR-0267 §4's own function over the **registered** ``quoted_output``, so
-    what is asserted is that a real reader takes a real provider's answer.
+    The price is read under the **registered** ``quoted_output``'s own keys, so what is
+    asserted is that a real provider's answer carries the configured price where its
+    declaration says it does. ADR-0267 §4's mint over that output retired with the old
+    path (ADR-0309 §5); the provider's half of the arm is what stands.
     """
     result, _ = await _answer(price_amount=price)
     output = _succeeded(result)
+    quoted = BOOKING_AVAILABILITY.quoted_output
 
-    quote = quote_read(
-        step=_plan_step(),
-        recorded=_recorded(output),
-        request=ActionRequest(tool=BOOKING_AVAILABILITY, parameters=arguments(), step_id=_STEP),
-        plan=_PLAN,
-    )
-
-    assert quote is not None
-    assert quote.amount == Decimal(price)
-    assert quote.currency == CURRENCY
-    assert quote.read_from == StepOutputRef(step=_STEP, field=PRICE_AMOUNT_KEY)
-    assert (quote.amount <= Decimal("200")) is under
+    assert quoted is not None
+    assert output[quoted.amount] == price
+    assert output[quoted.currency] == CURRENCY
+    assert (Decimal(str(output[quoted.amount])) <= Decimal("200")) is under
 
 
 # --------------------------------------------------------------------------- #
@@ -326,9 +179,8 @@ async def test_the_quote_mints_from_the_reads_own_output_under_and_over_a_bound(
 async def test_an_unavailable_day_is_answered_as_such_and_quotes_nothing() -> None:
     """Arm 6's first half (ADR-0273 §5).
 
-    An unavailable day carries **no price keys at all**, so ADR-0267 §4's mint yields no
-    quote rather than a repaired one — which is the true answer, because an unavailable
-    day is quoted nothing.
+    An unavailable day carries **no price keys at all**, rather than a repaired price —
+    which is the true answer, because an unavailable day is quoted nothing.
     """
     result, _ = await _answer(day=UNAVAILABLE)
     output = _succeeded(result)
@@ -337,15 +189,6 @@ async def test_an_unavailable_day_is_answered_as_such_and_quotes_nothing() -> No
     assert output[AVAILABLE_KEY] is False
     assert PRICE_AMOUNT_KEY not in output
     assert PRICE_CURRENCY_KEY not in output
-    assert (
-        quote_read(
-            step=_plan_step(),
-            recorded=_recorded(output),
-            request=ActionRequest(tool=BOOKING_AVAILABILITY, parameters=arguments(), step_id=_STEP),
-            plan=_PLAN,
-        )
-        is None
-    )
 
 
 async def test_a_booking_for_an_unavailable_day_writes_nothing_and_advances_nothing() -> None:
@@ -406,103 +249,14 @@ async def test_the_booking_reports_the_charge_it_is_configured_with(
 # --------------------------------------------------------------------------- #
 
 
-async def test_two_dispatches_of_one_intended_action_carry_one_key_and_only_one_acts() -> None:
-    """Arm 8 (ADR-0259 §2): one derived key, and **the second is not dispatched**.
-
-    The key is **derived** and never minted, supplied, configured or carried as a field,
-    so two authorisations of one intended action under one goal, carrying the same
-    arguments under the same binding, derive the *same* key.
-
-    **Driven through the production dispatcher** — :class:`~ai_assistant.orchestration
-    .executor.StepExecutor`, which is what claims the effect and decides whether the
-    callable runs at all. A case that made the claim itself and skipped the dispatch by
-    hand would be a **restatement of the guard** rather than a test of it: a regression
-    that dispatched after ``HELD``, ``UNCERTAIN`` or ``COMPLETED_OTHERWISE`` would pass
-    it unchanged. Here the executor is handed both calls and decides for itself.
-
-    **Two steps and not one**, because a claim re-made by the step that already holds it
-    is the *same* holder rather than a repeat — which is what a replan looks like: the
-    goal still intends one act, and a second step proposes it again.
-
-    What the case establishes is the guarantee M33 exists to demonstrate: **one record
-    and a commit count of one**, with a second authorisation that was live and spendable
-    and still booked nothing.
-    """
-    booking = await configured(retained_records=4)
-    registry = registry_for(booking)
-    seam = seam_for(booking, registry)
-    parameters = arguments()
-    binding = await bound(seam, BOOKING_ACT, parameters)
-    plans = FakePlanStore(now=lambda: DECIDED_AT)
-    state = await _seeded_execution(plans, parameters)
-    await plans.open_attempt(
-        GoalAttempt(
-            id="a-1",
-            goal_id=_GOAL,
-            opened_at=DECIDED_AT,
-            plan_ids=("p-1",),
-            execution_ids=(state.id,),
-            state=AttemptState.RUNNING,
-        )
-    )
-    executor = StepExecutor(
-        plans=plans, registry=registry, invoker=registry, now=lambda: DECIDED_AT
-    )
-
-    keys: list[EffectKey] = []
-    drives: list[Dispatch] = []
-    for decision_id, step_id in (("d-1", "s-book"), ("d-2", "s-rebook")):
-        call = authorised(
-            BOOKING_ACT,
-            parameters,
-            binding,
-            decision_id=decision_id,
-            step_id=step_id,
-            execution_id=state.id,
-            goal=_GOAL,
-            intended_action=_ACTION,
-        )
-        assert call.effect_key is not None
-        assert isinstance(call.effect_key, EffectKey)
-        keys.append(call.effect_key)
-        await _record(registry, call)
-        current = await plans.get_execution(state.id)
-        assert current is not None
-        drives.append(
-            await executor.execute(
-                current, step_id=step_id, call=call, attempt_id="a-1", timeout=TIMEOUT
-            )
-        )
-
-    assert keys[0] == keys[1]
-    assert keys[0].tool_id == BOOKING_ACT_ID
-    assert keys[0].egress_endpoint == ENDPOINT
-
-    first, second = drives
-    assert first.refused is None, "the first booking was refused"
-    assert not first.satisfied, "the first booking was satisfied from nothing"
-    # **Satisfied from the earlier holder rather than refused**, which is ADR-0259 §2's
-    # ``COMPLETED`` answer: the second step takes the first's recorded output and
-    # **reaches the callable not at all**. Either shape would satisfy the arm — what it
-    # forbids is a *fresh* dispatch — so both are admitted here and the store is what
-    # decides.
-    assert second.satisfied or second.refused is not None, "the second dispatch ran"
-
-    # The decisive half, and the reason the arm is not about a disposition: the provider
-    # committed **once**, though the second authorisation was live, spendable and
-    # carried the identical key.
-    assert len(await booking.store.records()) == 1
-    assert await booking.store.commit_count() == 1
-
-
 async def test_the_second_dispatch_is_the_only_thing_standing_between_it_and_two_bookings() -> None:
-    """The other half of arm 8, and the ground ADR-0273 §2 states for ``NONE``.
+    """Arm 8's provider half, and the ground ADR-0273 §2 states for ``NONE``.
 
-    The case above stops the repeat at the **claim**; this one removes the claim and
-    shows the provider booking twice under the identical key — so the arm above is
-    asserting the system's guarantee rather than a provider that happens to deduplicate.
-    Arm 13 states the same fact over two *separately authorised* actions; this states it
-    over the very key the claim refuses.
+    A repeat is stopped at the **claim**, before the dispatch, and never by the
+    provider: this case removes the claim and shows the provider booking twice under
+    the identical key — so a guarantee of one booking is the system's rather than a
+    provider that happens to deduplicate. Arm 13 states the same fact over two
+    *separately authorised* actions; this states it over the very key a claim refuses.
     """
     booking = await configured(retained_records=4)
     registry = registry_for(booking)

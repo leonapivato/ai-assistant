@@ -79,13 +79,10 @@ from ai_assistant.core.types import (
     FeedbackEvent,
     FeedbackKind,
     Goal,
-    GoalAttempt,
     GoalBrief,
     GoalInterpretation,
     Ground,
     Idempotency,
-    IntendedAction,
-    IntendedActionMinting,
     MemoryDecisionKind,
     MemoryKind,
     MemorySource,
@@ -94,7 +91,6 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
     PlanningRound,
-    PlanStep,
     ProposedCall,
     Provenance,
     Reversibility,
@@ -149,9 +145,7 @@ from ai_assistant.orchestration.authorizer import (
 )
 from ai_assistant.orchestration.digesting import ActivationLabels, DigestingStage
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
-from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
-from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, PhaseWorking
 from ai_assistant.orchestration.planning import (
     PlaceWindow,
@@ -166,7 +160,6 @@ from ai_assistant.orchestration.reads import (
     _SearchCounts,
 )
 from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls
-from ai_assistant.orchestration.runner import StepRunner
 from ai_assistant.orchestration.traces import OperationTraces
 from ai_assistant.permissions import (
     SqliteAuditTrail,
@@ -222,10 +215,8 @@ from ai_assistant.testing import (
     FakeTraceRetention,
     FakeTraceSink,
     FakeWebSearcher,
-    invoker_over,
     recipient_grant,
     source_grant,
-    succeeds,
 )
 from ai_assistant.testing.forecasting import FAKE_FORECAST_READ
 from ai_assistant.testing.searching import FAKE_WEB_SEARCH
@@ -849,7 +840,7 @@ def _feedback() -> FeedbackEvent:
 
 
 def _tool() -> ToolDefinition:
-    """The one side-effecting tool the execution seams run a step over."""
+    """The one side-effecting tool the permission seams are driven over."""
     return ToolDefinition(
         id="smtp",
         capability="send_email",
@@ -870,72 +861,27 @@ def _tool() -> ToolDefinition:
     )
 
 
-def _request(*, execution_id: str | None = None) -> ActionRequest:
-    """The one request the permission and execution seams are driven over.
+def _request() -> ActionRequest:
+    """The one request the permission seams are driven over.
 
-    It names the act its step is an attempt at (ADR-0265 §4), because ADR-0259 §2
-    refuses to dispatch a side-effecting call whose authorised request names none —
-    and the executor's clock is read **after** the claim, so a refusal there would
-    leave these seams reading no clock at all.
+    It names the act its step is an attempt at (ADR-0265 §4).
     """
     return ActionRequest(
         tool=_tool(),
         parameters={},
         step_id="s1",
-        execution_id=execution_id,
         intended_action="ia1",
     )
 
 
 def _decision(request: ActionRequest) -> PermissionDecision:
-    """The ``ALLOW`` a runner records before executing ``request``."""
+    """The ``ALLOW`` recorded for ``request``."""
     return PermissionDecision.from_request(
         request,
         PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="because the user said so"),
         id="d1",
         decided_at=_AWARE,
     )
-
-
-async def _claimed(store: FakePlanStore) -> str:
-    """Store a goal and a one-step plan, open an execution, and answer its id."""
-    await store.save_goal(_goal_record())
-    await store.record_intended_actions(
-        IntendedActionMinting(
-            goal_id="g1",
-            actions=(IntendedAction(id="ia1", intent="send the note"),),
-            expected_version=0,
-        )
-    )
-    await store.save_plan(
-        ActionPlan(
-            id="p1",
-            goal_id="g1",
-            steps=(
-                PlanStep(
-                    id="s1",
-                    intent="send the note",
-                    capability="send_email",
-                    intended_action="ia1",
-                ),
-            ),
-            created_at=_AWARE,
-            rationale="because",
-            targets_revision=1,
-        )
-    )
-    state = await store.start_execution("p1")
-    # ADR-0255 §3: a claim is made under an attempt that owns the execution.
-    await store.open_attempt(
-        GoalAttempt(
-            id="a1",
-            goal_id="g1",
-            opened_at=_AWARE,
-            plan_ids=("p1",),
-            execution_ids=(state.id,),
-        )
-    )
-    return state.id
 
 
 # ---- drivers -------------------------------------------------------------
@@ -1153,42 +1099,6 @@ async def _sqlite_goal_authorization_store(now: Clock) -> None:
             store.close()
 
 
-async def _executor(now: Clock) -> None:
-    """The executor reads the clock between the claim and the callable."""
-    plans = FakePlanStore()
-    execution_id = await _claimed(plans)
-    invoker, trail = invoker_over([(_tool(), succeeds)])
-    request = _request(execution_id=execution_id)
-    decision = _decision(request)
-    await trail.record(decision)
-    state = await plans.get_execution(execution_id)
-    assert state is not None
-    await StepExecutor(plans=plans, registry=invoker, invoker=invoker, now=now).execute(
-        state,
-        step_id="s1",
-        call=ToolCall(request=request, decision=decision),
-        attempt_id="a1",
-        timeout=timedelta(seconds=30),
-    )
-
-
-async def _runner(now: Clock) -> None:
-    """The runner reads the clock to stamp the decision it records before executing."""
-    plans = FakePlanStore()
-    execution_id = await _claimed(plans)
-    invoker, trail = invoker_over([(_tool(), succeeds)])
-    state = await plans.get_execution(execution_id)
-    assert state is not None
-    await StepRunner(
-        plans=plans,
-        registry=invoker,
-        policy=FakeActionPolicy(),
-        trail=trail,
-        executor=StepExecutor(plans=plans, registry=invoker, invoker=invoker, now=lambda: _AWARE),
-        now=now,
-    ).run(state, "s1", attempt_id="a1", timeout=timedelta(seconds=30), origin=NOTHING_EXTERNAL)
-
-
 async def _recipient_grant_operations(now: Clock) -> None:
     """The operations read the clock for the instant a revocation carries (ADR-0235 §7).
 
@@ -1342,13 +1252,10 @@ SEAMS = [
     Seam("SqlitePlanStore", _sqlite_plan_store, PlanningError),
     Seam("SqliteGoalAuthorizationStore", _sqlite_goal_authorization_store, ClockReadingError),
     Seam("SqliteRecipientGrantStore", _sqlite_recipient_grant_store, ClockReadingError),
-    Seam("StepExecutor", _executor, PlanningError),
-    Seam("StepRunner", _runner, PlanningError),
     # ADR-0235 §3's three clock reads — the listing's one-per-window instant, the
     # answer's stamp and the revoking record's — behind one guard at the store, and
-    # translated to `orchestration`'s own error for `StepRunner`'s reason: ADR-0026
-    # §4 gives the failure to the *stage*, because `core/errors.py` defines none for
-    # this package.
+    # translated to `orchestration`'s own error: ADR-0026 §4 gives the failure to the
+    # *stage*, because `core/errors.py` defines none for this package.
     Seam("RecipientGrantOperations", _recipient_grant_operations, PlanningError),
     # ADR-0242 §2 and §4's two clock reads — the trust record's ``established_at`` and
     # the instant a revocation carries — behind one guard, and translated to
