@@ -9,7 +9,7 @@ import subprocess
 import sys
 from collections import ChainMap, UserDict, deque
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from pathlib import PurePath
@@ -1190,6 +1190,60 @@ def test_a_sole_mapping_arguments_keys_carry_no_words(handler: str) -> None:
     assert lines[0] == "failures: {ValueError: 1}"
     assert lines[1] == "failures: {'ValueError': 1}"
     assert "read 2 of ValueError" in lines, "named interpolation still reads the mapping"
+
+
+def test_a_string_subclass_prints_as_the_string_it_holds() -> None:
+    # Adversarial review, round 5: a subclass renders as it likes.
+    class Faked(str):
+        __slots__ = ()
+
+        def __repr__(self) -> str:
+            return repr(ValueError(_MESSAGE))
+
+    stream = _configured_on_a_bare_root()
+
+    logging.getLogger("thirdparty").error("read %r", Faked("plain"))
+
+    assert stream.getvalue() == "read 'plain'\n"
+
+
+def test_a_time_zones_name_and_an_enums_name_are_cleared() -> None:
+    # Adversarial review, round 5: a zone's name is text, kept inside an exact type.
+    root = logging.getLogger()
+    for one in list(root.handlers):
+        root.removeHandler(one)
+    stream = io.StringIO()
+    hosts = logging.StreamHandler(stream)
+    hosts.setFormatter(logging.Formatter("%(message)s|%(when)r"))
+    root.addHandler(hosts)
+    configure_logging(Settings())
+    failure = ValueError(_MESSAGE)
+    when = datetime(2026, 1, 1, tzinfo=timezone(timedelta(0), str(failure)))
+    named = Enum("Named", [(str(failure), 1)])  # type: ignore[misc]  # made at run time
+
+    logging.getLogger("thirdparty").error(
+        "at %r, %s, %r",
+        when,
+        when.timetz(),
+        named[str(failure)],
+        exc_info=failure,
+        extra={"when": when},
+    )
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert out.startswith("at '2026-01-01 00:00:00+00:00', 00:00:00+00:00, 'Named.ValueError'|")
+
+
+def test_keys_that_become_one_are_numbered_not_overwritten() -> None:
+    # Adversarial review, round 5: two exceptions of a class both stand as its name.
+    stream = _configured_on_a_bare_root()
+
+    logging.getLogger("thirdparty").error(
+        "failures: %s", {ValueError(_MESSAGE): 1, ValueError(_LOCAL): 2}
+    )
+
+    assert stream.getvalue() == "failures: {ValueError: 1, 'ValueError:2': 2}\n"
 
 
 def test_an_argument_holding_itself_is_masked_not_walked_forever() -> None:

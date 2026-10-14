@@ -44,7 +44,7 @@ from dataclasses import fields, is_dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
-from pathlib import PosixPath, PurePath, PurePosixPath, PureWindowsPath, WindowsPath
+from pathlib import PosixPath, PurePosixPath, PureWindowsPath, WindowsPath
 from typing import TYPE_CHECKING, Any, Final, Self, TextIO, cast
 from uuid import UUID
 
@@ -488,10 +488,10 @@ _RECORD_FIELDS: Final = frozenset(
     vars(logging.LogRecord("", logging.NOTSET, "", 0, "", (), None))
 ) | {"message", "asctime"}
 
-#: The standard fields whose text a host or a library chooses: a thread's, a
-#: process's or a task's name. Cleared like an extra; the rest are the logging
-#: module's own (a level, a path, a function's name).
-_NAMED_FIELDS: Final = ("threadName", "processName", "taskName")
+#: The standard fields whose text a host or a library chooses at run time: a
+#: logger's, a thread's, a process's or a task's name. Cleared like an extra; the
+#: rest are the logging module's own (a level, a path, a function's name).
+_NAMED_FIELDS: Final = ("name", "threadName", "processName", "taskName")
 
 #: How many values an exception's arguments may hold, at any depth, before its
 #: ``str`` and ``repr`` are not built here (:func:`_affordable`).
@@ -502,6 +502,9 @@ _AFFORDABLE_PARTS: Final = 10_000
 #: a ``range`` or a library's lazy sequence can be unbounded to walk, and its repr
 #: is the type's own to choose.
 _WALKED_SEQUENCES: Final = (list, tuple, set, frozenset, deque)
+
+#: The path types the redactor trusts. A path is text, so the stdlib net clears it.
+_PATH_TYPES: Final = frozenset({PurePosixPath, PureWindowsPath, PosixPath, WindowsPath})
 
 #: The extras ``structlog.stdlib.ProcessorFormatter.wrap_for_formatter`` attaches,
 #: by which ``ProcessorFormatter`` tells a structlog event from a foreign record.
@@ -728,19 +731,46 @@ class _Unsaid:
 def _plain_leaf(value: object, unsaid: _Unsaid) -> object:
     """A value that is neither a string, an exception nor a walked container, made plain.
 
-    A path is text, so it is cleared as a string is, and becomes one. Any other
-    plain value — a number, a time, a UUID — has no text of its own and is kept, and
-    an enum is named by its member, as the redactor names one; anything else is
-    masked. Bytes are masked too: they are raw data — a library reporting a
-    malformed document quotes its bytes — and never words this net can match.
+    Only exact types are trusted, as the redactor trusts them: a subclass renders as
+    it likes. A path is text, so it is cleared as a string is, and becomes one; so is
+    a time zone's name, so a time carrying a zone becomes its ``str``, which prints
+    the offset alone. Any other plain value — a number, a date, a UUID — has no text
+    of its own and is kept. An enum is named by its member, as the redactor names
+    one, and the name cleared, since an enum can be made at run time from any text.
+    Anything else is masked. Bytes are masked too: they are raw data — a library
+    reporting a malformed document quotes its bytes — and never words this net can
+    match.
     """
-    if isinstance(value, PurePath):
+    if type(value) in _PATH_TYPES:
         return unsaid(str(value))
+    if isinstance(value, (datetime, time)) and value.tzinfo is not None:
+        return unsaid(str(value)) if type(value) in _SAFE_EXACT_TYPES else REDACTED
     if type(value) in _SAFE_EXACT_TYPES:
         return value
     if isinstance(value, Enum):
-        return f"{type(value).__name__}.{value.name}"
+        return unsaid(f"{type(value).__name__}.{value.name}")
     return REDACTED
+
+
+def _plain_mapping(
+    value: Mapping[Any, Any], unsaid: _Unsaid, done: set[int]
+) -> dict[object, object]:
+    """A mapping made plain, keys and all, keeping every entry.
+
+    Two keys can become one: two exceptions of a class both stand as its name. The
+    later is numbered, as the redactor numbers masked keys, rather than overwriting
+    the earlier.
+    """
+    rebuilt: dict[object, object] = {}
+    for key, item in value.items():
+        plain_key = _hashable(_plain(key, unsaid, done))
+        if plain_key in rebuilt:
+            count = 2
+            while f"{plain_key}:{count}" in rebuilt:
+                count += 1
+            plain_key = f"{plain_key}:{count}"
+        rebuilt[plain_key] = _plain(item, unsaid, done)
+    return rebuilt
 
 
 def _hashable(key: object) -> object:
@@ -767,7 +797,8 @@ def _plain(value: object, unsaid: _Unsaid, done: set[int]) -> object:
     if isinstance(value, BaseException):
         return _ClassName(value)
     if isinstance(value, str):
-        return unsaid(value)
+        # As an exact string: a subclass renders as it likes.
+        return unsaid(str.__str__(value))
     inside = _walked(value)
     if inside is None:
         return _plain_leaf(value, unsaid)
@@ -776,10 +807,7 @@ def _plain(value: object, unsaid: _Unsaid, done: set[int]) -> object:
     done.add(id(value))
     result: object
     if isinstance(value, Mapping):
-        result = {
-            _hashable(_plain(key, unsaid, done)): _plain(item, unsaid, done)
-            for key, item in value.items()
-        }
+        result = _plain_mapping(value, unsaid, done)
     else:
         items = [_plain(item, unsaid, done) for item in inside]
         result = tuple(items) if isinstance(value, tuple) else items
