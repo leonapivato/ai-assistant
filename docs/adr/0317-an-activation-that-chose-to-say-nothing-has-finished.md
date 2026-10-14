@@ -1,6 +1,6 @@
 # 317. An activation that chose to say nothing has finished
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-10-13
 - Scope: the phases, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): how an activation started from a conversation ends when planning chose to write nothing, and where the *couldn't finish* message is written ([#2943](https://github.com/leonapivato/ai-assistant/issues/2943)).
 - Authorization: the owner ruled this decision's content on 2026-10-13 in #2943, option A: silence is a normal ending. The dispatcher assigned 0317 and authorized ratifying it once its reviews are green.
@@ -50,7 +50,7 @@ We will treat an activation started from a conversation as finished when its las
 made no call other than a tidy-up, whatever its rounds wrote, so that one which wrote
 nothing ends done with no message; and we will write *couldn't finish* only where the
 round limit, a stage's failure or a deadline ended the activation, or where a message it
-wrote was refused or lost and none reached the conversation.
+wrote was refused or lost and no later message of it reached the conversation.
 
 ### 1. Status and delivery
 
@@ -101,9 +101,9 @@ finished activation's are.
 > nothing, since the activation did nothing.
 
 > **Normative.** It is written where a message a round wrote was refused by authorizing,
-> or its write did not come back done (ADR-0306 §5), and no message of the activation was
-> recorded in the conversation. Where one was, a refused or lost message writes no
-> *couldn't finish*, and the activation ends as §2:1 decides.
+> or its write did not come back done (ADR-0306 §5), and no later message of the
+> activation was recorded in the conversation. Where a later one was, the refused or lost
+> message writes no *couldn't finish*, and the activation ends as §2:1 decides.
 
 > **Normative.** Wherever it is written, the activation did not finish: its episode
 > freezes `failed`, classified by ADR-0275 §5:3's table, with the round limit, the loop
@@ -114,10 +114,12 @@ finished activation's are.
 > and §3 reaches none of them (ADR-0295 §3:3, ADR-0293 §9:2).
 
 §3:2 and §3:3 apply whatever earlier rounds wrote because a message already sent does not
-tell the user that the rest was cut short. §3:4 applies only where nothing reached the
-user, because a later round that wrote again has answered: a refused or lost message
-brings no round of its own (ADR-0315 §2:1 counts calls, not messages), but a round that
-made calls beside it brings one, which may write.
+tell the user that the rest was cut short. §3:4 applies whatever earlier rounds wrote for
+the same reason: an earlier "Let me check…" that reached the user, followed by a final
+answer that was refused or lost, leaves them waiting on an answer that never comes. It is
+excused only where a later message was recorded, because a later round that wrote again
+has answered: a refused or lost message brings no round of its own (ADR-0315 §2:1 counts
+calls, not messages), but a round that made calls beside it brings one, which may write.
 
 ### 4. The record and the viewer
 
@@ -223,9 +225,12 @@ the second is how the user hears that the assistant acted, not a guard against
   by the owner: it would make planning answer "thanks", which a person would not.
 - **`completed / no_content` for a silent ending.** Rejected: that row is for speech that
   produced no words, and spoken conversation retired at the cutover (ADR-0313 §3).
-- **Every refused or lost message writes *couldn't finish*, whatever else reached the
-  user.** Not chosen: a later round that wrote again has answered, and §9:1 never wrote
-  it where a message had been written.
+- ***Couldn't finish* for a refused or lost message only where none of the activation's
+  messages reached the conversation.** Not chosen: a round that wrote filler such as
+  "Let me check…", followed by a final answer that was refused or lost, would leave the
+  user waiting with no *couldn't finish*, since the filler reached them.
+- **Every refused or lost message writes *couldn't finish*, even where a later message
+  was recorded.** Not chosen: a later round that wrote again has answered.
 - **An entry recording that *couldn't finish* was written.** Rejected: `phase_path.py`
   writes no entry (ADR-0314 §4:2), and each cause but the two §4:3 names is in the record
   already.
