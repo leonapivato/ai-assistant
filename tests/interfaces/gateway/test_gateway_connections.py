@@ -150,10 +150,10 @@ def test_no_lane_of_this_surface_reaches_learn() -> None:
     promoted surface that is neither in the enumeration above nor the gateway's own",
     and no lane adds it without its own ratified decision.
 
-    The CONFIRM pair used to be asserted absent beside it and no longer is: ADR-0178's
-    merge discharged ADR-0177 §8's precondition, so ``pending_confirmations`` and
-    ``resume`` are served (#1404). ``learn`` is what is left, and it is left out for a
-    different reason — a missing *surface* decision rather than a missing content one.
+    The CONFIRM pair used to be asserted absent beside it: ADR-0178's merge discharged
+    ADR-0177 §8's precondition and the pair was served (#1404) until ADR-0309 §5 retired
+    the confirmations panel with its routes. ``learn`` is left out for a different
+    reason — a missing *surface* decision rather than a retired one.
     """
     reached = set(_ASSISTANT_PATHS.values())
 

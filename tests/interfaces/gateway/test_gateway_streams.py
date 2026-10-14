@@ -1077,15 +1077,13 @@ async def test_an_operation_this_gateway_does_not_serve_reaches_nothing(
     §11 gives it a trigger, so a shape for it here would be the lane inventing an
     operation. ``/observe`` was served until ADR-0285 §6 removed the route, so a
     request for it is now one the surface has no shape for, whatever the engine behind
-    it still answers. Every other path below names an operation this gateway *does*
-    serve, at a different path: a shape is a method and a path together (ADR-0168 §6),
-    so a path that merely names a served operation is no more admitted than
-    ``/nonsense``. That is now the whole reason ``/resume`` and
-    ``/pending_confirmations`` are here — ADR-0178's merge discharged ADR-0177 §8's
-    precondition and the pair is served, at ``/confirmation/resume`` and
-    ``/confirmations``. Each way the answer is §6's fourth class, which is the property
-    that makes an enumeration checkable: a path nothing serves behaves identically to a
-    path nothing has heard of.
+    it still answers. ``/resume`` and ``/pending_confirmations`` name operations this
+    gateway served at other paths until ADR-0309 §5 retired the confirmations panel and
+    its routes, and every other path below names an operation it *does* serve, at a
+    different path: a shape is a method and a path together (ADR-0168 §6), so a path
+    that merely names an operation is no more admitted than ``/nonsense``. Each way the
+    answer is §6's fourth class, which is the property that makes an enumeration
+    checkable: a path nothing serves behaves identically to a path nothing has heard of.
     """
     status, body = await harness.whole("POST", path, {})
 
@@ -1094,9 +1092,12 @@ async def test_an_operation_this_gateway_does_not_serve_reaches_nothing(
     assert harness.engine.calls == []
 
 
-#: The routes ADR-0309 §5 retires with the questions, goals and authorizations panels,
-#: at the paths this gateway served them under.
+#: The routes ADR-0309 §5 retires with the confirmations, questions, goals and
+#: authorizations panels, at the paths this gateway served them under.
 _RETIRED_WITH_THEIR_PANELS: Final = (
+    "/confirmations",
+    "/confirmation/resume",
+    "/confirmation/cancel-read",
     "/questions",
     "/questions/interrupted",
     "/question/answer",
@@ -1129,26 +1130,23 @@ async def test_a_route_retired_with_its_panel_is_a_path_nothing_serves(
 def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() -> None:
     """ADR-0177 §1's enumeration, read off the router.
 
-    Every operation §1 admits and no later decision has retired is served here. The
-    CONFIRM pair joined §1's own once ADR-0178's merge discharged §8's precondition, and
-    each addition since arrived by the route §1's third clause fixes, a ratified
-    decision's own text. ADR-0244 §13 adds ``cancel_read`` — "the command line and the
-    browser each render the pending read, collect the answer, and **offer the
-    cancellation act**". **ADR-0296's ``- Status:`` line records "§1:1's enumeration,
-    which gains the acts in the medium and the change stream"**, ADR-0293 §11:2's acts,
-    the read of the changes after a cursor, and since ADR-0298 §7 built it the change
-    stream itself. **ADR-0297 §6:4 rules that "the command line and the gateway's stop
-    control land last"**, which places ``stop_activation`` here by the governing
-    decision's own text, as ADR-0244 §13 placed ``cancel_read``; the header record it
-    owes ADR-0177 is issue #2714. Every other clause of §1 binds each of them exactly as
-    it binds §1's own.
+    Every operation §1 admits and no later decision has retired is served here, and each
+    addition since §1 arrived by the route §1's third clause fixes, a ratified decision's
+    own text. **ADR-0296's ``- Status:`` line records "§1:1's enumeration, which gains
+    the acts in the medium and the change stream"**, ADR-0293 §11:2's acts, the read of
+    the changes after a cursor, and since ADR-0298 §7 built it the change stream itself.
+    **ADR-0297 §6:4 rules that "the command line and the gateway's stop control land
+    last"**, which places ``stop_activation`` here by the governing decision's own text;
+    the header record it owes ADR-0177 is issue #2714. Every other clause of §1 binds
+    each of them exactly as it binds §1's own.
 
     **What has left is named by the decision that took it.** ADR-0309 §5:4 retires the
     Ask panel's ``converse`` and ADR-0313 §3:4 push-to-talk's ``converse_spoken``; and
-    ADR-0309 §5 retires the questions panel (the deferred-question operations), the
-    goals panel (ADR-0250's ``goals``, ``withdraw_clarification`` and
-    ``abandon_goal``) and the authorizations panel (``standing_authorizations`` and
-    ``revoke_authorization``), each with its routes.
+    ADR-0309 §5 retires the confirmations panel (the CONFIRM pair and ADR-0244 §13's
+    ``cancel_read``), the questions panel (the deferred-question operations), the goals
+    panel (ADR-0250's ``goals``, ``withdraw_clarification`` and ``abandon_goal``) and the
+    authorizations panel (``standing_authorizations`` and ``revoke_authorization``), each
+    with its routes.
 
     **The count is not written down here, and that is ADR-0177's own instruction rather
     than an omission.** Its third dated note retires the figure — "do not read that as
@@ -1169,8 +1167,8 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
     """
     assert set(_ASSISTANT_PATHS.values()) == {
         # ADR-0293 §11 retires `converse_streaming`, ADR-0309 §5:4 `converse`,
-        # ADR-0313 §3:4 `converse_spoken`, and ADR-0309 §5 the questions, goals and
-        # authorizations panels' operations.
+        # ADR-0313 §3:4 `converse_spoken`, and ADR-0309 §5 the confirmations (with
+        # `cancel_read`), questions, goals and authorizations panels' operations.
         "recent_conversations",
         "conversation",
         "forget_conversation",
@@ -1192,9 +1190,6 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         "disconnect_account",
         "connected_accounts",
         "recent_connection_acts",
-        "pending_confirmations",
-        "resume",
-        "cancel_read",
         # ADR-0296's record on ADR-0177 §1:1: "the acts in the medium (ADR-0293
         # §11:2) and the change stream", whose first build is one read after a cursor.
         "start_conversation",

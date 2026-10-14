@@ -7,9 +7,8 @@ one that has carried nothing — and none of that is visible from a handler call
 Milestone 13's exit test is a browser round-tripping a request and reading a
 legible hub-down fault, so the tests that stand for it speak HTTP. Since the Ask
 route retired (ADR-0309 §5:4) the request that stands for "asks the assistant for
-something" here is the conversations listing, and a turn's outcome is read through
-``/confirmation/resume`` (:class:`_Resuming`), the one route that still answers with
-one.
+something" here is the conversations listing; no route answers a browser with a turn's
+outcome since the confirmations panel retired too (ADR-0309 §5).
 
 Marked ``integration`` because a loopback socket is what they open.
 """
@@ -22,7 +21,7 @@ import json
 import socket
 import struct
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -35,22 +34,7 @@ from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError, UnknownConversationError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
-    ActionPlan,
     ConversationSummary,
-    CurrentContext,
-    Disposition,
-    ExecutionState,
-    Goal,
-    GoalBrief,
-    GoalInterpretation,
-    Ground,
-    MemorySource,
-    PlanStep,
-    Provenance,
-    StepOutcome,
-    TimeOfDay,
-    TurnOutcome,
-    TurnResult,
 )
 from ai_assistant.interfaces.gateway.server import Disclosure, Gateway
 from ai_assistant.testing import FakeAssistantEngine
@@ -59,14 +43,8 @@ from ai_assistant.wire.errors import HubUnavailableError
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from ai_assistant.core.types import ContinuationToken, UtcInstant
 
 pytestmark = pytest.mark.integration
-
-#: The instant every scripted turn in this file is stamped with. Fixed rather than
-#: read from a clock: nothing here turns on time, and a wall-clock reading would be
-#: one more thing a failure could be about.
-_AT = datetime(2026, 1, 2, 15, 0, tzinfo=UTC)
 
 _BUNDLE = {
     "/": (b"<!doctype html><p>document", "text/html; charset=utf-8"),
@@ -115,47 +93,6 @@ class _Blocking(FakeAssistantEngine):
         self.occupied.set()
         await self.release.wait()
         return await super().recent_conversations(limit=limit, offset=offset)
-
-
-class _Resuming(FakeAssistantEngine):
-    """The canonical fake, answering ``resume`` with the outcome a case scripted.
-
-    ``/confirmation/resume`` is the one route that answers a browser with a turn's
-    outcome since the Ask route retired (ADR-0309 §5:4), so it is the route
-    ``_outcome_view``'s projection is read through. ADR-0216 §4's admission of a
-    subclass, used one layer down: where a case scripts :attr:`turn_outcome`, ``resume``
-    hands it back whole whatever the token names; where it scripts none, ``resume`` is
-    the fake's own.
-    """
-
-    async def resume(
-        self,
-        token: ContinuationToken,
-        *,
-        approved: bool,
-        timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
-        remember_recipients_until: UtcInstant | None = None,
-    ) -> TurnOutcome:
-        """Answer with the scripted outcome, or as the fake does where there is none.
-
-        Args:
-            token: The park's handle.
-            approved: The owner's answer.
-            timeout: The caller's budget.
-            remember_recipients_until: How long to remember the recipients.
-
-        Returns:
-            :attr:`turn_outcome` where a case scripted one, else the fake's answer.
-        """
-        if self.turn_outcome is not None:
-            self.calls.append(("resume", {"token": token.handle}))
-            return self.turn_outcome
-        return await super().resume(
-            token,
-            approved=approved,
-            timeout=timeout,
-            remember_recipients_until=remember_recipients_until,
-        )
 
 
 @dataclass
@@ -257,7 +194,7 @@ async def _harness(
     """Bind one gateway on a free port and tear it down afterwards."""
     settings = Settings(gateway_port=free_port(), **overrides)
     clock, timers = Clock(), Timers()
-    behind = engine or _Resuming()
+    behind = engine or FakeAssistantEngine()
     gateway = Gateway(
         settings=settings,
         engine=behind,
@@ -341,19 +278,6 @@ def _request(
 ) -> tuple[str, bytes]:
     """Frame one request that asks the assistant for something: the listing."""
     return _framed(harness, "/conversations", {}, header_half=header_half, cookie_half=cookie_half)
-
-
-def _resume(
-    harness: Harness, *, header_half: str | None, cookie_half: str | None
-) -> tuple[str, bytes]:
-    """Frame one answer to a park, which :class:`_Resuming` answers as scripted."""
-    return _framed(
-        harness,
-        "/confirmation/resume",
-        {"token": "h-1", "approved": True},
-        header_half=header_half,
-        cookie_half=cookie_half,
-    )
 
 
 # --- ADR-0168 §3: the two things served without a session, and nothing else ---
@@ -654,91 +578,6 @@ async def test_an_admitted_request_round_trips_and_renders_what_the_hub_returned
     assert [call[0] for call in harness.engine.calls] == ["recent_conversations"]
 
 
-async def test_a_resumed_outcome_crosses_with_every_member_this_page_renders(
-    harness: Harness,
-) -> None:
-    """The turn's outcome, whole — the answer, the plan, the step and the conversation.
-
-    Read through ``/confirmation/resume``, the one route that answers with one since
-    the Ask route retired (ADR-0309 §5:4).
-
-    The member set is asserted whole rather than by presence, because this
-    enumeration is a decision (``_outcome_view``) and not a projection: a member
-    that stops being carried is as much a defect as one that starts being carried
-    unreviewed. Issue #1337 is that failure in the first direction — the answer was
-    composed, returned over the wire, and dropped here.
-
-    **``read_confirmation`` and ``read_answer`` join it here** because ADR-0244 §13
-    admits this surface for that kind by name — "the command line and the browser each
-    render the pending read, collect the answer, and offer the cancellation act" — which
-    is the decision the roster assertion below was waiting on. ``search_not_serviced``
-    is still absent, and that too is a decision: see
-    ``test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed``.
-
-    **ADR-0250's four join it for the same reason, one decision on**: §15 places this
-    surface by name — "the command line and the browser both implement this decision" —
-    and its last clause makes a member given but not rendered a section not implemented
-    rather than a permissible degradation.
-
-    **And ``forecast_not_read`` joins it while ``search_not_serviced`` above it does
-    not.** ADR-0260 §10 admits *a* surface with no deferral — "A surface renders, beside
-    the reply and never in place of it, one fixed statement per member" — and ADR-0262
-    §11 places this one by name: "a member rendered on one and not the other is the
-    parity failure M4 recorded". ADR-0242 §9's all-or-nothing clause is stated over *a
-    vocabulary*, so carrying all six of this one and none of that one's nine is both
-    rules met as written rather than one of them bent.
-
-    **And ``attempt_report`` joins it, carrying the outcome word alone.** ADR-0262 §11's
-    L5 puts §6's six fixed statements on "both surfaces" in one lane, so the member is
-    rendered here rather than deferred — while ``continues`` reaches the page through no
-    route at all, because §6 splits the report between the channels by name: "the
-    **reply** carries the offer and the **surface** the outcome word", an offer a surface
-    printed reaching "neither the browser's transcript nor the spoken channel as part of
-    what was said". A field carried to a page that must never render it is one an editor
-    is invited to render, and this enumeration is where that is decided (ADR-0168 §6).
-
-    **And ``drive_withheld`` joins it, carrying where the goal stands and nothing else.**
-    ADR-0261 §13's L3 puts §7's seven fixed statements on the CLI's surfaces "and on the
-    reply", so the member is rendered here rather than deferred. §7 fixes what it is not —
-    "the field is read, rendered and named as *where the goal stands*, never as *why the
-    step was not claimed*" — so no reason, conjunct or refusal reaches this page, there
-    being none the engine's own read could establish.
-    """
-    harness.engine.turn_outcome = TurnOutcome(
-        turn=_turn_that_ran(), conversation_id="c-1", reply="Done."
-    )
-    cookie_half, header_half = await _start_session(harness)
-    head, body = _resume(harness, header_half=header_half, cookie_half=cookie_half)
-
-    answer = await harness.send(head, body)
-
-    assert answer.status == 200
-    outcome = answer.payload["outcome"]
-    assert outcome["conversation_id"] == "c-1"
-    assert set(outcome) == {
-        "conversation_id",
-        "capture_degraded",
-        "memory_degraded",
-        "reply",
-        "reply_degraded",
-        "rationale",
-        "steps",
-        "step",
-        "routed",
-        "read_confirmation",
-        "read_answer",
-        "goal_engagement",
-        "clarification",
-        "reference",
-        "disambiguation",
-        "forecast_not_read",
-        "attempt_report",
-        "drive_withheld",
-        "authorizations",
-    }
-    assert [call[0] for call in harness.engine.calls] == ["resume"]
-
-
 async def test_an_admitted_request_that_asks_the_assistant_for_nothing_never_reaches_it(
     harness: Harness,
 ) -> None:
@@ -767,388 +606,6 @@ async def test_a_replaced_cookie_is_reported_as_its_own_condition(harness: Harne
 
     assert answer.status == 409
     assert answer.payload == {"fault": "cookie-half-mismatch"}
-
-
-# --- ADR-0170 §6: the answer is carried beside the step account (#1337) ---
-
-
-_RATIONALE = "one step, and the account of what became of it is the guarantee"
-
-
-def _turn_that_ran() -> TurnResult:
-    """One turn whose plan has a step, so there is an account to survive beside.
-
-    The fake's own turn plans nothing, and a case about the answer arriving *in
-    addition to* the account needs an account with something in it — a rationale
-    and a named step, which are what the page lists.
-    """
-    goal = Goal(
-        id="g-1",
-        interpretation=(
-            GoalInterpretation(
-                revision=1,
-                outcome="send the note",
-                outcome_ground=Ground.USER_STATED,
-                outcome_span="send the note",
-                recorded_at=_AT,
-                raised_by="t-1",
-            ),
-        ),
-        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT),
-        created_at=_AT,
-    )
-    return TurnResult(
-        utterance=goal.statement,
-        goal=GoalBrief.of(goal),
-        context=CurrentContext(
-            now=_AT, time_of_day=TimeOfDay.AFTERNOON, is_weekend=False, within_working_hours=True
-        ),
-        memories=(),
-        plan=ActionPlan(
-            id="p-1",
-            goal_id=goal.id,
-            steps=(PlanStep(id="s-1", intent="send the note", capability="send_email"),),
-            created_at=_AT,
-            rationale=_RATIONALE,
-        ),
-    )
-
-
-async def test_the_composed_answer_reaches_the_browser_beside_the_step_account(
-    harness: Harness,
-) -> None:
-    """ADR-0170 §6: an adapter renders the answer "**in addition to** the step
-    account it renders today, never instead of it".
-
-    Issue #1337 is the first half failing: ``_outcome_view`` enumerated the
-    pre-ADR-0170 members, so the Ask route answered 200 with the account and no
-    answer anywhere in it. The hub had composed one — the same ask through the CLI
-    rendered it from the same store — and the browser was shown the plan and the
-    disposition and never what the assistant said.
-
-    Both halves are asserted, because a fix that carried the answer *instead of*
-    the account would satisfy the issue and violate the clause: the deterministic
-    account is what this system guarantees about what it did, and the answer is
-    not.
-    """
-    harness.engine.turn_outcome = TurnOutcome(
-        turn=_turn_that_ran(),
-        conversation_id="c-1",
-        reply="I have sent the note.",
-    )
-    cookie_half, header_half = await _start_session(harness)
-
-    answer = await harness.send(*_resume(harness, header_half=header_half, cookie_half=cookie_half))
-
-    outcome = answer.payload["outcome"]
-    assert outcome["reply"] == "I have sent the note."
-    assert outcome["reply_degraded"] is False
-    assert outcome["rationale"] == _RATIONALE
-    assert outcome["steps"] == [{"intent": "send the note", "capability": "send_email"}]
-    assert outcome["conversation_id"] == "c-1"
-
-
-async def test_a_turn_whose_answer_could_not_be_composed_says_so_and_keeps_its_account(
-    harness: Harness,
-) -> None:
-    """ADR-0170 §6: "The step account is rendered on a degraded turn too".
-
-    A `reply_degraded` outcome is "the account it carries plus a statement that no
-    answer could be composed — never as a silent turn". The flag is carried rather
-    than left to be inferred from the ``None``, because §4 gives ``reply`` three
-    ``None`` shapes and this is the only one where an answer was owed: without it
-    the page cannot tell "no answer was owed" from "an answer was owed and could
-    not be composed", which is the whole reason the member exists.
-    """
-    harness.engine.turn_outcome = TurnOutcome(
-        turn=_turn_that_ran(), conversation_id="c-1", reply_degraded=True
-    )
-    cookie_half, header_half = await _start_session(harness)
-
-    answer = await harness.send(*_resume(harness, header_half=header_half, cookie_half=cookie_half))
-
-    outcome = answer.payload["outcome"]
-    assert outcome["reply"] is None
-    assert outcome["reply_degraded"] is True
-    assert outcome["rationale"] == _RATIONALE
-    assert outcome["steps"] == [{"intent": "send the note", "capability": "send_email"}]
-
-
-async def test_a_turn_that_owed_no_answer_carries_none_and_the_account_alone(
-    harness: Harness,
-) -> None:
-    """ADR-0170 §4's first ``None`` shape, reaching the page as a ``None``.
-
-    A parked step owes no answer: what the user must answer is the confirmation,
-    and prose beside it competes with the question. So the view carries ``null``
-    and an unset flag, and neither this adapter nor the page it feeds invents text
-    to fill the gap — a "no answer was available" line here would be exactly the
-    silent-``None``-versus-degraded confusion the flag exists to prevent, written
-    the other way round.
-    """
-    harness.engine.turn_outcome = TurnOutcome(
-        turn=_turn_that_ran(),
-        conversation_id="c-1",
-        step=StepOutcome(
-            disposition=Disposition.AWAITING_CONFIRMATION,
-            state=ExecutionState(id="e-1", plan_id="p-1", steps=(), updated_at=_AT),
-            step_id="s-1",
-            confirmation=harness.engine.park("h-1"),
-        ),
-    )
-    cookie_half, header_half = await _start_session(harness)
-
-    answer = await harness.send(*_resume(harness, header_half=header_half, cookie_half=cookie_half))
-
-    outcome = answer.payload["outcome"]
-    assert outcome["reply"] is None
-    assert outcome["reply_degraded"] is False
-    # The park crosses as the confirmation itself rather than as a flag (#1404), and
-    # `test_gateway_confirmations.py` is where its content is checked. What this case
-    # is about is the *answer*: a parked turn owes none, and the confirmation being
-    # present is what makes the `None` above the right shape rather than a gap.
-    assert outcome["step"]["confirmation"]["tool_id"] == "t-1"
-    assert outcome["steps"] == [{"intent": "send the note", "capability": "send_email"}]
-
-
-# The one case in this file that does not speak HTTP, because what it guards is not
-# a response: it is the enumeration behind every response above.
-def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> None:
-    """The guard #1337 did not have.
-
-    ``_outcome_view`` enumerates by design — the page renders what it returns, so
-    what may appear there is decided in this repository rather than by whatever a
-    future ``TurnOutcome`` happens to carry. The cost of that design is precisely
-    what happened: ADR-0170 added two members and gave the CLI a renderer for them,
-    this adapter's enumeration went on being correct by its own tests, and the
-    answer was dropped one layer short of the person who asked for it. Both of the
-    reviewing lenses on the PR that missed it approved.
-
-    So the roster is pinned here instead of the enumeration being replaced by a
-    dump. A member added to ``TurnOutcome`` fails this test, and whoever adds it
-    decides — in this file, beside the cases above — whether the page sees it.
-    Deciding "no" is a passing answer; not deciding at all is what this catches.
-
-    **``routed`` is ADR-0197 §8's member, and the decision taken here is now
-    "rendered".** The lane that added it landed the routing stage, its two contracts,
-    the store and the engine wiring, and recorded here that this adapter's
-    ``_outcome_view`` was deliberately unchanged — ADR-0197 §12's last Normative makes
-    §10's CLI and gateway renderings a **consumer group** and a separate lane, "not a
-    second decision". This is that lane, so ``_routed_view`` carries the account and
-    ``renderRouted`` puts it on screen beside the reply.
-
-    The cost that entry recorded — ADR-0197's own Consequences, "a client that ignores
-    ``routed`` renders a turn that did something as a turn that did nothing" — is
-    therefore paid rather than outstanding, and paid whole: all seven of
-    :data:`~ai_assistant.core.types.RoutedListing`'s arms cross as their records,
-    including the four this page had no panel for. ADR-0177 §1's enumeration still
-    admits no browser *request* for ``recent_reads``, ``recent_invocations``,
-    ``recent_decisions`` or ``spend_totals`` — ``test_gateway_decisions.py`` and
-    ``test_gateway_reads.py`` pin that — because that bar is on the route and not on
-    the rendering, and a routed pass makes no browser request for any of them.
-    ``tests/interfaces/gateway/test_gateway_routed.py`` is where the arms are pinned.
-
-    **``recipient_grant`` is ADR-0235 §4's member, and the decision taken here is
-    "not rendered".** That is a decision rather than an omission, and ADR-0235 §9
-    is where it is made: "The **browser** is not reached by this decision … whether
-    the page offers a control for it is the browser lane's, and until that lane the
-    page renders the card exactly as it does today." The member crosses the wire —
-    it is on ``TurnOutcome`` and this page decodes the whole outcome — and no panel
-    reads it, because a page that reported what became of a standing request would
-    have to offer the control that makes one, which ADR-0177 §1's enumeration does
-    not yet admit and which §9 assigns to a later consumer lane with its own
-    ratified decision.
-
-    The cost is stated rather than hidden: until that lane, a user of the page sees
-    no change from ADR-0235 at all, which is the sequencing §9 chose. Nothing on
-    this page can *set* ``remember_recipients_until`` either, so the member is
-    ``None`` on every outcome this adapter will ever see.
-
-    **``search_not_serviced`` is ADR-0242 §9's member, and the decision taken here is
-    "not rendered" for the identical reason.** ADR-0242 §5 leaves ADR-0177 §1's
-    enumeration unwidened and assigns a browser surface for the trust act to "a later
-    consumer lane with its own ratified decision"; §9 then says in terms what this page
-    does until that lane: "the browser … renders neither the statement nor the reply's
-    absence of one, because it renders the turn exactly as it does today and the field
-    it now receives is one it ignores." So the member crosses the wire — it is on
-    ``TurnOutcome`` and this page decodes the whole outcome — and no panel reads it.
-
-    **The cost here is larger than ``recipient_grant``'s and is stated rather than
-    hidden** (ADR-0242's Consequences): a user on the browser can establish neither a
-    recipient grant nor destination trust, and now also receives a field the page says
-    nothing about — so a turn whose search did not happen reads on this page exactly
-    like one whose search was never asked for. That gap is named in §5 with the lane
-    that closes it, and it is the same gap ADR-0235 §9 opened.
-
-    **``read_confirmation`` and ``read_answer`` are ADR-0244 §9's members, and the
-    decision taken here is now "rendered".** ADR-0244 §13 admits the browser for this
-    kind — it "admits the browser for this kind rather than inheriting ADR-0235 §9's
-    deferral of it, because the batch this lane belongs to states its exit over both
-    surfaces" — and §18's Lane 4 is the lane that spends it. So ``_outcome_view`` carries
-    both, ``renderReadConfirmation`` puts the question on screen with ADR-0178 §7's floor
-    entire and the exact query, and ``renderReadAnswer`` renders one fixed statement per
-    ``ReadAnswerOutcome`` member. §13's last clause is what made both obligatory rather
-    than optional: a surface rendering no statement for a member it was given "has not
-    implemented this section" and "is not permissibly degraded".
-
-    **The entry above it is therefore the one that is still "not rendered", and the two
-    decisions do not contradict each other.** ADR-0244 §18 gives Lane 4 "the ninth
-    ``SearchNotServiced`` statement … at its own surface", and ADR-0242 §9's deferral of
-    *this* surface is untouched by ADR-0244's supersession, which reaches "§9's statement
-    enumeration by one member. **Nothing else in that ADR**". §9 is all-or-nothing over
-    the vocabulary — "a surface that renders **no** statement for a member is a surface
-    that has not implemented this section, not a permitted degradation" — so a page
-    rendering one of the nine is the half-implemented surface it refuses, and a page
-    rendering all nine would mint browser wordings for eight members and three
-    terminal-only acts no ratified decision gives this surface. It therefore renders none
-    of the nine, and #2237 carries the lane that changes that.
-
-    **``goal_engagement``, ``clarification``, ``reference`` and ``disambiguation`` are
-    ADR-0250 §5's four members, and the decision taken here is "not rendered".** That is
-    a decision rather than an omission, and ADR-0250 §19 is where it is made: the lane
-    that lands these members is **M1**, "the contract, the wire and the stored shapes,
-    at unchanged behaviour", and §19 assigns every surface to **M4** — "``interfaces/``
-    alone: the CLI's and the browser's listing, answer, withdraw and abandon acts, and a
-    rendered statement for every member of every vocabulary this decision adds". So the
-    four cross the wire — they are on ``TurnOutcome`` and this page decodes the whole
-    outcome — and no panel reads one.
-
-    **The cost is stated rather than hidden, and in this lane it is nil.** §19 also
-    rules that "no behaviour changes in M1": no association is run, no question is
-    raised and no reference is resolved, so every one of the four is ``None`` on every
-    outcome this adapter can see until M3 lands. What M4 owes is not optional when it
-    arrives — §15's last clause makes a surface that "renders no statement for a
-    ``ReferenceOutcome``, an ``EngagementDisposition`` or a ``ClarificationWithdrawal``
-    member it was given" one that "has not implemented this section" — which is the
-    obligation ADR-0244 §13's own last clause already put on the two members above.
-
-    **``forecast_not_read`` is ADR-0260 §10's member, and the decision taken here is now
-    "rendered".** ADR-0260 §12 cut three lanes — the contract with its ``tools/``
-    implementation, the authority in ``permissions/``, and the servicing in
-    ``orchestration/`` plus the composition root — and named ``interfaces/`` in none of
-    them, which is why this entry read "not rendered" while those lanes ran. Issue #2474
-    is the lane that closes it: once L3 landed, the member was populated by the engine and
-    rendered by nothing at all. So ``_outcome_view`` carries it,
-    ``renderForecastNotRead`` puts one fixed statement per member on the screen beside the
-    reply, and ``FORECAST_NOT_READ_WORDS`` is total over the six.
-
-    **It was never optional, and §10 is where that is said**: "A surface renders, beside
-    the reply and never in place of it, one fixed statement per member", under ADR-0242
-    §9's bar binding word for word — and ADR-0262 §11's parity point put **both** surfaces
-    in the one lane, since "a member rendered on one and not the other is the parity
-    failure M4 recorded".
-
-    **The entry above it is still the one that is "not rendered", and the two decisions do
-    not contradict each other.** ADR-0242 §9's deferral is of *that* vocabulary on this
-    surface — "the browser, until its own lane (§5), renders neither the statement nor the
-    reply's absence of one" — and #2237 still carries the lane that ends it. §9's
-    all-or-nothing clause is stated over a vocabulary rather than over a surface, so a
-    page rendering all six of ``ForecastNotRead`` and none of ``SearchNotServiced``'s nine
-    has implemented §10 entire and left §9's browser deferral entire. ADR-0260 §10 defers
-    no surface at all, which is the difference between them.
-
-    **``drive_withheld`` is ADR-0261 §7's member, and the decision taken here is now
-    "rendered".** This entry read "not rendered" while L1 and L2 ran, and named the lane
-    that closes it: §13 assigns the rendering to **L3** by name — "the fixed statements §6
-    and §7 name, on the CLI's abandon and goals surfaces and **on the reply**". L3 is that
-    lane. So ``_outcome_view`` carries it, ``renderDriveWithheld`` puts one fixed statement
-    per member on the screen beside the reply, and ``DRIVE_WITHHELD_WORDS`` is total over
-    the seven §7 closes the vocabulary at.
-
-    **It was never optional, and §7 is where that is said**: one fixed statement per member
-    of a closed seven, rendered "beside the reply", under ADR-0242 §9's all-or-nothing
-    rule — the obligation ``forecast_not_read``'s and ``attempt_report``'s entries already
-    carry, and which ADR-0262 §11's parity point makes checkable here by putting both
-    surfaces in one lane.
-
-    **The member crosses and nothing is derived from it here.** §7 fixes it as "where the
-    goal stands" and never "why the step was not claimed": one ``ClaimRefused`` covers both
-    liveness raisers and the engine's own post-refusal read cannot establish which fired,
-    so this view carries the value ``orchestration`` computed and asks it no question. It
-    is not read off ``step``, which a withheld drive leaves at the status and version it
-    stood at, nor off ``attempt_report``, which §7's turn does not write at all.
-
-    **``satisfied_from_earlier`` is ADR-0259 §2's member, and the decision taken here is
-    "not rendered".** That is a decision rather than an omission, and §2 is where it is
-    made: "**The wording and the channel stay A9's**; what this decision fixes is the
-    field, its type, and that a silent reuse is not conforming." §11 cuts three lanes —
-    the contract and the store, the claim at dispatch, and the reconciliation pass — and
-    names ``interfaces/`` in none of them. So the member crosses the wire, because it is
-    on ``TurnOutcome`` and this page decodes the whole outcome, and no panel reads it.
-
-    **The cost in this lane is nil, and that is stated rather than hidden.** L1 lands the
-    contract and the store alone: nothing takes an effect claim at dispatch until L2, so
-    no step is satisfied and the member is ``None`` on every outcome this adapter can
-    see. What a surface owes when it does arrive is **not** ADR-0242 §9's
-    all-or-nothing rule — this is a tuple of step ids rather than a vocabulary of
-    statements — but §2 does make a silent reuse non-conforming, so a page that rendered
-    a satisfied turn as one that did nothing would be reporting work the assistant did
-    as work it did not do. That is the same gap ``recipient_grant``'s entry opened, and
-    it is A9's to close.
-
-    **``attempt_report`` is ADR-0262 §6's member, and the decision taken here is now
-    "rendered".** This entry read "not rendered" while L1 through L4 ran, and named the
-    lane that closes it: ADR-0262 §11 assigns both surfaces to **L5** — "``interfaces``.
-    §6's six fixed statements, on the CLI and on the browser — **both surfaces**, since a
-    member rendered on one and not the other is the parity failure M4 recorded." L5 is
-    that lane. So ``_outcome_view`` carries it, ``renderAttemptReport`` puts one fixed
-    statement per member on the screen beside the reply, and ``ATTEMPT_OUTCOME_WORDS`` is
-    total over the six §6's report admits.
-
-    **It was never optional, and §6 is where that is said**: "a surface that renders no
-    statement for a member has not implemented this section and is not a permitted
-    degradation" — ADR-0242 §9's all-or-nothing rule, which ``forecast_not_read``'s and
-    ``drive_withheld``'s entries already carry, and which §11's parity point made stricter
-    here than at either of theirs by putting both surfaces in one lane.
-
-    **What crosses is the outcome word alone, and ``continues`` crosses through no route.**
-    §6 splits the report between the two channels by name — "the **reply** carries the
-    offer and the **surface** the outcome word" — because "an offer a surface printed
-    would reach neither the browser's transcript nor the spoken channel as part of what
-    was said", and the reply's own offer is what the next turn's bare "Yes" binds to
-    (ADR-0250 §3). So the half this page is forbidden to render is a half it is not given,
-    which is ADR-0168 §6's enumeration discipline: what may appear on the page is decided
-    in ``_outcome_view`` rather than in the renderer that reads it.
-
-    **``stopped`` is ADR-0297 §4's member, and the decision taken here is "not
-    rendered".** It is ``True`` on exactly one shape, a ``resume`` whose control
-    activation the user stopped, and every turn route this page sends is a turn call,
-    which a stop answers with ``ActivationStoppedError`` rather than an outcome. A
-    stopped resume's outcome reaches this page as the reply-less card it already draws
-    for a recovered park, and what the stopped activation finished the user reads in
-    the conversation's current state (ADR-0295 §3:5). ADR-0297 §6:4 lands the
-    gateway's stop control last, in its own lane, and whether the page says
-    "stopped" on such a card is that lane's to decide.
-
-    **This assertion is the tripwire firing as designed**, which is what the test's own
-    name says: a member reaching the page unnoticed is what it exists to prevent, and a
-    lane that adds one names it here and states which way the decision went. Nothing
-    under ``src/ai_assistant/interfaces/gateway/`` changes for it.
-    """
-    assert set(TurnOutcome.model_fields) == {
-        "turn",
-        "step",
-        "conversation_id",
-        "capture_degraded",
-        "reply",
-        "reply_degraded",
-        "routed",
-        "recipient_grant",
-        "search_not_serviced",
-        "read_confirmation",
-        "read_answer",
-        "goal_engagement",
-        "clarification",
-        "reference",
-        "disambiguation",
-        "outbound_statement",
-        "forecast_not_read",
-        "authorizations",
-        "drive_withheld",
-        "satisfied_from_earlier",
-        "attempt_report",
-        "stopped",
-    }
 
 
 # --- ADR-0168 §7: the two checks that run before the session is read ---
@@ -1467,27 +924,6 @@ async def test_a_peer_that_resets_mid_request_raises_nothing_out_of_the_handler(
 
 
 # --- What the browser is handed, and what it is not ---
-
-
-async def test_the_view_keeps_the_gates_verdict_apart_from_the_steps_outcome(
-    harness: Harness,
-) -> None:
-    """Issue #531's rule, at the second adapter.
-
-    "The disposition is the gate's verdict; the named step's ``status`` and
-    ``failure`` are the outcome", and a renderer written as "not failed means
-    done" reproduces #531 one status over. A turn with no step says so with
-    ``None`` rather than with a success.
-    """
-    harness.engine.turn_outcome = TurnOutcome(
-        turn=_turn_that_ran(), conversation_id="c-1", reply="Done."
-    )
-    cookie_half, header_half = await _start_session(harness)
-    head, body = _resume(harness, header_half=header_half, cookie_half=cookie_half)
-
-    answer = await harness.send(head, body)
-
-    assert answer.payload["outcome"]["step"] is None
 
 
 async def test_no_session_value_appears_in_any_response_but_the_exchanges_own(
