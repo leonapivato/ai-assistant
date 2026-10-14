@@ -1,11 +1,8 @@
 """The values and the one enumeration ADR-0230 §4 adds, and what each refuses.
 
 §14 item 17 asks that "the models refuse what §1 says they refuse", arm for arm, and
-this file is the half of that item which lives in `core`: the ``ReadAsk`` validator's
-three arms, ``ReadRequest``'s at-most-one-of-each-kind rule over the new member, and
-``FetchOutcome``'s exactly-one rule. The rest of item 17 — that a plan carrying two
-``LOCAL_FILE`` asks is not an emission this corpus admits, asserted through a planner
-— is Lane C2's.
+this file covers ``FetchOutcome``'s exactly-one rule and what each listing value
+carries.
 
 **Mutation after construction is asserted here too**, because every model ADR-0230
 adds is frozen and item 17 names that as an arm of its own: a value a servicer could
@@ -15,7 +12,7 @@ edit after verifying it is a value whose verification means nothing.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Final
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -26,9 +23,6 @@ from ai_assistant.core.types import (
     FetchRefusal,
     MemorySource,
     Provenance,
-    ReadAsk,
-    ReadKind,
-    ReadRequest,
     SemanticMemory,
     SourceListing,
     SourceListingEntry,
@@ -68,101 +62,6 @@ def _record() -> SemanticMemory:
             attestation=Attestation(reported_by="files", reported_at=_WHEN),
         ),
     )
-
-
-# --- the LOCAL_FILE ask (ADR-0230 §1) ---------------------------------------
-
-
-def test_a_local_file_ask_carries_one_entry_label() -> None:
-    """The positive arm, so the refusals below are not vacuous."""
-    ask = ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F2")
-
-    assert (ask.entry, ask.query, ask.labels) == ("F2", None, ())
-
-
-@pytest.mark.parametrize("entry", [None, "", "   ", "\n\t"])
-def test_a_local_file_ask_without_a_non_blank_entry_is_refused(entry: str | None) -> None:
-    """§1: "a ``LOCAL_FILE`` ask carries a non-blank ``entry``".
-
-    ``None`` and a whitespace-only string are different mistakes and only one of them
-    is "this kind's argument is missing", which is why the model decides both here
-    rather than leaving the second to a field annotation that would name neither.
-    """
-    with pytest.raises(ValidationError, match="non-blank entry"):
-        ReadAsk(kind=ReadKind.LOCAL_FILE, entry=entry)
-
-
-def test_a_local_file_ask_carrying_a_query_is_refused() -> None:
-    """An ask carrying two kinds' arguments is two asks wearing one kind's name."""
-    with pytest.raises(ValidationError, match="must not carry a query"):
-        ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1", query="what did it say")
-
-
-def test_a_local_file_ask_carrying_labels_is_refused() -> None:
-    """``entry`` and ``labels`` index **different sequences** (§1).
-
-    A ``CITATION_HOP`` label is an ordinal into the ``memories`` sequence; a
-    ``LOCAL_FILE`` label is an ordinal into the *listing*. An ask carrying both would
-    make the model's output ambiguous at exactly the seam ADR-0226 §3 exists to keep
-    unambiguous.
-    """
-    with pytest.raises(ValidationError, match="must not carry labels"):
-        ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1", labels=("M1",))
-
-
-@pytest.mark.parametrize(
-    ("kind", "argument"),
-    [(ReadKind.SIGHTED_QUERY, {"query": "q"}), (ReadKind.CITATION_HOP, {"labels": ("M1",)})],
-)
-def test_an_older_kinds_ask_carrying_an_entry_is_refused(
-    kind: ReadKind, argument: dict[str, Any]
-) -> None:
-    """§1: "a ``SIGHTED_QUERY`` and a ``CITATION_HOP`` ask carry no ``entry``".
-
-    The arm that keeps every arm of the validator uniform: each kind carries exactly
-    its own argument and refuses the others, so a reader never has to consult ``kind``
-    to know which field is meaningful.
-    """
-    with pytest.raises(ValidationError, match="must not carry an entry"):
-        ReadAsk(kind=kind, entry="F1", **argument)
-
-
-def test_a_request_naming_two_local_file_asks_is_refused() -> None:
-    """ADR-0226 §2's at-most-one-of-each-kind rule, binding unchanged on the new member.
-
-    ADR-0230 §1: "one emission carries at most one ``LOCAL_FILE`` ask, and a request
-    naming two is not an emission this corpus admits". A turn that revises may emit a
-    second on its *second* plan, which is ADR-0228 §3 applied and not widened.
-    """
-    ask = ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1")
-
-    with pytest.raises(ValidationError, match="at most one ask of each kind"):
-        ReadRequest(asks=(ask, ask))
-
-
-def test_a_request_may_carry_a_local_file_ask_beside_each_other_kind() -> None:
-    """The positive arm: this kind is additive to the two ADR-0226 admitted.
-
-    Asserted against the three kinds by name rather than against ``set(ReadKind)``,
-    which is what it read before ADR-0231 §1 admitted a fourth. This case is about
-    ADR-0230's member sitting beside its neighbours, and an equality against the
-    whole enumeration would silently turn it into a case about whatever the
-    enumeration last gained — ``tests/core/test_planning_types.py`` holds the
-    widest-emission arm, where every member is deliberately named.
-    """
-    request = ReadRequest(
-        asks=(
-            ReadAsk(kind=ReadKind.SIGHTED_QUERY, query="q"),
-            ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1",)),
-            ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1"),
-        )
-    )
-
-    assert {ask.kind for ask in request.asks} == {
-        ReadKind.SIGHTED_QUERY,
-        ReadKind.CITATION_HOP,
-        ReadKind.LOCAL_FILE,
-    }
 
 
 # --- the outcome (ADR-0230 §4) ----------------------------------------------

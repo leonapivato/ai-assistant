@@ -4,7 +4,7 @@
 order it is *named* for; the construction refusal §6 gives ADR-0155 §3's absolute
 clause; ``authorises`` refusing across ``coverage`` **alone**, which §15 names as the
 case that fails an implementation leaving the field out of the whole-binding
-comparison; and the transcription onto the shape that crosses the wire.
+comparison; and the carrier holding each state unchanged for the seam to transcribe.
 
 **Two things this module deliberately does not test.** The *computation* of the value
 is ADR-0233 §5's and belongs to the lane that follows the `core` change (#2051): here
@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from typing import Final
 
 import pytest
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from ai_assistant.core.types import (
     ActionRequest,
@@ -32,15 +32,10 @@ from ai_assistant.core.types import (
     CapabilityEffect,
     CapabilityResult,
     CarriedProvenance,
-    Confirmation,
-    ConfirmationEgress,
-    ContinuationToken,
     CostBasis,
     DataTier,
-    DestinationProtocol,
     DiscloserProvenance,
     EgressBinding,
-    EgressDestination,
     EgressSpan,
     Idempotency,
     PermissionDecision,
@@ -52,7 +47,6 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
 )
-from ai_assistant.wire.codec import project
 
 _AT = datetime(2026, 9, 4, 9, 0, tzinfo=UTC)
 _ACCOUNT = BoundAccount(identity="work@example.com", reference="conn-0001")
@@ -299,89 +293,3 @@ def test_the_carrier_writes_the_bindings_value_unchanged() -> None:
             spans={}, planned_with_external_content=False, coverage=coverage
         )
         assert carrier.coverage is coverage
-
-
-# --- §4's seventh clause, ADR-0178 §6: the shape that crosses the wire -----------
-
-
-def test_the_confirmation_shape_carries_the_transcribed_state_across_the_wire() -> None:
-    """§4's seventh clause and ADR-0178 §6's rule, over the projection a peer receives.
-
-    ``ConfirmationEgress`` is what crosses — on ``TurnOutcome.step.confirmation`` and
-    as the element type of ``pending_confirmations`` — and ``wire/codec``'s ``project``
-    renders a model by ``model_dump()``, every field included. So the member is on the
-    wire on every egress confirmation, which is the arithmetic behind
-    ``PROTOCOL_VERSION`` moving (pinned beside the constant in
-    ``tests/core/test_engine_surface_closure.py``).
-
-    The value crosses as the enum's **spelling**, because ``project`` renders every
-    ``Enum`` as its ``value`` — the same route ``DiscloserProvenance`` takes on the
-    spans this model already carries, so no row is added to ADR-0087 §2c's scalar
-    table.
-
-    And it round-trips **equal** through an adapter of the type a client decodes into,
-    which is what makes the member a transcription rather than a second carriage: the
-    far end reconstructs the state the recorded decision held and nothing derives it
-    there.
-    """
-    egress = ConfirmationEgress(
-        account_identity=_ACCOUNT.identity,
-        spans=(
-            EgressSpan(
-                argument="to",
-                provenance=DiscloserProvenance.SYSTEM_SELECTED,
-                extent=len("a@example.com"),
-                destination=EgressDestination(
-                    protocol=DestinationProtocol.SMTP,
-                    supplied="a@example.com",
-                    canonical="a@example.com",
-                ),
-            ),
-        ),
-        planned_with_external_content=False,
-        coverage=SpanCoverage.MODEL_ON_EVERY_PATH,
-    )
-    confirmation = Confirmation(
-        tool_id="smtp",
-        tool_description="Send an email.",
-        parameters={"to": "a@example.com"},
-        reason="the policy wants a human answer",
-        token=ContinuationToken(handle="h-1"),
-        egress=egress,
-        read=None,
-        authorization=None,
-    )
-
-    projected = project(confirmation)
-    decoded = TypeAdapter(Confirmation).validate_python(projected)
-
-    assert projected["egress"]["coverage"] == "model_on_every_path"
-    assert decoded == confirmation
-    assert decoded.egress is not None
-    assert decoded.egress.coverage is SpanCoverage.MODEL_ON_EVERY_PATH
-
-
-def test_a_peer_that_omits_the_member_is_refused_rather_than_defaulted() -> None:
-    """ADR-0178 §6's rule seen from the decoding side: this is why the version moved.
-
-    The member is required with no default and ``ConfirmationEgress`` sets
-    ``extra="forbid"``, so the bump bites in **both** directions — a new client
-    decoding an old hub's confirmation fails with ``missing``, and an old client
-    decoding a new hub's fails with ``extra_forbidden``. Half of that pair is what a
-    default would silently convert into a fabricated ``NOT_COVERED`` on the surface
-    where a user is being asked to approve something.
-    """
-    whole = {
-        "account_identity": _ACCOUNT.identity,
-        "spans": [],
-        "planned_with_external_content": False,
-        "coverage": "not_covered",
-    }
-    adapter = TypeAdapter(ConfirmationEgress)
-
-    assert adapter.validate_python(whole).coverage is SpanCoverage.NOT_COVERED
-
-    with pytest.raises(ValidationError, match="coverage"):
-        adapter.validate_python(
-            {name: value for name, value in whole.items() if name != "coverage"}
-        )

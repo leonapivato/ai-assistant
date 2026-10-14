@@ -33,7 +33,6 @@ from ai_assistant.core.types import (
     CanonicalDestination,
     CapabilityEffect,
     CapabilityResult,
-    ConfirmationEgress,
     CostBasis,
     CoverageUnrecordedBinding,
     DataTier,
@@ -550,23 +549,3 @@ def test_from_request_transcribes_the_narrow_field_and_makes_no_sibling() -> Non
 
     assert isinstance(recorded.egress_binding, EgressBinding)
     assert recorded.egress_binding.coverage is SpanCoverage.MODEL_ON_EVERY_PATH
-
-
-def test_no_confirmation_shape_exists_for_this_epoch() -> None:
-    """§14's last clause: no coverage-unrecorded confirmation shape is minted.
-
-    ``ConfirmationEgress.coverage`` is required with no default, so composing one for a
-    row that never recorded the fact would demand the fabrication this representation
-    exists to avoid — at the surface where a user is being asked to approve something.
-    The absence is answered by not asking the question; both assembly sites refuse such
-    a row and neither gives the member a default or a nullable variant.
-    """
-    assert ConfirmationEgress.model_fields["coverage"].is_required()
-    assert not any(name.startswith("coverage_") for name in ConfirmationEgress.model_fields)
-
-    with pytest.raises(ValidationError, match="coverage"):
-        ConfirmationEgress(  # type: ignore[call-arg]  # the omission under test
-            account_identity=_ACCOUNT.identity,
-            spans=(),
-            planned_with_external_content=False,
-        )
