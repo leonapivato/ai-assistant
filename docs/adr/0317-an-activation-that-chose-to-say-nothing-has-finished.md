@@ -95,7 +95,10 @@ finished activation's are.
 
 > **Normative.** It is written where a stage failed, or a deadline ended the activation,
 > whatever earlier rounds wrote. The controller's loop guard ending the activation
-> (ADR-0280 §4:6, in the scopes later decisions give it) counts as a stage's failure.
+> (ADR-0280 §4:6, in the scopes later decisions give it) counts as a stage's failure, and
+> so does a failure after the activation took in any of the conversation's waiting
+> messages and before its first stage ran. A failure before it took in any writes
+> nothing, since the activation did nothing.
 
 > **Normative.** It is written where a message a round wrote was refused by authorizing,
 > or its write did not come back done (ADR-0306 §5), and no message of the activation was
@@ -130,9 +133,11 @@ made calls beside it brings one, which may write.
 > as authorizing's verdict on the message. Where one does not show, the lane files an
 > issue and does not widen its change to fix it.
 
-> **Normative.** A message write that did not come back done gains no entry in the record:
-> acting and the message writes write none (ADR-0314 §4:3). Its effect record holds its
-> outcome.
+> **Normative.** Two causes gain no entry in the record. A message write that did not come
+> back done has none, since acting and the message writes write none (ADR-0314 §4:3), and
+> its effect record holds its outcome. A failure before the first stage ran has none,
+> since no source ran to write one, and the episode's end entry `ended_before_controller`
+> holds it.
 
 > **Normative.** The viewer gains no reading for this decision. It shows the round limit,
 > a stage's failure, a deadline and the loop guard through its *could not finish* badge,
@@ -163,7 +168,8 @@ the second is how the user hears that the assistant acted, not a guard against
 | `ActivationState.unfinished` | Set for the round limit, the loop guard and §3:4's case alone, never for a silent ending (§2:3, §3:5) |
 | `terminal_status` | Unchanged rows; its docstring cites this decision |
 | Planning's instruction | Its text unchanged; the comment on its reply part cites this decision, not ADR-0293 §9:1 (§5:1) |
-| `PhasePath.unbegun`, `PhasePath._couldnt_finish` and the module docstring of `phase_path.py` | Each cites this decision where it cites ADR-0293 §9:1 for when the message is written |
+| `PhasePath.unbegun` | Unchanged in what it does: it writes the message for §3:3's failure after messages were taken in and before the first stage ran; it cites this decision where it cites ADR-0293 §9:1 |
+| `PhasePath._couldnt_finish` and the module docstring of `phase_path.py` | Each cites this decision where it cites ADR-0293 §9:1 for when the message is written |
 | `couldnt_finish` in `orchestration/chat.py` | Unchanged: the fixed message and how it lists the effects (§3:1) |
 | `ActivationEnding` | Unchanged members: `done` covers a silent ending (§2:4) |
 | The diagnostic record, its emitters and the viewer | Unchanged (§4) |
@@ -207,8 +213,9 @@ the second is how the user hears that the assistant acted, not a guard against
   episode and its effect records.
 
 **What stays open.**
-- A message lost to a store failure leaves the diagnostic record without the cause of the
-  *couldn't finish* it may write (§4:3).
+- A message lost to a store failure, and a failure before the first stage ran, leave the
+  diagnostic record without the cause of the *couldn't finish* written for them (§4:3).
+  The effect record and the episode's end entry hold each.
 
 ## Alternatives considered
 
@@ -220,7 +227,7 @@ the second is how the user hears that the assistant acted, not a guard against
   user.** Not chosen: a later round that wrote again has answered, and §9:1 never wrote
   it where a message had been written.
 - **An entry recording that *couldn't finish* was written.** Rejected: `phase_path.py`
-  writes no entry (ADR-0314 §4:2), and each cause except a lost write is in the record
+  writes no entry (ADR-0314 §4:2), and each cause but the two §4:3 names is in the record
   already.
 - **The viewer badging a refused message as *could not finish* where no message was
   allowed.** Not chosen: its *refused* badge already shows the cause, and the viewer is
