@@ -2,80 +2,28 @@
 
 The conformance subclass runs against ``:memory:`` (no filesystem, so no
 ``integration`` mark). The tests that open a real file — the half this store
-exists for (ADR-0049 §2): a parked confirmation, an execution, and the non-reused
-id space surviving the process that made them — say so via ``tmp_path``.
+exists for (ADR-0049 §2): a stop record and an activation's effect records
+surviving the process that wrote them — say so via ``tmp_path``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
-import os
-import shutil
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from plan_store_contract import (
-    _KEY,
-    PlanStoreContract,
-    _attempt,
-    _claim,
-    _effect_plan,
-    _goal,
-    _intended,
-    _minting,
-    _plan,
-    _quote,
-    _revision,
-)
+from plan_store_contract import PlanStoreContract
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import ClaimRefused, ClaimStopped, PlanningError
-from ai_assistant.core.types import (
-    MAX_ASSOCIATION_CANDIDATES,
-    MAX_GOAL_EVIDENCE,
-    ActionPlan,
-    ActionQuoteMinting,
-    ActivationEffect,
-    ActivationEffectClaim,
-    AttemptOutcome,
-    AttemptState,
-    AttemptTransition,
-    EffectClaim,
-    EvidenceApplicability,
-    EvidenceBasis,
-    EvidenceHistory,
-    EvidenceStanding,
-    ExecutionState,
-    Goal,
-    GoalAttempt,
-    GoalElement,
-    GoalEvidence,
-    GoalQuestion,
-    GoalQuestionDisposition,
-    GoalRevision,
-    GoalStatus,
-    Ground,
-    IntendedAction,
-    IntendedActionMinting,
-    MemorySource,
-    PlanStep,
-    ReadKind,
-    StepFailure,
-    StepStatus,
-    StepTransition,
-)
+from ai_assistant.core.errors import ClaimStopped, PlanningError
+from ai_assistant.core.types import ActivationEffect, ActivationEffectClaim, ToolOutcome
 from ai_assistant.planning import SqlitePlanStore, sqlite_store
-from ai_assistant.planning.sqlite_store import (
-    _META_SCHEMA,
-    _UPGRADABLE_FROM,
-    _run_to_completion,
-)
+from ai_assistant.planning.sqlite_store import _run_to_completion
 from ai_assistant.testing.cancellation import (
     ResourceLog,
     SuspendedMidWrite,
@@ -85,7 +33,6 @@ from ai_assistant.testing.cancellation import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
-    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from ai_assistant.core.protocols import PlanStore
@@ -96,13 +43,10 @@ def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
 
 
-#: The instant a pre-ADR-0249 row this suite seeds was written at.
+#: The instant every effect record this suite claims was claimed at.
 _AT = datetime(2026, 1, 1, tzinfo=UTC)
-
-#: Two engagement instants after it, for ADR-0250 §1's ordering key. Distinct, so
-#: "engaged later" is a fact about the values rather than about write order.
-_LATER = datetime(2026, 2, 1, tzinfo=UTC)
-_LATEST = datetime(2026, 3, 1, tzinfo=UTC)
+#: The record tables this store creates. A refused open creates neither.
+_RECORD_TABLES: Final = frozenset({"stopped_activations", "activation_effects"})
 
 
 def _journal_mode(database: Path) -> int | None:
@@ -111,78 +55,11 @@ def _journal_mode(database: Path) -> int | None:
     return journal.stat().st_mode & 0o777 if journal.exists() else None
 
 
-async def _seed_and_start(store: SqlitePlanStore, plan_id: str = "p1") -> str:
-    """Save a goal+plan and start one execution under an attempt, returning its id."""
-    await store.save_goal(_goal())
-    await store.save_plan(_plan(plan_id=plan_id))
-    return (await _owned(store, await store.start_execution(plan_id))).id
-
-
-async def _owned(store: SqlitePlanStore, state: ExecutionState) -> ExecutionState:
-    """Open the attempt that owns ``state``, which is what a claim names (ADR-0255 §3)."""
-    await store.open_attempt(
-        GoalAttempt(id="a1", goal_id="g1", opened_at=_fixed_now(), execution_ids=(state.id,))
-    )
-    return state
-
-
-async def _park(store: SqlitePlanStore) -> str:
-    """Seed, start, and drive the one step to AWAITING_APPROVAL; return the id."""
-    state = await _owned(store, await store.start_execution("p1"))
-    await store.commit_transition(
-        StepTransition(
-            execution_id=state.id,
-            step_id="s1",
-            to_status=StepStatus.AWAITING_APPROVAL,
-            expected_version=state.version,
-            bound_tool="smtp",
-        )
-    )
-    return state.id
-
-
 #: The private method each locked operation does its SQL in, which ADR-0060's hook
-#: wraps to park a worker thread inside the connection's turn. Spelled out rather
-#: than derived from the operation name, because the three by-id reads share one
-#: row reader: ``_read_one`` is named for what it does, not for the three contract
-#: methods that each take the lock around it. Wrapping the shared helper still
-#: exercises each of those three sites separately, because the case arms
-#: immediately before the site under test calls it.
+#: wraps to park a worker thread inside the connection's turn.
 _SYNC_METHODS = {
-    "save_goal": "_save_goal_sync",
-    "save_plan": "_save_plan_sync",
-    "start_execution": "_start_execution_sync",
-    "commit_transition": "_commit_transition_sync",
-    "delete_goal": "_delete_goal_sync",
     "clear": "_clear_sync",
-    "get_goal": "_read_one",
-    "get_plan": "_read_one",
-    "get_execution": "_read_one",
-    "active_executions": "_active_executions_sync",
     "export": "_export_sync",
-    # ADR-0252 §12's three members, each entering its own lock site. `get_evidence`
-    # reads through `_read_evidence` rather than the `_read_one` the three row reads
-    # above share, because an evidence row is reconciled against the columns promoted
-    # beside it (#2328) and a blob-only read cannot be.
-    "record_evidence": "_record_evidence_sync",
-    "get_evidence": "_read_evidence",
-    "evidence_of": "_evidence_of_sync",
-    # ADR-0265 §5's member, which is a compare-and-swap: its read, its comparison and
-    # its write are one `BEGIN IMMEDIATE`, so it is its own lock site rather than a
-    # caller of one above.
-    "record_intended_actions": "_record_intended_actions_sync",
-    # ADR-0267 §2's member, likewise a compare-and-swap: its read, its comparison and
-    # its write are one `BEGIN IMMEDIATE`, so it is its own lock site.
-    "record_quote": "_record_quote_sync",
-    # ADR-0261 §2's and §6's members. The first is a compare-and-swap whose one
-    # `BEGIN IMMEDIATE` carries several row writes and the answer together; the second
-    # is the read that answers the same predicate, whose own lock site is what makes it
-    # a single consistent snapshot — which is the hook ADR-0261 §14 arm 9 asks the
-    # *fixture* to supply, never a member of `PlanStore`.
-    "close_goal_abandoned": "_close_goal_abandoned_sync",
-    "has_outstanding_effect": "_has_outstanding_effect_sync",
-    # ADR-0259 §2's member, and a compare-and-swap for the same reason.
-    "claim_effect": "_claim_effect_sync",
     # ADR-0297 §1's member: the write every later claim is decided against.
     "record_stop": "_record_stop_sync",
     # ADR-0306 §6's three members: the claim is one `BEGIN IMMEDIATE` deciding the
@@ -257,452 +134,7 @@ class TestSqlitePlanStoreContract(PlanStoreContract):
             realised.close()
 
 
-# --- durability: state survives the process (ADR-0049 §2) ------------------
-
-
-async def test_a_parked_confirmation_survives_a_restart(tmp_path: Path) -> None:
-    """The property the whole store exists for: an AWAITING_APPROVAL step reloads.
-
-    A restarted StepRunner recovers it by asking the trail for
-    ``pending_confirmation(execution_id, step_id)`` (ADR-0044 §3), so the
-    ``bound_tool`` and the durable execution id must survive, and the step must
-    still be resumable — a RUNNING transition commits after the reopen.
-    """
-    path = tmp_path / "plans.db"
-    first = SqlitePlanStore(path=path, now=_fixed_now)
-    await first.save_goal(_goal())
-    await first.save_plan(_plan())
-    execution_id = await _park(first)
-    first.close()
-
-    reopened = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        state = await reopened.get_execution(execution_id)
-        assert state is not None
-        step = state.step("s1")
-        assert step is not None
-        assert step.status is StepStatus.AWAITING_APPROVAL
-        assert step.bound_tool == "smtp"
-
-        # Resumable across the restart: the parked step still claims.
-        ran = await reopened.commit_transition(
-            StepTransition(
-                execution_id=execution_id,
-                step_id="s1",
-                to_status=StepStatus.RUNNING,
-                expected_version=state.version,
-                approval_ref="perm-1",
-                attempt_id="a1",
-            )
-        )
-        resumed = ran.step("s1")
-        assert resumed is not None
-        assert resumed.status is StepStatus.RUNNING
-    finally:
-        reopened.close()
-
-
-async def test_an_execution_id_is_not_reused_after_delete_then_reopen(tmp_path: Path) -> None:
-    """The durable exec_counter does not rewind across delete_goal + a reopen."""
-    path = tmp_path / "plans.db"
-    first = SqlitePlanStore(path=path, now=_fixed_now)
-    first_id = await _seed_and_start(first)
-    await first.delete_goal("g1")
-    first.close()
-
-    reopened = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        second_id = await _seed_and_start(reopened)
-        assert second_id != first_id
-    finally:
-        reopened.close()
-
-
-async def test_an_execution_id_is_not_reused_after_clear_then_reopen(tmp_path: Path) -> None:
-    """Same non-reuse through clear + a reopen: the counter is not reset."""
-    path = tmp_path / "plans.db"
-    first = SqlitePlanStore(path=path, now=_fixed_now)
-    first_id = await _seed_and_start(first)
-    await first.clear()
-    first.close()
-
-    reopened = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        second_id = await _seed_and_start(reopened)
-        assert second_id != first_id
-    finally:
-        reopened.close()
-
-
-# --- execution-id non-reuse across fresh instances (ADR-0049 §3) -----------
-
-
-async def test_two_fresh_memory_instances_do_not_reuse_an_id() -> None:
-    """The mode where the durable counter is worthless (a fresh :memory: DB).
-
-    Non-reuse there rests entirely on the per-incarnation nonce. Injecting two
-    *distinct* fixed nonces makes the assertion deterministic (not two real
-    uuid4()s differing) and lets it check the id actually embeds its nonce.
-    """
-    first = SqlitePlanStore(path=":memory:", now=_fixed_now, incarnation_factory=lambda: "NONCE-A")
-    second = SqlitePlanStore(path=":memory:", now=_fixed_now, incarnation_factory=lambda: "NONCE-B")
-    try:
-        first_id = await _seed_and_start(first)
-        second_id = await _seed_and_start(second)
-        assert first_id != second_id
-        assert "NONCE-A" in first_id
-        assert "NONCE-B" in second_id
-    finally:
-        first.close()
-        second.close()
-
-
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="platform has no fork")
-async def test_execution_ids_do_not_collide_across_a_fork() -> None:
-    """#305's copied-store case, closed by reading the pid *at allocation*.
-
-    The store — nonce and all — is constructed and seeded in the **parent**, then
-    ``fork``ed. A fork copies the incarnation nonce (and the whole store object)
-    into both children, so the only thing that can differentiate their ids is the
-    pid — and only if it is read at allocation, not captured in ``__init__``. Each
-    child drives ``_start_execution_sync`` directly on its own copied ``:memory:``
-    database (a forked child is the sole user of its copy, and this avoids reusing
-    the parent's event loop), then writes its id through a pipe. A buggy impl that
-    stored ``os.getpid()`` at construction would give both children the *parent's*
-    pid and identical ids — this test fails on that; the real impl reads the pid in
-    ``_start_execution_sync`` and the ids differ.
-    """
-    parent = SqlitePlanStore(path=":memory:", now=_fixed_now, incarnation_factory=lambda: "SHARED")
-    await parent.save_goal(_goal())
-    await parent.save_plan(_plan())
-
-    def _run_child(write_fd: int) -> None:
-        # Drive the sync allocation path directly: no event loop (the parent's is
-        # copied into the child and must not be reused), the sole user of this
-        # child's copied in-memory database.
-        exec_id = parent._start_execution_sync("p1").id
-        with os.fdopen(write_fd, "w") as pipe:
-            pipe.write(exec_id)
-        os._exit(0)
-
-    ids: list[str] = []
-    try:
-        for _ in range(2):
-            read_fd, write_fd = os.pipe()
-            pid = os.fork()
-            if pid == 0:  # child
-                os.close(read_fd)
-                _run_child(write_fd)
-            os.close(write_fd)  # parent
-            with os.fdopen(read_fd) as pipe:
-                ids.append(pipe.read())
-            os.waitpid(pid, 0)  # noqa: ASYNC222 — reaping a forked child in a test
-    finally:
-        parent.close()
-
-    assert "SHARED" in ids[0]
-    assert ids[0] != ids[1], "forked children sharing a nonce must differ by pid"
-
-
 # --- transactional integrity (ADR-0049 §1) ---------------------------------
-
-
-async def test_a_refused_transition_leaves_the_execution_untouched(tmp_path: Path) -> None:
-    """A rejected commit rolls back: no half-applied version reaches disk.
-
-    An illegal transition (PENDING → SUCCEEDED, skipping the claim) must raise
-    and change nothing — asserted by reopening the file, so a return-value-only
-    rollback would not pass.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    execution_id = await _seed_and_start(store)
-    before = await store.get_execution(execution_id)
-    assert before is not None
-
-    with pytest.raises(PlanningError):
-        await store.commit_transition(
-            StepTransition(
-                execution_id=execution_id,
-                step_id="s1",
-                to_status=StepStatus.SUCCEEDED,
-                expected_version=before.version,
-            )
-        )
-    store.close()
-
-    reopened = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        after = await reopened.get_execution(execution_id)
-        assert after is not None
-        assert after.version == before.version
-        step = after.step("s1")
-        assert step is not None
-        assert step.status is StepStatus.PENDING
-    finally:
-        reopened.close()
-
-
-async def test_a_mutated_invalid_goal_is_refused_and_does_not_poison_reads(
-    tmp_path: Path,
-) -> None:
-    """An input tampered past its validators is rejected at the write, not on read.
-
-    ``Goal`` is frozen (ADR-0068), but the validation-skipping ``__dict__`` bypass
-    survives (ADR-0018 §3), so a caller can still empty a goal's ``interpretation``
-    behind pydantic's back — the same bypass ``test_a_mutated_invalid_plan_is_refused``
-    uses, and after ADR-0249 §1 the interpretation is where a goal's objective lives.
-    The store revalidates before persisting, so the write raises ``PlanningError``
-    and nothing durable is written — the store cannot poison its own later reads
-    (round-4 review).
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        tampered = _goal(goal_id="g-bad")
-        # An empty interpretation is the shape ADR-0249 §1 refuses outright: "no goal
-        # is ever constructed with an empty interpretation".
-        tampered.__dict__["interpretation"] = ()
-
-        with pytest.raises(PlanningError):
-            await store.save_goal(tampered)
-
-        assert await store.get_goal("g-bad") is None  # nothing was stored
-        # And a good goal still writes and reads back — the store is not poisoned.
-        await store.save_goal(_goal())
-        stored = await store.get_goal("g1")
-        assert stored is not None
-        assert stored.statement == "relocate to Lisbon"
-    finally:
-        store.close()
-
-
-async def test_a_mutated_invalid_plan_is_refused(tmp_path: Path) -> None:
-    """The same write-time revalidation guards plans (round-4 review)."""
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal())
-        tampered = _plan()
-        tampered.__dict__["goal_id"] = "   "  # blank Identifier — invalid
-
-        with pytest.raises(PlanningError):
-            await store.save_plan(tampered)
-        assert await store.get_plan("p1") is None
-    finally:
-        store.close()
-
-
-async def test_an_id_less_constructed_goal_or_plan_is_a_planning_error(tmp_path: Path) -> None:
-    """A model_construct'd instance missing its id fails as PlanningError, not AttributeError.
-
-    The revalidation helper reads the id only via ``getattr`` when composing its
-    message, so an id-less input stays inside this layer's error boundary rather
-    than leaking a raw ``AttributeError`` (round-5 review).
-    """
-    from ai_assistant.core.types import ActionPlan, Goal  # noqa: PLC0415 — test-local
-
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        with pytest.raises(PlanningError):
-            await store.save_goal(Goal.model_construct())
-        with pytest.raises(PlanningError):
-            await store.save_plan(ActionPlan.model_construct())
-    finally:
-        store.close()
-
-
-async def test_two_connections_serialise_a_compare_and_swap(tmp_path: Path) -> None:
-    """Two stores on one file: only one writer of a version wins (ADR-0049 §1)."""
-    path = tmp_path / "plans.db"
-    a = SqlitePlanStore(path=path, now=_fixed_now)
-    execution_id = await _seed_and_start(a)
-    b = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        state_a = await a.get_execution(execution_id)
-        state_b = await b.get_execution(execution_id)
-        assert state_a is not None
-        assert state_b is not None
-
-        claim_a = StepTransition(
-            execution_id=execution_id,
-            step_id="s1",
-            to_status=StepStatus.RUNNING,
-            expected_version=state_a.version,
-            bound_tool="smtp",
-            approval_ref="perm-1",
-            attempt_id="a1",
-        )
-        claim_b = claim_a.model_copy(update={"approval_ref": "perm-2"})
-
-        await a.commit_transition(claim_a)
-        with pytest.raises(PlanningError):  # StaleExecutionError, a PlanningError
-            await b.commit_transition(claim_b)
-    finally:
-        a.close()
-        b.close()
-
-
-@contextlib.contextmanager
-def _entering_together(*stores: SqlitePlanStore, attribute: str) -> Iterator[None]:
-    """Hold each store's worker at a barrier on entry, so the calls genuinely overlap.
-
-    A gather alone leaves *whether* the two workers are inside their sync methods at
-    the same moment to the scheduler, and a case that only sometimes exercises the
-    invariant is not evidence about it — which is
-    :class:`~ai_assistant.testing.cancellation.ThreadSuspension`'s own stated reason,
-    applied to a pair of workers rather than to one.
-
-    Each wrapped method announces itself and waits for the other before doing anything,
-    so both read-compare-write sequences are in flight together and SQLite's
-    ``BEGIN IMMEDIATE`` is the only thing separating them. An implementation that read
-    and compared *outside* its transaction would have both workers read the same
-    version here and both write.
-
-    Args:
-        stores: The stores whose workers to synchronise — one call each.
-        attribute: The synchronous method to wrap.
-
-    Yields:
-        Nothing; the wrapping is in force for the block.
-    """
-    barrier = threading.Barrier(len(stores), timeout=5)
-    originals = [getattr(store, attribute) for store in stores]
-
-    def wrap(original: Callable[..., object]) -> Callable[..., object]:
-        def blocking(*args: object) -> object:
-            barrier.wait()
-            return original(*args)
-
-        return blocking
-
-    for store, original in zip(stores, originals, strict=True):
-        setattr(store, attribute, wrap(original))
-    try:
-        yield
-    finally:
-        barrier.abort()
-        for store, original in zip(stores, originals, strict=True):
-            setattr(store, attribute, original)
-
-
-async def test_two_connections_race_an_interpretation_and_one_loses(tmp_path: Path) -> None:
-    """ADR-0249 §12's first compare-and-swap, raced across **separate connections**.
-
-    This is the level at which "the read, the comparison and the write are **one
-    indivisible step**" is load-bearing: two stores over one file share no in-process
-    lock, so what serialises them is the ``BEGIN IMMEDIATE`` each write opens. Both
-    callers read version 0 first — the shape a real race has, two turns that each read
-    a goal and then commit — and both workers are held at a barrier until the other
-    arrives, so the two sequences are genuinely in flight together rather than
-    whenever the scheduler happens to interleave them.
-
-    **Exactly one lands**, and the stored history is the winner's. An implementation
-    that read and compared outside its transaction would let both through and leave a
-    goal at version 2 carrying a revision neither caller could have computed.
-
-    The loser's error is asserted as ``PlanningError`` rather than as
-    ``StaleExecutionError`` specifically: the ordinary outcome is the stale refusal,
-    but a caller whose wait for the write lock expires is refused by the driver
-    instead, and both are this layer's error and both are a loss.
-    """
-    path = tmp_path / "plans.db"
-    a = SqlitePlanStore(path=path, now=_fixed_now)
-    b = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await a.save_goal(_goal())
-        held_a = await a.get_goal("g1")
-        held_b = await b.get_goal("g1")
-        assert held_a is not None
-        assert held_b is not None
-        assert held_a.version == held_b.version == 0, "both read the same version"
-
-        with _entering_together(a, b, attribute="_record_interpretation_sync"):
-            settled = await asyncio.gather(
-                a.record_interpretation(
-                    GoalRevision(
-                        goal_id="g1",
-                        interpretation=_revision(2, outcome="a's understanding"),
-                        expected_version=held_a.version,
-                    )
-                ),
-                b.record_interpretation(
-                    GoalRevision(
-                        goal_id="g1",
-                        interpretation=_revision(2, outcome="b's understanding"),
-                        expected_version=held_b.version,
-                    )
-                ),
-                return_exceptions=True,
-            )
-
-        won = [one for one in settled if isinstance(one, Goal)]
-        lost = [one for one in settled if isinstance(one, BaseException)]
-        assert len(won) == 1, "exactly one write of a version lands"
-        assert all(isinstance(one, PlanningError) for one in lost)
-
-        stored = await b.get_goal("g1")
-        assert stored is not None
-        assert stored.version == 1, "one write, one version"
-        assert [one.revision for one in stored.interpretation] == [1, 2]
-        assert stored.statement == won[0].statement, "and the stored history is the winner's"
-    finally:
-        a.close()
-        b.close()
-
-
-async def test_two_connections_race_an_attempt_transition_and_one_loses(
-    tmp_path: Path,
-) -> None:
-    """ADR-0249 §12's second compare-and-swap, on the same construction.
-
-    :func:`test_two_connections_race_an_interpretation_and_one_loses`'s reasoning
-    applied to ``commit_attempt``, because §12 states the rule of both writes and an
-    implementation can get one right and the other wrong.
-    """
-    path = tmp_path / "plans.db"
-    a = SqlitePlanStore(path=path, now=_fixed_now)
-    b = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await a.save_goal(_goal())
-        await a.save_plan(_plan())
-        await a.save_plan(_plan(plan_id="p2"))
-        await a.open_attempt(_attempt())
-        held_a = await a.get_attempt("a1")
-        held_b = await b.get_attempt("a1")
-        assert held_a is not None
-        assert held_b is not None
-        assert held_a.version == held_b.version == 0
-
-        with _entering_together(a, b, attribute="_commit_attempt_sync"):
-            settled = await asyncio.gather(
-                a.commit_attempt(
-                    AttemptTransition(
-                        attempt_id="a1", expected_version=held_a.version, add_plan_id="p1"
-                    )
-                ),
-                b.commit_attempt(
-                    AttemptTransition(
-                        attempt_id="a1", expected_version=held_b.version, add_plan_id="p2"
-                    )
-                ),
-                return_exceptions=True,
-            )
-
-        won = [one for one in settled if isinstance(one, GoalAttempt)]
-        lost = [one for one in settled if isinstance(one, BaseException)]
-        assert len(won) == 1, "exactly one transition of a version lands"
-        assert all(isinstance(one, PlanningError) for one in lost)
-
-        stored = await b.get_attempt("a1")
-        assert stored is not None
-        assert stored.version == 1
-        assert stored.plan_ids == won[0].plan_ids, "and the stored record is the winner's"
-        assert len(stored.plan_ids) == 1, "the loser appended nothing"
-    finally:
-        a.close()
-        b.close()
 
 
 async def test_a_stop_cannot_land_between_the_claims_lookup_and_its_write(
@@ -712,14 +144,13 @@ async def test_a_stop_cannot_land_between_the_claims_lookup_and_its_write(
 
     Raced across **separate connections**, which share no in-process lock, so what
     orders them is the claim's own ``BEGIN IMMEDIATE``. The claiming worker is parked
-    **after** it has read the stop records and **before** it writes the step, and a
+    **after** it has read the stop records and **before** it writes the record, and a
     second connection then tries to take the write lock a stop's write begins with,
     **while it is parked** and with no busy wait, so the attempt is made at that
     instant rather than whenever a scheduler gets to it. It must be refused. An
-    implementation that
-    read the records outside the claim's transaction would hold no lock there, so the
-    stop would commit inside the window and the claim then land after it — the "third
-    case" §2 says the store's total order admits none of.
+    implementation that read the records outside the claim's transaction would hold no
+    lock there, so the stop would commit inside the window and the claim then land
+    after it — the "third case" §2 says the store's total order admits none of.
 
     Released, the claim lands (it was first), and the stop then lands through the store
     and refuses the activation's next claim.
@@ -739,17 +170,9 @@ async def test_a_stop_cannot_land_between_the_claims_lookup_and_its_write(
 
     in_flight: list[asyncio.Future[Any]] = []
     try:
-        await claimer.save_goal(_goal())
-        await claimer.save_plan(_plan(steps=2))
-        state = await claimer.start_execution("p1")
-        await claimer.open_attempt(
-            GoalAttempt(id="a1", goal_id="g1", opened_at=_AT, execution_ids=(state.id,))
-        )
         monkeypatch.setattr(sqlite_store, "_is_stopped", parked)
 
-        claiming = asyncio.ensure_future(
-            claimer.commit_transition(_claim(state, activation_id="act-1"))
-        )
+        claiming = asyncio.ensure_future(claimer.claim_activation_effect(_acted("e1"), match=None))
         in_flight.append(claiming)
         assert await asyncio.to_thread(looked_up.wait, 10), "the claim reached its lookup"
 
@@ -767,11 +190,10 @@ async def test_a_stop_cannot_land_between_the_claims_lookup_and_its_write(
         monkeypatch.setattr(sqlite_store, "_is_stopped", original)
         await stopper.record_stop("act-1")
 
-        landed = claimed.step("s1")
-        assert landed is not None
-        assert landed.status is StepStatus.RUNNING, "the claim was first, so it stands"
+        assert claimed is ActivationEffectClaim.CLAIMED, "the claim was first, so it stands"
+        assert await stopper.activation_effects(["act-1"]) == (_acted("e1"),)
         with pytest.raises(ClaimStopped):
-            await claimer.commit_transition(_claim(claimed, "s2", activation_id="act-1"))
+            await claimer.claim_activation_effect(_acted("e2"), match=None)
     finally:
         # Released and drained before either connection closes: closing under a worker
         # still inside its statement is a native crash rather than a reported failure.
@@ -779,22 +201,6 @@ async def test_a_stop_cannot_land_between_the_claims_lookup_and_its_write(
         await asyncio.gather(*in_flight, return_exceptions=True)
         claimer.close()
         stopper.close()
-
-
-async def test_two_connections_do_not_reuse_an_execution_id(tmp_path: Path) -> None:
-    """The durable counter, allocated under the write lock, is unique across a file."""
-    path = tmp_path / "plans.db"
-    a = SqlitePlanStore(path=path, now=_fixed_now)
-    await a.save_goal(_goal())
-    await a.save_plan(_plan())
-    b = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        id_a = (await a.start_execution("p1")).id
-        id_b = (await b.start_execution("p1")).id
-        assert id_a != id_b
-    finally:
-        a.close()
-        b.close()
 
 
 def test_concurrent_first_opens_of_one_fresh_file_both_succeed(tmp_path: Path) -> None:
@@ -843,8 +249,8 @@ async def test_a_newer_schema_is_refused_before_any_record_table_exists(tmp_path
     """A rejected newer-schema open leaves no schema behind (§1).
 
     A database holding only a ``meta`` table marked ``schema_version = 999`` must
-    be refused *before* ``goals``/``plans``/``executions`` are created — creating a
-    table is a write, and the refusal must precede any write.
+    be refused *before* a record table is created — creating a table is a write,
+    and the refusal must precede any write.
     """
     path = tmp_path / "plans.db"
     raw = sqlite3.connect(path)
@@ -853,33 +259,10 @@ async def test_a_newer_schema_is_refused_before_any_record_table_exists(tmp_path
     raw.commit()
     raw.close()
 
-    with pytest.raises(PlanningError, match="this code reads version"):
+    with pytest.raises(PlanningError, match="this code reads version 11 only"):
         SqlitePlanStore(path=path, now=_fixed_now)
 
-    check = sqlite3.connect(path)
-    try:
-        tables = {
-            row[0] for row in check.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        }
-        assert "goals" not in tables
-        assert "plans" not in tables
-        assert "executions" not in tables
-    finally:
-        check.close()
-
-
-def test_foreign_keys_are_enforced(tmp_path: Path) -> None:
-    """The pragma is on, so the referential-integrity backstop is live (§1)."""
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        (flag,) = store._conn.execute("PRAGMA foreign_keys").fetchone()
-        assert flag == 1
-        # A raw orphan insert — bypassing the app-level check — is refused.
-        with pytest.raises(sqlite3.IntegrityError):
-            store._conn.execute("INSERT INTO plans(id, goal_id, data) VALUES ('p9', 'ghost', '{}')")
-    finally:
-        store.close()
+    assert _tables(path).isdisjoint(_RECORD_TABLES)
 
 
 @contextlib.contextmanager
@@ -931,12 +314,11 @@ def _assert_one_immediate_transaction(
 async def test_every_transaction_path_opens_and_closes_exactly_one(tmp_path: Path) -> None:
     """The same assertion over every path that opens a transaction.
 
-    Each reads before it writes — a presence check, an identity comparison, the
-    ordinal counter, a liveness scan — and each read is one #526 says must not be
-    interleavable. Three arms ``return`` from the middle of the block (an
-    idempotent re-save, a delete of an absent goal, a delete blocked by a live
-    execution) and two leave it by raising; both are driven, since an early exit
-    is where an open transaction would be abandoned.
+    Each write reads before it writes — the held id, the matching records and the
+    stop a claim is decided against, the held record a finish is applied to — and
+    each read is one #526 says must not be interleavable. The refusals leave the
+    block by raising, and are driven too, since a refusal is where an open
+    transaction would be abandoned.
     """
     store = SqlitePlanStore(path=tmp_path / "plans.db", now=_fixed_now)
 
@@ -952,136 +334,36 @@ async def test_every_transaction_path_opens_and_closes_exactly_one(tmp_path: Pat
         _assert_one_immediate_transaction(statements, what=what, closes=closes)
 
     try:
-        await recorded("save_goal (insert)", lambda: store.save_goal(_goal()))
         await recorded(
-            "save_goal (refused: the id is already held)",
-            lambda: store.save_goal(_goal()),
+            "claim_activation_effect",
+            lambda: store.claim_activation_effect(_acted("e1"), match=None),
+        )
+        await recorded(
+            "claim_activation_effect (refused: the id is already held)",
+            lambda: store.claim_activation_effect(_acted("e1"), match=None),
             closes="ROLLBACK",
         )
-        await recorded("open_attempt", lambda: store.open_attempt(_attempt()))
-        await recorded("save_plan (insert)", lambda: store.save_plan(_plan()))
-        await recorded("save_plan (idempotent re-save)", lambda: store.save_plan(_plan()))
-        # After the plan exists, because ADR-0014 §5's closure is kept at the write:
-        # an attempt may not name a plan the store does not hold under its goal.
         await recorded(
-            "commit_attempt",
-            lambda: store.commit_attempt(
-                AttemptTransition(attempt_id="a1", expected_version=0, add_plan_id="p1")
-            ),
+            "claim_activation_effect (matched: already done)",
+            lambda: store.claim_activation_effect(_acted("e2"), match=("act-1",)),
         )
         await recorded(
-            "save_plan (refused: unknown goal)",
-            lambda: store.save_plan(_plan(plan_id="orphan", goal_id="ghost")),
+            "finish_activation_effect",
+            lambda: store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED),
+        )
+        await recorded(
+            "finish_activation_effect (refused: already finished)",
+            lambda: store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED),
             closes="ROLLBACK",
         )
-        await recorded("start_execution", lambda: store.start_execution("p1"))
-        state = await store.start_execution("p1")
-        # The claim names the attempt that owns this execution (ADR-0255 §3), appended
-        # through the member that is already recorded above.
-        await store.commit_attempt(
-            AttemptTransition(attempt_id="a1", expected_version=1, add_execution_id=state.id)
+        await recorded("record_stop", lambda: store.record_stop("act-1"))
+        await recorded("record_stop (idempotent repeat)", lambda: store.record_stop("act-1"))
+        await recorded(
+            "claim_activation_effect (refused: the activation was stopped)",
+            lambda: store.claim_activation_effect(_acted("e3"), match=None),
+            closes="ROLLBACK",
         )
-        await recorded("commit_transition", lambda: store.commit_transition(_claim(state)))
         await recorded("export", store.export)
-        await recorded("delete_goal (absent)", lambda: store.delete_goal("no-such-goal"))
-        await recorded("delete_goal (blocked by a live step)", lambda: store.delete_goal("g1"))
-        await recorded("clear (refused: a step is live)", store.clear, closes="ROLLBACK")
-        await store.commit_transition(
-            StepTransition(
-                execution_id=state.id,
-                step_id="s1",
-                to_status=StepStatus.SUCCEEDED,
-                expected_version=state.version + 1,
-            )
-        )
-        # Taken **after** every claim above, because ADR-0249 §8 refuses a
-        # `→ RUNNING` claim on a plan that does not target the goal's current
-        # revision — recording a revision earlier would make the claim arms
-        # unreachable rather than exercise this one.
-        await recorded(
-            "record_interpretation",
-            lambda: store.record_interpretation(
-                GoalRevision(goal_id="g1", interpretation=_revision(2), expected_version=0)
-            ),
-        )
-        await recorded(
-            "record_interpretation (refused: stale version)",
-            lambda: store.record_interpretation(
-                GoalRevision(goal_id="g1", interpretation=_revision(3), expected_version=0)
-            ),
-            closes="ROLLBACK",
-        )
-        # ADR-0265 §5's member, both ways out of the block: an append that commits and
-        # a refusal that must still reach a ROLLBACK rather than abandon the
-        # transaction open on the shared connection.
-        await recorded(
-            "record_intended_actions",
-            lambda: store.record_intended_actions(
-                IntendedActionMinting(
-                    goal_id="g1",
-                    actions=(IntendedAction(id="ia1", intent="book the room"),),
-                    expected_version=1,
-                )
-            ),
-        )
-        await recorded(
-            "record_intended_actions (refused: an id the goal already holds)",
-            lambda: store.record_intended_actions(
-                IntendedActionMinting(
-                    goal_id="g1",
-                    actions=(IntendedAction(id="ia1", intent="book the room"),),
-                    expected_version=2,
-                )
-            ),
-            closes="ROLLBACK",
-        )
-        await recorded(
-            "record_intended_actions (refused: stale version)",
-            lambda: store.record_intended_actions(
-                IntendedActionMinting(
-                    goal_id="g1",
-                    actions=(IntendedAction(id="ia2", intent="book the room"),),
-                    expected_version=0,
-                )
-            ),
-            closes="ROLLBACK",
-        )
-        # ADR-0267 §2's member, both ways out of the block: an append that commits and
-        # a refusal that must still reach a ROLLBACK rather than abandon the
-        # transaction open on the shared connection.
-        await recorded(
-            "record_quote",
-            lambda: store.record_quote(
-                ActionQuoteMinting(
-                    goal_id="g1",
-                    quote=_quote(),
-                    expected_version=2,
-                )
-            ),
-        )
-        await recorded(
-            "record_quote (refused: an action the goal does not hold)",
-            lambda: store.record_quote(
-                ActionQuoteMinting(
-                    goal_id="g1",
-                    quote=_quote(action="ia-unknown"),
-                    expected_version=3,
-                )
-            ),
-            closes="ROLLBACK",
-        )
-        await recorded(
-            "record_quote (refused: stale version)",
-            lambda: store.record_quote(
-                ActionQuoteMinting(
-                    goal_id="g1",
-                    quote=_quote(),
-                    expected_version=0,
-                )
-            ),
-            closes="ROLLBACK",
-        )
-        await recorded("delete_goal (present)", lambda: store.delete_goal("g1"))
         await recorded("clear", store.clear)
     finally:
         store.close()
@@ -1090,20 +372,21 @@ async def test_every_transaction_path_opens_and_closes_exactly_one(tmp_path: Pat
 async def test_a_refusal_inside_a_transaction_leaves_the_store_usable(tmp_path: Path) -> None:
     """A domain refusal ends the transaction rather than abandoning it open.
 
-    ``save_plan`` raises ``PlanningError`` — not a ``sqlite3.Error`` — from inside
-    the block, which is the arm that has to reach a ``ROLLBACK`` on the way out.
-    The statement stream is asserted above; what this adds is the consequence:
-    the connection is out of its transaction and the next write still lands, since
-    a lingering transaction poisons the following ``BEGIN``.
+    Finishing a record the store does not hold raises ``PlanningError`` — not a
+    ``sqlite3.Error`` — from inside the block, which is the arm that has to reach a
+    ``ROLLBACK`` on the way out. The statement stream is asserted above; what this
+    adds is the consequence: the connection is out of its transaction and the next
+    write still lands, since a lingering transaction poisons the following ``BEGIN``.
     """
     store = SqlitePlanStore(path=tmp_path / "plans.db", now=_fixed_now)
     try:
-        await store.save_goal(_goal())
         with pytest.raises(PlanningError):
-            await store.save_plan(_plan(plan_id="orphan", goal_id="ghost"))
+            await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
 
         assert store._conn.in_transaction is False
-        assert await store.save_plan(_plan()) == "p1"  # the store is not poisoned
+        assert await store.claim_activation_effect(_acted("e1"), match=None) is (
+            ActivationEffectClaim.CLAIMED
+        ), "the store is not poisoned"
     finally:
         store.close()
 
@@ -1129,763 +412,68 @@ async def test_a_newer_on_disk_schema_is_refused(tmp_path: Path) -> None:
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
-async def test_an_attempt_row_written_before_the_ledger_gained_its_kind_still_decodes(
+async def test_a_fresh_file_is_labelled_version_11_and_holds_only_the_two_tables(
     tmp_path: Path,
 ) -> None:
-    """ADR-0251 §5, §16: no migration is owed, and this is the row that says so.
+    """The absolute figure's home, and the shape it labels (ADR-0309 §5).
 
-    ADR-0249 §12 moved this store's ``schema_version`` 1 → 2 because a version 1
-    ``goals`` row "no longer decodes"; ADR-0251 moves it nowhere, because a version 2
-    ``attempts`` row **does**. The blob is the record, and a blob whose ``effort``
-    carries only the two counters validates against the widened model with ``kind``
-    ``None`` — which ADR-0251 §5 defines as "the turn that opened this attempt declared
-    no operation", the true reading of a row whose writer knew of no operation to stamp.
-
-    **Seeded as the bytes a previous release would have written**, not by dumping the
-    current model and deleting a key from the object: what is being asserted is that the
-    stored JSON of the older shape is readable, so the older shape is what is written.
+    Version 11 is the store ADR-0309 §5 leaves: the stop records and the activation
+    effect records, beside ``meta``, and no table of the old path.
     """
     path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    await store.save_goal(_goal())
-    await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_fixed_now()))
-    store.close()
+    SqlitePlanStore(path=path, now=_fixed_now).close()
 
-    raw = sqlite3.connect(path)
-    [(stored,)] = raw.execute("SELECT data FROM attempts WHERE id = 'a1'").fetchall()
-    older = json.loads(stored)
-    older["effort"] = {"planner_calls": 2, "working": "PT45S"}
-    raw.execute("UPDATE attempts SET data = ? WHERE id = 'a1'", (json.dumps(older),))
-    raw.commit()
-    raw.close()
-
-    reopened = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        decoded = await reopened.get_attempt("a1")
-    finally:
-        reopened.close()
-
-    assert decoded is not None, "the older row is read rather than refused"
-    assert decoded.effort.planner_calls == 2, "and its counters are the ones it stored"
-    assert decoded.effort.kind is None, (
-        "ADR-0251 §5's default, and never a kind inferred at read time"
-    )
+    assert sqlite_store._SCHEMA_VERSION == 11
+    assert _meta(path, "schema_version") == "11"
+    assert _tables(path) == {"meta", *_RECORD_TABLES}
 
 
-async def test_a_plan_and_an_element_written_before_the_graph_still_decode(
-    tmp_path: Path,
-) -> None:
-    """ADR-0253 §10, §14 arm 13: no migration is owed, and these are the rows saying so.
+@pytest.mark.parametrize("version", ["0", "1", "10"], ids=["zero", "the-first", "the-last-old"])
+async def test_an_older_on_disk_schema_is_refused(tmp_path: Path, version: str) -> None:
+    """Every older version is refused, the ones this store once upgraded included.
 
-    "Every new field is defaulted, so a stored plan written before this decision decodes
-    with ``depends_on`` empty, ``resolves`` empty, ``when`` empty, ``verifies`` absent,
-    ``evidence_recency`` absent and ``interpretations`` empty — which is exactly the
-    plan it was: no dependency, no reference, no condition, no verification and no
-    interpretation." And a stored ``GoalElement`` decodes with ``id`` and
-    ``applicability`` absent, which §7 makes a conforming value rather than a row to
-    repair — an element nothing can name is one no condition was ever written against.
-
-    So this store's ``schema_version`` stays at 4, on the same footing as ADR-0251's
-    entry above: ADR-0249 §12 moved it because a version 1 ``goals`` row "no longer
-    decodes", and every row here does.
-
-    **Seeded as the bytes a previous release would have written**, not by dumping the
-    current model and deleting keys: what is asserted is that the stored JSON of the
-    older shape is readable, so the older shape is what is written.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    held = _goal()
-    conditioned = held.interpretation[0].model_copy(
-        update={
-            "conditions": (
-                GoalElement(id="e1", text="the weather permits it", ground=Ground.INFERRED),
-            )
-        }
-    )
-    await store.save_goal(held.model_copy(update={"interpretation": (conditioned,)}))
-    await store.save_plan(
-        ActionPlan(
-            id="p1",
-            goal_id="g1",
-            steps=(PlanStep(id="s1", intent="book", capability="send_email"),),
-            created_at=_fixed_now(),
-            targets_revision=1,
-        )
-    )
-    store.close()
-
-    raw = sqlite3.connect(path)
-    [(stored_plan,)] = raw.execute("SELECT data FROM plans WHERE id = 'p1'").fetchall()
-    older_plan = json.loads(stored_plan)
-    older_plan.pop("interpretations")
-    for step in older_plan["steps"]:
-        for gained in ("depends_on", "resolves", "when", "verifies", "evidence_recency"):
-            step.pop(gained)
-    raw.execute("UPDATE plans SET data = ? WHERE id = 'p1'", (json.dumps(older_plan),))
-
-    [(stored_goal,)] = raw.execute("SELECT data FROM goals WHERE id = 'g1'").fetchall()
-    older_goal = json.loads(stored_goal)
-    for revision in older_goal["interpretation"]:
-        for element in revision["conditions"]:
-            element.pop("id")
-            element.pop("applicability")
-    raw.execute("UPDATE goals SET data = ? WHERE id = 'g1'", (json.dumps(older_goal),))
-    raw.commit()
-    raw.close()
-
-    reopened = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        decoded = await reopened.get_plan("p1")
-        goal = await reopened.get_goal("g1")
-    finally:
-        reopened.close()
-
-    assert decoded is not None, "the older plan is read rather than refused"
-    assert decoded.interpretations == ()
-    step = decoded.steps[0]
-    assert (step.depends_on, step.resolves, step.when) == ((), (), ())
-    assert (step.verifies, step.evidence_recency) == (None, None)
-
-    assert goal is not None
-    element = goal.interpretation[0].conditions[0]
-    assert (element.id, element.applicability) == (None, None), (
-        "ADR-0253 §7's one route to None, and never a value minted at read time"
-    )
-    assert element.text == "the weather permits it", "and the element still says what it says"
-
-
-async def test_an_older_on_disk_schema_is_refused(tmp_path: Path) -> None:
-    """A version this code has no migration for is refused, older or newer alike.
-
-    Accepting ``schema_version = '0'`` and letting ``CREATE TABLE IF NOT EXISTS``
-    leave an incompatible table would construct successfully and only fail on the
-    first query, so it is a fault to report at open (ADR-0049 §1). ADR-0249 §12
-    adds exactly **one** upgradable version — 1, this store's original shape — and
-    ``0`` is not it.
+    ADR-0309 §6: the cutover deploys on a fresh data directory, and no lane writes a
+    migration, a reader or a shim for a store written before it. Opening such a file
+    over ``CREATE TABLE IF NOT EXISTS`` would leave its old tables beside the new ones,
+    holding records this code would neither export nor clear, so it is refused at the
+    open (ADR-0049 §1) and named as a store written before the cutover.
     """
     path = tmp_path / "plans.db"
     SqlitePlanStore(path=path, now=_fixed_now).close()
 
     raw = sqlite3.connect(path)
-    raw.execute("UPDATE meta SET value = '0' WHERE key = 'schema_version'")
+    raw.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (version,))
     raw.commit()
     raw.close()
 
-    with pytest.raises(PlanningError, match="this code reads version"):
+    with pytest.raises(PlanningError, match="written before the cutover has no reader"):
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
-@pytest.mark.parametrize(
-    "corrupt",
-    ["bad", 7.5, 9.223372036854776e18, -1],
-    ids=[
-        "text-no-affinity-converts",
-        "a-real-that-is-not-a-whole-number",
-        "the-real-sqlites-own-overflow-yields",
-        "negative",
-    ],
-)
-@pytest.mark.parametrize("read", ["evidence_of", "export"], ids=["evidence_of", "export"])
-async def test_a_corrupt_elision_count_is_a_planning_error(
-    tmp_path: Path, corrupt: object, read: str
-) -> None:
-    """A tampered ADR-0252 §13 counter is refused, not leaked (ADR-0049 §1).
-
-    ``INTEGER`` is an **affinity** and not a constraint, so SQLite stores whatever an
-    outside writer puts in the column, and every other stored value in this store is
-    read through a boundary that turns corruption into ``PlanningError`` rather than a
-    raw ``ValueError`` or ``ValidationError``. **Both** read paths are driven, because
-    they decode the counter separately and a fix applied to one would leave the other
-    open.
-
-    **A negative count is refused rather than clamped.** The count is the whole of what
-    makes §13's elision non-silent, so reading a corrupt one as zero would answer
-    *nothing was ever dropped* — ADR-0086 §4's "a *false* answer to the one question the
-    provenance display exists to answer".
-
-    **The cases are what an ``INTEGER``-affinity column can still hold, not a list of
-    dangerous-looking values**, because affinity converts most of them away before the
-    store ever sees them: ``'7'``, ``'007'`` and ``' 7'`` an outside writer puts in this
-    column are stored by SQLite as the integer ``7``, which is the value this store
-    would have written itself, so they are not corruption and are not listed. What
-    survives is text no conversion applies to (``'bad'``), a REAL that is not a whole
-    number of rows (``7.5``), the REAL SQLite's own 64-bit ``+`` yields on overflow
-    (``9.223372036854776e18``, which is why this store adds in Python instead), and a
-    negative integer — which cannot be a count of what a history has dropped at all.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal("g1"))
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE goals SET evidence_elided = ? WHERE id = 'g1'", (corrupt,))
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    reading = store.evidence_of("g1") if read == "evidence_of" else store.export()
-    try:
-        with pytest.raises(PlanningError, match="elision count"):
-            await reading
-    finally:
-        store.close()
-
-
-async def test_a_mark_is_refused_where_the_standing_column_hides_an_already_marked_row(
+async def test_a_pre_cutover_file_is_refused_and_left_exactly_as_it_was(
     tmp_path: Path,
 ) -> None:
-    """§12's refusals decide over the record, not over the column that summarises it.
+    """A version 10 file keeps its tables and its label, and gains none.
 
-    ``_refuse_unmarkable`` reads the promoted ``goal_id`` and ``standing`` — that is what
-    those columns are promoted for — and it is the one place the saving is not available:
-    those two refusals are the whole of what decides **which** rows may be marked. A row
-    whose column says ``standing`` while its record says ``superseded`` would pass the
-    refusal and then be marked a second time, which ADR-0252 §8 and §9 forbid in terms —
-    "a marking never un-marks" — and the second mark would overwrite the first row's
-    ``superseded_by``, erasing which row displaced it. That is the audit trail §1's fourth
-    axis exists to keep.
-
-    Reconciling the row against its record first refuses the whole call instead, before
-    anything is appended.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal("g1"))
-        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
-        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
-        await store.record_evidence(
-            _evidence_row("ev2", read_at=_AT + timedelta(minutes=1)), supersedes=("ev1",)
-        )
-    finally:
-        store.close()
-
-    # `ev1` is genuinely SUPERSEDED by `ev2`; only the column is walked back.
-    with sqlite3.connect(path) as conn:
-        conn.execute(
-            "UPDATE goal_evidence SET standing = ? WHERE id = 'ev1'",
-            (EvidenceStanding.STANDING.value,),
-        )
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        with pytest.raises(PlanningError, match="record and columns disagree"):
-            await store.record_evidence(
-                _evidence_row("ev3", read_at=_AT + timedelta(hours=1)), supersedes=("ev1",)
-            )
-
-        assert await store.get_evidence("ev3") is None, "the append did not land"
-        with sqlite3.connect(path) as conn:
-            (raw,) = conn.execute("SELECT data FROM goal_evidence WHERE id = 'ev1'").fetchone()
-        assert json.loads(raw)["superseded_by"] == "ev2", "and the first mark is intact"
-    finally:
-        store.close()
-
-
-async def test_an_elision_reconciles_every_candidate_before_it_destroys_one(
-    tmp_path: Path,
-) -> None:
-    """§13 drops the **oldest** row, and that order is the records', not the columns'.
-
-    The elision reads ``ORDER BY read_at ASC, id ASC`` over the promoted column and then
-    **deletes**, which is what separates this site from every other projection read in
-    this store: a read that trusted a lying column returns a wrong answer a later call
-    can still correct, while this one commits and the row is gone. Moving the logically
-    oldest row's promoted ``read_at`` into the future would otherwise make the next
-    write destroy a different row — permanently, and with the count still saying one row
-    was dropped.
-
-    Every candidate is reconciled first, so the write refuses whole and nothing is
-    destroyed: the history keeps all 64 rows, the elision count does not move, and the
-    row the caller was recording did not land.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal("g1"))
-        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
-        for index in range(MAX_GOAL_EVIDENCE):
-            await store.record_evidence(
-                _evidence_row(f"ev{index:03d}", read_at=_AT + timedelta(minutes=index))
-            )
-    finally:
-        store.close()
-
-    # `ev000` is the logically oldest row and the one the next write would drop. Its
-    # column now says it is the newest; its record still says it is the oldest.
-    with sqlite3.connect(path) as conn:
-        conn.execute(
-            "UPDATE goal_evidence SET read_at = ? WHERE id = 'ev000'",
-            ((_AT + timedelta(days=365)).isoformat(),),
-        )
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        with pytest.raises(PlanningError, match="record and columns disagree"):
-            await store.record_evidence(_evidence_row("ev-new", read_at=_AT + timedelta(days=1)))
-
-        assert await store.get_evidence("ev001") is not None, "no row was destroyed"
-        assert await store.get_evidence("ev-new") is None, "and the write rolled back whole"
-        with sqlite3.connect(path) as conn:
-            assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone()[0] == (
-                MAX_GOAL_EVIDENCE
-            )
-            assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [(0,)]
-    finally:
-        store.close()
-
-
-async def test_a_goals_table_whose_elision_default_is_not_zero_is_refused_at_open(
-    tmp_path: Path,
-) -> None:
-    """A default is load-bearing exactly where an insert omits the column (ADR-0252 §13).
-
-    Every column of every record table is written explicitly by the insert that creates
-    the row — **except** ``evidence_elided``, which ``save_goal`` omits and the migration
-    adds as ``NOT NULL DEFAULT 0`` precisely so the value arrives without a row pass. So
-    a pre-existing ``goals`` this store adopts — ``CREATE TABLE IF NOT EXISTS`` is a
-    no-op against one (#373) — can declare ``DEFAULT 7``, pass the affinity and NOT NULL
-    checks that were all this store looked at, and then a goal with **no evidence at
-    all** reports ``elided == 7``.
-
-    That is a history saying *this is the evidence that was kept* where nothing was ever
-    dropped — ADR-0086 §4's "a *false* answer to the one question the provenance display
-    exists to answer", arriving through the counter built to prevent it. It is refused at
-    open, the way every other shape this store's guarantees rest on is.
+    The refusal precedes every write, so the file a user's old hub wrote is not
+    half-adopted: no record table is created beside its own, and its marker is not
+    moved.
     """
     path = tmp_path / "plans.db"
     raw = sqlite3.connect(path)
     try:
-        raw.execute(
-            "CREATE TABLE goals(id TEXT PRIMARY KEY, conversation_id TEXT, "
-            "last_engaged_in TEXT, evidence_elided INTEGER NOT NULL DEFAULT 7, "
-            "data TEXT NOT NULL)"
-        )
+        raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '10')")
+        raw.execute("CREATE TABLE goals(id TEXT PRIMARY KEY, data TEXT NOT NULL)")
         raw.commit()
     finally:
         raw.close()
 
-    with pytest.raises(PlanningError, match="declares DEFAULT 7, not the DEFAULT 0"):
+    with pytest.raises(PlanningError, match="schema_version=10"):
         SqlitePlanStore(path=path, now=_fixed_now)
 
-
-async def test_a_goals_table_with_no_elision_default_is_refused_at_open(
-    tmp_path: Path,
-) -> None:
-    """The absent default is the same fault as the wrong one, and worse on a migration.
-
-    ``NOT NULL`` with no default makes ``save_goal``'s insert — which omits the column —
-    fail outright rather than silently mis-state a count, and the ``ALTER TABLE`` the
-    migration issues is only admissible *because* the default supplies the value every
-    existing row needs. A file declaring one without the other is not a file this store
-    shaped either way.
-    """
-    path = tmp_path / "plans.db"
-    raw = sqlite3.connect(path)
-    try:
-        raw.execute(
-            "CREATE TABLE goals(id TEXT PRIMARY KEY, conversation_id TEXT, "
-            "last_engaged_in TEXT, evidence_elided INTEGER NOT NULL, data TEXT NOT NULL)"
-        )
-        raw.commit()
-    finally:
-        raw.close()
-
-    with pytest.raises(PlanningError, match="declares no default, not the DEFAULT 0"):
-        SqlitePlanStore(path=path, now=_fixed_now)
-
-
-async def test_a_deletion_removes_the_rows_the_index_says_are_the_goals(
-    tmp_path: Path,
-) -> None:
-    """The cascade keys on the column, like every other site, and decodes nothing.
-
-    The evidence index rule has **no departure**: "the promoted columns are the index …
-    and a row is never selected under a goal its columns do not name". A goal's history
-    is what the index says it is, so ADR-0014 §5's "must not leave its plan history
-    behind" is satisfied by removing exactly those rows — and a row indexed under another
-    goal is that goal's, never this one's to delete.
-
-    It does not survive unnoticed, which is the half that makes keying on the index safe
-    rather than merely cheap: reading the goal its columns **do** name decodes it, finds
-    its record naming the deleted goal, and refuses. Both halves are asserted here,
-    because the first alone is also what a cascade that simply missed the row would do.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal("g1"))
-        await store.save_goal(_goal("g2"))
-        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
-        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
-        await store.record_evidence(_evidence_row("ev2", read_at=_AT + timedelta(minutes=1)))
-    finally:
-        store.close()
-
-    # `ev1`'s record still names `g1`; its index entry is moved to `g2`.
-    with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE goal_evidence SET goal_id = 'g2' WHERE id = 'ev1'")
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        removed = await store.delete_goal("g1")
-
-        assert removed.deleted
-        assert removed.evidence_removed == 1, "the rows the index says are g1's, and only those"
-        with sqlite3.connect(path) as conn:
-            assert conn.execute("SELECT id FROM goal_evidence").fetchall() == [("ev1",)]
-
-        # And the row left behind is not lost track of: it is g2's under the rule, and
-        # g2's own read is where its record is decoded and found to disagree.
-        with pytest.raises(PlanningError, match="record and columns disagree"):
-            await store.evidence_of("g2")
-    finally:
-        store.close()
-
-
-async def test_a_deletion_decodes_nothing_so_an_unreadable_row_cannot_block_it(
-    tmp_path: Path,
-) -> None:
-    """A cascade that decodes is a cascade an unrelated corrupt row can refuse.
-
-    Keying on the index means the deletion reads no blob at all, so a row whose record
-    does not decode — or is valid JSON that is not an object, or is not JSON — cannot
-    stand between a user and their ADR-0004 data-rights call. An earlier draft scanned
-    and decoded every row to ask the record-side question, and a ``'[]'`` blob anywhere
-    in the table raised through it.
-
-    The unreadable row here is indexed under this very goal, which is the case that
-    matters: it goes with the goal rather than outliving it, and no decode is attempted
-    on the way out.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal("g1"))
-        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
-        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
-        await store.record_evidence(_evidence_row("ev2", read_at=_AT + timedelta(minutes=1)))
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE goal_evidence SET data = '[]' WHERE id = 'ev1'")
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        removed = await store.delete_goal("g1")
-
-        assert removed.deleted, "an unreadable record does not block the deletion"
-        assert removed.evidence_removed == 2, "and it goes with the goal it is indexed under"
-        with sqlite3.connect(path) as conn:
-            assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
-    finally:
-        store.close()
-
-
-async def test_evidence_of_a_goal_the_store_does_not_hold_is_empty_even_with_an_orphan_row(
-    tmp_path: Path,
-) -> None:
-    """``core.protocols`` states this member's answer for an absent goal, and it is empty.
-
-    "*Empty, with a zero count, for a goal this store does not hold*: an absent goal is
-    not a fault to raise on a read that is already a lookup, which is ``open_question``'s
-    own posture." The rows are keyed by the promoted ``goal_id``, which an outside writer
-    can point at a goal the store has never held — and selecting them before asking
-    whether the goal exists answered that lookup with a **non-empty** history for a goal
-    that does not exist, which is neither answer the contract offers. It is also the
-    state ``export`` refuses, so the two reads disagreed about one file.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal("g1"))
-        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
-        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA foreign_keys = OFF")
-        (raw,) = conn.execute("SELECT data FROM goal_evidence WHERE id = 'ev1'").fetchone()
-        held = json.loads(raw)
-        held["goal_id"] = "ghost"
-        conn.execute(
-            "UPDATE goal_evidence SET goal_id = 'ghost', data = ? WHERE id = 'ev1'",
-            (json.dumps(held),),
-        )
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        assert await store.evidence_of("ghost") == EvidenceHistory(goal_id="ghost")
-    finally:
-        store.close()
-
-
-async def test_a_row_indexed_under_another_goal_is_that_goals_and_refuses_there(
-    tmp_path: Path,
-) -> None:
-    """The evidence index rule, in both of its consequences at once.
-
-    "The promoted columns are the index: a row is selected by its columns and, wherever
-    it is decoded, refused if its record disagrees with them, and a row is never selected
-    under a goal its columns do not name."
-
-    A row indexed under ``g2`` whose record names ``g1`` is therefore **not in g1's
-    history** — not filtered out of it, not lost from it, simply never selected there —
-    and it **does not hide**, because reading ``g2``, the goal its columns do name,
-    decodes it and refuses. Those are the two answers a store is allowed to give: a
-    sound file reads exactly right, and a tampered one reads refusing rather than quietly
-    short. Deciding ownership from the record instead would need a second index this
-    schema does not have and would make every history read a full-table decode.
-
-    Both halves are asserted together because either alone is consistent with the bug:
-    a store that silently dropped the row would pass the first, and one that scanned
-    every row on every read would pass the second.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal("g1"))
-        await store.save_goal(_goal("g2"))
-        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
-        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
-        await store.record_evidence(_evidence_row("ev2", read_at=_AT + timedelta(minutes=1)))
-    finally:
-        store.close()
-
-    # `ev1`'s record still names `g1`; its index entry is moved to `g2`.
-    with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE goal_evidence SET goal_id = 'g2' WHERE id = 'ev1'")
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        history = await store.evidence_of("g1")
-        assert [row.id for row in history.rows] == ["ev2"], "the row is not g1's under the rule"
-        assert history.elided == 0, "and nothing is reported as dropped, because nothing was"
-
-        with pytest.raises(PlanningError, match="record and columns disagree"):
-            await store.evidence_of("g2")
-    finally:
-        store.close()
-
-
-async def test_an_export_refuses_an_evidence_row_whose_goal_it_does_not_hold(
-    tmp_path: Path,
-) -> None:
-    """An orphaned projection is corruption, not a ``KeyError`` (ADR-0049 §1).
-
-    The export groups rows by the promoted ``goal_id`` into a mapping built from the
-    goals the store holds. The foreign key onto ``goals`` is enforced for this store's
-    own connection, so a row naming no goal can only come from a writer that turned it
-    off — which is exactly the premise every other corruption arm here assumes. Indexing
-    the mapping with it would leave a raw ``KeyError`` past the boundary every stored
-    value is read through, from a member ADR-0004 §6 makes a user-facing right.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal("g1"))
-        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
-        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
-    finally:
-        store.close()
-
-    # The column **and** the record both name the missing goal, so the row is internally
-    # consistent and reaches the grouping: this arm is about the orphan, not about a
-    # projection disagreement the arms above already drive.
-    with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA foreign_keys = OFF")
-        (raw,) = conn.execute("SELECT data FROM goal_evidence WHERE id = 'ev1'").fetchone()
-        held = json.loads(raw)
-        held["goal_id"] = "ghost"
-        conn.execute(
-            "UPDATE goal_evidence SET goal_id = 'ghost', data = ? WHERE id = 'ev1'",
-            (json.dumps(held),),
-        )
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        with pytest.raises(PlanningError, match="which it does not hold"):
-            await store.export()
-    finally:
-        store.close()
-
-
-@pytest.mark.parametrize(
-    "read",
-    ["get_evidence", "evidence_of", "export"],
-    ids=["get_evidence", "evidence_of", "export"],
-)
-@pytest.mark.parametrize(
-    "column",
-    ["data", "read_at"],
-    ids=["the-record-names-another-row", "the-order-column-contradicts-the-record"],
-)
-async def test_an_evidence_read_whose_record_and_columns_disagree_is_refused(
-    tmp_path: Path, read: str, column: str
-) -> None:
-    """A read is held to the same agreement the marking write is (#2328).
-
-    The columns promoted beside the blob (ADR-0252 §13) are not decoration: **all three
-    reads use them**, and each use breaks differently when they lie. `get_evidence`
-    answers under the id the caller asked for, so a row keyed `ev1` whose record calls
-    itself `ev2` would be returned as a row naming a different one. `evidence_of` and
-    the export order by ``(read_at, id)`` over the *columns* and return the *blobs*, so
-    a disagreeing `read_at` hands a caller §12's total order over values the rows
-    themselves contradict — and §10's ``E`` label is an ordinal into exactly that
-    sequence, so the labels would name rows other than the ones a reader counts to.
-
-    Both are refused as the corrupt file they are, on the boundary `_decode_evidence`
-    already draws for the blob's own shape. **The other five members' reads are not held
-    to this yet** — the same promoted-column shape predates this lane there — which is
-    what #2328 is left open for.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal("g1"))
-        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
-        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
-        await store.record_evidence(_evidence_row("ev2", read_at=_AT + timedelta(minutes=1)))
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        if column == "data":
-            impostor = conn.execute("SELECT data FROM goal_evidence WHERE id = 'ev2'").fetchone()[0]
-            conn.execute("UPDATE goal_evidence SET data = ? WHERE id = 'ev1'", (impostor,))
-        else:
-            conn.execute(
-                "UPDATE goal_evidence SET read_at = ? WHERE id = 'ev1'",
-                ((_AT + timedelta(days=1)).isoformat(),),
-            )
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        reads: dict[str, Callable[[], Awaitable[object]]] = {
-            "get_evidence": lambda: store.get_evidence("ev1"),
-            "evidence_of": lambda: store.evidence_of("g1"),
-            "export": store.export,
-        }
-        with pytest.raises(PlanningError, match="record and columns disagree"):
-            await reads[read]()
-    finally:
-        store.close()
-
-
-@pytest.mark.parametrize(
-    "mark",
-    ["supersede", "invalidate"],
-    ids=["record_evidence", "record_interpretation"],
-)
-async def test_an_evidence_row_whose_record_and_columns_disagree_is_refused(
-    tmp_path: Path, mark: str
-) -> None:
-    """A mark is validated over the columns, so it must be applied to the same row.
-
-    ``goal_evidence`` holds the record as a blob beside the ``goal_id``, ``read_at`` and
-    ``standing`` columns ADR-0252 §13 promotes, and ``CREATE TABLE IF NOT EXISTS`` is a
-    no-op against a table an outside writer shaped (#373), so the two can be made to
-    disagree. That is the one disagreement a **marking** write cannot survive: §12's
-    refusals are evaluated over the columns, so a SQL row keyed ``ev1`` whose blob calls
-    itself ``ev2`` would be validated as ``ev1`` and then written back as ``ev2`` —
-    marking a row the caller never named, leaving ``ev1`` ``STANDING``, and answering
-    success. Both marking members are driven, because each reads the row the same way.
-
-    It is refused as the corrupt file it is, on the boundary
-    ``_decode_evidence`` already draws for the blob's own shape, and the whole call rolls
-    back — a mark is atomic with the write that occasions it (§12).
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal("g1"))
-        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
-        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
-        await store.record_evidence(_evidence_row("ev2", read_at=_AT + timedelta(minutes=1)))
-    finally:
-        store.close()
-
-    # `ev1`'s blob is replaced with `ev2`'s: the primary key still reads `ev1`, and so do
-    # every one of the columns the refusals are evaluated over.
-    with sqlite3.connect(path) as conn:
-        impostor = conn.execute("SELECT data FROM goal_evidence WHERE id = 'ev2'").fetchone()[0]
-        conn.execute("UPDATE goal_evidence SET data = ? WHERE id = 'ev1'", (impostor,))
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        if mark == "supersede":
-            with pytest.raises(PlanningError, match="record and columns disagree"):
-                await store.record_evidence(
-                    _evidence_row("ev3", read_at=_AT + timedelta(hours=1)), supersedes=("ev1",)
-                )
-        else:
-            revision = GoalRevision(
-                goal_id="g1",
-                interpretation=_revision(2),
-                expected_version=0,
-                invalidates=("ev1",),
-            )
-            with pytest.raises(PlanningError, match="record and columns disagree"):
-                await store.record_interpretation(revision)
-
-        untouched = await store.get_evidence("ev2")
-        assert untouched is not None
-        assert untouched.standing is EvidenceStanding.STANDING, "no other row was marked"
-        assert await store.get_evidence("ev3") is None, "and the whole call rolled back"
-    finally:
-        store.close()
-
-
-async def test_a_tampered_elision_count_at_sqlites_ceiling_is_refused_as_corruption(
-    tmp_path: Path,
-) -> None:
-    """A count no write of this store could reach is the file being corrupt, not a bug.
-
-    ADR-0252 §13's counter advances by **at most one per successful write** — one row
-    appended, :data:`MAX_GOAL_EVIDENCE` bounding what is left behind — so reaching a
-    signed 64-bit ceiling takes 2**63 writes to one goal and no sequence of operations
-    this system can perform gets there. A count sitting at the ceiling therefore arrived
-    the only other way it can, from a writer outside this code, which is the case
-    :func:`~ai_assistant.planning.sqlite_store._elided_count` already refuses for a
-    negative or a REAL.
-
-    What this pins is that the *advance* refuses it in the same words rather than
-    letting the driver's ``OverflowError`` cross the boundary raw — the hole every other
-    stored value is read through a translation to avoid (ADR-0049 §1). It is **not** a
-    fourth refusal reason for ``record_evidence``: §12's three are about the caller's
-    row, and this is the store reporting that its own file is corrupt. The write is
-    rolled back whole, so the row the caller handed in is not left half-applied.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal("g1"))
-        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
-        for index in range(MAX_GOAL_EVIDENCE):
-            await store.record_evidence(
-                _evidence_row(f"ev{index:03d}", read_at=_AT + timedelta(minutes=index))
-            )
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE goals SET evidence_elided = ? WHERE id = 'g1'", (2**63 - 1,))
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        with pytest.raises(PlanningError, match="elision count"):
-            await store.record_evidence(_evidence_row("ev-new", read_at=_AT + timedelta(days=1)))
-
-        assert await store.get_evidence("ev-new") is None, "the whole write rolled back"
-        history = await store.evidence_of("g1")
-        assert history.elided == 2**63 - 1, "and the count is left exactly as it was found"
-        assert len(history.rows) == MAX_GOAL_EVIDENCE
-    finally:
-        store.close()
+    assert _tables(path) == {"meta", "goals"}
+    assert _meta(path, "schema_version") == "10"
 
 
 async def test_a_non_numeric_schema_version_is_a_planning_error(tmp_path: Path) -> None:
@@ -1908,12 +496,10 @@ async def test_a_non_numeric_schema_version_is_a_planning_error(tmp_path: Path) 
 
 
 # --- a `meta` table this store did not shape (issue #349) -------------------
-
 #: A ``meta`` **without** ``key TEXT PRIMARY KEY``, so it can hold two rows for
 #: one key. ``CREATE TABLE IF NOT EXISTS`` is a no-op against it, so this is the
 #: table the store actually opens.
 _META_WITHOUT_PK = "CREATE TABLE meta(key TEXT, value TEXT NOT NULL)"
-
 #: The same, with no declared type on ``value``: SQLite then hands back whatever
 #: was stored — a REAL, a NULL — rather than coercing it to TEXT.
 _META_UNTYPED = "CREATE TABLE meta(key TEXT, value)"
@@ -1946,13 +532,13 @@ async def test_conflicting_schema_version_rows_are_refused_whatever_their_order(
     but ``CREATE TABLE IF NOT EXISTS`` accepts a pre-existing one declared without
     it. Collapsing the table into a ``dict`` kept whichever row SQLite returned
     last, so these two databases — identical row *sets*, differing only in
-    insertion order — behaved oppositely: ``('1', '999')`` refused a supported
-    schema, and ``('999', '1')`` **opened** on an unsupported one. Asserting the
-    two messages are equal is what pins the order out of the answer.
+    insertion order — behaved oppositely: one refused a supported schema, and the
+    other **opened** on an unsupported one. Asserting the two messages are equal is
+    what pins the order out of the answer.
     """
     ascending, descending = tmp_path / "asc.db", tmp_path / "desc.db"
-    _hand_built_meta(ascending, (("schema_version", "1"), ("schema_version", "999")))
-    _hand_built_meta(descending, (("schema_version", "999"), ("schema_version", "1")))
+    _hand_built_meta(ascending, (("schema_version", "11"), ("schema_version", "999")))
+    _hand_built_meta(descending, (("schema_version", "999"), ("schema_version", "11")))
 
     assert _refusal(ascending, "2 schema_version rows") == _refusal(
         descending, "2 schema_version rows"
@@ -1960,96 +546,12 @@ async def test_conflicting_schema_version_rows_are_refused_whatever_their_order(
 
     # And refused before any record table exists: ADR-0049 §1 puts the refusal
     # ahead of every write, and creating a table is a write.
-    check = sqlite3.connect(ascending)
-    try:
-        tables = {
-            row[0] for row in check.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        }
-    finally:
-        check.close()
-    assert tables.isdisjoint({"goals", "plans", "executions"})
+    assert _tables(ascending).isdisjoint(_RECORD_TABLES)
 
 
-async def test_conflicting_exec_counter_rows_are_refused_whatever_their_order(
-    tmp_path: Path,
-) -> None:
-    """An ambiguous durable ordinal is refused too, for a sharper reason (§3).
-
-    ADR-0049 §3 makes ``exec_counter`` the durable half of execution-id
-    non-reuse. A losing row here does not merely mislabel the file: it **rewinds
-    the counter**, re-minting ordinals already handed out. Before the fix, a file
-    recording ``7`` allocated ordinal 3 — an id ADR-0044 §1 promises is never
-    issued twice, and the one a parked confirmation's recovery keys against.
-    """
-    low_first, high_first = tmp_path / "low.db", tmp_path / "high.db"
-    rows = (("schema_version", "1"), ("exec_counter", "2"), ("exec_counter", "7"))
-    _hand_built_meta(low_first, rows)
-    _hand_built_meta(high_first, (rows[0], rows[2], rows[1]))
-
-    assert _refusal(low_first, "2 exec_counter rows") == _refusal(high_first, "2 exec_counter rows")
-
-
-async def test_a_duplicated_exec_counter_appearing_after_the_open_is_refused(
-    tmp_path: Path,
-) -> None:
-    """The allocation read refuses on the same terms the open read does.
-
-    The open validates one counter row; nothing stops an outside writer adding a
-    second to a ``meta`` that has no primary key. Taking the first row at
-    allocation would rewind the ordinal on a file whose open had validated the
-    *other* row, so ``_next_ordinal`` re-reads defensively rather than trusting
-    what the open established.
-    """
-    path = tmp_path / "plans.db"
-    _hand_built_meta(path, (("schema_version", "1"), ("exec_counter", "7")))
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal())
-        await store.save_plan(_plan())
-
-        raw = sqlite3.connect(path)
-        try:
-            raw.execute("INSERT INTO meta(key, value) VALUES ('exec_counter', '2')")
-            raw.commit()
-        finally:
-            raw.close()
-
-        with pytest.raises(PlanningError, match="2 exec_counter rows"):
-            await store.start_execution("p1")
-    finally:
-        store.close()
-
-
-async def test_a_lost_exec_counter_is_refused_at_allocation(tmp_path: Path) -> None:
-    """An allocator with no durable counter refuses rather than restarting at zero.
-
-    Restarting would re-mint every ordinal the store has issued (ADR-0049 §3),
-    and unpacking the empty ``fetchone()`` would have raised a raw ``TypeError``
-    past this layer's boundary either way.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal())
-        await store.save_plan(_plan())
-
-        raw = sqlite3.connect(path)
-        try:
-            raw.execute("DELETE FROM meta WHERE key = 'exec_counter'")
-            raw.commit()
-        finally:
-            raw.close()
-
-        with pytest.raises(PlanningError, match="lost its exec_counter"):
-            await store.start_execution("p1")
-    finally:
-        store.close()
-
-
-@pytest.mark.parametrize("key", ["schema_version", "exec_counter", "exec_high_water"])
 @pytest.mark.parametrize("value", [float("inf"), None, b"1", 1.5])
 def test_an_untyped_meta_value_never_leaks_a_non_domain_error(
-    tmp_path: Path, key: str, value: object
+    tmp_path: Path, value: object
 ) -> None:
     """A ``value`` column with no declared type returns whatever was stored.
 
@@ -2060,16 +562,10 @@ def test_an_untyped_meta_value_never_leaks_a_non_domain_error(
     absent key, or the store would insert a second row beside it.
     """
     path = tmp_path / "plans.db"
-    rows: list[tuple[str, object]] = [(key, value)]
-    if key != "schema_version":
-        rows.insert(0, ("schema_version", "1"))
-    _hand_built_meta(path, rows, typed=False)
+    _hand_built_meta(path, [("schema_version", value)], typed=False)
 
-    with pytest.raises(PlanningError, match=f"non-numeric {key}"):
+    with pytest.raises(PlanningError, match="non-numeric schema_version"):
         SqlitePlanStore(path=path, now=_fixed_now)
-
-
-# --- the ordinal only moves forward (issue #356, ADR-0064) ------------------
 
 
 def _meta(path: Path, key: str) -> str | None:
@@ -2082,16 +578,6 @@ def _meta(path: Path, key: str) -> str | None:
     return None if row is None else str(row[0])
 
 
-def _write_meta(path: Path, key: str, value: str) -> None:
-    """Play the outside writer: set one ``meta`` row on a store this test opened."""
-    raw = sqlite3.connect(path)
-    try:
-        raw.execute("UPDATE meta SET value = ? WHERE key = ?", (value, key))
-        raw.commit()
-    finally:
-        raw.close()
-
-
 def _tables(path: Path) -> set[str]:
     raw = sqlite3.connect(path)
     try:
@@ -2102,222 +588,19 @@ def _tables(path: Path) -> set[str]:
         raw.close()
 
 
-async def test_a_mid_session_counter_rollback_cannot_reissue_an_execution_id(
-    tmp_path: Path,
-) -> None:
-    """Issue #356, reproduced: the rewind that hands out a byte-identical id.
+async def test_a_failed_open_rolls_the_schema_and_the_label_back(tmp_path: Path) -> None:
+    """The label and the tables are written in one transaction, or neither is.
 
-    ``exec_counter`` is one mutable row and nothing checked it only moves forward.
-    Rewinding it *mid-session* re-mints an ordinal already issued, and the rest of
-    the id is constant for the life of one store object — the pid, and the nonce
-    pinned here — so the id comes back **identical**, which ADR-0044 §1 makes
-    normative it never is and a parked confirmation's recovery keys against.
-
-    Against the code before ADR-0064 this exact sequence printed::
-
-        first id            : p1-exec-1087458-N-1
-        counter after clear : 1        (ADR-0049 §3: never reset)
-        counter rolled back : 0
-        after rollback      : p1-exec-1087458-N-1
-        SAME ID REISSUED    : True
-
-    ``clear()`` is what makes the reissue *silent*: it removes the earlier row, so
-    the ``executions.id`` primary key no longer catches the duplicate. The counter
-    surviving it is precisely the invariant being protected.
+    The create fails part-way: SQLite shares one namespace across tables and indexes,
+    so an index already named ``activation_effects`` makes ``CREATE TABLE IF NOT
+    EXISTS activation_effects`` an error rather than a no-op — after
+    ``stopped_activations`` has been created and the label written. Both roll back.
     """
     path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now, incarnation_factory=lambda: "N")
-    try:
-        first = await _seed_and_start(store)
-        assert first.endswith("-N-1")
-        await store.clear()
-        assert _meta(path, "exec_counter") == "1"  # never reset (ADR-0049 §3)
-        assert _meta(path, "exec_high_water") == "1"  # and neither is its witness
-
-        _write_meta(path, "exec_counter", "0")
-
-        await store.save_goal(_goal())
-        await store.save_plan(_plan())
-        with pytest.raises(PlanningError, match="has been rewound outside this store"):
-            await store.start_execution("p1")
-
-        # And nothing was allocated: the refusal precedes the insert, so the
-        # counter is still where the outside writer left it rather than one past.
-        assert _meta(path, "exec_counter") == "0"
-    finally:
-        store.close()
-
-
-async def test_a_rewound_counter_is_refused_at_open_before_any_record_table(
-    tmp_path: Path,
-) -> None:
-    """The same disagreement refuses the *open*, ahead of every record table.
-
-    ADR-0049 §1's posture: a store this code cannot vouch for is refused before it
-    creates, reads or writes a record. A counter below its mark is a file whose
-    ordinal is no longer the one this store maintained, so the open is where it is
-    loud and diagnosable rather than at whatever allocation happens to hit it.
-    """
-    path = tmp_path / "plans.db"
-    _hand_built_meta(
-        path,
-        (("schema_version", "1"), ("exec_counter", "3"), ("exec_high_water", "9")),
-    )
-
-    with pytest.raises(PlanningError, match="exec_counter=3, below the exec_high_water=9"):
-        SqlitePlanStore(path=path, now=_fixed_now)
-
-    assert _tables(path).isdisjoint({"goals", "plans", "executions"})
-
-
-async def test_a_whole_file_restore_rolls_both_markers_back_and_opens(tmp_path: Path) -> None:
-    """The trade that makes the refusal acceptable: an ordinary restore still opens.
-
-    The mark lives in the **same ``meta`` table** as the counter, so restoring the
-    database file moves them together and they still agree. That is what keeps
-    ADR-0064's refusal aimed at a hand-edit or a partial corruption rather than at
-    backup/restore — and the restore also removes the executions that used the
-    higher ordinals, so re-issuing those *ordinals* collides with nothing. The ids
-    still differ: a reopened store mints a fresh nonce (ADR-0049 §3).
-    """
-    path, backup = tmp_path / "plans.db", tmp_path / "plans.db.bak"
-
-    first = SqlitePlanStore(path=path, now=_fixed_now)
-    await _seed_and_start(first)
-    first.close()
-    shutil.copy(path, backup)  # the backup: counter and mark both at 1
-
-    second = SqlitePlanStore(path=path, now=_fixed_now)
-    later_ids = [(await second.start_execution("p1")).id for _ in range(2)]
-    second.close()
-    assert _meta(path, "exec_counter") == "3"
-
-    shutil.copy(backup, path)  # the restore
-    assert _meta(path, "exec_counter") == "1"
-    assert _meta(path, "exec_high_water") == "1"
-
-    restored = SqlitePlanStore(path=path, now=_fixed_now)  # opens: the two agree
-    try:
-        # The executions that held ordinals 2 and 3 went back with the file, so
-        # the ordinal is free again — and the new id differs from theirs anyway.
-        for erased in later_ids:
-            assert await restored.get_execution(erased) is None
-        fresh = (await restored.start_execution("p1")).id
-        assert fresh.endswith("-2")
-        assert fresh not in later_ids
-    finally:
-        restored.close()
-
-
-async def test_a_store_predating_the_mark_is_backfilled_not_refused(tmp_path: Path) -> None:
-    """A database with a counter and no mark opens, and is stamped from its counter.
-
-    Every store written before ADR-0064 is in this state. Refusing them would make
-    the durable record unopenable by the code that wrote it, and the stamp is
-    sound rather than merely lenient: the pre-ADR-0064 counter *was* the highest
-    ordinal that file had issued, so recording it asserts nothing new.
-    """
-    path = tmp_path / "plans.db"
-    _hand_built_meta(path, (("schema_version", "1"), ("exec_counter", "7")))
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        assert _meta(path, "exec_high_water") == "7"
-        # And the counter is carried forward, not restarted: ordinal 8 is next.
-        assert (await _seed_and_start(store)).endswith("-8")
-        assert _meta(path, "exec_high_water") == "8"
-    finally:
-        store.close()
-
-
-async def test_deleting_the_mark_does_not_launder_a_rewound_counter(tmp_path: Path) -> None:
-    """The backfill must not be a way *around* the invariant it exists to preserve.
-
-    A deleted mark is indistinguishable from one that was never written, so a
-    two-row tamper — drop ``exec_high_water``, lower ``exec_counter`` — would
-    otherwise be stamped at the reopen as a fresh, agreeing pair. The executions
-    that survive are the witness: each records the ordinal it was allocated with,
-    and ``MAX(created_seq) <= exec_counter`` holds for every file this store wrote
-    (``clear``/``delete_goal`` only remove rows).
-
-    Before this check the reopen **succeeded**, and left the table holding two
-    executions at ``created_seq = 1`` — so ``active_executions``/``export``'s
-    oldest-first ordering silently stopped being an order::
-
-        created_seq: [("…-A-1", 1), ("…-B-1", 1), ("…-A-2", 2), ("…-A-3", 3)]
-
-    No execution *id* was reused there: the reopened store mints a fresh nonce,
-    which is exactly the job ADR-0049 §3 assigns it. The durable ordering is the
-    casualty, and it is enough.
-    """
-    path = tmp_path / "plans.db"
-    first = SqlitePlanStore(path=path, now=_fixed_now, incarnation_factory=lambda: "A")
-    await first.save_goal(_goal())
-    await first.save_plan(_plan())
-    for _ in range(3):
-        await first.start_execution("p1")
-    first.close()
-
     raw = sqlite3.connect(path)
     try:
-        raw.execute("DELETE FROM meta WHERE key = 'exec_high_water'")
-        raw.execute("UPDATE meta SET value = '0' WHERE key = 'exec_counter'")
-        raw.commit()
-    finally:
-        raw.close()
-
-    with pytest.raises(PlanningError, match="still holds an execution allocated at created_seq=3"):
-        SqlitePlanStore(path=path, now=_fixed_now, incarnation_factory=lambda: "B")
-
-    assert _meta(path, "exec_high_water") is None  # the refusal wrote nothing
-
-
-async def test_a_deleted_mark_is_rebuilt_when_the_records_agree(tmp_path: Path) -> None:
-    """The corroboration refuses a rewind, not a missing mark on its own.
-
-    The same file with only the mark removed — the counter untouched — is a store
-    whose records are consistent with what it says, so it is re-stamped and the
-    ordinal carries on. This is what keeps the check above from being a second,
-    stricter refusal than the one ADR-0064 §4 argues for.
-    """
-    path = tmp_path / "plans.db"
-    first = SqlitePlanStore(path=path, now=_fixed_now)
-    await first.save_goal(_goal())
-    await first.save_plan(_plan())
-    for _ in range(3):
-        await first.start_execution("p1")
-    first.close()
-
-    raw = sqlite3.connect(path)
-    try:
-        raw.execute("DELETE FROM meta WHERE key = 'exec_high_water'")
-        raw.commit()
-    finally:
-        raw.close()
-
-    reopened = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        assert _meta(path, "exec_high_water") == "3"
-        assert (await reopened.start_execution("p1")).id.endswith("-4")
-    finally:
-        reopened.close()
-
-
-async def test_the_mark_is_not_stamped_when_the_open_fails(tmp_path: Path) -> None:
-    """The backfill lands after the record schema, inside the one transaction.
-
-    Stamping before the create would leave a database labelled with a mark an open
-    that then failed never established — the failure mode ``SqliteAuditTrail``
-    avoids the same way (#346). Here the create fails part-way: SQLite shares one
-    namespace across tables and indexes, so an index already named ``plans`` makes
-    ``CREATE TABLE IF NOT EXISTS plans`` an error rather than a no-op — after
-    ``goals`` has been created.
-    """
-    path = tmp_path / "plans.db"
-    _hand_built_meta(path, (("schema_version", "1"), ("exec_counter", "7")))
-    raw = sqlite3.connect(path)
-    try:
-        raw.execute("CREATE INDEX plans ON meta(key)")
+        raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        raw.execute("CREATE INDEX activation_effects ON meta(key)")
         raw.commit()
     finally:
         raw.close()
@@ -2325,9 +608,8 @@ async def test_the_mark_is_not_stamped_when_the_open_fails(tmp_path: Path) -> No
     with pytest.raises(PlanningError, match="failed to initialise the plan store"):
         SqlitePlanStore(path=path, now=_fixed_now)
 
-    assert _meta(path, "exec_high_water") is None
-    assert _meta(path, "exec_counter") == "7"
-    assert "goals" not in _tables(path)  # the half-built schema rolled back with it
+    assert _meta(path, "schema_version") is None
+    assert "stopped_activations" not in _tables(path)
 
 
 async def test_a_path_the_driver_refuses_outright_is_still_a_planning_error() -> None:
@@ -2343,206 +625,6 @@ async def test_a_path_the_driver_refuses_outright_is_still_a_planning_error() ->
     """
     with pytest.raises(PlanningError, match="failed to open"):
         SqlitePlanStore(path="plans\x00.db", now=_fixed_now)
-
-
-async def test_a_mark_below_the_counter_is_promoted_at_open_not_refused(tmp_path: Path) -> None:
-    """A lagging mark is levelled up, not refused — and levelled *at the open*.
-
-    A mark below the counter — what an older build advancing the counter without
-    the witness would leave — means no ordinal has been handed out twice, so there
-    is nothing to refuse. Promoting it is not a repair either: the counter is the
-    highest ordinal issued, so that is what the high water is.
-
-    Doing it eagerly is what makes the allocation-time test sound for the rest of
-    the session. Left lagging, the two would agree again as soon as an outside
-    writer rewound the counter down to meet the stale mark, and the allocation
-    would pass a rewind straight through — so the second half of this test rewinds
-    mid-session and requires the refusal.
-    """
-    path = tmp_path / "plans.db"
-    seeded = SqlitePlanStore(path=path, now=_fixed_now)
-    await _seed_and_start(seeded)
-    seeded.close()
-
-    _write_meta(path, "exec_counter", "9")  # advanced without its witness
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        assert _meta(path, "exec_high_water") == "9"  # levelled by the open itself
-        assert (await store.start_execution("p1")).id.endswith("-10")
-        assert _meta(path, "exec_high_water") == "10"
-
-        _write_meta(path, "exec_counter", "5")
-        with pytest.raises(PlanningError, match="has been rewound outside this store"):
-            await store.start_execution("p1")
-    finally:
-        store.close()
-
-
-async def test_a_rewind_down_to_a_lagging_mark_is_refused_by_the_records(
-    tmp_path: Path,
-) -> None:
-    """A stale mark cannot vouch for a counter rewound down to meet it.
-
-    Adversarial review, round 2. The ``counter >= mark`` test passes trivially when
-    both are 1 — but the file still holds executions at ``created_seq`` 2 and 3, so
-    the next allocation re-issues ordinal 2. Reproduced against the previous commit,
-    which opened the store happily and left::
-
-        created_seq: [("…-A-1", 1), ("…-A-2", 2), ("…-B-2", 2), ("…-A-3", 3)]
-
-    Two rows at 2, so ``active_executions``/``export`` stopped being an order. The
-    records are what close it: ``MAX(created_seq) <= exec_counter`` holds for every
-    file this store wrote.
-    """
-    path = tmp_path / "plans.db"
-    first = SqlitePlanStore(path=path, now=_fixed_now, incarnation_factory=lambda: "A")
-    await first.save_goal(_goal())
-    await first.save_plan(_plan())
-    for _ in range(3):
-        await first.start_execution("p1")
-    first.close()
-
-    _write_meta(path, "exec_high_water", "1")  # an older build left the mark behind
-    _write_meta(path, "exec_counter", "1")  # then an outside writer rewound to it
-
-    with pytest.raises(PlanningError, match="still holds an execution allocated at created_seq=3"):
-        SqlitePlanStore(path=path, now=_fixed_now, incarnation_factory=lambda: "B")
-
-
-async def test_two_executions_cannot_share_a_created_seq(tmp_path: Path) -> None:
-    """The oldest-first ordering is a property of the schema, not of the counter alone.
-
-    Adversarial review, round 3: a *concurrently running* older build can advance
-    the counter without the mark **after** this store has opened, so a subsequent
-    one-row rewind leaves counter and mark agreeing at a value the file has already
-    passed. The allocation-time mark test cannot see that, and re-scanning
-    ``executions`` on every ``start_execution`` would put a full scan on the hot
-    path. The uniqueness ``created_seq`` already has by construction is declared
-    instead, so a second row at one ordinal is refused whatever route it arrives by
-    — the same relationship the enforced foreign keys have to ``save_plan``'s
-    app-level orphan check (ADR-0049 §1).
-
-    Staged exactly as the finding describes: the store is open at counter 3, an
-    outside writer plays the older build (a row at ``created_seq = 4``, counter
-    advanced, mark untouched), then a reset script puts the counter back to 3.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal())
-        await store.save_plan(_plan())
-        for _ in range(3):
-            await store.start_execution("p1")
-
-        raw = sqlite3.connect(path)
-        try:
-            data = raw.execute("SELECT data FROM executions LIMIT 1").fetchone()[0]
-            raw.execute(
-                "INSERT INTO executions(id, plan_id, version, active, created_seq, data) "
-                "VALUES ('older-build-4', 'p1', 1, 1, 4, ?)",
-                (data,),
-            )
-            # The older build advances only the counter; the mark stays at 3.
-            raw.execute("UPDATE meta SET value = '4' WHERE key = 'exec_counter'")
-            # Then the reset script puts it back, so counter and mark agree again.
-            raw.execute("UPDATE meta SET value = '3' WHERE key = 'exec_counter'")
-            raw.commit()
-        finally:
-            raw.close()
-
-        with pytest.raises(PlanningError, match="UNIQUE constraint failed"):
-            await store.start_execution("p1")
-    finally:
-        store.close()
-
-    seqs = [row[0] for row in sqlite3.connect(path).execute("SELECT created_seq FROM executions")]
-    assert sorted(seqs) == [1, 2, 3, 4]  # no duplicate survived the refusal
-
-
-async def test_a_file_already_holding_duplicate_ordinals_is_refused_at_open(
-    tmp_path: Path,
-) -> None:
-    """A database that already lost the ordering is refused, not carried forward.
-
-    The unique index is created at every open, so a file whose ``created_seq``
-    duplicates predate this code cannot be opened — ADR-0049 §1's posture, and the
-    only honest answer: nothing here can decide which of two rows at one ordinal
-    came first.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    await store.save_goal(_goal())
-    await store.save_plan(_plan())
-    await store.start_execution("p1")
-    store.close()
-
-    raw = sqlite3.connect(path)
-    try:
-        data = raw.execute("SELECT data FROM executions LIMIT 1").fetchone()[0]
-        raw.execute("DROP INDEX executions_created_seq")
-        raw.execute(
-            "INSERT INTO executions(id, plan_id, version, active, created_seq, data) "
-            "VALUES ('dupe-1', 'p1', 1, 1, 1, ?)",
-            (data,),
-        )
-        raw.commit()
-    finally:
-        raw.close()
-
-    with pytest.raises(PlanningError, match="failed to initialise the plan store"):
-        SqlitePlanStore(path=path, now=_fixed_now)
-
-
-@pytest.mark.parametrize(
-    "collision",
-    [
-        pytest.param(
-            "CREATE INDEX executions_created_seq ON executions(created_seq)", id="not-unique"
-        ),
-        pytest.param(
-            "CREATE UNIQUE INDEX executions_created_seq ON executions(id)", id="wrong-column"
-        ),
-        pytest.param(
-            "CREATE UNIQUE INDEX executions_created_seq ON executions(created_seq) "
-            "WHERE active = 1",
-            id="partial",
-        ),
-    ],
-)
-async def test_an_index_that_only_shares_the_name_is_refused(
-    tmp_path: Path, collision: str
-) -> None:
-    """``IF NOT EXISTS`` keys on the name, so the name is not evidence about the object.
-
-    Adversarial review, round 4. A pre-existing index *called*
-    ``executions_created_seq`` but shaped differently makes the creation a silent
-    no-op, leaving no uniqueness constraint while every message in the module
-    claims one — the same fail-open issue #349 found in a ``meta`` table this code
-    did not shape. Verified against the previous commit: with a same-name
-    non-unique index in place, two rows at ``created_seq = 1`` inserted cleanly.
-
-    So the index is read back and required to be unique, total, and over exactly
-    ``created_seq``.
-    """
-    path = tmp_path / "plans.db"
-    raw = sqlite3.connect(path)
-    try:
-        # Otherwise the shape this store expects (#373), so the index check — not
-        # the record-table check that runs before it — is what refuses this file.
-        raw.execute(
-            "CREATE TABLE executions("
-            "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(id), "
-            "version INTEGER NOT NULL, active INTEGER NOT NULL, "
-            "created_seq INTEGER NOT NULL, data TEXT NOT NULL)"
-        )
-        raw.execute(collision)
-        raw.commit()
-    finally:
-        raw.close()
-
-    with pytest.raises(PlanningError, match="not a unique index over executions"):
-        SqlitePlanStore(path=path, now=_fixed_now)
 
 
 # --- a record table this store did not shape (issue #373) -------------------
@@ -2562,150 +644,76 @@ def _hand_built_table(path: Path, table: str, body: str) -> None:
         raw.close()
 
 
-async def test_a_preexisting_executions_with_a_text_created_seq_is_refused(
-    tmp_path: Path,
-) -> None:
-    """The headline #373 defect: a lexical ``created_seq``, reproduced and refused.
-
-    A pre-existing ``executions`` whose ``created_seq`` is ``TEXT`` — but which is
-    otherwise the shape this store expects, so #364's index check and every other
-    check pass — makes ``ORDER BY created_seq``/``MAX(created_seq)`` lexical, so
-    ``active_executions``/``export`` silently stop returning oldest-first (``['1',
-    '10', '2']``), the order ADR-0049 §1 requires. ``CREATE TABLE IF NOT EXISTS``
-    is a no-op against it and nothing validated the affinity, so the store opened
-    with the guarantee silently absent. It is now read back and refused at open.
-    """
-    path = tmp_path / "plans.db"
-    _hand_built_table(
-        path,
-        "executions",
-        "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(id), "
-        "version INTEGER NOT NULL, active INTEGER NOT NULL, "
-        "created_seq TEXT NOT NULL, data TEXT NOT NULL",
-    )
-
-    with pytest.raises(PlanningError, match="created_seq column has TEXT affinity"):
-        SqlitePlanStore(path=path, now=_fixed_now)
-
-
 @pytest.mark.parametrize(
     ("table", "body", "match"),
     [
         pytest.param(
-            "executions",
-            "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(id), "
-            "version TEXT NOT NULL, active INTEGER NOT NULL, "
-            "created_seq INTEGER NOT NULL, data TEXT NOT NULL",
-            "version column has TEXT affinity",
-            id="version-not-integer-breaks-the-cas-compare",
+            "activation_effects",
+            "id TEXT PRIMARY KEY, activation_id TEXT NOT NULL, claimed_seq TEXT NOT NULL, "
+            "data TEXT NOT NULL",
+            "claimed_seq column has TEXT affinity",
+            id="claimed-seq-not-integer-orders-the-claims-lexically",
         ),
         pytest.param(
-            "executions",
-            "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(id), "
-            "version INTEGER NOT NULL, active TEXT NOT NULL, "
-            "created_seq INTEGER NOT NULL, data TEXT NOT NULL",
-            "active column has TEXT affinity",
-            id="active-not-integer-breaks-the-active-filter",
-        ),
-        pytest.param(
-            "executions",
-            "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(id), "
-            "version INTEGER NOT NULL, active INTEGER NOT NULL, "
-            "created_seq INTEGER NOT NULL, data BLOB NOT NULL",
+            "activation_effects",
+            "id TEXT PRIMARY KEY, activation_id TEXT NOT NULL, claimed_seq INTEGER NOT NULL, "
+            "data BLOB NOT NULL",
             "data column has BLOB affinity",
             id="data-not-text-changes-what-model_validate_json-is-handed",
         ),
         pytest.param(
-            "goals",
-            "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
-            "evidence_elided INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL",
-            "data column has BLOB affinity",
-            id="goals-data-not-text",
-        ),
-        pytest.param(
-            "goals",
-            "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
-            "evidence_elided TEXT NOT NULL DEFAULT 0, data TEXT NOT NULL",
-            "evidence_elided column has TEXT affinity",
-            id="evidence-elided-not-integer-stores-a-count-no-read-accepts",
-        ),
-        pytest.param(
-            "goals",
-            "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
-            "evidence_elided INTEGER NOT NULL DEFAULT 0",
-            "data column is absent",
-            id="goals-missing-a-column",
-        ),
-        pytest.param(
-            "plans",
-            "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, data TEXT NOT NULL",
-            "foreign key from goal_id to goals",
-            id="plans-without-its-goal-reference",
-        ),
-        pytest.param(
-            "executions",
-            "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, "
-            "version INTEGER NOT NULL, active INTEGER NOT NULL, "
-            "created_seq INTEGER NOT NULL, data TEXT NOT NULL",
-            "foreign key from plan_id to plans",
-            id="executions-without-its-plan-reference",
-        ),
-        pytest.param(
-            "plans",
-            "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(data), data TEXT NOT NULL",
-            "foreign key from goal_id to goals",
-            id="plans-foreign-key-to-the-wrong-column",
-        ),
-        pytest.param(
-            "plans",
-            "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, data TEXT NOT NULL, "
-            "FOREIGN KEY(goal_id, data) REFERENCES goals(id, data)",
-            "no single-column foreign key from goal_id to goals",
-            id="plans-composite-foreign-key-is-not-the-required-binding",
-        ),
-        pytest.param(
-            "plans",
-            "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), "
-            "data TEXT NOT NULL, FOREIGN KEY(data) REFERENCES goals(id)",
-            "unexpected foreign key",
-            id="plans-with-an-extra-foreign-key-would-reject-valid-writes",
-        ),
-        pytest.param(
-            "goals",
-            "id TEXT, conversation_id TEXT, last_engaged_in TEXT, "
-            "evidence_elided INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL",
-            "no PRIMARY KEY",
-            id="goals-without-a-primary-key-breaks-on-conflict",
-        ),
-        pytest.param(
-            "goals",
-            "id TEXT PRIMARY KEY COLLATE NOCASE, conversation_id TEXT, last_engaged_in TEXT, "
-            "evidence_elided INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL",
-            "NOCASE-collated id PRIMARY KEY",
-            id="goals-case-insensitive-primary-key-folds-distinct-ids",
-        ),
-        pytest.param(
-            "goals",
-            "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
-            "evidence_elided INTEGER NOT NULL DEFAULT 0, data TEXT",
+            "activation_effects",
+            "id TEXT PRIMARY KEY, activation_id TEXT NOT NULL, claimed_seq INTEGER NOT NULL, "
+            "data TEXT",
             "data column is nullable",
-            id="goals-nullable-data-can-store-a-null-no-decode-accepts",
+            id="nullable-data-can-store-a-null-no-decode-accepts",
+        ),
+        pytest.param(
+            "activation_effects",
+            "id TEXT PRIMARY KEY, activation_id TEXT, claimed_seq INTEGER NOT NULL, "
+            "data TEXT NOT NULL",
+            "activation_id column is nullable",
+            id="nullable-activation-hides-a-record-from-every-match",
+        ),
+        pytest.param(
+            "activation_effects",
+            "id TEXT PRIMARY KEY, activation_id TEXT NOT NULL, data TEXT NOT NULL",
+            "claimed_seq column is absent",
+            id="missing-a-column",
+        ),
+        pytest.param(
+            "activation_effects",
+            "id TEXT, activation_id TEXT NOT NULL, claimed_seq INTEGER NOT NULL, "
+            "data TEXT NOT NULL",
+            "no PRIMARY KEY",
+            id="effects-without-a-primary-key-admit-a-second-record-of-one-id",
+        ),
+        pytest.param(
+            "activation_effects",
+            "id TEXT PRIMARY KEY COLLATE NOCASE, activation_id TEXT NOT NULL, "
+            "claimed_seq INTEGER NOT NULL, data TEXT NOT NULL",
+            "NOCASE-collated id PRIMARY KEY",
+            id="case-insensitive-primary-key-folds-distinct-ids",
+        ),
+        pytest.param(
+            "stopped_activations",
+            "activation_id TEXT PRIMARY KEY COLLATE NOCASE",
+            "NOCASE-collated activation_id PRIMARY KEY",
+            id="a-case-folded-stop-refuses-another-activations-claims",
         ),
     ],
 )
 async def test_a_record_table_of_the_wrong_shape_is_refused(
     tmp_path: Path, table: str, body: str, match: str
 ) -> None:
-    """It is not only ``created_seq`` (#373): every load-bearing shape property.
+    """Every load-bearing shape property, refused at open (#373).
 
-    A hand-built table breaks them all the same way ``CREATE TABLE IF NOT EXISTS``
-    lets ``created_seq`` through — the compare-and-swap ``version``, the
-    ``WHERE active = 1`` filter, the ``data`` blob ``model_validate_json`` reads, a
-    nullable ``data`` that can store a ``NULL`` no decode accepts, the ``id`` primary
-    key ``save_goal``'s upsert needs (absent, or folded case-insensitively by a
-    ``COLLATE NOCASE`` that collides distinct ids), and the ADR-0049 §1
-    referential-integrity backstop (absent, mis-targeted, or only present inside a
-    composite key SQLite would reject at the first write).
+    A hand-built table breaks each the same way ``CREATE TABLE IF NOT EXISTS`` lets
+    it through: the ``claimed_seq`` the claim order is read by, the ``data`` blob
+    ``model_validate_json`` reads, a nullable column that can store a ``NULL`` no
+    read accepts, and the primary key the ``ON CONFLICT`` writes and per-id
+    uniqueness need (absent, or folded case-insensitively by a ``COLLATE NOCASE``
+    that collides distinct ids).
     """
     path = tmp_path / "plans.db"
     _hand_built_table(path, table, body)
@@ -2717,43 +725,32 @@ async def test_a_record_table_of_the_wrong_shape_is_refused(
 async def test_a_case_variant_but_compatible_schema_is_accepted(tmp_path: Path) -> None:
     """SQLite identifiers are case-insensitive, so a case-variant schema is *the* shape.
 
-    A hand-built all-uppercase schema — tables, columns, the foreign keys and the
-    ordinal index — differs only in identifier casing, which every query this store
-    issues resolves case-insensitively, so it is the shape this store understands and
-    refusing it for casing alone would be a false refusal. Every shape check
-    (columns, primary key and its collation, foreign keys, and the ordinal index)
-    lower-cases identifier names before comparing, so the store opens and a full
-    goal/plan/execution round-trip — including the ``ORDER BY created_seq`` in
-    ``active_executions`` — works against ``CREATED_SEQ``.
+    A hand-built all-uppercase schema differs only in identifier casing, which every
+    query this store issues resolves case-insensitively, so it is the shape this store
+    understands and refusing it for casing alone would be a false refusal. Every shape
+    check lower-cases identifier names before comparing, so the store opens and a
+    claim, a stop and the read — including the ``ORDER BY claimed_seq`` — work against
+    ``CLAIMED_SEQ``.
     """
     path = tmp_path / "plans.db"
     raw = sqlite3.connect(path)
     try:
+        raw.execute("CREATE TABLE STOPPED_ACTIVATIONS(ACTIVATION_ID TEXT PRIMARY KEY)")
         raw.execute(
-            "CREATE TABLE GOALS(ID TEXT PRIMARY KEY, CONVERSATION_ID TEXT, "
-            "LAST_ENGAGED_IN TEXT, EVIDENCE_ELIDED INTEGER NOT NULL DEFAULT 0, "
-            "DATA TEXT NOT NULL)"
+            "CREATE TABLE ACTIVATION_EFFECTS(ID TEXT PRIMARY KEY, ACTIVATION_ID TEXT NOT NULL, "
+            "CLAIMED_SEQ INTEGER NOT NULL, DATA TEXT NOT NULL)"
         )
-        raw.execute(
-            "CREATE TABLE PLANS(ID TEXT PRIMARY KEY, "
-            "GOAL_ID TEXT NOT NULL REFERENCES GOALS(ID), DATA TEXT NOT NULL)"
-        )
-        raw.execute(
-            "CREATE TABLE EXECUTIONS(ID TEXT PRIMARY KEY, "
-            "PLAN_ID TEXT NOT NULL REFERENCES PLANS(ID), VERSION INTEGER NOT NULL, "
-            "ACTIVE INTEGER NOT NULL, CREATED_SEQ INTEGER NOT NULL, DATA TEXT NOT NULL)"
-        )
-        raw.execute("CREATE UNIQUE INDEX EXECUTIONS_CREATED_SEQ ON EXECUTIONS(CREATED_SEQ)")
         raw.commit()
     finally:
         raw.close()
 
     store = SqlitePlanStore(path=path, now=_fixed_now)  # opens rather than refusing
     try:
-        await store.save_goal(_goal())
-        await store.save_plan(_plan())
-        state = await store.start_execution("p1")
-        assert [execution.id for execution in await store.active_executions()] == [state.id]
+        await store.claim_activation_effect(_acted("e1"), match=None)
+        await store.claim_activation_effect(_acted("e2"), match=None)
+        await store.record_stop("act-1")
+        assert await store.activation_effects(["act-1"]) == (_acted("e1"), _acted("e2"))
+        assert (await store.export()).stopped_activations == ("act-1",)
     finally:
         store.close()
 
@@ -2761,20 +758,23 @@ async def test_a_case_variant_but_compatible_schema_is_accepted(tmp_path: Path) 
 async def test_a_trigger_on_a_record_table_is_refused(tmp_path: Path) -> None:
     """A mutating trigger subverts a *successful* write, so a table carrying one is refused.
 
-    The columns/PK/FK can be exactly right while an ``AFTER INSERT`` trigger rewrites
-    ``NEW.id`` underneath the write: ``save_goal`` would return the caller's id while
-    the row was moved, and ``get_goal`` would then find nothing. The store creates no
-    triggers, so any trigger on a record table is foreign and there is no shape that
-    makes a mutating one safe; it is refused at open (ADR-0049 §1's fail-closed
-    posture), the same reasoning as a wrong column or a missing key.
+    The columns and key can be exactly right while an ``AFTER INSERT`` trigger rewrites
+    ``NEW.id`` underneath the write: a claim would report its record stored while the
+    row was moved, and the read would then find it under an id nothing claimed. The
+    store creates no triggers, so any trigger on a record table is foreign and there is
+    no shape that makes a mutating one safe; it is refused at open (ADR-0049 §1's
+    fail-closed posture), the same reasoning as a wrong column or a missing key.
     """
     path = tmp_path / "plans.db"
     raw = sqlite3.connect(path)
     try:
-        raw.execute("CREATE TABLE goals(id TEXT PRIMARY KEY, data TEXT NOT NULL)")
         raw.execute(
-            "CREATE TRIGGER goals_tamper AFTER INSERT ON goals "
-            "BEGIN UPDATE goals SET id = id || '-moved' WHERE id = NEW.id; END"
+            "CREATE TABLE activation_effects(id TEXT PRIMARY KEY, activation_id TEXT NOT NULL, "
+            "claimed_seq INTEGER NOT NULL, data TEXT NOT NULL)"
+        )
+        raw.execute(
+            "CREATE TRIGGER effects_tamper AFTER INSERT ON activation_effects "
+            "BEGIN UPDATE activation_effects SET id = id || '-moved' WHERE id = NEW.id; END"
         )
         raw.commit()
     finally:
@@ -2785,24 +785,20 @@ async def test_a_trigger_on_a_record_table_is_refused(tmp_path: Path) -> None:
 
 
 async def test_a_trigger_on_meta_is_refused(tmp_path: Path) -> None:
-    """A `meta` trigger can reset the durable ordinal, so it too is refused (#373, #405).
+    """A ``meta`` trigger can relabel the schema, so it too is refused (#373, #405).
 
-    ``meta`` holds ``exec_counter``/``exec_high_water`` (ADR-0064). A trigger that
-    resets them on update defeats the ordinal-monotonicity execution-id non-reuse
-    rests on: a later ``start_execution`` re-issues an id already handed out, and a
-    reused id lets a stale parked confirmation resolve a freshly-created execution
-    (ADR-0049 §3). This is a *silent* break — every other check passes — so the
-    trigger class is closed over every table the store writes, ``meta`` included.
+    The open is decided on ``schema_version``, so a trigger that rewrites it would
+    move the label under the store's own write. This is a *silent* break — every
+    other check passes — so the trigger class is closed over every table the store
+    writes, ``meta`` included.
     """
     path = tmp_path / "plans.db"
     raw = sqlite3.connect(path)
     try:
         raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         raw.execute(
-            "CREATE TRIGGER meta_rewind AFTER UPDATE ON meta "
-            "WHEN NEW.key = 'exec_high_water' "
-            "BEGIN UPDATE meta SET value = '0' "
-            "WHERE key IN ('exec_counter', 'exec_high_water'); END"
+            "CREATE TRIGGER meta_relabel AFTER INSERT ON meta "
+            "BEGIN UPDATE meta SET value = '10' WHERE key = 'schema_version'; END"
         )
         raw.commit()
     finally:
@@ -2812,89 +808,28 @@ async def test_a_trigger_on_meta_is_refused(tmp_path: Path) -> None:
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
-async def test_a_lost_high_water_mark_is_refused_at_allocation(tmp_path: Path) -> None:
-    """An allocator that cannot witness its counter refuses, like one with no counter.
-
-    Minting on an unwitnessed counter is minting on a value that may already have
-    been rewound — the exact state ADR-0064 exists to detect — so the missing mark
-    is a corrupt store, not a mark to silently re-create from whatever is there.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal())
-        await store.save_plan(_plan())
-
-        raw = sqlite3.connect(path)
-        try:
-            raw.execute("DELETE FROM meta WHERE key = 'exec_high_water'")
-            raw.commit()
-        finally:
-            raw.close()
-
-        with pytest.raises(PlanningError, match="lost its exec_high_water"):
-            await store.start_execution("p1")
-    finally:
-        store.close()
-
-
-async def test_a_duplicated_high_water_row_appearing_after_the_open_is_refused(
-    tmp_path: Path,
-) -> None:
-    """The mark is read on the same terms as the counter, at both sites (#349).
-
-    ``meta``'s primary key does not hold for a table this code did not create, so
-    the mark can go ambiguous after the open validated it. Resolving that by row
-    order would let a low sibling row wave a rewound counter through.
-    """
-    path = tmp_path / "plans.db"
-    _hand_built_meta(
-        path,
-        (("schema_version", "1"), ("exec_counter", "7"), ("exec_high_water", "7")),
-    )
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal())
-        await store.save_plan(_plan())
-
-        raw = sqlite3.connect(path)
-        try:
-            raw.execute("INSERT INTO meta(key, value) VALUES ('exec_high_water', '2')")
-            raw.commit()
-        finally:
-            raw.close()
-
-        with pytest.raises(PlanningError, match="2 exec_high_water rows"):
-            await store.start_execution("p1")
-    finally:
-        store.close()
-
-
 async def test_export_is_a_single_consistent_snapshot(tmp_path: Path) -> None:
-    """A committed goal+plan pair is exported whole, never as a dangling plan.
+    """The export reads both tables in one transaction, against a second writer.
 
-    ``export`` reads all three tables inside one ``BEGIN IMMEDIATE`` transaction
-    (ADR-0004 §6), so a second connection cannot interleave a write between the
-    reads and leave a plan whose goal is missing — the referential inconsistency
-    ``PlanExport`` rejects. Two connections on one file: writer ``b`` commits a
-    goal and its plan; reader ``a``'s export then sees *both*, and (before ``b``
-    writes) sees *neither* — all-or-nothing visibility, which is exactly the
-    anti-dangling guarantee. A torn half would raise ``ValidationError`` here.
+    ``export`` reads both tables inside one ``BEGIN IMMEDIATE`` transaction (ADR-0004
+    §6), so a second connection cannot interleave a write between the reads. Two
+    connections on one file: reader ``a``'s export sees neither record before writer
+    ``b`` commits them, and both after.
     """
     path = tmp_path / "plans.db"
     a = SqlitePlanStore(path=path, now=_fixed_now)
     b = SqlitePlanStore(path=path, now=_fixed_now)
     try:
         empty = await a.export()
-        assert empty.goals == ()
-        assert empty.plans == ()
+        assert empty.stopped_activations == ()
+        assert empty.activation_effects == ()
 
-        await b.save_goal(_goal())
-        await b.save_plan(_plan())
+        await b.claim_activation_effect(_acted("e1"), match=None)
+        await b.record_stop("act-1")
 
         whole = await a.export()
-        assert [g.id for g in whole.goals] == ["g1"]
-        assert [p.id for p in whole.plans] == ["p1"]
+        assert whole.stopped_activations == ("act-1",)
+        assert whole.activation_effects == (_acted("e1"),)
     finally:
         a.close()
         b.close()
@@ -2936,10 +871,9 @@ async def test_a_journal_opened_during_setup_is_owner_only(
     observed: list[int | None] = []
     original = SqlitePlanStore._verify_or_init_meta
 
-    def observing(store: SqlitePlanStore, conn: sqlite3.Connection) -> tuple[int, int | None]:
-        result = original(store, conn)
+    def observing(store: SqlitePlanStore, conn: sqlite3.Connection) -> None:
+        original(store, conn)
         observed.append(_journal_mode(path))
-        return result
 
     monkeypatch.setattr(SqlitePlanStore, "_verify_or_init_meta", observing)
 
@@ -2988,29 +922,29 @@ async def _spin(iterations: int = 50) -> None:
 async def test_cancelling_a_write_does_not_release_the_connection(tmp_path: Path) -> None:
     """A cancelled write must not free the lock while its worker thread runs (ADR-0054).
 
-    ``asyncio.to_thread`` cannot interrupt a running worker, so a cancellation that
-    unwound the awaiting coroutine here would release the connection lock while the
-    worker was still inside its ``BEGIN IMMEDIATE`` transaction on the shared
-    connection. This blocks a worker inside ``save_goal``, cancels the awaiting
-    task, and asserts the lock stays held until the worker finishes, then that a
-    second write lands on an intact connection.
+    A worker thread cannot be interrupted, so a cancellation that unwound the awaiting
+    coroutine here would release the connection lock while the worker was still
+    inside its ``BEGIN IMMEDIATE`` transaction on the shared connection. This blocks a
+    worker inside ``record_stop``, cancels the awaiting task, and asserts the lock
+    stays held until the worker finishes, then that a second write lands on an intact
+    connection.
     """
     store = SqlitePlanStore(path=tmp_path / "cancel.db", now=_fixed_now)
     entered = threading.Event()
     release = threading.Event()
-    original_save = store._save_goal_sync
+    original_record = store._record_stop_sync
 
-    def blocking_save(goal: Goal) -> None:
+    def blocking_record(activation_id: str) -> None:
         if not entered.is_set():
             entered.set()
             if not release.wait(timeout=5):  # pragma: no cover - only on a hang
                 msg = "the blocked worker was never released"
                 raise AssertionError(msg)
-        original_save(goal)
+        original_record(activation_id)
 
-    store._save_goal_sync = blocking_save  # type: ignore[method-assign]
+    store._record_stop_sync = blocking_record  # type: ignore[method-assign]
     try:
-        first = asyncio.ensure_future(store.save_goal(_goal("g1")))
+        first = asyncio.ensure_future(store.record_stop("act-1"))
         assert await asyncio.to_thread(entered.wait, 5), "worker never entered"
         assert store._lock.locked()
 
@@ -3020,7 +954,7 @@ async def test_cancelling_a_write_does_not_release_the_connection(tmp_path: Path
         # still running, so the connection is still exclusively held.
         assert store._lock.locked()
 
-        second = asyncio.ensure_future(store.save_goal(_goal("g2")))
+        second = asyncio.ensure_future(store.record_stop("act-2"))
         await _spin()
         assert not second.done()
         assert store._lock.locked()
@@ -3032,53 +966,8 @@ async def test_cancelling_a_write_does_not_release_the_connection(tmp_path: Path
 
         # The connection is intact: the deferred-to-completion first write
         # committed, and the second landed cleanly on top of it.
-        assert await store.get_goal("g1") is not None
-        assert await store.get_goal("g2") is not None
+        assert (await store.export()).stopped_activations == ("act-1", "act-2")
         assert not store._lock.locked()
-    finally:
-        release.set()
-        store.close()
-
-
-# --- one observation of the caller's goal (ADR-0065) -------------------------
-
-
-async def test_a_goal_cannot_be_mutated_mid_write() -> None:
-    """ADR-0068 freezes ``Goal``, so a mid-write mutation is unrepresentable.
-
-    ``_revalidated_goal`` already detaches the record on the coroutine's first
-    line, so the *row* was never at risk here — the return value was. This blocks
-    the worker inside the write, which is the method's own suspension window, and
-    requires that the caller cannot mutate the ``Goal`` it still holds: freezing
-    makes the assignment raise, so the returned id necessarily names the row that
-    now exists (ADR-0068 §4).
-    """
-    store = SqlitePlanStore(path=":memory:", now=_fixed_now)
-    entered = threading.Event()
-    release = threading.Event()
-    original_save = store._save_goal_sync
-
-    def blocking_save(goal: Goal) -> None:
-        entered.set()
-        if not release.wait(timeout=5):  # pragma: no cover - only on a hang
-            msg = "the blocked worker was never released"
-            raise AssertionError(msg)
-        original_save(goal)
-
-    store._save_goal_sync = blocking_save  # type: ignore[method-assign]
-    try:
-        goal = _goal("g1")
-        writing = asyncio.ensure_future(store.save_goal(goal))
-        assert await asyncio.to_thread(entered.wait, 5), "worker never entered"
-
-        with pytest.raises(ValidationError):
-            goal.id = "g-tampered"  # frozen: the caller cannot mutate mid-write
-        release.set()
-        returned = await writing
-
-        assert returned == "g1"
-        assert await store.get_goal("g1") is not None
-        assert await store.get_goal("g-tampered") is None
     finally:
         release.set()
         store.close()
@@ -3170,185 +1059,56 @@ async def test_repeated_cancellation_does_not_consume_the_executor() -> None:
         executor.shutdown(wait=True)
 
 
-# --- ADR-0249 §12: this store's first migration, 1 → 2 ------------------------
-
-
-def _version_1_database(path: Path, *, source: MemorySource = MemorySource.USER_ASSERTED) -> None:
-    """Build the database this store shipped **before** ADR-0249, and seed it.
-
-    Written out here rather than produced by opening the current store, for ADR-0248
-    §10's reason applied to this store: it is the **stored** shape and not a converted
-    blob that the migration has to be able to read, so a fresh database seeded with
-    already-converted JSON would assert nothing. The ``goals`` row carries a
-    pre-decision :class:`~ai_assistant.core.types.Goal` — an ``id``, a ``statement``, a
-    ``status``, a ``provenance`` and a ``created_at`` — and the ``plans`` row carries no
-    ``targets_revision`` key at all, because the field did not exist.
-
-    ``provenance.source`` is a parameter because ADR-0249 §12's grounding rule reads
-    exactly that value, and both of its branches have to be driven from stored rows.
-    """
-    # A derived band must carry confidence below 1.0 (ADR-0072 §2), so the figure moves
-    # with the source rather than being pinned — what this arm varies is the *source*,
-    # which is the one value ADR-0249 §12's grounding rule reads.
-    goal: dict[str, object] = {
-        "id": "g1",
-        "statement": "relocate to Lisbon",
-        "status": "active",
-        "provenance": {
-            "source": source.value,
-            "confidence": 1.0 if source is MemorySource.USER_ASSERTED else 0.6,
-            "last_updated": _AT.isoformat(),
-            "evidence": [],
-            # An attested band must name what reported it and when (ADR-0073 §4), so the
-            # `EXTERNAL` row carries one. Nothing about it reaches the migration, which
-            # reads `provenance.source` and no other field.
-            "attestation": (
-                {"reported_by": "calendar", "reported_at": _AT.isoformat(), "extent": None}
-                if source is MemorySource.EXTERNAL
-                else None
-            ),
-        },
-        "created_at": _AT.isoformat(),
-        "deadline": None,
-    }
-    plan: dict[str, object] = {
-        "id": "p1",
-        "goal_id": "g1",
-        "steps": [{"id": "s1", "intent": "step 1", "capability": "send_email", "parameters": {}}],
-        "created_at": _AT.isoformat(),
-        "rationale": None,
-        "read_request": None,
-        "supersedes": None,
-    }
-    with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute(_META_SCHEMA)
-        conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')")
-        conn.execute("INSERT INTO meta(key, value) VALUES ('exec_counter', '0')")
-        # Version 1's record tables: `attempts` does not exist, because a store of that
-        # shape holds no attempt.
-        conn.execute("CREATE TABLE goals(id TEXT PRIMARY KEY, data TEXT NOT NULL)")
-        conn.execute(
-            "CREATE TABLE plans(id TEXT PRIMARY KEY, "
-            "goal_id TEXT NOT NULL REFERENCES goals(id), data TEXT NOT NULL)"
-        )
-        conn.execute(
-            "CREATE TABLE executions(id TEXT PRIMARY KEY, "
-            "plan_id TEXT NOT NULL REFERENCES plans(id), version INTEGER NOT NULL, "
-            "active INTEGER NOT NULL, created_seq INTEGER NOT NULL, data TEXT NOT NULL)"
-        )
-        conn.execute("CREATE UNIQUE INDEX executions_created_seq ON executions(created_seq)")
-        conn.execute("INSERT INTO goals(id, data) VALUES ('g1', ?)", (json.dumps(goal),))
-        conn.execute(
-            "INSERT INTO plans(id, goal_id, data) VALUES ('p1', 'g1', ?)", (json.dumps(plan),)
-        )
-
-
-#: The question text the retention cases look for in the file. A string no schema, no
-#: SQL keyword and no other fixture contains, so its presence is the row's doing — and
-#: long enough that repeating it pushes the row's JSON off the leaf page and into
+#: A string that occurs nowhere else in the file: no table or column name holds it, no
+#: SQL keyword and no other fixture contains it, so its presence is the row's doing —
+#: and long enough that repeating it pushes the row's JSON off the leaf page and into
 #: overflow, which is a second place freed content can be left behind.
-_QUESTION_NEEDLE: Final = b"heliotrope-belfry-quintessence"
-
-#: One question small enough to sit in a leaf page, and one whose blob needs overflow
+_NEEDLE: Final = b"heliotrope-belfry-quintessence"
+#: One record small enough to sit in a leaf page, and one whose blob needs overflow
 #: pages. The parametrisation is not decoration: `secure_delete` has to reach both.
-_QUESTION_SIZES: Final = {"one leaf page": 1, "several overflow pages": 800}
+_NEEDLE_SIZES: Final = {"one leaf page": 1, "several overflow pages": 800}
 
 
-def _needling_question(repeats: int) -> GoalQuestion:
-    """An open question whose ``text`` is :data:`_QUESTION_NEEDLE` ``repeats`` over."""
-    return GoalQuestion(
-        id="q1",
-        goal_id="g1",
-        attempt_id="a1",
-        text=_QUESTION_NEEDLE.decode() * repeats,
-        about="the usual campsite",
-        asked_at=_AT,
-        expires_at=_AT + timedelta(hours=72),
-    )
-
-
-@pytest.mark.parametrize("repeats", list(_QUESTION_SIZES.values()), ids=list(_QUESTION_SIZES))
-async def test_a_settlement_leaves_no_trace_of_the_question_in_the_file(
+@pytest.mark.parametrize("repeats", list(_NEEDLE_SIZES.values()), ids=list(_NEEDLE_SIZES))
+async def test_a_clear_leaves_no_trace_of_a_record_in_the_file(
     tmp_path: Path, repeats: int
 ) -> None:
-    """ADR-0250 §8's retention rule is about the **content**, not about the row.
+    """``clear`` is ADR-0004 §6's deletion, and it reaches the file's freed pages.
 
-    "``settle_question`` clears ``text`` and ``about`` **in the same step that moves
-    the disposition**, and no implementation retains a copy, a digest, a snapshot or an
-    archive of either. **The content lives exactly as long as the question does**."
-    A settlement that rewrote the blob and left the old bytes in a page SQLite marks
-    free would satisfy every assertion the shared suite can make — it reads decoded
-    rows — while the question the user was asked stayed recoverable by reading the
-    file, which is the one thing this rule is stated to make untrue.
-
-    **This store takes the pragma ``permissions/parked_reads.py`` reasoned it was alone
-    in needing**, and ADR-0250 §8 is what changed: that module's comment says it "is
-    the one in the tree whose ADR states a retention rule over named fields it clears
-    **in place**", and this decision states a second one.
+    A ``DELETE`` that merely unlinked the row would satisfy every assertion the shared
+    suite can make — it reads decoded rows — while the reason an effect was not done
+    stayed recoverable by reading the file. The needle rides in that reason.
 
     The first assertion is the anti-vacuity half: the bytes are genuinely there while
-    the question stands, so their absence afterwards is the settlement's doing and not
-    the needle's.
+    the record stands, so their absence afterwards is the clear's doing and not the
+    needle's.
     """
     path = tmp_path / "plans.db"
     store = SqlitePlanStore(path=path, now=_fixed_now)
     try:
-        await store.save_goal(_goal())
-        await store.open_attempt(_attempt())
-        assert await store.record_question(_needling_question(repeats))
-    finally:
-        store.close()
-    assert _QUESTION_NEEDLE in path.read_bytes(), "the question is on disk while it stands"
-
-    reopened = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        assert await reopened.settle_question(
-            "q1", disposition=GoalQuestionDisposition.ANSWERED, at=_LATER
+        await store.claim_activation_effect(_acted("e1"), match=None)
+        await store.finish_activation_effect(
+            "e1", ToolOutcome.FAILED, reason=_NEEDLE.decode() * repeats
         )
     finally:
-        reopened.close()
-
-    assert _QUESTION_NEEDLE not in path.read_bytes()
-
-
-@pytest.mark.parametrize("repeats", list(_QUESTION_SIZES.values()), ids=list(_QUESTION_SIZES))
-async def test_a_goals_deletion_leaves_no_trace_of_its_question_in_the_file(
-    tmp_path: Path, repeats: int
-) -> None:
-    """The same rule at the other destructive member (ADR-0250 §9, ADR-0004 §6).
-
-    ``delete_goal`` is the one act that removes a goal, and it cascades to that goal's
-    questions "open and terminal alike" — so a user who asked for a goal to be
-    destroyed and was told it was is the person this assertion is about. A ``DELETE``
-    that merely unlinked the row would leave the question they had been asked sitting
-    in the file.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal())
-        await store.open_attempt(_attempt())
-        assert await store.record_question(_needling_question(repeats))
-    finally:
         store.close()
-    assert _QUESTION_NEEDLE in path.read_bytes()
+    assert _NEEDLE in path.read_bytes(), "the record is on disk while it stands"
 
     reopened = SqlitePlanStore(path=path, now=_fixed_now)
     try:
-        assert (await reopened.delete_goal("g1")).deleted
+        assert await reopened.clear() == 1
     finally:
         reopened.close()
 
-    assert _QUESTION_NEEDLE not in path.read_bytes()
+    assert _NEEDLE not in path.read_bytes()
 
 
 async def test_the_store_asks_sqlite_to_overwrite_what_it_frees(tmp_path: Path) -> None:
     """The pragma itself, asserted where a lane could quietly drop it.
 
-    The two cases above would keep passing on a build whose ``SQLITE_SECURE_DELETE`` is
-    compiled **on** by default, so they are not on their own evidence that this store
-    asks for it. This is: the connection says so, whatever the build's default.
+    The case above would keep passing on a build whose ``SQLITE_SECURE_DELETE`` is
+    compiled **on** by default, so it is not on its own evidence that this store asks
+    for it. This is: the connection says so, whatever the build's default.
     """
     store = SqlitePlanStore(path=tmp_path / "plans.db", now=_fixed_now)
     try:
@@ -3357,738 +1117,7 @@ async def test_the_store_asks_sqlite_to_overwrite_what_it_frees(tmp_path: Path) 
         store.close()
 
 
-def _version_2_database(path: Path, *, engaged_at: datetime | None = None) -> None:
-    """Build the database this store shipped **after** ADR-0249 and before ADR-0250.
-
-    Written out here for :func:`_version_1_database`'s reason: it is the **stored**
-    shape the migration has to read, and a fresh database seeded with already-converted
-    rows would assert nothing. A version 2 ``goals`` row already carries the
-    interpretation sequence and decodes unchanged under this contract — what it does
-    **not** carry is ``last_engaged_in``, nor the two columns beside the blob that
-    ``candidates_for`` queries, which is the whole of what ADR-0250 §9's migration adds.
-
-    Args:
-        path: Where to build it.
-        engaged_at: A ``last_engaged_at`` for the seeded goal, or ``None`` for a goal
-            no turn has engaged. A version 2 row can carry one — ADR-0249 §1 landed the
-            field — and carrying one is what makes the ordering arm's "after every goal
-            carrying one" a statement about two real rows.
-    """
-    goal: dict[str, object] = {
-        "id": "g1",
-        "conversation_id": "c1",
-        "interpretation": [
-            {
-                "revision": 1,
-                "outcome": "relocate to Lisbon",
-                "outcome_ground": "user_stated",
-                "outcome_evidence_id": None,
-                "outcome_span": "relocate to Lisbon",
-                "constraints": [],
-                "criteria": [],
-                "conditions": [],
-                "recorded_at": _AT.isoformat(),
-                "raised_by": "t-1",
-            }
-        ],
-        "interpretation_elided": 0,
-        "status": "active",
-        "provenance": {
-            "source": "user_asserted",
-            "confidence": 1.0,
-            "last_updated": _AT.isoformat(),
-            "evidence": [],
-            "attestation": None,
-        },
-        "created_at": _AT.isoformat(),
-        "deadline": None,
-        "version": 0,
-        "last_engaged_at": None if engaged_at is None else engaged_at.isoformat(),
-    }
-    with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute(_META_SCHEMA)
-        conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '2')")
-        conn.execute("INSERT INTO meta(key, value) VALUES ('exec_counter', '0')")
-        # Version 2's record tables: `goals` carries the blob and no column beside it,
-        # and `goal_questions` does not exist.
-        conn.execute("CREATE TABLE goals(id TEXT PRIMARY KEY, data TEXT NOT NULL)")
-        conn.execute(
-            "CREATE TABLE plans(id TEXT PRIMARY KEY, "
-            "goal_id TEXT NOT NULL REFERENCES goals(id), data TEXT NOT NULL)"
-        )
-        conn.execute(
-            "CREATE TABLE executions(id TEXT PRIMARY KEY, "
-            "plan_id TEXT NOT NULL REFERENCES plans(id), version INTEGER NOT NULL, "
-            "active INTEGER NOT NULL, created_seq INTEGER NOT NULL, data TEXT NOT NULL)"
-        )
-        conn.execute(
-            "CREATE TABLE attempts(id TEXT PRIMARY KEY, "
-            "goal_id TEXT NOT NULL REFERENCES goals(id), opened_at TEXT NOT NULL, "
-            "data TEXT NOT NULL)"
-        )
-        conn.execute("CREATE UNIQUE INDEX executions_created_seq ON executions(created_seq)")
-        conn.execute("INSERT INTO goals(id, data) VALUES ('g1', ?)", (json.dumps(goal),))
-
-
-def _evidence_row(evidence_id: str, *, read_at: datetime) -> GoalEvidence:
-    """A ``STANDING`` ``READ_OUTCOME`` row of goal ``g1`` (ADR-0252 §1)."""
-    return GoalEvidence(
-        id=evidence_id,
-        goal_id="g1",
-        attempt_id="a1",
-        basis=EvidenceBasis.READ_OUTCOME,
-        read_kind=ReadKind.SIGHTED_QUERY,
-        supported=(EvidenceApplicability(topics=("weather",)),),
-        supported_elided=0,
-        read_at=read_at,
-        records=("m1",),
-        returned=1,
-        admitted=1,
-        verdict="returned_records",
-        standing=EvidenceStanding.STANDING,
-    )
-
-
-def _version_3_database(path: Path) -> None:
-    """Build the database this store shipped **after** ADR-0250 and before ADR-0252.
-
-    The **previous** version, which is the one ADR-0252 §18 arm 21 states the migration
-    over: "the migration runs on a database of the previous version, creates the table
-    empty, sets every goal's elision count to zero, converts nothing". Built from the
-    version 2 shape and then carried forward by hand, so the file this test opens is the
-    one the previous release actually wrote rather than a fresh one relabelled.
-
-    Args:
-        path: Where to build it.
-    """
-    _version_2_database(path)
-    with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA foreign_keys = ON")
-        for column in ("conversation_id", "last_engaged_in"):
-            conn.execute(f"ALTER TABLE goals ADD COLUMN {column} TEXT")
-        conn.execute("UPDATE goals SET conversation_id = 'c1'")
-        conn.execute(
-            "CREATE TABLE goal_questions(id TEXT PRIMARY KEY, "
-            "goal_id TEXT NOT NULL REFERENCES goals(id), attempt_id TEXT NOT NULL, "
-            "asked_at TEXT NOT NULL, disposition TEXT NOT NULL, data TEXT NOT NULL)"
-        )
-        conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
-
-
-def _version_4_database(path: Path) -> None:
-    """Build the database this store shipped **after** ADR-0252 and before ADR-0265.
-
-    The **previous** version, which is the one ADR-0265 §5's migration is stated over.
-    Built from the version 3 shape and then carried forward by hand, so the file this
-    test opens is the one the previous release actually wrote rather than a fresh one
-    relabelled.
-
-    Args:
-        path: Where to build it.
-    """
-    _version_3_database(path)
-    with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute(
-            "CREATE TABLE goal_evidence("
-            "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), "
-            "read_at TEXT NOT NULL, standing TEXT NOT NULL, data TEXT NOT NULL)"
-        )
-        conn.execute("ALTER TABLE goals ADD COLUMN evidence_elided INTEGER NOT NULL DEFAULT 0")
-        conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
-
-
-async def test_an_attempt_past_the_bound_variable_limit_is_still_answered(
-    tmp_path: Path,
-) -> None:
-    """ADR-0261 §6's unbounded history, driven over this backend's own cliff.
-
-    An attempt's ``execution_ids`` are **append-only and unbounded** (ADR-0249 §5,
-    §12), which is §6's own reason for the goal-wide member existing rather than the
-    engine walking ``attempts_of`` and ``get_execution``. A single
-    ``SELECT ... IN (...)`` over the whole tuple binds one variable per id, and every
-    SQLite connection has a finite ``SQLITE_LIMIT_VARIABLE_NUMBER`` — so past it the
-    predicate raised *too many SQL variables* instead of answering, and so did the act,
-    ``commit_attempt``'s cancellation and the upgrade repair, every one of them through
-    the same helper.
-
-    **Driven against a deliberately lowered limit rather than against 32,766 rows**,
-    which is what makes it a test rather than a soak: ``setlimit`` moves the boundary
-    to a figure a fixture can reach, and the assertion is that the answer comes back
-    at all. Both members are driven, because both read through that helper and a fix
-    applied to one would leave the other on the cliff.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal())
-        ids: list[str] = []
-        for index in range(1, 9):
-            await store.save_plan(_plan(plan_id=f"p{index}"))
-            ids.append((await store.start_execution(f"p{index}")).id)
-        await store.open_attempt(
-            GoalAttempt(id="a1", goal_id="g1", opened_at=_AT, execution_ids=tuple(ids))
-        )
-        # Below the number of ids the attempt holds, so the helper must issue more than
-        # one statement or raise. `sqlite3` refuses a limit under 1.
-        store._conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 2)
-
-        assert await store.has_outstanding_effect("g1") is False
-        goal = await store.get_goal("g1")
-        assert goal is not None
-        assert (
-            await store.close_goal_abandoned("g1", at=_LATER, expected_version=goal.version)
-            is False
-        )
-        ended = await store.get_attempt("a1")
-        assert ended is not None
-        assert ended.state is AttemptState.CANCELLED
-        assert ended.outcome is AttemptOutcome.CANCELLED
-    finally:
-        store.close()
-
-
-#: The write a second connection attempts while the scan is mid-flight. A no-op
-#: update — it sets a column to itself — because what the case is about is whether the
-#: write can *commit* under the scan's snapshot, not what it would have changed.
-_SECOND_WRITER = "UPDATE executions SET version = version WHERE id = ?"
-
-
-class _PausingScan(SqlitePlanStore):
-    """A store whose outstanding-effect scan stops between two attempts' reads.
-
-    The hook ADR-0261 §14 arm 9's **second connection** case needs, supplied by the
-    *fixture* rather than by any member of ``PlanStore`` — ADR-0060 §3's own division,
-    "a test-only affordance does not go on the Protocol". It is a subclass and not a
-    monkeypatch so that the override is type-checked against the method it replaces.
-    """
-
-    #: Set by the scan once it has read one attempt's executions and is waiting.
-    paused: threading.Event
-
-    #: Released by the case once the second connection has had its chance.
-    resume: threading.Event
-
-    #: Whether the connection stood inside a transaction at each attempt's read, in
-    #: the order the scan walked them.
-    inside: list[bool]
-
-    #: What each transaction this store opened was opened *for*, in order. Recorded by
-    #: overriding the store's own helper rather than by tracing the connection:
-    #: ``set_trace_callback`` on a connection the store is concurrently using from its
-    #: worker thread segfaults (#2441), and this is plain Python on the same thread the
-    #: read already runs on.
-    opened: list[str]
-
-    def _transaction(
-        self, what: str, *, immediate: bool = True
-    ) -> AbstractContextManager[sqlite3.Connection]:
-        """Open the transaction as the store does, and record that it was opened."""
-        self.opened.append(what)
-        return super()._transaction(what, immediate=immediate)
-
-    def _step_statuses(self, conn: sqlite3.Connection, attempt: GoalAttempt) -> list[StepStatus]:
-        """Read as the store does, then hold the scan open after the first attempt."""
-        self.inside.append(conn.in_transaction)
-        found = super()._step_statuses(conn, attempt)
-        if attempt.id == "a1":
-            self.paused.set()
-            self.resume.wait(timeout=10)
-        return found
-
-
-async def test_the_scan_is_one_snapshot_against_a_second_connection(tmp_path: Path) -> None:
-    """ADR-0261 §14 arm 9's indivisibility, over the interleaving that actually broke it.
-
-    **The shared suite's arm cannot see this, and that is why this one exists.** It
-    drives the query and the two transitions through one ``SqlitePlanStore``, whose
-    ``asyncio.Lock`` serialises them — so the implementation this case refuses, the one
-    whose scan issued its ``SELECT``s with no transaction around them, passes it. The
-    lock excludes no **second connection to the same file**, which is the concrete
-    failure: another holder claims a step this scan has already passed and resolves one
-    it has not yet reached, and the scan answers ``False`` though something was
-    outstanding throughout.
-
-    **The second connection is a raw ``sqlite3`` one on the case's own thread**, and
-    deliberately not a second store: what is being demonstrated is a property of the
-    *file's* locking, one parked worker is all the concurrency the case needs, and a
-    second store would add a worker thread and an event loop task to a case whose whole
-    value is being deterministic.
-
-    **Asserted as the refusal, which is arm 9's own "answer ``true`` or block until it
-    can"**: with ``busy_timeout`` at zero the write is refused *immediately* rather
-    than waiting, so the case decides in microseconds and never hangs. A scan holding
-    no snapshot lets that same commit through.
-
-    **And every attempt of the walk is asserted to be read inside a transaction**, not
-    only the first, which the refusal above does not say on its own.
-
-    **And the walk is asserted to be *one* transaction, which is what the refusal and
-    the pair above still do not say.** A store opening a transaction **per attempt**
-    would hold one while ``a1``'s read was paused, lock this outsider exactly as the
-    shipped one does, and record ``[True, True]`` — and then, in the gap after ``a1``'s
-    transaction closes, a writer that *waits* rather than giving up would commit, and
-    the scan would read ``a2`` in a newer snapshot and answer ``False``. Rollback
-    journal does not close that gap; only there being no gap does. So the count is
-    taken from the store's own transaction helper, overridden in the subclass —
-    **plain Python on the thread the read already runs on**, because
-    ``set_trace_callback`` on a connection the store is concurrently using from its
-    worker is not safe and segfaults (#2441).
-
-    **What a move to WAL would change, stated rather than left to be discovered**
-    (#2441): the outsider's commit would be **admitted** rather than refused, so that
-    half of this case would have to go, and the semantic interleaving would become both
-    reachable and the right thing to drive. The one-transaction count is unaffected by
-    the journal mode and would stay.
-    """
-    path = tmp_path / "plans.db"
-    scanning = _PausingScan(path=path, now=_fixed_now)
-    scanning.paused, scanning.resume = threading.Event(), threading.Event()
-    scanning.inside, scanning.opened = [], []
-    try:
-        await scanning.save_goal(_goal())
-        await scanning.save_plan(_plan(plan_id="p1"))
-        await scanning.save_plan(_plan(plan_id="p2"))
-        first = await scanning.start_execution("p1")
-        second = await scanning.start_execution("p2")
-        await scanning.open_attempt(
-            GoalAttempt(id="a1", goal_id="g1", opened_at=_AT, execution_ids=(first.id,))
-        )
-        await scanning.open_attempt(
-            GoalAttempt(
-                id="a2",
-                goal_id="g1",
-                opened_at=_AT + timedelta(minutes=1),
-                execution_ids=(second.id,),
-            )
-        )
-        await scanning.commit_transition(_claim(second, attempt_id="a2"))
-
-        scanning.opened.clear()  # the seeding writes above opened their own
-        asking = asyncio.ensure_future(scanning.has_outstanding_effect("g1"))
-        await asyncio.to_thread(scanning.paused.wait, 10)
-
-        outsider = sqlite3.connect(path, timeout=0)
-        try:
-            outsider.execute("BEGIN IMMEDIATE")
-            outsider.execute(_SECOND_WRITER, (second.id,))
-            with pytest.raises(sqlite3.OperationalError, match="locked"):
-                outsider.execute("COMMIT")
-        finally:
-            with contextlib.suppress(sqlite3.Error):
-                outsider.execute("ROLLBACK")
-            outsider.close()
-            scanning.resume.set()
-
-        assert await asking is True, (
-            "something was outstanding at every instant, so the scan must answer true "
-            "— ADR-0261 §14 arm 9's 'answer true or block until it can'"
-        )
-
-        assert scanning.inside == [True, True], (
-            "every attempt of the walk was read inside a transaction, not only the first"
-        )
-        assert len(scanning.opened) == 1, (
-            f"the whole walk is one transaction and not one per attempt: {scanning.opened}"
-        )
-    finally:
-        scanning.resume.set()
-        scanning.close()
-
-
-def _version_5_database(path: Path) -> None:
-    """Build the database this store shipped **after** ADR-0265 and before ADR-0267.
-
-    Built from the version 4 shape and then carried forward by hand, so the file this
-    test opens is the one the previous release actually wrote rather than a fresh one
-    relabelled. ADR-0265 added no table and no column, so the marker is the whole of
-    the difference.
-
-    Args:
-        path: Where to build it.
-    """
-    _version_4_database(path)
-    with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE meta SET value = '5' WHERE key = 'schema_version'")
-
-
-async def test_a_version_5_plan_store_reads_its_goals_with_no_quotes(
-    tmp_path: Path,
-) -> None:
-    """ADR-0267 §11's last clause, over the **previous** version's stored shape.
-
-    "A ``Goal`` written before Q1 decodes with ``quotes`` empty and ``quotes_elided``
-    ``0``", and "**no lane invents a quote for a stored goal or back-fills one onto a
-    stored row**: a price nothing read is a price no record holds."
-
-    **The migration adds no table and no column**, which is version 5's own shape one
-    decision over: a quote rides inside the ``goals`` blob, ``Goal.quotes`` is a
-    defaulted empty tuple and ``quotes_elided`` a defaulted ``0``, so the stored blob
-    decodes unrewritten. **What moves is the marker alone**, and it moves for the
-    reading in the other direction — this code writes blobs an older build's
-    ``extra="forbid"`` refuses, and ADR-0049 §1's loud refusal of a **newer** label is
-    what a version that did not move would leave that build nothing to fire.
-    """
-    path = tmp_path / "plans.db"
-    _version_5_database(path)
-    with sqlite3.connect(path) as conn:
-        before = conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0]
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        goal = await store.get_goal("g1")
-        assert goal is not None
-        assert goal.statement == "relocate to Lisbon", "the blob is read, not rewritten"
-        assert goal.quotes == (), "and nothing is invented for it"
-        assert goal.quotes_elided == 0, "a store that has dropped nothing says so"
-        assert await store.for_action("g1", "ia1") == (), "an absence and never a fault"
-
-        export = await store.export()
-        assert export.schema_version == 18
-        assert export.goals[0].quotes == ()
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "10",
-        )
-        assert conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0] == before, (
-            "the migration converts nothing: the blob is the one the previous release wrote"
-        )
-
-
-async def _abandoned_goal_with_two_live_attempts(path: Path, *, source: int) -> None:
-    """Build the legacy state ADR-0261 §10's repair exists for, labelled ``source``.
-
-    An ``ABANDONED`` goal carrying **two** non-terminal attempts, one of which holds an
-    ``INDETERMINATE`` step and one of which holds nothing — beside an **open** goal
-    carrying a live attempt, which the repair must leave exactly as it is.
-
-    **Reached by writing the goal's status under the contract rather than through it**,
-    which is ``seed_a_second_owner``'s own construction and for its own reason: ADR-0261
-    §2's ``set_goal_status`` conjunct now refuses exactly this write, so a store *after*
-    the decision cannot produce the state, and a fixture that could reach it through the
-    contract would be testing something else. Everything else — the goal, the plan, the
-    execution, the two attempts, the claim and its ``INDETERMINATE`` disposal — is
-    written by the store's own members.
-
-    **The rows are the current shape and the label is the source's**, which is what the
-    migration is stated over: ADR-0261 §10 rules that "no stored row changes shape and
-    every attempt already on disk decodes unchanged under the new contract, so nothing
-    is re-encoded". What each earlier version's *schema* needed is covered by that
-    version's own upgrade case above; what is parameterised here is the one thing this
-    decision adds, which is the repair.
-
-    Args:
-        path: Where to build it.
-        source: The ``schema_version`` to label the finished file with.
-    """
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal())
-        await store.save_plan(_plan())
-        state = await store.start_execution("p1")
-        await store.open_attempt(
-            GoalAttempt(id="a1", goal_id="g1", opened_at=_AT, execution_ids=(state.id,))
-        )
-        await store.open_attempt(_attempt("a2"))
-        claimed = await store.commit_transition(_claim(state))
-        await store.commit_transition(
-            StepTransition(
-                execution_id=state.id,
-                step_id="s1",
-                to_status=StepStatus.INDETERMINATE,
-                expected_version=claimed.version,
-                failure=StepFailure(message="whether the tool acted is unknown"),
-            )
-        )
-        await store.save_goal(_goal("g2"))
-        await store.open_attempt(_attempt("b1", goal_id="g2"))
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        row = conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()
-        blob = json.loads(row[0])
-        blob["status"] = "abandoned"
-        conn.execute("UPDATE goals SET data = ? WHERE id = 'g1'", (json.dumps(blob),))
-        conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(source),))
-
-
-@pytest.mark.parametrize("source", sorted(_UPGRADABLE_FROM))
-async def test_the_upgrade_repairs_every_live_attempt_of_an_abandoned_goal(
-    tmp_path: Path, source: int
-) -> None:
-    """ADR-0261 §14 arm 6's migration limb, over **every** source the marker admits.
-
-    §10 states the repair as "``AttemptState.CANCELLED``, with §3's outcome over that
-    attempt's own executions, on **every non-terminal attempt of a goal whose status is
-    ``ABANDONED``** — and on nothing else", and it is the one legacy state *no later act
-    can reach*: the goal is already closed, so ``abandon_goal`` answers
-    ``ALREADY_CLOSED`` and §2's act never runs on it, while ADR-0255 §3's claim conjunct
-    does not fire on a **live** attempt — "R78 unmet on legacy data, with no act left to
-    meet it".
-
-    **Both attempts, and not the newest** — repairing one would leave the other live and
-    claimable under a goal its user gave up, which is the state the repair exists to
-    remove — **each with the outcome §3's limbs yield over its *own* executions**: the
-    one holding the ``INDETERMINATE`` step earns ``UNCERTAIN`` and the one holding
-    nothing earns ``CANCELLED``. And each carries ``ended_at`` at **the migration's own
-    clock reading**, the only instant the database can honestly supply, with its
-    ``version`` advanced by one.
-
-    **Parameterised over every member of** :data:`_UPGRADABLE_FROM` **after this
-    decision's bump**, because "a repair run only for the newest source passes a single
-    unparameterised arm and leaves an older database with an ``ABANDONED`` goal and live
-    attempts". **Version 1 is the one that carries no repair**: ``attempts`` is created
-    by ADR-0249 §12's own migration and a version 1 store holds none, so it upgrades,
-    writes no attempt row and reaches the new marker — and no arm seeds an ``attempts``
-    table into a version 1 fixture, which would test a schema the application never
-    wrote.
-
-    **And an *open* goal's attempts are left exactly as they were**, which pins the
-    repair to the act a user actually performed: such a goal has had no abandoning act,
-    so ending an attempt under it would invent a user intent and produce §1's forbidden
-    third shape — an attempt ended while its goal stays open.
-    """
-    path = tmp_path / "plans.db"
-    if source == 1:
-        _version_1_database(path)
-    else:
-        await _abandoned_goal_with_two_live_attempts(path, source=source)
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        repaired = {one.id: one for one in await store.attempts_of("g1")}
-        if source == 1:
-            assert repaired == {}, "a version 1 store holds no attempt to repair"
-        else:
-            assert {one.state for one in repaired.values()} == {AttemptState.CANCELLED}
-            assert repaired["a1"].outcome is AttemptOutcome.UNCERTAIN
-            assert repaired["a2"].outcome is AttemptOutcome.CANCELLED
-            upgraded_at = _fixed_now()
-            assert [one.ended_at for one in repaired.values()] == [upgraded_at, upgraded_at]
-            assert [one.version for one in repaired.values()] == [1, 1]
-            (untouched,) = await store.attempts_of("g2")
-            assert untouched.state is AttemptState.RUNNING, "an open goal's attempt is left alone"
-            assert untouched.outcome is None
-            assert untouched.version == 0
-        # **Both migrations ran, and the composition is asserted rather than assumed.**
-        # A source at or below 5 passes through ADR-0267 §11's quotes relabel as well
-        # as this decision's repair and ends at 7, not at 6 — which is what a lane
-        # landing second owes. The goal reads back with an empty `quotes`, because
-        # "no lane invents a quote for a stored goal".
-        held = await store.get_goal("g1")
-        assert held is not None
-        assert held.quotes == ()
-        assert held.quotes_elided == 0
-        assert (await store.export()).schema_version == 18
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "10",
-        )
-
-
-def _version_6_database(path: Path) -> None:
-    """Build the database this store shipped **after** ADR-0267 and before ADR-0261.
-
-    ADR-0267 §11 added no column and no table — its marker moved for the *downgrade*
-    reading alone — so a version 6 file is a version 5 one wearing the next label, and
-    saying that here is what keeps the ladder honest rather than inventing a shape that
-    release never wrote.
-
-    Args:
-        path: Where to build it.
-    """
-    _version_5_database(path)
-    with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE meta SET value = '6' WHERE key = 'schema_version'")
-
-
-async def test_a_version_6_plan_store_upgrades_and_repairs_nothing_it_need_not(
-    tmp_path: Path,
-) -> None:
-    """The ladder's next rung: a version 6 file opens, upgrades and stays exportable.
-
-    ADR-0261 §10 adds no column and no table, so the stored rows decode unrewritten and
-    what moves is the marker — for ADR-0049 §1's *downgrade* reading, since this code
-    writes attempt blobs an older build's closed ``AttemptOutcome`` refuses. A version 6
-    database holding no ``ABANDONED`` goal has nothing to repair, and the arm says so
-    rather than leaving "the repair ran on nothing" indistinguishable from "the repair
-    did not run".
-    """
-    path = tmp_path / "plans.db"
-    _version_6_database(path)
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        goal = await store.get_goal("g1")
-        assert goal is not None
-        assert goal.status is GoalStatus.ACTIVE
-        assert await store.attempts_of("g1") == ()
-        export = await store.export()
-        assert export.schema_version == 18
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "10",
-        )
-
-
-def _version_7_database(path: Path) -> None:
-    """Build the database this store shipped **after** ADR-0261 and before ADR-0259.
-
-    The **previous** version, which is the one ADR-0259 §9's migration is stated over.
-    ADR-0261 §10 added no table and no column either — its marker moved for the
-    *downgrade* reading and its migration repairs rows rather than reshaping them — so a
-    version 7 file is the version 6 file with the marker moved, and one holding no
-    ``ABANDONED`` goal has nothing for that repair to have written. Built from the rung
-    below rather than from scratch, which is what keeps the two statements one.
-
-    Args:
-        path: Where to build it.
-    """
-    _version_6_database(path)
-    with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE meta SET value = '7' WHERE key = 'schema_version'")
-
-
-@pytest.mark.parametrize(
-    "build",
-    [
-        pytest.param(_version_5_database, id="from-version-5"),
-        pytest.param(_version_6_database, id="from-version-6"),
-        pytest.param(_version_7_database, id="from-version-7"),
-    ],
-)
-async def test_an_earlier_plan_store_opens_with_an_empty_effects_table(
-    tmp_path: Path, build: Callable[[Path], None]
-) -> None:
-    """ADR-0259 §9's migration, and the guarantee it delimits rather than closes.
-
-    "The migration creates the table empty" — **no lane reconstructs a row for an
-    execution that predates it**, because doing so would need the tool, digest and
-    binding of a decision the *audit trail* holds, and ``planning`` reaching into
-    ``permissions`` to build its own rows is what golden rule 1 forbids. So an effect
-    performed before the migration "is not claimed, is not recognised, and a later plan
-    repeating it answers ``CLAIMED`` and dispatches" — asserted here rather than left as
-    prose, because it is the one window the migration opens. What bounds it is ADR-0255
-    §13's Q4 rule: no consequential capability has been wired, so there is no legacy
-    real effect for the gap to expose.
-
-    **Driven from versions 5, 6 and 7, because the migrations compose.** A file three
-    versions behind must arrive at the current shape having been taken through **every**
-    pass between, not parked at an intermediate marker: the version 5 case is ADR-0267
-    §11's relabel, ADR-0261 §10's repair and this decision's new table applied in the one
-    setup transaction, and it asserts every half — an empty ``quotes`` on the stored
-    goal, no attempt invented for an open goal, and an empty ``goal_effects`` beside
-    them — so a pass that ran only the nearest one fails here.
-    """
-    path = tmp_path / "plans.db"
-    build(path)
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        export = await store.export()
-        assert export.schema_version == 18
-        assert export.effects == (), "the table is created empty rather than reconstructed"
-        assert export.goals[0].quotes == (), "and every earlier pass ran, not just the last"
-
-        # A plan written **after** the upgrade, naming an action minted after it: the
-        # only shape a claim can be scoped to at all (ADR-0265 §5).
-        await store.record_intended_actions(_minting(_intended("ia1")))
-        await store.save_plan(_effect_plan("p1"))
-        state = await store.start_execution("p1")
-        answer = await store.claim_effect(execution_id=state.id, step_id="s1", effect_key=_KEY)
-
-        assert answer.claim is EffectClaim.CLAIMED, (
-            "a legacy act is not recognised, so the repeat is claimed and dispatches"
-        )
-        assert (await store.delete_goal("g1")).deleted, "and the upgraded store still erases"
-        assert (await store.export()).effects == ()
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "10",
-        )
-
-
-def _version_8_database(path: Path) -> None:
-    """Build the database this store shipped **after** ADR-0259 and before ADR-0297.
-
-    The **previous** version, which is the one ADR-0297 §1's table is added over:
-    ADR-0259 §9's migration created ``goal_effects`` and moved the marker, and nothing
-    else, so a version 8 file is the version 7 one with that table beside it. Built
-    from the rung below rather than from scratch, which keeps the two statements one.
-
-    Args:
-        path: Where to build it.
-    """
-    _version_7_database(path)
-    with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute(
-            "CREATE TABLE goal_effects("
-            "goal_id TEXT NOT NULL REFERENCES goals(id), intended_action_id TEXT NOT NULL, "
-            "execution_id TEXT NOT NULL, step_id TEXT NOT NULL, data TEXT NOT NULL, "
-            "PRIMARY KEY (goal_id, intended_action_id))"
-        )
-        conn.execute("UPDATE meta SET value = '8' WHERE key = 'schema_version'")
-
-
-@pytest.mark.parametrize(
-    "build",
-    [
-        pytest.param(_version_5_database, id="from-version-5"),
-        pytest.param(_version_7_database, id="from-version-7"),
-        pytest.param(_version_8_database, id="from-version-8"),
-    ],
-)
-async def test_an_earlier_plan_store_opens_holding_no_stop_record(
-    tmp_path: Path, build: Callable[[Path], None]
-) -> None:
-    """ADR-0297 §1's table, created **empty** on every earlier file, at version 9.
-
-    No earlier store held a stop, so the migration writes no record and rewrites no
-    row; the marker moves for ADR-0049 §1's downgrade reading, since an older build
-    would ignore the table and commit a claim a record refuses. Driven from version 5
-    as well as 8, because the migrations compose: the older file takes ADR-0259 §9's
-    table and this one in the same open.
-    """
-    path = tmp_path / "plans.db"
-    build(path)
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        export = await store.export()
-        assert export.stopped_activations == (), "the table is created empty"
-        assert export.effects == ()
-
-        await store.record_stop("act-1")
-        await store.save_plan(_plan("p2"))
-        state = await store.start_execution("p2")
-        await store.open_attempt(
-            GoalAttempt(id="a9", goal_id="g1", opened_at=_AT, execution_ids=(state.id,))
-        )
-        with pytest.raises(ClaimStopped):
-            await store.commit_transition(_claim(state, attempt_id="a9", activation_id="act-1"))
-        assert (await store.export()).stopped_activations == ("act-1",)
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "10",
-        )
+# --- durability: state survives the process (ADR-0049 §2) ------------------
 
 
 async def test_a_stop_record_survives_a_restart(tmp_path: Path) -> None:
@@ -4101,22 +1130,14 @@ async def test_a_stop_record_survives_a_restart(tmp_path: Path) -> None:
     path = tmp_path / "plans.db"
     store = SqlitePlanStore(path=path, now=_fixed_now)
     try:
-        await store.save_goal(_goal())
-        await store.save_plan(_plan())
-        state = await store.start_execution("p1")
-        await store.open_attempt(
-            GoalAttempt(id="a1", goal_id="g1", opened_at=_AT, execution_ids=(state.id,))
-        )
         await store.record_stop("act-1")
     finally:
         store.close()
 
     reopened = SqlitePlanStore(path=path, now=_fixed_now)
     try:
-        held = await reopened.get_execution(state.id)
-        assert held is not None
         with pytest.raises(ClaimStopped):
-            await reopened.commit_transition(_claim(held, activation_id="act-1"))
+            await reopened.claim_activation_effect(_acted("e1"), match=None)
         assert (await reopened.export()).stopped_activations == ("act-1",)
     finally:
         reopened.close()
@@ -4165,459 +1186,7 @@ async def test_a_stop_table_without_its_key_is_refused_at_open(tmp_path: Path) -
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
-async def test_a_version_4_plan_store_reads_its_goals_with_no_intended_actions(
-    tmp_path: Path,
-) -> None:
-    """ADR-0265 §10 arm 6's last limb, over the **previous** version's stored shape.
-
-    "A stored goal written before this decision decodes with ``intended_actions``
-    empty" (§5), and "**no lane invents an intended action for a stored goal**: an act
-    nothing declared is an act no claim was ever scoped to, and minting one would state
-    a history the row does not hold."
-
-    **The migration adds no table and no column**, which is what makes it "an addition
-    with a total default": an intended action rides inside the ``goals`` blob and
-    ``Goal.intended_actions`` is a defaulted empty tuple, so the stored blob decodes
-    unrewritten. **What moves is the marker alone**, and it moves for the reading in
-    the other direction — this code writes blobs an older build's ``extra="forbid"``
-    refuses, and ADR-0049 §1's loud refusal of a **newer** label is what a version that
-    did not move would leave that build nothing to fire.
-    """
-    path = tmp_path / "plans.db"
-    _version_4_database(path)
-    with sqlite3.connect(path) as conn:
-        before = conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0]
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        goal = await store.get_goal("g1")
-        assert goal is not None
-        assert goal.statement == "relocate to Lisbon", "the blob is read, not rewritten"
-        assert goal.intended_actions == (), "and nothing is invented for it"
-
-        export = await store.export()
-        assert export.schema_version == 18
-        assert export.goals[0].intended_actions == ()
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "10",
-        )
-        assert conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0] == before, (
-            "the migration converts nothing: the blob is the one the previous release wrote"
-        )
-
-
-async def test_a_version_3_plan_store_gains_the_evidence_table_and_its_counter(
-    tmp_path: Path,
-) -> None:
-    """ADR-0252 §18 arm 21, over the **previous** version's stored shape.
-
-    "The migration adds a table, a per-goal counter and converts nothing" (§13). The
-    upgrade "creates the evidence table with the foreign key onto ``goals`` … **empty**,
-    because no earlier store holds a row; and it provides for the per-goal elision
-    count, at **zero** for every existing goal, which is true of a store that has never
-    dropped a row". **It writes no value this system did not record** — no row, no
-    instant, no region and no verdict — which is satisfied trivially here because there
-    is nothing to convert.
-
-    **The stored ``goals`` blobs are not rewritten either**, and that is a property of
-    how §10 widens rather than a step the migration skips: the three new fields are
-    optional with an absent or empty default and §10's validator adds a fourth shape
-    while leaving ADR-0249 §1's three untouched.
-    """
-    path = tmp_path / "plans.db"
-    _version_3_database(path)
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        goal = await store.get_goal("g1")
-        assert goal is not None
-        assert goal.statement == "relocate to Lisbon", "the blob is read, not rewritten"
-        assert goal.interpretation[0].outcome_evidence_row_id is None, "and nothing back-fills"
-
-        assert await store.evidence_of("g1") == EvidenceHistory(goal_id="g1")
-
-        export = await store.export()
-        assert export.schema_version == 18
-        assert export.evidence == (EvidenceHistory(goal_id="g1"),)
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "10",
-        )
-        assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
-        assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [(0,)]
-
-
-async def test_a_version_2_plan_store_is_taken_the_whole_way_to_the_current_shape(
-    tmp_path: Path,
-) -> None:
-    """ADR-0250 §9's migration, from a **stored** version 2 database.
-
-    "The store migration is the plan store's second, from the version ADR-0249 §12
-    lands to the next, and it is table creation for the questions plus the two new
-    ``Goal`` columns." A version 2 ``goals`` row decodes unchanged — ``last_engaged_in``
-    is defaulted — so the blob is **not** rewritten; what the file lacks is the two
-    columns ``candidates_for`` queries and the table a question is written to, and
-    ``CREATE TABLE IF NOT EXISTS`` cannot supply the first of those.
-
-    "**A goal row written before this decision migrates with ``last_engaged_in``
-    absent** and no question rows", which is ADR-0249 §1's absence posture and §1's one
-    route to a ``None``.
-    """
-    path = tmp_path / "plans.db"
-    _version_2_database(path)
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        goal = await store.get_goal("g1")
-        assert goal is not None
-        assert goal.statement == "relocate to Lisbon", "the blob is read, not rewritten"
-        assert goal.last_engaged_in is None, "the fifth absence (ADR-0250 §1)"
-        assert goal.last_engaged_at is None
-        assert (goal.version, goal.interpretation_elided) == (0, 0)
-
-        assert await store.open_question("g1") is None, "and no question rows"
-        assert await store.outstanding_questions() == ()
-
-        # The migrated goal is still a candidate of the conversation it was opened in,
-        # which is what the backfilled `conversation_id` column is for.
-        page = await store.candidates_for("c1", limit=MAX_ASSOCIATION_CANDIDATES)
-        assert [one.id for one in page.goals] == ["g1"]
-        assert page.elided == 0
-
-        export = await store.export()
-        assert export.schema_version == 18
-        assert export.questions == ()
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "10",
-        )
-        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(goals)").fetchall()}
-        assert {"conversation_id", "last_engaged_in", "evidence_elided"} <= columns
-        tables = {
-            str(row[0])
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        }
-        assert {"goal_questions", "goal_evidence"} <= tables
-        # ADR-0252 §13: the table is created **empty** and every existing goal's count
-        # is **zero**, which is true of a store that has never dropped a row. The
-        # migration converts nothing because there is nothing to convert.
-        assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
-        assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [(0,)]
-
-
-async def test_a_migrated_goal_sorts_after_one_that_carries_an_engagement_instant(
-    tmp_path: Path,
-) -> None:
-    """ADR-0250 §20 arm 26, driven **through the migration** rather than in memory.
-
-    "A conversation's candidate set orders such a goal **after** every goal carrying an
-    engagement instant; and the goal is still associable, still reopenable and still
-    referenceable." The absent instant sorts last because "sorting it first would make
-    the oldest, least-touched objective in the store the focused goal of every
-    conversation that holds one".
-
-    The upgraded goal carries **no** instant here, and the goal opened after the
-    upgrade is engaged — so the order is a fact about the two rows rather than about
-    which was written first.
-    """
-    path = tmp_path / "plans.db"
-    _version_2_database(path)
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal("g2"))
-        await store.engage_goal("g2", at=_LATER, conversation_id="c1", expected_version=0)
-
-        page = await store.candidates_for("c1", limit=MAX_ASSOCIATION_CANDIDATES)
-
-        assert [one.id for one in page.goals] == ["g2", "g1"], "the absent instant sorts last"
-        assert page.goals[1].last_engaged_at is None
-
-        # Still associable and still reopenable: the migrated row takes every write the
-        # contract offers, and the engagement stamp reaches the queried column.
-        await store.engage_goal("g1", at=_LATEST, conversation_id="c2", expected_version=0)
-        assert [one.id for one in (await store.candidates_for("c2", limit=8)).goals] == ["g1"]
-        reopened = await store.set_goal_status(
-            "g1", status=GoalStatus.ACTIVE, at=_LATEST, expected_version=1
-        )
-        assert reopened.status is GoalStatus.ACTIVE
-    finally:
-        store.close()
-
-
-@pytest.mark.parametrize(
-    ("source", "expected"),
-    [
-        pytest.param(MemorySource.USER_ASSERTED, Ground.USER_STATED, id="user-asserted"),
-        pytest.param(MemorySource.OBSERVED, Ground.INFERRED, id="observed"),
-        pytest.param(MemorySource.INFERRED, Ground.INFERRED, id="inferred"),
-        pytest.param(MemorySource.EXTERNAL, Ground.INFERRED, id="external"),
-    ],
-)
-async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
-    tmp_path: Path, source: MemorySource, expected: Ground
-) -> None:
-    """ADR-0249 §16 item 17, from a **stored** version 1 database.
-
-    Each goal reads back with exactly one interpretation whose ``outcome`` is its stored
-    ``statement``, whose ``outcome_ground`` is derived from the row's own
-    ``provenance.source`` with **no span** in either branch, and whose ``raised_by``,
-    ``conversation_id`` and ``last_engaged_at`` are **absent** — §12's "the migration
-    writes no value this system did not record, and the absences are the whole of how it
-    says so". ``attempts_of`` returns empty; each plan reads back with
-    ``targets_revision`` absent; ``export`` validates at the new ``schema_version``; and
-    ``delete_goal`` still cascades.
-    """
-    path = tmp_path / "plans.db"
-    _version_1_database(path, source=source)
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        goal = await store.get_goal("g1")
-        assert goal is not None
-        [revision] = goal.interpretation
-        assert revision.revision == 1
-        assert revision.outcome == "relocate to Lisbon"
-        assert goal.statement == "relocate to Lisbon", "the projection reads the stored bytes"
-        assert revision.outcome_ground is expected
-        assert revision.outcome_span is None, "the migration invents no span (§12)"
-        assert revision.outcome_evidence_id is None
-        assert (revision.constraints, revision.criteria, revision.conditions) == ((), (), ())
-        assert revision.recorded_at == _AT, "recorded_at is the row's own created_at"
-        assert revision.raised_by is None, "a migrated revision 1 carries no raised_by (§3)"
-        assert goal.conversation_id is None
-        assert goal.last_engaged_at is None
-        # ADR-0250 §1's fifth absence, on ADR-0249 §1's own posture: a row written
-        # before that decision reaches `last_engaged_in` `None` by the one route
-        # there is, and no lane writes `None` into it.
-        assert goal.last_engaged_in is None
-        assert (goal.version, goal.interpretation_elided) == (0, 0)
-
-        assert await store.attempts_of("g1") == ()
-
-        plan = await store.get_plan("p1")
-        assert plan is not None
-        assert plan.targets_revision is None, "each plans row's targets_revision is absent"
-
-        export = await store.export()
-        assert export.schema_version == 18
-        assert [one.id for one in export.goals] == ["g1"]
-        assert export.attempts == ()
-
-        assert (await store.delete_goal("g1")).deleted
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        # ADR-0250 §9's and ADR-0252 §13's migrations run in the same open: a version 1
-        # file is taken the whole way to the current marker rather than parked at 2 or
-        # 3, because every pass runs inside the one setup transaction and the marker is
-        # stamped last.
-        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "10",
-        )
-
-
-async def test_a_migrated_plan_is_not_driven(tmp_path: Path) -> None:
-    """ADR-0249 §8, over the rows §12's migration actually leaves behind.
-
-    "A migration that gives every stored plan an absent ``targets_revision`` while nothing
-    enforces the rule would leave an interval in which the existing claim path drives
-    exactly the plans §8 forbids" — so the refusal is driven by **resuming a pending
-    execution after the upgrade**, which is §16 item 26's own construction, rather than by
-    building the row by hand.
-    """
-    path = tmp_path / "plans.db"
-    _version_1_database(path)
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        state = await store.start_execution("p1")
-        with pytest.raises(ClaimRefused):
-            await store.commit_transition(_claim(state))
-    finally:
-        store.close()
-
-
-async def test_the_migration_leaves_the_file_alone_where_a_row_cannot_be_read(
-    tmp_path: Path,
-) -> None:
-    """A row this migration cannot read fails the open and rolls the whole thing back.
-
-    The transaction is the guarantee: the marker is moved last and inside it, so a file
-    that arrives unreadable is left "unupgraded, still labelled 1, and refusing to open
-    rather than half-migrated" (§12).
-    """
-    path = tmp_path / "plans.db"
-    _version_1_database(path)
-    with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE goals SET data = '{\"id\": \"g1\"}' WHERE id = 'g1'")
-
-    with pytest.raises(PlanningError, match="this migration cannot read"):
-        SqlitePlanStore(path=path, now=_fixed_now)
-
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "1",
-        )
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        pytest.param("statement", "   ", id="blank-statement"),
-        pytest.param("created_at", "not an instant", id="unparseable-instant"),
-        pytest.param("created_at", "2026-01-01T00:00:00", id="naive-instant"),
-    ],
-)
-async def test_a_row_that_fails_a_model_invariant_is_this_layers_error(
-    tmp_path: Path, field: str, value: str
-) -> None:
-    """A migrated value the model refuses is a ``PlanningError``, not a raw one.
-
-    A missing key fails at the read; a **present but invalid** one fails at the
-    construction, and a ``ValidationError`` escaping the migration would reach
-    ``_setup``, whose cleanup catches ``PlanningError``, ``sqlite3.Error`` and
-    ``OSError`` — so it would leak the connection past this layer's own error boundary
-    (ADR-0049 §1). Driven over the three shapes a stored row can actually hold: a
-    statement blank once stripped, an instant that does not parse, and one that parses
-    but is naive (ADR-0023 §3).
-    """
-    path = tmp_path / "plans.db"
-    _version_1_database(path)
-    with sqlite3.connect(path) as conn:
-        (raw,) = conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()
-        held = json.loads(raw)
-        held[field] = value
-        conn.execute("UPDATE goals SET data = ? WHERE id = 'g1'", (json.dumps(held),))
-
-    with pytest.raises(PlanningError, match="this migration cannot read"):
-        SqlitePlanStore(path=path, now=_fixed_now)
-
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "1",
-        ), "unupgraded rather than half-migrated"
-
-
-@pytest.mark.parametrize(
-    "tamper",
-    [
-        pytest.param("execution_id = 'ghost'", id="the-holders-execution"),
-        pytest.param("step_id = 's9'", id="the-holders-step"),
-    ],
-)
-async def test_an_effect_row_whose_holder_columns_disagree_with_its_blob_is_refused(
-    tmp_path: Path, tamper: str
-) -> None:
-    """The effect index rule, at the lookup ADR-0259 §2's at-most-once rests on.
-
-    ``goal_effects`` promotes four values and every one of them is something a reader
-    trusts: the pair decides which row a claim finds at all, and ``execution_id`` and
-    ``step_id`` decide the **status** §2's second limb is taken over. A row whose blob
-    names a holder its columns do not would have that status read off the wrong step —
-    this decision's at-most-once guarantee decided over a row nothing verified.
-
-    It refuses rather than repairs, which is the posture ``goal_evidence`` already takes
-    (#2328): a sound file reads exactly right, a tampered one reads refusing.
-    """
-    path = tmp_path / "plans.db"
-    state_id = await _claimed_effect(path)
-
-    # The record is untouched; the columns it was selected by are moved off it.
-    with sqlite3.connect(path) as conn:
-        conn.execute(f"UPDATE goal_effects SET {tamper}")  # noqa: S608 — a literal from the table above
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        with pytest.raises(PlanningError, match="the store is corrupt"):
-            await store.export()
-        with pytest.raises(PlanningError, match="the store is corrupt"):
-            await store.claim_effect(execution_id=state_id, step_id="s1", effect_key=_KEY)
-    finally:
-        store.close()
-
-
-async def test_an_effect_row_indexed_under_another_action_is_that_actions_and_refuses_there(
-    tmp_path: Path,
-) -> None:
-    """The effect index rule, in both of its consequences at once.
-
-    A row indexed at ``(g1, ia2)`` whose record names ``ia1`` is therefore **not
-    ``ia1``'s row** — not filtered out of the lookup, not lost from it, simply never
-    selected there, so a fresh ``ia1`` claim answers ``CLAIMED`` — and it **does not
-    hide**, because reading the pair its columns *do* name decodes it and refuses. Those
-    are the two answers a store is allowed to give, and the evidence rule's own arm
-    takes exactly this shape.
-
-    Both halves are asserted together because either alone is consistent with the bug: a
-    store that silently dropped the row would pass the first, and one that scanned every
-    row on every lookup would pass the second.
-    """
-    path = tmp_path / "plans.db"
-    await _claimed_effect(path)
-
-    with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE goal_effects SET intended_action_id = 'ia2'")
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        with pytest.raises(PlanningError, match="the store is corrupt"):
-            await store.export()
-
-        await store.save_plan(_effect_plan("p2", actions=("ia1",)))
-        under_ia1 = await store.start_execution("p2")
-        answer = await store.claim_effect(execution_id=under_ia1.id, step_id="s1", effect_key=_KEY)
-        assert answer.claim is EffectClaim.CLAIMED, "the row is not ia1's under the rule"
-
-        await store.save_plan(_effect_plan("p3", actions=("ia2",)))
-        under_ia2 = await store.start_execution("p3")
-        with pytest.raises(PlanningError, match="the store is corrupt"):
-            await store.claim_effect(execution_id=under_ia2.id, step_id="s1", effect_key=_KEY)
-    finally:
-        store.close()
-
-
-async def _claimed_effect(path: Path) -> str:
-    """Build a store holding one sound effect row, and return its holder's execution id."""
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal("g1"))
-        await store.record_intended_actions(_minting(_intended("ia1"), _intended("ia2")))
-        await store.save_plan(_effect_plan("p1"))
-        state = await store.start_execution("p1")
-        await store.claim_effect(execution_id=state.id, step_id="s1", effect_key=_KEY)
-    finally:
-        store.close()
-    return state.id
-
-
 # --- ADR-0306 §6: acting's effect records on the durable store -----------------
-
-
-def _version_9_database(path: Path) -> None:
-    """A version 9 file: the version 8 one with ADR-0297 §1's stop records beside it.
-
-    The previous version, which ADR-0306 §6's table is added over. Built from the rung
-    below, so the two statements stay one.
-
-    Args:
-        path: Where to build it.
-    """
-    _version_8_database(path)
-    with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TABLE stopped_activations(activation_id TEXT PRIMARY KEY)")
-        conn.execute("UPDATE meta SET value = '9' WHERE key = 'schema_version'")
 
 
 def _acted(effect_id: str, *, activation: str = "act-1") -> ActivationEffect:
@@ -4631,35 +1200,6 @@ def _acted(effect_id: str, *, activation: str = "act-1") -> ActivationEffect:
         decision_id=f"d-{effect_id}",
         claimed_at=_AT,
     )
-
-
-@pytest.mark.parametrize(
-    "build",
-    [
-        pytest.param(_version_5_database, id="from-version-5"),
-        pytest.param(_version_9_database, id="from-version-9"),
-    ],
-)
-async def test_an_earlier_plan_store_opens_holding_no_activation_effect(
-    tmp_path: Path, build: Callable[[Path], None]
-) -> None:
-    """ADR-0306 §6's table, created **empty** on every earlier file, at version 10."""
-    path = tmp_path / "plans.db"
-    build(path)
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        assert (await store.export()).activation_effects == (), "the table is created empty"
-        assert await store.claim_activation_effect(_acted("e1"), match=None) is (
-            ActivationEffectClaim.CLAIMED
-        )
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "10",
-        )
 
 
 async def test_an_activation_effect_survives_a_restart(tmp_path: Path) -> None:
