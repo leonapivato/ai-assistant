@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 import sys
 import traceback
 from collections.abc import Mapping, Sequence, Set
@@ -532,8 +533,13 @@ def _record_message(record: logging.LogRecord, failures: Sequence[BaseException]
     class. What remains is a message that *embeds* an exception's words itself —
     asyncio's "Task exception was never retrieved" carries the task's repr, and
     that holds ``exception=ValueError('…')`` — so each carried exception's repr and
-    its text are then replaced wherever they appear, longest first, so a group's
-    repr goes whole before a member's could split it.
+    its text are then replaced wherever they appear. One pass, longest first: a
+    group's repr goes whole before a member's could split it, and a class name put
+    in is never matched again.
+
+    Over-matching is the intended direction, as for the redactor's keys: an
+    exception whose text is a common word takes that word out of the rest of its
+    own record's message too.
     """
     named = copy.copy(record)
     named.msg = _named(record.msg)
@@ -549,9 +555,10 @@ def _record_message(record: logging.LogRecord, failures: Sequence[BaseException]
         for said in (repr(failure), str(failure)):
             if said:
                 words.setdefault(said, name)
-    for said in sorted(words, key=len, reverse=True):
-        text = text.replace(said, words[said])
-    return text
+    if not words:
+        return text
+    spoken = re.compile("|".join(re.escape(said) for said in sorted(words, key=len, reverse=True)))
+    return spoken.sub(lambda found: words[found.group(0)], text)
 
 
 def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:

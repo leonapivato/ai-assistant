@@ -970,6 +970,16 @@ def test_a_stdlib_message_naming_the_exception_names_only_its_class(shape: str) 
     assert "RuntimeError" in out
 
 
+def test_a_class_name_put_in_is_not_matched_again() -> None:
+    # One pass: an exception whose text is "Error" leaves "ValueError" whole.
+    stream = _configured_on_a_bare_root()
+    failure = ValueError("Error")
+
+    logging.getLogger("thirdparty").error(f"read failed: {failure!r} / {failure}", exc_info=failure)
+
+    assert stream.getvalue().splitlines()[0] == "read failed: ValueError / ValueError"
+
+
 async def _fail_with_content() -> None:
     _raise_with_content()
 
