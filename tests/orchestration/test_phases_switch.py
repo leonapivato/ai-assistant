@@ -26,7 +26,7 @@ from phases_support import (
     phases_harness,
     processing,
 )
-from test_engine import Harness, NoStepPlanner
+from test_engine import Harness
 
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import (
@@ -117,14 +117,14 @@ async def test_a_spoken_input_to_a_conversation_is_refused_and_starts_nothing(
 
 async def test_an_engine_without_the_phases_refuses_an_event_and_runs_no_reader() -> None:
     """§2:6: an engine built without the phases runs no activation."""
-    harness = Harness(planner=NoStepPlanner())
+    harness = Harness()
 
     with pytest.raises(ConfigurationError, match="informational event processing"):
         await harness.engine.receive(event_input(), reply=None, timeout=_BUDGET)
     assert await episodes(harness.memory) == []
 
     with pytest.raises(ConfigurationError, match="wired only beside them"):
-        Harness(planner=NoStepPlanner(), chat_reader=True)
+        Harness(chat_reader=True)
 
 
 def test_the_interim_tidy_up_is_gone() -> None:

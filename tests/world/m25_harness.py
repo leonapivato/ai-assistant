@@ -300,7 +300,7 @@ def the_capability_the_root_handed_out(composition: Composition) -> OutboundTran
     transport in it" is the premise every other assertion in this arm rests on and
     is exactly the kind of premise a mis-wired harness satisfies vacuously.
 
-    Reaching through the private attributes of the runner, the registry binding and
+    Reaching through the private attributes of the phases, the registry binding and
     the tool is what the composition-root tests in ``tests/app`` already do for the
     same reason: the wiring obligations ADR-0042 §2 discharges here are not visible
     on any public surface, and a test that could only see the public one could not
@@ -555,7 +555,9 @@ def registry(composition: Composition) -> InMemoryToolRegistry:
     Returns:
         The registry.
     """
-    tools = composition.engine._runner._registry
+    phases = composition.engine._phases
+    assert phases is not None, "the root wires the phases on every deployment"
+    tools = phases._tools._registry
     assert isinstance(tools, InMemoryToolRegistry)
     return tools
 
@@ -990,7 +992,7 @@ async def drive_the_probe(
         id=f"m25-d-{definition.id}",
         decided_at=DECIDED_AT,
     )
-    await composition.engine._runner._trail.record(decision)
+    await composition.engine._trail.record(decision)
     return await registry(composition).invoke(
         ToolCall(request=request, decision=decision), timeout=TIMEOUT
     )

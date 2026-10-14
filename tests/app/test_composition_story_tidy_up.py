@@ -46,7 +46,7 @@ async def test_planning_s_tidy_up_tidies_over_the_one_story_store_on_consolidati
         assert isinstance(tidy_up, StoryTidyUp)
         # One story store and one memory store: the engine surface's and the loop's.
         assert tidy_up._stories is engine._stories
-        assert tidy_up._memory is engine._loop._memory
+        assert tidy_up._memory is engine._memory
         # The route the deployment names for background work over its own records.
         assert engine._consolidation is not None
         assert tidy_up._model is engine._consolidation._model

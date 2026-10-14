@@ -26,7 +26,6 @@ from ai_assistant.core.errors import ConfigurationError, ModelError, ModelUnavai
 from ai_assistant.core.types import Message, Role
 from ai_assistant.memory import MemoryIngestor, ModelBackedReconciler
 from ai_assistant.models import PydanticAIProvider, RetryingProvider, RoutingProvider
-from ai_assistant.planning import ModelBackedPlanner
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -43,17 +42,18 @@ async def _no_sleep(delay: float) -> None:
     del delay
 
 
-def _planner_model(engine: Engine) -> ModelProvider:
-    """The provider the composed engine's planner will actually call.
+def _routed_model(engine: Engine) -> ModelProvider:
+    """The routed provider the composed engine's understanding stage will actually call.
 
-    The reach-in is deliberate and matches ``test_composition.py``'s existing
-    idiom: the composition root's obligations are about *which object ends up
-    where*, and no public surface exposes that — asserting it any other way would
-    mean widening the API to make a wiring rule observable.
+    The same object the phases' digests reach through (``_PhaseSeams.model``). The
+    reach-in is deliberate and matches ``test_composition.py``'s existing idiom: the
+    composition root's obligations are about *which object ends up where*, and no
+    public surface exposes that — asserting it any other way would mean widening the
+    API to make a wiring rule observable.
     """
-    planner = engine._loop._planner
-    assert isinstance(planner, ModelBackedPlanner)
-    return planner._model
+    understanding = engine._understanding
+    assert understanding is not None
+    return understanding._model
 
 
 class _FailingProvider:
@@ -82,17 +82,17 @@ class _AnsweringProvider:
         return Message(role=Role.ASSISTANT, content=self._content)
 
 
-async def test_build_engine_gives_the_planner_a_routing_provider(tmp_path: Path) -> None:
+async def test_build_engine_gives_the_model_seam_a_routing_provider(tmp_path: Path) -> None:
     """The production model seam is the router, not a bare retrying provider.
 
     Before this, ``RoutingProvider`` was constructed nowhere outside its own
     tests: the fallback mechanism ADR-0013 built existed in ``models/`` and was
-    unreachable from any running assistant. The seam the planner is handed is now
+    unreachable from any running assistant. The seam understanding is handed is now
     the shape ADR-0013 §3 recommends.
     """
     engine = build_engine(Settings(), data_dir=tmp_path)
     try:
-        assert isinstance(_planner_model(engine), RoutingProvider)
+        assert isinstance(_routed_model(engine), RoutingProvider)
     finally:
         await engine.aclose()
 
@@ -109,7 +109,7 @@ async def test_the_routers_routes_retry_before_routing_gives_up_on_them(tmp_path
     settings = Settings(model_max_attempts=5, model_timeout_seconds=12.5)
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        model = _planner_model(engine)
+        model = _routed_model(engine)
         assert isinstance(model, RoutingProvider)
         routes = model._routes
         assert routes, "the router must have at least one route"
@@ -166,14 +166,14 @@ async def test_a_configured_fallback_reaches_the_router_build_engine_hands_over(
     """The specs are not merely returned — they become the built router's routes.
 
     ``_model_specs`` and ``_build_model_provider`` are tested separately, so this
-    pins the join between them: what ``build_engine`` gives the planner has one
+    pins the join between them: what ``build_engine`` gives the model seam has one
     route per configured spec. Without it, a wiring change that dropped the
     fallbacks in between would pass every other test in this file.
     """
     settings = Settings(default_model="anthropic:claude-x", fallback_models=("openai:gpt-5",))
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        model = _planner_model(engine)
+        model = _routed_model(engine)
         assert isinstance(model, RoutingProvider)
         assert len(model._routes) == 2
     finally:
@@ -277,7 +277,7 @@ def test_every_spec_is_checked_not_merely_the_first() -> None:
 def _consolidation_provider(engine: Engine) -> ModelProvider:
     """The provider the composed engine's consolidation stage will actually call.
 
-    The same deliberate reach-in ``_planner_model`` uses: the composition root's
+    The same deliberate reach-in ``_routed_model`` uses: the composition root's
     obligations are about *which object ends up where*, and no public surface
     exposes that — the stage holds its provider and shows nobody.
     """
@@ -306,7 +306,7 @@ async def test_build_engine_gives_consolidation_a_route_that_cannot_fall_back(
     """Consolidation's seam is a ``RetryingProvider``, never a ``RoutingProvider``.
 
     **This is the no-fallback property, structurally** (ADR-0285 §5, §11:3): with two
-    specs configured the planner gets a two-route router, and consolidation gets a
+    specs configured the model seam gets a two-route router, and consolidation gets a
     provider that holds no route list at all — so there is no second candidate a
     routable failure could advance to. An implementation that reused the router
     wholesale would pass every other test in this file (ADR-0013 §4).
@@ -325,7 +325,7 @@ async def test_build_engine_gives_consolidation_a_route_that_cannot_fall_back(
         model = _consolidation_provider(engine)
         assert isinstance(model, RetryingProvider)
         assert not isinstance(model, RoutingProvider)
-        assert isinstance(_planner_model(engine), RoutingProvider)  # the answers still route
+        assert isinstance(_routed_model(engine), RoutingProvider)  # the answers still route
     finally:
         await engine.aclose()
 

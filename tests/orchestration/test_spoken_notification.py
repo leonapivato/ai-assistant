@@ -46,7 +46,6 @@ from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
 from ai_assistant.orchestration.upcoming import NOTIFICATION_CLASS, PRODUCER
 from ai_assistant.testing import (
     FakeAssistantEngine,
-    FakeContextProvider,
     FakeNotificationOutbox,
     FakeNotificationPolicy,
     FakeNotificationStore,
@@ -504,15 +503,15 @@ class TestThePlacementsConditionOnTheStamp:
         """§3: "The delivery path issues no store query, holds no ``MemoryStore`` and
         no ``ContextProvider``, and reads no record."
 
-        Every method of both Protocols is replaced with one that fails the test, so
-        the assertion is total over the surface rather than over a list this case
-        chose — a method added to either Protocol is covered on the day it lands.
+        Every method of the ``MemoryStore`` Protocol is replaced with one that fails
+        the test, so the assertion is total over the surface rather than over a list
+        this case chose — a method added to it is covered on the day it lands. The
+        engine holds no ``ContextProvider`` since the old path was deleted (ADR-0309
+        §5), so there is none to refuse.
         """
         outbox = FakeNotificationOutbox(now=lambda: NOW)
         await outbox.offer(_placed())
-        context = FakeContextProvider()
         harness = Harness(
-            context=context,
             transcriber=FakeSpeechTranscriber(),
             synthesizer=FakeSpeechSynthesizer(),
         )
@@ -523,7 +522,6 @@ class TestThePlacementsConditionOnTheStamp:
             synthesizer=harness.synthesizer,
         )
         _refuse_every_call(harness.memory, protocols_module.MemoryStore)
-        _refuse_every_call(context, protocols_module.ContextProvider)
 
         delivery = await engine.next_notification(plays=EVERYTHING, budget=timedelta(0))
 

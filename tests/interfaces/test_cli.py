@@ -40,19 +40,13 @@ from ai_assistant.core.errors import (
     UngrantableSourceError,
 )
 from ai_assistant.core.types import (
-    ActionPlan,
-    AssociationVerdict,
     Attestation,
     Belief,
     BeliefBand,
     BeliefSummary,
     ClassReach,
-    CurrentContext,
     DataTier,
     Evidence,
-    EvidenceDigest,
-    GoalAssociation,
-    GoalBrief,
     GrantScope,
     HeldNotification,
     MemoryKind,
@@ -64,54 +58,34 @@ from ai_assistant.core.types import (
     NotificationDispositionKind,
     NotificationPreferences,
     NotificationReach,
-    PlannerOutput,
-    PlanStep,
-    ProposedAction,
     Provenance,
     QuietWindow,
-    ReadAskOutcome,
     SemanticMemory,
-    ToolDefinition,
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.orchestration import (
-    ComposingStage,
     ConnectionOperations,
     ConversationLifecycle,
     DestinationTrustOperations,
     Engine,
     GrantOperations,
     HeldSource,
-    LearningLoop,
-    MemoryWriteStage,
-    QuestionStage,
     RecipientGrantOperations,
-    StepExecutor,
-    StepRunner,
 )
 from ai_assistant.orchestration.upcoming import NOTIFICATION_CLASS
 from ai_assistant.readers.calendar import CALENDAR_READER_NAME
 from ai_assistant.testing import (
-    FakeActionPolicy,
     FakeAssistantEngine,
     FakeAuditTrail,
     FakeConnectionProvisioner,
-    FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
     FakeDestinationTrustStore,
-    FakeFeedbackProcessor,
-    FakeGoalAssociator,
-    FakeMemoryPolicy,
     FakeMemoryStore,
-    FakeMemoryWriter,
-    FakeModelProvider,
     FakePlanStore,
     FakeRecipientGrantStore,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
-    FakeStreamingCompleter,
-    FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
 )
@@ -122,39 +96,10 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.protocols import ActionPolicy, AuditTrail
-    from ai_assistant.core.types import MemoryRecord, ShownFile, SourceGrant
-
-
-def _goal_ids(prefix: str) -> Callable[[], str]:
-    """Distinct identifiers, ``<prefix>-1`` first (ADR-0249 §12).
-
-    ``save_goal`` is the opening write alone since ADR-0249 §12, so a loop wired with a
-    *constant* factory would refuse its second turn: a goal per turn needs an id per
-    turn, which is what production's ``uuid4`` already gives it. The first value is
-    unchanged, so a single-turn case reads exactly what it read before.
-    """
-    count = 0
-
-    def factory() -> str:
-        nonlocal count
-        count += 1
-        return f"{prefix}-{count}"
-
-    return factory
+    from ai_assistant.core.types import SourceGrant
 
 
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
-
-
-def _composing() -> ComposingStage:
-    """The terminal composing stage every engine now takes (ADR-0170 §2).
-
-    Wired to a cooperating fake provider, which is all these tests need: what the
-    composed answer *says*, and what the engine does when composing it fails, are
-    pinned in ``tests/orchestration/test_composing.py`` and
-    ``tests/orchestration/test_engine_composing.py``.
-    """
-    return ComposingStage(model=FakeModelProvider(), streaming=FakeStreamingCompleter())
 
 
 def _grant_ids() -> Callable[[], str]:
@@ -224,8 +169,6 @@ def _recipient_grant_operations(
     """
     return RecipientGrantOperations(
         store=FakeRecipientGrantStore() if store is None else store,
-        trail=FakeAuditTrail() if trail is None else trail,
-        policy=FakeActionPolicy() if policy is None else policy,
         id_factory=_grant_ids(),
         clock=lambda: AT,
     )
@@ -244,10 +187,6 @@ def _connection_operations() -> ConnectionOperations:
     return ConnectionOperations(provisioner=FakeConnectionProvisioner())
 
 
-CAPABILITY = "send_email"
-PARAMETERS = {"to": "someone@example.com"}
-
-
 @pytest.fixture
 def output(monkeypatch: pytest.MonkeyPatch) -> StringIO:
     """Redirect the CLI's Rich console to a buffer and return it."""
@@ -256,101 +195,23 @@ def output(monkeypatch: pytest.MonkeyPatch) -> StringIO:
     return buffer
 
 
-class _OneStepPlanner:
-    """Plans one step for the goal it is given (so ``plan.goal_id`` matches)."""
-
-    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
-        self,
-        goal: GoalBrief,
-        *,
-        utterance: str,
-        context: CurrentContext,
-        memories: Sequence[MemoryRecord] = (),
-        capabilities: Sequence[str],
-        files: Sequence[ShownFile] = (),
-        read_outcomes: Sequence[ReadAskOutcome] = (),
-        evidence: Sequence[EvidenceDigest] = (),
-    ) -> PlannerOutput:
-        # ADR-0265 §4's label, and one act proposed per call: ADR-0259 §2 refuses to
-        # dispatch a side-effecting step whose plan names no act, and a fresh act each
-        # turn keeps a second turn over one goal a second dispatch rather than a reuse.
-        step = PlanStep(
-            id="step-1",
-            intent="send the note",
-            capability=CAPABILITY,
-            parameters=PARAMETERS,
-            intended_action=f"A{len(goal.actions) + 1}",
-        )
-        return PlannerOutput(
-            actions=(ProposedAction(intent="send the note"),),
-            plan=ActionPlan(
-                id=f"{goal.goal_id}-plan",
-                goal_id=goal.goal_id,
-                steps=(step,),
-                created_at=AT,
-                rationale="send the note",
-            ),
-        )
-
-
-async def _succeeds(parameters: object, *, idempotency_key: str | None) -> None:
-    """A tool that does nothing and succeeds."""
-
-
 def _engine(
     *,
-    tools: tuple[ToolDefinition, ...] = (),
-    policy: FakeActionPolicy | None = None,
     closers: Sequence[Callable[[], Awaitable[None]]] = (),
-    composing: ComposingStage | None = None,
     memory: FakeMemoryStore | None = None,
 ) -> Engine:
-    """A real ``Engine`` over canonical fakes, driving a one-step plan."""
+    """A real ``Engine`` over canonical fakes."""
     plans = FakePlanStore(now=lambda: AT)
     trail = FakeAuditTrail()
-    # The seam claims through the **same** trail the runner records rulings into
-    # (ADR-0192 §9's wiring clause); a second one would refuse every claim.
-    invoker = FakeToolInvoker(
-        [(definition, _succeeds) for definition in tools], ledger=trail, gate=trail
-    )
     memory = FakeMemoryStore(now=lambda: AT) if memory is None else memory
-    writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: AT)
     deferrals = FakeDeferralStore(now=lambda: AT)
-    writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
-    loop = LearningLoop(
-        context=FakeContextProvider(),
-        memory=memory,
-        writes=writes,
-        planner=_OneStepPlanner(),
-        feedback=FakeFeedbackProcessor(),
-        now=lambda: AT,
-        id_factory=_goal_ids("g"),
-        # The same object the runner below resolves against (ADR-0211 §3): a
-        # loop told one vocabulary while selection resolved against another
-        # could plan a step the selecting registry never advertised.
-        registry=invoker,
-    )
-    ids = iter(f"d-{n}" for n in range(1, 50))
-    runner = StepRunner(
-        plans=plans,
-        registry=invoker,
-        policy=policy if policy is not None else FakeActionPolicy(),
-        trail=trail,
-        executor=StepExecutor(plans=plans, registry=invoker, invoker=invoker, now=lambda: AT),
-        now=lambda: AT,
-        id_factory=lambda: next(ids),
-    )
     conversations = FakeConversationStore(now=lambda: AT)
     return Engine(
         chat_reader=False,
-        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
-        composing=composing if composing is not None else _composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
         destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
-        loop=loop,
-        runner=runner,
         plans=plans,
         trail=trail,
         spend=trail,
@@ -373,7 +234,6 @@ def _engine(
             retention=timedelta(days=30),
             now=lambda: AT,
         ),
-        questions=QuestionStage(writer=writer, deferrals=deferrals, memory=memory, now=lambda: AT),
         closers=closers,
     )
 
@@ -2360,59 +2220,23 @@ def test_forget_command_defaults_to_keeping_the_belief(
 # --- conversations: continuity, the listing, and the deletion (ADR-0074) ---
 
 
-def _conversation_engine(
-    *, composing: ComposingStage | None = None
-) -> tuple[Engine, FakeConversationStore]:
+def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
     """A real ``Engine`` over canonical fakes, plus the conversation index behind it.
 
     The store is handed back so a case can assert what capture actually recorded,
-    rather than inferring it from what the terminal printed. Unlike :func:`_engine`
-    this one mints a fresh goal id per turn, so it is the one a case driving *two*
-    turns has to use.
+    rather than inferring it from what the terminal printed.
     """
     plans = FakePlanStore(now=lambda: AT)
     trail = FakeAuditTrail()
-    # The seam claims through the **same** trail the runner records rulings into
-    # (ADR-0192 §9's wiring clause); a second one would refuse every claim.
-    invoker = FakeToolInvoker([], ledger=trail, gate=trail)
     memory = FakeMemoryStore(now=lambda: AT)
-    writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: AT)
     deferrals = FakeDeferralStore(now=lambda: AT)
-    writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
-    goals = iter(f"g-{n}" for n in range(1, 20))
-    loop = LearningLoop(
-        context=FakeContextProvider(),
-        memory=memory,
-        writes=writes,
-        planner=_NoStepPlanner(),
-        feedback=FakeFeedbackProcessor(),
-        now=lambda: AT,
-        id_factory=lambda: next(goals),
-        # The same object the runner below resolves against (ADR-0211 §3): a
-        # loop told one vocabulary while selection resolved against another
-        # could plan a step the selecting registry never advertised.
-        registry=invoker,
-    )
-    runner = StepRunner(
-        plans=plans,
-        registry=invoker,
-        policy=FakeActionPolicy(),
-        trail=trail,
-        executor=StepExecutor(plans=plans, registry=invoker, invoker=invoker, now=lambda: AT),
-        now=lambda: AT,
-        id_factory=lambda: "d-1",
-    )
     conversations = FakeConversationStore(now=lambda: AT)
     engine = Engine(
         chat_reader=False,
-        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
-        composing=composing if composing is not None else _composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
         destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
-        loop=loop,
-        runner=runner,
         plans=plans,
         trail=trail,
         spend=trail,
@@ -2432,31 +2256,8 @@ def _conversation_engine(
             retention=timedelta(days=30),
             now=lambda: AT,
         ),
-        questions=QuestionStage(writer=writer, deferrals=deferrals, memory=memory, now=lambda: AT),
     )
     return engine, conversations
-
-
-class _NoStepPlanner:
-    """A planner that ends a turn at an empty plan, so no tool is needed."""
-
-    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
-        self,
-        goal: GoalBrief,
-        *,
-        utterance: str,
-        context: CurrentContext,
-        memories: Sequence[MemoryRecord] = (),
-        capabilities: Sequence[str],
-        files: Sequence[ShownFile] = (),
-        read_outcomes: Sequence[ReadAskOutcome] = (),
-        evidence: Sequence[EvidenceDigest] = (),
-    ) -> PlannerOutput:
-        return PlannerOutput(
-            plan=ActionPlan(
-                id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(), created_at=AT
-            )
-        )
 
 
 # --- the composed answer, beside the account and never in place of it --------

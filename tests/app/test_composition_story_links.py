@@ -39,7 +39,7 @@ async def test_the_engine_is_built_with_both_story_pieces_over_its_one_story_sto
         # One story store: the engine surface's, the candidates' and the stage's.
         assert candidates._stories is engine._stories
         assert links._stories is engine._stories
-        assert candidates._memory is engine._loop._memory
+        assert candidates._memory is engine._memory
         assert (candidates._limit, candidates._lines, candidates._notes, candidates._episodes) == (
             UNDERSTANDING_STORY_CANDIDATES,
             STORY_SHORT_VIEW_LINES,

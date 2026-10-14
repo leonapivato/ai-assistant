@@ -54,15 +54,12 @@ from m23_harness import (
     _Keyring,
     _Records,
     consolidation_reply,
-    declines_reply,
     plant,
 )
 
 from ai_assistant.core.types import (
-    AssociationVerdict,
     ChatDevice,
     DeviceAccess,
-    GoalAssociation,
     ProposedCall,
     RoundResponse,
     UserMessage,
@@ -72,20 +69,15 @@ from ai_assistant.orchestration import Engine
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import ChatWriter
-from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.connections import ConnectionOperations
 from ai_assistant.orchestration.consolidation import ConsolidationStage
 from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
-from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.grants import GrantOperations
-from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools
-from ai_assistant.orchestration.questions import QuestionStage
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
-from ai_assistant.orchestration.runner import StepRunner
 from ai_assistant.orchestration.understanding import (
     RecentEpisodes,
     UnderstandingStage,
@@ -93,24 +85,19 @@ from ai_assistant.orchestration.understanding import (
 )
 from ai_assistant.orchestration.writes import MemoryWriteStage
 from ai_assistant.permissions import ThresholdActionPolicy
-from ai_assistant.planning import ModelBackedPlanner
 from ai_assistant.readers import CalendarReader
 from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
-    FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
     FakeDestinationTrustStore,
-    FakeFeedbackProcessor,
-    FakeGoalAssociator,
     FakeModelProvider,
     FakePlanStore,
     FakeRecipientGrantStore,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeStoryStore,
-    FakeStreamingCompleter,
     FakeToolCallingCompleter,
     FakeTraceRetention,
     FakeTraceSink,
@@ -310,36 +297,7 @@ def build_phases_world(
         now=lambda: NOW,
     )
 
-    # The old path's seams the façade still requires until the deletion lanes remove
-    # them. Nothing an activation on the phases runs reaches the loop or the runner.
-    decisions = count(1)
-    goals = count(1)
-    runner = StepRunner(
-        plans=plans,
-        registry=registry,
-        policy=gate,
-        trail=trail,
-        executor=StepExecutor(plans=plans, registry=registry, invoker=registry, now=lambda: NOW),
-        binder=binder,
-        now=lambda: NOW,
-        id_factory=lambda: f"d-{next(decisions)}",
-    )
-    loop = LearningLoop(
-        context=FakeContextProvider(),
-        memory=store,
-        writes=writes,
-        planner=ModelBackedPlanner(
-            FakeModelProvider(declines_reply()), now=lambda: NOW, id_factory=lambda: "p-1"
-        ),
-        feedback=FakeFeedbackProcessor(),
-        now=lambda: NOW,
-        id_factory=lambda: f"g-{next(goals)}",
-        registry=registry,
-    )
     engine = Engine(
-        loop=loop,
-        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
-        runner=runner,
         plans=plans,
         trail=trail,
         spend=trail,
@@ -352,8 +310,6 @@ def build_phases_world(
         conversations=ConversationLifecycle(
             conversations=chat, memory=store, retention=timedelta(days=30), now=lambda: NOW
         ),
-        composing=ComposingStage(model=FakeModelProvider(), streaming=FakeStreamingCompleter()),
-        questions=QuestionStage(writer=writer, deferrals=deferrals, memory=store, now=lambda: NOW),
         grant_operations=GrantOperations(
             store=FakeSourceGrantStore(),
             sources=(),
@@ -362,8 +318,6 @@ def build_phases_world(
         ),
         recipient_grant_operations=RecipientGrantOperations(
             store=FakeRecipientGrantStore(),
-            trail=trail,
-            policy=gate,
             id_factory=lambda: "recipient-grant-1",
             clock=lambda: NOW,
         ),

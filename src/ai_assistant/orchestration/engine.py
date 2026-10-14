@@ -223,11 +223,9 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
         AuditTrail,
-        AuthorizationResolution,
         DeferralStore,
         DiagnosticRetention,
         DiagnosticSink,
-        GoalAssociator,
         MemoryStore,
         NotificationPolicy,
         NotificationStore,
@@ -283,8 +281,6 @@ if TYPE_CHECKING:
         TranscriptPage,
         UserMessage,
     )
-    from ai_assistant.orchestration.authorization_surface import AuthorizationOperations
-    from ai_assistant.orchestration.composing import ComposingStage
     from ai_assistant.orchestration.connections import ConnectionOperations
     from ai_assistant.orchestration.consolidation import (
         ConsolidationReport,
@@ -294,20 +290,10 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.delivery import DeliveryOutbox
     from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
     from ai_assistant.orchestration.grants import GrantOperations
-    from ai_assistant.orchestration.informational_events import InformationalEventStage
-    from ai_assistant.orchestration.loop import LearningLoop
     from ai_assistant.orchestration.matters_pass import MattersPass, MattersPassReport
-    from ai_assistant.orchestration.parked_reads import ParkedReadOperations
     from ai_assistant.orchestration.phase_path import PhasePath, PhaseWorking
-    from ai_assistant.orchestration.questions import QuestionStage
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
-    from ai_assistant.orchestration.reconciling import ReconciliationStage
-    from ai_assistant.orchestration.recovery import RecoveryScan
-    from ai_assistant.orchestration.routing import RoutingStage
-    from ai_assistant.orchestration.runner import (
-        StepRunner,
-    )
     from ai_assistant.orchestration.story_links import (
         Candidates,
         StoryCandidates,
@@ -322,25 +308,6 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.upcoming import UpcomingEventStage
 
 _log = structlog.get_logger(__name__)
-
-#: ``Settings.routed_confirmation_ttl``'s own default, restated where the invariant
-#: is used so an engine built in a test that reads no setting still has a bounded
-#: routed park (ADR-0197 §7). A routed park is invisible — ``pending_confirmations``
-#: does not list it and no durable store recovers it — so without a lifetime a client
-#: that disconnected between the park and its token would hold a ceiling slot nothing
-#: could ever free.
-_DEFAULT_ROUTED_CONFIRMATION_TTL: Final = timedelta(minutes=15)
-
-#: How long a goal's clarification stays answerable, where no operator figure reaches
-#: this engine (ADR-0250 §8).
-#:
-#: **The normative figure is ``Settings.goal_question_ttl``**, which is required,
-#: defaults to PT72H, is refused at load where it is zero or negative and admits no
-#: disable sentinel. This default exists for the same reason
-#: :data:`_DEFAULT_ROUTED_CONFIRMATION_TTL` does — a test double constructing an engine
-#: directly is not a deployment — and the composition root passes the configured value.
-_DEFAULT_GOAL_QUESTION_TTL: Final = timedelta(hours=72)
-
 
 #: What a pass whose deadline expired before or inside the understanding stage says
 #: (ADR-0276 §5, §6): code-owned, so no provider content reaches the caller.
@@ -374,11 +341,6 @@ def _elapsed_since(started: datetime, now: datetime) -> timedelta:
     elapsed = now - started
     return max(elapsed, timedelta(0))
 
-
-#: Default ceiling on unanswered parked confirmations held in memory (see
-#: :class:`Engine`). Generous enough that a real interactive session never reaches
-#: it, low enough that an abandoning client cannot exhaust memory.
-_DEFAULT_MAX_OUTSTANDING = 1024
 
 #: ADR-0131 §5a's ``hub_max_notification_budget``, as the figure this engine
 #: refuses a poll above. Carried as a default so an engine built without the hub's
@@ -492,7 +454,7 @@ def _uuid() -> str:
 def _check_positive_int(value: int, *, name: str) -> None:
     """Refuse a constructor knob that is not a positive integer.
 
-    Three of this façade's knobs are counts or byte bounds, and each fails *open and
+    Two of this façade's knobs are byte bounds, and each fails *open and
     silently* rather than loudly when it cannot bind: ``float("nan")`` compares
     ``False`` against every ``>``, so a bound built from one admits everything while
     the engine reports health, and a ``float`` count truncates somewhere later
@@ -1518,9 +1480,6 @@ class Engine:
     def __init__(  # noqa: PLR0913, PLR0915 — one parameter per injected collaborator plus its knobs, and one assignment or wiring check per parameter
         self,
         *,
-        loop: LearningLoop,
-        associator: GoalAssociator,
-        runner: StepRunner,
         plans: PlanStore,
         trail: AuditTrail,
         spend: SpendLedger,
@@ -1531,9 +1490,6 @@ class Engine:
         trace_sink: TraceSink,
         trace_retention: timedelta | None,
         conversations: ConversationLifecycle,
-        composing: ComposingStage,
-        informational_events: InformationalEventStage | None = None,
-        questions: QuestionStage,
         grant_operations: GrantOperations,
         recipient_grant_operations: RecipientGrantOperations,
         destination_trust_operations: DestinationTrustOperations,
@@ -1543,35 +1499,24 @@ class Engine:
         notifications: NotificationStore | None = None,
         notification_policy: NotificationPolicy | None = None,
         notification_outbox: DeliveryOutbox | None = None,
-        recovery: RecoveryScan | None = None,
-        routing: RoutingStage | None = None,
         understanding: UnderstandingStage | None = None,
         understanding_version_limit: int | None = None,
         windows: WindowsStage | None = None,
         recall: RecallStage | None = None,
         stage_record_limit: int = DEFAULT_STAGE_RECORD_LIMIT,
-        reconciliation: ReconciliationStage | None = None,
-        parked_reads: ParkedReadOperations | None = None,
         stories: StoryStore | None = None,
         story_summary_notes: int = DEFAULT_STORY_SUMMARY_VIEW_NOTES,
         story_candidates: StoryCandidates | None = None,
         story_links: StoryLinksStage | None = None,
         matters_pass: MattersPass | None = None,
-        authorization_operations: AuthorizationOperations | None = None,
-        authorizations: AuthorizationResolution | None = None,
         transcriber: SpeechTranscriber | None = None,
         synthesizer: SpeechSynthesizer | None = None,
         speakable_attested_sources: frozenset[str] = frozenset(),
         max_spoken_audio_bytes: int = DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
-        routed_confirmation_ttl: timedelta = _DEFAULT_ROUTED_CONFIRMATION_TTL,
-        goal_question_ttl: timedelta = _DEFAULT_GOAL_QUESTION_TTL,
         max_notification_budget: timedelta = _DEFAULT_MAX_NOTIFICATION_BUDGET,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
-        id_factory: Callable[[], str] = _uuid,
         activation_id_factory: Callable[[], str] = _uuid,
-        epoch_factory: Callable[[], str] = _uuid,
         now: Clock = _utcnow,
-        max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
         drain_timeout: timedelta | None = None,
         chat_reader: bool = True,
@@ -1583,44 +1528,19 @@ class Engine:
     ) -> None:
         """Wire the façade from injected collaborators.
 
-        **``plans`` must be the very instance ``runner`` holds.** No type can say
-        so, so it is a composition-root obligation (ADR-0042 §2, the same shape as
-        ADR-0028 §4's writer/store rule): the façade persists the turn's plan and
-        starts the execution it drives through ``plans``, and reloads it through
-        ``plans`` to resume, so a façade wired to a *second* store would drive and
-        resume nothing while reporting success. The parked step's confirmation
-        content rides back on the runner's own disposition
-        (:attr:`~ai_assistant.orchestration.runner.StepDisposition.decision`), so
-        the façade needs no audit-trail handle of its own.
-
         Args:
-            loop: The turn stage. :meth:`converse` calls its ``respond``.
-            associator: ADR-0250 §4's one seam, reached **through the Protocol and by
-                no other route**. It is required and undefaulted for the reason every
-                other collaborator here is: §3 rules that "**Every turn resolves its
-                goal before it plans**", and a defaulted ``None`` would make that
-                either true or false depending on whether a composition root
-                remembered — the shape ADR-0250 §16's writer clauses exist to keep out
-                of the wiring layer. A turn makes **at most one** ``associate`` call
-                and no lane makes a second, retries one, or re-asks on a different
-                prompt (§4).
-            runner: The single-step stage (selection, permission, execution). Its
-                ``registry``, ``policy``, ``plans`` and ``trail`` are already
-                wired; the façade adds only ``plans`` for the reads a driver needs
-                around it.
-            plans: Durable planning state — the same instance ``runner`` holds.
-                The façade persists the turn's goal and plan and starts the
-                execution it drives, and reloads it to resume.
-            trail: The audit trail — the same instance ``runner`` holds (a
-                composition-root single-instance obligation of the same shape as
-                ``plans``; ADR-0052 §1). The façade reads it **query-only** to
-                recover a durably-parked confirmation's display content after a
-                restart (:meth:`pending_confirmations`): the ruling ``reason`` and
-                the tool declaration live only in the trail (ADR-0042 §4), and a
-                restarted façade has no in-process disposition to read them from. It
-                records nothing; authoring rulings stays the runner's (ADR-0042 §6).
-                A façade wired to a *second* trail would recover confirmations the
-                runner's own ``resume`` cannot resolve.
+            plans: Durable planning state — the same instance the phases record
+                into (a composition-root single-instance obligation, ADR-0042 §2).
+                The façade records an activation's stop through it and reads it for
+                a story's standing; a façade wired to a *second* store would record
+                stops no reader of the first could see.
+            trail: The audit trail — the same instance the phases' seams record
+                into (a composition-root single-instance obligation of the same
+                shape as ``plans``; ADR-0052 §1). The façade reads it **query-only**
+                for the decision and invocation listings and exports, and records
+                nothing; authoring rulings stays with the seams that rule
+                (ADR-0042 §6). A façade wired to a *second* trail would answer from
+                a store nothing writes to.
             spend: The spend ledger — the **same object** ``trail`` is, wired
                 through its ``SpendLedger`` face (ADR-0194 §5). One holder satisfies
                 that Protocol, ``SpendGate`` and ADR-0192's ledger seam, because all
@@ -1649,30 +1569,25 @@ class Engine:
                 from a store nothing writes to — which is worse than an error, since
                 an empty trail is a truthful answer about a store that was never
                 read from, and this one would be indistinguishable from it.
-            memory: Long-term memory — the same instance ``loop`` retrieves from and
-                the writer behind it persists to (a composition-root single-instance
-                obligation of the same shape as ``plans`` and ``trail``; ADR-0028
-                §4). The façade reads it for the inspection surface
-                (:meth:`beliefs`, :meth:`belief`) and deletes through it
+            memory: Long-term memory — the same instance the phases recall from and
+                the writer behind them persists to (a composition-root
+                single-instance obligation of the same shape as ``plans`` and
+                ``trail``; ADR-0028 §4). The façade reads it for the inspection
+                surface (:meth:`beliefs`, :meth:`belief`) and deletes through it
                 (:meth:`forget`), because ADR-0042 §6 forbids an adapter reaching
                 memory itself and ADR-0072 §7 forbids re-filtering ``export`` above
-                the store. It is held **directly** rather than reached through
-                ``loop``: inspection is not a turn, and threading a read that
-                answers "what do you believe about me" through the turn stage would
-                make the stage the seam for a question it has no part in. Wired to a
-                *second* store, a listing would show beliefs the assistant does not
-                use and ``forget`` would destroy nothing the user was shown.
+                the store. Wired to a *second* store, a listing would show beliefs
+                the assistant does not use and ``forget`` would destroy nothing the
+                user was shown.
             deferrals: The durable deferred-question queue — the **same** instance
-                ``questions`` holds and the write stage enqueues into, a
-                composition-root single-instance obligation of the same shape as
-                ``plans`` and ``trail``. Held directly, and for exactly one reason:
-                :meth:`purge_expired` is *one* job over *both* stores because
-                ADR-0078 §10 item 8 forbids a second sweeping mechanism, so the
-                façade has to be able to reach this one. Everything a *user* does to
-                a question still goes through ``questions``; nothing else on this
-                surface touches this handle. Wired to a second queue, the sweep
-                would reclaim rows nobody can see while the rows the user's
-                questions actually live in kept growing — which is ADR-0078 §1's cap
+                the write stage enqueues into, a composition-root single-instance
+                obligation of the same shape as ``plans`` and ``trail``. Held
+                directly, and for exactly one reason: :meth:`purge_expired` is *one*
+                job over *both* stores because ADR-0078 §10 item 8 forbids a second
+                sweeping mechanism, so the façade has to be able to reach this one;
+                nothing else on this surface touches this handle. Wired to a second
+                queue, the sweep would reclaim rows nobody can see while the rows the
+                write stage enqueues kept growing — which is ADR-0078 §1's cap
                 reported as kept and not kept.
             traces: The trace store's **deletion seam** — a
                 :class:`~ai_assistant.core.protocols.TraceRetention` and never a
@@ -1726,41 +1641,6 @@ class Engine:
                 Required rather than optional, deliberately — an engine that could
                 be built without it is an engine that can silently record nothing,
                 which is the one failure ADR-0074 §9 item 6 asks to be *reported*.
-            informational_events: Wired transient event processor, when configured.
-            composing: The **terminal composing stage** (ADR-0170 §1, §2) — the one
-                that speaks. Given the turn's goal, its assembled context, the
-                memories retrieved for it, its plan and what became of the step the
-                turn drove, it composes the natural-language answer
-                :attr:`~ai_assistant.core.types.TurnOutcome.reply` carries. It holds
-                its own injected ``ModelProvider`` and this façade holds none:
-                ``Engine.__init__`` takes no ``ModelProvider`` and no
-                ``ContextProvider``, and reaching a concrete subsystem's internals
-                to find one is what golden rule 1 forbids (ADR-0170 §2). So the
-                stage is injected already wired, exactly as ``consolidation``
-                is.
-
-                **Required rather than optional, and that is ADR-0170 §4.** An
-                optional collaborator defaults to unwired, and an unwired composer
-                is an engine that returns ``reply=None`` on turns §4 says must carry
-                one — a state the ``TurnOutcome`` validator refuses, so an engine
-                built without it could not return a conforming outcome at all. It is
-                required for the reason ``conversations`` is: an engine that can be
-                built without it is an engine that silently does not answer.
-            questions: The deferred-question stage (ADR-0078 §8, §9) — the third
-                two-store owner, and the one that also **writes** through both: it
-                claims a question, re-submits its proposal through the same write
-                path ``learn`` uses, and records the outcome. Three
-                composition-root obligations ride on it, all argued on its own
-                constructor: its ``DeferralStore`` must be the very instance the
-                write stage behind ``loop`` enqueues into (a
-                second one queues questions nobody can answer), its writer must
-                write to the same ``MemoryStore`` passed above (applying a confirmed
-                retirement against a different store would retire nothing while
-                reporting success), and it is the **only** producer of a
-                ``UserConfirmation``. Required rather than optional, for the reason
-                ``conversations`` is: an engine that could be built without it is an
-                engine where a deferred question reaches nobody, which is the exact
-                failure ADR-0078 exists to end.
             grant_operations: The four grant operations (ADR-0102 §1, §7) — the
                 **only** object in the system holding a
                 :class:`~ai_assistant.core.protocols.SourceGrantStore` (ADR-0097
@@ -1776,8 +1656,8 @@ class Engine:
                 so an engine that could be built without them is one whose surface
                 is conditionally present — which is what ADR-0102 §7's "no
                 production path may build an engine with the store unopened" is
-                aimed at. Its sibling stages ``conversations`` and
-                ``questions`` are required for the same reason.
+                aimed at. Its sibling stage ``conversations`` is required for the
+                same reason.
 
                 **Spelled ``grant_operations`` and not ``grants``** because
                 ``grants`` already means a
@@ -1793,8 +1673,7 @@ class Engine:
                 passing *"whole to whatever performs it"*. The façade delegates
                 ``grantable_decisions``, ``establish_recipient_grant``,
                 ``standing_recipient_grants``, ``recent_recipient_grants`` and
-                ``revoke_recipient_grant`` to it, and hands it the pair a ``resume``
-                carrying ``remember_recipients_until`` collected.
+                ``revoke_recipient_grant`` to it.
 
                 **Required, on ``grant_operations``' argument exactly**: these five
                 are ``AssistantEngine`` methods and the shared conformance suite runs
@@ -1906,12 +1785,6 @@ class Engine:
                 rather than as ``core``'s ``NotificationOutbox``, because §3b
                 gives the latter "exactly one method" and that one is the
                 *producer's*; see that module for why the seam is local.
-            routing: The operation-routing stage (ADR-0197 §1, §2), or ``None`` on a
-                deployment that routes nothing — where the pipeline is exactly what it was
-                before this decision, and every ask plans. **One parameter and not two**:
-                ADR-0197 §9 puts the write-only ``RoutingRecorder`` on the *stage*, so the
-                façade never holds a trail seam of any width and cannot be wired into the
-                half-configured state where a stage could route without recording.
             understanding: ADR-0276's understanding stage, holding the model seam, or
                 ``None`` on a deployment
                 that wires none — where no pass enters a stage, and every capture that
@@ -1930,22 +1803,6 @@ class Engine:
             stage_record_limit: ``STAGE_RECORD_LIMIT``, ADR-0280 §6's bound on the
                 entries one stage record retains; at least 2, so the first entry and
                 the end entry are both kept.
-            reconciliation: ADR-0259 §4's turn-start pass and §3's check, or ``None``
-                where this deployment wired neither — where the pipeline is exactly
-                what it was before that decision, and a goal's residual is repaired by
-                no turn. **Optional because the check needs a ``ToolInvoker``** and
-                this façade holds none: the seam is ``StepRunner``'s, and ADR-0259 §11
-                rules L3 *"touches ``StepRunner`` in nothing"*, so the stage is built
-                by the composition root beside the runner rather than assembled here
-                from parts this object happens to hold.
-            parked_reads: ADR-0244's parked-read operations — the enumeration, the
-                answer and the cancellation — or ``None`` where this deployment wired
-                none. **Passed rather than defaulted**, so a composition root states the
-                absence: an engine with none holds no questions, so
-                :meth:`pending_confirmations` lists no read park, :meth:`resume` finds
-                none behind a token, and :meth:`cancel_read` raises
-                ``UnknownContinuationError`` — which is exactly what is true of a
-                deployment on which no servicing ever writes one.
             stories: ADR-0289 §1's story store, which the nine story methods read and
                 write and nothing else here touches — or ``None`` where this deployment
                 wired none, in which case each of those methods raises
@@ -1965,31 +1822,6 @@ class Engine:
             matters_pass: ADR-0300 §9:3's matters pass, which
                 :meth:`decide_story_flags` runs — or ``None``, and then that operation
                 refuses. Only beside ``stories``, the store it reads and writes.
-            authorization_operations: ADR-0254 §11's read side — the confirmation
-                projection, the listing and the revocation — or ``None`` where this
-                deployment wired no authorization store. **Passed rather than
-                defaulted**, for ``parked_reads``' reason: an engine with none proposes
-                no row either (``StepRunner`` is given the same store or none), so every
-                ``Confirmation`` it assembles carries ``authorization`` ``None``,
-                :meth:`standing_authorizations` answers empty and
-                :meth:`revoke_authorization` answers ``NO_SUCH_AUTHORIZATION`` — which
-                is exactly what is true of a deployment that holds no rows.
-            authorizations: ADR-0262 §3's **one new collaborator**, and the whole of
-                what that decision adds to this engine: the ``resolve(id)``-and-nothing-
-                else face ADR-0254 §16 mints, held so that the ``VERIFY`` comparison can
-                read the :class:`~ai_assistant.core.types.Authorization` a step's own
-                pinned route-(d) decision points at. **It cannot name ``record``,
-                ``settle``, ``standing``, ``recent`` or ``live_for``**, which
-                ``mypy --strict`` keeps unnameable on it, and what that buys is that
-                this phase *"never authorises anything"* and never enumerates. It is
-                the **same object** ``authorization_operations`` and ``StepRunner``
-                hold, under a third face (ADR-0254 §16).
-
-                ``None`` where a deployment wired none, which resolves no row: every
-                criterion is then ``unestablished``, no attempt reaches ``VERIFIED``
-                and no goal reaches ``ACHIEVED``. That is the fail-closed direction
-                ADR-0262 §2 runs in throughout — *"a value that can only refuse to
-                establish and never establish"* — and never an error.
             transcriber: The speech-recognition seam (ADR-0200 §1, §2), already
                 wrapped in whatever deadline decorator the composition root wired
                 (ADR-0118 §2), or ``None`` on a deployment with no speech engines.
@@ -2014,34 +1846,6 @@ class Engine:
                 §6), in bytes of **decoded** audio: the bound a notification's
                 rendering is held to (ADR-0206 §6). It bounded a spoken turn's
                 recording too until ``converse_spoken`` retired (ADR-0313 §3:1).
-            routed_confirmation_ttl: ``Settings.routed_confirmation_ttl`` (ADR-0197 §7).
-                How long a routed park stays answerable before it is evicted and its
-                ceiling slot released. Positive and finite, with no spelling for "never":
-                a routed park is invisible — nothing enumerates it and no durable store
-                recovers it — so without a lifetime a client that disconnected between the
-                park and its token would hold a slot nothing could ever free. Elapse is
-                measured against ``now``, never a wall clock read at the seam, so a test
-                advances it rather than waits.
-            goal_question_ttl: ``Settings.goal_question_ttl`` (ADR-0250 §8). How long a
-                goal's clarification stays answerable, computed **once** at the instant
-                the question is written and *"never extended, refreshed or
-                recomputed"*. Required, positive and finite with **no disable
-                spelling**, for ADR-0244 §3's two reasons and one of ADR-0250's own: a
-                question nothing can free would block that goal's next question for ever,
-                *"which is the one-open rule turning from a correctness constraint into a
-                trap"*.
-            recovery: ADR-0014 §4's startup scan, or ``None`` where a deployment
-                composes none. Built by the composition root over the **same**
-                plan store and audit store this façade holds, and driven once from
-                :meth:`start` — which is where "at startup" lands in this system,
-                the hub calling it at step 4 and accepting at step 6, so the
-                precondition §4 states ("no executor is live for those states")
-                is a fact about the listener rather than a promise made here. It
-                is held as ``orchestration``'s own
-                :class:`~ai_assistant.orchestration.recovery.RecoveryScan` because
-                it is this subsystem's act: the scan reads the trail and the
-                completer (ADR-0192 §9) and commits through the plan store, and
-                nothing in `core` describes the composite.
             max_notification_budget: ADR-0131 §5a's
                 ``hub_max_notification_budget``, the ceiling a poll's ``budget``
                 is refused above. Not nullable, for §5a's reason.
@@ -2056,32 +1860,6 @@ class Engine:
                 connection on shutdown (ADR-0042 §2). Empty when the façade owns
                 nothing (its collaborators are all in-memory).
             activation_id_factory: Supplies independent UUID4 activation identifiers.
-            id_factory: Supplies opaque continuation-token handles; injectable so
-                a test can assert a stable handle.
-            epoch_factory: Supplies this engine's handle epoch, read **once** at
-                construction (#1644). **Its contract: return a value no other engine
-                over the same durable stores has used** — fresh per engine and so per
-                process life — which is what makes ADR-0198 §4's "a token from a
-                previous process life yields ``UnknownContinuationError``" true, and
-                what :meth:`_mint_handle` composes every handle with. Defaulted to a
-                UUID, so a composition root that says nothing honours it; and
-                **trusted**, exactly as ``now`` below is trusted to return the instant
-                it was asked for. :func:`~ai_assistant.core.clock.checked_clock`
-                guards *conformance* at that seam — aware, UTC, localizable — and
-                never *honesty*, and an epoch has no counterpart guard because the
-                only thing an engine could check a fresh epoch against is durable
-                state, which ADR-0198 §4 rules out ("process-scoped and never
-                persisted"). A factory that repeats a value across two engines breaks
-                the seam and gets what it asked for: two engines minting one handle.
-                Separate from ``id_factory`` rather than reusing
-                it, because the epoch's whole job is to differ between two engines
-                that share one factory — which is exactly what a repeating
-                ``id_factory`` produces and exactly the case the epoch exists for, so
-                drawing both from one source would make them agree at the moment they
-                must not. Injectable because ``CONTRIBUTING`` → "Determinism" puts
-                randomness behind a seam, and because a test proving restart isolation
-                should do it with two epochs it chose rather than with two real UUIDs
-                and the hope they differ.
             now: The clock :meth:`purge_expired` measures ``trace_retention`` back
                 from, and the only reading this façade takes — every other instant
                 on this surface is stamped by the stage that owns the write.
@@ -2090,27 +1868,6 @@ class Engine:
                 :func:`~ai_assistant.core.clock.checked_clock`, so a non-conforming
                 reading is this class's own failure rather than a horizon quietly
                 displaced.
-            max_outstanding_confirmations: The ceiling on **unanswered** parked
-                confirmations held in memory at once. Each holds the turn's
-                ``TurnResult``, and entries are removed only on resolution, so a
-                client that requests confirmable actions and abandons every token
-                would grow the table without bound — a memory-exhaustion vector in
-                a long-lived front end (a short-lived CLI barely touches it). At the
-                ceiling the engine applies **backpressure** (:meth:`_admit_and_reserve`).
-
-                **This is a global step-execution throttle at saturation, not a
-                selective one.** The engine cannot know before running a step
-                whether it will park (that is the policy's ruling, reached inside
-                ``run``), and letting it run and *then* dropping the park would
-                strand a durably-parked step (#287, round 7). So at the ceiling it
-                refuses to drive **any** further step — including one that would be
-                auto-allowed or find no capable tool — until an outstanding
-                confirmation is resolved. Selective admission (throttling only
-                would-be confirmations) awaits the durable-resume lane that can
-                recover a dropped continuation (#287, #242). The default is high
-                enough that this bites only a genuinely saturated system; a caller
-                that wants a different policy sets it here. Must be a positive
-                integer.
             max_payload_bytes: The contract limit ADR-0085 §8c declares, in bytes:
                 ``hub_max_frame_bytes`` less the 512-byte envelope reserve, applied
                 to the whole serialised payload of every call and every result. It
@@ -2168,27 +1925,24 @@ class Engine:
                 measures back from the engine's clock (§7:1).
 
         Raises:
-            TypeError: If ``max_outstanding_confirmations``,
-                ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is not an
-                **exact** ``int`` (:func:`_check_positive_int`, which carries the
-                reasoning). A ``bool`` is the named case
-                (it is an ``int`` subclass and a flag is not a count), and a
-                ``float`` like ``1.5`` is refused rather than compared — the same
-                guard shape ``LearningLoop`` uses for its own count. On the two
-                *bounds* the refusal is what keeps them able to bind at
+            TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
+                not an **exact** ``int`` (:func:`_check_positive_int`, which carries
+                the reasoning). A ``bool`` is the named case (it is an ``int``
+                subclass and a flag is not a count), and a ``float`` like ``1.5`` is
+                refused rather than compared. On these two *bounds* the refusal is
+                what keeps them able to bind at
                 all: ``float("nan")`` compares ``False`` against every ``>``, so an
                 engine built with one would admit a recording of any length and
                 return a rendering of any length while reporting health, and one
                 built with it as the contract limit would measure every argument and
                 every result against a ceiling nothing can exceed.
-            ValueError: If any of the three is not positive, or only one of
+            ValueError: If either is not positive, or only one of
                 ``diagnostic_retention`` and ``diagnostic_window`` is given.
         """
         _check_diagnostic_sweep(diagnostic_retention, diagnostic_window)
-        _check_positive_int(max_outstanding_confirmations, name="max_outstanding_confirmations")
-        # ADR-0200 §6's ceiling, guarded on the same terms and for a sharper reason.
-        # ``Settings`` refuses a non-integer or a non-positive value at load, but this
-        # is a *constructor* argument and a composition root is not the only caller —
+        # ADR-0200 §6's ceiling, guarded as an exact positive integer. ``Settings``
+        # refuses a non-integer or a non-positive value at load, but this is a
+        # *constructor* argument and a composition root is not the only caller —
         # and the failure mode here is silent rather than loud: ``nan`` compares
         # ``False`` against every ``>``, so an engine built with one would admit a
         # recording of any length and return a rendering of any length while reporting
@@ -2203,9 +1957,6 @@ class Engine:
         # result check on this façade measures against this one number, so ``nan`` here
         # is not a laxer contract limit but no contract limit at all (#1686).
         _check_positive_int(max_payload_bytes, name="max_payload_bytes")
-        self._loop = loop
-        self._associator = associator
-        self._runner = runner
         self._plans = plans
         self._trail = trail
         self._spend = spend
@@ -2243,9 +1994,6 @@ class Engine:
             now=self._clock,
             payload_limit=max_payload_bytes,
         )
-        self._informational_events = informational_events
-        self._composing = composing
-        self._questions = questions
         self._grants = grant_operations
         self._recipient_grants = recipient_grant_operations
         self._destination_trust = destination_trust_operations
@@ -2263,32 +2011,13 @@ class Engine:
         self._notifications = notifications
         self._notification_policy = notification_policy
         self._notification_outbox = notification_outbox
-        self._recovery = recovery
-        #: Whether this engine has already run ADR-0014 §4's recovery scan. The
-        #: scan's whole premise is that "no executor is live for those states"
-        #: (§4), and this method is **also** the hub scheduler's recurring
-        #: conversation-sweep job (``service/scheduler.py``'s job table names
-        #: ``engine.start``), so an unguarded scan would run on a timer against a
-        #: process serving turns and complete a *live* invocation's claim
-        #: ``INDETERMINATE`` — the exact misclassification ADR-0192 §3 relies on
-        #: that precondition to exclude. Guarded here rather than in the scan for
-        #: :meth:`_recover_leases_once`'s reason: the engine is what the hub
-        #: starts, so the ownership chain instance lock → one hub process → one
-        #: composition root → one engine → one recovery ends here.
-        self._recovery_scanned = False
-        #: Serialises the check-scan-set above. A bare flag is not a guard across
-        #: an ``await``: two overlapping ``start`` calls both read ``False``, the
-        #: first scans and returns, an executor then claims a step, and the second
-        #: resumes its already-started scan and completes that live claim. Its own
-        #: lock rather than ``_lease_recovery_lock``, for the reason stated on that
-        #: one — coupling two unrelated startup exclusions makes each one's
-        #: reasoning the other's problem.
-        self._recovery_scan_lock = asyncio.Lock()
         #: Whether this engine has already closed the open episodes a dead process
-        #: left (ADR-0286 §7), guarded as the recovery scan above is guarded and for
-        #: its reason: ``start`` is also the scheduler's recurring sweep.
+        #: left (ADR-0286 §7). Guarded because ``start`` is also the scheduler's
+        #: recurring sweep, and a close on every call would freeze an episode this
+        #: process holds open.
         self._open_episodes_closed = False
-        #: Serialises the check-close-set above, for the scan lock's reason.
+        #: Serialises the check-close-set above: a bare flag is not a guard across an
+        #: ``await``, so two overlapping ``start`` calls would both read ``False``.
         self._open_episodes_lock = asyncio.Lock()
         #: Whether this engine has already voided the delivery leases it inherited
         #: (ADR-0131 §3). Held here rather than in the outbox because the engine is
@@ -2310,21 +2039,6 @@ class Engine:
             )
             raise ConfigurationError(msg)
         self._max_notification_budget = max_notification_budget
-        if routed_confirmation_ttl <= timedelta(0):
-            msg = (
-                f"routed_confirmation_ttl must be positive, got {routed_confirmation_ttl!r}: a "
-                f"zero or negative lifetime produces a card unusable the instant it is "
-                f"rendered, and there is no spelling for 'never' (ADR-0197 §7)"
-            )
-            raise ConfigurationError(msg)
-        if goal_question_ttl <= timedelta(0):
-            msg = (
-                f"goal_question_ttl must be positive, got {goal_question_ttl!r}: a zero or "
-                f"negative lifetime produces a clarification already expired at the instant "
-                f"it is asked, so the question the user is shown can never be answered, and "
-                f"there is no spelling for 'never' (ADR-0250 §8)"
-            )
-            raise ConfigurationError(msg)
         if (transcriber is None) != (synthesizer is None):
             msg = (
                 "a spoken turn needs both speech seams or neither: half a pipeline can "
@@ -2333,7 +2047,6 @@ class Engine:
                 "or leave both unwired (ADR-0200 §1, §2)"
             )
             raise ConfigurationError(msg)
-        self._routing = routing
         # ADR-0276's understanding stage and §7's version bound, both from the
         # composition root. The bound is required wherever the stage is wired, and a
         # bound that cannot keep version 1 beside the latest is refused here rather
@@ -2371,35 +2084,15 @@ class Engine:
             msg = "a stage record keeps its first entry and its end entry (ADR-0280 §6)"
             raise ConfigurationError(msg)
         self._stage_record_limit = stage_record_limit
-        self._reconciliation = reconciliation
-        self._parked_reads = parked_reads
         self._stories = stories
-        # ADR-0254 §11's read side. **Optional, and its absence is fail-closed**:
-        # a deployment with no authorization store proposes no row (ADR-0254 §1,
-        # `StepRunner._propose`), so there is no projection to render, no standing
-        # row to list and nothing a revocation could settle. The listing then
-        # answers empty and the revocation answers ``NO_SUCH_AUTHORIZATION``, which
-        # is what is true of a store that holds no row with that id.
-        self._authorization_operations = authorization_operations
-        # ADR-0262 §3's read seam, and the only collaborator that decision adds. It is
-        # held **whole and narrow**: the annotation is the narrowing, so nothing on
-        # this engine can reach a member of the authorization store beyond ``resolve``.
-        self._authorizations = authorizations
         self._transcriber = transcriber
         self._synthesizer = synthesizer
         self._speakable_attested_sources = frozenset(speakable_attested_sources)
         self._max_spoken_audio_bytes = max_spoken_audio_bytes
-        self._routed_ttl = routed_confirmation_ttl
-        self._goal_question_ttl = goal_question_ttl
         self._closers = tuple(closers)
-        self._id_factory = id_factory
         self._activation_id_factory = activation_id_factory
-        self._max_outstanding = max_outstanding_confirmations
         self._max_payload_bytes = max_payload_bytes
         self._drain_timeout = drain_timeout
-        #: Read once from ``epoch_factory``. Nothing on this engine mints a
-        #: continuation handle any more (ADR-0309 §5).
-        self._handle_epoch = epoch_factory()
         self._inflight: set[asyncio.Task[Any]] = set()
         self._capture_safety: set[asyncio.Task[None]] = set()
         self._closing = False
@@ -2465,18 +2158,14 @@ class Engine:
         return self._drain_phase
 
     async def start(self) -> None:
-        """Recover what a crash left in flight, then finish the sweeps (ADR-0014 §4, ADR-0076).
+        """Close what a dead process left open, then finish the sweeps (ADR-0286 §7, ADR-0076).
 
-        **ADR-0014 §4's recovery scan first, and on the first call only.** A step
-        left ``RUNNING`` by a process that died mid-call becomes ``INDETERMINATE``,
-        and — since ADR-0192 §3 — every claim still open under that step's
-        ``approval_ref`` is completed ``INDETERMINATE`` **before** the step's
-        transition is committed. §4 puts the scan "at startup" and presumes no
-        executor is live for those states, and that presumption is what the guard
-        below keeps true: this method is *also* the hub scheduler's recurring
-        conversation sweep, so a scan on every call would eventually run against
-        this process's own live steps (:meth:`_recover_scan_once`). Skipped where
-        no scan is wired.
+        **No plan step is recovered here.** ADR-0014 §4's startup scan resolved the
+        steps the old path's runner left ``RUNNING``, and nothing writes one since
+        that path was deleted (ADR-0309 §5). The phases claim their effects through
+        the plan store's effect records and the invoker's ledger, and a claimed
+        record given no outcome is never resolved by guessing (ADR-0306 §5:6), so
+        no scan resolves one at startup.
 
         ADR-0074 §8 says the reclaim runs "by the deleting call, **at engine
         start**, and later by the hub's scheduler" — this is that middle case, and
@@ -2524,22 +2213,13 @@ class Engine:
         return await self._tracked(self._start(), "start")
 
     async def _start(self) -> None:
-        """Recover what a dead process left in flight, then sweep, then reconcile.
+        """Close what a dead process left open, then sweep, then reconcile.
 
-        The recovery scan runs **first** of the four, and — unlike the two sweeps
-        beside it — **only on the first call** (:meth:`_recover_scan_once`).
-        Nothing else here reads planning state or the trail's invocation rows, so
-        no ADR orders it against the sweeps; what running it first buys is that a
-        step a previous process left ``RUNNING`` — and every claim open under its
-        authorisation — is resolved before this engine does anything a caller can
-        observe.
-
-        **ADR-0286 §7's close follows it, also on the first call only, and before the
+        **ADR-0286 §7's close runs first, on the first call only, and before the
         deletion sweep** (:meth:`_close_open_episodes_once`): an episode a dead process
         left open is frozen ``interrupted`` / ``hub_stopped`` before anything sweeps
         or reads its conversation.
         """
-        await self._recover_scan_once()
         await self._close_open_episodes_once()
         await self._conversations.sweep_deletions()
         await self._conversations.reclaim()
@@ -2552,53 +2232,11 @@ class Engine:
             await self._recover_leases_once()
             await self._notification_outbox.reconcile()
 
-    async def _recover_scan_once(self) -> None:
-        """Run ADR-0014 §4's recovery scan, once per engine (ADR-0192 §3).
-
-        **Once, and that is what makes it a *startup* scan.** §4 authorises the
-        scan because it "presumes no executor is live for those states" — true of a
-        step the *previous* process left ``RUNNING``, false of one this process
-        claimed a moment ago. :meth:`start` promises it is safe to call more than
-        once and the hub's scheduler takes that promise literally: its job table
-        wires ``engine.start`` as the recurring conversation sweep, so an unguarded
-        scan would run on a timer inside a hub that is serving turns. It would then
-        complete a **live** invocation's claim ``INDETERMINATE`` and commit its step
-        out of ``RUNNING`` — after which the tool's real completion is refused
-        ``InvalidCompletionError``, its executor's terminal write is refused stale,
-        and the record says an act that in fact succeeded may or may not have
-        happened. That is the misclassification ADR-0034 §1 and ADR-0014 §4 both
-        exist to refuse, reached by running recovery at a moment recovery is not
-        for.
-
-        **The check, the scan and the flag are one critical section**, because a
-        bare flag is not a guard across an ``await`` — the same finding adversarial
-        review made against :meth:`_recover_leases_once` on its tenth round, and
-        the same remedy. Two overlapping ``start`` calls both read ``False``; the
-        first scans and returns, an executor then claims a step, and the second
-        resumes its already-started scan over that live claim.
-
-        **The flag is set only after the scan returns.** A scan that raised
-        completed nothing it had not already committed, and ADR-0192 §3's ordering
-        makes a re-run idempotent by construction: the interrupted step is still
-        ``RUNNING``, so the next scan finds it and completes whatever is still open.
-        Marking a failed attempt done would strand that step for the life of the
-        process. In the deployment this runs in the question does not arise — the
-        exception leaves ``start`` and the hub's startup fails — but the flag is a
-        property of this class rather than of that caller.
-        """
-        if self._recovery is None:
-            return
-        async with self._recovery_scan_lock:
-            if self._recovery_scanned:
-                return
-            await self._recovery.recover()
-            self._recovery_scanned = True
-
     async def _close_open_episodes_once(self) -> None:
         """Close the episodes a dead process left open, once per engine (ADR-0286 §7).
 
-        On the first call of :meth:`start`, guarded as :meth:`_recover_scan_once` is
-        guarded and before the deletion sweep (§7:2). Every open episode the store
+        On the first call of :meth:`start`, guarded to that call, and before the
+        deletion sweep (§7:2). Every open episode the store
         holds that no capture of this process holds is closed ``interrupted`` /
         ``hub_stopped``; an engine that admitted an activation before its first
         ``start`` passes over that activation's episode, and a later ``start`` closes

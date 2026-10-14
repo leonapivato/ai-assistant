@@ -95,9 +95,7 @@ from pydantic import SecretStr
 
 from ai_assistant.core.errors import TransportError
 from ai_assistant.core.types import (
-    AssociationVerdict,
     BeliefBand,
-    GoalAssociation,
     MemorySource,
     Provenance,
     ProvisioningState,
@@ -109,53 +107,35 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
 from ai_assistant.orchestration import Engine
-from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.connections import ConnectionOperations
 from ai_assistant.orchestration.consolidation import ConsolidationStage
 from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
-from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.grants import GrantOperations
-from ai_assistant.orchestration.loop import LearningLoop
-from ai_assistant.orchestration.questions import QuestionStage
 from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
-from ai_assistant.orchestration.runner import StepRunner
 from ai_assistant.orchestration.writes import MemoryWriteStage
-from ai_assistant.permissions import ThresholdActionPolicy
-from ai_assistant.planning import ModelBackedPlanner
 from ai_assistant.readers import CalendarReader
 from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
-    FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
     FakeDestinationTrustStore,
-    FakeFeedbackProcessor,
-    FakeGoalAssociator,
     FakeModelProvider,
     FakeOutboundTransport,
     FakePlanStore,
     FakeRecipientGrantStore,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
-    FakeStreamingCompleter,
     FakeTraceRetention,
     FakeTraceSink,
 )
-from ai_assistant.tools.builtin import (
-    build_default_registry,
-    build_send_email_integration,
-    egress_registrations,
-)
 from ai_assistant.tools.connection_store import ConnectionEntry, StoredEntry
-from ai_assistant.tools.egress_binder import EgressBindingSeam
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from ai_assistant.core.protocols import ActionPolicy
     from ai_assistant.core.types import MemoryRecord
 
 # --- the world's fixed instants and bounds ----------------------------------
@@ -491,7 +471,9 @@ class World:
     """One assembled deployment, with the probes each arm reads.
 
     Attributes:
-        engine: The real ``Engine``, over the real runner, policy and binder.
+        engine: The real ``Engine``. It holds no runner, policy or binder since the
+            old path was deleted (ADR-0309 §5); arm (a) is
+            :mod:`phases_m23_world`'s.
         store: The one memory store the reader writes to, the loop retrieves from
             and the consolidation walks — the composition root's same-store
             obligation (ADR-0028 §4), discharged here by there being one object.
@@ -506,7 +488,8 @@ class World:
             reply it is replaying. A constant transcript stipulates the causal
             chain; the recorded call is what demonstrates it.
         consolidation_model: The same, for the consolidation stage's transcript.
-        connector: The socket that must never be opened.
+        connector: The socket that must never be opened. Nothing in this world is
+            handed it since the old path's runner was deleted (ADR-0309 §5).
         source: The ``.ics`` file :func:`plant` rewrites per cycle.
     """
 
@@ -553,20 +536,13 @@ class _Consolidations(Protocol):
         """One stage reading ``walk``'s cursor."""
 
 
-def build_world(
-    tmp_path: Path, *, plan: str, consolidation: str, policy: ActionPolicy | None = None
-) -> World:
+def build_world(tmp_path: Path, *, plan: str, consolidation: str) -> World:
     """Assemble one deployment around the transcripts a scenario replays.
 
     Args:
         tmp_path: The directory the planted ``.ics`` is written into.
         plan: The planner's transcript, returned for every planning call.
         consolidation: The consolidation stage's transcript, likewise.
-        policy: The gate, or ``None`` for the shipping ``ThresholdActionPolicy``
-            every scenario uses. The one caller that passes something else is the
-            calibration case, which substitutes a gate that authorises the call so
-            that the transmission instrument can be shown to fire — a measurement
-            that can only ever read zero is not a measurement.
 
     Returns:
         The assembled world.
@@ -591,76 +567,15 @@ def build_world(
     ingestion = PriorIngestion(reader=reader, writer=writer)
 
     connector = Connector()
-    integration = build_send_email_integration(
-        connection=REFERENCE,
-        endpoint=ENDPOINT,
-        records=_Records(),
-        secrets=_Keyring(),
-        transport=connector.capability,
-    )
-    # One object as ``ToolRegistry``, as ``ToolInvoker`` and as the seam's
-    # ``RegisteredDefinitions`` (ADR-0029 §8, ADR-0152 §1) — the composition root's
-    # wiring, and the reason a binding is compared against the registry original
-    # rather than against a second table that must agree with it.
-    # Opened here rather than beside the plan store below, because the seam claims
-    # through the **same** trail this arm records its rulings into (ADR-0192 §9's
-    # wiring clause) and so needs it before the registry is built.
     trail = FakeAuditTrail()
-    registry = build_default_registry(now=lambda: NOW, egress=integration, ledger=trail, gate=trail)
-    binder = EgressBindingSeam(
-        definitions=registry,
-        registrations=egress_registrations(integration),
-        records=_Records(),
-    )
 
     plans = FakePlanStore(now=lambda: NOW)
-    decisions = count(1)
-    # One gate object, shared by the runner and by the recipient-grant
-    # operations below (ADR-0235 §3): the establishing act is ruled on by the same
-    # policy every other call is, so a grant cannot rest on a looser one.
-    gate = ThresholdActionPolicy() if policy is None else policy
-    runner = StepRunner(
-        plans=plans,
-        registry=registry,
-        # The real gate. Its two ADR-0021 §5 floors — off-device disclosure and an
-        # undeclared cost — both fire on ``send_email`` and no constructor argument
-        # reaches either, so this policy can never ``ALLOW`` this tool. That is the
-        # posture arm (a) measures rather than an arrangement of it.
-        policy=gate,
-        trail=trail,
-        executor=StepExecutor(plans=plans, registry=registry, invoker=registry, now=lambda: NOW),
-        binder=binder,
-        now=lambda: NOW,
-        id_factory=lambda: f"d-{next(decisions)}",
-    )
 
-    goals = count(1)
     planner_model = FakeModelProvider(plan)
-    loop = LearningLoop(
-        context=FakeContextProvider(),
-        memory=store,
-        writes=writes,
-        planner=ModelBackedPlanner(
-            planner_model, now=lambda: NOW, id_factory=lambda: f"p-{next(goals)}"
-        ),
-        feedback=FakeFeedbackProcessor(),
-        now=lambda: NOW,
-        id_factory=lambda: f"g-{next(goals)}",
-        # **The same object the runner resolves against** (ADR-0211 §3). This
-        # harness drives the real `StepRunner` over the real `build_default_registry`
-        # result, so a loop given a second, empty registry would prompt the planner
-        # that nothing can be done while selection could still find `send_email` —
-        # the divergence the same-object clause exists to close, and one no
-        # assertion here would catch while the planner's model is scripted.
-        registry=registry,
-    )
 
     conversations = FakeConversationStore(now=lambda: NOW)
     engine = Engine(
         chat_reader=False,
-        loop=loop,
-        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
-        runner=runner,
         plans=plans,
         trail=trail,
         spend=trail,
@@ -676,22 +591,14 @@ def build_world(
             retention=timedelta(days=30),
             now=lambda: NOW,
         ),
-        # A separate provider from the planner's: one ``FakeModelProvider`` shared
-        # across the two seams would hand the composer the planner's JSON.
-        composing=ComposingStage(model=FakeModelProvider(), streaming=FakeStreamingCompleter()),
-        questions=QuestionStage(writer=writer, deferrals=deferrals, memory=store, now=lambda: NOW),
         grant_operations=GrantOperations(
             store=FakeSourceGrantStore(),
             sources=(),
             id_factory=lambda: "grant-1",
             clock=lambda: NOW,
         ),
-        # The five recipient-grant operations, over this harness's own trail and
-        # policy (ADR-0235 §3): the act records where every other ruling is recorded.
         recipient_grant_operations=RecipientGrantOperations(
             store=FakeRecipientGrantStore(),
-            trail=trail,
-            policy=gate,
             id_factory=lambda: "recipient-grant-1",
             clock=lambda: NOW,
         ),

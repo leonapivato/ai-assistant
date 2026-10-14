@@ -49,7 +49,9 @@ from ai_assistant.core.types import (
     band_of,
 )
 from ai_assistant.memory import DefaultMemoryPolicy
-from ai_assistant.orchestration import MemoryWriteStage, QuestionStage
+from ai_assistant.orchestration import (
+    MemoryWriteStage,
+)
 from ai_assistant.orchestration.consolidation import (
     _MAX_EXTRACTION_MISSES,
     _SYSTEM_PROMPT,
@@ -57,6 +59,7 @@ from ai_assistant.orchestration.consolidation import (
     ConsolidationStage,
     _render,
 )
+from ai_assistant.orchestration.questions import QuestionStage
 from ai_assistant.service.scheduler import Job, Scheduler
 from ai_assistant.testing import (
     FakeDeferralStore,

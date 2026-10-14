@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Final
 
 import pytest
-from test_engine import Harness, NoStepPlanner
+from test_engine import Harness
 
 from ai_assistant.core.protocols import AssistantEngine
 from ai_assistant.core.types import ChatDevice, DeviceAccess, DevicesChangedChange
@@ -25,7 +25,7 @@ _LAPTOP: Final = ChatDevice(device_id="nLAPTOP1CNTRL", access=DeviceAccess.READ)
 
 def _harness() -> Harness:
     """An engine whose chat reader is off, so nothing answers in the background."""
-    return Harness(planner=NoStepPlanner(), chat_reader=False)
+    return Harness(chat_reader=False)
 
 
 async def test_a_removed_device_leaves_my_devices_and_every_conversation() -> None:

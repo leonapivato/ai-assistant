@@ -17,7 +17,7 @@ from story_support import activation, address, episode
 from test_activation_state import _admitted
 from test_authorizer import _ACTIVATION
 from test_authorizer import _episode as _own_episode
-from test_engine import AT, Harness, NoStepPlanner
+from test_engine import AT, Harness
 from test_engine_phases import (
     _BOUNDED,
     _DENTIST,
@@ -221,7 +221,7 @@ async def test_a_stamped_fact_planning_fetches_of_what_recall_kept_places_the_ep
     completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Noted."))
     store = FakeMemoryStore(now=lambda: AT)
     await store.add(_stamped(_SAID))
-    harness = Harness(planner=NoStepPlanner(), understanding=understanding_stage(), memory=store)
+    harness = Harness(understanding=understanding_stage(), memory=store)
     path = _phases(completer)(harness)
     working = _begun(path)
     working.second_recall = _kept(_SAID.id)
@@ -328,7 +328,7 @@ async def test_a_stamped_episode_a_story_view_shows_places_the_episode() -> None
     )
     assert created.story_id is not None
     completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Noted."))
-    harness = Harness(planner=NoStepPlanner(), understanding=understanding_stage(), memory=memory)
+    harness = Harness(understanding=understanding_stage(), memory=memory)
     path = _phases(completer, stories=stories)(harness)
     working = _begun(path)
     given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
@@ -360,7 +360,7 @@ async def test_a_stamped_episode_a_storys_full_view_shows_is_held_for_the_freeze
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(calls=(_call("c1", "read_story", story="S1"),)),
     )
-    harness = Harness(planner=NoStepPlanner(), understanding=understanding_stage(), memory=memory)
+    harness = Harness(understanding=understanding_stage(), memory=memory)
     path = _phases(completer, stories=stories, look_ups=True)(harness)
     working = path.begin(
         activation_id=_ACTIVATION,
@@ -403,7 +403,7 @@ async def test_a_story_reads_view_is_held_though_a_call_beside_it_fails_the_roun
             )
         ),
     )
-    harness = Harness(planner=NoStepPlanner(), understanding=understanding_stage(), memory=memory)
+    harness = Harness(understanding=understanding_stage(), memory=memory)
     claim = harness.plans.claim_activation_effect
 
     async def unclaimable(effect: ActivationEffect, /, **kwargs: Any) -> Any:

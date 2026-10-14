@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
-from test_engine import Harness, NoStepPlanner
+from test_engine import Harness
 
 from ai_assistant.core.device_context import serving_device
 from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
@@ -59,9 +59,7 @@ CONSOLE: Final = RequestingDevice(device_id="console", roles=frozenset({DeviceRo
 
 def _harness(*, notification_outbox: FakeNotificationOutbox | None = None) -> Harness:
     """An engine whose chat reader is off, so a written message waits."""
-    return Harness(
-        planner=NoStepPlanner(), chat_reader=False, notification_outbox=notification_outbox
-    )
+    return Harness(chat_reader=False, notification_outbox=notification_outbox)
 
 
 async def _conversation(engine: Engine, *devices: ChatDevice) -> str:
@@ -356,7 +354,7 @@ class _MovingStore(FakeConversationStore):
 async def test_a_candidate_deleted_mid_check_is_retried() -> None:
     """ADR-0296 §2: a role held throughout is never read as none, whatever lands."""
     store = _MovingStore()
-    engine = Harness(planner=NoStepPlanner(), chat_reader=False, conversation_store=store).engine
+    engine = Harness(chat_reader=False, conversation_store=store).engine
     held = await _conversation(engine, _PEN)
     granted = await _conversation(engine, _PHONE)
     await engine.set_my_devices([])
@@ -373,7 +371,7 @@ async def test_a_candidate_deleted_mid_check_is_retried() -> None:
 async def test_a_grant_of_my_devices_mid_check_is_not_read_as_no_role() -> None:
     """The bracket: a move to "my devices" between the reads retries, and finds it."""
     store = _MovingStore()
-    engine = Harness(planner=NoStepPlanner(), chat_reader=False, conversation_store=store).engine
+    engine = Harness(chat_reader=False, conversation_store=store).engine
     held = await _conversation(engine, _PEN)
     await engine.set_my_devices([])
 
@@ -406,7 +404,7 @@ class _ChurningStore(FakeConversationStore):
 async def test_no_role_is_decided_only_over_one_state() -> None:
     """A number that moved between the reads is retried; a settled one is NO_ROLE."""
     store = _ChurningStore(churn=1)
-    engine = Harness(planner=NoStepPlanner(), chat_reader=False, conversation_store=store).engine
+    engine = Harness(chat_reader=False, conversation_store=store).engine
     await _refused(STRANGER, engine.recent_conversations, DeviceRefusal.NO_ROLE)
     assert store.churn == 0
 
@@ -414,6 +412,6 @@ async def test_no_role_is_decided_only_over_one_state() -> None:
 async def test_an_unsettled_role_is_never_reported_as_no_role() -> None:
     """Where the number moves on every bracket, the refusal is not ``NO_ROLE``."""
     store = _ChurningStore(churn=1000)
-    engine = Harness(planner=NoStepPlanner(), chat_reader=False, conversation_store=store).engine
+    engine = Harness(chat_reader=False, conversation_store=store).engine
     await _refused(STRANGER, engine.recent_conversations, DeviceRefusal.NOT_ALLOWED)
     await _refused(STRANGER, engine.start_conversation, DeviceRefusal.NOT_ALLOWED)

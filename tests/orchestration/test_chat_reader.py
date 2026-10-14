@@ -18,7 +18,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 from phases_support import phases_harness
-from test_engine import AT, Harness, NoStepPlanner
+from test_engine import AT, Harness
 from understanding_support import STATED_PROPOSAL, understanding_stage
 
 from ai_assistant.core.errors import ModelError
@@ -125,7 +125,7 @@ def _harness(
 ) -> Harness:
     """The engine with its reader on and the phases wired, or the medium alone."""
     if knobs.get("chat_reader") is False:
-        return Harness(planner=NoStepPlanner(), conversation_store=store, memory=memory, **knobs)
+        return Harness(conversation_store=store, memory=memory, **knobs)
     return phases_harness(
         _Composing(composer if composer is not None else FakeModelProvider("Hello there.")),
         conversation_store=store,

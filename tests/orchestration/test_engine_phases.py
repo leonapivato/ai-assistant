@@ -29,7 +29,7 @@ from channel_receiver_contract import event_input
 from structlog.testing import capture_logs
 from test_activation_state import _admitted
 from test_authorizer import _ACTIVATION, _episode
-from test_engine import AT, Harness, NoStepPlanner
+from test_engine import AT, Harness
 from test_planning import _episode as _past_episode
 from test_planning import _understanding
 from understanding_support import (
@@ -439,7 +439,6 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
 
 def _harness(completer: FakeToolCallingCompleter, **knobs: Any) -> Harness:
     return Harness(
-        planner=NoStepPlanner(),
         understanding=understanding_stage(),
         tools=(_BOOK,),
         phases=_phases(completer, **knobs),
@@ -1123,7 +1122,6 @@ async def _recalling_harness(
         reply=json.dumps({"meaning": _DENTIST, "meaning_ground": "stated"})
     )
     harness = Harness(
-        planner=NoStepPlanner(),
         understanding=understanding_stage(model=understanding),
         tools=(_BOOK,),
         memory=store,
@@ -1511,7 +1509,6 @@ async def _recall_digest(
     memory = store if store is not None else FakeMemoryStore(now=lambda: AT)
     await memory.add(_remembered("reported", MemorySource.EXTERNAL, f"{_DENTIST} moved to 3pm"))
     harness = Harness(
-        planner=NoStepPlanner(),
         understanding=understanding_stage(),
         tools=(_BOOK,),
         memory=memory,
@@ -2050,7 +2047,6 @@ async def _story_harness(
         )
     )
     harness = Harness(
-        planner=NoStepPlanner(),
         understanding=understanding_stage(model=understanding),
         tools=(_BOOK,),
         memory=memory,
@@ -2275,7 +2271,6 @@ async def _planned_and_authorized(
 ) -> PhaseWorking:
     """One round planned and authorized under the real policy, the lookup offered."""
     harness = Harness(
-        planner=NoStepPlanner(),
         understanding=understanding_stage(),
         tools=(_BOOK, _LOOKUP),
         memory=memory,
@@ -2835,7 +2830,7 @@ async def test_the_story_standing_command_lists_what_was_done() -> None:
     unknown first, then not done, then done; an engine with no phases wired reads it too.
     """
     stories = FakeStoryStore(now=lambda: AT)
-    harness = Harness(planner=NoStepPlanner(), stories=stories)
+    harness = Harness(stories=stories)
     await harness.memory.add(_past_episode("activation:past"))
     trip = (
         await stories.create(
@@ -2884,7 +2879,6 @@ async def _searching_harness(
     for record in records:
         await store.add(record)
     return Harness(
-        planner=NoStepPlanner(),
         understanding=understanding_stage(),
         tools=(_BOOK,),
         memory=store,
@@ -3196,7 +3190,7 @@ async def test_a_story_read_naming_a_story_never_shown_is_refused_whole() -> Non
 
 def test_the_phases_are_wired_only_beside_understanding() -> None:
     with pytest.raises(ConfigurationError, match="only beside both"):
-        Harness(planner=NoStepPlanner(), phases=_phases(FakeToolCallingCompleter()))
+        Harness(phases=_phases(FakeToolCallingCompleter()))
 
 
 # --- ADR-0314: the diagnostic record of one activation, end to end ------------------------
@@ -3217,7 +3211,6 @@ async def test_with_the_record_on_each_source_writes_for_the_one_activation() ->
         RoundResponse(),
     )
     harness = Harness(
-        planner=NoStepPlanner(),
         understanding=UnderstandingStage(
             model=FakeModelProvider(reply=STATED_PROPOSAL),
             excerpt_chars=EXCERPT_CHARS,
@@ -3556,7 +3549,6 @@ async def test_an_events_result_past_the_output_bound_raises_as_every_result_doe
     as a returned one is, and one too large raises rather than being returned.
     """
     harness = Harness(
-        planner=NoStepPlanner(),
         understanding=understanding_stage(),
         tools=(_BOOK,),
         phases=_phases(completer),

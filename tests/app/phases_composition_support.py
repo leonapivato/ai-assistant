@@ -51,11 +51,19 @@ if TYPE_CHECKING:
 
     import pytest
 
-    from ai_assistant.core.protocols import ConversationStore, MemoryStore
+    from ai_assistant.core.protocols import (
+        ActionPolicy,
+        ConversationStore,
+        EgressBinder,
+        MemoryStore,
+        ToolRegistry,
+        WebSearcher,
+    )
     from ai_assistant.core.types import ChannelResult, Message, OfferedTool
     from ai_assistant.orchestration import Engine
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.activation_writer import ActivationWriter
+    from ai_assistant.orchestration.phase_path import PhasePath
 
 #: An event's budget, and the most a case waits for an activation to settle.
 BUDGET: Final = timedelta(seconds=10)
@@ -283,6 +291,37 @@ def build_phased(
     engine = build_engine(built, data_dir=tmp_path)
     assert engine._phases is not None, "the root wired the phases"
     return Phased(engine=engine, model=model, completer=planning, settings=built)
+
+
+def wired_phases(engine: Engine) -> PhasePath:
+    """The phases the composition root built into ``engine`` (ADR-0309 §2:6).
+
+    The reach-in is deliberate: the root's obligations are about *which object ends up
+    where*, and no public surface exposes that.
+    """
+    phases = engine._phases
+    assert phases is not None, "the root wires the phases on every deployment"
+    return phases
+
+
+def wired_registry(engine: Engine) -> ToolRegistry:
+    """The deployment's one registry and invoker, as the phases' tools hold it."""
+    return wired_phases(engine)._tools._registry
+
+
+def wired_binder(engine: Engine) -> EgressBinder | None:
+    """The egress binding seam authorizing binds a call through (ADR-0152 §10)."""
+    return wired_phases(engine)._authorizing._binder
+
+
+def wired_policy(engine: Engine) -> ActionPolicy:
+    """The policy authorizing rules with (ADR-0306 §4:11)."""
+    return wired_phases(engine)._authorizing._policy
+
+
+def wired_searcher(engine: Engine) -> WebSearcher | None:
+    """The configured search the phases' tools hold, or ``None`` (ADR-0309 §4)."""
+    return wired_phases(engine)._tools._searcher
 
 
 def phased(record: EpisodicMemory | None) -> EpisodicMemory:

@@ -50,13 +50,16 @@ from ai_assistant.core.types import (
     SemanticMemory,
     TimeOfDay,
 )
-from ai_assistant.orchestration import LearningLoop, MemoryWriteStage
+from ai_assistant.orchestration import (
+    MemoryWriteStage,
+)
 from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
     placed_facet_kinds,
     speakable_sources,
     supply_for_unbounded_audience,
 )
+from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.testing import (
     FakeContextProvider,
     FakeDeferralStore,

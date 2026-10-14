@@ -7,18 +7,16 @@ stage reached, and the search text one rule derives from the record.
 Every case builds the engine with :func:`ai_assistant.app.build_engine` over a
 fresh data directory, so the stores are the shipped ``sqlite`` ones, the
 lifecycle and the activation writer are the ones the root wires, and the only
-substitutes are the model-facing seams: the provider's ``complete``, the planner,
-the associator and the streaming completer. Nothing here reaches past the engine
-into a store it does not hold, and the assertions read the stores the engine
-itself reads.
+substitute is the model-facing seam: the provider's ``complete``. Nothing here
+reaches past the engine into a store it does not hold, and the assertions read the
+stores the engine itself reads.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from itertools import count
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -26,81 +24,32 @@ import pytest
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import (
-    ActionPlan,
-    AssociationVerdict,
-    CapabilityEffect,
-    CapabilityResult,
     ChannelIdentity,
     ChannelInput,
     ChannelResult,
-    CostBasis,
     EpisodicMemory,
-    GoalAssociation,
-    Idempotency,
     InputOrigin,
-    PlannerOutput,
-    PlanStep,
-    ProposedAction,
     RecordedChannelTrigger,
-    Reversibility,
-    RiskLevel,
     TextChannelPayload,
-    ToolCost,
-    ToolDefinition,
 )
 from ai_assistant.models import PydanticAIProvider
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.testing import (
-    FakeGoalAssociator,
     FakeModelProvider,
-    FakeStreamingCompleter,
-    StreamAttempt,
 )
-from ai_assistant.tools.registry import InMemoryToolRegistry
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Sequence
     from pathlib import Path
 
     from ai_assistant.core.protocols import ConversationStore, MemoryStore
-    from ai_assistant.core.types import FrozenJson, GoalBrief, Message
+    from ai_assistant.core.types import Message
     from ai_assistant.orchestration import Engine
 
 pytestmark = pytest.mark.integration
 _BUDGET = timedelta(seconds=10)
-_AT = datetime(2026, 9, 18, tzinfo=UTC)
 _UNDERSTANDING_PROMPT = "You read one incoming input and state what it means."
 _UNDERSTOOD = json.dumps({"meaning": "The input means what it says.", "meaning_ground": "stated"})
-#: The text a case's planner fails on, so a pass ends before capture (ADR-0275 §6).
-_FAILS = "this pass fails"
-#: The text a case's planner answers with one step the root's own policy confirms.
-_PARKS = "book it"
-#: A side-effecting declaration at a risk the root's ``confirm_at_risk`` default
-#: confirms, disclosing nothing, so the root's policy parks it with no egress binding.
-_BOOKING = ToolDefinition(
-    id="book_table",
-    capability="book_table",
-    description="Book a table.",
-    risk_level=RiskLevel.HIGH,
-    reversibility=Reversibility.REVERSIBLE,
-    side_effecting=True,
-    effect=CapabilityEffect.WORLD,
-    leaves_hub=True,
-    result=CapabilityResult.NO_OUTSIDE_TEXT,
-    outcome_can_be_unknown=True,
-    safe_to_repeat=False,
-    reads=(),
-    writes=(),
-    discloses=(),
-    cost=ToolCost(basis=CostBasis.FREE),
-    idempotency=Idempotency.NATURAL,
-)
-
-
-async def _book(parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None) -> FrozenJson:
-    """The booking's implementation: it does nothing and says so."""
-    del parameters, idempotency_key
-    return {"booked": True}
 
 
 def _reply(messages: Sequence[Message]) -> str:
@@ -155,46 +104,6 @@ async def composed(
     controlled = model
     monkeypatch.setattr(PydanticAIProvider, "complete", complete)
     engine = build_engine(settings, data_dir=tmp_path)
-    engine._associator = FakeGoalAssociator(
-        answer=GoalAssociation(verdict=AssociationVerdict.FRESH)
-    )
-    engine._routing = None
-    engine._composing._streaming = FakeStreamingCompleter(
-        script=tuple(StreamAttempt(deltas=("Channel reply.",)) for _ in range(64))
-    )
-    plan_ids = count(1)
-
-    async def plan(goal: GoalBrief, *, utterance: str, **_kwargs: object) -> PlannerOutput:
-        if utterance == _FAILS:
-            msg = "the planner is down"
-            raise RuntimeError(msg)
-        if utterance == _PARKS:
-            step = PlanStep(
-                id="step-1",
-                intent="book the table",
-                capability=_BOOKING.capability,
-                parameters={},
-                intended_action=f"A{len(goal.actions) + 1}",
-            )
-            return PlannerOutput(
-                actions=(ProposedAction(intent="book the table"),),
-                plan=ActionPlan(
-                    id=f"history-plan-{next(plan_ids)}",
-                    goal_id=goal.goal_id,
-                    steps=(step,),
-                    created_at=_AT,
-                ),
-            )
-        return PlannerOutput(
-            plan=ActionPlan(
-                id=f"history-plan-{next(plan_ids)}", goal_id=goal.goal_id, steps=(), created_at=_AT
-            )
-        )
-
-    monkeypatch.setattr(engine._loop._planner, "plan", plan)
-    registry = engine._runner._registry
-    assert isinstance(registry, InMemoryToolRegistry)
-    registry.register(_BOOKING, _book)
     await engine.start()
     try:
         yield Composed(engine, model)

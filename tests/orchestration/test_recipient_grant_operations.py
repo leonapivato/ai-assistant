@@ -30,11 +30,7 @@ from ai_assistant.core.types import (
     RecipientGrant,
 )
 from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
-from ai_assistant.testing import (
-    FakeActionPolicy,
-    FakeAuditTrail,
-    FakeRecipientGrantStore,
-)
+from ai_assistant.testing import FakeRecipientGrantStore
 from ai_assistant.testing.recipient_grants import (
     recipient_grant,
     recipient_revocation_of,
@@ -43,7 +39,7 @@ from ai_assistant.testing.recipient_grants import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from ai_assistant.core.protocols import ActionPolicy, AuditTrail, RecipientGrantStore
+    from ai_assistant.core.protocols import RecipientGrantStore
 
 #: The recipient the cases here are arranged over.
 ALICE: Final = "alice@example.com"
@@ -142,17 +138,10 @@ class _StoreRefusingRevocations(_WrappedStore):
             raise InvalidRecipientGrantError(msg)
 
 
-def _operations(
-    *,
-    trail: AuditTrail | None = None,
-    store: RecipientGrantStore | None = None,
-    policy: ActionPolicy | None = None,
-) -> RecipientGrantOperations:
-    """The operations over the three seams, at one instant."""
+def _operations(*, store: RecipientGrantStore | None = None) -> RecipientGrantOperations:
+    """The operations over the store, at one instant."""
     return RecipientGrantOperations(
         store=FakeRecipientGrantStore(now=lambda: _ANSWERED_AT) if store is None else store,
-        trail=FakeAuditTrail() if trail is None else trail,
-        policy=FakeActionPolicy() if policy is None else policy,
         id_factory=lambda: next(_MINTED),
         clock=lambda: _ANSWERED_AT,
     )
@@ -331,8 +320,6 @@ async def test_a_non_conforming_clock_reading_is_the_stages_own_error() -> None:
     await store.record(granted)
     operations = RecipientGrantOperations(
         store=store,
-        trail=FakeAuditTrail(),
-        policy=FakeActionPolicy(),
         id_factory=lambda: next(_MINTED),
         clock=_naive_clock,
     )

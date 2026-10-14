@@ -19,7 +19,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from channel_receiver_contract import event_input
-from test_engine import Harness, NoStepPlanner
+from test_engine import Harness
 from test_engine_phases import _BOOK, _phases
 from understanding_support import understanding_stage
 
@@ -98,7 +98,6 @@ def phases_harness(
     keyword knobs ``test_engine_phases._phases`` takes; ``knobs`` are the harness's.
     Understanding is wired by default, since the phases are wired only beside it.
     """
-    knobs.setdefault("planner", NoStepPlanner())
     knobs.setdefault("understanding", understanding_stage())
     knobs.setdefault("tools", (_BOOK,))
     return Harness(
