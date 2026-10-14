@@ -35,7 +35,6 @@ import m24_harness
 import pytest
 from m24_harness import (
     CALENDAR,
-    EMAIL,
     READ_AT,
     ROOMY,
     Clock,
@@ -165,23 +164,20 @@ async def _drive_the_six(world: World, use: GrantScope, source: str) -> list[Dri
 # --- arm (a): completeness ---------------------------------------------------
 
 #: Every use a driver reads under, paired with the readers it is driven over. A use
-#: with no driver has nothing to record: ``INGEST``'s stage is retired (ADR-0294 §1).
-_DRIVEN: Final = (
-    (GrantScope.FACET, CALENDAR),
-    (GrantScope.FACET, EMAIL),
-    (GrantScope.NOTIFY, CALENDAR),
-)
+#: with no driver has nothing to record: ``INGEST``'s stage is retired (ADR-0294 §1),
+#: and ``FACET``'s drivers retired with the ``context`` package (ADR-0309 §5).
+_DRIVEN: Final = ((GrantScope.NOTIFY, CALENDAR),)
 
 
 async def _run_arm_a(world: World) -> tuple[list[Driven], list[SourceReadRecord]]:
-    """Drive arm (a)'s run: eighteen attempts, then export.
+    """Drive arm (a)'s run: six attempts per driven pair, then export.
 
-    Six outcomes over every use a driver reads under, and both declared readers —
-    §11's "across all three uses and both readers, including at least one of each of
-    ``ReadOutcome``'s six members". Since ADR-0294 §1 retired the ``INGEST`` driver
-    there are two uses with a driver, so the facet is driven over both readers and
-    the upcoming-event producer over the calendar it serves. Eighteen is far below
-    :data:`~m24_harness.ROOMY`, so nothing is pruned.
+    Six outcomes over every use a driver reads under — §11's "across all three uses
+    and both readers, including at least one of each of ``ReadOutcome``'s six
+    members". ADR-0294 §1 retired the ``INGEST`` driver and ADR-0309 §5 the ``FACET``
+    ones, so the upcoming-event producer over the calendar it serves is the one use
+    left with a driver. The run is far below :data:`~m24_harness.ROOMY`, so nothing is
+    pruned.
     """
     driven: list[Driven] = []
     for use, source in _DRIVEN:
@@ -227,7 +223,7 @@ async def test_arm_a_stamps_the_instant_the_first_check_resolved(world: World) -
     and on a read whose bytes are acquired later, so a lane that reached for
     ``SourceReading.read_at`` fails here too."
 
-    Both traps are live in every one of the eighteen attempts: the gate suspends and
+    Both traps are live in every one of the attempts: the gate suspends and
     ticks the clock inside the first ``live()``, and every seeded reading is stamped
     :data:`~m24_harness.READ_AT`, which is hours after any instant the clock serves.
     So this asserts three things at once — the instant is the clock's, it is the
@@ -587,7 +583,7 @@ async def test_arm_d_the_cap_holds_and_the_survivors_are_the_newest() -> None:
         for _ in range(cap * 3):
             driven.append(
                 await world.drive(
-                    GrantScope.FACET,
+                    GrantScope.NOTIFY,
                     reader=seeded_reader(CALENDAR, proposals=SEEDED),
                     gate=world.granted(CALENDAR),
                     outcome=ReadOutcome.COMPLETED,
@@ -641,16 +637,6 @@ async def test_arm_e_nothing_comes_of_an_unrecorded_attempt(world: World) -> Non
     # 1. The recorder raised. The read ran; the row was attempted and refused.
     refusing = FakeSourceReadRecorder()
     refusing.fail_record()
-    facet = world.driver(
-        GrantScope.FACET,
-        reader=seeded_reader(CALENDAR, proposals=SEEDED),
-        gate=world.granted(CALENDAR),
-        recorder=refusing,
-    )
-    with pytest.raises(ReadTrailError):
-        await facet.contribute()  # type: ignore[attr-defined]  # the FACET driver
-    leaked += len(refusing.written)
-
     notify_gate = world.granted(CALENDAR)
     upcoming = world.driver(
         GrantScope.NOTIFY,
@@ -668,8 +654,8 @@ async def test_arm_e_nothing_comes_of_an_unrecorded_attempt(world: World) -> Non
     gate = world.granted(CALENDAR)
     gate.begin()
     suspended = slow.suspend_next()
-    driver = world.driver(GrantScope.FACET, reader=slow, gate=gate, recorder=world.trail)
-    running = asyncio.ensure_future(driver.contribute())  # type: ignore[attr-defined]
+    driver = world.driver(GrantScope.NOTIFY, reader=slow, gate=gate, recorder=world.trail)
+    running = asyncio.ensure_future(driver.notice())  # type: ignore[attr-defined]
     await suspended.reached()
     running.cancel()
     suspended.release()
@@ -705,7 +691,7 @@ async def test_arm_e_nothing_comes_of_an_unrecorded_attempt(world: World) -> Non
         [
             "",
             "arm (e) — the two attempts ADR-0185 §5a names (§11)",
-            f"  leaked-product count       {count(leaked, 4)}  proposals, facets or "
+            f"  leaked-product count       {count(leaked, 3)}  proposals, facets or "
             "candidates that reached a consumer from an unrecorded attempt; must be zero",
         ]
     )
@@ -746,7 +732,7 @@ def test_the_read_half_registers_no_live_arm() -> None:
 def test_the_harness_serves_a_clock_no_reading_could_be_mistaken_for() -> None:
     """The trap arm (a) rests on, pinned rather than trusted to two constants.
 
-    A run that drove eighteen attempts would move the clock eighteen ticks; if
+    A run that drove arm (a)'s attempts would move the clock one tick each; if
     :data:`~m24_harness.READ_AT` were ever moved back inside that span, arm (a)'s
     "``checked_at`` is not the reading's" assertion would start passing for a
     reason that has nothing to do with the implementation.
@@ -763,10 +749,10 @@ def test_the_roomy_cap_is_above_what_the_completeness_arms_drive() -> None:
 
     "so that nothing is pruned under them, and arm (d) deliberately drives more, so a
     completeness figure taken over arm (d) would count the prune as a loss". Arm (a)
-    drives eighteen and arm (b) six; a later edit that grew either past the cap would
+    drives six and arm (b) six; a later edit that grew either past the cap would
     make ``unrecorded-read count`` non-zero for a reason the figure does not mean.
     """
-    assert ROOMY > 18 * 4
+    assert ROOMY > 6 * 4
 
 
 def test_the_gate_is_a_source_grants_and_nothing_wider() -> None:

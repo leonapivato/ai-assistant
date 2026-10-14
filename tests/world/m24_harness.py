@@ -11,10 +11,10 @@ its own figure with its denominator.
 **What is real here and what is a double, stated once so nobody has to infer it.**
 Everything on the path the arms measure is the shipping class: the real
 :class:`~ai_assistant.permissions.reads.SqliteSourceReadTrail`, the real
-``CalendarContextSource`` and ``EmailContextSource``, the real ``UpcomingEventStage``
-(the ``INGEST`` driver is retired, ADR-0294 §1), and — in arm (c), where the subject is a *path* and
-a *configured location* — the real ``CalendarReader`` over a planted ``.ics``. The
-doubles are:
+``UpcomingEventStage`` (the ``INGEST`` driver is retired, ADR-0294 §1, and the
+``FACET`` drivers with the ``context`` package, ADR-0309 §5), and — in arm (c),
+where the subject is a *path* and a *configured location* — the real
+``CalendarReader`` over a planted ``.ics``. The doubles are:
 
 * **the grant seam**, wrapped so that ``live()`` can be made to answer ``None``, to
   raise, and to **suspend across a clock tick**, which §11 arm (a) requires by name;
@@ -49,7 +49,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
-from ai_assistant.context.sources import CalendarContextSource, EmailContextSource
 from ai_assistant.core.errors import (
     GrantError,
     ReaderError,
@@ -81,10 +80,8 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import Reader, SourceReadRecorder
     from ai_assistant.core.types import SourceGrant, SourceReadRecord
 
-#: The two declared reader identities the tree actually holds (ADR-0185's Context).
-#: §11 arm (a) drives "both readers", and these are the two.
+#: The declared reader identity the one remaining driver reads (ADR-0185's Context).
 CALENDAR: Final = "calendar"
-EMAIL: Final = "email"
 
 #: Where the controlled clock starts. Every attempt moves it on by one tick, so no
 #: two records in one run share a ``checked_at`` and the arm can key on it.
@@ -357,9 +354,9 @@ class World:
     def granted(self, source: str = CALENDAR) -> Gate:
         """A gate holding a live grant covering every use of ``source``.
 
-        Every member of ``GrantScope`` is named, which is what lets one arrangement
-        drive the same source for ``FACET`` and ``NOTIFY`` — ADR-0133 §2 keeps the
-        uses independent, and a grant naming one would refuse the other. The store
+        Every member of ``GrantScope`` is named, so the arrangement covers whichever
+        use is driven — ADR-0133 §2 keeps the uses independent, and a grant naming
+        one would refuse another. The store
         seam still accepts a scope naming ``INGEST`` (ADR-0294 §4); only a new grant
         made through ``AssistantEngine.grant`` refuses it.
         """
@@ -375,17 +372,21 @@ class World:
         """The shipping driver for ``use``, wired over ``reader`` and ``gate``.
 
         Args:
-            use: Which driver to build — ADR-0185 §5 names one per use.
+            use: Which driver to build — ADR-0185 §5 names one per use, and
+                ``NOTIFY``'s is the one left.
             reader: The producer.
             gate: The grant seam, seen through its ``SourceGrants`` shape.
             recorder: The write seam, normally this world's own trail.
 
         Returns:
             The driver, whose single operation :meth:`drive` calls.
+
+        Raises:
+            AssertionError: If ``use`` names a use no driver reads under.
         """
-        if use is GrantScope.FACET:
-            builder = CalendarContextSource if reader.name == CALENDAR else EmailContextSource
-            return builder(reader=reader, grants=gate, reads=recorder, now=self.clock)
+        if use is not GrantScope.NOTIFY:
+            msg = f"no driver reads under {use}: NOTIFY's is the one that survives"
+            raise AssertionError(msg)
         return UpcomingEventStage(
             reader=reader,
             grants=gate,
@@ -412,7 +413,7 @@ class World:
         each refusal produces, and what these arms rule on is the **trail**.
 
         Args:
-            use: Which use to drive — ``FACET`` or ``NOTIFY``.
+            use: Which use to drive — ``NOTIFY``, the one with a driver.
             reader: The producer.
             gate: The grant seam, already arranged for the outcome wanted.
             outcome: What the arrangement was built to produce.
@@ -426,7 +427,7 @@ class World:
         gate.begin(raise_on=raise_on)
         driver = self.driver(use, reader=reader, gate=gate, recorder=recorder or self.trail)
         with contextlib.suppress(*REFUSALS):
-            await _run(driver, use)
+            await _run(driver)
         return Driven(
             use=use,
             source=reader.name,
@@ -436,10 +437,8 @@ class World:
         )
 
 
-async def _run(driver: object, use: GrantScope) -> object:
-    """Call the one operation the driver for ``use`` exposes."""
-    if use is GrantScope.FACET:
-        return await driver.contribute()  # type: ignore[attr-defined]  # the driver is the one this use names
+async def _run(driver: object) -> object:
+    """Call the one operation the driver exposes."""
     return await driver.notice()  # type: ignore[attr-defined]
 
 
@@ -513,7 +512,6 @@ def count(hits: int, total: int) -> str:
 
 __all__ = [
     "CALENDAR",
-    "EMAIL",
     "FIGURE_BANNER",
     "READ_AT",
     "REFUSALS",

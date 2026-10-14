@@ -616,7 +616,6 @@ source_modules = ["ai_assistant.core"]
 forbidden_modules = [
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -650,7 +649,6 @@ type = "independence"
 modules = [
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -692,7 +690,6 @@ type = "forbidden"
 source_modules = [
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -712,7 +709,6 @@ allow_indirect_imports = "true"
 source_modules = [
     "ai_assistant.core",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -785,7 +781,6 @@ source_modules = [
     "ai_assistant.core",
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -828,7 +823,6 @@ source_modules = ["ai_assistant.interfaces"]
 forbidden_modules = [
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -862,7 +856,6 @@ source_modules = [
     "ai_assistant.core",
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -913,7 +906,6 @@ source_modules = ["ai_assistant.wire"]
 forbidden_modules = [
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -954,7 +946,6 @@ source_modules = ["ai_assistant.readers"]
 forbidden_modules = [
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -1018,7 +1009,6 @@ source_modules = [
     "ai_assistant.core",
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -1086,7 +1076,6 @@ source_modules = ["ai_assistant.evaluation"]
 forbidden_modules = [
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -1138,7 +1127,6 @@ source_modules = [
     "ai_assistant.core",
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -1178,7 +1166,6 @@ source_modules = ["ai_assistant.secret_store"]
 forbidden_modules = [
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -1237,7 +1224,6 @@ source_modules = [
     "ai_assistant.core",
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -1288,7 +1274,6 @@ source_modules = [
     "ai_assistant.core",
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -1375,7 +1360,6 @@ source_modules = [
     # The package that *holds* the census, matched module by module. See the
     # paragraph above for why the parent package's own name does not work here.
     "ai_assistant.memory.**",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",
@@ -1429,7 +1413,6 @@ allow_indirect_imports = "true"
 source_modules = [
     "ai_assistant.models",
     "ai_assistant.memory",
-    "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
     "ai_assistant.permissions",

@@ -47,18 +47,12 @@ import pytest
 import structlog.testing
 
 import ai_assistant
-from ai_assistant.context.sources import (
-    CalendarContextSource,
-    ClockContextSource,
-    EmailContextSource,
-)
 from ai_assistant.core import clock
 from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import (
     AssistantError,
     AuditError,
-    ContextError,
     ConversationStoreError,
     DeferralStoreError,
     MemoryStoreError,
@@ -92,7 +86,6 @@ from ai_assistant.core.types import (
     Idempotency,
     IntendedAction,
     IntendedActionMinting,
-    MemoryDecision,
     MemoryDecisionKind,
     MemoryKind,
     MemorySource,
@@ -147,7 +140,6 @@ from ai_assistant.orchestration.acting import ActingStage, AuthorizedCall, Autho
 from ai_assistant.orchestration.activation_coordinator import ActivationCoordinator
 from ai_assistant.orchestration.activation_state import admit_channel
 from ai_assistant.orchestration.activation_writer import ActivationWriter
-from ai_assistant.orchestration.authorization_surface import AuthorizationOperations
 from ai_assistant.orchestration.authorizer import (
     AuthorizingStage,
     CallToAuthorize,
@@ -160,7 +152,6 @@ from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
-from ai_assistant.orchestration.parked_reads import ParkedReadOperations
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, PhaseWorking
 from ai_assistant.orchestration.planning import (
     PlaceWindow,
@@ -168,7 +159,6 @@ from ai_assistant.orchestration.planning import (
     PlanningInputs,
     PlanningStage,
 )
-from ai_assistant.orchestration.questions import QuestionStage
 from ai_assistant.orchestration.reads import (
     ForecastServicer,
     SearchFooting,
@@ -216,7 +206,6 @@ from ai_assistant.testing import (
     FakeNotificationPolicy,
     FakeNotificationStore,
     FakeNotificationWriter,
-    FakeParkedReads,
     FakePlanner,
     FakePlanStore,
     FakeQueryComposer,
@@ -705,34 +694,6 @@ async def _forecast_servicer(now: Clock) -> None:
     ).service(remaining=10, external=False)
 
 
-async def _clock_source(now: Clock) -> None:
-    await ClockContextSource(now=now).contribute()
-
-
-async def _calendar_context_source(now: Clock) -> None:
-    """The granted facet adapter's clock, read whether or not a grant answers.
-
-    Driven with **no** grant, which is the shortest path to the reading: ADR-0185
-    §12 has the clock read the instant ``live()`` resolves, "by answering or by
-    raising", so a refusal reaches the seam exactly as a grant does.
-    """
-    await CalendarContextSource(
-        reader=FakeReader(), grants=FakeSourceGrants([]), reads=FakeSourceReadRecorder(), now=now
-    ).contribute()
-
-
-async def _email_context_source(now: Clock) -> None:
-    """The second adapter of the same class, on :func:`_calendar_context_source`'s rule.
-
-    Both are driven rather than one taken as representative of the pair: the
-    ``owner`` is ``type(self).__name__``, so the two labels are produced by one
-    line of source and only driving both proves that line yields both.
-    """
-    await EmailContextSource(
-        reader=FakeReader(), grants=FakeSourceGrants([]), reads=FakeSourceReadRecorder(), now=now
-    ).contribute()
-
-
 @dataclass(frozen=True)
 class _VouchingTables:
     """A platform view that vouches for one real directory, truthfully about its device.
@@ -977,11 +938,6 @@ async def _claimed(store: FakePlanStore) -> str:
     return state.id
 
 
-def _ask() -> MemoryDecision:
-    """The ruling that puts a proposal on the deferral queue as a question."""
-    return MemoryDecision(kind=MemoryDecisionKind.ASK_USER, reason="the user decides")
-
-
 # ---- drivers -------------------------------------------------------------
 
 
@@ -1072,19 +1028,6 @@ async def _planner(now: Clock) -> None:
     await ModelBackedPlanner(FakeModelProvider(_PLAN_REPLY), now=now).plan(
         _goal(), utterance="a request", context=_context(), capabilities=("search_housing",)
     )
-
-
-async def _questions(now: Clock) -> None:
-    """Accepting a question reads the clock for the proposal's staleness check."""
-    memory = FakeMemoryStore(now=lambda: _AWARE)
-    deferrals = FakeDeferralStore(now=lambda: _AWARE)
-    await deferrals.defer(deferral_id="q1", proposal=_proposal(), decision=_ask())
-    await QuestionStage(
-        writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: _AWARE),
-        deferrals=deferrals,
-        memory=memory,
-        now=now,
-    ).answer("q1", accept=True)
 
 
 async def _rule_based_processor(now: Clock) -> None:
@@ -1261,41 +1204,6 @@ async def _recipient_grant_operations(now: Clock) -> None:
     ).revoke_recipient_grant("g-1")
 
 
-async def _authorization_operations(now: Clock) -> None:
-    """The operations read the clock to judge a row's liveness (ADR-0254 §11, §16).
-
-    Driven through the **revocation**, which is the one of the two reads that is
-    unconditional: the listing takes its single reading (ADR-0193 §9) **after** the
-    snapshot, so that a row settled while ``standing`` was suspended cannot come back
-    with an instant after it — which means the listing over a goal nothing holds reads no
-    clock at all, and §11 makes that empty answer *"rather than a raise"*. A withdrawal
-    stamps its instant whatever the store then finds, so it reaches the guard on an empty
-    store too. Both reads are behind the one wrapper.
-    """
-    await AuthorizationOperations(
-        authorizations=FakeGoalAuthorizationStore(),
-        plans=FakePlanStore(now=lambda: _AWARE),
-        now=now,
-    ).revoke_authorization("auth-1")
-
-
-async def _parked_read_operations(now: Clock) -> None:
-    """The operations read the clock to judge a park's lifetime (ADR-0244 §5, §6).
-
-    Driven through the **enumeration**, which is the cheapest of the three reads and the
-    one a surface reaches first: ADR-0244 §5 has it settle an expired park rather than
-    offering it, so the reading happens whether or not a park is outstanding. The other
-    two — the answer's clause-1 comparison and the cancellation's settlement instant —
-    are behind the same guard.
-    """
-    await ParkedReadOperations(
-        store=FakeParkedReads(),
-        conversations=FakeConversationStore(now=lambda: _AWARE),
-        search=None,
-        clock=now,
-    ).outstanding()
-
-
 async def _destination_trust_operations(now: Clock) -> None:
     """The operations read the clock for the instant of the user's act (ADR-0242 §2, §4).
 
@@ -1367,13 +1275,6 @@ async def _upcoming(now: Clock) -> None:
 #: ``FakeMemoryWriter`` was the first of those (ADR-0028), in scope for §7's
 #: reason: it is a canonical double (#186).
 SEAMS = [
-    Seam("ClockContextSource", _clock_source, ContextError),
-    # `context`'s other two seams take the *opposite* posture, and ADR-0026 §4 is
-    # why both are right: §4 gives `ClockContextSource` `ContextError` because it is
-    # the one **required** source, whose failure may not be degraded away. A granted
-    # facet source is optional, so its clock fault is left to reach the assembler as
-    # itself and become an absent facet like every other fault there (ADR-0008 §4).
-    Seam("CalendarContextSource", _calendar_context_source, ClockReadingError),
     # ADR-0230 §4's fetch seam, propagating rather than translating for the reason
     # `PROPAGATED` records: that ADR adds **no** error class to `core.errors`, because
     # "there is no failure a caller would handle differently from a refusal it must
@@ -1381,7 +1282,6 @@ SEAMS = [
     # the refusals either.
     Seam("LocalFileFetcher", _local_file_fetcher, ClockReadingError),
     Seam("FakeFetcher", _fake_fetcher, ClockReadingError),
-    Seam("EmailContextSource", _email_context_source, ClockReadingError),
     Seam("PlanExecution", _plan_execution, PlanningError),
     Seam("InMemoryPlanStore", _in_memory_plan_store, PlanningError),
     Seam("InMemoryMemoryStore", _in_memory_store, MemoryStoreError),
@@ -1431,7 +1331,6 @@ SEAMS = [
     Seam("FakeRecipientGrantStore", _fake_recipient_grant_store, ClockReadingError),
     Seam("FakeRecipientGrants", _fake_recipient_grants, ClockReadingError),
     Seam("ModelBackedPlanner", _planner, PlanningError),
-    Seam("QuestionStage", _questions, DeferralStoreError),
     Seam("RuleBasedFeedbackProcessor", _rule_based_processor, ClockReadingError),
     Seam("SqliteAuditTrail", _sqlite_audit_trail, AuditError),
     Seam("SqliteConversationStore", _sqlite_conversation_store, ConversationStoreError),
@@ -1455,16 +1354,6 @@ SEAMS = [
     # the instant a revocation carries — behind one guard, and translated to
     # `orchestration`'s own error for ``RecipientGrantOperations``' reason exactly.
     Seam("DestinationTrustOperations", _destination_trust_operations, PlanningError),
-    # ADR-0244 §5, §6 and §11's three clock reads — the enumeration's expiry
-    # comparison, the answer's clause-1 comparison and the instant a settlement carries
-    # — behind one guard, and translated to `orchestration`'s own error for
-    # ``RecipientGrantOperations``' reason exactly.
-    Seam("ParkedReadOperations", _parked_read_operations, PlanningError),
-    # ADR-0254 §11 and §16's two clock reads — the listing's one-per-listing liveness
-    # instant and the instant a revocation stamps — behind one guard, and translated to
-    # `orchestration`'s own error for ``RecipientGrantOperations``' reason exactly.
-    # Adversarial and architecture review of that decision's Lane 3, round 1, ``blocker``.
-    Seam("AuthorizationOperations", _authorization_operations, PlanningError),
     # The canonical fake's own reading of the same act, guarded at the **read**
     # because `recipient_grant_clock` is a public lever a consumer's test replaces —
     # so a wrap at construction would be discarded by the next assignment. It
@@ -1731,11 +1620,6 @@ _UNDECLARED: Final = (
 #: ``ValueError`` either way, so a caller holding only the ADR's promise still
 #: catches it.
 PROPAGATED: Final[dict[str, str]] = {
-    "CalendarContextSource": (
-        "an optional source, whose fault ADR-0008 §4 degrades to an absent facet; only "
-        "the required ClockContextSource owes ContextError (ADR-0026 §4)"
-    ),
-    "EmailContextSource": "the second adapter of that one class",
     "FakeFetcher": "the canonical double of the seam below, with its clause verbatim",
     "LocalFileFetcher": (
         "ADR-0230 §4 adds **no** error class to `core.errors` — a source failure is a "
@@ -1829,59 +1713,6 @@ def test_the_untranslated_seams_are_the_declared_ones() -> None:
         f"translates into something that is not an ``AssistantError`` at all, which is "
         f"neither of the two postures ADR-0026 §4 admits"
     )
-
-
-def _derived_classes_in(source: str) -> dict[str, set[str]]:
-    """The base-to-subclass edges one module declares, with aliased bases resolved.
-
-    Args:
-        source: One module's text.
-
-    Returns:
-        Each base's *imported* name mapped to the classes deriving from it here.
-    """
-    tree = ast.parse(source)
-    aliases = _bindings(tree)
-    edges: dict[str, set[str]] = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        for parent in node.bases:
-            if isinstance(parent, ast.Name):
-                named = aliases.get(parent.id, parent.id)
-            elif isinstance(parent, ast.Attribute):
-                named = parent.attr
-            else:
-                continue
-            edges.setdefault(named.rpartition(".")[2], set()).add(node.name)
-    return edges
-
-
-def _classes_deriving(base: str) -> frozenset[str]:
-    """Every class in ``src/`` that has ``base`` above it, however deep.
-
-    Read out of the source for :func:`_clock_seam_roster`'s reason. The obvious
-    alternative, ``base.__subclasses__()``, only sees the subclasses something has
-    already imported — so a third one in a module this test never loads would be
-    invisible, which is the failure a roster exists to prevent.
-
-    Args:
-        base: The class name to walk down from. It is not itself included.
-
-    Returns:
-        The names of every class deriving from it.
-    """
-    children: dict[str, set[str]] = {}
-    for path in sorted(Path(ai_assistant.__file__).parent.rglob("*.py")):
-        for named, derived in _derived_classes_in(path.read_text(encoding="utf-8")).items():
-            children.setdefault(named, set()).update(derived)
-    found: set[str] = set()
-    pending = [base]
-    while pending:
-        for name in children.get(pending.pop(), set()) - found:
-            found.add(name)
-            pending.append(name)
-    return frozenset(found)
 
 
 def _module_constants(tree: ast.Module) -> dict[str, str]:
@@ -1988,13 +1819,12 @@ def _owners_given_to(callee: str, module: str) -> frozenset[str]:
 #: Seams whose ``owner=`` is a run-time expression, so the scan cannot read the
 #: label off the seam itself: the unparsed expression maps to a function that
 #: **derives** the labels it produces from ``src/``. Derived rather than listed,
-#: because a list is exactly what goes stale — a third ``_GrantedFacetSource``
-#: subclass, or a third ``MemoryTraces`` construction, would produce a new label
-#: while the expression at the seam stayed word for word the same, and a declared
-#: pair would have gone on passing. What stays declared is the *expression*, so a
-#: new computed-owner seam still has to be accounted for here by hand.
+#: because a list is exactly what goes stale — a third ``MemoryTraces``
+#: construction would produce a new label while the expression at the seam stayed
+#: word for word the same, and a declared pair would have gone on passing. What
+#: stays declared is the *expression*, so a new computed-owner seam still has to be
+#: accounted for here by hand.
 COMPUTED_OWNERS: Final[dict[str, Callable[[], frozenset[str]]]] = {
-    "type(self).__name__": lambda: _classes_deriving(_FACET_SOURCE),
     "owner": lambda: _owners_given_to(_EMITTER, _EMITTER_MODULE),
 }
 
@@ -2025,37 +1855,6 @@ _CLOCK: Final = "ai_assistant.core.clock"
 #: The emitter whose ``owner`` is a constructor argument, and its module.
 _EMITTER: Final = "MemoryTraces"
 _EMITTER_MODULE: Final = "ai_assistant.memory.traces"
-
-#: The gated context adapter every concrete facet source derives from.
-_FACET_SOURCE: Final = "_GrantedFacetSource"
-
-
-def _bindings(tree: ast.Module) -> dict[str, str]:
-    """What each name this module imports under an alias actually refers to.
-
-    Both scans below match source by name, and a name is only ever a local
-    binding: ``from ... import checked_clock as guard`` and
-    ``class X(Facet)`` after ``import _GrantedFacetSource as Facet`` are both
-    valid, and both would make a name-matching scan miss a real seam while the
-    partition assertion went on passing — the silence this roster exists to end.
-
-    What remains out of reach is a *runtime* rebinding — ``guard = checked_clock``
-    as a statement, a lookup through a dictionary, a dynamically built class.
-    Nothing static can follow those, and nothing in the tree does them.
-
-    Args:
-        tree: One parsed module.
-
-    Returns:
-        Local name to imported name, for the aliased imports only.
-    """
-    return {
-        alias.asname: alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom | ast.Import)
-        for alias in node.names
-        if alias.asname is not None
-    }
 
 
 def _modules_bound_in(tree: ast.Module) -> dict[str, str]:
@@ -2186,11 +1985,9 @@ def test_the_roster_scans_follow_a_name_under_any_spelling_of_its_import() -> No
     No module in ``src/`` writes any of these spellings today, so nothing above
     would fail if the scans handled only the plain one — and a scan that silently
     stopped finding seams is worse than no scan, because the partition assertion
-    would go on passing. This is the three of them run over source written to
-    break each in turn: the guard called under an alias, a constructor whose owner
-    label is a literal or a module constant called under an alias, and a subclass
-    declared against an aliased base — which is how a fourth
-    ``_GrantedFacetSource`` could arrive with no row driving it. The last emitter
+    would go on passing. This is the two of them run over source written to break
+    each in turn: the guard called under an alias, and a constructor whose owner
+    label is a literal or a module constant called under an alias. The last emitter
     builds its label at run time, which nothing static can follow: that one is
     *reported*, so the roster refuses it rather than shortening itself.
 
@@ -2206,7 +2003,6 @@ def test_the_roster_scans_follow_a_name_under_any_spelling_of_its_import() -> No
         from ai_assistant.core import clock as module
         from ai_assistant.memory.traces import MemoryTraces as Emitter
         from vendor.timing import checked_clock as vendored
-        from ai_assistant.context.sources import _GrantedFacetSource as Facet
 
         a = checked_clock(now, owner="Plain")
         b = guard(now, owner="Aliased")
@@ -2219,9 +2015,6 @@ def test_the_roster_scans_follow_a_name_under_any_spelling_of_its_import() -> No
         e = Emitter(kind=kind, sink=sink, now=now, owner="Aliased emitter")
         f = Emitter(kind=kind, sink=sink, now=now, owner=_OWNER)
         g = Emitter(kind=kind, sink=sink, now=now, owner=build_label())
-
-        class SmsContextSource(Facet):
-            pass
         """)
 
     literal, computed = _owners_in(source)
@@ -2232,7 +2025,6 @@ def test_the_roster_scans_follow_a_name_under_any_spelling_of_its_import() -> No
         frozenset({"Aliased emitter", "Named constant"}),
         frozenset({"build_label()"}),
     )
-    assert _derived_classes_in(source)[_FACET_SOURCE] == {"SmsContextSource"}
 
 
 def test_the_seam_table_is_the_whole_set() -> None:

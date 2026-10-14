@@ -844,7 +844,7 @@ def test_the_act_reaches_its_implementation_by_injection_and_not_by_import() -> 
     imported = _imported_by(purge)
     assert "ai_assistant.app.build_connection_purger" in imported
     assert not [name for name in imported if name.startswith("ai_assistant.tools")]
-    for subsystem in ("models", "memory", "context", "planning", "permissions", "learning"):
+    for subsystem in ("models", "memory", "planning", "permissions", "learning"):
         assert not [name for name in imported if name.startswith(f"ai_assistant.{subsystem}")]
 
 
