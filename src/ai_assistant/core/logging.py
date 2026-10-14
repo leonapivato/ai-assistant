@@ -23,20 +23,18 @@ the same should anything reach it. No content reaches a log (ADR-0314 §3:2).
 **A standard-library record is held to the same rule.** Records from the
 ``logging`` module — a third-party library's, asyncio's "Task exception was never
 retrieved" — never pass through structlog's chain, and the stdlib's formatter
-appends a traceback with the exception's message. So each root handler is handed a
-scrubbed copy of every record (:class:`_ScrubRecords`): its exception rendered as
-class and frames, every exception it carries named by its class wherever its
-message, arguments or extras would have printed it (the repr asyncio's message
-embeds included), and an argument or extra this net cannot look inside masked, as
-the redactor masks an unknown value.
+appends a traceback with the exception's message. So each root handler is handed,
+for every record that carries an exception, a copy that prints no message and no
+argument (:class:`_ScrubRecords`): its logger's name, its level, a fixed marker
+saying its message was withheld, and each exception's class and frames. Nothing is
+taken out of a string: any string can be rebuilt from an exception's words, so the
+strings are not printed at all. A record that carries no exception prints as it is.
 """
 
 from __future__ import annotations
 
 import copy
-import json
 import logging
-import re
 import sys
 import traceback
 from collections import deque
@@ -46,7 +44,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import PosixPath, PurePosixPath, PureWindowsPath, WindowsPath
-from typing import TYPE_CHECKING, Any, Final, Self, TextIO, cast
+from typing import TYPE_CHECKING, Any, Final, TextIO, cast
 from uuid import UUID
 
 import structlog
@@ -456,30 +454,9 @@ def _write_exception(sio: TextIO, exc_info: ExcInfo) -> None:
         raise structlog.DropEvent from exc
 
 
-class _ClassName(str):
-    """An exception standing in a log record's arguments or extras as its class alone.
-
-    ``%s`` and ``%r`` both print the class, so ``log.error("failed: %s", exc)``
-    renders ``failed: ValueError`` and never the exception's words. A string, so a
-    host's formatter that serialises an extra handles it as one.
-    """
-
-    __slots__ = ()
-
-    def __new__(cls, failure: BaseException) -> Self:
-        """Name ``failure`` by its class.
-
-        Args:
-            failure: The exception to stand in for.
-
-        Returns:
-            Its class's name, as :func:`_class_name` gives it.
-        """
-        return super().__new__(cls, _class_name(failure))
-
-    def __repr__(self) -> str:
-        return str.__str__(self)
-
+#: What a record that carries an exception prints in place of its message. Fixed and
+#: code-owned, so it holds none of the record's words.
+_WITHHELD: Final = "[message withheld: the record carries an exception]"
 
 #: The attributes every ``LogRecord`` has, and those a formatter adds. Any other
 #: attribute was set by a call site's ``extra``, which a host's format may print.
@@ -489,23 +466,11 @@ _RECORD_FIELDS: Final = frozenset(
     vars(logging.LogRecord("", logging.NOTSET, "", 0, "", (), None))
 ) | {"message", "asctime"}
 
-#: The standard fields whose text a host or a library chooses at run time: a
-#: logger's, a thread's, a process's or a task's name. Cleared like an extra; the
-#: rest are the logging module's own (a level, a path, a function's name).
-_NAMED_FIELDS: Final = ("name", "threadName", "processName", "taskName")
-
-#: How many values an exception's arguments may hold, at any depth, before its
-#: ``str`` and ``repr`` are not built here (:func:`_affordable`).
-_AFFORDABLE_PARTS: Final = 10_000
-
-#: The sequences walked inside a record's arguments and extras. Every mapping is
-#: walked; a sequence or set of any other type is masked, as an unknown object is:
-#: a ``range`` or a library's lazy sequence can be unbounded to walk, and its repr
-#: is the type's own to choose.
+#: The sequences walked inside a record's message, arguments and extras for an
+#: exception. Every mapping, dataclass and pydantic model is walked too, as the
+#: redactor walks one. Any other object is not looked inside: a ``range`` or a
+#: library's lazy sequence can be unbounded to walk.
 _WALKED_SEQUENCES: Final = (list, tuple, set, frozenset, deque)
-
-#: The path types the redactor trusts. A path is text, so the stdlib net clears it.
-_PATH_TYPES: Final = frozenset({PurePosixPath, PureWindowsPath, PosixPath, WindowsPath})
 
 #: The extras ``structlog.stdlib.ProcessorFormatter.wrap_for_formatter`` attaches,
 #: by which ``ProcessorFormatter`` tells a structlog event from a foreign record.
@@ -529,340 +494,41 @@ def _exc_info_raised(exc_info: object) -> BaseException | None:
 
 
 def _walked(value: object) -> Iterable[object] | None:
-    """What :func:`_carried` and :func:`_plain` look inside ``value`` at, or ``None``.
+    """What :func:`_carried` looks inside ``value`` at, or ``None``.
 
-    A mapping's keys and values, or a walked sequence's items.
+    A mapping's keys and values, a dataclass's or a pydantic model's fields
+    (:func:`_as_mapping`), or a walked sequence's items.
     """
-    if isinstance(value, Mapping):
-        return [part for pair in value.items() for part in pair]
+    mapping = _as_mapping(value)
+    if mapping is not None:
+        return [part for pair in mapping.items() for part in pair]
     if isinstance(value, _WALKED_SEQUENCES):
         return value
     return None
 
 
 def _carried(values: Iterable[object]) -> list[BaseException]:
-    """Every exception in ``values``, at any depth of a walked container.
+    """Every exception in ``values``, at any depth of a mapping or walked sequence.
 
-    Each container is looked inside once, so shared structure and a cycle end the
-    walk rather than repeating it.
+    In the order met, each once. Each container is looked inside once, so shared
+    structure and a cycle end the walk rather than repeating it, and the cost is
+    linear in what the record holds.
     """
-    pending = list(values)
+    pending = deque(values)
     found: list[BaseException] = []
     seen: set[int] = set()
     while pending:
-        one = pending.pop()
+        one = pending.popleft()
+        if id(one) in seen:
+            continue
+        seen.add(id(one))
         if isinstance(one, BaseException):
             found.append(one)
             continue
         inside = _walked(one)
-        if inside is None or id(one) in seen:
-            continue
-        seen.add(id(one))
-        pending.extend(inside)
-    return found
-
-
-def _held(carried: Sequence[BaseException]) -> list[BaseException]:
-    """``carried`` with each one's chain and a group's members, each listed once.
-
-    So a cycle, or a member groups share, ends the walk rather than repeating it.
-    """
-    pending = list(carried)
-    found: list[BaseException] = []
-    seen: set[int] = set()
-    while pending:
-        one = pending.pop()
-        if id(one) in seen:
-            continue
-        seen.add(id(one))
-        found.append(one)
-        held: list[BaseException | None] = [one.__cause__, one.__context__]
-        if isinstance(one, BaseExceptionGroup):
-            held.extend(one.exceptions)
-        pending.extend(member for member in held if member is not None)
-    return found
-
-
-def _affordable(failure: BaseException) -> bool:
-    """Whether ``failure``'s ``str`` and ``repr`` cost no more than its arguments' size.
-
-    A repr is linear in a tree of values and can be exponential in a graph that
-    shares them: ``[shared, shared]`` nested sixteen times is seventeen lists and a
-    repr of 65,536 leaves, as is a group holding the group before it twice. So the
-    arguments are walked first — into a held exception's own arguments too — and an
-    exception whose arguments share an object, or hold more than
-    :data:`_AFFORDABLE_PARTS` values, has neither built. :class:`_Unsaid` still
-    clears its text arguments and notes, and masks its repr where one appears.
-    """
-    pending = list(failure.args)
-    seen: set[int] = set()
-    parts = 0
-    while pending:
-        one = pending.pop()
-        parts += 1
-        if parts > _AFFORDABLE_PARTS:
-            return False
-        if isinstance(one, str) or type(one) in _SAFE_EXACT_TYPES:
-            continue
-        if id(one) in seen:
-            return False
-        seen.add(id(one))
-        inside = one.args if isinstance(one, BaseException) else _walked(one)
         if inside is not None:
             pending.extend(inside)
-    return True
-
-
-def _escaped(text: str) -> list[str]:
-    """``text`` escaped as ``repr``, ``ascii`` and JSON escape it, without the quotes."""
-    return [
-        repr(text)[1:-1],
-        ascii(text)[1:-1],
-        json.dumps(text)[1:-1],
-        json.dumps(text, ensure_ascii=False)[1:-1],
-    ]
-
-
-def _renderings(text: str) -> list[str]:
-    """``text`` as a formatter commonly prints it: as is, and escaped.
-
-    Escaped by ``repr`` and ``ascii`` (``%r``, ``%a``, ``!r``, a container's repr)
-    and by JSON (a payload logged whole), each with its quotes and without, and each
-    line on its own, as is and escaped: a line of a multi-line text is printed
-    between the escapes of the lines around it.
-    """
-    lines = text.splitlines()
-    return [
-        text,
-        repr(text),
-        ascii(text),
-        *_escaped(text),
-        *lines,
-        *(one for line in lines for one in _escaped(line)),
-    ]
-
-
-#: How long a word's start or end must be, found in a text, for the word to be
-#: taken as cut short there (:func:`_cut_short`).
-_ANCHOR: Final = 8
-
-
-def _cut_short(text: str, word: str, replacement: str) -> list[tuple[int, int, str]]:
-    """Where ``text`` holds ``word`` cut short: its start or its end, :data:`_ANCHOR` or longer.
-
-    A call site bounds a log line by slicing an exception's text — ``str(exc)[:200]``
-    — and ``reprlib`` keeps a repr's start and end around ``...``. Each place the
-    word's first (or last) :data:`_ANCHOR` characters appear is extended for as long
-    as the text goes on (or back) matching the word.
-    """
-    spans: list[tuple[int, int, str]] = []
-    head, tail = word[:_ANCHOR], word[-_ANCHOR:]
-    at = text.find(head)
-    while at != -1:
-        end = at + _ANCHOR
-        while end < len(text) and end - at < len(word) and text[end] == word[end - at]:
-            end += 1
-        spans.append((at, end, replacement))
-        at = text.find(head, end)
-    at = text.find(tail)
-    while at != -1:
-        start, inside = at, len(word) - _ANCHOR
-        while start > 0 and inside > 0 and text[start - 1] == word[inside - 1]:
-            start -= 1
-            inside -= 1
-        spans.append((start, at + _ANCHOR, replacement))
-        at = text.find(tail, at + _ANCHOR)
-    return spans
-
-
-def _replaced(text: str, words: Mapping[str, str]) -> str:
-    """``text`` with each of ``words`` replaced by its value, in one pass, longest first.
-
-    Every occurrence of every word is found with ``str.find``, and so is every place
-    a word of at least :data:`_ANCHOR` characters appears cut short
-    (:func:`_cut_short`). They are taken leftmost first and, at one place, longest
-    first, skipping any that overlaps one already taken; so a replacement put in is
-    never read again. Not a regular expression: an exception's text can be megabytes
-    long, and compiling it — then holding it in the ``re`` module's cache — would
-    cost far more than finding it.
-    """
-    spans: list[tuple[int, int, str]] = []
-    for word, replacement in words.items():
-        at = text.find(word)
-        while at != -1:
-            spans.append((at, at + len(word), replacement))
-            at = text.find(word, at + len(word))
-        if len(word) >= _ANCHOR:
-            spans.extend(_cut_short(text, word, replacement))
-    if not spans:
-        return text
-    spans.sort(key=lambda span: (span[0], span[0] - span[1]))
-    parts: list[str] = []
-    cursor = 0
-    for start, end, replacement in spans:
-        if start >= cursor:
-            parts.extend((text[cursor:start], replacement))
-            cursor = end
-    parts.append(text[cursor:])
-    return "".join(parts)
-
-
-class _Unsaid:
-    """What takes the words of a record's exceptions out of a string.
-
-    First, a line holding a carried exception's class followed by ``(`` is cut there
-    and what followed is masked: that is the exception's repr, whole or in a form
-    this module could not reproduce — asyncio's debug mode prints a callback's
-    arguments through ``reprlib``, which cuts a long repr to ``ValueError('P…_END')``.
-    Then, in what is left, each exception's text, each of its text arguments and
-    each of its notes is replaced by its class wherever it appears, as are the forms
-    a formatter commonly turns one into (:func:`_renderings`). Its text and repr are
-    built only where that is affordable (:func:`_affordable`).
-
-    Over-matching is the intended direction, as for the redactor's keys: an
-    exception whose text is a common word takes that word out of the rest of the
-    text too.
-    """
-
-    __slots__ = ("_built", "_words")
-
-    def __init__(self, failures: Sequence[BaseException]) -> None:
-        words: dict[str, str] = {}
-        for failure in failures:
-            name = _class_name(failure)
-            # Each text argument and note on its own: a group's ``str`` adds a count
-            # of its members to its message, and a call site can print either alone.
-            texts = [arg for arg in failure.args if isinstance(arg, str)]
-            notes = getattr(failure, "__notes__", ())
-            if isinstance(notes, (list, tuple)):  # assigned by hand, it could be a string
-                texts.extend(note for note in notes if isinstance(note, str))
-            said: list[str] = []
-            if _affordable(failure):
-                texts.append(str(failure))
-                said.append(repr(failure))
-            for text in texts:
-                said.extend(_renderings(text))
-            for one in said:
-                if one.strip():
-                    words.setdefault(one, name)
-        self._words = words
-        names = sorted({type(failure).__name__ for failure in failures}, key=len, reverse=True)
-        self._built = (
-            re.compile("(" + "|".join(re.escape(name) for name in names) + r")\(")
-            if names
-            else None
-        )
-
-    def __call__(self, text: str) -> str:
-        """``text`` with no word of the record's exceptions left in it.
-
-        Args:
-            text: A string the record would put in front of a formatter.
-
-        Returns:
-            The string, with each exception named by its class alone.
-        """
-        if self._built is None:
-            return text
-        lines = []
-        for line in text.splitlines(keepends=True):
-            # The cut is found in the line as given, before any word is replaced: a
-            # word inside a class's name ("Error" in "ValueError") would otherwise
-            # change the name the cut looks for, and let the rest of the line through.
-            opened = self._built.search(line)
-            if opened is None:
-                lines.append(_replaced(line, self._words))
-            else:
-                ending = line[len(line.rstrip("\r\n")) :]
-                head = _replaced(line[: opened.start()], self._words)
-                lines.append(f"{head}{opened.group(1)}({REDACTED}){ending}")
-        return "".join(lines)
-
-
-def _plain_leaf(value: object, unsaid: _Unsaid) -> object:
-    """A value that is neither a string, an exception nor a walked container, made plain.
-
-    Only exact types are trusted, as the redactor trusts them: a subclass renders as
-    it likes. A path is text, so it is cleared as a string is, and becomes one; so is
-    a time zone's name, so a time carrying a zone becomes its ``str``, which prints
-    the offset alone. Any other plain value — a number, a date, a UUID — has no text
-    of its own and is kept. An enum is named by its member, as the redactor names
-    one, and the name cleared, since an enum can be made at run time from any text.
-    Anything else is masked. Bytes are masked too: they are raw data — a library
-    reporting a malformed document quotes its bytes — and never words this net can
-    match.
-    """
-    if type(value) in _PATH_TYPES:
-        return unsaid(str(value))
-    if isinstance(value, (datetime, time)) and value.tzinfo is not None:
-        return unsaid(str(value)) if type(value) in _SAFE_EXACT_TYPES else REDACTED
-    if type(value) in _SAFE_EXACT_TYPES:
-        return value
-    if isinstance(value, Enum):
-        return unsaid(f"{type(value).__name__}.{value.name}")
-    return REDACTED
-
-
-def _plain_mapping(
-    value: Mapping[Any, Any], unsaid: _Unsaid, done: set[int]
-) -> dict[object, object]:
-    """A mapping made plain, keys and all, keeping every entry.
-
-    Two keys can become one: two exceptions of a class both stand as its name. The
-    later is numbered, as the redactor numbers masked keys, rather than overwriting
-    the earlier.
-    """
-    rebuilt: dict[object, object] = {}
-    for key, item in value.items():
-        plain_key = _hashable(_plain(key, unsaid, done))
-        if plain_key in rebuilt:
-            count = 2
-            while f"{plain_key}:{count}" in rebuilt:
-                count += 1
-            plain_key = f"{plain_key}:{count}"
-        rebuilt[plain_key] = _plain(item, unsaid, done)
-    return rebuilt
-
-
-def _hashable(key: object) -> object:
-    """A rebuilt mapping key, masked if rebuilding left it unhashable (a set become a list)."""
-    try:
-        hash(key)
-    except TypeError:
-        return REDACTED
-    return key
-
-
-def _plain(value: object, unsaid: _Unsaid, done: set[int]) -> object:
-    """``value`` as plain values a formatter can print without an exception's words.
-
-    An exception stands as its class (:class:`_ClassName`) and a string loses the
-    words of the record's exceptions. A plain value is kept, an enum is named by its
-    member, and a mapping or walked sequence is rebuilt from its parts (a ``dict``, a
-    ``tuple``, or a ``list``). Anything else is masked, as the redactor masks it:
-    its repr is whatever it holds, which can be an exception this net never saw — a
-    finished task's repr carries its exception's. A container met again — shared,
-    or a cycle — is masked rather than printed again: a graph that shares its parts
-    prints exponentially in its depth.
-    """
-    if isinstance(value, BaseException):
-        return _ClassName(value)
-    if isinstance(value, str):
-        # As an exact string: a subclass renders as it likes.
-        return unsaid(str.__str__(value))
-    inside = _walked(value)
-    if inside is None:
-        return _plain_leaf(value, unsaid)
-    if id(value) in done:
-        return REDACTED
-    done.add(id(value))
-    result: object
-    if isinstance(value, Mapping):
-        result = _plain_mapping(value, unsaid, done)
-    else:
-        items = [_plain(item, unsaid, done) for item in inside]
-        result = tuple(items) if isinstance(value, tuple) else items
-    return result
+    return found
 
 
 def _from_structlog(record: logging.LogRecord) -> bool:
@@ -876,101 +542,97 @@ def _from_structlog(record: logging.LogRecord) -> bool:
     )
 
 
-def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
-    """A copy of ``record`` that carries no exception's words.
+def _scrubbed_event(record: logging.LogRecord) -> logging.LogRecord:
+    """A copy of a wrapped structlog event, its dict through this module's structlog net.
 
-    Every exception the record carries — its ``exc_info``, its message, one among
-    its arguments or its extras, at any depth of a walked container — is found
-    first. Then the message, the arguments and the extras are made plain
-    (:func:`_plain`): an exception stands as its class, a string loses the words of
-    every one of those exceptions, their chains and a group's members, and an
-    object this net cannot look inside is masked. Each part is cleared *before* the
-    message is formatted, so ``%r`` cannot escape a word out of reach, and once, so a
-    class name put in is never read again. A message formatted before it was logged
-    is its own one part: asyncio's "Task exception was never retrieved" embeds the
-    task's repr, which holds ``exception=ValueError('…')``.
-
-    A structlog event wrapped for ``ProcessorFormatter`` keeps its event dict as
-    its message, put through this module's structlog net, :func:`scrub_exceptions`
-    then :func:`redact_sensitive`; its plumbing extras are left as they are.
-
-    The copy's message has no arguments left to format. Its exception is rendered
-    as its class and frames, as :func:`scrub_exceptions` renders one, and set as the
-    text a formatter appends, with no ``exc_info`` left for a formatter to render
-    its own way. Text a formatter rendered before this net — a record sent over a
-    socket carries its traceback as text alone — cannot have its words told from
-    its frames, so it is masked. ``stack_info`` is kept: the logging module builds
-    it from the caller's frames alone, which hold no message and print no local.
-
-    The record itself is untouched, so every other handler it reaches is handed the
-    record as it was logged.
+    The event dict goes through :func:`scrub_exceptions` then
+    :func:`redact_sensitive`, the rule every structlog event is held to: an
+    exception is its class and frames, and any value the redactor cannot vouch for —
+    an exception under another key included — is masked. Its plumbing extras are
+    left as they are, for ``ProcessorFormatter`` to read.
     """
-    raised = _exc_info_raised(record.exc_info)
-    wrapped = _from_structlog(record)
-    extras = {
-        key: value
-        for key, value in vars(record).items()
-        if key not in _RECORD_FIELDS and not (wrapped and key in _STRUCTLOG_PLUMBING)
-    }
-    args = record.args
-    # A sole mapping argument is the record's ``args`` itself: printed whole by ``%s``,
-    # or read by name by ``%(name)s``. Either way its keys are printed or matched, so
-    # it is walked, and made plain, as one value, keys and all.
-    arguments = [args] if isinstance(args, Mapping) else list(args or ())
-    message: list[object] = [] if wrapped else [record.msg]
-    unsaid = _Unsaid(_held(_carried([raised, *message, *arguments, *extras.values()])))
-    done: set[int] = set()
-
-    safe = copy.copy(record)
-    for key, value in extras.items():
-        setattr(safe, key, _plain(value, unsaid, done))
-    for field, value in vars(record).items():
-        if field in _RECORD_FIELDS and isinstance(value, str):
-            # As exact strings, as an argument is: a subclass renders as it likes.
-            exact = str.__str__(value)
-            setattr(safe, field, unsaid(exact) if field in _NAMED_FIELDS else exact)
-    # What a formatter cached on the record — another handler may have formatted it
-    # first — is its rendering of the record as logged; every formatter makes both
-    # again.
-    for cached in ("message", "asctime"):
-        vars(safe).pop(cached, None)
-    if wrapped:
-        safe.msg = _scrubbed_event(record)
-    else:
-        named = copy.copy(record)
-        named.msg = _plain(record.msg, unsaid, done)
-        if isinstance(args, Mapping):
-            named.args = cast("dict[str, object]", _plain(args, unsaid, done))
-        elif args:
-            named.args = tuple(_plain(value, unsaid, done) for value in args)
-        text = named.getMessage()
-        safe.msg = text
-        safe.args = ()
-        safe.message = text
-    safe.exc_text = _exception_text(record, raised)
-    safe.exc_info = None
-    return safe
-
-
-def _scrubbed_event(record: logging.LogRecord) -> dict[str, Any]:
-    """A wrapped structlog event's dict, through :func:`scrub_exceptions` and the redactor."""
     held: dict[str, Any] = dict(cast("dict[str, Any]", record.msg))
     try:
         event = scrub_exceptions(None, record.levelname.lower(), held)
-        return dict(redact_sensitive(None, record.levelname.lower(), event))
+        scrubbed = dict(redact_sensitive(None, record.levelname.lower(), event))
     except structlog.DropEvent as exc:
         # Not an ``Exception``: raised as is, it would pass every handler's own
         # ``except Exception`` and reach the line that logged the record.
         raise _UnscrubbableError from exc
+    safe = copy.copy(record)
+    safe.msg = scrubbed
+    raised = _exc_info_raised(record.exc_info)
+    safe.exc_text = _exception_text([raised] if raised is not None else [], record.exc_text)
+    safe.exc_info = None
+    return safe
 
 
-def _exception_text(record: logging.LogRecord, raised: BaseException | None) -> str | None:
-    """The text a formatter appends for ``record``'s exception: class and frames alone."""
-    if raised is not None:
-        return _described(raised)
-    if isinstance(record.exc_text, _Described) or not record.exc_text:
-        return record.exc_text
+def _exception_text(carried: Sequence[BaseException], exc_text: str | None) -> str | None:
+    """The text a formatter appends for a record: each exception as class and frames.
+
+    Each carried exception is rendered by :func:`_describe`, with its chain and a
+    group's members, and one already shown — the cause of another, or the same one
+    passed twice — is not shown again. Where the record carries none, a traceback a
+    formatter rendered before this net (a record sent over a socket carries its
+    traceback as text alone) cannot have its words told from its frames, so it is
+    masked.
+    """
+    if carried:
+        seen: set[int] = set()
+        shown = ["".join(_describe(one, seen)) for one in carried if id(one) not in seen]
+        return _Described("\n".join(part.rstrip("\n") for part in shown))
+    if isinstance(exc_text, _Described) or not exc_text:
+        return exc_text
     return REDACTED
+
+
+def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
+    """``record``, or a copy of it that prints no message and no argument.
+
+    The rule F7 holds a structlog event to, applied to a standard-library record: an
+    exception is shown by its class and frames, and never by anything that could
+    hold its words. No string is edited to take words out of it. A record that
+    carries an exception — its ``exc_info``, or an exception instance in its
+    message, its arguments or its extras, at any depth of the containers the
+    redactor walks (:func:`_carried`) — or a traceback rendered before this net, keeps
+    what is code-owned: its logger's name, its level, where it was logged. In place
+    of its message it prints :data:`_WITHHELD`; it has no arguments; each extra is
+    masked. The text a formatter appends is each exception's class and frames
+    (:func:`_exception_text`), with no ``exc_info`` left for a formatter to render
+    its own way. ``stack_info`` is kept: the logging module builds it from the
+    caller's frames alone, which hold no message and print no local.
+
+    A record that carries no exception is returned as it is, and prints as it
+    printed before this net: what a call site puts in an ordinary message is the
+    call site's to keep out of it (ADR-0004 §5).
+
+    A structlog event wrapped for ``ProcessorFormatter`` is handed on with its event
+    dict put through this module's structlog net (:func:`_scrubbed_event`).
+
+    The record itself is never changed, so every other handler it reaches is handed
+    the record as it was logged.
+    """
+    if _from_structlog(record):
+        return _scrubbed_event(record)
+    extras = [key for key in vars(record) if key not in _RECORD_FIELDS]
+    args = record.args
+    arguments = [args] if isinstance(args, Mapping) else list(args or ())
+    raised = _exc_info_raised(record.exc_info)
+    carried = _carried([raised, record.msg, *arguments, *(getattr(record, key) for key in extras)])
+    pre_rendered = bool(record.exc_text) and not isinstance(record.exc_text, _Described)
+    if not carried and not pre_rendered:
+        return record
+    safe = copy.copy(record)
+    for key in extras:
+        setattr(safe, key, REDACTED)
+    safe.msg = _WITHHELD
+    safe.args = ()
+    # What a formatter cached on the record — another handler may have formatted it
+    # first — is its rendering of the record as logged.
+    safe.message = _WITHHELD
+    safe.exc_text = _exception_text(carried, record.exc_text)
+    safe.exc_info = None
+    return safe
 
 
 class _ScrubRecords(logging.Filter):
@@ -981,13 +643,13 @@ class _ScrubRecords(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool | logging.LogRecord:
-        """Return a scrubbed copy of ``record``, or ``False`` to drop it.
+        """Return ``record`` or its content-free copy, or ``False`` to drop it.
 
         Args:
             record: The record a handler is about to emit.
 
         Returns:
-            The copy to emit in its place, or ``False`` if it could not be made.
+            The record to emit in its place, or ``False`` if it could not be made.
         """
         try:
             return _scrubbed_record(record)
@@ -1053,10 +715,10 @@ def _install_stdlib_net(level: int | None) -> None:
 
     Each handler on the root logger, and ``logging.lastResort``, gains
     :class:`_ScrubRecords` once — a host's handler included, which keeps its own
-    format and level and loses only the exception's words, as
-    :func:`install_redaction` composes with a host's structlog chain rather than
-    replacing it. Given a ``level`` and a root logger with no handler, this
-    module's own standard-error handler is installed and the root set to that
+    format and level and loses only what a record carrying an exception would
+    print, as :func:`install_redaction` composes with a host's structlog chain
+    rather than replacing it. Given a ``level`` and a root logger with no handler,
+    this module's own standard-error handler is installed and the root set to that
     level, as ``logging.basicConfig`` did. ``basicConfig`` does nothing at all
     where the root already has a handler — under pytest, or in a host that
     configured logging first — so the net is attached here rather than left to it.
@@ -1145,8 +807,8 @@ def install_redaction() -> None:
     renderer. Both configurations end up strictly more redacted than either was
     alone, and the host keeps its formatting, level, and factory. The standard
     library's handlers are composed with the same way: each root handler gains a
-    filter that hands it records with no exception's words in them, and keeps its
-    own format (see :func:`_install_stdlib_net`).
+    filter that hands it a record carrying an exception as its class and frames
+    alone, and keeps its own format (see :func:`_install_stdlib_net`).
     """
     if not structlog.is_configured():
         _configure(logging.INFO)
