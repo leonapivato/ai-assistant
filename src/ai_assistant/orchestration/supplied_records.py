@@ -14,20 +14,16 @@ writes it."
 activation is given or obtains it, round after round, and asks it for the value at the
 freeze. No phase module imports it.
 
-**One predicate, the old path's** (ADR-0204 §2:7). The value is ADR-0199 §3's
-placement applied to recorded origin, and nothing here decides it: a record counts where
+**One predicate** (ADR-0204 §2:7). The value is ADR-0199 §3's placement applied to
+recorded origin, and nothing here decides it: a record counts where
 :func:`~ai_assistant.orchestration.disclosure.admitted_to_understanding` would not admit
-it to a channel of unbounded audience, and a context facet where
-:func:`~ai_assistant.orchestration.disclosure.supply_for_unbounded_audience` would
-withhold it. Both are the one predicate the old path's turn evaluates through
-:class:`~ai_assistant.orchestration.disclosure.BoundedAudienceSupply` and
-:class:`~ai_assistant.orchestration.disclosure.UnboundedAudienceSupply`. It refuses a
-record whose ``placement`` is already narrowed, so ADR-0204 §2's second term, a supplied
-record already stamped, is answered by the same read as the first (ADR-0217 §1:3).
+it to a channel of unbounded audience. That predicate refuses a record whose
+``placement`` is already narrowed, so ADR-0204 §2's second term, a supplied record
+already stamped, is answered by the same read as the first (ADR-0217 §1:3).
 
 **Nothing is read but recorded origin, and nothing is fetched** (ADR-0204 §2:7-§2:8).
-No ``content``, no rendered text, no goal, no plan; no ``MemoryStore``, no
-``ContextProvider``, no store query of any kind. It is a predicate over records the
+No ``content``, no rendered text, no goal, no plan; no ``MemoryStore``, no store
+query of any kind. It is a predicate over records the
 activation already holds, so a record the activation never held, such as one a memory
 search named by id that was never fetched, is not among them.
 
@@ -38,10 +34,8 @@ over everything held. A record that both stands in a window and was obtained som
 way is held in both, and so counts on either pass, as ADR-0210 §1:2 counts a record both
 the tail and a relevance read carry.
 
-**Context facets** (ADR-0204 §2:2's first term). The phases' planning is given no
-context facets today, so none is handed in; :meth:`SuppliedRecords.facets` takes one
-when a phase is given it, and every pass counts it, as ADR-0210 §1:1 counts the turn's
-facets.
+**Context facets** (ADR-0204 §2:2's first term). The phases give an activation no
+context facets, so the value ranges over records alone.
 """
 
 from __future__ import annotations
@@ -51,13 +45,12 @@ from typing import TYPE_CHECKING, final
 from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
     admitted_to_understanding,
-    supply_for_unbounded_audience,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from ai_assistant.core.types import CurrentContext, MemoryRecord
+    from ai_assistant.core.types import MemoryRecord
     from ai_assistant.orchestration.disclosure import TurnSupply
 
 __all__ = ["SuppliedRecords"]
@@ -65,7 +58,7 @@ __all__ = ["SuppliedRecords"]
 
 @final
 class SuppliedRecords:
-    """Every memory record and context facet one activation was given or obtained.
+    """Every memory record one activation was given or obtained.
 
     Held in the activation's working set for the whole pass and added to as each record
     arrives, so the value :meth:`withheld` takes at the freeze ranges over every round.
@@ -78,7 +71,6 @@ class SuppliedRecords:
         # two versions of one stored record are two objects and both count.
         self._windows: dict[int, MemoryRecord] = {}
         self._obtained: dict[int, MemoryRecord] = {}
-        self._contexts: dict[int, CurrentContext] = {}
 
     def windows(self, records: Iterable[MemoryRecord]) -> None:
         """Hold the records of the activation's windows (ADR-0276 §3-§4).
@@ -99,14 +91,6 @@ class SuppliedRecords:
         """
         self._obtained.update((id(one), one) for one in records)
 
-    def facets(self, context: CurrentContext) -> None:
-        """Hold a situational context the activation was given, for its facets.
-
-        Args:
-            context: The context, as the activation was given it.
-        """
-        self._contexts[id(context)] = context
-
     def withheld(self, audience: TurnSupply) -> bool:
         """ADR-0204 §2's disjunction over what is held, as ADR-0309 §5:10 sets it.
 
@@ -116,19 +100,12 @@ class SuppliedRecords:
                 (§1:5). It decides only the set: the predicate is the same on both.
 
         Returns:
-            Whether any record held, or any context facet, is one a channel of unbounded
-            audience withholds, a record already placed for the owner alone included.
+            Whether any record held is one a channel of unbounded audience withholds, a
+            record already placed for the owner alone included.
         """
         records = list(self._obtained.values())
         if not isinstance(audience, UnboundedAudienceSupply):
             records.extend(self._windows.values())
         sources = audience.speakable_attested_sources
         unbounded = UnboundedAudienceSupply(speakable_attested_sources=sources)
-        if len(admitted_to_understanding(unbounded, records)) < len(records):
-            return True
-        return any(
-            supply_for_unbounded_audience(
-                context, (), speakable_attested_sources=sources, retrieved_ids=frozenset()
-            )[2]
-            for context in self._contexts.values()
-        )
+        return len(admitted_to_understanding(unbounded, records)) < len(records)

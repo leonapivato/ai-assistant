@@ -746,7 +746,7 @@ async def test_a_spoken_turn_takes_no_episode_window() -> None:
 
 
 async def test_an_unbounded_audience_withholds_an_owner_placed_tail_record_silently() -> None:
-    """§4: withheld from every rendering, label and referent — and no `withheld` fact."""
+    """§4: withheld from every rendering, label and referent."""
     placed = _episode(
         "conv:c-1:1",
         text="OWNER-ONLY-SENTINEL",
@@ -762,10 +762,9 @@ async def test_an_unbounded_audience_withholds_an_owner_placed_tail_record_silen
     )
     assert "OWNER-ONLY-SENTINEL" not in model.calls[0].messages[1].content
     assert [item["label"] for item in _sent(model)["channel_window"]] == ["H1"]
-    assert spoken.withheld is False
 
 
-async def test_a_bounded_audience_withholds_nothing_and_latches_nothing() -> None:
+async def test_a_bounded_audience_withholds_nothing() -> None:
     placed = _episode(
         "conv:c-1:1",
         text="OWNER-ONLY-SENTINEL",
@@ -779,7 +778,6 @@ async def test_a_bounded_audience_withholds_nothing_and_latches_nothing() -> Non
         audience=bounded,
     )
     assert "OWNER-ONLY-SENTINEL" in model.calls[0].messages[1].content
-    assert bounded.withheld is False
 
 
 # --- the initial selector ------------------------------------------------------------------

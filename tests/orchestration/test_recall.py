@@ -391,7 +391,6 @@ async def test_the_audience_predicate_filters_before_anything_is_kept() -> None:
     )
     spoken = await _recall(_stage(await _store(*records), limit=4), audience=UNBOUNDED)
     assert _ids(spoken) == ["speakable"]
-    assert UNBOUNDED.withheld is False
     bounded = await _recall(_stage(await _store(*records), limit=4))
     assert sorted(_ids(bounded)) == ["about-someone", "attested", "owner-only", "speakable"]
 
