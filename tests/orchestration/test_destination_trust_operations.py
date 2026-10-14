@@ -290,10 +290,11 @@ async def test_the_act_succeeds_on_a_decision_whose_confirmation_was_answered() 
     """§15: "the ordering trap §1 exists to close".
 
     A user may record trust from a decision they answered a month ago — which is exactly
-    what keeps the act reachable **after** the grant act has taken the row out of
-    ``grantable_decisions`` (ADR-0235 §3's fourth condition). An implementation that
-    reused that listing's availability set would be unreachable for every user who
-    granted first, which is the order the listing's own next-step line teaches.
+    what kept the act reachable **after** the grant act had taken the row out of
+    ``grantable_decisions`` (ADR-0235 §3's fourth condition), a listing retired since
+    with the grant act (ADR-0313 §5:1). An implementation that reused that listing's
+    availability set would have been unreachable for every user who granted first,
+    which is the order the listing's own next-step line taught.
     """
     answered = _decision("d-1", outcome=PermissionOutcome.CONFIRM, binding=_binding(planned=False))
     resolution = _decision(
@@ -519,20 +520,20 @@ async def test_a_clean_footing_is_eligible_even_where_records_were_retrieved() -
 
 
 async def test_the_earlier_resolved_decision_is_the_subject_the_journey_ends_on() -> None:
-    """§9's recovery journey, at the point where the two listings differ.
+    """§9's recovery journey, at the point where the two listings differed.
 
     The decision recording a ``TRUST_MISSING`` refusal carries
-    ``planned_with_external_content`` ``True``, so ADR-0235 §3's seventh condition
-    excludes it from ``grantable_decisions`` **and** ADR-0242 §1's third condition
-    excludes it from the trust act; and the earlier decision the user granted from has
-    been **resolved**, so §3's fourth condition has taken it out of that listing too.
-    "``assistant remember-recipients`` can therefore be empty at exactly the moment its
-    guidance is followed."
+    ``planned_with_external_content`` ``True``, so ADR-0242 §1's third condition
+    excludes it from the trust act, as ADR-0235 §3's seventh condition excluded it from
+    ``grantable_decisions``; and the earlier decision the user granted from has been
+    **resolved**, so §3's fourth condition had taken it out of that listing too. So
+    ``assistant remember-recipients`` could be empty at exactly the moment its guidance
+    was followed. Both have retired since (ADR-0313 §5:1).
 
     What makes the journey end anywhere is that the act is **indifferent to a decision's
     ruling and resolution** (§1), so the earlier resolved row is still a valid subject —
     which is what ``assistant decisions``, ADR-0186 §1's bounded read of the whole
-    trail, can hand back and the other listing cannot.
+    trail, can hand back and the retired listing could not.
     """
     earlier = _decision("d-1", outcome=PermissionOutcome.CONFIRM, binding=_binding(planned=False))
     answer = _decision(

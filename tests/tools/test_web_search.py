@@ -1220,8 +1220,8 @@ async def test_a_first_record_read_that_fails_is_not_converted() -> None:
     """ADR-0148 §6: "A store outage asserts nothing about the call and is never converted".
 
     The *second* read is different and is covered above. This is the first, where
-    nothing is in hand: the store's own error leaves, and the servicer degrades the
-    turn on it exactly as ADR-0226 §5 requires it to degrade on anything else.
+    nothing is in hand: the store's own error leaves, for its caller to handle as it
+    handles any other fault.
     """
     subject = await built(
         channels=[answering(result())], records=Records(ConnectionStoreError("the store is down"))
@@ -1558,7 +1558,7 @@ async def test_an_expiry_inside_the_admission_writes_no_row_at_all() -> None:
 
     ADR-0192 §1's placement is relied upon and not moved — before the claim there is
     no invocation row, and inventing one for a call that provably never ran would be
-    the opposite error to the one §5 corrects. So the servicing still reports
+    the opposite error to the one §5 corrects. So the search still reports
     ``DEADLINE_EXPIRED`` and the ledger holds nothing.
 
     The gate takes many times the bound, so the expiry lands *inside* the admission
@@ -1649,11 +1649,11 @@ async def test_a_cancellation_nobody_asked_for_is_a_fault_and_not_a_teardown() -
     """ADR-0241 §12's **Arm 11**, second half, and §7's second misclassification.
 
     A ``CancelledError`` raised where no cancellation was requested is a fault the
-    searcher raised: ADR-0031 §2's case, which §7 says must reach ADR-0226 §5's
-    degradation and §8's ``SEARCH_FAILED`` — "**never** a teardown that ends the turn,
-    and never an outcome". So what leaves is an ``AssistantError``, which is what the
-    servicing site degrades on, and **not** a ``CancelledError`` the executor would
-    honour by tearing the turn down.
+    searcher raised: ADR-0031 §2's case, which §7 says is "**never** a teardown that
+    ends the turn, and never an outcome". So what leaves is an ``AssistantError``, a
+    fault its caller handles as one, and **not** a ``CancelledError`` a caller would
+    honour by tearing its own work down. (The servicing site that degraded on it, with
+    §8's ``SEARCH_FAILED``, retired at the cutover, ADR-0319.)
 
     The count is the discriminator and not the class: nothing cancelled this task, so
     ``Task.cancelling()`` never moved.
@@ -1924,11 +1924,11 @@ async def test_a_transport_that_absorbs_the_deadline_does_not_report_success() -
 async def test_a_transport_that_absorbs_an_outside_cancellation_still_delivers_it() -> None:
     """ADR-0060 §1 through the same gap: a cancellation is never answered with a result.
 
-    The other half of the clause above, and the one ADR-0029 §4 keeps on the executor:
-    swallowing an external cancellation to answer with a value would break structured
-    concurrency and shutdown. The count is the discriminator — the callable absorbed
-    the exception but cannot lower ``Task.cancelling()`` — so the cancellation is
-    raised afresh here, and `consumed_call` completes the claim with
+    The other half of the clause above: swallowing an external cancellation to answer
+    with a value would break structured concurrency and shutdown. The count is the
+    discriminator — the callable absorbed the exception but cannot lower
+    ``Task.cancelling()`` — so the cancellation is raised afresh here, and
+    `consumed_call` completes the claim with
     ``interrupted_outcome`` on the way past (ADR-0192 §3).
     """
     transport = AbsorbingTransport(60.0, answering(result()))
@@ -2115,9 +2115,8 @@ async def test_a_fault_that_replaces_an_outside_cancellation_still_delivers_it()
 
     A connection reader that catches this task's ``CancelledError`` and raises
     ``ConnectionStoreError`` instead leaves the frame holding an ordinary exception —
-    and letting it out would degrade the turn under ADR-0226 §5 with ADR-0241 §8's
-    ``SEARCH_FAILED`` while the cancellation the executor asked for was never
-    delivered, and the claim left open rather than completed.
+    and letting it out would hand the caller a fault to handle while the cancellation
+    it asked for was never delivered, and the claim left open rather than completed.
 
     So the precedence applies on the fault path too. The claim **is** open here, which
     is what makes the completion assertable: ``consumed_call`` writes it with the
@@ -2143,7 +2142,7 @@ async def test_a_fault_that_replaces_an_outside_cancellation_still_delivers_it()
     ]
     assert [row.outcome for row in completions] == [ToolOutcome.INDETERMINATE], (
         "and the row is the one ADR-0029 §4 computes for an interruption, not the "
-        "open claim a `SEARCH_FAILED` degradation would have left"
+        "open claim a fault let out in its place would have left"
     )
 
 
@@ -2152,8 +2151,8 @@ async def test_a_fault_with_nothing_cancelled_still_leaves_unchanged() -> None:
 
     Where no cancellation is pending, an ordinary fault the searcher raised leaves
     exactly as it arrived — unwrapped, unannotated, and with no outcome invented for
-    it (ADR-0029 §3) — so it reaches ADR-0226 §5's degradation and ADR-0241 §8's
-    ``SEARCH_FAILED`` as before. Asserted beside the interruption arm so a check
+    it (ADR-0029 §3) — so it reaches its caller as the fault it is. Asserted beside
+    the interruption arm so a check
     written one condition too wide fails here rather than silently converting every
     store fault into a cancellation.
     """
@@ -2174,7 +2173,7 @@ async def test_a_fault_that_replaces_this_seams_own_expiry_is_still_an_expiry() 
     was, so a transport that catches the expiry's ``CancelledError`` and raises a
     store fault instead leaves no trace in the cancellation count — and the
     external-cancellation precedence therefore sees nothing. Letting the fault out
-    would degrade the turn under ADR-0226 §5 with the claim left open, where ADR-0241
+    would hand the caller a fault with the claim left open, where ADR-0241
     §5 requires a completion carrying the declaration's ``interrupted_outcome``.
 
     ``Timeout.expired()`` is this seam's own state and no callable can reset it, which
@@ -2210,7 +2209,7 @@ async def test_a_gate_that_absorbs_a_cancellation_and_then_admits_still_delivers
     cancels, which catches the ``CancelledError`` and then admits normally, leaves
     ``admitted_call`` free to run the callable — and both the claim and ``act`` sample
     their own baselines *after* the absorption, so neither sees anything. The search
-    then completes and this seam returns a value for a turn the executor cancelled,
+    then completes and this seam returns a value for work its caller cancelled,
     which is the one thing ADR-0060 §1 says a method never does.
 
     So the precedence is checked against the **pre-admission** baseline at the top of
@@ -2275,8 +2274,8 @@ async def test_an_admission_fault_that_replaces_a_cancellation_still_delivers_it
     A gate that catches the caller's ``CancelledError`` and raises an ``AuditError``
     instead: the watching wrapper notices only a ``TimeoutError``, and the spend
     clauses catch only ADR-0194 §4's two classes, so the fault would otherwise reach
-    ADR-0226 §5's degradation and ADR-0241 §8's ``SEARCH_FAILED`` — letting a
-    cancelled turn degrade and carry on, which is the absorption ADR-0060 §1 forbids.
+    the caller as a fault — letting cancelled work handle it and carry on, which is
+    the absorption ADR-0060 §1 forbids.
 
     Nothing was appended and nothing was opened, so this exit owes no row (ADR-0241
     §5).
@@ -2303,7 +2302,7 @@ async def test_an_admission_fault_with_nothing_cancelled_still_leaves_unchanged(
 
     Where no cancellation is pending, an ordinary fault out of the admission leaves
     exactly as the gate raised it — unwrapped and unannotated (ADR-0029 §3) — and
-    reaches ADR-0226 §5's degradation as before. Asserted beside the interruption arm
+    reaches its caller as the fault it is. Asserted beside the interruption arm
     so a check written one condition too wide fails here rather than silently
     converting every gate fault into a cancellation.
     """
@@ -2327,8 +2326,8 @@ async def test_an_admission_fault_that_replaces_this_seams_own_expiry_is_still_a
     calls ``uncancel`` on its way out **whatever** the exception was, so a gate that
     catches the deadline's cancellation and raises an ordinary fault instead leaves the
     caller holding a fault and a count that never moved — and the expiry would be
-    reported as ADR-0241 §8's ``SEARCH_FAILED`` rather than as §4's own member, with
-    the turn degraded under ADR-0226 §5 for a call that simply ran out of time.
+    reported as a fault rather than as §4's own member, for a call that simply ran out
+    of time.
 
     The provenance is therefore captured **inside** that context manager, where the
     cancellation is still on the task, and read out here. Nothing was appended and
