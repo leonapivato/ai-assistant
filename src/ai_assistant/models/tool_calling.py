@@ -367,16 +367,21 @@ def _offered(request: _Request) -> tuple[list[dict[str, object]], dict[str, obje
     """Every tool ``request`` offered as the record keeps it, and why not as prepared.
 
     Each tool's parameters are as the model's own request preparation gives them to its
-    provider (#2910): pydantic-ai prepares every request it sends from the same model,
-    settings and parameters, and preparation is a function of those alone, so preparing
-    them again here gives what the request carried without touching what it sent. The
-    name, the description and the order are the round's own.
+    provider (#2910). The request prepares itself inside pydantic-ai, where nothing can
+    observe it, so the record prepares the same model, settings and parameters again.
+    pydantic-ai's own preparation is a function of those alone, built by replacement
+    over a deep copy, and pydantic-ai replays it itself (its fallback model prepares a
+    request apart from sending it), so that gives what the request carried without
+    touching what it sent. The name, the description and the order are the round's own.
 
-    Where that cannot be computed — the preparation raises, gives back other tools than
-    were sent, or the model is a
-    :class:`~pydantic_ai.models.fallback.FallbackModel`, which prepares each request
-    for whichever model it holds answers — each tool is kept as the round built it, and
-    the second value says why. Nothing here fails the round or drops the entry.
+    Where that cannot be computed, each tool is kept as the round built it and the
+    second value says why. That is so where any model the request passes through
+    prepares or sends it with code other than pydantic-ai's own, which may keep state a
+    replay would change or carry the request somewhere a replay cannot see; where the
+    model is a :class:`~pydantic_ai.models.fallback.FallbackModel`, which prepares each
+    request for whichever model it holds answers; and where the preparation raises, or
+    gives back other tools than were sent. Nothing here fails the round or drops the
+    entry.
     """
     sent = request.parameters.function_tools
     try:
@@ -392,11 +397,20 @@ def _prepared(request: _Request) -> list[NativeTool]:
     """The function tools as ``request.model``'s own request preparation gives them.
 
     Raises:
-        ModelError: If the model is a fallback one, or preparation gives back tools
-            other than the ones sent, by name and order.
+        ModelError: If a model the request passes through prepares or sends it with
+            code other than pydantic-ai's own, the model is a fallback one, or
+            preparation gives back tools other than the ones sent, by name and order.
     """
     inner = request.model
-    while isinstance(inner, WrapperModel):
+    while True:
+        if not _pydantic_ais_own(inner):
+            msg = (
+                f"{type(inner).__qualname__} prepares or sends its requests with code other "
+                "than pydantic-ai's own, so its preparation is not replayed"
+            )
+            raise ModelError(msg)
+        if not isinstance(inner, WrapperModel):
+            break
         inner = inner.wrapped
     if isinstance(inner, FallbackModel):
         msg = "a fallback model prepares the request for whichever model it holds answers"
@@ -409,6 +423,18 @@ def _prepared(request: _Request) -> list[NativeTool]:
         msg = "the model's request preparation gave back other tools than were sent"
         raise ModelError(msg)
     return prepared
+
+
+#: The methods through which a model prepares and sends a request.
+_PREPARING: Final = ("request", "prepare_request", "customize_request_parameters")
+
+
+def _pydantic_ais_own(model: models.Model) -> bool:
+    """Whether ``model`` prepares and sends a request with pydantic-ai's own code alone."""
+    return all(
+        str(getattr(getattr(model, name, None), "__module__", "")).startswith("pydantic_ai.")
+        for name in _PREPARING
+    )
 
 
 def _recorded(tool: NativeTool, prepared: NativeTool) -> dict[str, object]:
