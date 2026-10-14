@@ -1,6 +1,6 @@
 # 319. The decisions the cutover left standing over deleted code retire, the stamp drops recall's limit, and an unasked memory question is logged
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-14
 - Scope: the phases after understanding, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): the records [#2836](https://github.com/leonapivato/ai-assistant/issues/2836) asks for, for the ratified decisions whose code the cutover's deletion lanes removed or are removing, and four decisions those deletions leave to be recorded.
 - Dependency: [ADR-0309](0309-the-phases-are-built-beside-the-old-path-and-one-cutover-switches-the-controller-over-deletes-the-old-path-and-goes-live-in-one-deploy.md), ADR-0313 and ADR-0318, all Accepted.
