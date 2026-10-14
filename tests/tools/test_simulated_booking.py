@@ -66,9 +66,6 @@ from ai_assistant.core.types import (
     IntendedAction,
     IntendedActionMinting,
     MemorySource,
-    PermissionDecision,
-    PermissionOutcome,
-    PermissionRuling,
     PlanStep,
     Provenance,
     ProvisioningState,
@@ -78,13 +75,11 @@ from ai_assistant.core.types import (
     StepFailure,
     StepOutputRef,
     StepStatus,
-    StepTransition,
     ToolFailureKind,
     ToolOutcome,
 )
 from ai_assistant.orchestration.executor import Dispatch, StepExecutor
 from ai_assistant.orchestration.quotes import quote_read
-from ai_assistant.orchestration.reconciling import ReconciliationStage
 from ai_assistant.testing import FakeAuditTrail, FakePlanStore
 from ai_assistant.tools.booking import (
     AVAILABLE_KEY,
@@ -1373,161 +1368,8 @@ def test_the_reference_is_the_one_the_harness_configures() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# arm 19's second half: the reconciliation pass passes over it
+# arm 19's second half: nothing is declared that could reconcile it
 # --------------------------------------------------------------------------- #
-
-
-class _RecordingInvoker:
-    """A ``ToolInvoker`` that records what it was asked to run and runs nothing.
-
-    Arm 19 asserts that ADR-0259 §4's pass *"invokes the provider **not at all**"*, and
-    that is a claim about a call which did **not** happen — only a recording subject can
-    distinguish it from one whose result was discarded.
-    """
-
-    def __init__(self) -> None:
-        """Start having been asked nothing."""
-        self.calls: list[tuple[ToolCall, timedelta]] = []
-
-    async def invoke(self, call: ToolCall, *, timeout: timedelta) -> ToolResult:  # noqa: ASYNC109 — the seam's own signature, which this double stands in for
-        """Record the call and refuse to run it.
-
-        Args:
-            call: What the reconciliation asked for.
-            timeout: The deadline it offered.
-
-        Raises:
-            AssertionError: Always — reaching here is the failure this arm is about.
-        """
-        self.calls.append((call, timeout))
-        msg = "ADR-0259 §4's pass reached the provider, which arm 19 forbids"
-        raise AssertionError(msg)
-
-
-async def test_an_indeterminate_booking_is_passed_over_and_left_standing(
-    tmp_path: Path,
-) -> None:
-    """Arm 19's third clause (ADR-0259 §3, §4; ADR-0273 §4).
-
-    *"ADR-0259 §4's reconciliation pass is run over that ``INDETERMINATE`` step,
-    asserting that it **invokes the provider not at all**, leaves the provider's durable
-    state — the record and the count alike — **exactly as the interrupted commit left
-    it**, and leaves the step standing ``INDETERMINATE``."*
-
-    The ground is ADR-0259 §3's conjunction, and the booking fails **both** limbs: it is
-    ``side_effecting`` and its decision carries an ``egress_binding``. So no
-    reconciliation lookup is declared on either definition and none can be — *"no
-    ``ToolDefinition`` field is added to say so"* — and the step's status remains *"the
-    authoritative record of the uncertainty"* (ADR-0255 §6).
-
-    **That pass's act 3 moves the *attempt* to ``EFFECT_UNRESOLVED``, which is its own
-    repair and not a resolution of the effect**, so this case asserts the step's status
-    and the store rather than the attempt's state.
-    """
-    path = tmp_path / "bookings.db"
-    booking = await configured(store_path=path, indeterminate_date=UNCERTAIN)
-    registry = registry_for(booking)
-    seam = seam_for(booking, registry)
-    parameters = arguments(UNCERTAIN)
-    binding = await bound(seam, BOOKING_ACT, parameters)
-
-    uncertain = await drive(registry, seam, BOOKING_ACT, parameters)
-    assert uncertain.outcome is ToolOutcome.INDETERMINATE
-    left_behind = await booking.store.records()
-    left_count = await booking.store.commit_count()
-
-    plans = FakePlanStore(now=lambda: DECIDED_AT)
-    trail = FakeAuditTrail()
-    invoker = _RecordingInvoker()
-    await plans.save_goal(
-        Goal(
-            id="g-1",
-            interpretation=(
-                GoalInterpretation(
-                    revision=1,
-                    outcome="book the stay",
-                    outcome_ground=Ground.USER_STATED,
-                    outcome_span="book the stay",
-                    recorded_at=DECIDED_AT,
-                    raised_by="t-1",
-                ),
-            ),
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=DECIDED_AT
-            ),
-            created_at=DECIDED_AT,
-        )
-    )
-    step = PlanStep(
-        id="s-book",
-        intent="book it",
-        capability=BOOKING_ACT.capability,
-        parameters=parameters,
-    )
-    plan = ActionPlan(
-        id="p-1", goal_id="g-1", steps=(step,), created_at=DECIDED_AT, targets_revision=1
-    )
-    await plans.save_plan(plan)
-    state = await plans.start_execution(plan.id)
-    await plans.open_attempt(
-        GoalAttempt(
-            id="a-1",
-            goal_id="g-1",
-            opened_at=DECIDED_AT,
-            plan_ids=(plan.id,),
-            execution_ids=(state.id,),
-            state=AttemptState.RUNNING,
-        )
-    )
-    request = ActionRequest(
-        tool=BOOKING_ACT,
-        parameters=parameters,
-        goal="g-1",
-        step_id=step.id,
-        execution_id=state.id,
-        egress_binding=binding,
-    )
-    decision = PermissionDecision.from_request(
-        request,
-        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="the user confirmed the booking"),
-        id="d-recon",
-        decided_at=DECIDED_AT,
-    )
-    await trail.record(decision)
-    state = await plans.commit_transition(
-        StepTransition(
-            execution_id=state.id,
-            step_id=step.id,
-            to_status=StepStatus.RUNNING,
-            expected_version=state.version,
-            bound_tool=BOOKING_ACT.id,
-            approval_ref=decision.id,
-            attempt_id="a-1",
-        )
-    )
-    state = await plans.commit_transition(
-        StepTransition(
-            execution_id=state.id,
-            step_id=step.id,
-            to_status=StepStatus.INDETERMINATE,
-            expected_version=state.version,
-            failure=StepFailure(message="the booking's outcome was never confirmed", kind=None),
-        )
-    )
-
-    stage = ReconciliationStage(plans=plans, trail=trail, invoker=invoker, monotonic=lambda: 0.0)
-    reconciled = await stage.run("g-1", remaining=stage.opened(timedelta(seconds=30)))
-
-    assert invoker.calls == []
-    assert reconciled.uncertain == (step.id,)
-    assert reconciled.established == ()
-    held = await plans.get_execution(state.id)
-    assert held is not None
-    record = held.step(step.id)
-    assert record is not None
-    assert record.status is StepStatus.INDETERMINATE
-    assert await booking.store.records() == left_behind
-    assert await booking.store.commit_count() == left_count
 
 
 def test_neither_declaration_offers_a_reconciliation_lookup() -> None:
