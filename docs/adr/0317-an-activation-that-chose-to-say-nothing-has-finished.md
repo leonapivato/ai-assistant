@@ -1,6 +1,6 @@
 # 317. An activation that chose to say nothing has finished
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-13
 - Scope: the phases, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): how an activation started from a conversation ends when planning chose to write nothing, and where the *couldn't finish* message is written ([#2943](https://github.com/leonapivato/ai-assistant/issues/2943)).
 - Authorization: the owner ruled this decision's content on 2026-10-13 in #2943, option A: silence is a normal ending. The dispatcher assigned 0317 and authorized ratifying it once its reviews are green.
