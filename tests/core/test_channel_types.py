@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from ai_assistant.core import types as types_module
 from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.types import (
     ActivationEnding,
@@ -19,9 +20,7 @@ from ai_assistant.core.types import (
     SpeechChannelPayload,
     SpokenAudio,
     SpokenAudioFormat,
-    SpokenChannelResult,
     SpokenReply,
-    SpokenTurn,
     StreamingTextReply,
     TextChannelPayload,
     WholeTextReply,
@@ -49,13 +48,9 @@ def test_context_attribution_alone_and_history_without_text_are_invalid() -> Non
     assert ChannelContext(reply_to=ChannelContextItem(item_id="one")).history == ()
 
 
-def test_blank_speech_and_event_results_require_their_corresponding_identity() -> None:
+def test_an_event_result_requires_an_event_identity() -> None:
     conversation = ChannelIdentity(channel_type="conversation", instance_id="one")
     capture = EpisodeCaptureReport(activation_id=None, episode_id=None, state="degraded")
-    with pytest.raises(ValidationError):
-        ChannelResult(
-            channel=conversation, capture=capture, result=SpokenChannelResult(outcome=SpokenTurn())
-        )
     with pytest.raises(ValidationError):
         ChannelResult(
             channel=conversation,
@@ -70,7 +65,6 @@ def test_invalid_nested_audio_snapshot_exposes_no_value_or_exception_chain() -> 
         target=NewConversation(),
         payload=SpeechChannelPayload.model_construct(audio=audio),
         context=ChannelContext(),
-        conversation=None,
     )
     with pytest.raises(ValueError, match="invalid channel") as caught:
         snapshot(supplied, SpokenReply(plays=(SpokenAudioFormat.MP4,)))
@@ -110,3 +104,37 @@ def test_a_streaming_reply_is_admitted_by_no_entry(typed_turn: bool) -> None:
     supplied = ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hello"))
     with pytest.raises(ValueError, match="unsupported channel"):
         snapshot(supplied, StreamingTextReply(), typed_turn=typed_turn)
+
+
+@pytest.mark.parametrize("typed_turn", [False, True])
+@pytest.mark.parametrize(
+    "target", [NewConversation(), ChannelIdentity(channel_type="conversation", instance_id="one")]
+)
+def test_the_spoken_conversational_combination_is_admitted_by_no_entry(
+    target: NewConversation | ChannelIdentity, typed_turn: bool
+) -> None:
+    """ADR-0313 §3:2, §4:1: spoken conversation retired, so no entry admits it."""
+    supplied = ChannelInput(
+        target=target,
+        payload=SpeechChannelPayload(
+            audio=SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
+        ),
+    )
+    with pytest.raises(ValueError, match="unsupported channel"):
+        snapshot(supplied, SpokenReply(plays=(SpokenAudioFormat.MP4,)), typed_turn=typed_turn)
+
+
+def test_an_input_carries_no_conversation_options() -> None:
+    """ADR-0313 §4:2: ``ChannelInput`` lost ``conversation``, and a value naming it is refused."""
+    assert set(ChannelInput.model_fields) == {"target", "payload", "context"}
+    held = ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hi"))
+    dumped = held.model_dump(mode="json")
+    assert ChannelInput.model_validate(dumped) == held
+    with pytest.raises(ValidationError, match="conversation"):
+        ChannelInput.model_validate({**dumped, "conversation": {}})
+
+
+@pytest.mark.parametrize("name", ["SpokenTurn", "SpokenChannelResult", "ConversationInputOptions"])
+def test_the_retired_channel_types_are_gone_from_core(name: str) -> None:
+    """ADR-0313 §3:1, §4:2, §4:6: these leave ``core`` with spoken conversation."""
+    assert not hasattr(types_module, name)

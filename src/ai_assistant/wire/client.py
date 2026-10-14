@@ -70,7 +70,6 @@ from ai_assistant.core.types import (
     EpisodeChunk,
     EpisodePage,
     ProcessingStatus,
-    SpokenDeliveryState,
     chat_conversation_ids,
     check_chat_cursor,
     check_chat_position,
@@ -160,11 +159,8 @@ if TYPE_CHECKING:
         SourceGrant,
         SourceReadRecord,
         SpendTotal,
-        SpokenAudio,
         SpokenAudioFormat,
-        SpokenDeliveryReport,
         SpokenReply,
-        SpokenTurn,
         StoryHeader,
         StoryLogPage,
         StoryMember,
@@ -303,8 +299,8 @@ class HubClient:
     ) -> ChannelResult:
         """Process a channel input on the authenticated hub (ADR-0274 §9).
 
-        The text conversational combination is refused here, before any I/O, as the
-        engine refuses it (ADR-0293 §11).
+        Every combination but an event with text and no reply is refused here, before
+        any I/O, as the engine refuses it (ADR-0293 §11, ADR-0313 §4:1).
         """
         supplied, capability = snapshot(input, reply)
         return await self._call(  # type: ignore[no-any-return]  # reflected result adapter
@@ -344,93 +340,6 @@ class HubClient:
             timeout=timeout,
             conversation_id=selected,
             reference=reference,
-        )
-
-    async def converse_spoken(
-        self,
-        utterance: SpokenAudio,
-        *,
-        plays: tuple[SpokenAudioFormat, ...],
-        timeout: timedelta,  # noqa: ASYNC109 - the caller's budget, relayed to the hub (ADR-0029 §4)
-        conversation_id: Identifier | None = None,
-        delivery: SpokenDeliveryReport | None = None,
-    ) -> SpokenTurn:
-        """Run one spoken turn on the hub (ADR-0200 §3, ADR-0205 §1).
-
-        **One frame each way, and nothing under** ``wire/`` **carries audio
-        specially** (ADR-0200 §9). The recording travels as
-        :data:`~ai_assistant.core.types.Base64Audio` — text — inside the ordinary
-        request envelope, so ``codec``'s ``project`` needs no ``bytes`` branch and
-        the framing is untouched. This method exists because the client implements
-        :class:`~ai_assistant.core.protocols.AssistantEngine`, and that is the whole
-        of the client's change.
-
-        Args:
-            utterance: The recording.
-            plays: What the caller can render, in preference order. Non-empty.
-            timeout: The budget for the whole call.
-            conversation_id: The conversation to continue, or ``None``.
-            delivery: What a device played of an earlier turn, naming that turn by
-                the ``episode_id`` a previous call disclosed (ADR-0205 §1). It
-                crosses as the ordinary nested model it is — a frozen value of
-                scalars, a ``StrEnum`` and two durations on ADR-0087 §2e's form — so
-                ``codec``'s ``project`` needs no branch for it and
-                ``wire/surface.py`` derives its adapter from the annotation as it
-                derives every other. This method carries it and reads none of it.
-
-        Returns:
-            The transcript, the turn it drove, the rendering of its answer, and the
-            id of the episode recording it.
-
-        Raises:
-            ValueError: If ``plays`` is empty, ``conversation_id`` is blank, a
-                ``delivery`` is supplied beside a ``conversation_id`` of ``None``, or
-                a supplied ``delivery`` carries a state of ``UNKNOWN`` — each refused
-                here, before any I/O, so this client and the engine it stands in for
-                refuse the same values without a round trip (ADR-0085 §9, ADR-0205
-                §1, §2). It bites hardest on this method: a refusal deferred to the
-                far side would put a **recording** on the network for a call the hub
-                is bound to refuse. Spelled inline rather than shared with
-                ``orchestration.payloads``' twin, because ``wire`` depends on
-                ``core`` and nothing else; what keeps the two agreeing is the shared
-                conformance suite, which drives this refusal against both.
-        """
-        selected = (
-            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
-        )
-        if not plays:
-            msg = (
-                "plays must name at least one format the caller can render; an empty "
-                "preference order is a call that could not be answered whatever the "
-                "synthesizer produces (ADR-0200 §3)"
-            )
-            raise ValueError(msg)
-        if delivery is not None:
-            # ADR-0205 §1 and §2's two refusals, mirrored here for the reason the two
-            # above are: a value the promoted surface refuses "locally, before any I/O"
-            # must not cost a round trip — and on this path it would cost a *recording*
-            # crossing the network for a call guaranteed to be refused at the far end.
-            if selected is None:
-                msg = (
-                    "a delivery report names a turn of a conversation, and a fresh "
-                    "conversation contains no turn one could name; supply the conversation "
-                    "this report is about, or no report (ADR-0205 §1)"
-                )
-                raise ValueError(msg)
-            if delivery.delivery.state is SpokenDeliveryState.UNKNOWN:
-                msg = (
-                    "a device that does not know reports nothing: UNKNOWN is what the hub "
-                    "writes for an unreported turn, and the absence of a report is spelled "
-                    "by omitting the argument (ADR-0205 §2)"
-                )
-                raise ValueError(msg)
-        return await self._call(  # type: ignore[no-any-return]
-            "converse_spoken",
-            utterance=utterance,
-            plays=plays,
-            timeout=timeout,
-            conversation_id=selected,
-            delivery=delivery,
         )
 
     async def _stream_call(

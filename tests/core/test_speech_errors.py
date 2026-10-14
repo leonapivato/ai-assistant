@@ -27,6 +27,7 @@ from ai_assistant.core.errors import (
     SpeechTimeoutError,
 )
 from ai_assistant.core.protocols import ModelProvider, SpeechSynthesizer, SpeechTranscriber
+from ai_assistant.core.types import SpeechFailure
 
 
 def _proper_subclasses(base: type) -> set[type]:
@@ -144,3 +145,27 @@ def test_the_synthesizer_takes_one_positional_subject_and_a_keyword_format() -> 
 
     assert parameters["text"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
     assert parameters["format"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+# --- ADR-0200 §4: the failure vocabulary is a bijection ----------------------
+#
+# Moved here from the spoken turn's own test module when ADR-0313 §3:1 retired
+# `converse_spoken` and `SpokenTurn`: the vocabulary stays with the seams (§3:7).
+
+
+def test_there_is_one_failure_member_per_speech_error_class() -> None:
+    # ADR-0200 §4: "exactly one member per class of the `SpeechError` taxonomy §1
+    # fixes". Enumerating both and comparing counts is what stops a later subclass
+    # landing without its member — the drift §4 forbids in terms.
+    taxonomy = _proper_subclasses(SpeechError) | {SpeechError}
+    assert taxonomy == {SpeechError, SpeechTimeoutError}
+    assert len(SpeechFailure) == len(taxonomy)
+
+
+def test_the_vocabulary_is_the_two_members_the_adr_names() -> None:
+    assert {member.value for member in SpeechFailure} == {"unclassified", "timed_out"}
+
+
+def test_no_transcription_failure_is_declared() -> None:
+    """ADR-0313 §3:1: ``converse_spoken`` was the one member declaring it, and left."""
+    assert not hasattr(errors_module, "TranscriptionFailedError")

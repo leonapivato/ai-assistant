@@ -21,7 +21,6 @@ from ai_assistant.core.errors import (
     ModelTimeoutError,
     OversizedValueError,
     SpeechTimeoutError,
-    TranscriptionFailedError,
     UnderstandingError,
 )
 from ai_assistant.core.types import (
@@ -38,8 +37,6 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     RouteOutcome,
     SpeechChannelPayload,
-    SpeechFailure,
-    SpokenTurn,
     TurnOutcome,
     UnderstandingOmission,
     is_live_confirmation_park,
@@ -321,16 +318,10 @@ class ActivationState:
             }
         )
 
-    def observe_result(self, result: TurnOutcome | SpokenTurn) -> None:
-        """Carry production degradation and response facts after synthesis decisions."""
-        if isinstance(result, SpokenTurn):
-            self.spoken_degraded = result.spoken_degraded
-            outcome = result.outcome
-        else:
-            outcome = result
-        if outcome is not None:
-            self.outcome = outcome
-            self.response = outcome.reply
+    def observe_result(self, outcome: TurnOutcome) -> None:
+        """Carry production degradation and response facts after composition."""
+        self.outcome = outcome
+        self.response = outcome.reply
 
     def composition(self, text: str | None, *, degraded: bool, timed_out: bool) -> None:
         """Retain the completed composition before later bookkeeping can fail."""
@@ -653,19 +644,12 @@ def terminal_status(  # noqa: C901, PLR0911, PLR0912 — ADR-0275's ordered term
         return ProcessingStatus.INTERRUPTED, ProcessingReason.STOPPED
     if isinstance(failure, asyncio.CancelledError):
         return ProcessingStatus.INTERRUPTED, ProcessingReason.CANCELLED
-    if (
-        state.composition_timed_out
-        or isinstance(
-            failure, ModelTimeoutError | SpeechTimeoutError | ChannelProcessingTimeoutError
-        )
-        or (
-            isinstance(failure, TranscriptionFailedError)
-            and failure.failure is SpeechFailure.TIMED_OUT
-        )
+    if state.composition_timed_out or isinstance(
+        failure, ModelTimeoutError | SpeechTimeoutError | ChannelProcessingTimeoutError
     ):
         return ProcessingStatus.FAILED, ProcessingReason.TIMEOUT
-    if isinstance(failure, TranscriptionFailedError):
-        return ProcessingStatus.FAILED, ProcessingReason.TRANSCRIPTION_FAILED
+    # No failure classifies as a transcription failure since ADR-0313 §3:1 retired
+    # `converse_spoken`, whose `TranscriptionFailedError` was the one that did.
     # ADR-0276 §6: immediately below transcription failure and above output oversize.
     # The flag carries the reason through the event path's outward mapping.
     if isinstance(failure, UnderstandingError) or (

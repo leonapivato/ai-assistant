@@ -1,43 +1,34 @@
-"""What the wire does with a recording, and with the one failure the call declares.
+"""What the wire does with a recording.
 
 ADR-0200 §9 is a claim about *carriage*: audio crosses as
 :data:`~ai_assistant.core.types.Base64Audio`, which is text, so ADR-0087 §2c's
 scalar table gains no row and ``project`` gains no branch. What §9 *does* cost
 ``wire/`` is a **refusal path** — "a refused recording never travels inside the
-refusal" — and that is what the first half of this module pins.
+refusal" — and that is what this module pins.
 
-The second half is ADR-0200 §4's reduced delivery: ``TranscriptionFailedError``'s
-``failure`` keyword defaults so that ADR-0085 §10a's reduction reconstructs the
-declared failure rather than a ``ProtocolError``, and the loss is *marked* rather
-than silent.
+``converse_spoken`` retired (ADR-0313 §3:1), and with it its delivery report's
+argument, its result and its one declared failure. A recording still reaches the
+surface inside ``receive``'s ``input``, as a speech payload every combination
+refuses (§4:1), so the refusal path is pinned there.
 """
 
 from __future__ import annotations
 
-import json
 from base64 import b64encode
 from datetime import timedelta
 from typing import Final
 
 import pytest
 
-from ai_assistant.core.errors import TranscriptionFailedError
 from ai_assistant.core.types import (
-    SpeechFailure,
     SpokenAudio,
     SpokenAudioFormat,
     SpokenDelivery,
     SpokenDeliveryReport,
     SpokenDeliveryState,
-    SpokenTurn,
-    TurnOutcome,
 )
-from ai_assistant.wire.codec import canonical_payload, project
-from ai_assistant.wire.errors import (
-    UndecodableFrameError,
-    error_payload,
-    raise_from_payload,
-)
+from ai_assistant.wire.codec import project
+from ai_assistant.wire.errors import UndecodableFrameError
 from ai_assistant.wire.server import _decode_arguments
 from ai_assistant.wire.surface import audio_bearing
 
@@ -48,12 +39,27 @@ _CLIP: Final = b64encode(b"PRIVATE-CLIP-MARKER-0001").decode("ascii")
 _NEAR_VALID: Final = f"{_CLIP[:-2]}!{_CLIP[-1]}"
 
 
+def _spoken_input(content: str) -> dict[str, object]:
+    """``receive``'s arguments for the retired spoken conversational combination."""
+    return {
+        "input": {
+            "target": {"kind": "new_conversation"},
+            "payload": {
+                "modality": "speech",
+                "audio": {"content": content, "media_type": "audio/mp4"},
+            },
+        },
+        "reply": {"kind": "spoken", "plays": ["audio/mp4"]},
+        "timeout": "PT30S",
+    }
+
+
 # --- §9: a refused recording never travels inside the refusal ----------------
 
 
 def test_the_surface_knows_which_arguments_can_hold_a_recording() -> None:
     """Derived from the Protocol, so a second such method needs no edit here."""
-    assert audio_bearing("converse_spoken") == {"utterance"}
+    assert audio_bearing("receive") == {"input"}
     assert audio_bearing("converse") == frozenset()
 
 
@@ -66,14 +72,7 @@ def test_a_malformed_recording_is_refused_without_being_echoed() -> None:
     so the entry point has to refuse without quoting it.
     """
     with pytest.raises(UndecodableFrameError) as caught:
-        _decode_arguments(
-            "converse_spoken",
-            {
-                "utterance": {"content": _NEAR_VALID, "media_type": "audio/mp4"},
-                "plays": ["audio/mp4"],
-                "timeout": "PT30S",
-            },
-        )
+        _decode_arguments("receive", _spoken_input(_NEAR_VALID))
 
     assert "PRIVATE-CLIP-MARKER" not in str(caught.value)
     assert "PRIVATE-CLIP-MARKER" not in repr(caught.value)
@@ -88,14 +87,7 @@ def test_that_refusal_chains_nothing_that_could_carry_the_clip() -> None:
     to attach.
     """
     with pytest.raises(UndecodableFrameError) as caught:
-        _decode_arguments(
-            "converse_spoken",
-            {
-                "utterance": {"content": _NEAR_VALID, "media_type": "audio/mp4"},
-                "plays": ["audio/mp4"],
-                "timeout": "PT30S",
-            },
-        )
+        _decode_arguments("receive", _spoken_input(_NEAR_VALID))
 
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
@@ -114,19 +106,17 @@ def test_a_non_audio_argument_still_quotes_what_its_type_refused() -> None:
     assert caught.value.__cause__ is not None
 
 
-def test_a_well_formed_recording_decodes_into_the_declared_type() -> None:
-    """The other side: nothing about the refusal path breaks the ordinary call."""
-    decoded = _decode_arguments(
-        "converse_spoken",
-        {
-            "utterance": {"content": _CLIP, "media_type": "audio/mp4"},
-            "plays": ["audio/mp4", "audio/webm;codecs=opus"],
-            "timeout": "PT30S",
-        },
-    )
+def test_a_well_formed_spoken_input_is_refused_as_a_combination_and_not_echoed() -> None:
+    """ADR-0313 §3:2, §4:1: the recording decodes, and the combination is refused.
 
-    assert decoded["utterance"] == SpokenAudio(content=_CLIP, media_type=SpokenAudioFormat.MP4)
-    assert decoded["plays"] == (SpokenAudioFormat.MP4, SpokenAudioFormat.WEBM_OPUS)
+    Refused at the far side as an unsupported combination, before any row is read or
+    the engine is called, and with no part of the recording in the refusal.
+    """
+    with pytest.raises(UndecodableFrameError, match="unsupported channel") as caught:
+        _decode_arguments("receive", _spoken_input(_CLIP))
+
+    assert _CLIP not in str(caught.value)
+    assert caught.value.__cause__ is None
 
 
 def test_a_recording_projects_as_ordinary_text() -> None:
@@ -171,121 +161,3 @@ def test_the_report_projects_through_the_branches_the_codec_already_had() -> Non
             "rendered": "PT9.8S",
         },
     }
-
-
-def test_the_report_decodes_from_the_annotation_alone() -> None:
-    """ADR-0205 §9: "``wire/surface.py`` derives this argument's adapter from the
-    annotation as it derives every other."
-
-    So the far side reconstructs the promoted surface's own type with no wire-side
-    declaration of it, and the partition ADR-0205 §2 fixes is enforced there by the
-    model's own validator rather than by anything under ``wire/``.
-    """
-    decoded = _decode_arguments(
-        "converse_spoken",
-        {
-            "utterance": {"content": _CLIP, "media_type": "audio/mp4"},
-            "plays": ["audio/mp4"],
-            "timeout": "PT30S",
-            "conversation_id": "c-1",
-            "delivery": {
-                "episode_id": "conv:c-1:1",
-                "delivery": {"state": "complete", "played": "PT9.8S", "rendered": "PT9.8S"},
-            },
-        },
-    )
-
-    assert decoded["delivery"] == SpokenDeliveryReport(
-        episode_id="conv:c-1:1",
-        delivery=SpokenDelivery(
-            state=SpokenDeliveryState.COMPLETE,
-            played=timedelta(seconds=9, milliseconds=800),
-            rendered=timedelta(seconds=9, milliseconds=800),
-        ),
-    )
-
-
-def test_a_report_outside_the_partition_is_refused_at_the_far_side() -> None:
-    """The same derivation, on the value ADR-0205 §2 refuses.
-
-    "A value that has already contradicted itself is not a report, it is a defect" —
-    and the refusal is the model's, so a peer cannot reach the engine with one by
-    sending it over the wire instead of constructing it.
-    """
-    with pytest.raises(UndecodableFrameError):
-        _decode_arguments(
-            "converse_spoken",
-            {
-                "utterance": {"content": _CLIP, "media_type": "audio/mp4"},
-                "plays": ["audio/mp4"],
-                "timeout": "PT30S",
-                "delivery": {
-                    "episode_id": "conv:c-1:1",
-                    "delivery": {
-                        "state": "complete",
-                        "played": "PT1S",
-                        "rendered": "PT9.8S",
-                    },
-                },
-            },
-        )
-
-
-def test_the_disclosed_episode_id_crosses_as_ordinary_text() -> None:
-    """ADR-0205 §1: the id "reaches the caller so that it can be handed back".
-
-    ``SpokenTurn`` is rendered by ``model_dump()``, so the member is **present
-    whatever it holds** — which is what makes this a version bump biting in the
-    result direction as well as the argument one.
-    """
-    assert project(SpokenTurn())["episode_id"] is None
-    recorded = SpokenTurn(heard="hi", outcome=TurnOutcome(turn=None), episode_id="conv:c-1:1")
-    assert project(recorded)["episode_id"] == "conv:c-1:1"
-
-
-# --- §4: the reduced delivery -------------------------------------------------
-
-
-def test_a_transcription_failure_round_trips_with_its_classification() -> None:
-    """ADR-0085 §10a: the far side reconstructs the same class with the same member."""
-    payload = json.loads(
-        canonical_payload(
-            error_payload(
-                TranscriptionFailedError("nope", failure=SpeechFailure.TIMED_OUT),
-                max_bytes=4096,
-            )
-        )
-    )
-
-    with pytest.raises(TranscriptionFailedError) as caught:
-        raise_from_payload(payload)
-
-    assert caught.value.failure is SpeechFailure.TIMED_OUT
-    assert caught.value.details_elided is False
-
-
-def test_a_reduced_delivery_raises_the_declared_failure_and_marks_the_loss() -> None:
-    """§4: the default's one caller, and why it exists at all.
-
-    §10a sets ``details`` to ``null`` when an error payload will not fit the frame,
-    and ``raise_from_payload`` then calls the declared type with the message alone.
-    A *required* keyword there would make that call raise ``ProtocolError`` instead
-    of the declared failure — "two observable failure contracts for one call", which
-    is what ADR-0084 §4-§5 promote this surface to prevent.
-
-    And the loss is legible rather than silent: ``UNCLASSIFIED`` beside
-    ``details_elided`` ``True`` means the classification did not survive the frame,
-    where beside ``False`` it means the seam raised a bare ``SpeechError``.
-    """
-    raised = TranscriptionFailedError(
-        "the recording could not be transcribed " * 40, failure=SpeechFailure.TIMED_OUT
-    )
-    payload = json.loads(canonical_payload(error_payload(raised, max_bytes=128)))
-    assert payload["reduced"] is True
-    assert payload["details"] is None
-
-    with pytest.raises(TranscriptionFailedError) as caught:
-        raise_from_payload(payload)
-
-    assert caught.value.failure is SpeechFailure.UNCLASSIFIED
-    assert caught.value.details_elided is True

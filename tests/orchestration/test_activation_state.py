@@ -15,7 +15,7 @@ from ai_assistant.core.errors import (
     ModelTimeoutError,
     OversizedValueError,
     PlanningError,
-    TranscriptionFailedError,
+    SpeechTimeoutError,
     UnderstandingError,
 )
 from ai_assistant.core.types import (
@@ -37,7 +37,6 @@ from ai_assistant.core.types import (
     RecordedSpeechInput,
     RecordedTextInput,
     SpeechChannelPayload,
-    SpeechFailure,
     SpokenAudio,
     SpokenAudioFormat,
     SpokenReply,
@@ -153,10 +152,7 @@ def test_actual_cancellation_takes_precedence_over_composition_timeout_and_no_wo
     ("failure", "reason"),
     [
         (ModelTimeoutError("private response"), ProcessingReason.TIMEOUT),
-        (
-            TranscriptionFailedError("private transcript", failure=SpeechFailure.TIMED_OUT),
-            ProcessingReason.TIMEOUT,
-        ),
+        (SpeechTimeoutError("private transcript"), ProcessingReason.TIMEOUT),
         (TimeoutError("unexpected timeout implementation bug"), ProcessingReason.INTERNAL_ERROR),
         (RuntimeError("private diagnostic"), ProcessingReason.INTERNAL_ERROR),
     ],
@@ -396,8 +392,6 @@ def test_an_understanding_error_is_its_own_terminal_reason_and_carries_no_text()
     )
     assert record.understanding_omitted is UnderstandingOmission.FAILED
     assert "private output" not in record.model_dump_json()
-    transcription = TranscriptionFailedError("t", failure=SpeechFailure.UNCLASSIFIED)
-    assert terminal_status(state, transcription)[1] is ProcessingReason.TRANSCRIPTION_FAILED
     assert terminal_status(_admitted(), OversizedValueError("o", limit=1, size=2))[1] is (
         ProcessingReason.OUTPUT_OVERSIZED
     )

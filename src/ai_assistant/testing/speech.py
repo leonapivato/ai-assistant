@@ -123,9 +123,7 @@ class FakeSpeechTranscriber:
     def fail_next_transcribe(self, error: Exception) -> None:
         """Make the next :meth:`transcribe` raise ``error``.
 
-        What ADR-0200 §4's translation is tested against one boundary out: a
-        ``SpeechError`` becomes ``TranscriptionFailedError`` and anything else
-        propagates, and a consumer cannot test either half without a seam it can
+        A consumer cannot test how it meets a seam's failure without a seam it can
         make fail.
 
         Args:

@@ -90,7 +90,6 @@ from ai_assistant.core.types import (
     ConfirmationEgress,
     ContinuationToken,
     ConversationDigest,
-    ConversationInputOptions,
     ConversationSummary,
     CurrentContext,
     DestinationTrust,
@@ -145,17 +144,13 @@ from ai_assistant.core.types import (
     RouteOutcome,
     SkipReason,
     SourceGrant,
-    SpeechChannelPayload,
     SpendTotal,
     SpokenAudio,
     SpokenAudioFormat,
-    SpokenChannelResult,
     SpokenDelivery,
-    SpokenDeliveryReport,
     SpokenDeliveryState,
     SpokenRendering,
     SpokenReply,
-    SpokenTurn,
     StepExecution,
     StepOutcome,
     StepStatus,
@@ -180,7 +175,6 @@ from ai_assistant.core.types import (
     checked_chat_devices,
     describe_untrusted,
     encodable_text,
-    is_live_confirmation_park,
     rests_on_recorded_external_content,
     secret_value,
     story_members,
@@ -196,7 +190,6 @@ from ai_assistant.orchestration.channels import (
     ChannelProjection,
     captured_result,
     conversation_target,
-    spoken_result,
     text_result,
 )
 from ai_assistant.orchestration.chat import (
@@ -216,14 +209,13 @@ from ai_assistant.orchestration.conversations import (
     fit_transcript,
 )
 
-# ADR-0206 §3's placement is **named rather than copied**, exactly as ADR-0207 §5's
-# third arm requires of `SPOKEN_PARK_SENTENCE` below and ADR-0087 §7 requires of the
-# payload encoder above: "the canonical fake reaches for this one rather than growing
-# a second copy to keep in step by hand". A re-declared triple here would be a second
-# disclosure rule that drifts silently — the fake would certify a consumer against a
-# hub that speaks a different set of notifications, which is the one thing this
-# package may not do, and is the drift golden rule 1 exists to prevent rather than an
-# instance of it. `lint-imports` holds the boundary that rule is enforced by, and
+# ADR-0206 §3's placement is **named rather than copied**, exactly as ADR-0087 §7
+# requires of the payload encoder above: "the canonical fake reaches for this one rather
+# than growing a second copy to keep in step by hand". A re-declared triple here would be
+# a second disclosure rule that drifts silently — the fake would certify a consumer
+# against a hub that speaks a different set of notifications, which is the one thing
+# this package may not do, and is the drift golden rule 1 exists to prevent rather than
+# an instance of it. `lint-imports` holds the boundary that rule is enforced by, and
 # `ai_assistant.testing` is test-only rather than a runtime subsystem.
 from ai_assistant.orchestration.disclosure import notification_is_speakable
 from ai_assistant.orchestration.episode_reads import fit_chunk, fit_page
@@ -243,7 +235,6 @@ from ai_assistant.orchestration.recipient_grants import (
     record_the_grant,
     rides_an_establishing_act,
 )
-from ai_assistant.orchestration.speech import SPOKEN_PARK_SENTENCE
 from ai_assistant.orchestration.stories import (
     fitted,
     owner_summary,
@@ -624,22 +615,14 @@ class FakeAssistantEngine:
         #: :class:`~ai_assistant.core.types.ConversationDigest` is the deletion
         #: ceremony's shape and carries no activity stamp.
         self.activity: dict[str, datetime] = {}
-        #: What :meth:`converse_spoken` reports having heard (ADR-0200 §4). A
-        #: **blank** value — empty or whitespace only — is what makes that call take
-        #: §4's no-words shape, which is the one shape a consumer cannot reach by
-        #: scripting :attr:`turn_outcome`.
-        self.spoken_transcript: str = "What did I do last week?"
-        #: What this engine's synthesizer can produce (ADR-0200 §3). The call
-        #: renders in the **first** member of ``plays`` this set also names; an
-        #: empty intersection degrades the turn, which is how a consumer reaches
-        #: that shape without a seam of its own.
+        #: What this engine's synthesizer can produce (ADR-0206 §3).
+        #: :meth:`next_notification` renders in the **first** member of ``plays`` this
+        #: set also names; an empty intersection degrades the rendering, which is how a
+        #: consumer reaches that shape without a seam of its own.
         self.spoken_formats: frozenset[SpokenAudioFormat] = frozenset(SpokenAudioFormat)
-        #: What a device has reported playing, by the episode id
-        #: :meth:`converse_spoken` disclosed for that turn (ADR-0205 §3). Written
-        #: **once** per turn: a second report naming a turn already in here performs
-        #: nothing, and a report naming an episode this engine never disclosed is
-        #: discarded — which is §1's rule, kept here so a consumer can drive the page
-        #: against it without a store.
+        #: The delivery row of each spoken turn's episode (ADR-0205 §3). No spoken turn
+        #: runs since ``converse_spoken`` retired (ADR-0313 §3:1), and the rows leave
+        #: with the conversation store's delivery members (§3:3).
         self.deliveries: dict[str, SpokenDelivery] = {}
         #: Which conversation each captured episode was recorded in, by episode id.
         #: Every id is ``activation:<activation_id>``, fixed at admission
@@ -1334,52 +1317,26 @@ class FakeAssistantEngine:
         conversation_id: Identifier | None = None,
         reference: TurnReference | None = None,
     ) -> TurnOutcome:
-        """Adapt a legacy text call through shared channel admission."""
+        """Adapt a legacy text call through shared channel admission.
+
+        ``reference`` travels beside the input rather than on it: ``ChannelInput``
+        carries no conversation options since ADR-0313 §4:2.
+        """
         result = await self._receive(
             ChannelInput(
                 target=conversation_target(conversation_id),
                 payload=TextChannelPayload(text=utterance),
-                conversation=ConversationInputOptions(reference=reference),
             ),
             reply=WholeTextReply(),
             timeout=timeout,
             projection=ChannelProjection("converse"),
             typed_turn=True,
+            reference=reference,
         )
         assert isinstance(result.result, TextChannelResult)  # noqa: S101 — validated result
         return result.result.outcome
 
-    async def converse_spoken(
-        self,
-        utterance: SpokenAudio,
-        *,
-        plays: tuple[SpokenAudioFormat, ...],
-        timeout: timedelta,  # noqa: ASYNC109 — contract budget
-        conversation_id: Identifier | None = None,
-        delivery: SpokenDeliveryReport | None = None,
-    ) -> SpokenTurn:
-        """Adapt a legacy spoken call through shared channel admission."""
-        selected = (
-            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
-        )
-        if not plays:
-            msg = "plays must name at least one format the caller can render (ADR-0200 §3)"
-            raise ValueError(msg)
-        _refuse_unusable_report(delivery, conversation_id=selected)
-        result = await self._receive(
-            ChannelInput(
-                target=conversation_target(selected),
-                payload=SpeechChannelPayload(audio=utterance),
-                conversation=ConversationInputOptions(delivery=delivery),
-            ),
-            reply=SpokenReply(plays=plays),
-            timeout=timeout,
-            projection=ChannelProjection("converse_spoken"),
-        )
-        assert isinstance(result.result, SpokenChannelResult)  # noqa: S101 — validated result
-        return result.result.outcome
-
-    async def _receive(
+    async def _receive(  # noqa: PLR0913 — the channel call's three, the entry's projection, and `converse`'s own two
         self,
         input: ChannelInput,  # noqa: A002 — ADR-0274 names the public parameter
         *,
@@ -1387,8 +1344,12 @@ class FakeAssistantEngine:
         reply: WholeTextReply | SpokenReply | None,
         timeout: timedelta,  # noqa: ASYNC109 — contract budget
         typed_turn: bool = False,
+        reference: TurnReference | None = None,
     ) -> ChannelResult:
-        """Process the channel using the fake's existing scripted outcomes."""
+        """Process the channel using the fake's existing scripted outcomes.
+
+        ``reference`` is ``converse``'s own, and nothing else passes one.
+        """
         supplied, capability = snapshot(input, reply, typed_turn=typed_turn)
         if projection.method == "receive":
             check_payload(
@@ -1396,7 +1357,7 @@ class FakeAssistantEngine:
                 max_bytes=self._max_payload_bytes,
                 subject="the arguments to receive()",
             )
-        self._validate_legacy_channel(supplied, capability, timeout, projection.method)
+        self._validate_legacy_channel(supplied, timeout, projection.method, reference)
         activation = FakeActivation.channel(supplied, capability, _AT)
         activation.identify(self.activation_id_factory)
         self._running_activations.append(activation)
@@ -1405,7 +1366,7 @@ class FakeAssistantEngine:
         failure: BaseException | None = None
         try:
             result = await self._dispatch_channel(
-                supplied, capability, timeout, projection, activation
+                supplied, capability, timeout, projection, activation, reference
             )
             # Output bounds are processing obligations even when no capture
             # envelope could be allocated and finalization must return early.
@@ -1443,20 +1404,20 @@ class FakeAssistantEngine:
             # Held to the output bound with its receipt reserved, as a returned result is
             # (ADR-0085 §8c): it is built after the dispatch's own check.
             self._check_channel_result(answer, projection)
-            return captured_result(answer, report, episode_id=None)
+            return captured_result(answer, report)
         if failure is not None:
             raise failure
         if activation.output_failure is not None:
             raise activation.output_failure
         assert result is not None  # noqa: S101 — a successful dispatch returned a value
-        return captured_result(result, report, episode_id=_turn_episode(activation, report))
+        return captured_result(result, report)
 
     def _validate_legacy_channel(
         self,
         supplied: ChannelInput,
-        capability: ReplyCapability | None,
         timeout: timedelta,
         method: str,
+        reference: TurnReference | None,
     ) -> None:
         """Apply legacy local refusals before the fake admits an activation."""
         if method == "receive":
@@ -1464,27 +1425,15 @@ class FakeAssistantEngine:
         selected = (
             None if isinstance(supplied.target, NewConversation) else supplied.target.instance_id
         )
-        options = supplied.conversation or ConversationInputOptions()
-        if isinstance(supplied.payload, SpeechChannelPayload):
-            assert isinstance(capability, SpokenReply)  # noqa: S101 — validated combination
-            check_arguments(
-                method,
-                max_bytes=self._max_payload_bytes,
-                utterance=supplied.payload.audio,
-                plays=capability.plays,
-                timeout=timeout,
-                conversation_id=selected,
-                delivery=options.delivery,
-            )
-        else:
-            check_arguments(
-                method,
-                max_bytes=self._max_payload_bytes,
-                utterance=supplied.payload.text,
-                timeout=timeout,
-                conversation_id=selected,
-                reference=options.reference,
-            )
+        assert isinstance(supplied.payload, TextChannelPayload)  # noqa: S101 — validated combination
+        check_arguments(
+            method,
+            max_bytes=self._max_payload_bytes,
+            utterance=supplied.payload.text,
+            timeout=timeout,
+            conversation_id=selected,
+            reference=reference,
+        )
 
     def _check_channel_result(
         self, result: ChannelResult | None, projection: ChannelProjection
@@ -1492,13 +1441,14 @@ class FakeAssistantEngine:
         if result is not None:
             self._checked(projection.terminal(result), projection.method)
 
-    async def _dispatch_channel(
+    async def _dispatch_channel(  # noqa: PLR0913 — the admitted call and `converse`'s own reference
         self,
         supplied: ChannelInput,
         capability: ReplyCapability | None,
         timeout: timedelta,  # noqa: ASYNC109 — caller processing budget
         projection: ChannelProjection,
         activation: FakeActivation,
+        reference: TurnReference | None,
     ) -> ChannelResult:
         target = supplied.target
         selected = None if isinstance(target, NewConversation) else target.instance_id
@@ -1512,31 +1462,14 @@ class FakeAssistantEngine:
             result = _event_result(target, ActivationEnding.DONE)
             activation.observe(result)
             return result
-        options = supplied.conversation or ConversationInputOptions()
-        if isinstance(supplied.payload, SpeechChannelPayload):
-            assert isinstance(capability, SpokenReply)  # noqa: S101 — validated combination
-            spoken = await self._legacy_converse_spoken(
-                supplied.payload.audio,
-                plays=capability.plays,
-                timeout=timeout,
-                conversation_id=selected,
-                delivery=options.delivery,
-                activation=activation,
-            )
-            try:
-                self._checked(projection.spoken(spoken), projection.method)
-            except OversizedValueError:
-                if spoken.spoken is None:
-                    raise
-                spoken = spoken.model_copy(update={"spoken": None, "spoken_degraded": True})
-                self._checked(projection.spoken(spoken), projection.method)
-            activation.observe(spoken)
-            return spoken_result(spoken)
+        # Admission refuses every conversational input but `converse`'s own typed one
+        # (ADR-0313 §4:1), so a text payload is all that reaches here.
+        assert isinstance(supplied.payload, TextChannelPayload)  # noqa: S101 — validated combination
         outcome = await self._legacy_converse(
             supplied.payload.text,
             timeout=timeout,
             conversation_id=selected,
-            reference=options.reference,
+            reference=reference,
             activation=activation,
         )
         self._checked(projection.text(outcome), projection.method)
@@ -1603,154 +1536,6 @@ class FakeAssistantEngine:
             activation.observe(outcome)
         return self._checked(outcome, "converse")
 
-    async def _legacy_converse_spoken(  # noqa: PLR0913 — legacy speech inputs plus per-call observation
-        self,
-        utterance: SpokenAudio,
-        *,
-        plays: tuple[SpokenAudioFormat, ...],
-        timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
-        conversation_id: Identifier | None = None,
-        delivery: SpokenDeliveryReport | None = None,
-        activation: FakeActivation,
-    ) -> SpokenTurn:
-        """Run one spoken turn, scripted by :attr:`spoken_transcript` (ADR-0200 §3).
-
-        **The transcript is the lever, and everything else follows from it**, which
-        keeps this double honest about the join ADR-0200 §4 makes load-bearing: a
-        blank transcript yields §4's no-words shape — four members, no turn, no
-        conversation and no exception — and a non-blank one reaches ``heard``
-        **byte for byte**, leading and trailing spaces included. A consumer that
-        wants the turn to say something else scripts :attr:`turn_outcome` as it
-        does for :meth:`converse`.
-
-        The rendering is the first member of ``plays`` that :attr:`spoken_formats`
-        also names, and its octets are a hash of what was said — deterministic,
-        opaque, and not to be decoded by anything. An empty intersection degrades
-        exactly as ADR-0200 §4 rules: ``spoken`` ``None``, ``spoken_degraded``
-        ``True``, and no rendering attempted.
-
-        **A scripted turn that parks says ADR-0207 §2's sentence** rather than
-        falling silent, on both of §1's shapes — a ``turn_outcome`` whose step reached
-        ``AWAITING_CONFIRMATION`` and one whose routed operation did — by the same rule
-        and under the same ladder as an answer, so this double satisfies the widened
-        validator rather than being exempted from it. The sentence is the
-        ``orchestration`` constant itself, imported and never re-declared (ADR-0207
-        §5): a copied literal here would be exactly the drift golden rule 1 exists to
-        prevent, arriving through the package whose job is to make the contract
-        testable. Every other ``reply``-less outcome — a composition failure, a
-        recovered resume — is silent as before (§3).
-
-        Args:
-            activation: This admitted call's independent recording state.
-            utterance: The recording. Carried no further than this call — nothing
-                here writes it, logs it or keeps it (ADR-0200 §8), and the fake
-                never decodes it, because what it *says* is not something a
-                transcriber's caller may infer from its bytes.
-            plays: What the caller can render, in preference order.
-            timeout: The budget for the whole call.
-            conversation_id: The conversation to continue, or ``None``.
-            delivery: What a device played of an earlier turn, naming that turn by
-                the ``episode_id`` this method disclosed for it (ADR-0205 §1). It is
-                applied **before** anything else this call does, so a recording that
-                carried no words still records it; a report naming an episode this
-                engine never disclosed, or one whose turn is already stamped, is
-                discarded and the call proceeds as though none had been given.
-
-        Returns:
-            The transcript, the turn it drove, the rendering of the answer, and the
-            id of the episode recording it.
-
-        Raises:
-            ValueError: If ``plays`` is empty, ``conversation_id`` is blank, a
-                ``delivery`` was supplied beside a ``conversation_id`` of ``None``,
-                or a supplied ``delivery`` carries a state of ``UNKNOWN`` — each
-                refused locally, before anything else, and before there is any
-                transcript to be blank (ADR-0200 §4, ADR-0205 §1, §2).
-            UnknownConversationError: If ``conversation_id`` names no conversation
-                this engine holds — where a turn actually ran, and also where a
-                ``delivery`` was supplied, since the report is recorded against that
-                conversation before the recording is looked at.
-        """
-        selected = (
-            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
-        )
-        if not plays:
-            msg = "plays must name at least one format the caller can render (ADR-0200 §3)"
-            raise ValueError(msg)
-        _refuse_unusable_report(delivery, conversation_id=selected)
-        check_arguments(
-            "converse_spoken",
-            max_bytes=self._max_payload_bytes,
-            utterance=utterance,
-            plays=plays,
-            timeout=timeout,
-            conversation_id=selected,
-            delivery=delivery,
-        )
-
-        def observed(value: SpokenTurn, _method: str) -> SpokenTurn:
-            activation.observe(value)
-            return value
-
-        self.calls.append(
-            (
-                "converse_spoken",
-                {"plays": plays, "conversation_id": selected, "delivery": delivery},
-            )
-        )
-        if delivery is not None:
-            # ADR-0205 §1: recorded **before the turn plans**, so a blank recording,
-            # a degradation or a failure later in the call does not lose a fact about
-            # a turn that has already happened. `selected` is not None here, which is
-            # what the refusal above guarantees.
-            self._record_delivery(str(selected), delivery)
-        heard = self.spoken_transcript
-        activation.transcription(heard)
-        if not heard.strip():
-            return observed(SpokenTurn(), "converse_spoken")
-        held = self._resolve(selected)
-        activation.resolved(held)
-        activation.understand()
-        outcome = self.turn_outcome or TurnOutcome(
-            turn=_turn(heard),
-            conversation_id=held,
-            reply=f"This fake engine composed no real answer to {heard.strip()!r}.",
-        )
-        # ADR-0264 §7's member, exactly as on the two text calls. A **spoken** turn
-        # carries it like any other: §7 makes the spoken surface no rendering surface,
-        # which is a fact about that surface and not a reason to leave the member
-        # absent on the outcome (#2381).
-        if outcome.conversation_id is None:
-            outcome = outcome.model_copy(update={"conversation_id": held})
-        outcome = self._stating(outcome)
-        activation.observe(outcome)
-        chosen = next((member for member in plays if member in self.spoken_formats), None)
-        # ADR-0205 §4: every turn of this operation is stamped `UNKNOWN` at capture,
-        # the park and the degraded synthesis included, so the id is minted before
-        # the rendering is decided and reaches every shape below that recorded one.
-        episode = None
-        # ADR-0207 §1: a live confirmation park speaks §2's sentence rather than
-        # falling silent, and the constant is **named** rather than copied (§5's
-        # third arm), so this double cannot drift from the engine it stands in for.
-        # Every other `reply`-less shape keeps ADR-0200 §4's silence (§3).
-        text = outcome.reply
-        if text is None and is_live_confirmation_park(outcome):
-            text = SPOKEN_PARK_SENTENCE
-        if text is None:
-            return observed(
-                SpokenTurn(heard=heard, outcome=outcome, episode_id=episode), "converse_spoken"
-            )
-        if chosen is None:
-            return observed(
-                SpokenTurn(heard=heard, outcome=outcome, spoken_degraded=True, episode_id=episode),
-                "converse_spoken",
-            )
-        rendering = SpokenAudio(content=_pseudo_audio(text, chosen), media_type=chosen)
-        return observed(
-            SpokenTurn(heard=heard, outcome=outcome, spoken=rendering, episode_id=episode),
-            "converse_spoken",
-        )
-
     @staticmethod
     def _allocate_episode(conversation_id: str, activation: FakeActivation) -> str:
         """The address the activation's episode is written at (ADR-0283 §2).
@@ -1793,28 +1578,6 @@ class FakeAssistantEngine:
             and activation.outcome is not None
         ):
             self.deliveries[episode] = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
-
-    def _record_delivery(self, conversation_id: str, report: SpokenDeliveryReport) -> None:
-        """Stamp the turn the report names, if it is this conversation's and unstamped.
-
-        ADR-0205 §3's three conditions, over what this double holds instead of an
-        index: the episode belongs to the conversation named, it is one this engine
-        disclosed, and its recorded delivery is still ``UNKNOWN``. Any of them
-        failing performs nothing and raises nothing.
-
-        Raises:
-            UnknownConversationError: If the conversation is not one this engine
-                holds — the refusal ``ConversationStore.record_delivery`` carries.
-        """
-        if conversation_id not in self.conversations_held:
-            msg = f"no conversation {conversation_id!r}"
-            raise UnknownConversationError(msg)
-        recorded = self.deliveries.get(report.episode_id)
-        if recorded is None or recorded.state is not SpokenDeliveryState.UNKNOWN:
-            return
-        if self._episode_conversations.get(report.episode_id) != conversation_id:
-            return
-        self.deliveries[report.episode_id] = report.delivery
 
     async def resume(
         self,
@@ -5431,15 +5194,6 @@ def _stopped_failure(
     return stopped
 
 
-def _turn_episode(activation: FakeActivation, report: EpisodeCaptureReport) -> str | None:
-    """The episode a spoken turn discloses: the one recorded, and ``None`` otherwise.
-
-    ADR-0205 §1 as ADR-0283 §2 restates it: the id is carried exactly when a turn was
-    recorded, so a capture that degraded discloses none.
-    """
-    return activation.episode_id if report.state == "recorded" else None
-
-
 def _approving(confirmed: PermissionDecision) -> PermissionRuling:
     """The resolving ``ALLOW`` an approving answer to ``confirmed`` produces.
 
@@ -5614,42 +5368,6 @@ def _summary_of(belief: Belief) -> BeliefSummary:
         attestation=belief.attestation,
         rests_on_recorded_external_content=belief.rests_on_recorded_external_content,
     )
-
-
-def _refuse_unusable_report(
-    report: SpokenDeliveryReport | None, *, conversation_id: str | None
-) -> None:
-    """The two local refusals ADR-0205 §1 and §2 place on a supplied report.
-
-    A report beside no conversation names a turn that cannot exist — a fresh
-    conversation contains none — and an ``UNKNOWN`` report is a value the hub writes
-    and never one a caller supplies: a device that does not know reports nothing, and
-    the absence of a report is spelled by omitting the argument.
-
-    Both are before any I/O, which is ADR-0085 §3's convention for a malformed
-    argument, and both are spelled here rather than shared with the engine's twin
-    because ``testing`` depends on ``core`` and what keeps the two agreeing is the
-    shared conformance suite that drives both.
-
-    Raises:
-        ValueError: If either refusal applies.
-    """
-    if report is None:
-        return
-    if conversation_id is None:
-        msg = (
-            "a delivery report names a turn of a conversation, and a fresh conversation "
-            "contains no turn one could name; supply the conversation this report is "
-            "about, or no report (ADR-0205 §1)"
-        )
-        raise ValueError(msg)
-    if report.delivery.state is SpokenDeliveryState.UNKNOWN:
-        msg = (
-            "a device that does not know reports nothing: UNKNOWN is what this hub writes "
-            "for an unreported turn, and the absence of a report is spelled by omitting "
-            "the argument (ADR-0205 §2)"
-        )
-        raise ValueError(msg)
 
 
 def _pseudo_audio(text: str, media_type: SpokenAudioFormat) -> str:

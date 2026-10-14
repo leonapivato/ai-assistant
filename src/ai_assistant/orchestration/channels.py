@@ -10,8 +10,6 @@ from ai_assistant.core.types import (
     ChannelResult,
     EpisodeCaptureReport,
     NewConversation,
-    SpokenChannelResult,
-    SpokenTurn,
     TextChannelResult,
     TurnOutcome,
 )
@@ -57,25 +55,10 @@ class ChannelProjection:
             outcome = outcome.model_copy(update={"capture_degraded": False})
         return outcome
 
-    def spoken(self, outcome: SpokenTurn) -> SpokenTurn | ChannelResult:
-        """Measure speech with room for the index address its capture may obtain."""
-        if self.capture_report is not None and outcome.outcome is not None:
-            outcome = outcome.model_copy(
-                update={
-                    "outcome": outcome.outcome.model_copy(update={"capture_degraded": False}),
-                    "episode_id": self.report().episode_id,
-                }
-            )
-        if self.method == "receive":
-            return spoken_result(outcome, capture=self.report())
-        return outcome
-
-    def terminal(self, result: ChannelResult) -> TurnOutcome | SpokenTurn | ChannelResult:
+    def terminal(self, result: ChannelResult) -> TurnOutcome | ChannelResult:
         """Measure the terminal value in the public entry point's result shape."""
         if isinstance(result.result, TextChannelResult):
             return self.text(result.result.outcome)
-        if isinstance(result.result, SpokenChannelResult):
-            return self.spoken(result.result.outcome)
         return result.model_copy(update={"capture": self.report()})
 
 
@@ -93,37 +76,11 @@ def text_result(
     )
 
 
-def spoken_result(
-    outcome: SpokenTurn, *, capture: EpisodeCaptureReport = UNCAPTURED
-) -> ChannelResult:
-    """Wrap speech; a recording with no words resolves no channel."""
-    channel = None if outcome.outcome is None else text_result(outcome.outcome).channel
-    return ChannelResult(
-        channel=channel, result=SpokenChannelResult(outcome=outcome), capture=capture
-    )
-
-
-def captured_result(
-    result: ChannelResult, report: EpisodeCaptureReport, *, episode_id: str | None
-) -> ChannelResult:
-    """Fold the final receipt into the channel and its existing legacy projection.
-
-    ``episode_id`` is what ``SpokenTurn.episode_id`` discloses: the episode's
-    ``activation:<activation_id>`` address where its conversation recorded the turn,
-    and so holds the delivery row a later report names (ADR-0205 §1, ADR-0283 §2),
-    and ``None`` otherwise.
-    """
+def captured_result(result: ChannelResult, report: EpisodeCaptureReport) -> ChannelResult:
+    """Fold the final receipt into the channel and its existing legacy projection."""
     value = result.result
     if isinstance(value, TextChannelResult):
         value = value.model_copy(update={"outcome": _captured_outcome(value.outcome, report)})
-    elif isinstance(value, SpokenChannelResult) and value.outcome.outcome is not None:
-        spoken = value.outcome.model_copy(
-            update={
-                "outcome": _captured_outcome(value.outcome.outcome, report),
-                "episode_id": episode_id,
-            }
-        )
-        value = value.model_copy(update={"outcome": spoken})
     return result.model_copy(update={"result": value, "capture": report})
 
 

@@ -2834,7 +2834,7 @@ async def test_the_question_surface_is_refused_while_the_engine_is_shutting_down
 #: ``aclose``, and the members the switch retired (ADR-0309 §2:6, §5:1): each refuses
 #: before any work and reaches no wiring point, until the engine-surface deletion lane
 #: removes it.
-_UNTRACED = frozenset({"aclose", "converse", "converse_spoken", "resume"})
+_UNTRACED = frozenset({"aclose", "converse", "resume"})
 
 
 class _TrackedScan(ast.NodeVisitor):

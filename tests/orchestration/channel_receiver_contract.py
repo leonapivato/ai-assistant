@@ -21,20 +21,33 @@ from ai_assistant.core.types import (
     ChannelInput,
     ChannelResult,
     ControllerStage,
-    ConversationInputOptions,
     EpisodicMemory,
     InformationalEventResult,
     InputOrigin,
+    NewConversation,
     ProcessingReason,
     ProcessingStatus,
     RecordedChannelTrigger,
     RecordedTextInput,
+    SpeechChannelPayload,
+    SpokenAudio,
+    SpokenAudioFormat,
+    SpokenReply,
     TextChannelPayload,
     UnderstandingOmission,
     UnderstandingProducer,
 )
 
 _BUDGET = timedelta(seconds=10)
+_TEXT = TextChannelPayload(text="Hello")
+_SPEECH = SpeechChannelPayload(
+    audio=SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
+)
+_PLAYS = SpokenReply(plays=(SpokenAudioFormat.MP4,))
+
+
+def _channel(kind: str) -> ChannelIdentity:
+    return ChannelIdentity(channel_type=kind, instance_id="unused")
 
 
 def event_input() -> ChannelInput:
@@ -174,17 +187,49 @@ class ChannelReceiverContract:
         assert_a_channel_stage_record(episode)
         assert episode.outcome is None
 
-    @pytest.mark.parametrize("kind", ["unknown", "conversation", "informational_event"])
+    @pytest.mark.parametrize(
+        ("target", "payload", "reply"),
+        [
+            (_channel("unknown"), _TEXT, None),
+            # ADR-0293 §11: the text conversational combination, whatever the reply.
+            (_channel("conversation"), _TEXT, None),
+            (NewConversation(), _TEXT, None),
+            # ADR-0313 §3:2: the spoken conversational combination retired.
+            (_channel("conversation"), _SPEECH, _PLAYS),
+            (NewConversation(), _SPEECH, _PLAYS),
+            # §4:1: an event is text with no reply, and nothing else.
+            (_channel("informational_event"), _TEXT, _PLAYS),
+            (_channel("informational_event"), _SPEECH, None),
+        ],
+        ids=[
+            "unknown-text",
+            "conversation-text",
+            "new-conversation-text",
+            "conversation-speech-spoken",
+            "new-conversation-speech-spoken",
+            "event-text-spoken",
+            "event-speech",
+        ],
+    )
     async def test_channel_unsupported_combinations_are_refused(
         self,
         engine: AssistantEngine,
-        kind: str,
+        target: ChannelIdentity | NewConversation,
+        payload: TextChannelPayload | SpeechChannelPayload,
+        reply: SpokenReply | None,
     ) -> None:
-        supplied = ChannelInput(
-            target=ChannelIdentity(channel_type=kind, instance_id="unused"),
-            payload=TextChannelPayload(text="Hello"),
-            conversation=ConversationInputOptions(),
-        )
+        """ADR-0313 §4:1: one combination is admitted, and any other is refused first.
+
+        Refused before processing: no activation is captured and no conversation is
+        created, the spoken conversational one included (§3:2).
+        """
+        conversations = await engine.recent_conversations()
+        supplied = ChannelInput(target=target, payload=payload)
         with pytest.raises(ValueError, match="unsupported channel"):
-            await engine.receive(supplied, reply=None, timeout=_BUDGET)
+            await engine.receive(supplied, reply=reply, timeout=_BUDGET)
         assert (await engine.episodes()).items == ()
+        assert await engine.recent_conversations() == conversations
+
+    def test_spoken_conversation_is_no_member(self, engine: AssistantEngine) -> None:
+        """ADR-0313 §3:1: ``converse_spoken`` left the surface, on every implementation."""
+        assert not hasattr(engine, "converse_spoken")
