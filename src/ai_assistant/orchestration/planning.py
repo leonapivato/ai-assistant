@@ -894,12 +894,15 @@ _STORY_CALLS: Final = (
     "refused whole."
 )
 
-#: #2893: a story read shows the notes a tidy-up has taken in, so a move or a split can
-#: name them; said where a story read is offered beside the story calls.
+#: #2893, #2944: a story read shows the notes a tidy-up has taken in, so a move or a split
+#: can name the note a summary's line came from instead of restating it; said where a story
+#: read is offered beside the story calls.
 _OLDER_NOTES: Final = (
     " A story's views show only its notes since it was last tidied; read the story to see "
-    "its older notes too, newest first a page at a time, and name any of them in a move "
-    "or a split."
+    "its older notes too, newest first a page at a time. To move or split something a "
+    "story's summary holds, read the story, find the note it came from, and name that "
+    "note by its label in the move or the split rather than restating it as a new note; "
+    "then tidy the story it left, so its summary drops it."
 )
 
 
@@ -946,6 +949,12 @@ _SUMMARY_WITHHELD: Final = (
 _NEVER_TIDIED: Final = "never"
 _NONE_NEWER: Final = "none"
 _NO_OLDER: Final = "none on this page"
+#: #2944: beside a tidied story's summary, where a story read is offered and notes may be
+#: shown, that its lines came from notes a story read lists by label. It adds nothing to
+#: the view: it points at the full view ADR-0307 §6:5 already lets planning look up.
+_FROM_OLDER_NOTES: Final = (
+    "older notes a tidy-up took in: read the story to see them by their labels"
+)
 _NO_EPISODES: Final = "none shown"
 _SHOWN_ABOVE: Final = "shown above under this label"
 _NOTHING_DONE: Final = "nothing recorded"
@@ -1035,6 +1044,8 @@ class _Request:
         self._excerpt_chars = excerpt_chars
         self._now = now
         self.shown = _Shown()
+        # Whether a story read is offered this round, set as the request is rendered.
+        self._reads_stories = False
         # The episodes rendered whole so far, so one shown again is named by its label.
         self._rendered: set[str] = set()
         # What the place window shows of each episode it links to: the user's texts and
@@ -1050,6 +1061,7 @@ class _Request:
     def rendered(self, offered: Sequence[OfferedTool]) -> str:
         """The request's JSON object, as one string."""
         inputs = self._inputs
+        self._reads_stories = _offers_story_reads(offered)
         document: dict[str, object] = {
             "now": self._now.isoformat(),
             "place": self._place(),
@@ -1217,6 +1229,10 @@ class _Request:
         When the summary was last tidied and the count of changes since are shown on
         every pass (§6:3-§6:4). On a pass that may not be shown a note, the notes part
         is absent, saying nothing of them (ADR-0305 §4).
+
+        A tidied story says beside its summary that a story read lists the older notes
+        its lines came from, where a story read is offered and notes may be shown, and
+        not on a read's own view, which lists them (#2944).
         """
         shown: dict[str, object] = {
             "label": self._book.label(LabelKind.STORY, one.story_id),
@@ -1226,6 +1242,13 @@ class _Request:
         }
         if one.outside and one.written and not one.withheld:
             shown["summary_outside_content"] = _OUTSIDE
+        if (
+            one.tidied_at is not None
+            and not one.notes_withheld
+            and one.older is None
+            and self._reads_stories
+        ):
+            shown["summary_built_from"] = _FROM_OLDER_NOTES
         shown["last_tidied"] = _NEVER_TIDIED if one.tidied_at is None else one.tidied_at.isoformat()
         shown["changes_since_tidied"] = one.changes
         if not one.notes_withheld:
@@ -1636,6 +1659,11 @@ def _messages_in_place(
     return frozenset(shown)
 
 
+def _offers_story_reads(offered: Sequence[OfferedTool]) -> bool:
+    """Whether a story read is among the round's offered tools (#2893, #2944)."""
+    return any(tool.name == _READ_STORY for tool in offered)
+
+
 def _more_older(count: int, page: int) -> str:
     """What a story read says of the older notes beyond the page it shows (#2893)."""
     return (
@@ -1806,7 +1834,7 @@ class PlanningStage:
                 content=_instruction(
                     takes_message=inputs.place.takes_message,
                     story_calls=any(tool.name in STORY_CALL_CAPABILITIES for tool in offered),
-                    story_reads=any(tool.name == _READ_STORY for tool in offered),
+                    story_reads=_offers_story_reads(offered),
                 ),
             ),
             Message(role=Role.USER, content=rendered),

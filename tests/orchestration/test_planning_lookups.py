@@ -8,7 +8,7 @@ by the question it answered.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from test_planning import _earlier, _inputs, _instruction, _remembered, _sent, _stage
@@ -301,7 +301,11 @@ async def test_the_view_planning_is_given_each_round_shows_no_older_notes() -> N
 async def test_planning_is_told_a_story_read_shows_older_notes_where_it_can_read_one(
     reads: bool,
 ) -> None:
-    """#2893: said beside the story calls, only where a story read is offered too."""
+    """#2893, #2944: said beside the story calls, only where a story read is offered too.
+
+    With it, the procedure for moving what a summary holds: read the story, name the note
+    the line came from rather than restating it, then tidy the story it left.
+    """
     stage, completer, _ = _stage()
 
     await stage.plan(_inputs(capabilities=(*STORY_CALLS, *((READ_STORY,) if reads else ()))))
@@ -309,3 +313,72 @@ async def test_planning_is_told_a_story_read_shows_older_notes_where_it_can_read
     instruction = _instruction(completer)
     assert "Stories are yours to keep" in instruction
     assert ("read the story to see its older notes too" in instruction) is reads
+    procedure = (
+        "To move or split something a story's summary holds, read the story, find the note "
+        "it came from, and name that note by its label in the move or the split rather than "
+        "restating it as a new note; then tidy the story it left, so its summary drops it."
+    )
+    assert (procedure in instruction) is reads
+
+
+# --- a tidied story's summary points at the story read (#2944) ---------------------------------
+
+_CUE = "summary_built_from"
+_STORY_READS = (*STORY_CALLS, READ_STORY)
+
+
+@pytest.mark.parametrize(
+    ("fields", "cued"),
+    [
+        ({}, True),
+        ({"tidied_at": None, "written": False, "lines": ()}, False),
+        ({"notes_withheld": True}, False),
+    ],
+    ids=["tidied", "never_tidied", "notes_withheld"],
+)
+async def test_a_tidied_storys_view_says_a_read_lists_the_notes_its_summary_came_from(
+    fields: dict[str, Any], cued: bool
+) -> None:
+    """#2944: beside the summary of a story a tidy-up has taken notes into, never otherwise.
+
+    Where no note may be shown the notes part says nothing of notes (ADR-0305 §4), so
+    neither does this.
+    """
+    stage, completer, _ = _stage()
+
+    await stage.plan(
+        _inputs(capabilities=_STORY_READS, stories=PlanningStories(stories=(_story(**fields),)))
+    )
+
+    (shown,) = _sent(completer)["stories"]
+    assert (_CUE in shown) is cued
+    if cued:
+        assert shown[_CUE] == (
+            "older notes a tidy-up took in: read the story to see them by their labels"
+        )
+        assert list(shown).index(_CUE) == list(shown).index("summary") + 1
+
+
+async def test_no_view_points_at_a_story_read_where_none_is_offered() -> None:
+    """#2944: the cue is shown only where a story read is offered, as the procedure is."""
+    stage, completer, _ = _stage()
+
+    await stage.plan(
+        _inputs(capabilities=STORY_CALLS, stories=PlanningStories(stories=(_story(),)))
+    )
+
+    (shown,) = _sent(completer)["stories"]
+    assert _CUE not in shown
+
+
+async def test_a_story_reads_own_view_lists_the_older_notes_and_points_nowhere() -> None:
+    """#2944: a read's view lists the older notes itself, so it carries no cue."""
+    earlier, outcome = _read(_story(older=(_note(7, "the car inspection is due"),)))
+    stage, completer, _ = _stage()
+
+    await stage.plan(_inputs(capabilities=_STORY_READS, rounds=(earlier,), outcomes=(outcome,)))
+
+    (call,) = _sent(completer)["rounds"][0]["calls"]
+    shown = call["result"]["value"]
+    assert "older_notes" in shown
+    assert _CUE not in shown
