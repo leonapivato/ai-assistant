@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from structlog.testing import capture_logs
 from test_chat_reader import _answered as chat_answered
 from test_chat_reader import _conversation as chat_conversation
 from test_chat_reader import _GatedModel
@@ -182,3 +183,38 @@ def test_a_call_awaiting_a_stopped_pass_is_answered_with_the_stop() -> None:
     assert _stopped_failure(state, cancelled) is cancelled
     assert isinstance(_stopped_failure(state, raised), ActivationStoppedError)
     assert isinstance(_stopped_failure(state, None), ActivationStoppedError)
+
+
+def _defect() -> ValueError:
+    """A defect raised, so it carries the frames it passed through."""
+    words = "the user's " + "private words"
+    try:
+        raise ValueError(words)
+    except ValueError as exc:
+        return exc
+
+
+def test_a_defect_behind_a_stop_is_logged_once_by_its_class_and_frames() -> None:
+    """#2927: past the stop the defect survives only as the stop's cause, so it is logged here.
+
+    Once, at error level, by its class and the frames it passed through, never its
+    message (ADR-0314 §3:2); an expected failure behind a stop, or a defect no stop
+    reached, logs nothing here.
+    """
+    state = _admitted()
+    defect = _defect()
+    with capture_logs() as logs:
+        assert _stopped_failure(state, defect) is defect, "no stop: answered as it ended"
+        assert state.stop()
+        expected = _stopped_failure(state, PlanningError("expected"))
+        stopped = _stopped_failure(state, defect)
+    assert isinstance(expected, ActivationStoppedError)
+    assert isinstance(stopped, ActivationStoppedError)
+    assert stopped.__cause__ is defect
+    (line,) = [one for one in logs if one["log_level"] == "error"]
+    assert line["event"] == "stopped_activation_failed"
+    assert line["error"] == "ValueError"
+    assert line["activation_id"] == state.activation_id
+    assert "_defect" in line["traceback"], "the frames it passed through"
+    assert line["traceback"].rstrip().endswith("ValueError")
+    assert "private" not in str(line), "never its message"
