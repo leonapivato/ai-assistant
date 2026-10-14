@@ -95,6 +95,7 @@ from ai_assistant.core.types import (
     EgressBinding,
     EgressDestination,
     EgressSpan,
+    EpisodicMemory,
     GrantScope,
     Idempotency,
     MemoryKind,
@@ -108,6 +109,7 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
+    ProcessingStatus,
     Reversibility,
     RiskLevel,
     SpanCoverage,
@@ -1088,6 +1090,54 @@ async def test_a_pass_that_fails_writes_couldnt_finish(monkeypatch: pytest.Monke
     digest = await engine.conversation(conversation)
     assert digest is not None
     assert digest.state.last_ended is ActivationEnding.COULDNT_FINISH
+
+
+async def test_a_cancellation_during_the_couldnt_finish_write_still_ends_the_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0293 §8, §9:2: cancelled while writing *couldn't finish*, the pass still ends.
+
+    Its episode is captured interrupted, it stops counting as running, and the
+    cancellation goes on.
+    """
+    engine = FakeAssistantEngine()
+
+    def failing(*_: object) -> NewMessage:
+        msg = "the pass failed"
+        raise RuntimeError(msg)
+
+    writing = asyncio.Event()
+    never = asyncio.Event()
+    conversation = await _started(engine)
+    append = engine.chat.append_message
+
+    async def held(conversation_id: str, message: NewMessage) -> MessageReceipt:
+        if message.author is not MessageAuthor.ASSISTANT:
+            return await append(conversation_id, message)
+        writing.set()
+        await never.wait()
+        raise AssertionError  # pragma: no cover — cancelled first
+
+    monkeypatch.setattr(engine, "_chat_message", failing)
+    monkeypatch.setattr(engine.chat, "append_message", held)
+    read = await _reading(engine, conversation)
+    async with asyncio.timeout(10):
+        await writing.wait()
+    read.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await read
+
+    assert not engine._running_activations
+    digest = await engine.conversation(conversation)
+    assert digest is not None
+    assert not digest.state.working
+    assert digest.state.last_ended is ActivationEnding.INTERRUPTED
+    (episode,) = [
+        one for one in await engine.episode_memory.export() if one.id.startswith("activation:")
+    ]
+    assert isinstance(episode, EpisodicMemory)
+    assert episode.processing_record is not None
+    assert episode.processing_record.status is ProcessingStatus.INTERRUPTED
 
 
 @pytest.mark.parametrize("by", ["constructor", "attribute"])
