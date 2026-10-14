@@ -32,7 +32,6 @@ from typer.testing import CliRunner
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import (
     ConfigurationError,
-    DeferralStoreError,
     GrantError,
     InvalidGrantError,
     MemoryStoreError,
@@ -42,8 +41,6 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     ActionPlan,
-    AnswerKind,
-    AnswerOutcome,
     AssociationVerdict,
     Attestation,
     Belief,
@@ -71,16 +68,10 @@ from ai_assistant.core.types import (
     PlanStep,
     ProposedAction,
     Provenance,
-    Question,
-    QuestionState,
     QuietWindow,
     ReadAskOutcome,
-    Retirement,
     SemanticMemory,
-    SuccessorLink,
     ToolDefinition,
-    Warrant,
-    encodable_text,
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.orchestration import (
@@ -674,14 +665,7 @@ def test_a_recorded_ruling_reaches_the_audit_surface_and_nothing_else() -> None:
     on this surface. The set is **extended** rather than relaxed to a superset test,
     because a membership check would stop catching the entry this case exists for.
 
-    ``_render_grantable_decisions`` is the eighth, added by ADR-0235 §8: the listing
-    that tells the user a search was refused renders **recorded rulings** and not
-    confirmations — §5's population-(b) floor is ADR-0186 §7's row floor, and this
-    function delegates each row to ``_render_decision`` rather than growing a second
-    renderer. It is on the audit surface for exactly the reason the seven above are,
-    and its presence here is what keeps the confirmation path holding no ruling.
-
-    ``_rests_on_the_configuration`` is the ninth, added by ADR-0247 §2 (#2256): a
+    ``_rests_on_the_configuration`` is the eighth, added by ADR-0247 §2 (#2256): a
     standing ``ALLOW``'s route is read off the row — ``authorised_subject`` unset and
     the binding's ``closed_loop`` — so that route (c) is rendered as its basis and the
     connection reference ADR-0148 §6 bars from every surface is rendered to nobody. It
@@ -705,7 +689,6 @@ def test_a_recorded_ruling_reaches_the_audit_surface_and_nothing_else() -> None:
         "_render_decision",
         "_refuse_a_page_this_surface_cannot_state",
         "_render_decisions",
-        "_render_grantable_decisions",
         "_render_recorded_egress",
         "_rests_on_the_configuration",
     }
@@ -1430,9 +1413,9 @@ def test_why_marks_an_attested_belief_as_a_source_s_report_not_ours(output: Stri
 
 # --- ADR-0189 §9: the origin reaches the six rendered surfaces ---------------
 #
-# Three of §9's six rendering paths are this module's — ``_why``,
-# ``_render_retirements`` and ``_render_question`` — and each owes a test over an
-# **attested, resolved** subject asserting that *both* ``reported_by`` and
+# ``_why`` is the one of §9's six rendering paths left on this module — the question
+# renderers retired with ``assistant questions`` (ADR-0309 §5) — and it owes a test over
+# an **attested, resolved** subject asserting that *both* ``reported_by`` and
 # ``reported_at`` reach the rendered output. §9 says outright that a test asserting
 # only that a field is populated, or only that the source is named, does not satisfy
 # it, so every one of these reads the console's own bytes.
@@ -2543,9 +2526,9 @@ def test_the_observe_command_is_gone_and_reaches_no_client(
     assert opened == []
 
 
-# --- the old path's turn commands are retired (ADR-0309 §5) ------------------
+# --- the old path's commands are retired (ADR-0309 §5, ADR-0313 §5:1) -------
 
-#: The part of ADR-0309 §5's CLI list that took a turn, parked one, or tended a goal.
+#: ADR-0309 §5's CLI list, and ADR-0313 §5:1's ``remember-recipients``.
 _RETIRED_COMMANDS = (
     "ask",
     "resume",
@@ -2553,6 +2536,12 @@ _RETIRED_COMMANDS = (
     "goals",
     "withdraw-clarification",
     "abandon-goal",
+    "questions",
+    "answer",
+    "forget-question",
+    "authorizations",
+    "revoke-authorization",
+    "remember-recipients",
 )
 
 
@@ -2560,7 +2549,7 @@ _RETIRED_COMMANDS = (
 def test_a_retired_command_is_gone_and_reaches_no_client(
     name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-0309 §5 retires these commands; ``assistant chat`` is how to talk (§5:4).
+    """ADR-0309 §5 and ADR-0313 §5:1 retire these; ``assistant chat`` is how to talk.
 
     Asserted over the registered commands, so a hidden command or an alias that kept
     the name fails here, and by invoking it: an unknown command is a usage error, with
@@ -2650,892 +2639,6 @@ def test_the_forget_prompt_shows_the_warrant_the_user_is_judging(output: StringI
     assert "About to forget this belief" in rendered
     assert "they asked for metric units" in rendered
     assert "an item of evidence stood here and is gone" in rendered
-
-
-# --- the deferred-question surface (ADR-0078 §8, §9) ----------------------
-
-
-class _QuestionEngine:
-    """A stand-in façade over two fixed question lists and one answer."""
-
-    def __init__(
-        self,
-        *,
-        waiting: tuple[Question, ...] = (),
-        stranded: tuple[Question, ...] = (),
-        answer: AnswerOutcome | None = None,
-        forgotten: bool = True,
-    ) -> None:
-        self._waiting = waiting
-        self._stranded = stranded
-        self._answer = answer
-        self._forgotten = forgotten
-        self.answered: list[tuple[str, bool]] = []
-        self.disposed: list[str] = []
-
-    async def questions(self, *, limit: int = 50, offset: int = 0) -> tuple[Question, ...]:
-        """The answerable page, ignoring paging (the façade's own contract covers it)."""
-        return self._waiting
-
-    async def interrupted_questions(
-        self, *, limit: int = 50, offset: int = 0
-    ) -> tuple[Question, ...]:
-        """The interrupted page, which is a *separate* read all the way to here."""
-        return self._stranded
-
-    async def answer(self, question_id: str, *, accept: bool) -> AnswerOutcome:
-        """Record the relayed answer and return the scripted outcome."""
-        self.answered.append((question_id, accept))
-        assert self._answer is not None
-        return self._answer
-
-    async def forget_question(self, question_id: str) -> bool:
-        """Record the disposal and report whether anything was there."""
-        self.disposed.append(question_id)
-        return self._forgotten
-
-    async def start(self) -> None:
-        """The start-up sweeps, which this stand-in has no stores to sweep."""
-
-    async def aclose(self) -> None:
-        """Nothing to release: this stand-in owns no resource."""
-
-
-def _question(  # noqa: PLR0913 — one knob per field a Question carries; that is the point
-    question_id: str = "q-1",
-    *,
-    state: QuestionState = QuestionState.OPEN,
-    retires: tuple[Retirement, ...] = (),
-    successor: SuccessorLink | None = None,
-    band: BeliefBand = BeliefBand.ASSERTED,
-    attestation: Attestation | None = None,
-    rests_on_recorded_external_content: bool = False,
-) -> Question:
-    """One deferred question, as the façade hands it to the adapter.
-
-    ``band``, ``attestation`` and ``rests_on_recorded_external_content`` all describe
-    the **proposal** — the record that would be written if the question were accepted —
-    on the same reading ``band`` already had here, and describe no entry in ``retires``
-    (ADR-0189 §2). Each retirement answers for itself through :func:`_retired`.
-    """
-    return Question(
-        id=question_id,
-        state=state,
-        content="the user works from Lisbon",
-        kind=MemoryKind.SEMANTIC,
-        band=band,
-        rationale="they said so",
-        reason="contradicts a prior user assertion",
-        retires=retires,
-        asked_at=AT,
-        expires_at=AT,
-        successor=successor,
-        attestation=attestation,
-        rests_on_recorded_external_content=rests_on_recorded_external_content,
-    )
-
-
-def _retired(
-    record_id: str = "live-1",
-    *,
-    content: str | None = "the user works from Madrid",
-    band: BeliefBand = BeliefBand.ASSERTED,
-    attestation: Attestation | None = None,
-    rests_on_recorded_external_content: bool = False,
-) -> Retirement:
-    """One record accepting would retire, with the whole warrant or none of it.
-
-    ``content=None`` yields the tombstone ADR-0045 §6 produces and ADR-0189 §2 ties to
-    it: the store hid a closed window, so ``warrant`` is ``None`` too. Every other call
-    builds a whole warrant, because a warrant that exists is always whole (ADR-0189 §3)
-    and ``Warrant``'s own band-keyed validator refuses every combination the band
-    forecloses.
-    """
-    if content is None:
-        return Retirement(record_id=record_id, content=None, warrant=None)
-    return Retirement(
-        record_id=record_id,
-        content=encodable_text(content),
-        warrant=Warrant(
-            band=band,
-            rests_on_recorded_external_content=(
-                True if band is BeliefBand.ATTESTED else rests_on_recorded_external_content
-            ),
-            attestation=attestation,
-        ),
-    )
-
-
-def test_questions_renders_the_question_the_band_it_would_enter_and_what_it_retires(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Everything ADR-0078 §8 requires per question, and the band as a **conditional**.
-
-    A pending question is not a belief of any band (§1): ``band_of`` applied to its
-    proposal says only where the record *would* land if accepted, so the surface must
-    not word it as something held. And what accepting would retire is the exact scope
-    the answer authorises, not decoration — a conflict retired since the question was
-    asked renders as *no longer held* rather than being omitted.
-    """
-    engine = _QuestionEngine(
-        waiting=(
-            _question(
-                retires=(
-                    Retirement(record_id="live-1", content="the user works from Madrid"),
-                    Retirement(record_id="gone-1", content=None),
-                ),
-            ),
-        )
-    )
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(cli.app, ["questions"])
-
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert "q-1" in rendered
-    assert "the user works from Lisbon" in rendered
-    assert "Would be held as" in rendered, "a conditional, never a belief held"
-    assert "not held yet" in rendered
-    assert "contradicts a prior user assertion" in rendered, "why the user is being asked"
-    assert "the user works from Madrid" in rendered, "resolved to content, not an id alone"
-    assert "no longer held" in rendered, "and one that has gone says so"
-    assert "assistant answer q-1" in rendered
-
-
-# --- ADR-0189 §9 on the two question renderers ------------------------------
-
-
-def test_a_retirement_names_the_source_that_reported_it_and_when_it_spoke(
-    output: StringIO,
-) -> None:
-    """ADR-0189 §9's first surface clause, on ``_render_retirements``.
-
-    The attested-and-resolved arm of the required matrix: both ``reported_by`` **and**
-    ``reported_at`` reach the rendered output. §9 is explicit that a test asserting
-    only that a field is populated, or only that the source is named, does not satisfy
-    it, so both are read off the console's own bytes.
-    """
-    cli._render_retirements(
-        _question(retires=(_retired("live-1", band=BeliefBand.ATTESTED, attestation=ATTESTED_BY),))
-    )
-    rendered = _flat(output.getvalue())
-    assert "work-calendar" in rendered, "the reporting source is named"
-    assert "2026-03-02 08:30 UTC" in rendered, "and the instant it spoke"
-    assert "on that source's own clock" in rendered
-
-
-def test_an_attested_retirement_is_presented_as_somebody_elses_words(
-    output: StringIO,
-) -> None:
-    """#673 closed: ADR-0098 §7's first clause, satisfiable for the first time.
-
-    Before ``Retirement.warrant`` existed this list rendered attacker-authorable
-    calendar text under *"Accepting would retire:"* with **no origin marker at all** —
-    the span safely rendered and silently unattributed, on the screen where the user is
-    deciding. ADR-0098 §7 names that as what escalation must not become: "Escalating to
-    the user is not a mitigation if the escalation is where the attacker's sentence is
-    read as ours."
-
-    ADR-0189 §4 makes the presentation conditional on the band, and the marker leads
-    the content rather than trailing it: a marker read *after* the sentence it
-    qualifies has already let that sentence land as ours.
-    """
-    cli._render_retirements(
-        _question(
-            retires=(
-                _retired(
-                    "live-1",
-                    content="dinner with the board on Thursday",
-                    band=BeliefBand.ATTESTED,
-                    attestation=ATTESTED_BY,
-                ),
-            )
-        )
-    )
-    rendered = _flat(output.getvalue())
-    marker = rendered.index("someone else's words")
-    assert marker < rendered.index("dinner with the board"), "the marker leads the span"
-    assert "These are not my words and not yours" in rendered
-
-
-@pytest.mark.parametrize(
-    ("band", "marker", "note"),
-    [
-        pytest.param(
-            BeliefBand.ASSERTED,
-            "your own words",
-            "You told me this",
-            id="asserted",
-        ),
-        pytest.param(
-            BeliefBand.DERIVED,
-            "my own inference",
-            "these are my words rather than a source's",
-            id="derived",
-        ),
-    ],
-)
-def test_a_retirement_that_is_not_attested_is_never_presented_as_third_party(
-    band: BeliefBand, marker: str, note: str, output: StringIO
-) -> None:
-    """ADR-0189 §4's fifth clause, and the mistake it was written to stop recurring.
-
-    "Where ``retirement.warrant`` is present and its band is ``ASSERTED`` or
-    ``DERIVED``, the ``content`` is **not** third-party and no surface presents it as
-    such: an asserted retirement is the user's own word (ADR-0038 §1a) and a derived
-    one is this system's own sentence."
-
-    An earlier draft of ADR-0189 ruled the third-party presentation unconditionally, so
-    a retirement of the user's own assertion would have been rendered as somebody
-    else's words and a retirement of this system's own inference likewise; architecture
-    review found it on round 3. The band inside the warrant is what tells the three
-    apart, and this is the pin that keeps them apart.
-    """
-    cli._render_retirements(_question(retires=(_retired("live-1", band=band),)))
-    rendered = _flat(output.getvalue())
-    assert marker in rendered
-    assert note in rendered
-    assert "someone else's words" not in rendered
-    assert "work-calendar" not in rendered, "and no source is named where none reported it"
-
-
-def test_a_derived_retirement_says_its_warrant_came_from_outside(output: StringIO) -> None:
-    """#1517's first finding, on the retirement path (ADR-0189 §4's third clause).
-
-    §4 names the access path for this projection explicitly, because an earlier draft
-    did not: the two facts are read "from
-    ``retirement.warrant.rests_on_recorded_external_content`` beside
-    ``retirement.warrant.band`` on a ``Retirement``" — ``Retirement`` carries neither of
-    its own, so a clause naming them bare was not implementable, and adversarial review
-    found that on round 3.
-
-    The content stays this system's own sentence on this arm, exactly as it does on the
-    belief line: §4 forbids presenting it as third-party text on the strength of the
-    predicate.
-    """
-    cli._render_retirements(
-        _question(
-            retires=(
-                _retired(
-                    "live-1",
-                    band=BeliefBand.DERIVED,
-                    rests_on_recorded_external_content=True,
-                ),
-            )
-        )
-    )
-    rendered = _flat(output.getvalue())
-    assert "came from a connected source rather than from you" in rendered
-    assert "my own inference" in rendered, "the words are still ours"
-    assert "someone else's words" not in rendered
-
-
-def test_an_unresolved_retirement_renders_no_band_no_origin_and_no_source(
-    output: StringIO,
-) -> None:
-    """ADR-0189 §9's tombstone clause, over the two retirement paths' CLI half.
-
-    §4: where the warrant is ``None`` the retired record no longer resolves —
-    ``content`` is ``None`` too — "and the surface renders it as *no longer held* … and
-    asserts nothing about its band, its origin or its source. It renders no third state
-    as ``False`` and no absence as a value."
-
-    **This is a second test rather than a clause of the first, because the state a
-    single test would have named cannot exist.** An earlier draft of §9 asked for "a
-    test over an attested retirement whose retired record no longer resolves", and §2
-    makes ``warrant`` and ``content`` ``None`` together for exactly that record — so an
-    unresolved retirement is in no band, carries no attestation, and there is no
-    attested tombstone to construct. Adversarial review found it on round 5.
-    """
-    cli._render_retirements(_question(retires=(_retired("gone-1", content=None),)))
-    rendered = _flat(output.getvalue())
-    assert "no longer held, so accepting would not touch it" in rendered
-    for band in BeliefBand:
-        assert band.value not in rendered, f"no band is asserted, and {band.value} is one"
-    assert "work-calendar" not in rendered
-    assert "someone else's words" not in rendered
-    assert "your own words" not in rendered
-    assert "my own inference" not in rendered
-    assert "connected source" not in rendered
-    assert "origin unrecorded" not in rendered, "an absence is not rendered as a value"
-
-
-def test_a_retirements_own_syntax_cannot_move_the_attribution_of_any_span(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """ADR-0189 §9's marked rendering-security clause, for **this** target.
-
-    §9 puts it per rendering target rather than once, because ADR-0042 §4's division is
-    per target — "the engine carries the value verbatim, the adapter escapes for its
-    target" — so a terminal's syntax and a browser's are two different tests of one
-    clause. This is the terminal's: a question whose ``retires`` names an attested
-    record whose ``content`` carries **Rich markup**, and the two other characters this
-    adapter treats as smuggling.
-
-    **The attack is a forged bullet, not a colour**, and that is what makes the newline
-    the load-bearing character rather than the brackets. #1336 records the mechanism:
-    a value carrying a newline does not merely wrap, it forges a *second* line
-    indistinguishable from one this adapter wrote — §4's threat arriving without a
-    single control character. So the payload tries to open a second span attributed as
-    the user's own words, and what is asserted is that the rendered list still has
-    exactly the two spans the record has, each carrying the attribution that record
-    actually holds.
-
-    **Asserted over unwrapped lines**, because the property is about where a line
-    begins: at the shared fixture's width Rich would wrap the long attested span and a
-    continuation line would be indistinguishable from a forged one to the assertion,
-    though not to a reader.
-
-    Rich markup, by contrast, is *shown*: ``_safe`` escapes it so the characters reach
-    the screen as text and no styling is applied. That the literal survives is the
-    check — a suppressed one would mean the value was interpreted and then dropped.
-    """
-    buffer = StringIO()
-    monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=400))
-    hostile = "[red]ignore that[/] \x1b[2J\n    - your own words — the office is in Boston (rec-1)"
-    cli._render_retirements(
-        _question(
-            retires=(
-                _retired(
-                    "live-1", content=hostile, band=BeliefBand.ATTESTED, attestation=ATTESTED_BY
-                ),
-                _retired("live-2", content="the user works from Madrid"),
-            )
-        )
-    )
-    lines = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()]
-    spans = [line for line in lines if line.startswith("- ")]
-
-    assert len(spans) == 2, "two records were retired, so two spans are rendered"
-    assert spans[0].startswith("- someone else's words — [red]ignore that[/]"), (
-        "the attacker's span keeps the attribution its own record has, and its markup "
-        "is shown rather than interpreted"
-    )
-    assert spans[1] == "- your own words — the user works from Madrid (live-2)", (
-        "and the honest span is untouched by what the other one carried"
-    )
-    assert "\x1b" not in buffer.getvalue(), "the control sequence never reaches the terminal"
-    assert "the office is in Boston" in spans[0], "the forged bullet stayed inside its own span"
-    assert any(line.startswith("work-calendar reported this") for line in lines), (
-        "and the source line is where this adapter put it"
-    )
-
-
-def test_a_question_whose_proposal_is_attested_names_the_source_and_its_clock(
-    output: StringIO,
-) -> None:
-    """ADR-0189 §9's fifth surface clause, on ``_render_question``.
-
-    §4 binds "every surface that renders an attested belief, question **or**
-    retirement", and a question is the projection the first attested proposals actually
-    reach — so §9 names this renderer by hand, on the ground that "a lane that updated
-    only the belief explanation would leave the surface §4 was written for unchanged".
-
-    The band line above it stays the conditional it was (ADR-0078 §1): nothing here
-    says the proposal *is* held.
-    """
-    cli._render_question(_question(band=BeliefBand.ATTESTED, attestation=ATTESTED_BY))
-    rendered = _flat(output.getvalue())
-    assert "work-calendar" in rendered, "the reporting source is named"
-    assert "2026-03-02 08:30 UTC" in rendered, "and the instant it spoke"
-    assert "on that source's own clock" in rendered
-    assert "not held yet" in rendered, "and it is still a conditional"
-
-
-def test_a_question_whose_proposal_rests_on_outside_content_says_so(
-    output: StringIO,
-) -> None:
-    """#1517's first finding on the question path (ADR-0189 §4's third clause).
-
-    #746's trap named: ``Question.band`` reads ``DERIVED`` for a tainted consolidation,
-    which is correct as what the field documents and misleading as a statement about
-    warrant, since ``DERIVED`` is glossed as "we worked it out". A surface rendering
-    only the band tells the user this is the assistant's own inference at the moment it
-    is not entirely — and the structured field is what lets this line exist at all,
-    rather than a sentence a client has to parse.
-    """
-    cli._render_question(
-        _question(band=BeliefBand.DERIVED, rests_on_recorded_external_content=True)
-    )
-    rendered = _flat(output.getvalue())
-    assert "came from a connected source rather than from you" in rendered
-    assert "someone else's words" not in rendered
-
-
-@pytest.mark.parametrize(
-    "band",
-    [
-        pytest.param(BeliefBand.ASSERTED, id="asserted"),
-        pytest.param(BeliefBand.DERIVED, id="derived"),
-    ],
-)
-def test_an_attestation_outside_the_attested_band_promotes_no_proposal(
-    band: BeliefBand, output: StringIO
-) -> None:
-    """ADR-0072 §4: nothing acquires the standing of a band it is not in by decorating.
-
-    ADR-0189 §2 adds no cross-field validator to ``Question`` — those are ratified types
-    with construction sites in the tree, and ADR-0086 §3's admissibility test refuses a
-    validator that would refuse what already works — so ``Question(band=ASSERTED,
-    attestation=…)`` is model-valid and reaches this surface.
-
-    A renderer keyed on the attestation's **presence** would then introduce the user's
-    own word as a connected source's report, which is exactly the laundering ADR-0072 §4
-    names one type over: classification is keyed on the source and never on a
-    decoration, so "an attestation on an ``INFERRED`` record would be the same
-    laundering by a different field — a derived guess wearing a citation to a system
-    that never reported it". The band is the classifier, and this keeps it the
-    classifier here.
-    """
-    cli._render_question(_question(band=band, attestation=ATTESTED_BY))
-    rendered = _flat(output.getvalue())
-    assert "work-calendar" not in rendered
-    assert "connected source reported it" not in rendered
-    assert f"Would be held as: {band.value}" in rendered, "and the band is unchanged"
-
-
-def test_an_attested_proposal_with_no_attestation_says_what_reached_it(
-    output: StringIO,
-) -> None:
-    """The off-contract arm on this path, answered as ``_why`` answers its own.
-
-    Constructable for the same reason, and it must draw neither of the two available
-    lies: claiming the attestation was **not recorded**, which errs in the direction
-    ADR-0073 §4 forgives least on the one band whose whole purpose is provenance, or
-    saying nothing at all — which would leave the attested arm silent on the very
-    surface ADR-0189 §9 names to stop that.
-    """
-    cli._render_question(_question(band=BeliefBand.ATTESTED))
-    rendered = _flat(output.getvalue())
-    assert "does not name that source or say when it spoke" in rendered
-    assert "not recorded" not in rendered
-
-
-def test_a_questions_own_origin_never_answers_for_what_it_would_retire(
-    output: StringIO,
-) -> None:
-    """ADR-0189 §2's fourth clause, which is the one a renderer would run together.
-
-    "On ``Question``, both fields describe the **proposal** … and describe no entry in
-    ``retires``. Each entry in ``retires`` answers for itself through its own
-    ``warrant``." The case that makes it concrete is the ordinary one #673 describes: a
-    user's own assertion, which the policy defers, retiring an attested calendar line.
-    The proposal is ``ASSERTED`` with no attestation; the retirement is ``ATTESTED``
-    with one — so the source is named exactly once, against the retirement, and the
-    proposal is not decorated with a report it never had.
-    """
-    cli._render_question(
-        _question(retires=(_retired("live-1", band=BeliefBand.ATTESTED, attestation=ATTESTED_BY),))
-    )
-    rendered = _flat(output.getvalue())
-    assert "Where it came from:" not in rendered, "an asserted proposal has no origin line"
-    assert rendered.count("work-calendar") == 1, "the source is named against the retirement"
-    assert "someone else's words" in rendered
-    assert "Would be held as: asserted" in rendered, "and the proposal is still the user's"
-
-
-def test_questions_says_nothing_is_waiting_when_both_lists_are_empty(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An empty surface says so rather than printing an empty heading."""
-    _wire(monkeypatch, _QuestionEngine())
-
-    result = CliRunner().invoke(cli.app, ["questions"])
-
-    assert result.exit_code == 0
-    assert "Nothing is waiting" in output.getvalue()
-
-
-def test_questions_keeps_the_interrupted_list_separate_and_offers_no_retry(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """§8's two enumerations stay separate, and §9's rendering is the honest one.
-
-    An interrupted question is **not answerable**, so it must not be offered beside the
-    ones that are. What it says is that an answer was begun and its outcome is not
-    recorded — the actual epistemic situation — plus §9's two recovery steps in order.
-    There is deliberately **no verb that claims to retry an apply**: the system does not
-    know whether the write landed, and a verb implying it does would be the one
-    dishonest line on this surface.
-    """
-    engine = _QuestionEngine(
-        waiting=(_question("q-open"),),
-        stranded=(_question("q-stuck", state=QuestionState.INTERRUPTED),),
-    )
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(cli.app, ["questions"])
-
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert "1 question(s) waiting" in rendered
-    assert "1 interrupted answer(s)" in rendered, "a separate section, not one merged list"
-    assert "outcome was never recorded" in rendered
-    assert "nothing to retry" in rendered
-    assert "assistant forget-question q-stuck" in rendered, "step 1, named"
-    assert "tell me again in 'assistant chat'" in rendered, "step 2, named"
-    assert "assistant answer q-stuck" not in rendered, "an interrupted question is not answerable"
-    assert "assistant answer q-open" in rendered, "the answerable one still is"
-
-
-def test_a_pasted_question_hint_names_the_question_it_was_printed_for(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Both hints on this surface have to survive being pasted (#984).
-
-    ``Identifier`` strips a question id but does not forbid an interior space, so an
-    unquoted hint for ``q 1`` renders a *valid* command against the wrong argument:
-    ``assistant answer q 1 --accept`` answers ``q``. That is a wrong action rather
-    than an error, which is what makes it worth a test — ``_safe`` answers a different
-    question (Rich markup and control characters) and cannot catch it.
-
-    Asserted by parsing each line the way a shell would rather than by matching quote
-    characters, so it holds whichever quoting form ``shlex`` picks.
-    """
-    engine = _QuestionEngine(
-        waiting=(_question("q 1"),),
-        stranded=(_question("q 2", state=QuestionState.INTERRUPTED),),
-    )
-    _wire(monkeypatch, engine)
-
-    assert CliRunner().invoke(cli.app, ["questions"]).exit_code == 0
-
-    rendered = _flowed(output.getvalue())
-    assert _pasted(rendered, "assistant answer", "--accept") == ["assistant", "answer", "q 1"]
-    assert _pasted(rendered, "assistant forget-question", "2. Check") == [
-        "assistant",
-        "forget-question",
-        "q 2",
-    ]
-
-
-@pytest.mark.parametrize("unshowable", ["\n", "\t"], ids=["replaced", "expanded"])
-def test_a_question_hint_is_withheld_where_showing_it_would_change_what_it_says(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch, unshowable: str
-) -> None:
-    """Quoting settles where an argument ends, not whether it survives being shown.
-
-    Two ways a value fails to reach the screen intact, and the hint has to go for both.
-    ``_safe`` **replaces** a character a terminal must not be handed, so an id carrying
-    a newline renders as ``q�1``; Rich **expands** a tab, which ``_safe`` deliberately
-    keeps, so an id tabbed in the middle renders with spaces. Either way the line is
-    perfectly quoted
-    and names a question that does not exist — the failure quoting was added to prevent,
-    arriving one step later and looking like a working instruction rather than a
-    mistake (#1013).
-
-    The question still renders and both recovery steps keep their numbers: what is
-    withheld is the copyable command, and the replacement says so rather than leaving a
-    gap the reader has to notice. Asserted as the *absence of an offered argument*
-    rather than against one mangled spelling, so one case can cover both mechanisms.
-    """
-    _wire(
-        monkeypatch,
-        _QuestionEngine(
-            waiting=(_question(f"q{unshowable}1"),),
-            stranded=(_question(f"q{unshowable}2", state=QuestionState.INTERRUPTED),),
-        ),
-    )
-
-    assert CliRunner().invoke(cli.app, ["questions"]).exit_code == 0
-
-    rendered = _flowed(output.getvalue())
-    assert "the user works from Lisbon" in rendered, "the question itself still renders"
-    assert "2. Check" in rendered, "the second recovery step keeps its number"
-    assert rendered.count("cannot show") == 2, "one per withheld hint, not one for the page"
-    assert "assistant answer '" not in rendered, "no argument is offered at all"
-    assert "assistant forget-question '" not in rendered
-
-
-def test_the_follow_up_hint_is_withheld_where_the_successors_id_cannot_be_shown(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The re-deferral line still names the successor; only its command goes (#1013).
-
-    Naming it is ADR-0078 §9's requirement and does not depend on the id being
-    copyable — a user who cannot paste the command still needs to know their answer
-    raised a question. So the two renderings part company here: the name stays and the
-    offer goes, which is the same split the quoting case makes for the opposite reason.
-    """
-    _wire(
-        monkeypatch,
-        _QuestionEngine(
-            answer=AnswerOutcome(
-                kind=AnswerKind.REDEFERRED,
-                question_id="q-1",
-                successor=SuccessorLink(id="q\n2", state=QuestionState.OPEN),
-            )
-        ),
-    )
-
-    assert CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"]).exit_code == 0
-
-    rendered = _flowed(output.getvalue())
-    assert "Here is the follow-up" in rendered, "the successor is still named"
-    assert "cannot show" in rendered
-    assert "assistant answer " + shlex.quote("q�2") not in rendered
-
-
-@pytest.mark.parametrize(
-    ("state", "expected"),
-    [
-        (QuestionState.OPEN, "which is waiting"),
-        (QuestionState.DECLINED, "already declined"),
-        (QuestionState.INTERRUPTED, "another interrupted answer"),
-        (QuestionState.APPLIED, "since settled"),
-    ],
-    ids=["waiting", "declined", "interrupted", "settled"],
-)
-def test_questions_renders_a_stranded_parents_successor_by_that_rows_own_state(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch, state: QuestionState, expected: str
-) -> None:
-    """§9's cancellation residue, rendered honestly per state.
-
-    Where the parent already names a successor — a cancellation caught after the
-    re-deferral admitted one — "the surface shows that row too, rendered by its own
-    state: a ``PENDING`` one is the question their answer raised and they can go answer
-    it; a ``REJECTED`` or ``APPLYING`` one is not, and says what it needs instead."
-    Naming it without its state would advertise something the user cannot act on.
-    """
-    engine = _QuestionEngine(
-        stranded=(
-            _question(
-                "q-stuck",
-                state=QuestionState.INTERRUPTED,
-                successor=SuccessorLink(id="q-next", state=state),
-            ),
-        )
-    )
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(cli.app, ["questions"])
-
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert "q-next" in rendered
-    assert expected in rendered
-
-
-def test_questions_reports_a_read_failure_with_a_nonzero_exit(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """One error boundary per command, mapped to an exit code (ADR-0042 §7)."""
-
-    class _Failing(_QuestionEngine):
-        async def questions(self, *, limit: int = 50, offset: int = 0) -> tuple[Question, ...]:
-            msg = "the queue would not open"
-            raise DeferralStoreError(msg)
-
-    _wire(monkeypatch, _Failing())
-
-    result = CliRunner().invoke(cli.app, ["questions"])
-
-    assert result.exit_code == 1
-    assert "would not open" in output.getvalue()
-
-
-@pytest.mark.parametrize(
-    ("flag", "accept"), [("--accept", True), ("--reject", False)], ids=["accept", "reject"]
-)
-def test_answer_relays_the_binary_choice_untouched(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch, flag: str, accept: bool
-) -> None:
-    """The adapter conveys consent and authors nothing (ADR-0042 §6, ADR-0078 §8).
-
-    Binary on purpose: an amendment is a new proposal and ``learn`` already is one, so
-    a free-text answer here would be a second correction path wearing a confirmation's
-    clothes.
-    """
-    engine = _QuestionEngine(
-        answer=AnswerOutcome(kind=AnswerKind.APPLIED, question_id="q-1", record_id="rec-9")
-        if accept
-        else AnswerOutcome(kind=AnswerKind.REJECTED, question_id="q-1")
-    )
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(cli.app, ["answer", "q-1", flag])
-
-    assert result.exit_code == 0
-    assert engine.answered == [("q-1", accept)]
-
-
-def test_answer_requires_an_explicit_choice() -> None:
-    """Neither flag is a usage error: there is no default answer to a question."""
-    result = CliRunner().invoke(cli.app, ["answer", "q-1"])
-
-    assert result.exit_code == 2
-
-
-def test_answer_renders_an_applied_correction_with_the_record_it_left_live(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The exit test's last mile, at the surface."""
-    _wire(
-        monkeypatch,
-        _QuestionEngine(
-            answer=AnswerOutcome(kind=AnswerKind.APPLIED, question_id="q-1", record_id="rec-9")
-        ),
-    )
-
-    result = CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"])
-
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert "Applied" in rendered
-    assert "rec-9" in rendered
-
-
-def test_answer_renders_a_re_deferral_as_a_completed_answer_with_the_next_question(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """§8: rendering a re-deferral as a failure "would be the same lie in a smaller place".
-
-    The answer *was* used — it raised a successor — so the user is handed the next
-    question rather than told their answer went nowhere.
-    """
-    _wire(
-        monkeypatch,
-        _QuestionEngine(
-            answer=AnswerOutcome(
-                kind=AnswerKind.REDEFERRED,
-                question_id="q-1",
-                successor=SuccessorLink(id="q-2", state=QuestionState.OPEN),
-            )
-        ),
-    )
-
-    result = CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"])
-
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert "Your answer was used" in rendered
-    assert "Here is the follow-up" in rendered
-    assert "q-2" in rendered
-
-
-def test_the_follow_up_is_named_plainly_and_offered_quoted(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """One id, two renderings, and only the copyable one is quoted (#984).
-
-    The re-deferral line both *names* the successor and *offers* a command for it.
-    The name is read, so it is shown as the id is; the command is pasted, so it is
-    shown as a shell would need it. Quoting the name too would have the user reading
-    quote characters as part of an id they may go and type somewhere else.
-    """
-    _wire(
-        monkeypatch,
-        _QuestionEngine(
-            answer=AnswerOutcome(
-                kind=AnswerKind.REDEFERRED,
-                question_id="q-1",
-                successor=SuccessorLink(id="q 2", state=QuestionState.OPEN),
-            )
-        ),
-    )
-
-    assert CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"]).exit_code == 0
-
-    rendered = _flowed(output.getvalue())
-    assert "Here is the follow-up: q 2 " in rendered, "named as the id reads"
-    assert _pasted(rendered, "assistant answer", "--accept") == ["assistant", "answer", "q 2"]
-
-
-def test_answer_says_no_follow_up_could_be_queued_rather_than_naming_one(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The one sentence ADR-0078 cannot write, refused at the surface (§9).
-
-    "Saying 're-deferred' there would claim a question was asked when none was." The
-    queue was full and this admission had no exemption to spend, so the line names the
-    queue.
-    """
-    _wire(
-        monkeypatch,
-        _QuestionEngine(
-            answer=AnswerOutcome(
-                kind=AnswerKind.REDEFERRED,
-                question_id="q-1",
-                successor=None,
-                successor_refused=True,
-                disposed=True,
-            )
-        ),
-    )
-
-    result = CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"])
-
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert "queue is full" in rendered
-    assert "could not put the follow-up" in rendered
-    assert "destroyed while your answer was being applied" in rendered
-
-
-def test_answer_reports_a_stale_answer_without_calling_the_user_slow(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """§6: ``STALE`` is not a lapsed deadline, and the line must not read as one."""
-    _wire(
-        monkeypatch, _QuestionEngine(answer=AnswerOutcome(kind=AnswerKind.STALE, question_id="q-1"))
-    )
-
-    result = CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"])
-
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert "no longer applies" in rendered
-    assert "too slow" not in rendered
-
-
-def test_answer_reports_a_question_that_is_not_open_with_a_nonzero_exit(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An id naming nothing open is reported and mapped to an exit code (§7)."""
-    _wire(
-        monkeypatch,
-        _QuestionEngine(answer=AnswerOutcome(kind=AnswerKind.NOT_OPEN, question_id="q-1")),
-    )
-
-    result = CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"])
-
-    assert result.exit_code == 1
-    assert "not open" in output.getvalue()
-
-
-def test_forget_question_destroys_it_and_says_what_it_does_not_undo(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """§9's first recovery step, and the honest half of what it does not do.
-
-    Destroying the question does not undo a memory write an interrupted answer may
-    already have made — and the surface cannot say whether one landed, so it points at
-    ``beliefs`` rather than guessing.
-    """
-    engine = _QuestionEngine()
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(cli.app, ["forget-question", "q-1"])
-
-    assert result.exit_code == 0
-    assert engine.disposed == ["q-1"]
-    rendered = _flat(output.getvalue())
-    assert "Forgotten" in rendered
-    assert "assistant beliefs" in rendered
-    assert "cannot tell you whether that write landed" in rendered
-
-
-def test_forget_question_reports_an_id_naming_nothing_with_a_nonzero_exit(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``False`` is rendered and mapped to an exit code, as ``forget`` does (§7)."""
-    _wire(monkeypatch, _QuestionEngine(forgotten=False))
-
-    result = CliRunner().invoke(cli.app, ["forget-question", "q-1"])
-
-    assert result.exit_code == 1
-    assert "Nothing to forget" in _flowed(output.getvalue())
 
 
 # --- the grant surface (ADR-0102 §1, §6, §9) --------------------------------
@@ -4581,8 +3684,6 @@ def _id_invocations(value: str) -> tuple[tuple[str, list[str]], ...]:
     """
     return (
         ("forget", ["forget", value, "--yes"]),
-        ("answer", ["answer", value, "--accept"]),
-        ("forget-question", ["forget-question", value]),
         ("forget-conversation", ["forget-conversation", value, "--yes"]),
         ("dismiss", ["dismiss", value]),
         ("forget-notification", ["forget-notification", value]),
@@ -4731,8 +3832,6 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
     # Asserted as a mapping rather than with `all(...)`, so a failure names the
     # parameter that is missing its callback instead of reporting `False`.
     assert carried == {
-        "answer:question_id": True,
-        "authorizations:goal_id": True,
         # ADR-0293's chat space: `chat --conversation` is an id spelled without an
         # `_id` suffix, named here for the reason above.
         "chat:conversation": True,
@@ -4746,10 +3845,7 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
         "forget:belief_id": True,
         "forget-conversation:conversation_id": True,
         "forget-notification:notification_id": True,
-        "forget-question:question_id": True,
-        "remember-recipients:decision_id": True,
         "revoke-destination-trust:record_id": True,
-        "revoke-authorization:authorization_id": True,
         "revoke-recipient-grant:grant_id": True,
         "stop:activation_id": True,
         "trust-destinations:decision_id": True,

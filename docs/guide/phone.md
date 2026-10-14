@@ -40,11 +40,9 @@ What the certificate buys is a **secure context**, and nothing about the wire
 changes to get it. The overlay already encrypted every byte end to end between
 the two devices and it still does; what was missing was that the browser had no
 way to *know* it, so it withheld the capabilities it reserves for trustworthy
-origins — microphone capture among them. With the classification in hand it
-stops withholding them.
+origins. With the classification in hand it stops withholding them.
 
-Step 8 is what that buys: holding a button on the phone and speaking. Entering a
-credential is still a loopback-only act, on a separate rule of its own
+Entering a credential is still a loopback-only act, on a separate rule of its own
 (ADR-0177 §3).
 
 ## 1. Put both devices on one overlay network
@@ -136,9 +134,8 @@ to buy (ADR-0202 §1).
 As in step 1, the requirement is a property rather than a vendor: an overlay
 that obtains, for a name it assigns, a certificate from an authority the
 browsing device already trusts out of the box. One that runs its own private
-authority does not satisfy it — you would get the same warning and the same
-withheld microphone, which is the self-signed route by a longer road (ADR-0202
-§1).
+authority does not satisfy it — you would get the same warning, which is the
+self-signed route by a longer road (ADR-0202 §1).
 
 **The key is a secret, and the certificate's integrity matters too.** The key is
 of the same class as the memory database, so it lives owner-only:
@@ -351,124 +348,14 @@ off the laptop screen is the boring answer and a perfectly good one.
 
 ## 8. Talk to it
 
-**Hold to talk** is under the Ask box. Hold it down, speak, and let go — the
-recording goes up when you release, and the answer comes back on that same
-request. There is nothing to press to stop and nothing to press to send.
+The chat is the same on the phone as on the laptop. Press **Chat** under
+*Talk*, then **Start a conversation** or pick one from the list, type into
+*Message* and press **Send**. The reply arrives in the conversation as a message
+of its own.
 
-You get three things back, and they are three different statements.
-
-- **`Heard: …`**, under the button. That is the transcript the hub worked from,
-  shown every time it got one. It is there so that an answer to the wrong
-  question is something you can see the cause of rather than guess at — if it
-  misheard you, that line is where it says so.
-- **The answer**, in the panel below, exactly as a typed question's answer
-  appears. It is the same rendering: a spoken turn is an ordinary turn that
-  arrived by a different door.
-- **The answer spoken aloud**, played as it arrives. Holding the button again
-  stops it: a press is an interrupt, so an answer you have already read is one
-  you can talk over rather than wait out. The page says where the sound stopped,
-  because the words on screen are the same either way.
-
-  **A press that then asks nothing gives the answer back.** Let go without having
-  said anything — the brush against the button in a pocket, which is the way this
-  usually happens — and the answer picks up from where the sound stopped instead
-  of staying stopped. The recording still goes up and comes back empty, because
-  that is how the page learns you said nothing, so there is the ordinary
-  `Sending…` gap first and then the answer plays on from where it was. It is the
-  same answer continued, not a new one: nothing is re-asked and no turn runs, and
-  the page swaps its "this answer stopped being spoken" sentence for one saying
-  so.
-
-  **The press has to have recorded something**, though. A tap too brief to record
-  at all is answered by the page rather than the hub — "that press was too short
-  to record anything, so nothing was sent" — and there is nothing coming back for
-  the answer to resume on. The same holds wherever the recording is not sent or
-  the answer cannot be taken up again: a press that ran past the longest
-  recording this page holds, a request that never came back, a browser that has
-  taken the audio away, a later answer that has replaced that one. In each of
-  those the earlier sentence stands and the answer is simply the one on screen.
-
-**And the assistant is told what you actually heard.** When you press again, the
-page tells the hub how much of the previous answer played — "3.2 of 9.8 seconds,
-interrupted" — and the hub records that against that turn. So the assistant does
-not build on words you cut off, and "carry on with what you were saying" is an
-ordinary thing to ask: it picks up from about where the sound stopped, in fresh
-words rather than by replaying anything. Where nothing is reported — you
-interrupted and then put the phone down — the record says *unknown*, which is
-never read as heard.
-
-What crosses is two numbers and one word: how long it played, how long the whole
-answer was, and whether it finished or was cut off. No audio, no transcript, and
-no position in the words.
-
-**On an iPhone, the ring/silent switch silences it.** If the answer is on screen
-and you hear nothing, check that switch before anything else — the phone mutes
-this page's audio while it is on silent, with the volume up and nothing on the
-page able to tell.
-
-Two things it says instead, and neither is something going wrong.
-
-- **"I heard nothing in that recording"** — the press caught no words. Nothing
-  was asked, so nothing was answered and no conversation was started. If that
-  press stopped an answer being spoken, this is the case above where the answer
-  picks up again.
-- **"That answer is shown here and was not spoken"** — the answer is complete
-  and on screen, and only the audio is missing. Speech is composed after the
-  answer is, so a failure there costs you the sound and never the answer.
-
-**Nothing about your voice is kept.** The recording exists for the length of the
-call and is written to no store, no log and no trail — not by the browser, not by
-the gateway, and not by the hub.
-
-**The page runs no speech engine of its own.** It does not use your browser's
-dictation or its speech synthesis: what is transcribed and what is spoken are the
-hub's, which is what lets the assistant's ruling about what may be said aloud
-apply to the loudspeaker rather than to a text box.
-
-**If the button is there but greyed out**, the page says why underneath it. The
-usual cause is the origin: a browser hands a microphone only to a page it
-considers secure, which is this `https://` one and the laptop's own
-`http://127.0.0.1` one — and no other. Typing works everywhere.
-
-## 9. It can speak a notification, but only after you have spoken to it
-
-A notification arrives in the panel while the page is open, and some of them are
-spoken aloud as well. Which ones is the assistant's ruling and not the page's:
-one kind of notification is placed as speakable — an upcoming event from your
-calendar — and every other kind arrives on screen without a sound. Nothing you
-can set here changes that, and a notification the ruling withheld from the
-loudspeaker is not marked as withheld: it simply arrives the way a notification
-arrived before any of this.
-
-**It will not speak until you have held the button at least once since the page
-loaded.** That is a browser rule rather than a choice. A page may only build the
-audio machinery it needs inside a gesture you made — a press, a tap — so a tab
-you opened and never spoke to has no way to make a sound at all, however much it
-would like to. The honest description is that the assistant speaks *proactively*
-and never *spontaneously*: it speaks up in a conversation you have already
-started, not out of a page you left open on a shelf.
-
-**And it will not speak over anything.** If an answer is still being spoken, or
-another notification is, the new one arrives on screen and stays silent — it is
-not queued up to be said afterwards, and it is not saved for later. The words
-are on the page, which is where a notification lives either way.
-
-**Holding the button stops it**, exactly as it stops an answer. A notification is
-the interruptible one of the two: what you are saying wins over what the
-assistant volunteered.
-
-**Nothing about any of this goes anywhere.** Whether this page was able to play,
-whether it played, whether it finished, whether you cut it off — none of it is
-sent to the hub, recorded, or used to decide anything. Playing a notification is
-not the same as acknowledging it, and the assistant learns nothing from the
-loudspeaker.
-
-**If you hear nothing at all**, the ring/silent switch is the first thing to
-check, for the same reason it is for an answer. The second is whether this
-browser can play the audio it was sent: one notification carries one recording in
-one format, and a browser that cannot decode that format shows the notification
-and says nothing. There is no message for that case, because there is nothing
-wrong — the notification arrived, and you are reading it.
+There is no push-to-talk and nothing is spoken: speaking to the assistant retired
+at the cutover and will return as a decision of its own (ADR-0313 §3). A
+notification arrives in the *Notifications* panel as text, with no sound.
 
 ## Why your phone had to be listed
 
@@ -530,16 +417,6 @@ name. Type the `https://` origin with the name in it, from step 5's line. Do not
 click through the warning: the browser's refusal is the mechanism this whole page
 exists to obtain, and overruling it gives back exactly what the certificate
 bought.
-
-**The button says the browser will not hand the page a microphone.** You are on
-an origin the browser does not consider secure — most often `http://` at the
-numeric address rather than the `https://` name from step 5. The remedy is step
-6's: type the origin with the scheme and the name in it.
-
-**You held the button and it says "this browser would not start recording".**
-The microphone opened and the encoder refused it. Hold it again; if it keeps
-happening, that browser cannot record either of the two formats this surface
-carries, and typing is the way in on that device.
 
 **You want the local browser back and the certificate has lapsed.** Unset
 `ASSISTANT_GATEWAY_REMOTE_ADDRESS` together with both TLS paths and restart. The

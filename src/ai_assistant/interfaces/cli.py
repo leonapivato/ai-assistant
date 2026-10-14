@@ -24,19 +24,6 @@ could pass off as a warrant.
 not because anything here filters it, but because the store hides a stamped
 conversation from every read that presents one.
 
-``questions``, ``answer`` and ``forget-question`` are the deferred-question surface
-(ADR-0078 §8): a memory decision the gate would not make without the user's word now
-waits durably, and this is where it reaches them. The two enumerations stay
-**separate** — the answerable questions, and the ones whose answer was begun and whose
-outcome was never recorded — because an interrupted question is not answerable and
-offering it beside the others would present a claim that cannot be taken. Answering is
-binary; there is deliberately **no verb that claims to retry an apply**, because the
-system does not know whether the interrupted write landed and a verb implying it does
-would be the one dishonest line on this surface. This module renders what the engine
-computed and mints no authority: the ``UserConfirmation`` an accept carries is
-constructed in `orchestration`, from a claim, and an adapter can neither build one nor
-see one.
-
 ``sources``, ``grant``, ``revoke`` and ``grants`` are the grant surface (ADR-0097
 §9, ADR-0102 §1): the four operations by which a person connects a source, says
 what may be read from it, withdraws that, and reads back what they decided. A
@@ -252,18 +239,12 @@ from ai_assistant.core.errors import (
     DeviceRefusedError,
     DisplacedProvisioningError,
     DuplicateDestinationTrustError,
-    DuplicateRecipientGrantError,
     IncompleteProvisioningError,
     InvalidDestinationTrustError,
-    InvalidRecipientGrantError,
     InvalidResolutionError,
     OversizedValueError,
-    PermissionDeniedError,
     ProvisioningOutcomeUnknownError,
-    RecipientGrantCeilingError,
-    RecipientGrantError,
     ResidualCredentialError,
-    UngrantableActError,
     UnknownConnectionError,
     UntrustableDestinationError,
     UnusableIdentityError,
@@ -278,12 +259,8 @@ from ai_assistant.core.types import (
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEnding,
     ActivationStop,
-    AnswerKind,
-    AuthorizationSettlement,
-    AuthorizationView,
     Belief,
     BeliefBand,
-    BoundKind,
     ChannelIdentity,
     ChatDevice,
     ChatStreamEnd,
@@ -292,7 +269,6 @@ from ai_assistant.core.types import (
     ConversationStartedChange,
     CostBasis,
     CoverageUnrecordedBinding,
-    CoverageView,
     DeletedMessage,
     DestinationTrustRecord,
     DeviceAccess,
@@ -313,8 +289,6 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     ProcessingStatus,
     ProvisioningState,
-    Question,
-    QuestionState,
     QuietWindow,
     ReadOutcome,
     RecipientGrant,
@@ -330,7 +304,6 @@ from ai_assistant.core.types import (
     ToolOutcome,
     TranscriptMessage,
     UserMessage,
-    ValueBound,
     check_story_page,
     encodable_text,
     secret_value,
@@ -366,7 +339,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.core.types import (
-        AnswerOutcome,
         BeliefSummary,
         CanonicalDestination,
         ChatChange,
@@ -386,7 +358,6 @@ if TYPE_CHECKING:
         ToolCost,
         ToolInvocation,
         TranscriptPage,
-        Warrant,
     )
 
 app = typer.Typer(
@@ -888,71 +859,6 @@ def _positive_page_argument(value: int) -> int:
         msg = f"must be between 1 and {_PAGE_BOUND - 1}"
         raise typer.BadParameter(msg)
     return value
-
-
-def _parsed_instant(value: str) -> datetime:
-    """Parse an ISO 8601 instant, refusing one that carries no offset (ADR-0235 §9).
-
-    **The surface attributes no offset and reads no timezone of its own.** ADR-0023
-    §3 names *"a datetime a user typed meaning their own wall clock"* as exactly the
-    value for which attribution **fabricates** a fact rather than restoring one, and
-    puts attribution in the adapter that *knows* the offset — which this one does
-    not. The user is stating when a standing authorisation ends, and a surface that
-    guessed a zone would date it by an hour the user never gave.
-
-    Refusing rather than accepting-and-changing is :func:`_quiet_window`'s rule one
-    type over, and refusing during Typer's parameter parsing is
-    :func:`_page_argument`'s shape: it makes this a usage error with a controlled
-    exit code rather than a traceback out of a command's error boundary (ADR-0042
-    §7).
-
-    Args:
-        value: The instant as the user typed it.
-
-    Returns:
-        The instant, timezone-aware.
-
-    Raises:
-        BadParameter: If it is not an ISO 8601 timestamp, or carries no offset.
-    """
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError as exc:
-        msg = (
-            "must be an ISO 8601 timestamp with an explicit offset, "
-            "like 2026-10-01T09:00:00Z or 2026-10-01T11:00:00+02:00"
-        )
-        raise typer.BadParameter(msg) from exc
-    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
-        msg = (
-            "must carry an explicit UTC offset — I will not guess your timezone, "
-            "because guessing would date the authorisation by an hour you never gave. "
-            "Write 2026-10-01T09:00:00Z or 2026-10-01T11:00:00+02:00"
-        )
-        raise typer.BadParameter(msg)
-    return parsed
-
-
-def _offset_instant(value: str) -> str:
-    """Refuse an offsetless instant during parameter parsing, returning it unchanged.
-
-    The value reaches the engine as the ``datetime``
-    :func:`_parsed_instant` produces; what this does is make the refusal a **usage**
-    error before any client is built (ADR-0235 §9). The parse is run once here and
-    once where the argument is used, through the one function, so the surface has a
-    single statement of what an admissible instant is.
-    """
-    _parsed_instant(value)
-    return value
-
-
-def _optional_offset_instant(value: str | None) -> str | None:
-    """:func:`_offset_instant` for the two instant options that may be absent.
-
-    ``None`` is "the user asked for nothing standing", which is the ordinary
-    outcome and the one thing this must not turn into a value (ADR-0235 §1).
-    """
-    return None if value is None else _offset_instant(value)
 
 
 def _present_notification_class(value: str | None) -> str | None:
@@ -3094,90 +3000,6 @@ def beliefs(
 
 
 @app.command()
-def questions(
-    limit: int = typer.Option(
-        50, "--limit", callback=_page_argument, help="How many questions to show at most."
-    ),
-    offset: int = typer.Option(
-        0,
-        "--offset",
-        callback=_page_argument,
-        help="How many questions to skip before the page begins.",
-    ),
-) -> None:
-    """List the questions I need you to answer before I change what I believe.
-
-    Some corrections cannot be applied without your word — most often because what
-    you told me contradicts something you told me earlier, and I may not quietly
-    throw either away. Each question shows what accepting it would have me believe,
-    why I am asking, and exactly what accepting would retire. Answer one with
-    ``assistant answer``.
-
-    A second list follows it where relevant: questions whose answer was **begun and
-    whose outcome was never recorded**, because a process died part-way. I do not
-    know whether those writes landed, so there is nothing to retry — each one says
-    what to do instead.
-
-    There is no total count — ask for the next page to find out whether there is
-    more.
-    """
-    code = asyncio.run(_list_questions(limit=limit, offset=offset))
-    raise typer.Exit(code)
-
-
-@app.command()
-def answer(
-    question_id: str = typer.Argument(
-        ..., callback=_present_id, help="The id of the question to answer."
-    ),
-    *,
-    accept: bool = typer.Option(
-        ...,
-        "--accept/--reject",
-        help="Whether to accept the proposed change (--accept) or decline it (--reject).",
-    ),
-) -> None:
-    """Answer one deferred question — accept the change, or decline it.
-
-    Accepting re-submits the proposal through the same gate a correction goes through,
-    now carrying your authority for exactly what the question showed you: it may
-    retire an earlier thing you told me, and it may retire nothing else.
-
-    Declining writes nothing and is remembered, so the same question is not put to
-    you again. To change your mind later, forget the question
-    (``assistant forget-question``) and teach me the correction again.
-
-    The answer is binary on purpose. To say something different from either option,
-    reply to what I got wrong in ``assistant chat`` — that is a new correction, not an
-    answer to this one.
-    """
-    code = asyncio.run(_answer_question(question_id, accept=accept))
-    raise typer.Exit(code)
-
-
-@app.command("forget-question")
-def forget_question(
-    question_id: str = typer.Argument(
-        ..., callback=_present_id, help="The id of the question to destroy."
-    ),
-) -> None:
-    """Destroy one deferred question, answered or not.
-
-    Use this to dispose of a question whose answer was interrupted — it is the first
-    of the two recovery steps ``assistant questions`` prints, and it is what frees me
-    to ask again about the same thing. Use it too to be re-asked something you
-    declined earlier.
-
-    This destroys the question and the words it holds; it does **not** undo any
-    memory write an interrupted answer may already have made. Check with
-    ``assistant beliefs`` afterwards and tell me again in ``assistant chat`` if the
-    correction is missing.
-    """
-    code = asyncio.run(_forget_question(question_id))
-    raise typer.Exit(code)
-
-
-@app.command()
 def forget(
     belief_id: str = typer.Argument(
         ..., callback=_present_id, help="The id of the belief to destroy."
@@ -3353,65 +3175,6 @@ def granted() -> None:
     raise typer.Exit(code)
 
 
-@app.command("remember-recipients")
-def remember_recipients(
-    decision_id: str | None = typer.Argument(
-        None,
-        callback=_present_optional_id,
-        help="A decision from this listing, to make its recipients standing.",
-    ),
-    limit: int = typer.Option(
-        DEFAULT_PAGE_SIZE,
-        "--limit",
-        callback=_positive_page_argument,
-        help="How many rulings to read when listing (at least 1).",
-    ),
-    until: str | None = typer.Option(
-        None,
-        "--until",
-        callback=_optional_offset_instant,
-        metavar="INSTANT",
-        help="When the standing authorisation ends (ISO 8601 with an offset).",
-    ),
-) -> None:
-    """Show calls that were refused, and remember their recipients if you want to.
-
-    Bare, this lists the recorded questions you can still answer this way: calls
-    this assistant was **not** permitted to make and did not make. A search it
-    wanted to run and was refused shows up here, and this is the only place it does
-    — nothing was appended to a reply, and no notification was sent.
-
-    **Answering here does not make the call.** The call was refused and is gone;
-    nothing is sent on account of your answer. What the answer establishes is a
-    standing authorisation for the **recipients** of calls like it — never for their
-    payloads, and never for what they would say.
-
-    Give a decision id from this listing, with ``--until``, and I record your answer
-    and remember those recipients until that instant:
-
-        assistant remember-recipients <decision-id> --until 2026-10-01T09:00:00Z
-
-    ``--until`` is yours to choose and I will not choose it for you. See what stands
-    with ``assistant recipient-grants`` and withdraw one with ``assistant
-    revoke-recipient-grant``.
-    """
-    if decision_id is None and until is not None:
-        msg = "is only meaningful with a decision id: bare, this command lists"
-        raise typer.BadParameter(msg, param_hint="--until")
-    if decision_id is not None and until is None:
-        msg = (
-            "is required when a decision is named: a standing authorisation ends at an "
-            "instant you choose, and I will not choose one for you"
-        )
-        raise typer.BadParameter(msg, param_hint="--until")
-    code = asyncio.run(
-        _list_grantable(limit=limit)
-        if decision_id is None or until is None
-        else _establish_recipients(decision_id, expires_at=_parsed_instant(until))
-    )
-    raise typer.Exit(code)
-
-
 @app.command("trust-destinations")
 def trust_destinations(
     decision_id: str = typer.Argument(
@@ -3422,9 +3185,9 @@ def trust_destinations(
 ) -> None:
     """Choose the parties a recorded call would have gone to, so I may compose for them.
 
-    **This is not the question of whether I may talk to them.** That one is
-    ``assistant remember-recipients``, and it is a separate question with a separate
-    answer. Answering either does not answer the other, and withdrawing either
+    **This is not the question of whether I may talk to them.** That one is a
+    recipient grant (``assistant recipient-grants``), and it is a separate question
+    with a separate answer. Answering either does not answer the other, and withdrawing either
     withdraws nothing of the other.
 
     What this one settles is *what I may compose for them*: after it, what I put
@@ -3435,11 +3198,10 @@ def trust_destinations(
     **A conversation that has already read from a party you had not chosen is not
     repaired by this.** What this changes is what a *later* conversation may compose.
 
-    Give a decision id from ``assistant decisions`` or from ``assistant
-    remember-recipients``. I take the parties from that recorded call and never from
-    anything you type, so there is nothing to spell and nothing to get wrong. **I
-    cannot show you what any future call would send**, because those calls have not
-    been planned yet, and I will not pretend otherwise.
+    Give a decision id from ``assistant decisions``. I take the parties from that
+    recorded call and never from anything you type, so there is nothing to spell and
+    nothing to get wrong. **I cannot show you what any future call would send**, because
+    those calls have not been planned yet, and I will not pretend otherwise.
 
     See what stands with ``assistant destination-trust`` and withdraw one with
     ``assistant revoke-destination-trust``.
@@ -3532,56 +3294,6 @@ def recipient_grant_log(
     withdraw it. This is where you find its id.
     """
     code = asyncio.run(_list_recipient_grant_log(limit=limit))
-    raise typer.Exit(code)
-
-
-@app.command()
-def authorizations(
-    goal_id: str = typer.Argument(
-        ..., callback=_present_id, help="The piece of work to ask about."
-    ),
-) -> None:
-    """Show what one piece of work still authorises me to do without asking.
-
-    Each entry is one act of yours: what it fixed or bounded, in your own words, the
-    tool it is about, and when it runs out. Anything you authorised is here — including
-    what has already lapsed, so you can still withdraw it.
-
-    **This is a record of what you authorised and not a promise about the next call.**
-    I re-check every call against everything else at the moment I make it, so a listing
-    here does not mean the next one goes through without a question.
-
-    **It is per piece of work, deliberately.** There is no listing across all of them:
-    that answer would either be truncated or unbounded, and a truncated answer to "what
-    do I authorise" is a false answer rather than a partial one.
-    """
-    code = asyncio.run(_list_authorizations(goal_id))
-    raise typer.Exit(code)
-
-
-@app.command("revoke-authorization")
-def revoke_authorization(
-    authorization_id: str = typer.Argument(
-        ..., callback=_present_id, help="The authority to withdraw, from the listing."
-    ),
-) -> None:
-    """Withdraw one standing authority.
-
-    **No question is asked and nothing stands in the way**, deliberately: this is your
-    remedy, and a prompt between you and it is a prompt too many. It is never refused
-    for being "too many" — there is no ceiling here at all.
-
-    Withdrawal is whole: there is no partial withdrawal and no narrowing. Changing what
-    you authorise is a withdrawal followed by a fresh act, and a fresh act needs a call
-    you are asked about.
-
-    It rewrites nothing already decided and stops nothing already going out. What it
-    does is make the next such call a question again.
-
-    A question you have **not** answered is not withdrawn here: decline it, or leave it
-    to lapse.
-    """
-    code = asyncio.run(_revoke_authorization(authorization_id))
     raise typer.Exit(code)
 
 
@@ -4774,63 +4486,6 @@ async def _list_beliefs(
     return await _drive_beliefs(engine, bands=bands, kinds=kinds, limit=limit, offset=offset)
 
 
-async def _list_questions(*, limit: int, offset: int) -> int:
-    """Load settings, build the engine, list the questions, and close it (ADR-0078 §8).
-
-    The deferred-question counterpart to :func:`_list_beliefs`, with the same single
-    error boundary (ADR-0042 §7). The paging arguments were already checked against
-    the store's accepted range at parse time (:func:`_page_argument`), so the one
-    failure that is not an ``AssistantError`` cannot reach here.
-    """
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_questions(engine, limit=limit, offset=offset)
-
-
-async def _answer_question(question_id: str, *, accept: bool) -> int:
-    """Load settings, build the engine, answer one question, and close it (§9).
-
-    The same single error boundary every other command has (ADR-0042 §7). The id
-    arrives non-blank and already stripped (:func:`_present_id`, ADR-0085 §3c);
-    whether it *names* an open question is the engine's question, and one that does
-    not comes back as an ordinary outcome rather than an error.
-    """
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_answer(engine, question_id, accept=accept)
-
-
-async def _forget_question(question_id: str) -> int:
-    """Load settings, build the engine, destroy one question, and close it (§9 step 1).
-
-    **No show-then-confirm ceremony, and that is a deliberate difference from
-    ``forget``/``forget-conversation``.** Those destroy *beliefs* — what the assistant
-    holds about the user — so ADR-0073 §5 requires the thing be rendered before
-    consent is taken. A question is emphatically **not** a belief of any band
-    (ADR-0078 §1): nothing is being un-believed, the correction it holds is one the
-    user can simply tell me again, and ADR-0073 §6 names ``DeferralStore.delete`` as
-    exactly the verb for "destroy the record of having been asked". Showing it first
-    would also need a single-question read the façade does not have and ADR-0078 §8
-    does not name, and ``assistant questions`` has already rendered the question
-    together with the two recovery steps this call is step 1 of.
-    """
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_forget_question(engine, question_id)
-
-
 async def _list_sources() -> int:
     """Obtain a client, enumerate the grantable sources, and render them.
 
@@ -4916,28 +4571,6 @@ async def _list_standing() -> int:
     return await _drive_standing(engine)
 
 
-async def _list_grantable(*, limit: int) -> int:
-    """Obtain a client, read the offerable rulings, and render them (ADR-0235 §3)."""
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_grantable(engine, limit=limit)
-
-
-async def _establish_recipients(decision_id: str, *, expires_at: datetime) -> int:
-    """Obtain a client and perform the establishing act (ADR-0235 §3)."""
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_establish(engine, decision_id, expires_at=expires_at)
-
-
 async def _list_recipient_grants() -> int:
     """Obtain a client, read what recipients are authorised now, and render it (§7)."""
     try:
@@ -4969,28 +4602,6 @@ async def _revoke_recipient_grant(grant_id: str) -> int:
         return _EXIT_ERROR
 
     return await _drive_revoke_recipient_grant(engine, grant_id)
-
-
-async def _list_authorizations(goal_id: str) -> int:
-    """Obtain a client, read one goal's standing authorities, and render them (§11)."""
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_authorizations(engine, goal_id)
-
-
-async def _revoke_authorization(authorization_id: str) -> int:
-    """Obtain a client and withdraw one standing authorization (§11)."""
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_revoke_authorization(engine, authorization_id)
 
 
 async def _establish_destination_trust(decision_id: str) -> int:
@@ -5050,8 +4661,7 @@ async def _amend_source(source: str, *, scope: list[GrantScope], assume_yes: boo
 async def _list_notifications(*, limit: int, offset: int) -> int:
     """Obtain a client, read the held notifications, and render them (ADR-0130 §7).
 
-    The notification counterpart to :func:`_list_questions`, with the same single
-    error boundary (ADR-0042 §7). The paging arguments were already checked against
+    One error boundary (ADR-0042 §7). The paging arguments were already checked against
     the range the engine refuses outside of at parse time (:func:`_page_argument`),
     so the one failure that is not an ``AssistantError`` cannot reach here.
     """
@@ -5067,10 +4677,9 @@ async def _list_notifications(*, limit: int, offset: int) -> int:
 async def _dismiss_notification(notification_id: str) -> int:
     """Obtain a client, dismiss one notification, and say what happened (ADR-0130 §9).
 
-    **No show-then-confirm ceremony**, for :func:`_forget_question`'s reason and one
-    more of its own. A held notification is not a belief of any band, so ADR-0073 §5's
-    requirement to render before destroying does not reach it — and a dismissal
-    destroys nothing at all: the record stays readable and stays in the export
+    **No show-then-confirm ceremony.** A held notification is not a belief of any band,
+    so ADR-0073 §5's requirement to render before destroying does not reach it — and a
+    dismissal destroys nothing at all: the record stays readable and stays in the export
     (ADR-0130 §9). What ends is its actionability, which is what ``assistant
     notifications`` has already shown the user before they typed this.
     """
@@ -5088,8 +4697,7 @@ async def _forget_notification(notification_id: str) -> int:
 
     **No ceremony either, and that is ADR-0130 §9's own instruction rather than this
     module's convenience**: the per-record delete lands "in the shape
-    ``forget_question`` takes", and :func:`_forget_question` is where the reasoning
-    for that shape is written down — a question is not a belief, so nothing is being
+    ``forget_question`` takes" — a question is not a belief, so nothing is being
     un-believed and ADR-0073 §5 does not reach it. Neither is a notification: it is a
     proposal about a moment, the user has just read it in ``assistant
     notifications``, and showing it again would need a single-record read the façade
@@ -5641,65 +5249,6 @@ async def _drive_forget_conversation(
     return _EXIT_OK
 
 
-async def _drive_questions(engine: AssistantEngine, *, limit: int, offset: int) -> int:
-    """Ask the façade for the two question lists and render them (ADR-0078 §8).
-
-    **Two calls, two lists, never merged.** An interrupted question is not answerable,
-    so offering it beside the ones that are would present a claim that cannot be
-    taken — which is why the façade keeps two enumerations and why this renders two
-    sections rather than one table with a status column. They are both printed by one
-    command because ADR-0078 §9 makes disposing of a stranded question the user's
-    *first* recovery step, and a step behind a flag nobody knows to pass is a step
-    nobody takes.
-
-    The adapter re-filters nothing, re-orders nothing and reads no clock: membership
-    and order are the store's contract, each row's band was projected in the engine,
-    and every instant shown arrived on the DTO.
-    """
-    try:
-        waiting = await engine.questions(limit=limit, offset=offset)
-        stranded = await engine.interrupted_questions(limit=limit, offset=offset)
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-    _render_questions(waiting, stranded, limit=limit, offset=offset)
-    return _EXIT_OK
-
-
-async def _drive_answer(engine: AssistantEngine, question_id: str, *, accept: bool) -> int:
-    """Relay one answer and render what it did (ADR-0078 §9, ADR-0042 §6).
-
-    The adapter conveys the user's yes/no and renders the engine's outcome; it authors
-    no memory write, mints no authority and reaches no subsystem. A question that is
-    not open is reported and exits non-zero, exactly as an id naming no belief does.
-    """
-    try:
-        outcome = await engine.answer(question_id, accept=accept)
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-    return _render_answer(outcome)
-
-
-async def _drive_forget_question(engine: AssistantEngine, question_id: str) -> int:
-    """Destroy one question and report whether anything was there (ADR-0078 §9)."""
-    try:
-        destroyed = await engine.forget_question(question_id)
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-    if not destroyed:
-        _print("[yellow]Nothing to forget:[/] no question has that id.")
-        return _EXIT_ERROR
-    _print(
-        "[green]Forgotten.[/] That question is destroyed. If an answer to it was "
-        "already in flight, check 'assistant beliefs' — I cannot tell you whether "
-        "that write landed — and tell me again in 'assistant chat' if the correction "
-        "is missing."
-    )
-    return _EXIT_OK
-
-
 async def _drive_sources(engine: AssistantEngine) -> int:
     """Ask the hub what may be granted and render it (ADR-0102 §1)."""
     try:
@@ -5853,65 +5402,12 @@ def _outcome_of(exc: Exception) -> _ActOutcome:
     return _ActOutcome.NOT_LANDED
 
 
-async def _drive_grantable(engine: AssistantEngine, *, limit: int) -> int:
-    """Read the offerable rulings and render them (ADR-0235 §3, §5, §8)."""
-    try:
-        offerable = await engine.grantable_decisions(limit=limit)
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-    _render_grantable_decisions(offerable, limit=limit)
-    return _EXIT_OK
-
-
-async def _drive_establish(  # noqa: PLR0911 — ADR-0235 §9's five renderings plus the pre-answer refusal and the success, each read from its own type
-    engine: AssistantEngine, decision_id: str, *, expires_at: datetime
-) -> int:
-    """Perform the act, and state the outcome from the refusal's own type (ADR-0235 §9).
-
-    **Five outcomes, and each is read from the type of what was raised** — never
-    from its message, never from a count this adapter took, and never from a
-    listing read afterwards (ADR-0235 §11). Naming the ceiling refusal is ADR-0193
-    §1's obligation on a surface offering the act.
-
-    **None of the five escapes as a traceback, and none is rendered as a fault of
-    the call the decision records** — that call was refused before this act and is
-    not made by it (ADR-0235 §3).
-    """
-    try:
-        grant = await engine.establish_recipient_grant(decision_id, expires_at=expires_at)
-    except RecipientGrantCeilingError:
-        _render_ceiling_reached()
-        return _EXIT_ERROR
-    except DuplicateRecipientGrantError:
-        _render_already_standing()
-        return _EXIT_ERROR
-    except InvalidRecipientGrantError:
-        _render_grant_refused()
-        return _EXIT_ERROR
-    except RecipientGrantError:
-        _render_grant_store_unavailable()
-        return _EXIT_ERROR
-    except PermissionDeniedError:
-        _render_grant_declined()
-        return _EXIT_ERROR
-    except UngrantableActError as exc:
-        _render_ungrantable(exc)
-        return _EXIT_ERROR
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-    _render_recipient_grant_established(grant)
-    return _EXIT_OK
-
-
 async def _drive_trust_destinations(engine: AssistantEngine, decision_id: str) -> int:
     """Perform the trust act, and state the outcome from the refusal's own type (§5).
 
     **Four renderings, and each is read from the type of what was raised** — never
     from its message, never from a count this adapter took, and never from a listing
-    read afterwards (ADR-0242 §2, §5). That is ``_drive_establish``'s ratified shape
-    one act over, and it is why
+    read afterwards (ADR-0242 §2, §5). That is why
     :class:`~ai_assistant.core.errors.DuplicateDestinationTrustError` exists as a
     subclass rather than as a message convention: reading *already chosen* off a
     string, or off a ``standing_destination_trust`` read taken after the refusal, is
@@ -5922,9 +5418,8 @@ async def _drive_trust_destinations(engine: AssistantEngine, decision_id: str) -
     clause — the destination set in both forms, the account, the tool and the instant
     — is discharged at the **listing** the id was taken from, which is where ADR-0242
     §1 puts it: "The user names a decision from a listing that already renders the
-    canonical destination set ``core`` derived." ``assistant decisions`` and
-    ``assistant remember-recipients`` both render the row whole through
-    :func:`_render_decision`, origin states and all.
+    canonical destination set ``core`` derived." ``assistant decisions`` renders the
+    row whole through :func:`_render_decision`, origin states and all.
 
     **None of the four propagates as a traceback, and none is rendered as a fault of
     any call** — the call this decision records was refused before this act and is not
@@ -6071,40 +5566,6 @@ async def _drive_revoke_recipient_grant(engine: AssistantEngine, grant_id: str) 
         "[dim]Sends to those recipients will be put to you again. Nothing already "
         "sent is retired, and a send already going out is not stopped.[/]"
     )
-    return _EXIT_OK
-
-
-async def _drive_authorizations(engine: AssistantEngine, goal_id: str) -> int:
-    """Ask what one goal's recorded acts still authorise and render it (ADR-0254 §11).
-
-    **One call and no second one.** It does not read the recipient grants to annotate
-    the set, does not compute liveness of its own — the engine took one clock reading
-    for the whole listing and this surface renders what it was told (§16) — and does
-    not merge in what ``assistant recipient-grants`` answers. Those are two
-    vocabularies, and a page answering one with the other is how someone comes to
-    believe that withdrawing one withdrew the other.
-    """
-    try:
-        standing = await engine.standing_authorizations(goal_id)
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-    _render_standing_authorizations(standing, goal_id=goal_id)
-    return _EXIT_OK
-
-
-async def _drive_revoke_authorization(engine: AssistantEngine, authorization_id: str) -> int:
-    """Withdraw one standing authorization and say what the store found (§11, §16).
-
-    **No read-back afterwards**: the settlement already says exactly what happened, and a listing
-    taken after it could not tell "withdrawn" from "was already gone" apart.
-    """
-    try:
-        settlement = await engine.revoke_authorization(authorization_id)
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-    _render_authorization_settlement(settlement, authorization_id)
     return _EXIT_OK
 
 
@@ -7384,433 +6845,6 @@ def _confirm_forget_conversation(_digest: ConversationDigest | None) -> bool:
     return typer.confirm("Forget it?", default=False)
 
 
-def _render_questions(
-    waiting: tuple[Question, ...],
-    stranded: tuple[Question, ...],
-    *,
-    limit: int,
-    offset: int,
-) -> None:
-    """Render the answerable questions, then the interrupted ones (ADR-0078 §8).
-
-    Two sections, and the second is never folded into the first. **No total is shown**
-    and none is available: "is there more" is answered by asking for the next page,
-    exactly as the belief and conversation listings answer it.
-    """
-    if not waiting and not stranded:
-        _print("[dim]Nothing is waiting on your answer.[/]")
-        return
-    if waiting:
-        _print(f"[bold]{len(waiting)} question(s)[/] waiting on your answer, oldest first.")
-        for question in waiting:
-            _render_question(question)
-        if limit and len(waiting) == limit:
-            _print(
-                f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]"
-            )
-    if stranded:
-        _print(
-            f"\n[bold yellow]{len(stranded)} interrupted answer(s).[/] "
-            "An answer to each of these was begun and its outcome was never recorded."
-        )
-        for question in stranded:
-            _render_question(question)
-
-
-def _render_question(question: Question) -> None:
-    """Render one question with everything ADR-0078 §8 requires it to convey.
-
-    Six things, and each is there because leaving it out would misrepresent what the
-    user is being asked:
-
-    * **what accepting would have the assistant believe**, and the band it *would*
-      enter — worded as a conditional, never as a belief held. A pending question is
-      not a belief of any band (§1), so "would be held as" rather than "is";
-    * **why the user is being asked** — the ruling's own non-optional reason;
-    * **where the proposal came from** (:func:`_proposal_origin`), which ADR-0189 §9
-      puts on this renderer by name: §4 binds "every surface that renders an attested
-      belief, question or retirement", and a question is the projection the first
-      attested proposals actually reach, so a lane that updated only the belief
-      explanation would have left the surface §4 was written for unchanged;
-    * **what accepting would retire** (:func:`_render_retirements`), which is not
-      decoration but the exact scope the answer authorises;
-    * **when it was asked and when it stops being answerable**;
-    * for an interrupted question, that an answer was begun and its outcome is not
-      recorded, plus the two recovery steps **in order** — and deliberately not a
-      retry, because the system does not know whether the write landed and a verb
-      implying it does would be the one dishonest line on this surface;
-    * where an interrupted answer already raised a follow-up, that row **rendered by
-      its own state** (:func:`_render_successor`): only a waiting one is something the
-      user can go and answer.
-
-    Engine-supplied text is neutralised for this terminal (``_safe``, ADR-0042 §4).
-    The band, kind and state are this system's own closed vocabularies.
-    """
-    _print(f"\n  [bold cyan]{_safe(question.id)}[/]")
-    _print(f"  [bold]{_safe(question.content)}[/]")
-    _print(
-        f"  [dim]Would be held as:[/] {question.band.value} {question.kind.value} "
-        f"[dim](not held yet — I am asking first)[/]"
-    )
-    _print(f"  [dim]Why I am asking:[/] {_safe(question.reason)}")
-    _print(f"  [dim]Proposed because:[/] {_safe(question.rationale)}")
-    origin = _proposal_origin(question)
-    if origin:
-        _print(f"  [dim]Where it came from:[/] {origin}")
-    _render_retirements(question)
-    _print(f"  [dim]Asked:[/] {_when(question.asked_at)}")
-    if question.expires_at is None:
-        _print("  [dim]Answerable:[/] indefinitely")
-    else:
-        _print(f"  [dim]Answerable until:[/] {_when(question.expires_at)}")
-    if question.state is QuestionState.INTERRUPTED:
-        _print(
-            "  [yellow]An answer to this was begun and its outcome was never recorded.[/] "
-            "I cannot tell you whether the change landed, so there is nothing to retry."
-        )
-        # The step is numbered either way: what a lossy id costs is the copyable
-        # command, never the recovery step it belongs to.
-        _print_hint(
-            f"  [dim]1.[/] Dispose of it: assistant forget-question {_argument(question.id)}"
-            if _is_pasteable(question.id)
-            else f"  [dim]1.[/] Dispose of it with 'assistant forget-question'. "
-            f"{_uncopyable('Its id')}"
-        )
-        _print(
-            "  [dim]2.[/] Check 'assistant beliefs', and tell me again in 'assistant chat' "
-            "if the correction is missing."
-        )
-    else:
-        _print_hint(
-            f"  [dim]Answer with:[/] assistant answer {_argument(question.id)} "
-            f"--accept  [dim]|[/]  --reject"
-            if _is_pasteable(question.id)
-            else "  [dim]Answer with:[/] 'assistant answer', with --accept or --reject. "
-            f"{_uncopyable('Its id')}"
-        )
-    _render_successor(question)
-
-
-def _proposal_origin(question: Question) -> str:
-    """Where the **proposal** came from, or nothing to say (ADR-0189 §4, §9).
-
-    Both fields read here describe the record that would be written if the question
-    were accepted — the same reading ``band`` already has on this type — and describe
-    **no entry in ``retires``** (ADR-0189 §2). Each retirement answers for itself
-    through its own warrant, which :func:`_retirement_origin` renders, and the two must
-    not be confused: a question proposing the user's own assertion routinely retires an
-    attested calendar line, so borrowing one answer for the other would mislabel both.
-
-    **The attested arm is why §9 names this renderer.** A pending question is not a
-    belief of any band, so nothing here says the proposal *is* held — but where it
-    would be attested, §4's first clause requires the reporting source named and the
-    instant it said the fact was current stated on that source's clock, and this is the
-    only place on this surface that can do it.
-
-    The derived arm carries §4's third clause about the *warrant*, never about the
-    content — see :func:`_outside_warrant`, whose prohibition applies here unchanged.
-
-    **The band selects the arm, and an attestation's presence never does.** ADR-0189 §2
-    adds no cross-field validator to this type, so ``Question(band=ASSERTED,
-    attestation=…)`` is model-valid — and a renderer keyed on the attestation would
-    introduce the user's own word as a connected source's report. That is the laundering
-    ADR-0072 §4 forbids in its own words: classification is keyed on the source and
-    never on a decoration, so "nothing may acquire the standing of a band it is not in
-    by decorating itself". The band is the classifier here as it is everywhere else, so
-    this matches on it, is total over it, and says nothing at all about an attestation
-    carried outside the attested band.
-
-    The attested-with-no-attestation arm gets the honest sentence :func:`_why` gives its
-    own, for the same reason: this projection is not what dropped the fact, so "not
-    recorded" would err in the direction ADR-0073 §4 forgives least — and saying nothing
-    would leave the one band whose whole purpose is provenance silent about it.
-
-    Args:
-        question: The question being rendered.
-
-    Returns:
-        The clause, or the empty string where the proposal's origin adds nothing the
-        band has not already said.
-    """
-    match question.band:
-        case BeliefBand.ATTESTED:
-            if question.attestation is None:
-                return (
-                    "a source you connected reported it, and what reached me here does "
-                    "not name that source or say when it spoke."
-                )
-            return (
-                f"a connected source reported it — {_safe(question.attestation.reported_by)}, "
-                f"which said this was current as of "
-                f"{_when(question.attestation.reported_at)}, on that source's own clock."
-            )
-        case BeliefBand.DERIVED:
-            if question.rests_on_recorded_external_content:
-                return (
-                    "I worked it out, and some of what I worked it out from came from a "
-                    "connected source rather than from you."
-                )
-            return ""
-        case BeliefBand.ASSERTED:
-            return ""
-        case _:  # pragma: no cover - exhaustive
-            assert_never(question.band)
-
-
-def _retirement_origin(warrant: Warrant | None) -> tuple[str, str]:
-    """How a retired record's content is introduced, and what is said about it (§4).
-
-    ADR-0189 §4 rules three arms over a :class:`~ai_assistant.core.types.Retirement`,
-    and the distinction between them is the whole of what #673 asked for. Before
-    ``warrant`` existed this surface rendered attacker-authorable calendar text under
-    *"Accepting would retire:"* with **no origin marker at all** — a third party's
-    sentence presented on the assistant's authority, at the one screen where the user
-    is deciding. ADR-0098 §7 names that as the failure escalation is supposed to
-    prevent: "Escalating to the user is not a mitigation if the escalation is where
-    the attacker's sentence is read as ours."
-
-    * **Attested** — the content **is** presented as third-party content, which is
-      ADR-0098 §7's first clause satisfiable for the first time, and the source and
-      the instant it spoke are named beside it (ADR-0189 §4's first clause read one
-      projection over).
-    * **Asserted** — the content is the user's own word (ADR-0038 §1a) and is **not**
-      third-party. §4 is explicit that no surface presents it as such.
-    * **Derived** — the content is this system's own sentence, likewise not
-      third-party; where its *warrant* rests on recorded external content that fact is
-      conveyed about the warrant and never about the words.
-
-    An earlier draft of ADR-0189 ruled the third-party presentation unconditionally
-    and architecture review caught it on round 3, because it would have rendered a
-    retirement of the user's own assertion as somebody else's words. The band is what
-    tells the three apart, and the band is inside ``warrant`` rather than on the
-    ``Retirement``, which is why this reads it there (§4).
-
-    **The lead comes before the content rather than after it**, because a marker a
-    user reads *after* the sentence it qualifies has already let the sentence land as
-    ours — and this is a confirmation prompt, where the whole point is that they are
-    deciding while they read.
-
-    **The ``None`` arm is off-contract and is still answered.** ADR-0189 §2 puts the
-    ``content``/``warrant`` tie on the producer and adds no validator, so a warrantless
-    resolved retirement is constructable and no producer in the tree builds one. It is
-    not rendered as *no longer held* — that would be false, the content is right there —
-    and it asserts no band, no origin and no source, which is the only honest answer
-    available.
-
-    Args:
-        warrant: The retired record's warrant, or ``None``.
-
-    Returns:
-        The lead that introduces the content, and the note that follows it.
-    """
-    if warrant is None:
-        return (
-            "[dim]origin unrecorded —[/]",
-            "I cannot say how this was held or what reported it.",
-        )
-    match warrant.band:
-        case BeliefBand.ATTESTED:
-            lead = "[yellow]someone else's words —[/]"
-            note = (
-                (
-                    f"{_safe(warrant.attestation.reported_by)} reported this, and said it "
-                    f"was current as of {_when(warrant.attestation.reported_at)}, on that "
-                    f"source's own clock. These are not my words and not yours."
-                )
-                if warrant.attestation is not None
-                else "A connected source reported this. These are not my words and not yours."
-            )
-        case BeliefBand.ASSERTED:
-            lead = "[dim]your own words —[/]"
-            note = "You told me this; it is neither a source's report nor my inference."
-        case BeliefBand.DERIVED:
-            lead = "[dim]my own inference —[/]"
-            note = "I worked this out, so these are my words rather than a source's."
-            if warrant.rests_on_recorded_external_content:
-                note += (
-                    " Some of what I worked it out from came from a connected source "
-                    "rather than from you."
-                )
-        case _:  # pragma: no cover - exhaustive
-            assert_never(warrant.band)
-    return lead, note
-
-
-def _render_retirements(question: Question) -> None:
-    """Render exactly what accepting a question would retire (ADR-0078 §8, ADR-0189 §4).
-
-    A conflict that has been retired since the question was asked does not resolve
-    and is rendered as **no longer held** rather than omitted: the user should be told
-    that the thing they would be overruling is already gone. Omitting it would
-    understate the answer's scope in one direction and overstate it in the other.
-
-    Each resolved entry now carries where its content came from
-    (:func:`_retirement_origin`), which is what closes #673. The **unresolved** entry
-    deliberately gains nothing: ADR-0189 §4's last retirement clause rules that where
-    the warrant is absent the surface "renders it as *no longer held* … and asserts
-    nothing about its band, its origin or its source. It renders no third state as
-    ``False`` and no absence as a value." There is no attested tombstone to construct —
-    §2 makes ``warrant`` and ``content`` ``None`` together — so this line stays exactly
-    the sentence it was.
-
-    Every value on both arms is neutralised for this terminal (``_safe``, ADR-0042 §4,
-    ADR-0189 §9's last clause but one). A ``reported_by`` is a value this system
-    declared and a ``reported_at`` is an instant, but a ``content`` is neither, and the
-    line that renders them together escapes all of them — so no retired content can
-    forge the attribution of the span above or below it.
-    """
-    if not question.retires:
-        _print("  [dim]Accepting would retire:[/] nothing")
-        return
-    _print("  [dim]Accepting would retire:[/]")
-    for retirement in question.retires:
-        if retirement.content is None:
-            _print(
-                f"    - [dim]{_safe(retirement.record_id)} — no longer held, so accepting "
-                f"would not touch it[/]"
-            )
-            continue
-        lead, note = _retirement_origin(retirement.warrant)
-        _print(f"    - {lead} {_safe(retirement.content)} [dim]({_safe(retirement.record_id)})[/]")
-        _print(f"      [dim]{note}[/]")
-
-
-def _render_successor(question: Question) -> None:
-    """Name the question an answer to this one already raised, with its state (§9).
-
-    Reached where a re-deferral admitted a successor and the answer was then
-    interrupted. **Rendered by the successor's own state**, because naming it without
-    one would be the failure ADR-0078 §9 warns about: only a waiting successor is a
-    question the user can go and answer, while a declined or interrupted one needs its
-    own handling and calling either "the follow-on question" would advertise something
-    they cannot act on.
-    """
-    successor = question.successor
-    if successor is None:
-        return
-    identifier = _safe(successor.id)
-    match successor.state:
-        case QuestionState.OPEN:
-            _print(
-                f"  [dim]Your answer raised a further question, which is waiting:[/] "
-                f"[bold cyan]{identifier}[/]"
-            )
-        case QuestionState.DECLINED:
-            _print(
-                f"  [dim]Your answer landed on a question you had already declined:[/] "
-                f"{identifier} [dim](forget it to be asked again)[/]"
-            )
-        case QuestionState.INTERRUPTED:
-            _print(
-                f"  [dim]Your answer landed on another interrupted answer:[/] {identifier} "
-                f"[dim](dispose of that one too)[/]"
-            )
-        case QuestionState.APPLIED | QuestionState.STALE | QuestionState.REDEFERRED:
-            _print(f"  [dim]Your answer raised a further question, since settled:[/] {identifier}")
-        case _:  # pragma: no cover — exhaustive over the enum
-            assert_never(successor.state)
-
-
-def _render_answer(outcome: AnswerOutcome) -> int:
-    """Render what one answer did, and map it to an exit code (ADR-0078 §8, §9).
-
-    Five outcomes, and a **re-deferral is reported as a completed answer** carrying
-    the next question rather than as a failure: the answer was used, it raised
-    something new, and rendering that as "your answer went nowhere" would be the same
-    lie in a smaller place.
-
-    Two facts are reported *alongside* whichever outcome applies, never in place of
-    it. A question destroyed while its answer was being applied is a true statement
-    the user brought about, and what is said about the answer comes from the ingest
-    the engine still held — never inferred from the failed bookkeeping. And a
-    re-deferral that could queue no follow-up at all says so, because calling it
-    "re-deferred" would claim a question was asked when none was.
-    """
-    match outcome.kind:
-        case AnswerKind.APPLIED:
-            _print(
-                f"[green]Applied.[/] That is what I believe now "
-                f"[dim]({_safe(outcome.record_id or '')})[/]"
-            )
-        case AnswerKind.REJECTED:
-            _print(
-                "[green]Declined.[/] Nothing was written, and I will not ask you this again "
-                "— forget the question if you want to be asked."
-            )
-        case AnswerKind.STALE:
-            _print(
-                "[yellow]Not applied.[/] What that question was about no longer applies, so "
-                "accepting it would have stored a belief that was already out of date."
-            )
-        case AnswerKind.NOT_OPEN:
-            _print(
-                "[yellow]That question is not open.[/] It may never have existed, or it may "
-                "have lapsed, been answered, or have an answer already in flight — "
-                "'assistant questions' lists the ones that are still open."
-            )
-            return _EXIT_ERROR
-        case AnswerKind.REDEFERRED:
-            _render_redeferral(outcome)
-        case _:  # pragma: no cover — exhaustive over the enum
-            assert_never(outcome.kind)
-    if outcome.disposed:
-        _print(
-            "[dim]Note: that question was destroyed while your answer was being applied, "
-            "so no record of the answer was kept.[/]"
-        )
-    return _EXIT_OK
-
-
-def _render_redeferral(outcome: AnswerOutcome) -> None:
-    """Render an answer that was used and raised a further question (§5a, §9).
-
-    The successor is rendered **by its state**, for :func:`_render_successor`'s reason.
-    Where no successor could be queued at all — the queue was full and this admission
-    had no exemption to spend — the line says exactly that rather than pointing at a
-    question that does not exist.
-    """
-    _print(
-        "[yellow]Not applied yet.[/] Your answer was used, but it turned out to "
-        "contradict something else you told me that you had not been shown."
-    )
-    successor = outcome.successor
-    if successor is None:
-        if outcome.successor_refused:
-            _print(
-                "  [yellow]The question queue is full, so I could not put the follow-up to "
-                "you.[/] Answer or forget some of what is waiting, then teach me the "
-                "correction again."
-            )
-        return
-    identifier = _safe(successor.id)
-    match successor.state:
-        case QuestionState.OPEN:
-            # Named and offered are two renderings of one id, and only the second is
-            # quoted: the name is read, the command is pasted.
-            offer = (
-                f"[dim](assistant answer {_argument(successor.id)} --accept)[/]"
-                if _is_pasteable(successor.id)
-                else _uncopyable(
-                    "Its id", "'assistant answer' still takes it, given the exact bytes."
-                )
-            )
-            _print_hint(f"  [dim]Here is the follow-up:[/] [bold cyan]{identifier}[/] {offer}")
-        case QuestionState.DECLINED:
-            _print(
-                f"  [dim]That raises a question you had already declined:[/] {identifier} "
-                f"[dim](forget it to be asked again)[/]"
-            )
-        case QuestionState.INTERRUPTED:
-            _print(
-                f"  [dim]That raises a question whose own answer was interrupted:[/] "
-                f"{identifier} [dim](dispose of that one first)[/]"
-            )
-        case QuestionState.APPLIED | QuestionState.STALE | QuestionState.REDEFERRED:
-            _print(f"  [dim]That raises a question already settled:[/] {identifier}")
-        case _:  # pragma: no cover — exhaustive over the enum
-            assert_never(successor.state)
-
-
 def _when(instant: datetime) -> str:
     """Render an instant the engine supplied, in UTC.
 
@@ -7910,10 +6944,10 @@ def _outside_warrant(belief: Belief | BeliefSummary) -> str:
     source's would overclaim on exactly the second-order case ADR-0223 §10's second
     test exists for.
 
-    **The arm reaches this renderer and not the question or retirement ones**, and
-    that is scope rather than oversight. §5 binds "every surface that renders the
-    belief listing"; a :class:`~ai_assistant.core.types.Question` renders a *proposal*
-    (:func:`_proposal_origin`) and no proposal is ever episodic — an observer "distils
+    **The arm reaches the belief listing alone**, and that is scope rather than
+    oversight. §5 binds "every surface that renders the belief listing"; a
+    :class:`~ai_assistant.core.types.Question` carries a *proposal* and no proposal is
+    ever episodic — an observer "distils
     evidence, it does not manufacture it" (ADR-0077 §2) — and no episode reaches a
     deferral at all, because capture writes through ``write_atomic`` and never through
     ``MemoryWriter.ingest``, so ADR-0106 §6's gate is not on its path (ADR-0223 §8).
@@ -8570,157 +7604,6 @@ def _confirm_grant(_source: GrantableSource) -> bool:
     return typer.confirm("Connect it?", default=False)
 
 
-def _render_grantable_decisions(offerable: tuple[PermissionDecision, ...], *, limit: int) -> None:
-    """The listing that tells the user a call was refused (ADR-0235 §8).
-
-    **This listing is the message, and there is nowhere else** (§8). No reply says
-    it, nothing is appended to one, no reply is degraded for it, and no notification
-    is minted: a refused read interrupting the user is the posture ADR-0226 §5
-    designed the mechanism against. What is left is a place to look, next to the one
-    act that changes the answer.
-
-    **It states what the recorded decisions say and no more.** It does not say the
-    turn would have answered differently, that a reply was incomplete, that a search
-    would have succeeded, or that anything is owed — which is ADR-0235 §3's
-    outstanding-work clause read on the words as well as on the shape. Nothing here
-    is a task, a queue, a to-do, a badge or an unread count.
-
-    **The three facts §5 requires are stated before any act is collected**, once for
-    the page rather than once per row: that the call was refused and was not made,
-    that answering now does not make it, and that what an answer establishes is a
-    standing authorisation for the **recipients** of calls like it and never for
-    their payloads.
-
-    **ADR-0233 §8's span-value floor is not met here and this does not claim it is.**
-    A recorded ruling carries a ``parameters_digest`` rather than the argument
-    values, so the bytes are not in the store to render — and nothing here renders a
-    digest as a value, reconstructs, summarises, excerpts or paraphrases the
-    arguments, or implies the user has been shown what the call would have sent.
-    :func:`_render_decision` is what renders the row, floor and all.
-    """
-    if not offerable:
-        _print(
-            "[dim]Nothing to answer.[/] No refused call is waiting for a decision "
-            "about its recipients."
-        )
-        return
-    _print(f"[bold]{len(offerable)}[/] refused call(s) you can still decide about, newest first:\n")
-    _print(
-        "[yellow]Each of these was refused and was not made.[/] Answering now does "
-        "not make it — nothing is sent on account of your answer. What an answer "
-        "establishes is a standing authorisation for the [bold]recipients[/] of "
-        "calls like it, never for what such a call would say.\n"
-    )
-    for decision in offerable:
-        _render_decision(decision)
-    if len(offerable) == limit:
-        _print(
-            f"[dim]Read from the most recent {limit} rulings. Ask for more with "
-            "--limit; a call older than that window is not offered here.[/]"
-        )
-    # ADR-0242 §5: this listing **names both acts, as two acts**, giving the granting
-    # form and the trusting form side by side over the same decision id and saying that
-    # they are two questions and that neither completes the other. It performs **no
-    # trust read** to do it — the line is a fixed statement of what the two commands
-    # are, not a rendering of any destination's current state — so no inference and no
-    # second store read enters this listing. This is what discharges ADR-0238 §1's
-    # "knowing it was a second question" at the point of discovery, and it is the whole
-    # of the coupling between the two acts.
-    _print(
-        "[dim]Two separate questions can be answered from a decision here, and "
-        "neither completes the other:[/]"
-    )
-    _print(
-        "[dim]  may I talk to them at all — assistant remember-recipients "
-        "<decision-id> --until <instant>[/]"
-    )
-    _print("[dim]  what may I compose for them — assistant trust-destinations <decision-id>[/]")
-    # ADR-0242 §3's five facts, **here** rather than only on the command that performs
-    # the act. §3 obliges a surface offering the act to state them "**before it collects
-    # it**", and on a terminal the act is collected when the user types the command — so
-    # a statement printed by that command has already been read too late. This listing is
-    # where the act is offered (§1: "The user names a decision from a listing"), and it
-    # is the shape ADR-0235 §5's own listing already takes for the sibling act: the rows
-    # and what an answer establishes are on screen before any id is typed.
-    _render_destination_trust_preamble()
-
-
-def _render_recipient_grant_established(grant: RecipientGrant) -> None:
-    """Say a grant was recorded, and say exactly what it covers (ADR-0235 §5)."""
-    _print(f"[green]Remembered.[/] Recorded as {_safe(grant.id)}.")
-    _print(f"  [bold]Account:[/] {_safe(grant.account.identity)}")
-    _print("  [bold]Recipients:[/]")
-    for member in grant.destinations:
-        _print(f"    {_recorded_destination_line(member)}")
-    _print(f"  [bold]Until:[/] {_decided_at(grant.expires_at)}")
-    _print(
-        "[dim]Calls this covers will not be put to you again, so their payload "
-        "description is not shown again. It authorises the recipients and never "
-        "what is sent to them. 'assistant recipient-grants' shows what stands; "
-        "'assistant revoke-recipient-grant' withdraws one.[/]"
-    )
-
-
-def _render_ceiling_reached() -> None:
-    """Name the ceiling and the recourse, and never the call (ADR-0193 §1, ADR-0235 §6)."""
-    _print(
-        "[yellow]Not remembered.[/] You are holding as many standing recipient "
-        "authorisations as this deployment admits, so this one was refused. Nothing "
-        "you already hold was evicted, narrowed or expired to make room."
-    )
-    _print(
-        "[dim]Withdraw one you hold with 'assistant revoke-recipient-grant' — "
-        "'assistant recipient-grant-log' lists them, expired ones included, which "
-        "'assistant recipient-grants' correctly omits. Withdrawing frees a slot for "
-        "the next such call; it does not reopen this one.[/]"
-    )
-
-
-def _render_already_standing() -> None:
-    """Say the recipients were already authorised (ADR-0235 §4, §9)."""
-    _print(
-        "[yellow]Nothing to do.[/] Those recipients are already authorised for this "
-        "account and this tool, so no second authorisation was recorded."
-    )
-    _print("[dim]'assistant recipient-grants' shows what stands.[/]")
-
-
-def _render_grant_refused() -> None:
-    """Say no authorisation was created, naming no cause it was not given (§4, §9)."""
-    _print(
-        "[yellow]Not remembered.[/] No standing authorisation was created. I was not "
-        "told why, and I will not guess."
-    )
-
-
-def _render_grant_store_unavailable() -> None:
-    """Say the store could not be written, and that the call was unaffected (§4, §9)."""
-    _print(
-        "[yellow]Not remembered.[/] The record of standing recipient authorisations "
-        "could not be written, so nothing stands from this. That is a storage fault "
-        "and not a refusal of what you asked for."
-    )
-
-
-def _render_grant_declined() -> None:
-    """Say the call was declined when it was ruled on, and settled (§2, §9)."""
-    _print(
-        "[yellow]Declined.[/] The call was declined when it was ruled on. That "
-        "decision is recorded and settled, and nothing was made standing."
-    )
-
-
-def _render_ungrantable(exc: Exception) -> None:
-    """The refusal that recorded nothing, in the recorded population's words (§9, §12).
-
-    There is no park to answer on a recorded decision, so this offers no retry: a
-    surface that offered one it knows will not be there would be inviting the one
-    thing ADR-0235 §6 forbids it to promise.
-    """
-    _print(f"[yellow]Not remembered.[/] {_safe(str(exc))}")
-    _print("[dim]Nothing was recorded and nothing was sent.[/]")
-
-
 def _render_destination_trust_preamble() -> None:
     """ADR-0242 §3's five facts, stated **before** the act is collected.
 
@@ -8729,8 +7612,8 @@ def _render_destination_trust_preamble() -> None:
     <decision-id>``, so a statement only that command prints has been read after the
     decision rather than before it. §1 puts the offer at the listing — "The user names a
     decision from a listing that already renders the canonical destination set ``core``
-    derived" — so :func:`_render_grantable_decisions` prints these beside the next-step
-    line that names both acts, which is where a user meets them before typing anything.
+    derived" — so ``assistant decisions`` prints these beside the next-step line that
+    offers the act, which is where a user meets them before typing anything.
     The command prints them again immediately above what it recorded, where they are the
     account of what has just been done rather than the disclosure that precedes it.
 
@@ -8759,8 +7642,8 @@ def _render_destination_trust_preamble() -> None:
     promises no bound.
 
     **The destination set itself is rendered at the listing** the id came from
-    (ADR-0242 §1, §3): ``assistant decisions`` and ``assistant remember-recipients``
-    render the recorded call whole through :func:`_render_decision` — the canonical
+    (ADR-0242 §1, §3): ``assistant decisions`` renders the recorded call whole
+    through :func:`_render_decision` — the canonical
     destination set in both supplied and canonical forms as ``core`` derived it, the
     connected account's identity, the tool by its declaration's own identifier and
     capability, the instant the decision was recorded, and the call's origin in all
@@ -8808,8 +7691,8 @@ def _render_destination_trust_established(record: DestinationTrustRecord) -> Non
     _print(f"  [bold]From:[/] {_decided_at(record.established_at)}")
     _print(
         "[dim]This says what I may compose for them and never that I may talk to "
-        "them — that is 'assistant remember-recipients', and it is a separate "
-        "question. 'assistant destination-trust' shows what stands; 'assistant "
+        "them — that is a recipient grant ('assistant recipient-grants'), and it "
+        "is a separate question. 'assistant destination-trust' shows what stands; 'assistant "
         "revoke-destination-trust' withdraws one.[/]"
     )
 
@@ -9493,8 +8376,8 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
     class named ``calendar upcoming`` reads as a valid command that sets a different
     class. ``_safe`` is about Rich markup and control characters and answers a
     different question; quoting happens first, so what is escaped is the quoted form.
-    The same exposure on the older ``answer``/``forget-question``/``revoke`` hints is
-    #984 rather than a wider diff here.
+    The same exposure on the older ``revoke`` hints is #984 rather than a wider diff
+    here.
 
     **And where quoting is not enough, no command is printed at all**
     (:func:`_is_pasteable`). ``_safe`` *replaces* a character a terminal must not be
@@ -9739,238 +8622,6 @@ def _origin_line(*, planned_with_external_content: bool) -> str:
         "material this assistant selected, in which no record is marked as "
         "resting on recorded external content"
     )
-
-
-# --- what an authorization says, on this surface (ADR-0254 §11) --------------
-# **One renderer for a member, used by the question, the listing and the
-# announcement**, because §11 puts the same three facts in front of the user at all
-# three — the argument, the fixed value or the bound, and the user's own words — and
-# a second renderer would be the two shapes of one fact ADR-0150 is named after.
-#
-# **Every value goes through :func:`_safe`.** An argument key is caller-influenced
-# (ADR-0150 §13), a fixed value is whatever the record holds, and a span is the
-# user's own text; none of them is trusted with the terminal's control codes.
-
-
-#: What each :class:`~ai_assistant.core.types.BoundKind` reads as in a coverage
-#: line (ADR-0266 §9's §11 scope). **The vocabulary rendered in the owner's words,
-#: not its wire value**: a member says what the user's act constrained — an amount,
-#: a period, a named term — and ``"money"`` beside a ceiling would read as a field
-#: name rather than as what it is. Closed, and a member added later fails the type
-#: check here rather than rendering as silence.
-_KIND_WORDS: Final[Mapping[BoundKind, str]] = {
-    BoundKind.MONEY: "the amount",
-    BoundKind.PERIOD: "the dates",
-    BoundKind.TERMS: "the terms",
-}
-
-
-def _bound_sentence(bound: ValueBound) -> str:
-    """One bound, as a sentence (ADR-0254 §2's three kinds and no fourth).
-
-    **A statement per kind, and the enumeration is closed by a ``match``** with no
-    catch-all: a fourth member would fail the type check here rather than render as
-    silence, which is ADR-0177 §7's rule for a vocabulary a surface renders.
-
-    **Nothing is normalised, re-cased, rounded or localised.** ADR-0254 §10 puts
-    whatever normalising an act needed at the moment the member was minted, and a
-    second normalisation at the rendering would be the second shape ADR-0150 names.
-
-    Args:
-        bound: The permitted range the act stated.
-
-    Returns:
-        The sentence, with every value already escaped.
-    """
-    match bound.kind:
-        case BoundKind.MONEY:
-            currency = _safe("" if bound.currency is None else bound.currency)
-            # **A strict ceiling is said strictly** (ADR-0266 §3): *"under 100"* and
-            # *"at most 100"* stopped being one value, and a rendering that said "up
-            # to" for both would show the owner a limit one cent wider than the one
-            # they are about to establish — the permissive direction, on the one
-            # screen where the working is meant to be checkable.
-            limit = "under" if bound.maximum_exclusive else "up to"
-            ceiling = f"{limit} {_safe(str(bound.maximum))} {currency}".rstrip()
-            if bound.minimum is None:
-                return ceiling
-            return f"from {_safe(str(bound.minimum))} {currency} {ceiling}".replace("  ", " ")
-        case BoundKind.PERIOD:
-            start = "" if bound.starts_at is None else _safe(_when(bound.starts_at))
-            end = "" if bound.ends_at is None else _safe(_when(bound.ends_at))
-            zone = "" if bound.timezone is None else f", read in {_safe(bound.timezone)}"
-            return f"from {start} up to but not including {end}{zone}"
-        case BoundKind.TERMS:
-            named = ", ".join(_safe(term) for term in bound.terms or ())
-            return f"one of: {named}"
-
-
-def _render_coverage(coverage: Sequence[CoverageView], *, indent: str) -> None:
-    """Every member as its own statement, with the words behind it (ADR-0254 §11).
-
-    **A member per line and the span beneath it**, because ADR-0254 §8 makes both
-    halves survive — *"neither is derivable from the other"* — so a reader can check
-    the working rather than take the figure on trust.
-
-    **Each member is rendered by its ``kind``** (ADR-0266 §9's §11 scope): *this
-    kind of value is fixed at that value*, or *bounded by that limit*, the
-    ``BoundKind`` naming what the act constrained where the argument key used to
-    stand. A member names no argument, so a rendering that named one would be
-    inventing it.
-
-    **An empty coverage says what it is and never nothing at all** (§1, §11). It is
-    an authority over a call that carries no argument, and it is a wildcard over
-    nothing: a blank here would read as *"no limits"*, which is the opposite of what
-    the record says.
-
-    Args:
-        coverage: The views to render, in the record's own order.
-        indent: The leading whitespace this block sits at.
-    """
-    if not coverage:
-        _print(
-            f"{indent}[dim]It fixes no value, because the call carries no argument of "
-            f"yours. It covers a call with no arguments and nothing else — it is not "
-            f"permission for anything wider.[/]"
-        )
-        return
-    for view in coverage:
-        kind = _safe(_KIND_WORDS[view.kind])
-        if view.bound is not None:
-            _print(f"{indent}{kind}: {_bound_sentence(view.bound)}")
-        else:
-            _print(f"{indent}{kind}: fixed at {_safe(str(view.fixed))}")
-        _print(f'{indent}  [dim]from what you said: "{_safe(view.span)}"[/]')
-
-
-def _render_authorization(view: AuthorizationView, *, with_goal: bool) -> None:
-    """One standing record, as ADR-0254 §11's listing renders it.
-
-    **The goal by its statement and never by its id** (§11), the declaration by its
-    own identifier and description, each member as a statement with the words behind
-    it, the horizon (ADR-0256), whether it still stands, and the row's ``id`` as the
-    **revocation handle** — which is the one internal value the bar admits, because
-    *"a listing that named no id would state an act and withhold the means to perform
-    it"*.
-
-    **Lapsed rows are here and are marked**, because ADR-0254 §16 returns them
-    deliberately: a user can see and revoke what they once authorised, and the
-    withdrawal path then needs no history query.
-
-    **``live`` is reported and is never read as a promise.** §11: *"The listing is a
-    record of what the user authorised and is not a promise that the next call will
-    be allowed"* — so nothing here says the next call will go through, and a record
-    resting on a recipient authority that has since lapsed still reads as standing,
-    because that is what it is.
-
-    **The goal is named once and not once per row**, which is what driving the page
-    settled: §11's listing is *per goal*, so every row of one listing carries the same
-    statement and repeating it turns the fact that distinguishes the rows — the
-    declaration — into the third line of each. The listing names the goal in its own
-    heading and the rows lead with the declaration; the **announcement** passes
-    ``with_goal`` true, because it has no heading naming the goal and a reader meeting
-    it mid-reply needs to know which piece of work it is about.
-
-    Args:
-        view: The record to render.
-        with_goal: Whether this rendering names the goal itself.
-    """
-    if with_goal:
-        _print(f"\n[bold]{_safe(view.goal_statement)}[/]")
-        _print(f"  Through: {_safe(view.tool.id)} — {_safe(view.tool.description)}")
-    else:
-        _print(f"\n[bold]{_safe(view.tool.id)}[/] — {_safe(view.tool.description)}")
-    _render_coverage(view.coverage, indent="  ")
-    standing = "still stands" if view.live else "has lapsed"
-    _print(f"  [dim]{standing}; the horizon is {_safe(_when(view.expires_at))}.[/]")
-    if not _is_pasteable(view.id):
-        # The handle is the one value this view carries that a printed command has to
-        # reproduce **exactly**, so a value the terminal cannot show is one no command
-        # here may name: a command written from what is on screen would name something
-        # else. The act still takes the exact bytes from anything that can carry them.
-        _print(f"  {_uncopyable('Its handle')}")
-        return
-    _print_hint(f"  [dim]Withdraw it:[/] assistant revoke-authorization {_argument(view.id)}")
-
-
-def _render_standing_authorizations(standing: Sequence[AuthorizationView], *, goal_id: str) -> None:
-    """The listing for one goal (ADR-0254 §11).
-
-    **Per goal, and the empty answer is not a fault.** §11 makes the listing keyed on
-    a goal and adds no cross-goal read, and a goal this system holds no record for —
-    or holds no *authority* for — is answered by an empty listing rather than by a
-    refusal.
-
-    Args:
-        standing: What the engine answered, in the store's own order.
-        goal_id: The goal that was asked about, for the empty sentence.
-    """
-    if not standing:
-        _print(
-            f"[dim]Nothing standing for {_safe(goal_id)}. Every call for that piece of "
-            f"work is put to you as it comes up.[/]"
-        )
-        return
-    _print(f"[bold]What this authorises:[/] {_safe(standing[0].goal_statement)}")
-    for view in standing:
-        _render_authorization(view, with_goal=False)
-    _print(
-        "\n[dim]These are records of what you authorised. They are not a promise that "
-        "the next call will go through — I check every call against everything else "
-        "at the moment I make it.[/]"
-    )
-
-
-def _render_authorization_settlement(settlement: AuthorizationSettlement, handle: str) -> None:
-    """What the withdrawal did, as a statement per member (ADR-0254 §16).
-
-    **The store's own four-member vocabulary, rendered as prose and never as its own
-    spelling** (§11, §16): a second three-valued word for one fact is the second
-    carrier ADR-0150 is named after, so the member crosses unmapped and this is where
-    it becomes English.
-
-    **All four members are handled and the ``match`` has no catch-all.**
-    ``WOULD_DUPLICATE`` is **unreachable on this surface** — it is reachable only on a
-    settlement to ``ESTABLISHED`` and a withdrawal settles to ``REVOKED`` — and it is
-    still given a sentence, because the closed vocabulary crosses a version boundary:
-    a hub that sent it would otherwise render as silence, which is the failure
-    ADR-0177 §7's enumeration rule exists against. It is not a fault slot either; the
-    sentence says what the hub said and claims nothing further.
-
-    **No member of the vocabulary is reported as an error**, and none of them is one:
-    each says what the store found, and the two that moved nothing are the store
-    working rather than failing.
-
-    Args:
-        settlement: What the engine answered.
-        handle: The handle the user passed, for the sentences that name it.
-    """
-    match settlement:
-        case AuthorizationSettlement.SETTLED:
-            _print("[green]Withdrawn.[/]")
-            _print(
-                "[dim]Calls this authority covered will be put to you again. Nothing "
-                "already decided is rewritten and nothing already done is undone, and "
-                "a call already going out is not stopped.[/]"
-            )
-        case AuthorizationSettlement.NOT_AT_SOURCE:
-            _print(
-                f"[yellow]Nothing to withdraw.[/] I hold {_safe(handle)}, and it is not "
-                f"a standing authority: it may have been withdrawn already, replaced by "
-                f"a later one, lapsed, or be a question you never answered."
-            )
-            _print(
-                "[dim]A question you have not answered is withdrawn by declining it, not here.[/]"
-            )
-        case AuthorizationSettlement.NO_SUCH_AUTHORIZATION:
-            _print(f"[yellow]Nothing to withdraw.[/] I hold no record {_safe(handle)} at all.")
-            _print("[dim]'assistant authorizations <goal>' shows what stands now.[/]")
-        case AuthorizationSettlement.WOULD_DUPLICATE:
-            _print(
-                f"[yellow]Nothing was withdrawn.[/] The hub answered about "
-                f"{_safe(handle)} with an outcome a withdrawal cannot produce, so I have "
-                f"changed nothing and I am not guessing at what it meant."
-            )
 
 
 # --- rendering the audit trail (ADR-0186 §7, §8) ----------------------------
@@ -10449,24 +9100,18 @@ def _render_decisions(recorded: tuple[PermissionDecision, ...], *, limit: int) -
         "themselves are not in this record and are not shown.[/]"
     )
     # ADR-0242 §9 sends a user here — "``assistant decisions`` … carries resolved
-    # decisions, and the earlier decision remains a valid subject of the trust act" —
-    # precisely because ``remember-recipients`` can be **empty at exactly the moment its
-    # guidance is followed**. So this page offers the act on the route §9 prescribes, and
-    # §3's obligation to state the five facts "before it collects the act" therefore
-    # lands here too: a user who arrived from that statement and typed the command would
-    # otherwise read them only after performing it.
-    #
-    # **It offers the trust act and not the grant act.** ADR-0235 §3's own availability
-    # set is what ``assistant remember-recipients`` renders, and a row here may fail it
-    # for reasons this page does not compute; naming that command beside a row it cannot
-    # judge would be this surface deriving an availability it was not given. The trust
-    # act's three conditions are on the row (ADR-0186 §7 renders the binding's origin in
-    # all three of ADR-0181 §6's states), which is what makes the offer honest here.
+    # decisions, and the earlier decision remains a valid subject of the trust act". So
+    # this page offers the act on the route §9 prescribes, and §3's obligation to state
+    # the five facts "before it collects the act" therefore lands here too: a user who
+    # arrived from that statement and typed the command would otherwise read them only
+    # after performing it. The trust act's three conditions are on the row (ADR-0186 §7
+    # renders the binding's origin in all three of ADR-0181 §6's states), which is what
+    # makes the offer honest here.
     _print(
         "[dim]From an eligible row here you can settle what I may compose for the "
         "parties it names — assistant trust-destinations <decision-id>. That is not "
-        "the question of whether I may talk to them, which is 'assistant "
-        "remember-recipients', and neither completes the other.[/]"
+        "the question of whether I may talk to them, which is a recipient grant "
+        "('assistant recipient-grants'), and neither completes the other.[/]"
     )
     _render_destination_trust_preamble()
 
