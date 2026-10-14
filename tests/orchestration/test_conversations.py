@@ -3,7 +3,7 @@
 ADR-0074 §9 assigns this list here rather than to the shared conformance suite,
 and says why: "a conformance suite exercises one store against one contract; §8's
 ordering and its serialisation span two stores and the coordinator between them".
-Since ADR-0283 a conversation's history, membership and deletion have one source —
+Since ADR-0283 a conversation's membership and deletion have one source —
 the episodes on its channel — so every case below seeds that channel directly
 (``channel_episodes.conversation_episode``) and asserts what the stage reads from it
 or destroys on it. How an episode is *written* is the writer's, and its own suite
@@ -30,10 +30,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import Validity
 from ai_assistant.memory.conversation_store import SqliteConversationStore
-from ai_assistant.orchestration.conversations import (
-    HISTORY_REPLAY_BOUND,
-    ConversationLifecycle,
-)
+from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.testing import (
     FakeConversationStore,
     FakeMemoryStore,
@@ -44,9 +41,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import (
         ChannelEpisodeId,
-        ChannelEpisodePage,
         ChannelIdentity,
-        Conversation,
     )
 
 AT = datetime(2026, 7, 28, 9, 0, tzinfo=UTC)
@@ -142,179 +137,6 @@ async def _seed_turns(wiring: Wiring, count: int) -> tuple[str, list[str]]:
         for index in range(count)
     ]
     return conversation.id, episodes
-
-
-# --- continuity: reading the channel back (ADR-0283 §4:1) ----------------
-
-
-async def test_history_returns_the_channels_episodes_oldest_first() -> None:
-    """§4:1: the conversation's recent episodes, in number order, as records."""
-    wiring = Wiring()
-    conversation_id, episodes = await _seed_turns(wiring, 3)
-
-    history = await wiring.stage.history(conversation_id)
-
-    assert [record.id for record in history.records] == episodes
-    assert history.degraded is False
-
-
-async def test_the_order_is_the_episodes_numbers_and_never_their_instants() -> None:
-    """§1: a channel's order is its episodes' numbers, never a timestamp.
-
-    The later-written episode carries the *earlier* instant, so an implementation
-    that sorted by ``occurred_at`` would replay the conversation backwards.
-    """
-    wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
-    first = await wiring.seed(conversation.id, "activation:first", occurred_at=AT + HOUR)
-    second = await wiring.seed(conversation.id, "activation:second", occurred_at=AT)
-
-    history = await wiring.stage.history(conversation.id)
-
-    assert [record.id for record in history.records] == [first, second]
-
-
-async def test_history_reads_a_pass_that_ended_before_capture() -> None:
-    """ADR-0284 §6:2: a pass that ended early is on the channel and in its history.
-
-    Superseding ADR-0283 §4:1's eligibility filter: no read filters on status, so
-    the episode is replayed in its place with its status, and the digest counts it.
-    """
-    wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
-    kept = await wiring.seed(conversation.id, "activation:kept")
-    await wiring.seed(conversation.id, "activation:ended-early", completed=False)
-    last = await wiring.seed(conversation.id, "activation:last")
-
-    history = await wiring.stage.history(conversation.id)
-
-    assert [record.id for record in history.records] == [kept, "activation:ended-early", last]
-    assert await channel_ids(wiring.memory, conversation.id) == [
-        kept,
-        "activation:ended-early",
-        last,
-    ]
-    digest = await wiring.stage.digest(conversation.id)
-    assert digest is not None
-    assert digest.recorded_turns == 3
-
-
-async def test_history_skips_a_deleted_episode_without_resurrecting_it() -> None:
-    """§4:1: a gap, never an error — the read is already filtered by liveness."""
-    wiring = Wiring()
-    conversation_id, episodes = await _seed_turns(wiring, 3)
-    assert await wiring.memory.delete(episodes[1]) is True
-
-    history = await wiring.stage.history(conversation_id)
-
-    assert [record.id for record in history.records] == [episodes[0], episodes[2]]
-    assert history.degraded is False, "a gap is an ordinary state, not a degradation"
-
-
-async def test_history_reads_the_newest_episodes_within_the_replay_bound() -> None:
-    """§4:1: the replay bound is the page, and the page is the channel's newest."""
-    wiring = Wiring()
-    conversation_id, episodes = await _seed_turns(wiring, HISTORY_REPLAY_BOUND + 5)
-
-    history = await wiring.stage.history(conversation_id)
-
-    assert [record.id for record in history.records] == episodes[-HISTORY_REPLAY_BOUND:]
-
-
-async def test_a_run_of_failed_passes_takes_its_place_in_the_replay_page() -> None:
-    """ADR-0284 §6:2: the page is the channel's newest episodes, failed ones included.
-
-    A bound's worth of completed episodes followed by five a pass ended early left:
-    the five are the newest the conversation has, so they are in the page and the
-    five oldest are not.
-    """
-    wiring = Wiring()
-    conversation_id, episodes = await _seed_turns(wiring, HISTORY_REPLAY_BOUND)
-    for index in range(5):
-        await wiring.seed(conversation_id, f"activation:ended-{index}", completed=False)
-
-    history = await wiring.stage.history(conversation_id)
-
-    ended = [f"activation:ended-{index}" for index in range(5)]
-    assert [record.id for record in history.records] == (episodes + ended)[-HISTORY_REPLAY_BOUND:]
-
-
-async def test_history_of_a_stamped_conversation_is_degraded_and_reads_no_channel() -> None:
-    """§4:1: a ``get`` that answers nothing for a stamped conversation comes first."""
-
-    class Watching(FakeMemoryStore):
-        reads = 0
-
-        async def channel_episodes(
-            self,
-            channel: ChannelIdentity,
-            *,
-            after: int | None = None,
-            limit: int,
-        ) -> ChannelEpisodePage:
-            self.reads += 1
-            return await super().channel_episodes(channel, after=after, limit=limit)
-
-    clock = MovableClock()
-    memory = Watching(now=clock)
-    wiring = Wiring(clock=clock, memory=memory)
-    conversation_id, _ = await _seed_turns(wiring, 1)
-    await wiring.conversations.stamp_deleted(conversation_id)
-    memory.reads = 0
-
-    history = await wiring.stage.history(conversation_id)
-
-    assert history.records == ()
-    assert history.degraded is True
-    assert memory.reads == 0
-
-
-@pytest.mark.parametrize("failing", ["memory", "conversations"])
-async def test_history_degrades_rather_than_failing_the_turn(failing: str) -> None:
-    """Losing continuity costs the answer its history, not its usefulness.
-
-    Each store faults the one read history makes of it: the conversation's ``get``,
-    and the channel read that follows it.
-    """
-
-    class FaultingMemory(FakeMemoryStore):
-        fail = False
-
-        async def channel_episodes(
-            self,
-            channel: ChannelIdentity,
-            *,
-            after: int | None = None,
-            limit: int,
-        ) -> ChannelEpisodePage:
-            if self.fail:
-                msg = "the store would not read"
-                raise MemoryStoreError(msg)
-            return await super().channel_episodes(channel, after=after, limit=limit)
-
-    class FaultingConversations(FakeConversationStore):
-        fail = False
-
-        async def get(self, conversation_id: str) -> Conversation | None:
-            if self.fail:
-                msg = "the index would not read"
-                raise ConversationStoreError(msg)
-            return await super().get(conversation_id)
-
-    clock = MovableClock()
-    memory = FaultingMemory(now=clock)
-    conversations = FaultingConversations(now=clock, retention=RETENTION)
-    wiring = Wiring(clock=clock, memory=memory, conversations=conversations)
-    conversation_id, _ = await _seed_turns(wiring, 1)
-    if failing == "memory":
-        memory.fail = True
-    else:
-        conversations.fail = True
-
-    history = await wiring.stage.history(conversation_id)
-
-    assert history.records == ()
-    assert history.degraded is True
 
 
 # --- the digest a deletion ceremony shows (ADR-0283 §4:2) ----------------

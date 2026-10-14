@@ -31,13 +31,12 @@ from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.types import (
     EpisodicMemory,
     InputOrigin,
-    ProcessingReason,
     ProcessingStatus,
     RecordedChannelTrigger,
     RoundResponse,
     Validity,
 )
-from ai_assistant.orchestration.conversations import HISTORY_REPLAY_BOUND, conversation_channel
+from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.testing import FakeToolCallingCompleter
 
 if TYPE_CHECKING:
@@ -142,46 +141,10 @@ async def test_a_conversational_episode_is_named_for_its_activation_on_its_chann
     assert await composed.held(turn.conversation_id) == [turn.address]
 
 
-async def test_history_returns_the_channels_newest_episodes_in_number_order_within_the_bound(
+async def test_a_failed_activation_on_a_conversation_is_recorded_on_its_channel_with_its_status(
     composed: Phased,
 ) -> None:
-    """§4:1: the newest ``HISTORY_REPLAY_BOUND`` episodes, number ascending, a failed
-    pass among them in its place (ADR-0284 §6:2)."""
-    first = await composed.say("hello")
-    template = await _episode(composed, first.address)
-    copies = [
-        template.model_copy(update={"id": f"activation:copy-{n:02d}"})
-        for n in range(HISTORY_REPLAY_BOUND + 2)
-    ]
-    for copy in copies:
-        await composed.memory.add(copy)
-    assert template.processing_record is not None
-    failed = template.model_copy(
-        update={
-            "id": "activation:failed",
-            "processing_record": template.processing_record.model_copy(
-                update={
-                    "status": ProcessingStatus.FAILED,
-                    "reason": ProcessingReason.PROCESSING_FAILED,
-                }
-            ),
-        }
-    )
-    await composed.memory.add(failed)
-
-    history = await composed.engine._conversations.history(first.conversation_id)
-
-    assert history.degraded is False
-    assert [record.id for record in history.records] == [
-        *(copy.id for copy in copies[-(HISTORY_REPLAY_BOUND - 1) :]),
-        "activation:failed",
-    ]
-
-
-async def test_a_failed_activation_on_a_conversation_appears_in_its_history_with_its_status(
-    composed: Phased,
-) -> None:
-    """ADR-0284 §11:2, §6:2: the failed activation is recorded and replayed, with its status."""
+    """ADR-0284 §11:2, §6:2: the failed activation is recorded on the channel, with its status."""
     first = await composed.say("hello")
 
     failed = await _fail(composed, first.conversation_id)
@@ -190,13 +153,8 @@ async def test_a_failed_activation_on_a_conversation_appears_in_its_history_with
     assert episode.processing_record is not None
     assert episode.processing_record.status is ProcessingStatus.FAILED
     assert episode.processing_record.trigger.channel == conversation_channel(first.conversation_id)
-    history = await composed.engine._conversations.history(first.conversation_id)
-    assert [record.id for record in history.records] == [first.address, failed]
-    (replayed,) = [record for record in history.records if record.id == failed]
-    assert isinstance(replayed, EpisodicMemory)
-    assert replayed.processing_record is not None
-    assert replayed.processing_record.status is ProcessingStatus.FAILED
-    assert replayed.content == episode_content(replayed), "§7:1: the one rule, failed or not"
+    assert await composed.held(first.conversation_id) == [first.address, failed]
+    assert episode.content == episode_content(episode), "§7:1: the one rule, failed or not"
 
 
 async def test_the_digest_counts_the_channels_episodes(composed: Phased) -> None:

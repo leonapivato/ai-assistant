@@ -37,7 +37,6 @@ through their Protocols (CLAUDE.md golden rule 1).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
@@ -46,7 +45,6 @@ import structlog
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     ConversationStoreError,
-    MemoryStoreError,
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
@@ -103,13 +101,6 @@ CAPTURE_CONFIDENCE = 0.9
 
 #: How many conversations the retention reclaim shortlists per ``recent`` page.
 _RECLAIM_PAGE = 50
-
-#: The replay bound: how many of a conversation's most recent episodes
-#: :meth:`ConversationLifecycle.history` reads (ADR-0283 §4:1). The value the turn
-#: index's configured replay window had (ADR-0074 §9.3) — finite, and the same for
-#: every caller, because an unbounded replay of a months-old conversation is a
-#: prompt nobody sized.
-HISTORY_REPLAY_BOUND: Final = 20
 
 #: How many identifiers one ``channel_episode_ids`` page asks for while forgetting or
 #: a reclaim walks a conversation's channel (ADR-0283 §8). The read's own bound.
@@ -580,23 +571,6 @@ def fit_stream_chunk(chunk: ChatStreamChunk, *, max_bytes: int) -> ChatStreamChu
     return fitted
 
 
-@dataclass(frozen=True, slots=True)
-class AssembledHistory:
-    """A conversation's recent episodes (ADR-0283 §4).
-
-    Attributes:
-        records: The channel's live episodes, oldest first in number order
-            (ADR-0283 §1), within the replay bound. A deleted or expired episode is
-            simply not on the channel's live read, so a conversation that lost a turn
-            still resumes and never resurrects the deleted one.
-        degraded: Whether reading them failed outright, which costs the turn its
-            continuity exactly as a failed retrieval costs it its personalisation.
-    """
-
-    records: tuple[MemoryRecord, ...] = ()
-    degraded: bool = False
-
-
 class ConversationLifecycle:
     """Owns every ``ConversationStore``/``MemoryStore`` sequence (ADR-0074 §9)."""
 
@@ -692,42 +666,6 @@ class ConversationLifecycle:
         if conversation_id is None:
             return await self._conversations.start()
         return await self._conversations.mark_active(conversation_id)
-
-    async def history(self, conversation_id: str) -> AssembledHistory:
-        """The conversation's recent episodes, oldest first (§4).
-
-        ADR-0283 §4:1: a ``get`` that answers nothing for a stamped or absent
-        conversation, then the conversation's channel read with
-        ``MemoryStore.channel_episodes`` with the replay bound as ``limit``. No turn
-        is read from the conversation store.
-
-        **Every episode, and no eligibility** (ADR-0284 §6:2, superseding ADR-0283
-        §4:1's ``episode_model_eligible=True``): a failed, interrupted or outside
-        episode is part of the conversation's history like any other, and its
-        renderings state its status.
-
-        **The order is the channel's, the episodes' numbers ascending** (§1), never a
-        timestamp and never an id. The read already filters by liveness, so a
-        deleted, expired or never-landed episode is a gap here rather than a fault.
-
-        Returns:
-            The records, and whether reading them failed
-            outright — which a stamped or absent conversation counts as, exactly as
-            the turn index's refusal of it did.
-        """
-        try:
-            if await self._conversations.get(conversation_id) is None:
-                return AssembledHistory(degraded=True)
-            page = await self._memory.channel_episodes(
-                conversation_channel(conversation_id), limit=HISTORY_REPLAY_BOUND
-            )
-            records: list[MemoryRecord] = [entry.record for entry in page.entries]
-        except ConversationStoreError, MemoryStoreError:
-            # Losing continuity costs the answer its history, not its usefulness —
-            # so the turn goes on, saying so, exactly as a failed retrieval does.
-            _log.warning("conversation_history_degraded", stage="history", exc_info=True)
-            return AssembledHistory(degraded=True)
-        return AssembledHistory(records=tuple(records))
 
     # --- deletion (§8) -------------------------------------------------------
 
@@ -1065,8 +1003,6 @@ class ConversationLifecycle:
 
 __all__ = [
     "CAPTURE_CONFIDENCE",
-    "HISTORY_REPLAY_BOUND",
-    "AssembledHistory",
     "ConversationDigest",
     "ConversationLifecycle",
     "activation_ending",
