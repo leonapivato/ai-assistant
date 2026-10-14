@@ -37,13 +37,11 @@ import copy
 import logging
 import sys
 import traceback
-from collections import deque
 from collections.abc import Mapping, Sequence, Set
 from dataclasses import fields, is_dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
-from itertools import islice
 from pathlib import PosixPath, PurePosixPath, PureWindowsPath, WindowsPath
 from typing import TYPE_CHECKING, Any, Final, TextIO, cast
 from uuid import UUID
@@ -52,7 +50,7 @@ import structlog
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, MutableMapping
+    from collections.abc import Iterable, Iterator, MutableMapping
 
     from structlog.typing import ExcInfo
 
@@ -480,6 +478,9 @@ _RECORD_FIELDS: Final = frozenset(
 #: sequences of themselves, and a ``range``, which can be unbounded to walk.
 _LEAF_SEQUENCES: Final = (str, bytes, bytearray, memoryview, range)
 
+#: What an exhausted iterator gives :func:`_carried` in place of a value.
+_DONE: Final = object()
+
 #: The extras ``structlog.stdlib.ProcessorFormatter.wrap_for_formatter`` attaches,
 #: by which ``ProcessorFormatter`` tells a structlog event from a foreign record.
 _STRUCTLOG_PLUMBING: Final = frozenset({"_logger", "_name"})
@@ -501,7 +502,7 @@ def _exc_info_raised(exc_info: object) -> BaseException | None:
     return exc_info if isinstance(exc_info, BaseException) else None
 
 
-def _walked(value: object) -> Iterable[object] | None:
+def _walked(value: object) -> Iterator[object] | None:
     """What :func:`_carried` looks inside ``value`` at, or ``None``.
 
     The containers the redactor walks (:func:`_redact_value`): a mapping's keys and
@@ -519,30 +520,35 @@ def _walked(value: object) -> Iterable[object] | None:
 def _carried(values: Iterable[object]) -> tuple[list[BaseException], bool]:
     """Every exception in ``values``, at any depth of a container :func:`_walked` opens.
 
-    In the order met, each once. Each container is looked inside once, so shared
-    structure and a cycle end the walk rather than repeating it. At most
-    :data:`_WALK_LIMIT` values are taken out of containers, a value met again
-    counted too, and no container is read further than that; the second item says
-    whether the walk finished within it.
+    Each container is looked inside once, so shared structure and a cycle end the
+    walk rather than repeating it. Containers are read one value at a time, depth
+    first, from one budget of :data:`_WALK_LIMIT` values — a value met again counted
+    too — so no input reads or holds more than that, however it branches. The
+    second item says whether the walk finished within it.
     """
-    pending = deque(values)
     found: list[BaseException] = []
-    seen: set[int] = set()
-    looked = 0
-    while pending:
-        one = pending.popleft()
-        looked += 1
-        if looked > _WALK_LIMIT:
+    # Each value held by its id, so a value a lazy container made and dropped cannot
+    # free its id for another to be mistaken for it.
+    seen: dict[int, object] = {}
+    budget = _WALK_LIMIT
+    open_: list[Iterator[object]] = [iter(values)]
+    while open_:
+        one = next(open_[-1], _DONE)
+        if one is _DONE:
+            open_.pop()
+            continue
+        budget -= 1
+        if budget < 0:
             return found, False
         if id(one) in seen:
             continue
-        seen.add(id(one))
+        seen[id(one)] = one
         if isinstance(one, BaseException):
             found.append(one)
             continue
         inside = _walked(one)
         if inside is not None:
-            pending.extend(islice(inside, _WALK_LIMIT - looked + 1))
+            open_.append(inside)
     return found, True
 
 
@@ -569,10 +575,11 @@ def _scrubbed_event(record: logging.LogRecord) -> logging.LogRecord:
     :func:`redact_sensitive`, the rule every structlog event is held to: an
     exception is its class and frames, and any value the redactor cannot vouch for —
     an exception under another key included — is masked. Where the record carries
-    an exception outside the dict — its ``exc_info``, or an extra a record factory
-    set — each extra is masked, as a foreign record's is, and its ``exc_info`` is
-    rendered as class and frames. The plumbing extras are left as they are, for
-    ``ProcessorFormatter`` to read.
+    an exception — in its event dict (an ``exception`` or a true ``exc_info``, as
+    the structlog chain left it), its ``exc_info``, or an extra a record factory set
+    — each extra is masked, as a foreign record's is: a factory can put an
+    exception's text there. Its ``exc_info`` is rendered as class and frames. The
+    plumbing extras are left as they are, for ``ProcessorFormatter`` to read.
     """
     held: dict[str, Any] = dict(cast("dict[str, Any]", record.msg))
     try:
@@ -584,10 +591,14 @@ def _scrubbed_event(record: logging.LogRecord) -> logging.LogRecord:
         raise _UnscrubbableError from exc
     extras = [key for key in _extras(record) if key not in _STRUCTLOG_PLUMBING]
     raised = _exc_info_raised(record.exc_info)
-    carried, checked = _carried([raised, *(getattr(record, key) for key in extras)])
+    given = cast("dict[str, Any]", record.msg)
+    carried, checked = _carried([raised, given, *(getattr(record, key) for key in extras)])
+    # An exception the structlog chain already rendered is an ``exception`` key, and
+    # one not yet rendered may be a bare ``exc_info=True``.
+    in_event = "exception" in given or bool(given.get("exc_info"))
     safe = copy.copy(record)
     safe.msg = scrubbed
-    if carried or not checked:
+    if carried or in_event or not checked:
         for key in extras:
             setattr(safe, key, REDACTED)
     safe.exc_text = _exception_text([raised] if raised is not None else [], record.exc_text)

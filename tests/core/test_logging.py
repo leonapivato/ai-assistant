@@ -8,6 +8,7 @@ import logging
 import subprocess
 import sys
 from collections import ChainMap, UserDict, UserList, deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -1081,6 +1082,55 @@ def test_a_record_holding_more_than_the_net_checks_is_withheld() -> None:
     assert out == "[message withheld: the record holds more than this net checks]\n"
 
 
+def test_the_walk_reads_no_more_than_its_limit_however_the_input_branches() -> None:
+    # Adversarial review, round 2 under this holder: each of two hundred sibling
+    # sequences was read to its own limit, nearly two million reads in all.
+    reads = 0
+
+    class Counted(Sequence[int]):
+        def __len__(self) -> int:
+            return 10_000
+
+        def __getitem__(self, index: Any) -> Any:
+            raise NotImplementedError
+
+        def __iter__(self) -> Iterator[int]:
+            nonlocal reads
+            for number in range(10_000):
+                reads += 1
+                yield number
+
+    stream = _configured_on_a_bare_root()
+
+    logging.getLogger("thirdparty").error("rows: %s", [Counted() for _ in range(200)])
+
+    assert reads <= 10_000
+    assert stream.getvalue().startswith("[message withheld: the record holds more")
+
+
+def test_a_lazy_containers_fresh_values_are_each_looked_inside() -> None:
+    # A value a lazy container makes and drops frees its id; the next one made can
+    # take it, and must not be mistaken for the one already looked inside.
+    class Fresh(Sequence[list[object]]):
+        def __len__(self) -> int:
+            return 2
+
+        def __getitem__(self, index: Any) -> Any:
+            raise NotImplementedError
+
+        def __iter__(self) -> Iterator[list[object]]:
+            yield []
+            yield [ValueError(_MESSAGE)]
+
+    stream = _configured_on_a_bare_root()
+
+    logging.getLogger("thirdparty").error("rows: %s", Fresh())
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert out == f"{_WITHHELD}\nValueError\n"
+
+
 def test_an_exception_passed_twice_is_shown_once() -> None:
     stream = _configured_on_a_bare_root()
     failure = _caught(_raise_chained)
@@ -1359,6 +1409,32 @@ def test_a_wrapped_structlog_events_factory_field_is_masked_when_it_carries_one(
     out = stream.getvalue()
     _assert_no_content(out)
     assert out.count(f"|{REDACTED}") == len(("structlog event", "foreign record"))
+    assert "read_failed" in out
+
+
+def test_a_wrapped_structlog_events_factory_text_is_masked_when_the_event_carries_one() -> None:
+    # Adversarial review, round 2 under this holder: the event's exception was already
+    # rendered in its dict, and a factory put the exception's text in a field.
+    made = logging.getLogRecordFactory()
+
+    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = made(*args, **kwargs)
+        record.detail = str(sys.exc_info()[1])
+        return record
+
+    logging.setLogRecordFactory(factory)
+    try:
+        stream = _hosted_by_processor_formatter("%(message)s|%(detail)s")
+        try:
+            _raise_with_content()
+        except _ReadFailedError as failure:
+            structlog.get_logger("host").warning("read_failed", exc_info=failure)
+    finally:
+        logging.setLogRecordFactory(made)
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert out.rstrip().endswith(f"|{REDACTED}")
     assert "read_failed" in out
 
 
