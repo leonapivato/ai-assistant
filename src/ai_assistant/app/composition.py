@@ -107,7 +107,6 @@ from ai_assistant.permissions import (
     ConfiguredSearchDestination,
     SqliteAuditTrail,
     SqliteDestinationTrustStore,
-    SqliteParkedReads,
     SqliteRecipientGrantStore,
     SqliteSourceGrantStore,
     SqliteSourceReadTrail,
@@ -1068,23 +1067,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             path=directory / "destination_trust.db",
         )
         opened.append(destination_trust.close)
-        # **ADR-0244 §3's parked-read store, and this root is the only place it is
-        # constructed** (§18's Lane 2). Nothing writes a park since the old path's
-        # servicing was deleted (ADR-0309 §5); the one instance is handed to the
-        # capture/lifecycle stage, which drops a deleted conversation's parks, so the
-        # rows an older process wrote are still destroyed with their conversation.
-        #
-        # **It is a Tier 1 store and the first three of a park's nine fields are
-        # content** — the composed query, the objective minted from the utterance and the
-        # plan the planner returned (ADR-0244 §2) — so ADR-0004 §2's residency clause
-        # governs the file: under the data directory, owner-only, and never written to a
-        # remote service. The retention that bounds that exposure is the park's own
-        # deadline and this conversation's lifecycle, and there is no third rule (§15).
-        #
-        # **No ceiling, no clock and no `Settings` field reach the constructor**: a
-        # park's `expires_at` was computed by the servicing that wrote it.
-        parked_reads = SqliteParkedReads(path=directory / "parked_reads.db")
-        opened.append(parked_reads.close)
         # **ADR-0289 §1's story store, on its own file.** It reads no other store and
         # no store reads it. The engine surface writes it as the owner (§4), and since
         # ADR-0300 §6 understanding's candidates read it and the story-links stage
@@ -1857,14 +1839,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             conversations=ConversationLifecycle(
                 conversations=conversations,
                 memory=memory,
-                # The fourth durable store this stage spans, and the one it only ever
-                # destroys from (ADR-0244 §3): §8's deletion sequence drops a deleted
-                # conversation's parks through the Protocol, from "the one layer that
-                # legitimately holds both handles by injection" (ADR-0074 §9). The
-                # **same instance** the servicing writes into — a second would leave the
-                # user's standing question behind after they asked for the conversation
-                # to be destroyed.
-                parked_reads=parked_reads,
                 retention=settings.episode_retention,
             ),
             # Leg 10's upcoming-event producer (ADR-0132). **The first holder of
@@ -2091,19 +2065,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # liveness of a grant as evidence of trust", so neither store's close
                 # can make the other fail closed.
                 _as_async(destination_trust.close),
-                # And the parked-read store beside it: a Tier 1 store like the rest,
-                # joining the same ordered shutdown (ADR-0083 ruling 4, ADR-0042 §2,
-                # ADR-0244 §18). Registering it on the build-failure cleanup list alone
-                # would close it when the build *failed* and never when it succeeded,
-                # which is #1903 exactly — and here it would leave a `-wal` holding a
-                # standing question's composed query, objective and plan behind, which
-                # are the three Tier 1 fields ADR-0244 §3's retention rule is about.
-                #
-                # **Nothing constrains its position** among the stores: no store reads
-                # it and it reads none, and the façade drains in-flight work before any
-                # of these run — so a `resume` that settles a park and dispatches its
-                # read has already finished by the time this list is walked.
-                _as_async(parked_reads.close),
                 # And the story store: no store reads it and it reads none (ADR-0289
                 # §1), so nothing constrains its position, and the façade drains any
                 # story call in flight before this list is walked.

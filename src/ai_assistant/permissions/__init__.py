@@ -69,7 +69,6 @@ from ai_assistant.permissions.audit import SqliteAuditTrail
 from ai_assistant.permissions.destination_trust import SqliteDestinationTrustStore
 from ai_assistant.permissions.goal_authorizations import SqliteGoalAuthorizationStore
 from ai_assistant.permissions.grants import SqliteSourceGrantStore
-from ai_assistant.permissions.parked_reads import SqliteParkedReads
 from ai_assistant.permissions.policy import (
     ConfiguredForecastDestination,
     ConfiguredSearchDestination,
@@ -84,7 +83,6 @@ __all__ = [
     "SqliteAuditTrail",
     "SqliteDestinationTrustStore",
     "SqliteGoalAuthorizationStore",
-    "SqliteParkedReads",
     "SqliteRecipientGrantStore",
     "SqliteSourceGrantStore",
     "SqliteSourceReadTrail",
