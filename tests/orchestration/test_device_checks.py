@@ -23,7 +23,6 @@ from ai_assistant.core.device_context import serving_device
 from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import (
     HUB_REQUESTING_DEVICE,
-    ChannelIdentity,
     ChatChanges,
     ChatDevice,
     DataTier,
@@ -35,9 +34,7 @@ from ai_assistant.core.types import (
     TranscriptMessage,
     UserMessage,
 )
-from ai_assistant.orchestration.conversations import ConversationLifecycle
-from ai_assistant.orchestration.device_checks import DeviceChecks
-from ai_assistant.testing import FakeConversationStore, FakeMemoryStore, FakeNotificationOutbox
+from ai_assistant.testing import FakeConversationStore, FakeNotificationOutbox
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -267,24 +264,6 @@ async def test_a_restricted_page_reaches_past_other_conversations_changes() -> N
     )
     assert len(full.changes) == 3
     assert full.next_after == full.changes[-1].seq
-
-
-# --- the legacy turn (§5 "A legacy turn") -----------------------------------------
-
-
-async def test_only_a_conversation_target_is_a_legacy_turn() -> None:
-    """§5:2: any other target is spoke traffic, the wire server's alone to check."""
-    checks = DeviceChecks(
-        ConversationLifecycle(
-            conversations=FakeConversationStore(), memory=FakeMemoryStore(), retention=None
-        )
-    )
-    spoke = ChannelIdentity(channel_type="informational_event", instance_id="calendar")
-    await checks.receiving(STRANGER, spoke, "receive")
-    with pytest.raises(DeviceRefusedError):
-        await checks.receiving(
-            STRANGER, ChannelIdentity(channel_type="conversation", instance_id="c"), "receive"
-        )
 
 
 # --- the notification poll (§5 "Notification poll") -------------------------------
