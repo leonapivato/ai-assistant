@@ -56,9 +56,9 @@ interfaces/     thin adapters onto the engine; no business logic
 testing/        canonical fakes for the core Protocols; test-only
 ```
 
-Request pipeline (owned by `orchestration`): intent → context assembly →
-memory retrieval → planning → tool selection → permission check → execute →
-learn/update memory.
+Request pipeline (owned by `orchestration`, the phases of ADR-0309 §3): recall →
+understanding → recall again, and its digest → rounds of planning → authorizing
+→ acting, with digesting beside it → the episode, frozen when the activation ends.
 
 ## Delivery planning
 

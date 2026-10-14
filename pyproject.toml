@@ -966,10 +966,9 @@ forbidden_modules = [
 #
 # **This is the clause ADR-0095 §3 leans on**, and it is why the `Reader`
 # Protocol stays in `core` rather than becoming an internal seam of this package.
-# Two subsystems hold the type — `orchestration` by injection (ADR-0093 §1, §6)
-# and later `context/` through its facet adapter (§3) — and an internal seam
-# would require exactly the `orchestration -> ai_assistant.readers` edge this
-# forbids in as many words. The split is the resolution of that tension: the
+# `orchestration` holds the type by injection (ADR-0093 §1, §6), and an internal
+# seam would require exactly the `orchestration -> ai_assistant.readers` edge
+# this forbids in as many words. The split is the resolution of that tension: the
 # contract in `core` where every subsystem may name it, the implementations in a
 # leaf package nothing imports.
 #
