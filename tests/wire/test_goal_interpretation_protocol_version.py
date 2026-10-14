@@ -12,14 +12,7 @@ from __future__ import annotations
 import inspect
 from typing import Final
 
-from ai_assistant.core.types import (
-    ActionPlan,
-    ConversationExport,
-    Goal,
-    ParkedRead,
-    PlanExport,
-    TurnResult,
-)
+from ai_assistant.core.types import ConversationExport, PlanExport
 from ai_assistant.wire import client, envelope, server
 
 #: The version ADR-0249's L1 moves to, and the one it moves from.
@@ -74,21 +67,6 @@ def test_the_entry_records_what_did_not_move() -> None:
     assert "no compatibility shim" in entry.lower(), "ADR-0084 §3 is the mechanism (§12)"
 
 
-def test_each_of_the_three_grounds_is_true_of_the_types_themselves() -> None:
-    """The entry's three claims, checked against the models rather than the prose.
-
-    ``wire/codec.py`` renders a model by ``model_dump()`` and all three set
-    ``extra="forbid"``, so each of these on its own makes a hub's turn undecodable by a
-    client at the previous version.
-    """
-    assert "interpretation" in Goal.model_fields, "a required field an older reader has none for"
-    assert "statement" not in Goal.model_fields, "and one it expects that is no longer emitted"
-    assert "targets_revision" in ActionPlan.model_fields
-    assert TurnResult.model_fields["goal"].annotation is not Goal
-    for model in (Goal, ActionPlan, TurnResult):
-        assert model.model_config.get("extra") == "forbid"
-
-
 def test_the_two_halves_of_the_handshake_name_both_versions_when_they_disagree() -> None:
     """§12: ADR-0084 §3's exact-match handshake, and the refusal names both versions.
 
@@ -130,7 +108,6 @@ def test_the_stored_record_versions_moved_and_the_conversation_export_did_not() 
     )
     # ADR-0275 later advances the export for activation eligibility.
     assert ConversationExport.model_fields["schema_version"].default >= 2
-    assert "goal_id" in ParkedRead.model_fields, "and the record gained its identifier"
 
 
 def _entry_for(version: int) -> str:

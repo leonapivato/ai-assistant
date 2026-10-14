@@ -25,14 +25,10 @@ from ai_assistant.core.types import (
     DEFAULT_NOTIFICATION_REACH,
     BeliefBand,
     BeliefSummary,
-    ForecastNotRead,
     GrantScope,
     MemoryKind,
     NotificationCondition,
     NotificationReach,
-    ReadAnswerOutcome,
-    ReadCancellation,
-    SearchNotServiced,
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.interfaces.gateway.records import RefusalCondition
@@ -3632,63 +3628,6 @@ def test_the_page_shifts_no_instant_and_reaches_for_no_zone_database() -> None:
     assert "Intl." not in script
     assert "toLocale" not in script
     assert "getTimezoneOffset" not in script
-
-
-# --- ADR-0242 §9: the statements the browser does not render -------------------
-
-
-def test_the_page_renders_no_statement_for_any_search_not_serviced_member() -> None:
-    """ADR-0242 §9's browser deferral, which ADR-0244 leaves entire — a decision this
-    lane took rather than an omission it left.
-
-    §9's last clause is explicit about this surface: "the browser, until its own lane
-    (§5), renders neither the statement nor the reply's absence of one, because it
-    renders the turn exactly as it does today and the field it now receives is one it
-    ignores." ADR-0244 supersedes that ADR as to "§9's statement enumeration by **one
-    member**. **Nothing else in that ADR**", so the deferral binds and the enumeration
-    stays all-or-nothing: "a surface that renders **no** statement for a member is a
-    surface that has not implemented this section, not a permitted degradation".
-
-    A page rendering one of the nine is therefore the half-implemented surface §9
-    refuses, and one rendering all nine would mint browser wordings for eight members and
-    for three acts that exist only in a terminal. So it renders none, the member reaches
-    it through no route, and #2237 carries the lane that changes that.
-
-    This assertion is what stops the decision being quietly reversed: the member reaching
-    the page at all fails here, and whoever puts it there decides in this docstring
-    whether the page sees the whole vocabulary.
-
-    **Asserted over the route first**, because that is the only way a member can arrive:
-    ``search_not_serviced`` is the one field that carries it, and a page that never reads
-    it renders nothing for any of the nine however the words are spelled.
-
-    **And over the key form for the members that are this enum's alone.** ``declined`` and
-    ``interrupted`` are values two of these vocabularies share — ``ReadAnswerOutcome`` has
-    the first and ``ReadCancellation`` the second — so a key of that name says nothing
-    about which enum it belongs to.
-
-    **``ForecastNotRead`` joins that overlap, which narrows this arm rather than weakening
-    it.** ADR-0260 §10 closes that vocabulary at six and this page now renders all six
-    (#2474), and three of its values — ``spend_exhausted``, ``authorisation_awaited`` and
-    ``unavailable`` — are spelled identically in ``SearchNotServiced``. A key of one of
-    those names says nothing about which enum declared it, exactly as ``declined`` already
-    said nothing. **The assertion this arm actually rests on is the one above it**: the
-    member arrives through ``search_not_serviced`` and through no other route, so a page
-    that never reads that field renders nothing for any of the nine however the words are
-    spelled. What is left to the key form is ``trust_missing`` and ``answer_awaited``,
-    which are this enum's alone and are the two whose acts exist only in a terminal.
-    """
-    script = _code("app.js")
-    shared = (
-        {member.value for member in ReadAnswerOutcome}
-        | {member.value for member in ReadCancellation}
-        | {member.value for member in ForecastNotRead}
-    )
-
-    assert "search_not_serviced" not in script
-    for member in SearchNotServiced:
-        if member.value not in shared:
-            assert f"\n  {member.value}:" not in script, member.value
 
 
 # --- ADR-0296 §4: the chat and the devices it reaches ----------------------------

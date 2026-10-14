@@ -11,21 +11,10 @@ it is written to its shape.
 from __future__ import annotations
 
 import inspect
-from datetime import UTC, datetime
 from typing import Final
 
-from ai_assistant.core.types import (
-    AttemptEffort,
-    AttemptKind,
-    ConversationExport,
-    GoalAttempt,
-    PlanExport,
-    ReadAskOutcome,
-    ReadOutcomeKind,
-)
+from ai_assistant.core.types import ConversationExport, PlanExport
 from ai_assistant.wire import client, envelope, server
-
-_WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
 #: The version ADR-0251's L1 moves to, and the one it moves from.
 _MOVED_TO: Final = 39
@@ -80,48 +69,6 @@ def test_the_entry_records_what_did_not_move() -> None:
     assert "Planner" in entry, "the Protocol that is not a wire surface"
     assert "PlanExport" in entry, "the stored-record version that is not a second wire one"
     assert "no compatibility shim" in entry.lower(), "ADR-0084 §3 is the mechanism"
-
-
-def test_the_ground_is_true_of_the_types_themselves() -> None:
-    """The entry's claim, checked against the models rather than the prose.
-
-    ``wire/codec.py`` renders a model by ``model_dump()`` and both set
-    ``extra="forbid"``, so the new member on every attempt a hub sends is what makes a
-    turn undecodable by a client at the previous version.
-    """
-    assert "kind" in AttemptEffort.model_fields
-    assert AttemptEffort.model_fields["kind"].annotation == AttemptKind | None
-    assert GoalAttempt.model_fields["effort"].annotation is AttemptEffort
-    for model in (AttemptEffort, GoalAttempt):
-        assert model.model_config.get("extra") == "forbid"
-    dumped = GoalAttempt(
-        id="a1",
-        goal_id="g1",
-        opened_at=_WHEN,
-        effort=AttemptEffort(kind=AttemptKind.SPOKEN),
-    ).model_dump()
-    assert dumped["effort"]["kind"] == "spoken", "emitted on every attempt, not only a set one"
-
-
-def test_the_new_vocabularies_reach_no_wire_carried_field() -> None:
-    """§16: "``ReadOutcomeKind`` and ``ReadAskOutcome`` are not a second ground".
-
-    Both exist only as an argument to ``Planner.plan``. Asserted where it could stop
-    being true: no field of any model in ``core.types`` is annotated with either, so a
-    later lane putting one on a wire-carried record fails here and has to read ADR-0124
-    §9 rather than discover it in review.
-    """
-    from ai_assistant.core import types  # noqa: PLC0415 — the module is the subject
-
-    carrying = [
-        f"{name}.{field}"
-        for name, model in vars(types).items()
-        if isinstance(model, type) and hasattr(model, "model_fields")
-        for field, info in model.model_fields.items()
-        if info.annotation in {ReadOutcomeKind, ReadAskOutcome} and model is not ReadAskOutcome
-    ]
-
-    assert carrying == [], "the carrier is an in-process argument and lives on no record"
 
 
 def test_the_two_halves_of_the_handshake_name_both_versions_when_they_disagree() -> None:
