@@ -20,14 +20,16 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from ai_assistant.core.errors import OversizedValueError
 from ai_assistant.core.types import (
     Belief,
     BeliefBand,
-    Confirmation,
-    ContinuationToken,
+    EncodableText,
     Evidence,
+    FrozenJsonMapping,
+    Identifier,
     MemoryKind,
 )
 from ai_assistant.orchestration import payloads
@@ -46,6 +48,38 @@ if TYPE_CHECKING:
 def _encoded(value: object) -> str:
     """The canonical bytes as text, so a failure message is readable."""
     return canonical_payload(value).decode("utf-8")
+
+
+class _Token(BaseModel):
+    """The continuation token's shape: one opaque handle, frozen, nothing extra."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    handle: Identifier
+
+
+class _ConfirmationShaped(BaseModel):
+    """ADR-0087 §5e's confirmation-shaped input, declared here rather than borrowed.
+
+    §5e's composite vectors "state the field set they were built over inline, so that a
+    vector remains verifiable whatever the surface ADR settles", and the ``Confirmation``
+    that used to supply this one leaves ``core`` with the old path (ADR-0309 §5). So the
+    vector keeps its own input: the same eight members under the same names, the same
+    ``extra="forbid"`` and ``frozen=True``, ``parameters`` the same
+    ``FrozenJsonMapping``, and the three members every vector holds at ``null`` typed
+    as nothing else. The bytes and their lengths are the ratified ones, unchanged.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tool_id: Identifier
+    tool_description: EncodableText
+    parameters: FrozenJsonMapping
+    reason: EncodableText
+    token: _Token
+    egress: None
+    read: None
+    authorization: None
 
 
 class TestStrings:
@@ -144,18 +178,18 @@ class TestNumbers:
     def test_equal_values_that_must_stay_apart(
         self, parameters: Mapping[str, Any], expected: str, size: int
     ) -> None:
-        """§5b's five ``==``-equal values, inside the promoted holder that reaches them.
+        """§5b's five ``==``-equal values, inside a ``FrozenJsonMapping`` holder.
 
         ``1``, ``True`` and ``1.0`` are all ``==``; so are ``0.0`` and ``-0.0``.
         §4's equivalence is indistinguishability rather than ``==``, so each keeps
         its own bytes and the encoding normalises nothing.
         """
-        confirmation = Confirmation(
+        confirmation = _ConfirmationShaped(
             tool_id="t-1",
             tool_description="send",
             parameters=parameters,
             reason="external",
-            token=ContinuationToken(handle="h-1"),
+            token=_Token(handle="h-1"),
             egress=None,
             read=None,
             authorization=None,
@@ -343,23 +377,23 @@ class TestComposites:
             '"reason":"external","token":{"handle":"h-1"},"tool_description":"send",'
             '"tool_id":"t-1"}'
         )
-        one = Confirmation(
+        one = _ConfirmationShaped(
             tool_id="t-1",
             tool_description="send",
             parameters={"to": "a@b", "body": "hi", "Z": 1},
             reason="external",
-            token=ContinuationToken(handle="h-1"),
+            token=_Token(handle="h-1"),
             egress=None,
             read=None,
             authorization=None,
         )
         other = one.model_copy(update={"parameters": one.parameters})
-        reordered = Confirmation(
+        reordered = _ConfirmationShaped(
             tool_id="t-1",
             tool_description="send",
             parameters={"Z": 1, "body": "hi", "to": "a@b"},
             reason="external",
-            token=ContinuationToken(handle="h-1"),
+            token=_Token(handle="h-1"),
             egress=None,
             read=None,
             authorization=None,
