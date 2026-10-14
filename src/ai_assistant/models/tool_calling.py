@@ -374,14 +374,18 @@ def _offered(request: _Request) -> tuple[list[dict[str, object]], dict[str, obje
     request apart from sending it), so that gives what the request carried without
     touching what it sent. The name, the description and the order are the round's own.
 
+    So the replay is made only where every piece of code the preparation runs is
+    pydantic-ai's own: each model the request passes through is an instance of one of
+    pydantic-ai's classes with no method shadowed, and the profile's schema transformer,
+    the one hook a profile gives preparation, is pydantic-ai's too. Code of anyone
+    else's may keep state a replay would change, recording what was never sent and
+    moving the next request on, or carry the request somewhere a replay cannot see.
+
     Where that cannot be computed, each tool is kept as the round built it and the
-    second value says why. That is so where any model the request passes through
-    prepares or sends it with code other than pydantic-ai's own, which may keep state a
-    replay would change or carry the request somewhere a replay cannot see; where the
-    model is a :class:`~pydantic_ai.models.fallback.FallbackModel`, which prepares each
-    request for whichever model it holds answers; and where the preparation raises, or
-    gives back other tools than were sent. Nothing here fails the round or drops the
-    entry.
+    second value says why: where the replay is not made, as above; where the model is a
+    :class:`~pydantic_ai.models.fallback.FallbackModel`, which prepares each request for
+    whichever model it holds answers; and where the preparation raises, or gives back
+    other tools than were sent. Nothing here fails the round or drops the entry.
     """
     sent = request.parameters.function_tools
     try:
@@ -397,16 +401,16 @@ def _prepared(request: _Request) -> list[NativeTool]:
     """The function tools as ``request.model``'s own request preparation gives them.
 
     Raises:
-        ModelError: If a model the request passes through prepares or sends it with
-            code other than pydantic-ai's own, the model is a fallback one, or
-            preparation gives back tools other than the ones sent, by name and order.
+        ModelError: If the preparation runs code other than pydantic-ai's own, the
+            model is a fallback one, or preparation gives back tools other than the
+            ones sent, by name and order.
     """
     inner = request.model
     while True:
         if not _pydantic_ais_own(inner):
             msg = (
-                f"{type(inner).__qualname__} prepares or sends its requests with code other "
-                "than pydantic-ai's own, so its preparation is not replayed"
+                f"{type(inner).__qualname__} is not one of pydantic-ai's own models, so its "
+                "preparation is not replayed"
             )
             raise ModelError(msg)
         if not isinstance(inner, WrapperModel):
@@ -414,6 +418,13 @@ def _prepared(request: _Request) -> list[NativeTool]:
         inner = inner.wrapped
     if isinstance(inner, FallbackModel):
         msg = "a fallback model prepares the request for whichever model it holds answers"
+        raise ModelError(msg)
+    transformer = inner.profile.get("json_schema_transformer")
+    if transformer is not None and not _pydantic_ais(transformer):
+        msg = (
+            f"the schema transformer {transformer.__qualname__} is not one of pydantic-ai's "
+            "own, so the preparation is not replayed"
+        )
         raise ModelError(msg)
     _, parameters = request.model.prepare_request(request.settings, request.parameters)
     prepared = list(parameters.function_tools)
@@ -425,16 +436,20 @@ def _prepared(request: _Request) -> list[NativeTool]:
     return prepared
 
 
-#: The methods through which a model prepares and sends a request.
-_PREPARING: Final = ("request", "prepare_request", "customize_request_parameters")
+def _pydantic_ais(code: type) -> bool:
+    """Whether ``code`` is defined by pydantic-ai itself."""
+    return code.__module__.startswith("pydantic_ai.")
 
 
 def _pydantic_ais_own(model: models.Model) -> bool:
-    """Whether ``model`` prepares and sends a request with pydantic-ai's own code alone."""
-    return all(
-        str(getattr(getattr(model, name, None), "__module__", "")).startswith("pydantic_ai.")
-        for name in _PREPARING
-    )
+    """Whether ``model`` is an instance of pydantic-ai's own class, its methods unshadowed.
+
+    Then the code that prepares and sends its requests is pydantic-ai's alone, down to
+    every method a preparation calls on it.
+    """
+    cls = type(model)
+    shadowed = any(callable(getattr(cls, name, None)) for name in getattr(model, "__dict__", {}))
+    return _pydantic_ais(cls) and not shadowed
 
 
 def _recorded(tool: NativeTool, prepared: NativeTool) -> dict[str, object]:

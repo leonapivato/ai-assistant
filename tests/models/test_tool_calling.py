@@ -15,7 +15,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
 
 import httpx
 import pytest
@@ -37,7 +37,7 @@ from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.wrapper import WrapperModel
-from pydantic_ai.profiles import ModelProfile
+from pydantic_ai.profiles import JsonSchemaTransformer, ModelProfile
 from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from tool_calling_completer_contract import SeenTool, ToolCallingCompleterContract, Turn
@@ -820,6 +820,51 @@ async def test_a_preparation_that_is_not_pydantic_ais_own_is_not_replayed() -> N
         assert "_Counting" in body["offered_tools_unprepared"]["message"]
 
 
+class _CountingTransformer(JsonSchemaTransformer):
+    """A schema transformer that keeps state: each walk numbers the first property."""
+
+    walks: ClassVar[int] = 0
+
+    def walk(self) -> dict[str, Any]:
+        schema = super().walk()
+        if "query" in schema.get("properties", {}):
+            type(self).walks += 1
+            schema["properties"] = {"query": {"const": type(self).walks}}
+        return schema
+
+    def transform(self, schema: dict[str, Any]) -> dict[str, Any]:
+        return schema
+
+
+async def test_a_schema_transformer_that_is_not_pydantic_ais_own_is_not_replayed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The round-2 review's probe: the profile's hook runs other code, so no replay."""
+    monkeypatch.setattr(_CountingTransformer, "walks", 0)
+    seen: list[object] = []
+
+    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del messages
+        seen.append(info.function_tools[0].parameters_json_schema["properties"]["query"])
+        return ModelResponse(parts=[TextPart("ok")])
+
+    sink = FakeDiagnosticSink()
+    model = FunctionModel(
+        answer, profile=ModelProfile(json_schema_transformer=_CountingTransformer)
+    )
+    completer = PydanticAIToolCallingCompleter(model, diagnostics=sink)
+
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now):
+        await completer.respond(_request(), [_tool()])
+        await completer.respond(_request(), [_tool()])
+
+    assert seen == [{"const": 1}, {"const": 2}]
+    for entry in sink.recorded:
+        body = entry.model_dump(mode="json")["body"]
+        assert body["offered_tools"][0] == _tool().model_dump(mode="json")
+        assert "_CountingTransformer" in body["offered_tools_unprepared"]["message"]
+
+
 def _answering() -> FunctionModel:
     def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         del messages, info
@@ -843,7 +888,7 @@ class _Wrapping(WrapperModel):
 @pytest.mark.parametrize(
     ("model", "why"),
     [
-        pytest.param(lambda: _Wrapping(_answering()), "_Wrapping prepares", id="own-wrapper"),
+        pytest.param(lambda: _Wrapping(_answering()), "_Wrapping is not", id="own-wrapper"),
         pytest.param(
             lambda: FallbackModel(_answering()), "a fallback model prepares", id="fallback"
         ),
