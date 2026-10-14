@@ -34,6 +34,7 @@ the redactor masks an unknown value.
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import re
 import sys
@@ -612,33 +613,78 @@ def _affordable(failure: BaseException) -> bool:
     return True
 
 
-def _renderings(text: str) -> list[str]:
-    """``text`` as a formatter commonly prints it: as is, and escaped by ``repr`` or ``ascii``.
+def _escaped(text: str) -> list[str]:
+    """``text`` escaped as ``repr``, ``ascii`` and JSON escape it, without the quotes."""
+    return [
+        repr(text)[1:-1],
+        ascii(text)[1:-1],
+        json.dumps(text)[1:-1],
+        json.dumps(text, ensure_ascii=False)[1:-1],
+    ]
 
-    Each with and without its quotes, and each line on its own, as is and escaped: a
-    line of a multi-line text is printed between the escapes of the lines around it.
+
+def _renderings(text: str) -> list[str]:
+    """``text`` as a formatter commonly prints it: as is, and escaped.
+
+    Escaped by ``repr`` and ``ascii`` (``%r``, ``%a``, ``!r``, a container's repr)
+    and by JSON (a payload logged whole), each with its quotes and without, and each
+    line on its own, as is and escaped: a line of a multi-line text is printed
+    between the escapes of the lines around it.
     """
     lines = text.splitlines()
     return [
         text,
         repr(text),
-        repr(text)[1:-1],
         ascii(text),
-        ascii(text)[1:-1],
+        *_escaped(text),
         *lines,
-        *(repr(line)[1:-1] for line in lines),
-        *(ascii(line)[1:-1] for line in lines),
+        *(one for line in lines for one in _escaped(line)),
     ]
+
+
+#: How long a word's start or end must be, found in a text, for the word to be
+#: taken as cut short there (:func:`_cut_short`).
+_ANCHOR: Final = 8
+
+
+def _cut_short(text: str, word: str, replacement: str) -> list[tuple[int, int, str]]:
+    """Where ``text`` holds ``word`` cut short: its start or its end, :data:`_ANCHOR` or longer.
+
+    A call site bounds a log line by slicing an exception's text — ``str(exc)[:200]``
+    — and ``reprlib`` keeps a repr's start and end around ``...``. Each place the
+    word's first (or last) :data:`_ANCHOR` characters appear is extended for as long
+    as the text goes on (or back) matching the word.
+    """
+    spans: list[tuple[int, int, str]] = []
+    head, tail = word[:_ANCHOR], word[-_ANCHOR:]
+    at = text.find(head)
+    while at != -1:
+        end = at + _ANCHOR
+        while end < len(text) and end - at < len(word) and text[end] == word[end - at]:
+            end += 1
+        spans.append((at, end, replacement))
+        at = text.find(head, end)
+    at = text.find(tail)
+    while at != -1:
+        start, inside = at, len(word) - _ANCHOR
+        while start > 0 and inside > 0 and text[start - 1] == word[inside - 1]:
+            start -= 1
+            inside -= 1
+        spans.append((start, at + _ANCHOR, replacement))
+        at = text.find(tail, at + _ANCHOR)
+    return spans
 
 
 def _replaced(text: str, words: Mapping[str, str]) -> str:
     """``text`` with each of ``words`` replaced by its value, in one pass, longest first.
 
-    Every occurrence of every word is found with ``str.find``, then taken leftmost
-    first and, at one place, longest first, skipping any that overlaps one already
-    taken; so a replacement put in is never read again. Not a regular expression: an
-    exception's text can be megabytes long, and compiling it — then holding it in
-    the ``re`` module's cache — would cost far more than finding it.
+    Every occurrence of every word is found with ``str.find``, and so is every place
+    a word of at least :data:`_ANCHOR` characters appears cut short
+    (:func:`_cut_short`). They are taken leftmost first and, at one place, longest
+    first, skipping any that overlaps one already taken; so a replacement put in is
+    never read again. Not a regular expression: an exception's text can be megabytes
+    long, and compiling it — then holding it in the ``re`` module's cache — would
+    cost far more than finding it.
     """
     spans: list[tuple[int, int, str]] = []
     for word, replacement in words.items():
@@ -646,6 +692,8 @@ def _replaced(text: str, words: Mapping[str, str]) -> str:
         while at != -1:
             spans.append((at, at + len(word), replacement))
             at = text.find(word, at + len(word))
+        if len(word) >= _ANCHOR:
+            spans.extend(_cut_short(text, word, replacement))
     if not spans:
         return text
     spans.sort(key=lambda span: (span[0], span[0] - span[1]))
@@ -662,14 +710,14 @@ def _replaced(text: str, words: Mapping[str, str]) -> str:
 class _Unsaid:
     """What takes the words of a record's exceptions out of a string.
 
-    Each exception's text, each of its text arguments and each of its notes is
-    replaced by its class wherever it appears, as are the forms a formatter commonly
-    turns one into (:func:`_renderings`), and the exception's own repr. Its text and
-    repr are built only where that is affordable (:func:`_affordable`). That leaves
-    a rendering this module could not reproduce — asyncio's debug mode prints a callback's arguments
-    through ``reprlib``, which cuts a long repr to ``ValueError('P…_END')`` — so a
-    line still holding a carried exception's class followed by ``(`` is cut there,
-    and what followed is masked.
+    First, a line holding a carried exception's class followed by ``(`` is cut there
+    and what followed is masked: that is the exception's repr, whole or in a form
+    this module could not reproduce — asyncio's debug mode prints a callback's
+    arguments through ``reprlib``, which cuts a long repr to ``ValueError('P…_END')``.
+    Then, in what is left, each exception's text, each of its text arguments and
+    each of its notes is replaced by its class wherever it appears, as are the forms
+    a formatter commonly turns one into (:func:`_renderings`). Its text and repr are
+    built only where that is affordable (:func:`_affordable`).
 
     Over-matching is the intended direction, as for the redactor's keys: an
     exception whose text is a common word takes that word out of the rest of the
@@ -700,7 +748,7 @@ class _Unsaid:
         self._words = words
         names = sorted({type(failure).__name__ for failure in failures}, key=len, reverse=True)
         self._built = (
-            re.compile(r"\b(" + "|".join(re.escape(name) for name in names) + r")\(")
+            re.compile("(" + "|".join(re.escape(name) for name in names) + r")\(")
             if names
             else None
         )
@@ -716,15 +764,18 @@ class _Unsaid:
         """
         if self._built is None:
             return text
-        text = _replaced(text, self._words)
         lines = []
         for line in text.splitlines(keepends=True):
+            # The cut is found in the line as given, before any word is replaced: a
+            # word inside a class's name ("Error" in "ValueError") would otherwise
+            # change the name the cut looks for, and let the rest of the line through.
             opened = self._built.search(line)
             if opened is None:
-                lines.append(line)
+                lines.append(_replaced(line, self._words))
             else:
                 ending = line[len(line.rstrip("\r\n")) :]
-                lines.append(f"{line[: opened.start()]}{opened.group(1)}({REDACTED}){ending}")
+                head = _replaced(line[: opened.start()], self._words)
+                lines.append(f"{head}{opened.group(1)}({REDACTED}){ending}")
         return "".join(lines)
 
 
@@ -873,10 +924,16 @@ def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
     safe = copy.copy(record)
     for key, value in extras.items():
         setattr(safe, key, _plain(value, unsaid, done))
-    for field in _NAMED_FIELDS:
-        named_by = getattr(record, field, None)
-        if isinstance(named_by, str):
-            setattr(safe, field, unsaid(named_by))
+    for field, value in vars(record).items():
+        if field in _RECORD_FIELDS and isinstance(value, str):
+            # As exact strings, as an argument is: a subclass renders as it likes.
+            exact = str.__str__(value)
+            setattr(safe, field, unsaid(exact) if field in _NAMED_FIELDS else exact)
+    # What a formatter cached on the record — another handler may have formatted it
+    # first — is its rendering of the record as logged; every formatter makes both
+    # again.
+    for cached in ("message", "asctime"):
+        vars(safe).pop(cached, None)
     if wrapped:
         safe.msg = _scrubbed_event(record)
     else:
