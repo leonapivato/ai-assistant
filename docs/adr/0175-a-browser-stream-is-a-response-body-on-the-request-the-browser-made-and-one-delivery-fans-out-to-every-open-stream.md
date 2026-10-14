@@ -1,6 +1,6 @@
 # 175. A browser stream is a response body on the request the browser made, and one delivery fans out to every open stream
 
-- Status: Partially superseded by ADR-0177 (§6's first clause, the closed enumeration of five browser-reachable operations) and ADR-0296 (§5:4's and §6:4's bars on a per-browser identifier and a per-browser scope, and §6:4's reach equal to the gateway device's, each only as it reaches a browser device) and ADR-0299 (§3:4's *both turn entries reach the browser*, of which one, `converse`, does)
+- Status: Partially superseded by ADR-0177 (§6's first clause, the closed enumeration of five browser-reachable operations) and ADR-0296 (§5:4's and §6:4's bars on a per-browser identifier and a per-browser scope, and §6:4's reach equal to the gateway device's, each only as it reaches a browser device) and ADR-0299 (§3:4's *both turn entries reach the browser*, of which one, `converse`, does) and ADR-0319 (§3:1–§3:4)
 - Date: 2026-08-21
 - Partially superseded: 2026-08-22 by ADR-0177 — **one clause, and the clause
   beside it is what authorised the replacement.** ADR-0177 is
@@ -105,6 +105,7 @@
   The rest of §3:4, §3:1–§3:3 and §3:5 stand, and every other clause stands. This replacement takes effect on ratification of ADR-0299. This reciprocal
   header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §3:1–§3:4. They governed the browser's streamed and whole turn, which no gateway route serves. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

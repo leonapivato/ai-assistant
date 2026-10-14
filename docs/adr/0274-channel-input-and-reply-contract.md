@@ -1,6 +1,6 @@
 # 274. Channel inputs share an assistant receiver, and reply delivery is optional
 
-- Status: Partially superseded by ADR-0275 (§1, §3 and §5–§8's event/context and speech-ending persistence, capture reporting and post-processing cleanup) and ADR-0276 (§5's third clause, in its prompt and reference-resolution halves alone: the understanding stage renders supplied context into its own prompt as quoted data and resolves the input's references against it) and ADR-0293 (§2–§6, in so far as they govern a typed text input to the conversation and its reply) and ADR-0309 (§7's informational processing, in its summary stage) and ADR-0313 (the conversational combinations: §3:1's `ConversationInputOptions`, `TextChannelResult` and `SpokenChannelResult`, §4:2's conversational rows, §4:3–§4:4's conversational limbs, §4:6 and §8:4; for an event, §3:1's `InformationalEventResult`, §7:6–§7:7 and §8:6–§8:7)
+- Status: Partially superseded by ADR-0275 (§1, §3 and §5–§8's event/context and speech-ending persistence, capture reporting and post-processing cleanup) and ADR-0276 (§5's third clause, in its prompt and reference-resolution halves alone: the understanding stage renders supplied context into its own prompt as quoted data and resolves the input's references against it) and ADR-0293 (§2–§6, in so far as they govern a typed text input to the conversation and its reply) and ADR-0309 (§7's informational processing, in its summary stage) and ADR-0313 (the conversational combinations: §3:1's `ConversationInputOptions`, `TextChannelResult` and `SpokenChannelResult`, §4:2's conversational rows, §4:3–§4:4's conversational limbs, §4:6 and §8:4; for an event, §3:1's `InformationalEventResult`, §7:6–§7:7 and §8:6–§8:7) and ADR-0319 (§2:6, §3:5, §6:2, §6:8–§6:10, §8:2–§8:3 and §10:1)
 - Date: 2026-09-17
 - Scope: [Milestone 1](https://github.com/leonapivato/ai-assistant/milestone/1), [#2521](https://github.com/leonapivato/ai-assistant/issues/2521).
 - Owner authorization: Reviewed and authorized for ratification on 2026-09-18; the owner assigned ADR-0274.
@@ -62,6 +62,7 @@
   This replacement takes effect on ratification of ADR-0313. This reciprocal header
   record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §2:6, §3:5, §6:2, §6:8–§6:10, §8:2–§8:3 and §10:1. They governed the spoken and compatibility limbs of the conversational entry. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

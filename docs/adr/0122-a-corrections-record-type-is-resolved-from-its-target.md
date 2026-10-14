@@ -1,6 +1,6 @@
 # 122. A correction's record type is resolved from its target, not declared by its caller
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0319 (§3:1–§3:3, §4:1, §5:1 and §7:2)
 - Date: 2026-08-09
 - **Note (2026-09-03): §11's residue bullet calls the cross-kind misresolution
   "visible"; read that as §3's and §4's "discoverable by belief inspection".**
@@ -79,6 +79,7 @@
   per-kind lock that `MemoryIngestor.__init__` weighs and *rejects*. The reasons
   the widening is refused are the four others §8 gives.
 - Closes the decision half of issue #864. Refs #862, #865.
+- Partially superseded: 2026-10-14 by ADR-0319 — §3:1–§3:3, §4:1, §5:1 and §7:2. They governed the learning loop's resolution of a correction's kind, in `orchestration/loop.py`. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

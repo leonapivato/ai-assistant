@@ -1,6 +1,6 @@
 # 286. An episode is open while its activation runs, and frozen when it ends
 
-- Status: Partially superseded by ADR-0287 (§2:2's, §3:5's, §4:4's and §5:3's archive members; §8:1's discard) and ADR-0293 (§4:4's and §7:3's deletion of the episode where `record_turn` returns `None`) and ADR-0307 (§3:3's admitted differences, in the additions alone; §3:8's *no field is added for a stage's result*, for planning's rounds and labels alone) and ADR-0308 (§3:3's admitted differences, in the additions alone; §3:8's *no field is added for a stage's result*, for the second run and the digests alone)
+- Status: Partially superseded by ADR-0287 (§2:2's, §3:5's, §4:4's and §5:3's archive members; §8:1's discard) and ADR-0293 (§4:4's and §7:3's deletion of the episode where `record_turn` returns `None`) and ADR-0307 (§3:3's admitted differences, in the additions alone; §3:8's *no field is added for a stage's result*, for planning's rounds and labels alone) and ADR-0308 (§3:3's admitted differences, in the additions alone; §3:8's *no field is added for a stage's result*, for the second run and the digests alone) and ADR-0319 (§2:3 and §9:1)
 - Date: 2026-10-03
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); step 3a of the plan recorded there on 2026-10-03, the open episode, behind the cutover that steps 2 and 3 share.
 - Dependency: ADR-0284 and ADR-0285, implemented at `6b41b305`.
@@ -52,6 +52,7 @@
   stands. These scoped replacements take effect on ratification of ADR-0308. This
   reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §2:3 and §9:1. They governed `resume`'s admission write and its episode. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

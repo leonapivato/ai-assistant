@@ -1,6 +1,6 @@
 # 57. Resolving the deferred caller-cancellation gap: `assemble()` observes its sources
 
-- Status: Accepted
+- Status: Superseded by ADR-0319
 - Date: 2026-07-24
 - Resolves issue #231, which ADR-0033 filed rather than folded into its own PR.
   It is a behaviour decision for `context`, the completion of a follow-up
@@ -19,6 +19,7 @@
   separate-PR requirement does not apply and this ADR merges with the
   implementation it authorises, exactly as ADR-0033 did for #211.
 - Refs: ADR-0033 §4 and Consequences, ADR-0026 §4, ADR-0008 §4.
+- Superseded: 2026-10-14 by ADR-0319 — the whole decision. Every clause still in force governed `AssemblingContextProvider.assemble`'s observation of its sources, in `context/provider.py`. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

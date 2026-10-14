@@ -1,6 +1,6 @@
 # 106. Consolidation inherits taint, lands in the derived band, and is the seam that makes externality recoverable
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0319 (§6:9 and §10:9–§10:11)
 - Date: 2026-08-05
 - **Note (2026-08-23): §12's third deferral is answered by ADR-0181, and no clause
   of this ADR changes.** That bullet — "Whether a tainted belief may parameterise an
@@ -181,6 +181,7 @@
   second clause still has work to do. **#746 is open**, as are #40, #659, #673 and
   #301. **ADR-0070 §1's no-rewrite rule now protects this text**, so any later
   correction to any of it is an appended dated note.
+- Partially superseded: 2026-10-14 by ADR-0319 — §6:9 and §10:9–§10:11. They governed the deferred-question queue in `memory/deferral_store.py` and the answer path. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

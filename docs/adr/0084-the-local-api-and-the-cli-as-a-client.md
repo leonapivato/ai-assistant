@@ -1,6 +1,6 @@
 # 84. The local API: a loopback socket, a versioned envelope, and the CLI as a client
 
-- Status: Partially superseded by ADR-0087 (§3's rule that a payload is serialised through pydantic's JSON mode; §5's enumeration of the implementation sequence as four changes) and ADR-0131 (§3's count of the decoded-frame close as the one exception)
+- Status: Partially superseded by ADR-0087 (§3's rule that a payload is serialised through pydantic's JSON mode; §5's enumeration of the implementation sequence as four changes) and ADR-0131 (§3's count of the decoded-frame close as the one exception) and ADR-0319 (§7, and §8's ruling that `StepOutcome` names the driven step)
 - Date: 2026-07-31
 - Partially superseded: 2026-08-01 by ADR-0087 — **two clauses: §3's
   payload-encoding rule is replaced, and §5's sequence is five changes, not
@@ -139,6 +139,7 @@
   anticipated this exactly: "One thing ADR-0084's lane inherits as work, not as a
   constraint… That lane owes ADR-0082 §1's test against ADR-0042, and this ADR
   does not pre-judge it."
+- Partially superseded: 2026-10-14 by ADR-0319 — §7, and §8's ruling that `StepOutcome` names the driven step. They governed `resume`'s continuation token and the driven step's outcome, which left the engine surface. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 119. An evaluation trace records an event at a seam, references what it is about, and never contains it
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0319 (§9:4, for a control whose effective `search` limit depends on each activation's data)
 - Date: 2026-08-08
 - **Decides `core` surface and implements none of it.** Three new Protocols —
   `TraceSink`, `TraceRetention` and `TraceStore` — in `core/protocols.py`, and the
@@ -22,6 +22,7 @@
 - **This ADR amends nothing and supersedes nothing.** §14 applies ADR-0082 §1's
   test to each of the fifteen places where a record looks owed, and records why
   none is.
+- Partially superseded: 2026-10-14 by ADR-0319 — §9:4, for a control whose effective `search` limit depends on each activation's data, as recall's does under ADR-0282 §4:2. No startup figure can say whether such a search could truncate, so the allowlist records none for it, and the `retrieval_search_limit` key retires (ADR-0319 §4). §9:4 still reaches the ingestor's conflict search, and §9:5's per-trace exclusion stands. Every other clause stands. This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

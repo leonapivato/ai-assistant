@@ -1,6 +1,6 @@
 # 221. An episode carries the reply, a typed disposition, and how the turn was captured
 
-- Status: Partially superseded by ADR-0223 (§6's first clause, and within it only its first sentence — *"Capture writes the captured episode's `Provenance.derived_from_external` exactly as it does today — it is not set, and takes its `False` default"*. Capture now stamps that field, from the turn's own selection and threaded to the capture point. The remaining sentence of that clause, the whole of §6's second clause, and every other section of this ADR stand) and ADR-0275 (§1, §2, §5, §8 and §14's episode response role, processing metadata and model-facing eligibility) and ADR-0284 (§2:1's `EpisodicMemory.disposition` field; §3:1 and §3:2) and ADR-0285 (§4:1) and ADR-0287 (§2:1–§2:5)
+- Status: Partially superseded by ADR-0223 (§6's first clause, and within it only its first sentence — *"Capture writes the captured episode's `Provenance.derived_from_external` exactly as it does today — it is not set, and takes its `False` default"*. Capture now stamps that field, from the turn's own selection and threaded to the capture point. The remaining sentence of that clause, the whole of §6's second clause, and every other section of this ADR stand) and ADR-0275 (§1, §2, §5, §8 and §14's episode response role, processing metadata and model-facing eligibility) and ADR-0284 (§2:1's `EpisodicMemory.disposition` field; §3:1 and §3:2) and ADR-0285 (§4:1) and ADR-0287 (§2:1–§2:5) and ADR-0319 (§1:2, §1:3 and §5:6–§5:8)
 - Date: 2026-09-01
 - Partially superseded: 2026-09-02 by ADR-0223 — **§6's first clause no longer
   holds of capture: `Provenance.derived_from_external` is stamped on the captured
@@ -68,6 +68,7 @@
   effect on ratification of ADR-0287. This reciprocal header record accompanies the
   numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
   below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §1:2, §1:3 and §5:6–§5:8. They governed the composing stage's no-reply shapes, a stream's stop, and the spoken, parked, recovered and routed captures. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

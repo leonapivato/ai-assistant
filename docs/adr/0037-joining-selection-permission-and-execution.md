@@ -1,6 +1,6 @@
 # 37. Joining selection, the permission check and execution
 
-- Status: Partially superseded by ADR-0144 (§1's several-candidates refusal) and ADR-0306 (§4's park, for the calls the phases run: a `CONFIRM` parks nothing and goes back to planning)
+- Status: Partially superseded by ADR-0144 (§1's several-candidates refusal) and ADR-0306 (§4's park, for the calls the phases run: a `CONFIRM` parks nothing and goes back to planning) and ADR-0319 (§1's disposition table, §4, §5 and §6)
 - Date: 2026-07-22
 - **Partially superseded: 2026-08-13 by ADR-0144** — §1's several-candidates row
   only, and nothing else. A step is no longer refused whenever
@@ -54,6 +54,7 @@
   ratification of ADR-0306. This reciprocal header record accompanies the numbered draft
   under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
   preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §1's disposition table, §4, §5 and §6. They governed `StepRunner` in `orchestration/runner.py`: its dispositions, its park, its one-commit denial and its entry state; §2–§3's decide, record and read back stand, as the authorizing phase relies on them. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

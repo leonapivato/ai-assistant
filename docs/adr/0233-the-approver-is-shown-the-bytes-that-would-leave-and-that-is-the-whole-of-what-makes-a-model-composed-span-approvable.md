@@ -1,6 +1,6 @@
 # 233. The approver is shown the bytes that would leave, and that is the whole of what makes a model-composed span approvable
 
-- Status: Partially superseded by ADR-0238 (§9's first clause in its exclusivity alone — its "only where all four hold" admits a second exception, which that decision's §7 states over a search query composed for a destination whose recorded trust is `USER_CHOSEN` — and §9's second clause for that one class; the four conditions themselves are neither weakened, reordered nor made disjunctive, §8's floor binds unchanged wherever those four are the route, and §9's third, fourth and fifth clauses and every other section of this ADR stand entire)
+- Status: Partially superseded by ADR-0238 (§9's first clause in its exclusivity alone — its "only where all four hold" admits a second exception, which that decision's §7 states over a search query composed for a destination whose recorded trust is `USER_CHOSEN` — and §9's second clause for that one class; the four conditions themselves are neither weakened, reordered nor made disjunctive, §8's floor binds unchanged wherever those four are the route, and §9's third, fourth and fifth clauses and every other section of this ADR stand entire) and ADR-0319 (§11:2 and §14:8)
 - Date: 2026-09-04
 - **Partially superseded: 2026-09-05 by ADR-0238 — §9's first clause in its
   exclusivity alone, and §9's second clause for one class. Those two scopes, and
@@ -175,6 +175,7 @@
   reading its own §4 does not support is corrected rather than grandfathered. Appended
   dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
   other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
+- Partially superseded: 2026-10-14 by ADR-0319 — §11:2 and §14:8. They governed the confirmation surfaces and assembly sites, which are gone; the authority milestone redoes asking the user. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 160. The episodic bound meets the belief budget, and post-hoc attribution replaces the ablation arm
 
-- Status: Partially superseded by ADR-0162 (§1's episodic bound value of 15, and §1's clause fixing the evidence that moves it) and ADR-0285 (§3:2–§3:7 and §4:1–§4:9)
+- Status: Superseded by ADR-0319; partially superseded before it by ADR-0162 (§1's episodic bound value of 15, and §1's clause fixing the evidence that moves it) and ADR-0285 (§3:2–§3:7 and §4:1–§4:9)
 - Date: 2026-08-16
 - **Partially supersedes:**
   [ADR-0158](0158-an-episode-may-supplement-the-answering-prompt-and-never-shares-the-belief-budget.md)
@@ -101,6 +101,7 @@
   §3:1 and every other clause stand. These replacements take effect on ratification of
   ADR-0285. This reciprocal header record accompanies the numbered draft under ADR-0070
   and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Superseded: 2026-10-14 by ADR-0319 — the whole decision. Every clause still in force governed the episodic supplement's bound, in `orchestration/retrieval.py` and `orchestration/loop.py`. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 297. A stop is marked on the activation and recorded where claims are decided
 
-- Status: Partially superseded by ADR-0306 (§2:11's *and at no other write*, in the addition alone: the phases' effect claim is also refused on a stop record)
+- Status: Partially superseded by ADR-0306 (§2:11's *and at no other write*, in the addition alone: the phases' effect claim is also refused on a stop record) and ADR-0319 (§2:2, §2:10, §4:6, §4:10, §4:12 and §4:14–§4:16)
 - Date: 2026-10-05
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: how a stop bites, which ships with the conversation channel (ADR-0293 §11:8, ADR-0295 §6).
 - Dependency: ADR-0295, ratified.
@@ -16,6 +16,7 @@
   replacement takes effect on ratification of ADR-0306. This reciprocal header record
   accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the
   ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §2:2, §2:10, §4:6, §4:10, §4:12 and §4:14–§4:16. They governed the turn's drive, `resume`, the step runner and executor, the goal and the old adapter. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 210. On a channel of unbounded audience the withholding fires on what the turn was retrieved for, and the conversation's own recent turns fire nothing
 
-- Status: Partially superseded by ADR-0309 (§1:1–§1:2, in the set they name, for an activation the phases plan); §1 and §8 amended by ADR-0217
+- Status: Partially superseded by ADR-0309 (§1:1–§1:2, in the set they name, for an activation the phases plan) and ADR-0319 (§1:1–§1:2 as ADR-0309 left them, and §9); §1 and §8 amended by ADR-0217
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md)
@@ -72,6 +72,7 @@
   takes effect on ratification of ADR-0309. This reciprocal header record accompanies the
   numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
   below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §1:1–§1:2 as ADR-0309 left them, and §9. They governed the turn's relevance reads and the tests over the spoken operation and the composing stage. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

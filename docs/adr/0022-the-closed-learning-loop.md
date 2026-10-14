@@ -1,6 +1,6 @@
 # 22. The closed learning loop in `orchestration`
 
-- Status: Partially superseded by ADR-0084 (§2's placement of `TurnResult` outside `core/types.py`, and its sole graduation trigger) and ADR-0108 (§4's same-id collision resolution) and ADR-0158 (§3's Retrieval row, in the scope of the episodic supplement's own read) and ADR-0293 (§1's `learn`, as the route by which the user's feedback reaches the assistant)
+- Status: Superseded by ADR-0319; partially superseded before it by ADR-0084 (§2's placement of `TurnResult` outside `core/types.py`, and its sole graduation trigger) and ADR-0108 (§4's same-id collision resolution) and ADR-0158 (§3's Retrieval row, in the scope of the episodic supplement's own read) and ADR-0293 (§1's `learn`, as the route by which the user's feedback reaches the assistant)
 - Date: 2026-07-20
 - Partially superseded: 2026-10-04 by ADR-0293 — one scope. §1's `learn`, as the route
   by which the user's feedback reaches the assistant: the user corrects the assistant by
@@ -186,6 +186,7 @@
   it would have (ADR-0028 §4a). §4a's retrieval_limit check is unaffected. §5's
   injected clock stops stamping expires_at, which the writer's own clock now
   does (ADR-0028 §4b); it still stamps the goal.
+- Superseded: 2026-10-14 by ADR-0319 — the whole decision. Every clause still in force governed `LearningLoop` in `orchestration/loop.py`: its `respond`, its stage order, its failure table, its write path and its tuning check. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

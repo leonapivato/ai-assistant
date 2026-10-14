@@ -1,6 +1,6 @@
 # 60. Cancellation must not orphan a resource a seam acquired
 
-- Status: Accepted, §5's `Embedder` assessment amended by ADR-0118
+- Status: Partially superseded by ADR-0319 (§3's `ContextProvider` leg); §5's `Embedder` assessment amended by ADR-0118
 - Date: 2026-07-24
 - **Amended: 2026-08-08 by
   [ADR-0118](0118-the-embedding-seam-carries-its-own-deadline.md)**, in the scope
@@ -56,6 +56,7 @@
   covered — see "What this does not cover").
 - Source: `docs/review/architecture-validation-2026-07-24.md`, claim C1, verdict
   ASPIRATIONAL.
+- Partially superseded: 2026-10-14 by ADR-0319 — §3's `ContextProvider` leg. They governed `AssemblingContextProvider` in `context/provider.py`. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

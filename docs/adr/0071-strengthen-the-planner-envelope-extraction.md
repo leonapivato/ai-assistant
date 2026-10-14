@@ -1,6 +1,6 @@
 # 71. Strengthen the planner's envelope extraction to a scanning parse
 
-- Status: Partially superseded by ADR-0176 (the Decision's envelope-discriminator predicate — the first bullet's "non-empty list" test and the third bullet's rejection of an empty outer envelope)
+- Status: Superseded by ADR-0319; partially superseded before it by ADR-0176 (the Decision's envelope-discriminator predicate — the first bullet's "non-empty list" test and the third bullet's rejection of an empty outer envelope)
 - Date: 2026-07-26
 - Partially supersedes: ADR-0047 — §4 step 1's extraction *mechanism* (the "first
   `{` to last `}`" slice); the Decision below replaces it with a scanning parse.
@@ -29,6 +29,7 @@
   every shape this Decision rules on today is ruled the same way after it: a bare
   `{"steps": []}` decoy is still stepped over, and an outer object whose `steps` is
   empty still cannot be overridden by a non-empty `steps` nested inside it.
+- Superseded: 2026-10-14 by ADR-0319 — the whole decision. Every clause still in force governed the planner's envelope scan, `_extract_object` in `planning/planner.py`. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

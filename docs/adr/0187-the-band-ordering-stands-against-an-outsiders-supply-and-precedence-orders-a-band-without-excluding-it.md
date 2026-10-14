@@ -1,6 +1,6 @@
 # 187. The band ordering stands against an outsider's supply, and precedence orders a band without excluding it
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0319 (§3:1, §4, §4d, §5, §6:1 and §7:1)
 - Date: 2026-08-23
 - **This is the *second* revisit of ADR-0072 §5's band ordering, and the first one
   to weigh the adversarial input.** #663 records ADR-0072 §5's revisit trigger as
@@ -39,6 +39,7 @@
   #1484 (the milestone-23 QA run), #789 (leg 7's measurement instrument).
 - **Files** #1508 — the disclosure the milestone-23 run observed reading `True` on
   every send, which §5 rules is not this decision's.
+- Partially superseded: 2026-10-14 by ADR-0319 — §3:1, §4, §4d, §5, §6:1 and §7:1. They governed the retrieval assembler's band floor in `orchestration/retrieval.py`. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

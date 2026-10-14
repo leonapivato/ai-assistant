@@ -1,6 +1,6 @@
 # 211. The planner is told which capabilities exist, and an act nothing advertises is declined rather than planned
 
-- Status: Accepted
+- Status: Superseded by ADR-0319
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0014](0014-planning-model.md) — §6's `Planner` Protocol block, and only the
@@ -51,6 +51,7 @@
   its text on any later day. Where a later ADR changes one of the ADRs cited, this
   ADR is read against the text quoted here and that ADR's own record says what
   moved. This is ADR-0143's clause, taken for its reason.
+- Superseded: 2026-10-14 by ADR-0319 — the whole decision. Every clause still in force governed the planner's capability roster: `Planner.plan`'s `capabilities`, the turn loop's read of it, the planner's prompt and envelope, the composing stage's rendering and the alias layer. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

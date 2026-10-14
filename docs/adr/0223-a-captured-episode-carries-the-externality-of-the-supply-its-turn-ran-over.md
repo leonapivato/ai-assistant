@@ -1,6 +1,6 @@
 # 223. A captured episode carries the externality of the supply its turn ran over
 
-- Status: Partially superseded by ADR-0284 (§4:3's last sentence) and ADR-0286 (§3:1's partition, in the addition alone)
+- Status: Partially superseded by ADR-0284 (§4:3's last sentence) and ADR-0286 (§3:1's partition, in the addition alone) and ADR-0319 (§1:1, §2:1, §3:3, §3:4 and §4)
 - Date: 2026-09-02
 - **Partially supersedes:**
   [ADR-0221](0221-an-episode-carries-the-reply-a-typed-disposition-and-how-the-turn-was-captured.md)
@@ -29,6 +29,7 @@
   ratification of ADR-0286. This reciprocal header record accompanies the numbered draft
   under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
   preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §1:1, §2:1, §3:3, §3:4 and §4. They governed the old turn's capture of its supply's externality. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

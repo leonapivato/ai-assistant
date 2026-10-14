@@ -1,11 +1,12 @@
 # 295. Stopping an activation is a command that starts nothing new and cuts off nothing already sent
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0319 (§4:1)
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: stopping an activation, which ships with the conversation channel (ADR-0293 §11:8).
 - Authorization: the owner accepted proposal #2684 on 2026-10-04, at `483ae003`, and the dispatcher assigned 0295. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
 - **Partially supersedes** [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) — **two scopes.** **§4:2's member set, in the addition alone**: `ControllerRule` gains the end entry of a stop (§3 below). **§5:3's and §5:4's `interrupted`, for a pass a stop ends**: such a pass ends with a stop's own end entry, appended where and when those clauses append `interrupted` (§3 below). Every other clause stands, §5:3 and §5:4 for every other cancellation included.
 - **Partially supersedes** [ADR-0293](0293-the-hubs-chat-is-a-hosted-medium-and-a-conversation-keeps-its-own-transcript.md) — **two scopes.** **§8:3's list of endings, in the addition alone**: the current state also shows *stopped*, with the effects the stopped activation sent that finished (§3 below). **§9:1 and §10:2, for a stopped activation**: a stopped activation writes no *couldn't finish* message, as §6:17 already has it write nothing new (§3 below). Every other clause stands.
+- Partially superseded: 2026-10-14 by ADR-0319 — §4:1. They governed the goal a stopped activation was working on. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

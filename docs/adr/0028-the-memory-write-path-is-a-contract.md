@@ -1,6 +1,6 @@
 # 28. The memory write path is a contract: `MemoryWriter`
 
-- Status: Accepted, §8 amended by ADR-0040, ADR-0045 and ADR-0078
+- Status: Partially superseded by ADR-0319 (§4's ruling on `LearningLoop`, with its `LearningLoop` limbs in §4a and §4b); §8 amended by ADR-0040, ADR-0045 and ADR-0078
 - Date: 2026-07-21
 - Note (2026-07-29): **§8's conformance suite gains two clauses**, one from each
   of [ADR-0078](0078-a-deferred-memory-decision-is-a-durable-question.md)'s §4
@@ -134,6 +134,7 @@
   no `Status` edit is owed
   ([ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §1).
   Refs #604.
+- Partially superseded: 2026-10-14 by ADR-0319 — §4's ruling on `LearningLoop`, with its `LearningLoop` limbs in §4a and §4b. They governed `LearningLoop` in `orchestration/loop.py`; the writer itself, its tuning check and its expiry clock stand. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

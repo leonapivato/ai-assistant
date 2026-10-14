@@ -1,6 +1,6 @@
 # 241. The search seam is handed the deadline it runs under, and an expiry is an outcome of its own
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0319 (§3:1–§3:3, §3:5, §4:5, §6, §8 and §10)
 - Date: 2026-09-09
 - **Partially supersedes**
   [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
@@ -53,6 +53,7 @@
   (deferred in §13, filed by this lane), #1908 (milestone 31's live record), ADR-0029 §4,
   ADR-0060, ADR-0118, ADR-0192, ADR-0194, ADR-0226 §5, ADR-0228 §4 and §10, ADR-0231,
   ADR-0238.
+- Partially superseded: 2026-10-14 by ADR-0319 — §3:1–§3:3, §3:5, §4:5, §6, §8 and §10. They governed the servicing site's deadline setting and dispositions. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

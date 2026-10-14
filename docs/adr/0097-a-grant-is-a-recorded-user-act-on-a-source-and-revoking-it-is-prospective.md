@@ -1,6 +1,6 @@
 # 97. A grant is a recorded user act on a source; revoking it stops the reading and does not unwrite the beliefs
 
-- Status: Partially superseded by ADR-0133 (§2's enumeration of the uses a grant may name)
+- Status: Partially superseded by ADR-0133 (§2's enumeration of the uses a grant may name) and ADR-0319 (§5a:7)
 - Date: 2026-08-03
 - Partially superseded: 2026-08-11 by ADR-0133 — **one enumeration, and the clause
   that carries it otherwise stands whole.** ADR-0130 created a third consumer of a
@@ -107,6 +107,7 @@
   of ADR-0093 §7a's `Settings` figures are on `main`; ADR-0096 has decided the
   facet and lifted §7a's reserved facet-only state. So the two things a grant has
   to gate both exist as ratified surfaces, and neither is guessed at here.
+- Partially superseded: 2026-10-14 by ADR-0319 — §5a:7. They governed a facet left out of `CurrentContext` for want of a `FACET` grant, in `context/`. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

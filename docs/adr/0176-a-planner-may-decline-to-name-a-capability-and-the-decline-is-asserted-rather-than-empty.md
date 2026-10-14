@@ -1,6 +1,6 @@
 # 176. A planner may decline to name a capability, and the decline is asserted rather than empty
 
-- Status: Partially superseded by ADR-0211 (§4's second normative clause — the test the prompt states between the plan and decline envelope shapes)
+- Status: Superseded by ADR-0319; partially superseded before it by ADR-0211 (§4's second normative clause — the test the prompt states between the plan and decline envelope shapes)
 - Date: 2026-08-21
 - **Partially supersedes:**
   [ADR-0047](0047-the-model-backed-planner.md) — §4 step 2's requirement that the
@@ -65,6 +65,7 @@
   scope statement — a claim about *this* ADR's reach, which a later ADR changing a
   contract does not falsify — §9's deferrals and §10's records of ADR-0047 and
   ADR-0071 all stand. Refs #1772, #60, ADR-0211 §11.
+- Superseded: 2026-10-14 by ADR-0319 — the whole decision. Every clause still in force governed the planner's decline in `planning/planner.py` and the turn loop's empty-plan branch in `orchestration/loop.py`. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

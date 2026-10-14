@@ -1,6 +1,6 @@
 # 185. Every attempt to read a source is recorded, refusals included, and the trail's bound has no unlimited spelling
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0319 (§11:3, in its "all three uses and both readers")
 - Date: 2026-08-23
 - **Note (2026-09-03): the Alternatives entry "A boolean `opened` field beside the
   outcome" calls opened-ness a *total* function of `outcome`; §1 makes it a function
@@ -116,6 +116,7 @@
 - **Refs:** #1017 (the lane this discharges), #1427 (`track:world`, milestone 24),
   #629 (which asked for this alongside the grant), ADR-0139 §6, ADR-0097 §12.
   **Filed by this lane:** none.
+- Partially superseded: 2026-10-14 by ADR-0319 — §11:3, in its "all three uses and both readers". The `FACET` driver went with `context/` and the `INGEST` driver with ADR-0294, so the arms run over the surviving `NOTIFY` driver and the reader it drives (ADR-0319 §7). Every other clause stands, §11's five figures included. This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
