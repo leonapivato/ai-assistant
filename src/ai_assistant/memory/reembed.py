@@ -67,7 +67,6 @@ from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory.sqlite_store import (
     _ADAPTER,
     SqliteMemoryStore,
-    _labels_of,
     _to_micros,
 )
 
@@ -157,7 +156,7 @@ _DESTINATION_FIELDS: Final = frozenset(
     name.strip() for name in _DESTINATION_COLUMNS.split(",") if name.strip() != "rowid"
 )
 _DESTINATION_TABLES: Final = frozenset(
-    {"records", "vec_records", "record_labels", "revision_issuer", "meta", "episode_record_format"}
+    {"records", "vec_records", "revision_issuer", "meta", "episode_record_format"}
 )
 
 #: Where the stamp sits in a source row read through either of the two above.
@@ -451,8 +450,7 @@ def _derived(
     only do from a column; a rebuild that carried the blob and left the column
     ``NULL`` would leave every window filter reaching *nothing* while every record
     round-tripped intact — the same quiet failure as ``valid_from``'s, in the other
-    direction. The label index ``record_labels`` is the same hazard once more and is
-    written by :func:`_insert` and checked by :func:`_verify` beside these.
+    direction.
 
     **The channel pair is here for the same reason again** (ADR-0283 §1): a channel's
     reads and its deletion enumeration are served from those two columns alone, so a
@@ -1206,17 +1204,6 @@ def _insert(
             "INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)",
             (rowid, sqlite_vec.serialize_float32(list(vector))),
         )
-    # The label index goes across with the row (ADR-0237 §1). The work store's
-    # schema carries an *empty* ``record_labels``, and the store's own backfill
-    # runs only on the open that creates the table — so a copy that skipped this
-    # would swap in a store whose three label axes reach nothing at all, with
-    # every record intact and every read silently narrower.
-    labels = [(rowid, axis, value) for axis, value in _labels_of(record)]
-    if labels:
-        work.executemany(
-            "INSERT OR IGNORE INTO record_labels(record_rowid, axis, value) VALUES (?, ?, ?)",
-            labels,
-        )
 
 
 def _write_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
@@ -1226,45 +1213,6 @@ def _write_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, value),
     )
-
-
-def _verify_labels(
-    work: sqlite3.Connection, expected: set[tuple[int, str, str]], what: str
-) -> None:
-    """Check the copied label index against the one the records themselves imply.
-
-    The third quiet failure this module can produce (ADR-0237 §1). ``record_labels``
-    is a derived index the three label axes bind through *before* either read's cut,
-    and it is not in the blob — so a rebuild that carried every row and left the
-    table empty would swap in a store on which ``topics``, ``participants`` and
-    ``about_person`` reach nothing at all, with every record round-tripping intact
-    and no read reporting a fault.
-
-    Compared as one set rather than row by row: the expected side is accumulated
-    while :func:`_verify` is already decoding each record, and the stored side is one
-    scan, so the check costs a query rather than a query per record. ``INSERT OR
-    IGNORE`` collapses two of a record's own values that fold to one key, which is
-    why the expected side is a set and not a list.
-
-    Raises:
-        MemoryStoreError: If the table cannot be read, or holds anything other than
-            exactly the rows the copied records imply.
-    """
-    try:
-        stored = {
-            (int(row[0]), str(row[1]), str(row[2]))
-            for row in work.execute("SELECT record_rowid, axis, value FROM record_labels")
-        }
-    except sqlite3.Error as exc:
-        msg = f"failed to read the label index in {what}: {exc}"
-        raise MemoryStoreError(msg) from exc
-    if stored != expected:
-        missing = len(expected - stored)
-        orphaned = len(stored - expected)
-        _fail(
-            f"its label index is wrong: {missing} label rows the records imply are "
-            f"absent and {orphaned} name nothing the records carry"
-        )
 
 
 def _rowids(conn: sqlite3.Connection, table: str, what: str, *, where: str = "") -> set[int]:
@@ -1385,7 +1333,6 @@ def _verify(
 
     destination = _DESTINATION_COLUMNS
     highest = 0
-    labels: set[tuple[int, str, str]] = set()
     for left, right in zip_longest(_rows(source, columns), _rows(work, destination)):
         if left is None or right is None:
             _fail("it holds a different number of records")
@@ -1394,7 +1341,6 @@ def _verify(
         record = _decode(str(right[3]), right[1])
         if (*right[4:8], *right[9:13]) != _derived(record):
             _fail(f"row {right[0]!r} has columns that disagree with the record stored in it")
-        labels.update((int(right[0]), axis, value) for axis, value in _labels_of(record))
         highest = max(highest, _verified_stamp(left, right))
     _verify_issuer(source, work, highest)
     if _numbers_issued(work) < _numbers_issued(source):
@@ -1402,7 +1348,6 @@ def _verify(
             f"its record counter stands at {_numbers_issued(work)}, below the "
             f"{_numbers_issued(source)} the live store has already issued"
         )
-    _verify_labels(work, labels, str(plan.work))
 
     # Every frozen record carries a vector and no open episode does (ADR-0286 §12:5).
     # The open column was checked against each blob above, so it names exactly the
