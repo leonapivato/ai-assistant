@@ -32,7 +32,6 @@ from ai_assistant.core.errors import (
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
-    Attestation,
     BeliefBand,
     ConflictRelation,
     MemoryDecisionKind,
@@ -41,10 +40,7 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     PreferenceMemory,
     Provenance,
-    ReadCoverage,
-    ReportedExtent,
     SemanticMemory,
-    SourceReading,
     TraceKind,
     TraceLabel,
     TraceOutcome,
@@ -67,7 +63,6 @@ if TYPE_CHECKING:
 
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
-_SOURCE = "calendar:work"
 
 #: The type a seam label and a metric key both are, so the constants can be
 #: checked against ``core``'s own validator rather than against this module's copy.
@@ -634,31 +629,6 @@ def _asserted(record_id: str, content: str) -> MemoryRecord:
     return _preference(record_id, content, source=MemorySource.USER_ASSERTED)
 
 
-def _attested(record_id: str, content: str) -> MemoryRecord:
-    """An attested belief a covered reading can close, in ADR-0117 §3's shape.
-
-    The envelope window is open and the position is stated by the extent, which is
-    what a conforming reader now proposes — ADR-0117 §1's reason being that a
-    window stating a forward-looking position would put the record out of reach of
-    retrieval, the fold and this very enumeration.
-    """
-    return PreferenceMemory(
-        id=record_id,
-        content=content,
-        preference=content,
-        provenance=Provenance(
-            source=MemorySource.EXTERNAL,
-            confidence=0.6,
-            last_updated=_WHEN,
-            attestation=Attestation(
-                reported_by=_SOURCE,
-                reported_at=_WHEN,
-                extent=ReportedExtent(extends_until=_NOW + timedelta(days=1)),
-            ),
-        ),
-    )
-
-
 def _writer(
     store: MemoryStore, sink: TraceSink, *, policy: MemoryPolicy | None = None
 ) -> MemoryIngestor:
@@ -668,43 +638,6 @@ def _writer(
         traces_sink=sink,
         now=_fixed_now,
     )
-
-
-async def test_two_proposals_reinforcing_one_record_keep_their_trace(
-    sink: FakeTraceSink,
-) -> None:
-    """The repeat §3 forbids a ``RecordIdSet`` to carry, arriving honestly.
-
-    One reading may hold two proposals that both fold into the same standing
-    belief, and both results then name that one id. Filing it twice fails the
-    type's "each id at most once" validator, which §5 turns into a **lost trace**
-    for a crossing where nothing went wrong — the instrument lying because the
-    writer did its job twice.
-
-    So the set collapses and the counts do not: two rulings stay two in
-    ``decisions_reinforce``, and the answer to "which records ended up
-    reinforced" is a set, which is what §3 defines it to be.
-    """
-    store = InMemoryMemoryStore(now=_fixed_now)
-    await store.add(_preference("standing", "the office is on the third floor"))
-    writer = _writer(store, sink, policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
-    reading = SourceReading(
-        source=_SOURCE,
-        read_at=_NOW,
-        proposals=(
-            _proposal(_preference("first", "the office is on the third floor")),
-            _proposal(_preference("second", "the office is on the third floor")),
-        ),
-        coverage=None,
-    )
-
-    results = await writer.ingest_reading(reading)
-
-    assert [result.record_id for result in results] == ["standing", "standing"]
-    trace = _only(sink, TraceKind.MEMORY_WRITE)
-    assert trace.metrics["decisions_reinforce"] == 2
-    assert trace.records[TraceRecordSet.REINFORCED].ids == ("standing",)
-    assert trace.records[TraceRecordSet.REINFORCED].total == 1
 
 
 async def test_an_accepted_write_counts_every_kind_and_files_the_id_as_written(
@@ -776,112 +709,6 @@ async def test_a_supersede_files_the_correction_written_and_the_target_supersede
     assert trace.metrics["decisions_supersede"] == 1
     assert trace.records[TraceRecordSet.SUPERSEDED].ids == ("stale",)
     assert trace.records[TraceRecordSet.WRITTEN].ids == (result.record_id,)
-
-
-async def test_one_reading_is_one_crossing_and_one_trace(sink: FakeTraceSink) -> None:
-    """ADR-0119 §5's one-crossing rule over §8's named case.
-
-    "A ``MemoryWriter.ingest_reading`` call is one crossing and one trace, not one
-    per resulting ``MemoryIngestResult``… the per-reading counts ride as metrics."
-    Three proposals, one trace, and the count of them on it — which also pins that
-    the member does not reach the write path through :meth:`MemoryIngestor.ingest`,
-    since that would emit a second trace apiece.
-    """
-    store = InMemoryMemoryStore(now=_fixed_now)
-    writer = _writer(store, sink)
-    reading = SourceReading(
-        source=_SOURCE,
-        read_at=_NOW,
-        proposals=tuple(_proposal(_attested(f"e{n}", f"entry number {n}")) for n in range(3)),
-        coverage=None,
-    )
-
-    results = await writer.ingest_reading(reading)
-
-    assert len(results) == 3
-    trace = _only(sink, TraceKind.MEMORY_WRITE)
-    assert trace.seam == traces.SEAM_INGEST_READING
-    assert trace.metrics[traces.PROPOSALS] == 3
-    assert trace.metrics[traces.COVERAGE_DECLARED] is False
-    assert trace.metrics["decisions_accept"] == 3
-    assert TraceRecordSet.RETIRED not in trace.records, "an uncovered reading reconciles nothing"
-    assert traces.CLOSED not in trace.metrics
-
-
-async def test_a_covered_reading_files_what_its_absence_retired(sink: FakeTraceSink) -> None:
-    """ADR-0110's close, filed under its own key rather than folded into the writes.
-
-    An empty ``RETIRED`` set is a different claim from an absent one (§3), so the
-    covered arm carries the key whatever it closed — here, the belief the reading
-    no longer reports.
-    """
-    store = InMemoryMemoryStore(now=_fixed_now)
-    await store.add(_attested("gone", "the entry that vanished"))
-    writer = _writer(store, sink)
-    reading = SourceReading(
-        source=_SOURCE,
-        read_at=_NOW,
-        proposals=(),
-        coverage=ReadCoverage(covers_until=_NOW + timedelta(days=30)),
-    )
-
-    await writer.ingest_reading(reading)
-
-    trace = _only(sink, TraceKind.MEMORY_WRITE)
-    assert trace.metrics[traces.COVERAGE_DECLARED] is True
-    assert trace.metrics[traces.CLOSED] == 1
-    assert trace.records[TraceRecordSet.RETIRED].ids == ("gone",)
-
-
-async def test_a_reading_that_refuses_half_way_still_files_what_it_applied(
-    sink: FakeTraceSink,
-) -> None:
-    """A partial commit is observed work, and §3 forbids the trace to deny it.
-
-    ADR-0115 §3 leaves "the proposals ingested before the raise stay applied", so a
-    ``REFUSED`` trace carrying no ``WRITTEN`` id would say a record that is live was
-    never written. An absent key means *not observed* — and this one was observed,
-    committed, and is readable from the store while the trace denies it. That is
-    the same fabrication §8's fault-path paragraph refuses in the other direction,
-    arriving through a partial commit instead of through a zero.
-
-    ``RETIRED`` stays absent because the reconciliation genuinely never ran, and
-    the decision counts sum to one against ``proposals = 2``, which is what a
-    half-finished crossing looks like when it is described honestly.
-    """
-    store = InMemoryMemoryStore(now=_fixed_now)
-    writer = _writer(store, sink)
-    unwarranted = SemanticMemory(
-        id="derived",
-        content="a conclusion drawn from nothing",
-        fact="a conclusion drawn from nothing",
-        provenance=Provenance(
-            source=MemorySource.INFERRED,
-            confidence=0.6,
-            last_updated=_WHEN,
-            evidence=("missing",),
-        ),
-    )
-    reading = SourceReading(
-        source=_SOURCE,
-        read_at=_NOW,
-        proposals=(
-            _proposal(_asserted("landed", "the office is on the third floor")),
-            _proposal(unwarranted),
-        ),
-        coverage=None,
-    )
-
-    with pytest.raises(UnresolvedEvidenceError):
-        await writer.ingest_reading(reading)
-
-    assert await store.get("landed") is not None, "the first proposal stayed applied"
-    trace = _only(sink, TraceKind.MEMORY_WRITE)
-    assert trace.outcome is TraceOutcome.REFUSED
-    assert trace.metrics[traces.PROPOSALS] == 2
-    assert trace.metrics["decisions_accept"] == 1
-    assert trace.records[TraceRecordSet.WRITTEN].ids == ("landed",)
-    assert TraceRecordSet.RETIRED not in trace.records, "the reconciliation never ran"
 
 
 async def test_an_inadmissible_proposal_traces_as_a_refusal_and_not_a_fault(
@@ -1006,7 +833,6 @@ def test_the_reconciliation_roster_is_the_ten_keys_and_no_others() -> None:
     [
         traces.SEAM_SEARCH,
         traces.SEAM_INGEST,
-        traces.SEAM_INGEST_READING,
         *traces.DECISION_METRICS.values(),
         traces.LIMIT,
         traces.FETCH_K,
@@ -1018,8 +844,6 @@ def test_the_reconciliation_roster_is_the_ten_keys_and_no_others() -> None:
         traces.EXCLUDED_BAND,
         traces.BANDS,
         traces.PROPOSALS,
-        traces.COVERAGE_DECLARED,
-        traces.CLOSED,
         *traces.RECONCILIATION_METRICS,
     ],
 )

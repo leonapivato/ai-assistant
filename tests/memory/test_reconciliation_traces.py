@@ -42,7 +42,6 @@ from ai_assistant.core.types import (
     PreferenceMemory,
     Provenance,
     SemanticMemory,
-    SourceReading,
     TraceKind,
     TraceOutcome,
 )
@@ -63,7 +62,6 @@ if TYPE_CHECKING:
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 _EPISODE = "episode-1"
 _ROUTE = "anthropic:claude-x"
-_SOURCE = "reader:test"
 
 #: The contents these cases plant. Kept together because every case depends on
 #: them landing in one conflict set at :data:`_THRESHOLD`, and a content edited in
@@ -807,87 +805,6 @@ async def test_a_proposal_the_invocation_condition_excludes_contributes_zero_to_
     assert trace.metrics[traces.PROPOSALS] == 1
     assert reconciler.calls == 0
     assert _ten(trace) == dict.fromkeys(traces.RECONCILIATION_METRICS, 0)
-
-
-async def test_a_crossing_that_reconciled_nothing_emits_ten_zeros_and_not_ten_absences(
-    sink: FakeTraceSink,
-) -> None:
-    """ADR-0119 §3 read in the direction the emitter can get wrong.
-
-    §3's substitution is available both ways. A crossing whose proposals ADR-0159 §2
-    all excluded **did** evaluate the invocation condition, on every proposal, and
-    found none admitted; ``reconciled = 0`` is that finding. Making the ten absent
-    here would record it identically to a crossing that faulted before any reading
-    was taken — and "the reconciler was never reached" and "the trace never got that
-    far" call for opposite responses.
-
-    The six ``decisions_*`` keys are the anchor: the ten are present on exactly the
-    crossings they are present on, so the two sets are asserted together.
-    """
-    store = await _planted()
-    reading = SourceReading(
-        source=_SOURCE,
-        read_at=_fixed_now(),
-        proposals=(
-            _proposal(_belief("one", _MORNING, source=MemorySource.USER_ASSERTED)),
-            _proposal(_belief("two", _AFTERNOON, source=MemorySource.USER_ASSERTED)),
-        ),
-        coverage=None,
-    )
-
-    await _writer(store, sink).ingest_reading(reading)
-
-    trace = _only(sink)
-    assert trace.metrics[traces.PROPOSALS] == 2
-    assert all(key in trace.metrics for key in traces.DECISION_METRICS.values())
-    assert _ten(trace) == dict.fromkeys(traces.RECONCILIATION_METRICS, 0)
-
-
-async def test_a_reading_that_refuses_half_way_files_the_first_proposals_relation_keys(
-    sink: FakeTraceSink,
-) -> None:
-    """§3 binds the ten to the observation the six ``decisions_*`` keys ride.
-
-    ADR-0115 §3 leaves the proposals ingested before a raise applied, and ADR-0119
-    §5's partial reading is what stops the trace denying them. The relation keys
-    have to travel on that same reading: a fault path carrying the decision counts
-    of a proposal whose reconciliation it then reported as unobserved would split one
-    observation across two answers.
-    """
-    store = await _planted(_belief("stale", _MORNING))
-    reconciler = _Reporting({"stale": ConflictRelation.CONTRADICTS})
-    unwarranted = SemanticMemory(
-        id="derived",
-        content="a conclusion drawn from nothing",
-        fact="a conclusion drawn from nothing",
-        provenance=Provenance(
-            source=MemorySource.INFERRED,
-            confidence=0.6,
-            last_updated=_WHEN,
-            evidence=("missing",),
-        ),
-    )
-    reading = SourceReading(
-        source=_SOURCE,
-        read_at=_fixed_now(),
-        proposals=(_proposal(_belief("new", _AFTERNOON)), _proposal(unwarranted)),
-        coverage=None,
-    )
-    writer = _writer(
-        store, sink, reconciler=reconciler, policy=FakeMemoryPolicy(MemoryDecisionKind.ACCEPT)
-    )
-
-    with pytest.raises(UnresolvedEvidenceError):
-        await writer.ingest_reading(reading)
-
-    trace = _only(sink)
-    assert trace.outcome is TraceOutcome.REFUSED
-    assert trace.metrics[traces.PROPOSALS] == 2
-    assert trace.metrics["decisions_accept"] == 1
-    counts = _ten(trace)
-    assert counts[traces.RECONCILED] == 1
-    assert counts[traces.RELATION_METRICS[ConflictRelation.CONTRADICTS]] == 1
-    assert counts[traces.RELATIONS_OFFERED] == 1
 
 
 async def test_a_crossing_that_took_no_reading_carries_none_of_the_ten(
