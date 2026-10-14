@@ -1091,10 +1091,10 @@ def test_a_row_carries_no_answer_control_and_composes_no_confirmation(
     with no default, so composing the card would demand the fabrication ADR-0184
     exists to avoid.
 
-    Asserted against the shipped card's own wording, so a renderer that reached for
-    :func:`~ai_assistant.interfaces.cli._render_confirmation` fails here rather than
-    in a user's terminal, and against the runner having been given no input at all —
-    a prompt would have raised rather than silently defaulted.
+    Asserted against the confirmation card's own wording, so a renderer that reached for
+    a card fails here rather than in a user's terminal, and against the runner having
+    been given no input at all — a prompt would have raised rather than silently
+    defaulted.
     """
     engine = _ScriptedDecisionEngine(
         _decision("d-ask", outcome=PermissionOutcome.CONFIRM, binding=_legacy_binding())

@@ -1,21 +1,17 @@
-"""The terminal surface for the trust act, and the statement beside a reply (ADR-0242).
+"""The terminal surface for the trust act (ADR-0242).
 
-Three commands, four refusal renderings, one next-step line and eight statements.
-ADR-0242 §5 fixes the command names **here rather than leaving them to the lane**, for
-the reason ADR-0186 §9 fixed ``assistant decisions`` in terms — "a normative decision an
-operator cannot derive a working command from is one no test can pin" — so the names are
-pinned literally.
+Three commands, four refusal renderings and one next-step line. ADR-0242 §5 fixes the
+command names **here rather than leaving them to the lane**, for the reason ADR-0186 §9
+fixed ``assistant decisions`` in terms — "a normative decision an operator cannot derive
+a working command from is one no test can pin" — so the names are pinned literally.
 
 **Every outcome case is asserted over the rendered output**, because ADR-0242 §3's floor
-and §9's eight statements are discharged in what the user reads and nowhere else. §15's
-last clause is explicit that the eight surface statements are asserted "over their
-rendered bytes, because those are the system's own words".
+is discharged in what the user reads and nowhere else.
 """
 
 from __future__ import annotations
 
 import re
-from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from typing import Final
@@ -28,7 +24,6 @@ from typer.testing import CliRunner
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import (
-    ConfigurationError,
     DuplicateDestinationTrustError,
     InvalidDestinationTrustError,
     UntrustableDestinationError,
@@ -39,11 +34,8 @@ from ai_assistant.core.types import (
     DestinationTrust,
     DestinationTrustRecord,
     PermissionOutcome,
-    SearchNotServiced,
-    TurnOutcome,
 )
 from ai_assistant.interfaces import cli
-from ai_assistant.orchestration.reads import SearchDisposition
 from ai_assistant.testing import FakeAssistantEngine
 
 _AT: Final = datetime(2026, 5, 1, 9, tzinfo=UTC)
@@ -54,12 +46,6 @@ _ELIGIBLE: Final = _decision(
     "d-1", outcome=PermissionOutcome.CONFIRM, binding=_binding(planned=False)
 )
 
-#: The same row with ADR-0181 §4's fact set, which §1's third condition refuses: trust
-#: recorded from a call a model reached *from* external content is the loop closing on
-#: itself.
-_EXTERNAL: Final = _decision(
-    "d-2", outcome=PermissionOutcome.CONFIRM, binding=_binding(planned=True)
-)
 
 _RECORD: Final = DestinationTrustRecord(
     id="t-1",
@@ -191,9 +177,7 @@ def test_no_flag_on_any_command_performs_the_other_act() -> None:
 
     assert [param.name for param in commands["trust-destinations"].params] == ["decision_id"]
     assert [param.name for param in commands["revoke-destination-trust"].params] == ["record_id"]
-    assert "trust" not in {param.name for param in commands["remember-recipients"].params} | {
-        param.name for param in commands["resume"].params
-    }
+    assert "trust" not in {param.name for param in commands["remember-recipients"].params}
 
 
 # --- §3: the five facts, stated before the act is collected ------------------
@@ -496,261 +480,7 @@ def test_the_grantable_listing_names_both_acts_as_two(
     assert "standing_destination_trust" not in [call[0] for call in engine.calls]
 
 
-# --- §9: one statement per member, over their rendered bytes -----------------
-
-
-_STATEMENTS: Final = {
-    SearchNotServiced.SPEND_EXHAUSTED: ("spending ceiling refused", "operator setting"),
-    SearchNotServiced.DECLINED: ("declined when it was ruled on",),
-    SearchNotServiced.TRUST_MISSING: (
-        "assistant trust-destinations <decision-id>",
-        "assistant decisions",
-        "a later conversation may compose",
-    ),
-    SearchNotServiced.AUTHORISATION_AWAITED: (
-        "put to you as a question",
-        "assistant remember-recipients",
-    ),
-    SearchNotServiced.INTERRUPTED: ("begun and stopped",),
-    SearchNotServiced.UNAVAILABLE: ("nothing this turn could use",),
-    SearchNotServiced.ANSWER_AWAITED: (
-        "waiting on your answer",
-        "assistant resume",
-        "assistant cancel-read",
-    ),
-}
-
-#: The members this surface does **not** yet render, each naming the lane that closes it.
-#:
-#: **Empty is the intended state**, and an entry here is a lane-ordering fact rather than
-#: a permitted degradation: ADR-0242 §9's clause — "a surface that renders no statement
-#: for a member has not implemented this section" — binds on whichever lane owes the
-#: statement, and the partition assertion below is what stops this dict growing by
-#: accident.
-#:
-#: It is **empty again**: ``ANSWER_AWAITED`` was ADR-0244 §12's ninth member, deferred
-#: here between Lane 1 and Lane 3, and ADR-0244 §18's Lane 3 — the command line — has
-#: landed its statement along with the rest of that surface's read obligations. The
-#: partition below is what retires an entry rather than an editor's memory.
-_DEFERRED_TO_A_LATER_LANE: Final[dict[SearchNotServiced, str]] = {}
-
-
-def test_the_members_this_surface_defers_are_the_declared_ones() -> None:
-    """The partition, so a deferral cannot be added by an editor's convenience.
-
-    A member that renders nothing and is **not** named above is the failure ADR-0242 §9
-    is about; a member that renders something and *is* named above is a deferral somebody
-    forgot to retire. Both are caught here, which is what makes the parametrised case
-    below a narrowing of the vocabulary rather than a hole in it.
-    """
-    silent = set()
-    for member in SearchNotServiced:
-        buffer = StringIO()
-        with redirect_stdout(buffer):
-            cli._render_search_not_serviced(member)
-        if not _flat(buffer.getvalue()).strip():
-            silent.add(member)
-
-    assert silent == set(_DEFERRED_TO_A_LATER_LANE), (
-        "every member this surface renders nothing for is one a lane is recorded as "
-        "owing, and every member so recorded still renders nothing (ADR-0242 §9)"
-    )
-    assert set(_STATEMENTS) | set(_DEFERRED_TO_A_LATER_LANE) == set(SearchNotServiced), (
-        "and the two together are the whole vocabulary"
-    )
-
-
-@pytest.mark.parametrize(
-    "member", [one for one in SearchNotServiced if one not in _DEFERRED_TO_A_LATER_LANE]
-)
-def test_every_member_renders_a_statement(
-    member: SearchNotServiced, monkeypatch: pytest.MonkeyPatch, output: StringIO
-) -> None:
-    """§9: "A surface that renders **no** statement for a member is a surface that has
-    not implemented this section, not a permitted degradation."
-
-    Parametrised over the vocabulary itself, so a member added without its statement
-    fails here rather than rendering nothing in a user's terminal — which is what §13
-    means by "a member added without its two texts is a member with no rendering".
-
-    **Less the members a later lane owes** (:data:`_DEFERRED_TO_A_LATER_LANE`), whose
-    partition the case above pins: a narrowing that could quietly absorb a member is the
-    failure this case exists to catch, so the exclusion is a *named* list with a reason
-    per entry rather than a filter.
-    """
-    cli._render_search_not_serviced(member)
-    rendered = _flat(output.getvalue())
-
-    assert rendered.strip(), f"{member} renders nothing"
-    for fragment in _STATEMENTS[member]:
-        assert fragment in rendered
-
-
-def test_no_statement_is_rendered_for_a_turn_that_serviced_every_search(
-    output: StringIO,
-) -> None:
-    """§6: on every other turn the surface says nothing about a lookup at all."""
-    cli._render_search_not_serviced(None)
-
-    assert output.getvalue() == ""
-
-
-@pytest.mark.parametrize("member", list(SearchNotServiced))
-def test_no_statement_carries_a_destination_a_count_or_a_figure(
-    member: SearchNotServiced, monkeypatch: pytest.MonkeyPatch, output: StringIO
-) -> None:
-    """§9's bar, asserted **over the rendered bytes** and not over an intention.
-
-    None of the eight carries a destination, a host, an origin, a provider name, a
-    connection reference, an account identity, a query or any fragment of one, a record,
-    a count, a monetary figure, a duration, a budget, a ``Settings`` field name or a
-    ``SearchDisposition`` value. §7's bar on the prompt fragments and this bar are one
-    rule stated at the two render sites it has to hold at.
-    """
-    cli._render_search_not_serviced(member)
-    rendered = _flat(output.getvalue())
-
-    assert not any(character.isdigit() for character in rendered)
-    for forbidden in ("http", "@", "$", "£", "search_calls_per_conversation"):
-        assert forbidden not in rendered
-    # **No ``SearchDisposition`` value**, which is the vocabulary §8 keeps for the
-    # operator's audit and §9 keeps out of the user's screen.
-    for stage in SearchDisposition:
-        assert stage.value not in rendered
-
-
-def test_the_two_confirm_statements_name_different_commands(output: StringIO) -> None:
-    """§8's finding, held at the surface: one disposition, two acts, two commands.
-
-    ``RULING_CONFIRM`` is recorded both where no grant covers the recipients at all and
-    where a grant stands but the closed loop is not closed. "An explanation derived from
-    the disposition alone would send half of milestone 31's users to the wrong command",
-    and this is what makes that concrete.
-    """
-    cli._render_search_not_serviced(SearchNotServiced.AUTHORISATION_AWAITED)
-    awaited = _flat(output.getvalue())
-    output.truncate(0)
-    output.seek(0)
-    cli._render_search_not_serviced(SearchNotServiced.TRUST_MISSING)
-    missing = _flat(output.getvalue())
-
-    assert "assistant remember-recipients" in awaited
-    assert "assistant trust-destinations" not in awaited
-    assert "assistant trust-destinations" in missing
-    assert "assistant remember-recipients" not in missing
-
-
-def test_the_awaited_statement_does_not_say_no_authorisation_covers_the_recipients(
-    output: StringIO,
-) -> None:
-    """§9, §15's arm 2(a2): the sentence that is false on a reachable configuration.
-
-    ADR-0236 §4 fixes the shipped default in terms — with ``web_search_cost_per_call``
-    unset "the ``RecipientGrants`` seam is consulted **zero** times whatever grants
-    exist" — so a ``CONFIRM`` establishes nothing about what grants stand, and a
-    statement asserting one would be false of a deployment holding a standing grant.
-    """
-    cli._render_search_not_serviced(SearchNotServiced.AUTHORISATION_AWAITED)
-    rendered = _flat(output.getvalue())
-
-    for forbidden in ("no standing", "not authorised", "no authorisation", "missing"):
-        assert forbidden not in rendered.lower()
-
-
-def test_the_trust_statement_promises_no_eligible_decision(output: StringIO) -> None:
-    """§9: the statement names what makes a decision eligible and asserts nothing about
-    what is there.
-
-    "There is a reachable deployment on which none exists" — one whose *first* search is
-    planned over external content — so a statement promising an available id would be
-    false on it. And ADR-0181 §6's second clause binds: ``False`` is rendered as no
-    assurance, so it does not say the request was composed from the user's own words
-    alone and names no source and no kind of source.
-    """
-    cli._render_search_not_serviced(SearchNotServiced.TRUST_MISSING)
-    rendered = _flat(output.getvalue())
-
-    assert "no record selected into it was marked as resting on recorded external content" in (
-        rendered
-    )
-    for forbidden in ("your own words alone", "there will be", "you will find", "guarantee"):
-        assert forbidden not in rendered.lower()
-
-
-def test_the_unavailable_statement_names_no_cause_and_no_act(output: StringIO) -> None:
-    """§8, §9: the deliberate residue names no cause and no act.
-
-    It is one member rather than thirteen "because none of the situations behind it
-    gives the user anything to do — including the closed-loop case, where an act exists
-    but is not one that would help". **Naming an act that cannot help is worse than
-    naming none.**
-    """
-    cli._render_search_not_serviced(SearchNotServiced.UNAVAILABLE)
-    rendered = _flat(output.getvalue())
-
-    assert "assistant" not in rendered
-    assert "no request" not in rendered.lower()
-
-
-def test_the_statement_is_rendered_beside_the_reply_and_never_in_place_of_it(
-    output: StringIO,
-) -> None:
-    """§9: "beside the reply and never in place of it".
-
-    Driven through the production ``_render_turn``, so what is asserted is the order a
-    user actually reads rather than a call this test made itself.
-    """
-    cli._render_turn(
-        TurnOutcome(
-            turn=None,
-            capture_degraded=True,
-            search_not_serviced=SearchNotServiced.TRUST_MISSING,
-        )
-    )
-    rendered = _flat(output.getvalue())
-
-    assert "this turn was not recorded" in rendered
-    assert rendered.index("this turn was not recorded") < rendered.index(
-        "assistant trust-destinations"
-    )
-
-
-# --- §15 Arm 5: a load-time refusal reaches the user as a configuration fault --
-
-
-async def test_a_configuration_refusal_is_rendered_as_one_and_never_as_a_search_refusal(
-    monkeypatch: pytest.MonkeyPatch, output: StringIO
-) -> None:
-    """§15 Arm 5: **what this lane owes is the rendering**.
-
-    ADR-0238 §10 raises ``ConfigurationError`` naming the field at ``Settings`` load
-    where ``web_search_cost_per_call`` is configured beside an ADR-0194 period ceiling
-    without ``world_spend_unknown_allowance``; the refusal itself is that decision's and
-    lane B1's. What §15 requires **here** is that the command's error boundary states it
-    as a configuration fault naming the field, at a controlled exit code, and **never**
-    as a search refusal, a :class:`~ai_assistant.core.types.SearchNotServiced` member or
-    a reply.
-    """
-
-    def _refused() -> object:
-        msg = (
-            "invalid configuration: web_search_cost_per_call is set beside a period "
-            "ceiling and world_spend_unknown_allowance is unset"
-        )
-        raise ConfigurationError(msg)
-
-    monkeypatch.setattr(cli, "load_settings", _refused)
-
-    code = await cli._ask("what is the weather", timeout_seconds=1.0, assume_yes=True)
-    rendered = _flat(output.getvalue())
-
-    assert code == 1, "a controlled exit code and never a traceback (ADR-0042 §7)"
-    assert "web_search_cost_per_call" in rendered
-    assert "world_spend_unknown_allowance" in rendered
-    for member in SearchNotServiced:
-        assert member.value not in rendered
-    for forbidden in ("lookup", "assistant trust-destinations", "assistant remember-recipients"):
-        assert forbidden not in rendered
+# --- §9: the decisions page offers the act ------------------------------------
 
 
 def test_the_decisions_page_offers_the_act_and_states_the_five_facts(
