@@ -474,8 +474,8 @@ def test_a_retention_horizon_past_the_calendar_answers_not_purgeable(
 
     ``ceased + retention`` raises ``OverflowError`` for both of these, and the
     predicate has to answer anyway: it is what ADR-0083 §7's **shared** retention
-    job reads, so one such record raising would stop ``MemoryStore`` and
-    ``DeferralStore`` being swept too. The answer is the one §7 states — a
+    job reads, so one such record raising would stop ``MemoryStore`` being
+    swept too. The answer is the one §7 states — a
     retention that has not elapsed leaves the record retained — and a horizon past
     the end of representable time never elapses.
 

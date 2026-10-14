@@ -249,9 +249,9 @@ async def test_a_secret_tainted_proposal_takes_the_secret_path() -> None:
     Both rule ``ASK_USER``, so the *kind* cannot tell them apart — which is why
     the ``reason`` is what this asserts. ADR-0078 §1 refuses to queue a secret
     proposal at all, so its question is reported and never persisted; a taint rule
-    ordered first would produce a question the write stage *would* queue, putting
-    Tier-0 content into a durable ``DeferralStore`` row. ADR-0004 §3's "never in
-    the memory database" is defeated by the queue as surely as by the store.
+    ordered first would produce a question a queue *would* hold, putting Tier-0
+    content into a durable row. ADR-0004 §3's "never in the memory database" is
+    defeated by a queue as surely as by the store.
     """
     proposal = _proposal(
         _semantic("consolidated", derived_from_external=True), sensitivity=DataTier.SECRET

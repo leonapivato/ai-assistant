@@ -48,7 +48,6 @@ from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
     MAX_TOPICS_PER_RECORD,
     ActivationDigest,
-    ActivationLinks,
     ActivationRecall,
     ActivationUnderstanding,
     Attestation,
@@ -73,7 +72,6 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     Modality,
     NewConversation,
-    ParkedBinding,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -930,20 +928,6 @@ class _ChannelEpisodesOp(_ReadOp):
         return store.channel_episodes(_CHANNEL_B, limit=5)
 
 
-class _EpisodeParkingOp(_ReadOp):
-    """``episode_parking`` — ADR-0283 §3:3's lookup, its own lock site."""
-
-    name = "episode_parking"
-
-    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
-        """Look one binding up — the call that is cancelled."""
-        return store.episode_parking(ParkedBinding(execution_id="cancel", step_id="a"))
-
-    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
-        """Look another binding up concurrently."""
-        return store.episode_parking(ParkedBinding(execution_id="cancel", step_id="b"))
-
-
 class _ChannelEpisodeIdsOp(_ReadOp):
     """``channel_episode_ids`` — ADR-0283 §3:5's enumeration, its own lock site."""
 
@@ -993,7 +977,6 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _WalkRecordsOp,
     _AdvanceWalkOp,
     _ChannelEpisodesOp,
-    _EpisodeParkingOp,
     _ChannelEpisodeIdsOp,
     _OpenEpisodesOp,
 )
@@ -1035,13 +1018,11 @@ _CHANNEL_B = ChannelIdentity(channel_type="informational_event", instance_id="b"
 _CONVERSATION_A = ChannelIdentity(channel_type="conversation", instance_id="a")
 
 
-def _on_channel(  # noqa: PLR0913 — one keyword per ADR-0283 axis a case may need to vary
+def _on_channel(
     record_id: str,
     *,
     channel: ChannelIdentity | None = _CHANNEL_A,
     completed: bool = True,
-    parks: ParkedBinding | None = None,
-    parked: ParkedBinding | None = None,
     expires_at: datetime | None = None,
     validity: Validity | None = None,
 ) -> EpisodicMemory:
@@ -1053,9 +1034,7 @@ def _on_channel(  # noqa: PLR0913 — one keyword per ADR-0283 axis a case may n
     """
     base = _activation_episode(record_id, completed=completed)
     assert base.processing_record is not None
-    record = base.processing_record.model_copy(
-        update={"links": ActivationLinks(parks=parks, parked=parked)}
-    )
+    record = base.processing_record
     if channel is None or channel.channel_type != "informational_event":
         record = record.model_copy(
             update={"trigger": RecordedResumeTrigger(channel=channel, approved=True)}
@@ -6191,38 +6170,6 @@ class MemoryStoreContract:
         kept = await store.get("a")
         assert kept is not None
         assert kept.score == 0.5
-
-    async def test_episode_parking_finds_the_lowest_numbered_live_parker(
-        self, store: MemoryStore
-    ) -> None:
-        """§3:3: ``links.parks`` equal to the binding, live, lowest number first.
-
-        The lowest-numbered carrier is expired, so it is passed over; an episode
-        carrying the binding as ``parked`` — a resumption — is never a match (§3:4);
-        both halves of the binding must match, so swapping them finds nothing.
-        """
-        binding = ParkedBinding(execution_id="execution", step_id="step")
-        await store.add(_on_channel("expired-parker", parks=binding, expires_at=_LONG_AGO))
-        await store.add(_on_channel("resumer", parked=binding))
-        await store.add(_on_channel("parker", parks=binding))
-        await store.add(_on_channel("later-parker", channel=_CHANNEL_B, parks=binding))
-        await store.add(
-            _on_channel("other", parks=ParkedBinding(execution_id="execution", step_id="other"))
-        )
-
-        found = await store.episode_parking(binding)
-
-        assert found is not None
-        assert found.revision > 0
-        assert _unstamped(found) == _on_channel("parker", parks=binding)
-        swapped = ParkedBinding(execution_id="step", step_id="execution")
-        assert await store.episode_parking(swapped) is None
-        absent = ParkedBinding(execution_id="nothing", step_id="step")
-        assert await store.episode_parking(absent) is None
-        await store.delete("parker")
-        later = await store.episode_parking(binding)
-        assert later is not None
-        assert later.id == "later-parker"
 
     @pytest.mark.parametrize("limit", [0, 1001, -1, True, 1.0, "1", None])
     async def test_channel_reads_refuse_a_limit_outside_their_bounds(

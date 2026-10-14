@@ -80,7 +80,6 @@ if TYPE_CHECKING:
         MemoryKind,
         MemoryRecord,
         MemoryWrite,
-        ParkedBinding,
         TimeWindow,
     )
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
@@ -139,13 +138,6 @@ def _channel_of(record: MemoryRecord) -> ChannelIdentity | None:
     if not isinstance(record, EpisodicMemory) or record.processing_record is None:
         return None
     return record.processing_record.trigger.channel
-
-
-def _parks_of(record: MemoryRecord) -> ParkedBinding | None:
-    """The binding ``record``'s own step parked (``links.parks``), or ``None``."""
-    if not isinstance(record, EpisodicMemory) or record.processing_record is None:
-        return None
-    return record.processing_record.links.parks
 
 
 def _is_open(record: MemoryRecord) -> bool:
@@ -1198,26 +1190,6 @@ class FakeMemoryStore:
                 ),
                 total=len(matching),
             )
-
-    async def episode_parking(self, binding: ParkedBinding) -> EpisodicMemory | None:
-        """Return the lowest-numbered live episode whose step parked ``binding`` (§3:3).
-
-        Raises:
-            MemoryStoreError: The fake was constructed with a ``failure``, or the
-                injected clock's reading is not a conforming one.
-        """
-        async with self._resource.held():
-            self._refuse_read()
-            now = self._now_utc()
-            for rid in self._keys:
-                record = self._records[rid]
-                if (
-                    isinstance(record, EpisodicMemory)
-                    and _parks_of(record) == binding
-                    and self._is_readable(record, now)
-                ):
-                    return record.model_copy(deep=True)
-            return None
 
     async def channel_episode_ids(
         self,

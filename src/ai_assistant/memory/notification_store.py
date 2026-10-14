@@ -1012,8 +1012,8 @@ class SqliteNotificationStore:
         """Draw a record id, refusing one this store already holds.
 
         **A store that overwrote a record here would lose one silently**, and the
-        two dispositions would name the same id — which is ``DeferralStore.defer``'s
-        argument for making a present id "a hard error, not an overwrite". A
+        two dispositions would name the same id — which is ADR-0078's argument
+        for making a present id "a hard error, not an overwrite". A
         collision is the *store's* fault and never a caller's, ids being minted
         here, so it carries this seam's error rather than a ``ValueError``.
 

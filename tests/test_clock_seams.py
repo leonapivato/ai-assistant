@@ -54,7 +54,6 @@ from ai_assistant.core.errors import (
     AssistantError,
     AuditError,
     ConversationStoreError,
-    DeferralStoreError,
     MemoryStoreError,
     NotificationOutboxError,
     NotificationStoreError,
@@ -167,7 +166,6 @@ from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeConversationStore,
-    FakeDeferralStore,
     FakeDestinationTrustStore,
     FakeEmbedder,
     FakeFeedbackProcessor,
@@ -780,11 +778,6 @@ async def _fake_conversation_store(now: Clock) -> None:
     await FakeConversationStore(now=now).start()
 
 
-async def _fake_deferral_store(now: Clock) -> None:
-    """The retention purge reads the clock to place its horizon."""
-    await FakeDeferralStore(now=now).purge()
-
-
 async def _fake_feedback_processor(now: Clock) -> None:
     """Every proposal the fake synthesises carries a provenance it stamps."""
     await FakeFeedbackProcessor(now=now).process(_feedback())
@@ -1049,7 +1042,6 @@ SEAMS = [
     Seam("CurrentTime", _current_time, ClockReadingError),
     Seam("FakeAuditTrail", _fake_audit_trail, AuditError),
     Seam("FakeConversationStore", _fake_conversation_store, ConversationStoreError),
-    Seam("FakeDeferralStore", _fake_deferral_store, DeferralStoreError),
     Seam("FakeFeedbackProcessor", _fake_feedback_processor, ClockReadingError),
     Seam("FakeNotificationOutbox", _fake_notification_outbox, NotificationOutboxError),
     Seam("FakeNotificationStore", _fake_notification_store, NotificationStoreError),
