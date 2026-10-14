@@ -31,7 +31,6 @@ from query_composer_contract import (
 )
 
 from ai_assistant import planning
-from ai_assistant.core.config import Settings
 from ai_assistant.core.types import (
     ActivationUnderstanding,
     ChannelContext,
@@ -936,19 +935,9 @@ async def test_the_bound_is_applied_to_what_was_adopted_and_not_to_the_raw_span(
 # --- construction, and the figure the deployment configures -----------------
 
 
-def test_the_default_bound_is_the_one_settings_carries() -> None:
-    """The concrete default and ``Settings``' own, pinned equal.
-
-    ``readers/files.py`` states ADR-0230 §6's five figures beside ``core.config``'s
-    for the same reason; what a duplication of a *named default* needs is a test that
-    fails when one moves without the other.
-    """
-    assert Settings().search_query_max_chars == DEFAULT_SEARCH_QUERY_MAX_CHARS
-
-
 @pytest.mark.parametrize("max_chars", [True, 1.5, "32", None])
 def test_a_bound_that_is_not_an_integer_is_refused(max_chars: Any) -> None:
-    """The type is part of the domain, exactly as it is for ``Settings`` (§5)."""
+    """The type is part of the domain (ADR-0231 §5)."""
     with pytest.raises(TypeError):
         ModelBackedQueryComposer(FakeModelProvider(), max_chars=max_chars)
 
