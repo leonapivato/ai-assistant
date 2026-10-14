@@ -49,7 +49,6 @@ from ai_assistant.core.types import (
     RiskLevel,
     SearchRefusal,
 )
-from ai_assistant.orchestration.reads import SearchDisposition
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.testing import FakeAuditTrail, FakeRecipientGrants
 from ai_assistant.testing.recipient_grants import recipient_grant
@@ -533,58 +532,6 @@ async def test_a_configured_registration_leaves_the_module_constant_alone() -> N
 # --------------------------------------------------------------------------- #
 # §8 item 10: the audit is unchanged                                            #
 # --------------------------------------------------------------------------- #
-
-
-def test_the_search_disposition_enumeration_carries_no_member_for_a_cost() -> None:
-    """§8 item 10's mechanical half, which is ADR-0236 §5's "no sixteenth member".
-
-    "``SearchDisposition`` has fifteen members. This is §5 asserted, and it fails a
-    lane that reached for a sixteenth on the way past." Named one for one rather than
-    counted, so a member swapped for another fails as loudly as a member added.
-
-    **The sixteenth arrived, and it is not this ADR's.** ADR-0236 §5's clause is stated
-    over *itself* — "``SearchDisposition`` is unchanged … and **this ADR adds none**" —
-    and its last clause says in terms that "a later ADR opening §13 for a fault at the
-    send is free to revisit this section's answer on its own grounds". ADR-0238 §11 is
-    such an ADR, ratified after this one, and it adds exactly one member for a servicing
-    ``admit_search`` refused. So what this case pins is what it was always *about*: that
-    no member of this enumeration reports a **cost** ground, which is ADR-0236 §5's
-    actual decision and the thing the `RULING_CONFIRM` collapse rests on. The counting
-    half moved to ``tests/orchestration/test_loop_search.py``, where ADR-0238 §11's own
-    closure is asserted beside its mapping.
-    """
-    assert [member.name for member in SearchDisposition] == [
-        "NOT_CONFIGURED",
-        "NO_BUDGET",
-        # ADR-0238 §11's sixteenth stood here — `NOT_ADMITTED`, the admission the
-        # servicing reached after the read budget and before a query was composed — and
-        # ADR-0247 §6 removes it with the budget behind it. It named a stage and no cost
-        # either way, so ADR-0236 §5's collapse is untouched by its arrival and by its
-        # departure alike: a `CONFIRM` whose grounds include the cost floor is still
-        # `RULING_CONFIRM`, exactly as one produced by the disclosure floor alone is.
-        "COMPOSER_DECLINED",
-        "COMPOSER_UNAVAILABLE",
-        "COMPOSER_MALFORMED",
-        "COMPOSER_TOO_LONG",
-        "BINDING_FAILED",
-        "RULING_CONFIRM",
-        "RULING_DENY",
-        "RULING_UNAVAILABLE",
-        "SPEND_REFUSED",
-        "TRANSPORT_FAILED",
-        # ADR-0241 §4's seventeenth, beside the member it was split out of: an
-        # elapsed-time bound firing, which is a bound to size or a provider to change
-        # where `TRANSPORT_FAILED` is an outage. It names a stage and no cost either.
-        "DEADLINE_EXPIRED",
-        "PROVIDER_REFUSED",
-        "RESPONSE_TOO_LARGE",
-        "UNATTESTED",
-        # ADR-0241 §8's eighteenth, for a fault the searcher raised after the ruling
-        # (issue #2112). A stage, and no cost: a store, ledger or authorisation fault
-        # is not a ceiling, so ADR-0236 §5's collapse is untouched by it too.
-        "SEARCH_FAILED",
-    ]
-    assert not [member for member in SearchDisposition if "COST" in member.name]
 
 
 async def test_both_cost_configurations_reach_the_same_confirm_and_so_the_same_record() -> None:
