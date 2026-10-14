@@ -93,8 +93,7 @@ from ai_assistant.core.types import (
     SearchRefusal,
     ToolOutcome,
 )
-from ai_assistant.orchestration.recovery import RecoveryScan
-from ai_assistant.testing import FakeAuditTrail, FakePlanStore
+from ai_assistant.testing import FakeAuditTrail
 from ai_assistant.testing.cancellation import settle
 from ai_assistant.tools import web_search
 from ai_assistant.tools.egress import TransportPinError
@@ -1318,13 +1317,14 @@ async def test_a_refused_admission_reaches_no_credential_no_channel_and_no_claim
 
 
 async def test_an_interruption_on_the_way_to_the_completion_leaves_the_claim_open() -> None:
-    """§18 arm 14's second half, "in the direction that would fail an implementation
-    which added the recovery arm §6 forbids".
+    """§18 arm 14's second half: the searcher itself completes nothing it did not see end.
 
     ADR-0029 §3 requires a ``BaseException`` that is not a cancellation to propagate
     unchanged: no outcome is invented for it, no completion is written, and the claim
     is left open — the honest state for a process being torn down, and the state
-    ADR-0231 §6 rules "nothing reconciles".
+    ADR-0231 §6 rules "nothing reconciles". The startup recovery scan this case once
+    also drove is retired with the old path (ADR-0309 §5), so what is pinned here is
+    the searcher's own half.
     """
     subject = await built(transport=InterruptingTransport())
     call = await authorised_search(subject.trail, proposal=await request(subject))
@@ -1335,20 +1335,6 @@ async def test_an_interruption_on_the_way_to_the_completion_leaves_the_claim_ope
     rows = [row.invocation for row in await subject.trail.export_invocations()]
     assert len(rows) == 1, "the claim, and no completion for it"
     assert rows[0].completes is None
-
-    # **And it *stays* open**, which is the half that would fail an implementation
-    # adding the recovery arm §6 forbids. The scan is driven exactly as the
-    # composition root wires it — one store behind the trail and the completer faces —
-    # over a plan store holding no execution at all, which is the state a search
-    # decision leaves: it has no `step_id` and no `execution_id` (§6), so
-    # `_recover_execution` never reaches this claim's approval.
-    await RecoveryScan(
-        plans=FakePlanStore(), trail=subject.trail, completer=subject.trail
-    ).recover()
-
-    after = [row.invocation for row in await subject.trail.export_invocations()]
-    assert [row.id for row in after] == [rows[0].id], "the scan completed nothing"
-    assert after[0].completes is None
     assert await subject.trail.open_invocations(decision_id=call.decision.id) == [rows[0]]
 
     # **And no further claim is admitted under that decision** (ADR-0192 §1): "the
