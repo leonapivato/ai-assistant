@@ -1,4 +1,4 @@
-"""Tests for ``StepFailure``, ``PlanExport``'s own members and the frozen-JSON annotations.
+"""Tests for ``PlanExport``'s own members and the frozen-JSON annotations.
 
 The frozen-JSON arms go through a local holder that declares each annotation exactly
 as the planning steps declared it, so each arm pins the annotation and nothing else.
@@ -21,8 +21,6 @@ from ai_assistant.core.types import (
     FrozenJsonMapping,
     FrozenJsonValue,
     PlanExport,
-    StepFailure,
-    ToolFailureKind,
 )
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -151,43 +149,6 @@ def test_a_mapping_output_is_frozen() -> None:
     assert holder.output is not None
     with pytest.raises(TypeError):
         holder.output["ref"] = "XYZ"  # type: ignore[index]
-
-
-# --- StepFailure --------------------------------------------------------
-
-
-def test_step_failure_defaults_to_no_kind() -> None:
-    """``message`` required, ``kind`` optional — the whole asymmetry (ADR-0039 §1)."""
-    failure = StepFailure(message="the upstream is down")
-    assert failure.message == "the upstream is down"
-    assert failure.kind is None
-
-
-def test_step_failure_carries_a_tool_kind_when_one_produced_it() -> None:
-    failure = StepFailure(kind=ToolFailureKind.UNAVAILABLE, message="the upstream is down")
-    assert failure.kind is ToolFailureKind.UNAVAILABLE
-
-
-def test_step_failure_refuses_a_blank_message() -> None:
-    """ADR-0029 §3's ``_has_visible_text`` case, one layer up (ADR-0039 §1)."""
-    with pytest.raises(ValidationError, match="must contain visible text"):
-        StepFailure(message="   ")
-
-
-def test_step_failure_strips_its_message() -> None:
-    assert StepFailure(message="  boom  ").message == "boom"
-
-
-def test_step_failure_is_frozen() -> None:
-    """An account of what already happened must not be editable after the fact."""
-    failure = StepFailure(message="boom")
-    with pytest.raises(ValidationError):
-        failure.message = "rewritten"
-
-
-def test_step_failure_round_trips_through_json() -> None:
-    failure = StepFailure(kind=ToolFailureKind.RATE_LIMITED, message="throttled")
-    assert TypeAdapter(StepFailure).validate_json(failure.model_dump_json()) == failure
 
 
 # --- Non-finite floats have no JSON representation ----------------------
@@ -319,47 +280,38 @@ def test_a_scalar_output_with_a_lone_surrogate_is_rejected() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 18
+    assert export.schema_version == 19
     assert export.activation_effects == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_eighteen() -> None:
+def test_export_pins_the_schema_version_to_exactly_nineteen() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[18]`` refuses an explicit ``17`` — a document of the shape this export
-    had before it gained ``activation_effects`` does not validate against this
-    contract at all (ADR-0306 §6), exactly as a ``16`` stopped validating when it
-    gained ``stopped_activations`` (ADR-0297 §1), a ``15`` when it
-    gained ``effects`` and ``StepExecution`` gained the two satisfaction marks
-    (ADR-0259 §9), a ``14`` when ``AttemptOutcome`` gained ``CANCELLED`` (ADR-0261
-    §10) — §10's mechanism applied for the first time to a **value** rather than to a
-    shape, the document carrying ``tuple[GoalAttempt, ...]`` so that a reader at ``14``
-    refuses an ``outcome`` of ``"cancelled"`` outright — a ``13`` when ``Goal``
-    gained ``quotes`` and ``quotes_elided`` (ADR-0267 §11), a ``12`` when ``Goal``
-    gained ``intended_actions`` and ``PlanStep`` gained
-    ``intended_action`` (ADR-0265 §5), an ``11`` stopped validating when
-    ``ActionPlan`` and ``PlanStep`` gained the plan's graph, ``GoalElement`` gained
-    an identity and an applicability and ``GoalEvidence`` gained
-    ``interpreted_output`` (ADR-0253 §10), a ``10`` when this
-    document gained
-    ``evidence``, a ``9`` when it gained ``questions``, an ``8`` when
-    ``AttemptEffort`` gained ``kind``, a ``7`` when this document gained ``attempts``
-    and ``ActionPlan`` gained ``targets_revision``, a ``6`` when ``ReadKind`` gained
-    ``STRUCTURED_READ``, a ``5`` when it gained ``WEB_SEARCH``, a ``4`` when it gained
-    ``LOCAL_FILE`` and ``ReadAsk`` gained ``entry``, a ``3`` when ``ActionPlan``
-    gained ``supersedes`` and a ``2`` when it gained ``read_request`` — and any other
-    value, so the advertised version cannot be mislabelled. The positive default is
-    what a producer gets for free; only the rejections pin it.
+    ``Literal[19]`` refuses an explicit ``18`` — a document of the shape this export
+    had before the old path's sections left it does not validate against this contract
+    at all (ADR-0309 §5), and no reader for it is written (ADR-0309 §6:4) — and any
+    other value, so the advertised version cannot be mislabelled. The positive default
+    is what a producer gets for free; only the rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``17`` is
-    the shape this contract had one decision ago and ``19`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``18`` is
+    the shape this contract had one decision ago and ``20`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=18).schema_version == 18
-    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19):
+    assert PlanExport(exported_at=_WHEN, schema_version=19).schema_version == 19
+    for stale in (*range(1, 19), 20):
         with pytest.raises(ValidationError):
-            PlanExport(exported_at=_WHEN, schema_version=stale)  # type: ignore[arg-type]
+            PlanExport(exported_at=_WHEN, schema_version=stale)
+
+
+@pytest.mark.parametrize(
+    "retired", ["goals", "plans", "executions", "attempts", "questions", "evidence", "effects"]
+)
+def test_export_refuses_a_section_the_old_path_carried(retired: str) -> None:
+    """ADR-0309 §5: the old path's sections left the document, and ``extra="forbid"``
+    refuses a document that still carries one rather than dropping it silently."""
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        PlanExport.model_validate({"exported_at": _WHEN, retired: []})
 
 
 def test_export_carries_stopped_activations_once_each() -> None:

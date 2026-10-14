@@ -311,8 +311,7 @@ class FakePlanStore:
         """Return a portable, internally consistent snapshot — under the resource (#397).
 
         The sections ADR-0309 §5 retired (goals, plans, executions, attempts,
-        questions, evidence and effect rows) export empty, since nothing here writes
-        them.
+        questions, evidence and effect rows) left the document with them.
         """
         async with self._resource.held():
             return PlanExport(

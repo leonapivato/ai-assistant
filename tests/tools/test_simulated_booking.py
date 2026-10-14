@@ -53,7 +53,6 @@ from ai_assistant.core.types import (
     ProvisioningState,
     SecretName,
     SecretScope,
-    StepFailure,
     ToolFailureKind,
     ToolOutcome,
 )
@@ -264,34 +263,12 @@ async def test_the_second_dispatch_is_the_only_thing_standing_between_it_and_two
 
     first = authorised(BOOKING_ACT, parameters, binding, decision_id="d-1")
     second = authorised(BOOKING_ACT, parameters, binding, decision_id="d-2")
-    assert first.effect_key == second.effect_key
 
     _succeeded(await recorded(registry, first))
     _succeeded(await recorded(registry, second))
 
     assert len(await booking.store.records()) == 2
     assert await booking.store.commit_count() == 2
-
-
-async def test_the_reads_call_derives_no_effect_key_and_the_acts_does() -> None:
-    """``effect_key`` is ``None`` *if and only if* the tool is not ``side_effecting``.
-
-    The read performs nothing, so there is no effect to claim; the act does, so there
-    is — the asymmetry ADR-0259 §2's claim rests on, over this provider's own two
-    declarations.
-    """
-    booking = await configured()
-    registry = registry_for(booking)
-    seam = seam_for(booking, registry)
-    parameters = arguments()
-
-    read = authorised(
-        BOOKING_AVAILABILITY, parameters, await bound(seam, BOOKING_AVAILABILITY, parameters)
-    )
-    act = authorised(BOOKING_ACT, parameters, await bound(seam, BOOKING_ACT, parameters))
-
-    assert read.effect_key is None
-    assert act.effect_key is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -1099,19 +1076,6 @@ async def test_the_charge_does_not_vary_with_the_commit_count(tmp_path: Path) ->
 
     assert charges == [(PRICE, CURRENCY)] * 3
     assert await booking.store.commit_count() == 3
-
-
-def test_a_step_failure_records_the_providers_own_kind() -> None:
-    """``StepFailure`` keeps the tool's own classification (ADR-0039 §3).
-
-    Stated here because ADR-0273 §6's statement rides in a ``ToolFailure.message``, and
-    what a finished step keeps is that failure's ``kind`` beside the text — not a
-    planning-owned mirror of it. A reader of a trail therefore sees both.
-    """
-    failure = StepFailure(kind=ToolFailureKind.REFUSED, message=f"no stay. {SIMULATION_NOTICE}")
-
-    assert failure.kind is ToolFailureKind.REFUSED
-    assert SIMULATION_NOTICE in failure.message
 
 
 def test_the_reference_is_the_one_the_harness_configures() -> None:

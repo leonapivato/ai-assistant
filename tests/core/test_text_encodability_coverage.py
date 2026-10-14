@@ -44,22 +44,16 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError, create_mode
 
 from ai_assistant.core import types as core_types
 from ai_assistant.core.types import (
-    ActionPlan,
     EncodableText,
     EpisodicMemory,
     FeedbackEvent,
     FeedbackKind,
     FrozenJsonMapping,
     FrozenJsonValue,
-    Goal,
-    GoalInterpretation,
-    GoalStatus,
-    Ground,
     Identifier,
     MemoryKind,
     MemorySource,
     Message,
-    PlanStep,
     Provenance,
     Role,
     SemanticMemory,
@@ -197,7 +191,7 @@ def test_the_scan_actually_finds_the_core_models() -> None:
         "Provenance",
         "MemoryBase",
         "FeedbackEvent",
-        "Goal",
+        "ActivationEffect",
         "ToolDefinition",
     } <= names
 
@@ -384,26 +378,6 @@ def test_feedback_with_no_utf8_encoding_is_refused(field: dict[str, Any]) -> Non
         FeedbackEvent(**payload)
 
 
-def test_a_goal_statement_with_no_utf8_encoding_is_refused() -> None:
-    with pytest.raises(ValidationError, match="UTF-8"):
-        Goal(
-            id="g-1",
-            interpretation=(
-                GoalInterpretation(
-                    revision=1,
-                    outcome=SURROGATE,
-                    outcome_ground=Ground.USER_STATED,
-                    outcome_span=SURROGATE,
-                    recorded_at=AT,
-                    raised_by="t-1",
-                ),
-            ),
-            status=GoalStatus.ACTIVE,
-            provenance=_provenance(),
-            created_at=AT,
-        )
-
-
 def test_a_memory_record_with_no_utf8_encoding_is_refused() -> None:
     with pytest.raises(ValidationError, match="UTF-8"):
         SemanticMemory(id="m-1", content="fine", fact=SURROGATE, provenance=_provenance())
@@ -418,17 +392,6 @@ def test_a_memory_participant_with_no_utf8_encoding_is_refused() -> None:
             occurred_at=AT,
             participants=("ana", SURROGATE),
             provenance=_provenance(),
-        )
-
-
-def test_a_plan_rationale_with_no_utf8_encoding_is_refused() -> None:
-    with pytest.raises(ValidationError, match="UTF-8"):
-        ActionPlan(
-            id="p-1",
-            goal_id="g-1",
-            steps=(PlanStep(id="s-1", intent="do it", capability="send_email"),),
-            rationale=SURROGATE,
-            created_at=AT,
         )
 
 

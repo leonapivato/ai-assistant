@@ -42,13 +42,13 @@ from contextlib import contextmanager
 from typing import Any, ClassVar
 
 import pytest
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
     _MAX_JSON_DEPTH,
     FrozenDict,
     FrozenJson,
-    PlanStep,
+    FrozenJsonMapping,
     ToolOutcome,
     ToolResult,
     _faithful_json_depth,
@@ -106,9 +106,23 @@ def nested(levels: int) -> Any:
     return value
 
 
-def step(parameters: object) -> PlanStep:
-    """A minimal :class:`PlanStep` holding ``parameters``, the first of nine holders."""
-    return PlanStep(id="s1", intent="i", capability="cap", parameters=parameters)  # type: ignore[arg-type]  # the hostile inputs below are the point
+class _Holder(BaseModel):
+    """One ``FrozenJsonMapping`` field, declared as the planning step declared it.
+
+    The pins below held their values through ``PlanStep.parameters``, which left
+    ``core`` with the old path (ADR-0309 §5). ``FrozenJsonMapping`` is carried by live
+    types — ``ProposedCall.arguments`` and ``ActionRequest.parameters`` among them — and
+    a holder with nothing else on it keeps each pin about the annotation alone.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    parameters: FrozenJsonMapping
+
+
+def step(parameters: object) -> _Holder:
+    """A minimal holder of ``parameters``, standing where the plan step stood."""
+    return _Holder(parameters=parameters)  # type: ignore[arg-type]  # the hostile inputs below are the point
 
 
 class UnderReportingDict(dict[str, Any]):
@@ -248,7 +262,7 @@ def test_a_value_at_the_ceiling_can_be_dumped_and_revalidated() -> None:
     accepts survives the whole round trip.
     """
     original = step(nested(_MAX_JSON_DEPTH))
-    assert PlanStep.model_validate_json(original.model_dump_json()) == original
+    assert _Holder.model_validate_json(original.model_dump_json()) == original
 
 
 # --- §5(d): the refusal does not depend on a process-global ------------------

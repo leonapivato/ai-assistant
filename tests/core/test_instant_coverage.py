@@ -104,7 +104,13 @@ def _core_models() -> list[type[BaseModel]]:
 def test_the_scan_actually_finds_the_core_models() -> None:
     """A discovery check that silently found nothing would pass forever."""
     names = {model.__name__ for model in _core_models()}
-    assert {"Provenance", "MemoryBase", "CurrentContext", "Goal", "PermissionDecision"} <= names
+    assert {
+        "Provenance",
+        "MemoryBase",
+        "CurrentContext",
+        "ActivationEffect",
+        "PermissionDecision",
+    } <= names
 
 
 @pytest.mark.parametrize("model", _core_models(), ids=lambda model: model.__name__)
