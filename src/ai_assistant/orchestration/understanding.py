@@ -64,7 +64,10 @@ module rendered, never from model output (§2).
 **The same exchange in both windows is rendered once** (§3): an episode whose stored id
 equals a channel item's identifier is the channel item, under its ``H`` label, annotated
 as also present in the episode window; it takes no ``P`` label and is not counted
-toward the selector's bound.
+toward the selector's bound. A transcript message that links to an activation is
+identified by that activation's episode, so on the chat path too an earlier exchange of
+the conversation is shown once, as its messages (#2899); where it is several messages,
+the first carries the episode's annotations and each is marked.
 
 **Validation, one repair, then record or refuse** (§6). The output must parse as one
 :class:`~ai_assistant.core.types.ProposedActivationUnderstanding`, every label must
@@ -132,6 +135,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
+from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_privacy import activation_of
 
 if TYPE_CHECKING:
@@ -399,8 +403,9 @@ class TranscriptWindow:
     replacing the tail read from episodes for that input (ADR-0293's partial
     supersession of ADR-0276 §3:1-§3:2). Each message keeps its author, so the window
     informs and never authorizes (§6:5). A message is not a stored record: it passes as
-    the medium holds it, as a supplied item does, with no identifier the episode
-    window or recall could share.
+    the medium holds it, as a supplied item does. Where it links to an activation, its
+    identifier is that activation's episode's stored id, which the episode window and
+    recall share (ADR-0276 §3, #2899); a message that links to nothing has none.
 
     Attributes:
         conversation: The conversation channel, rendered as each item's source.
@@ -869,6 +874,7 @@ class UnderstandingStage:
                     one.also,
                     excerpt_chars=self._excerpt_chars,
                     linkable=one.link is not None,
+                    annotated=one.annotated,
                 )
             )
             labels[label] = one.item.referent
@@ -1060,11 +1066,20 @@ class _Problem:
 
 @dataclass(frozen=True, slots=True)
 class _PlacedItem:
-    """One item of the place window, what it shares with the episode window, its link."""
+    """One item of the place window, what it shares with the episode window, its link.
+
+    ``annotated`` is whether this item carries what the episode window would have added
+    about ``also`` — its status, verdicts and understanding. Several transcript messages
+    can be one exchange — the user's message an activation took in and the reply it
+    wrote — and that exchange is rendered once (ADR-0276 §3): the first of them in
+    rendering order carries its annotations, and every one of them is marked as also in
+    the episode window.
+    """
 
     item: _ChannelItem
     also: EpisodicMemory | None
     link: str | None
+    annotated: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -1099,9 +1114,13 @@ class _Placed:
             admitted = admitted_to_understanding(audience, episodes)
         merged = {record.id: record for record in admitted if record.id in shared}
         placed: list[_PlacedItem] = []
+        annotated: set[str] = set()
         for item in items:
             also = None if item.identifier is None else merged.get(item.identifier)
-            placed.append(_PlacedItem(item, also, item.linked(also)))
+            first = also is not None and also.id not in annotated
+            if also is not None:
+                annotated.add(also.id)
+            placed.append(_PlacedItem(item, also, item.linked(also), annotated=first))
         return cls(items=tuple(placed), shared=shared, episodes=admitted)
 
 
@@ -1173,7 +1192,13 @@ class _ChannelItem:
     position: int | None = None
 
     def rendering(
-        self, label: str, also: EpisodicMemory | None, *, excerpt_chars: int, linkable: bool
+        self,
+        label: str,
+        also: EpisodicMemory | None,
+        *,
+        excerpt_chars: int,
+        linkable: bool,
+        annotated: bool = True,
     ) -> dict[str, object]:
         """The item under its label, marked where it is also in the episode window.
 
@@ -1182,8 +1207,10 @@ class _ChannelItem:
 
         ``also`` is the episode-window record the item names, where it names one: its
         status, reason, verdicts and understanding ride here, rendered once (§3). A
-        tail record is that episode itself; a supplied item is not a record and keeps
-        its own text, gaining only those annotations.
+        tail record is that episode itself; a supplied item or a transcript message is
+        not a record and keeps its own text, gaining only those annotations, and only
+        where ``annotated``: of several items that are one exchange, the first carries
+        them and the rest are only marked, so the exchange is rendered once.
 
         **A stored understanding version rides only on an item also in the episode
         window** — what that window would have added about it. On its own the channel
@@ -1199,7 +1226,7 @@ class _ChannelItem:
                 self.episode, excerpt_chars=excerpt_chars, admit_outside_input=False
             )
             rendered.update(projected.parts(understood=also is not None))
-        elif also is not None:
+        elif also is not None and annotated:
             projected = _ProjectedEpisode.of(
                 also, excerpt_chars=excerpt_chars, admit_outside_input=False
             )
@@ -1311,7 +1338,14 @@ def _message_item(
     """One message of the transcript, quoted as the medium holds it (ADR-0293 §5:2).
 
     It links to the activation the reader's bookkeeping records as having taken it in,
-    where it records one (ADR-0303 §7:3).
+    or the phases' effect record as having written it, where one is recorded (ADR-0303
+    §7:1, §7:3). Where it links, its identifier is that activation's episode's stored
+    id, ``activation:<activation_id>`` (ADR-0283 §2), so ADR-0276 §3's *same exchange*
+    matches it as written: the episode window's record of the exchange the message
+    belongs to is rendered with it, under its ``H`` label, and takes no ``P`` label
+    (#2899). A message that links to nothing has no identifier, and §3 does not apply
+    to it (ADR-0303 §7:5's conservative direction). Its referent stays the message,
+    by its position: a reading grounded in it names the message, not the episode.
     """
     body: dict[str, object] = {"item": role, "position": message.position}
     excerpt = ""
@@ -1328,8 +1362,9 @@ def _message_item(
             body["cut_off"] = True
     if first is not None and message.position > first:
         body["written_after_the_input_began"] = True
+    link = links.get(message.position)
     return _ChannelItem(
-        identifier=None,
+        identifier=None if link is None else episode_address(link),
         body=body,
         referent=UnderstandingReferent(
             kind="channel_item",
@@ -1337,7 +1372,7 @@ def _message_item(
             source=source,
             excerpt=excerpt,
         ),
-        link=links.get(message.position),
+        link=link,
         position=message.position,
     )
 

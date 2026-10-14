@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
+    MessageAuthor,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -41,6 +42,7 @@ from ai_assistant.core.types import (
     SemanticMemory,
     StageEntry,
     StageOutcome,
+    TranscriptMessage,
     UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
@@ -55,6 +57,7 @@ from ai_assistant.orchestration.understanding import (
     ConversationWindow,
     RecentEpisodes,
     SuppliedWindow,
+    TranscriptWindow,
     UnderstandingStage,
     WindowsStage,
     fetch_held,
@@ -157,7 +160,7 @@ async def _understand(  # noqa: PLR0913 — the stage's own inputs, each default
     text: str = "Book the second one.",
     *,
     channel: ChannelIdentity = CONVERSATION,
-    window: SuppliedWindow | ConversationWindow | None = None,
+    window: SuppliedWindow | ConversationWindow | TranscriptWindow | None = None,
     audience: TurnSupply = BOUNDED,
     episodes: bool = True,
     deadline: float = math.inf,
@@ -566,6 +569,128 @@ async def test_a_supplied_item_naming_a_windowed_episode_carries_its_annotations
     assert item["what_became_of_it"] == ["the action was refused by the permission policy"]
     assert item["understood_then"]["meaning"] == "A campsite filled up."
     assert sent["episode_window"] == "missing: there are no other recent episodes to show"
+
+
+def _message(position: int, text: str, author: MessageAuthor) -> TranscriptMessage:
+    """One message of conversation c-1's transcript, as the chat's reader reads it."""
+    user = author is MessageAuthor.USER
+    return TranscriptMessage(
+        conversation_id="c-1",
+        position=position,
+        written_at=AT - timedelta(minutes=1),
+        author=author,
+        text=text,
+        device_id="phone" if user else None,
+        message_id=f"m-{position}" if user else None,
+    )
+
+
+def _exchange(links: dict[int, str]) -> tuple[EpisodicMemory, TranscriptWindow]:
+    """One earlier exchange of conversation c-1: its episode, and the transcript showing it.
+
+    The episode is activation a-1's, at its own address (ADR-0283 §2). The transcript
+    holds the user's message a-1 took in and the reply it wrote; ``links`` is what the
+    chat's reader brought of which activation took in or wrote each (ADR-0303 §7:1).
+    """
+    own = _episode(
+        "activation:a-1",
+        at=AT - timedelta(minutes=1),
+        understanding=(
+            ActivationUnderstanding(
+                version=1,
+                recorded_at=AT,
+                producer=UnderstandingProducer.INTERPRETATION,
+                meaning="They asked about campsites.",
+                meaning_ground=UnderstandingGround.STATED,
+            ),
+        ),
+    )
+    window = TranscriptWindow(
+        CONVERSATION,
+        (
+            _message(1, "Find a campsite near Riverside.", MessageAuthor.USER),
+            _message(2, "Riverside and Pine Flat both have space.", MessageAuthor.ASSISTANT),
+        ),
+        links=links,
+    )
+    return own, window
+
+
+async def test_a_transcript_exchange_linked_to_its_episode_is_rendered_once_as_its_messages() -> (
+    None
+):
+    """§3 on the chat path (#2899): a linked message is identified by its episode.
+
+    The episode takes no `P` label and spends none of the bound; the first message of
+    the exchange carries what the episode window would have added about it, the reply
+    is marked as part of the same exchange, and a reading grounded in a message names
+    that message, one referent.
+    """
+    own, window = _exchange({1: "a-1", 2: "a-1"})
+    other = _episode(
+        "activation:e-1", at=AT - timedelta(minutes=5), channel=EVENTS, text="Pine Flat full."
+    )
+    model = FakeModelProvider.scripted(
+        _proposal(
+            relationships=[{"statement": "Refers back.", "labels": ["H1"], "ground": "supplied"}]
+        )
+    )
+    understood = await _understand(_stage(model, await _store(own, other), limit=1), window=window)
+    sent = _sent(model)
+    asked, replied = sent["channel_window"]
+    assert asked["text"] == "Find a campsite near Riverside."
+    assert asked["also_in_episode_window"] is True
+    assert asked["status"] == "completed"
+    assert asked["understood_then"]["meaning"] == "They asked about campsites."
+    # The exchange is rendered once: the reply is marked, and carries none of it again.
+    assert replied["text"] == "Riverside and Pine Flat both have space."
+    assert replied["also_in_episode_window"] is True
+    assert "status" not in replied
+    assert "understood_then" not in replied
+    # The bound of one was not spent on the shared exchange: the event still arrives.
+    (episode,) = sent["episode_window"]
+    assert episode["label"] == "P1"
+    assert episode["input"] == "Pine Flat full."
+    (relationship,) = understood.relationships
+    assert [(one.kind, one.id) for one in relationship.referents] == [("channel_item", "message:1")]
+
+
+async def test_a_reply_whose_writer_is_unrecorded_is_shown_once_and_the_exchange_once() -> None:
+    """§3, ADR-0303 §7:5: before the phases write messages only the user's message links.
+
+    It alone is identified by the episode, which it carries; the reply links to nothing,
+    is not marked, and is shown once, as itself.
+    """
+    own, window = _exchange({1: "a-1"})
+    model = FakeModelProvider.scripted(_proposal())
+    await _understand(_stage(model, await _store(own)), window=window)
+    sent = _sent(model)
+    asked, replied = sent["channel_window"]
+    assert asked["also_in_episode_window"] is True
+    assert asked["understood_then"]["meaning"] == "They asked about campsites."
+    assert "also_in_episode_window" not in replied
+    assert sent["episode_window"] == "missing: there are no other recent episodes to show"
+
+
+async def test_a_message_that_links_to_nothing_is_shown_as_h_and_its_episode_as_p() -> None:
+    """§3 matches identifiers only: a message no record links names no episode.
+
+    ADR-0303 §7:5's conservative direction: where the reader brought no link, nothing
+    infers which episode a message belongs to, so the message is shown once as its `H`
+    item, unmarked, and its episode keeps its own `P` label.
+    """
+    own, window = _exchange({})
+    model = FakeModelProvider.scripted(_proposal())
+    await _understand(_stage(model, await _store(own)), window=window)
+    sent = _sent(model)
+    asked, replied = sent["channel_window"]
+    assert [asked["label"], replied["label"]] == ["H1", "H2"]
+    assert "also_in_episode_window" not in asked
+    assert "also_in_episode_window" not in replied
+    (episode,) = sent["episode_window"]
+    assert episode["label"] == "P1"
+    assert episode["input"] == "Find a campsite near Riverside."
+    assert episode["understood_then"]["meaning"] == "They asked about campsites."
 
 
 async def test_an_episode_is_projected_explicitly_and_never_serialized() -> None:
