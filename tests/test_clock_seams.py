@@ -240,6 +240,7 @@ from ai_assistant.testing import (
     FakeTraceSink,
     FakeWebSearcher,
     invoker_over,
+    recipient_grant,
     source_grant,
     succeeds,
 )
@@ -1313,20 +1314,20 @@ async def _runner(now: Clock) -> None:
 
 
 async def _recipient_grant_operations(now: Clock) -> None:
-    """The operations read the clock to judge a confirmation's lifetime (ADR-0235 §3).
+    """The operations read the clock for the instant a revocation carries (ADR-0235 §7).
 
-    Driven through the listing, which is the cheapest of the three reads and the one
-    a client reaches first; the other two are pinned beside the operations
-    themselves. ``grantable_decisions`` reads the clock **once** for the whole
-    window, so the reading happens whether or not a row carries an expiry.
+    Driven through the **revocation**, the one surface read left that takes a reading
+    since the establishing act and its listing left the surface (ADR-0313 §5:1). The
+    revoking record is stamped after the outstanding read, so the grant seeded here is
+    what makes the reading happen.
     """
     await RecipientGrantOperations(
-        store=FakeRecipientGrantStore(),
+        store=FakeRecipientGrantStore([recipient_grant(grant_id="g-1")]),
         trail=FakeAuditTrail(),
         policy=FakeActionPolicy(),
         id_factory=_goal_ids("g"),
         clock=now,
-    ).grantable_decisions(limit=1)
+    ).revoke_recipient_grant("g-1")
 
 
 async def _authorization_operations(now: Clock) -> None:
@@ -1394,17 +1395,18 @@ async def _destination_trust_operations(now: Clock) -> None:
 
 
 async def _fake_assistant_engine(now: Clock) -> None:
-    """The canonical fake reads a clock of its own for the establishing act.
+    """The canonical fake reads a clock of its own for a revoking record's instant.
 
     **Guarded at the read rather than at construction**, which is what makes this
     seam's ``owner`` a run-time expression at all: ``recipient_grant_clock`` is a
     public lever a test replaces, so a wrapper installed in ``__init__`` would be
     discarded by the next assignment. The seam is driven through the promoted
-    listing, as the concrete one above is.
+    revocation, as the concrete one above is.
     """
     engine = FakeAssistantEngine()
+    engine.recipient_grants = FakeRecipientGrantStore([recipient_grant(grant_id="g-1")])
     engine.recipient_grant_clock = now
-    await engine.grantable_decisions(limit=1)
+    await engine.revoke_recipient_grant("g-1")
 
 
 async def _store_health(now: Clock) -> None:

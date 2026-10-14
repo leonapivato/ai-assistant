@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from assistant_engine_contract import (
-    _AUTHORIZATION_LIMIT,
     _DECISION_LIMIT,
     _INVOCATION_LIMIT,
     _NOT_CANONICAL,
@@ -77,7 +76,6 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     ActionRequest,
-    AnswerKind,
     Attestation,
     BeliefBand,
     BeliefSummary,
@@ -96,8 +94,6 @@ from ai_assistant.core.types import (
     EgressBinding,
     EgressDestination,
     EgressSpan,
-    GoalStatus,
-    GoalSummary,
     GrantScope,
     Idempotency,
     MemoryKind,
@@ -111,7 +107,6 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
-    QuestionState,
     Reversibility,
     RiskLevel,
     SpanCoverage,
@@ -122,10 +117,8 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.chat import COULDNT_FINISH
 from ai_assistant.testing import (
-    AUTHORIZATION_GOAL,
     FakeAssistantEngine,
     FakeMemoryStore,
-    opening_act,
 )
 
 #: The per-turn budget the two ``converse`` entries take. A fixed figure rather than a
@@ -489,13 +482,6 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         return engine
 
     @pytest.fixture
-    async def overfull_authorizations(self) -> AssistantEngine:
-        """The fake at a limit one standing row's view cannot fit inside."""
-        engine = FakeAssistantEngine(max_payload_bytes=_AUTHORIZATION_LIMIT)
-        engine.hold_authorization(opening_act(goal=AUTHORIZATION_GOAL))
-        return engine
-
-    @pytest.fixture
     async def invocations(self) -> InvocationSubject:
         """The fake over a seeded invocation trail — the object the suite reads as control.
 
@@ -564,38 +550,6 @@ async def test_the_fake_s_listing_discloses_the_same_elision_as_its_detail_view(
     assert detail is not None
     assert detail.evidence_elided == 900
     assert page[0].evidence_elided == detail.evidence_elided
-
-
-async def test_the_two_question_enumerations_stay_disjoint() -> None:
-    """ADR-0078 §8: an interrupted question is a second list all the way up.
-
-    Offering it beside the answerable ones would present a claim that cannot be
-    taken — the system does not know whether the memory write landed.
-    """
-    engine = FakeAssistantEngine()
-    engine.ask("q-1", content="works from home", state=QuestionState.OPEN)
-    engine.ask("q-2", content="prefers metric", state=QuestionState.INTERRUPTED)
-    assert [q.id for q in await engine.questions()] == ["q-1"]
-    assert [q.id for q in await engine.interrupted_questions()] == ["q-2"]
-
-
-async def test_accepting_a_question_leaves_a_record_live() -> None:
-    """An applied answer names what is now live (ADR-0078 §8)."""
-    engine = FakeAssistantEngine()
-    engine.ask("q-1", content="works from home", state=QuestionState.OPEN)
-    outcome = await engine.answer("q-1", accept=True)
-    assert outcome.record_id is not None
-    assert await engine.belief(outcome.record_id) is not None
-    assert await engine.questions() == ()
-
-
-async def test_declining_a_question_writes_nothing() -> None:
-    """A rejection needs no claim, because it writes nothing."""
-    engine = FakeAssistantEngine()
-    engine.ask("q-1", content="works from home", state=QuestionState.OPEN)
-    outcome = await engine.answer("q-1", accept=False)
-    assert outcome.record_id is None
-    assert await engine.beliefs() == ()
 
 
 async def test_the_filters_compose_by_conjunction() -> None:
@@ -743,38 +697,11 @@ async def test_the_ordering_clause_catches_insertion_order() -> None:
     assert await _listed(_InsertionOrderEngine()) == ["c-1", "c-2"]  # nothing ordered it
 
 
-def test_the_retention_ceiling_is_guarded_exactly_as_the_concrete_engine_guards_it() -> None:
-    """The fake refuses every value ``Engine`` refuses, with the class ``Engine`` uses.
-
-    ADR-0084 §4's substitutability runs in both directions. A fake admitting a
-    deployment no engine admits lets a consumer's tests pass over a configuration
-    production cannot be built into — and a fake refusing the same value with a
-    different class makes the two disagree about what kind of failure it is, which is
-    the half a positivity check on its own would leave open.
-
-    The three shapes are the ones the concrete engine names: a ``bool``, which is an
-    ``int`` subclass and would silently mean one; a ``float``, which would compare
-    fine and then bound the retention at ``int``-of-itself; and a non-positive count,
-    which would discard from an empty table on the first settlement.
-    """
-    for wrong_type in (True, 1.5, "1"):
-        with pytest.raises(TypeError):
-            FakeAssistantEngine(max_outstanding_confirmations=wrong_type)  # type: ignore[arg-type]
-
-    for not_positive in (0, -1):
-        with pytest.raises(ValueError, match="must be positive"):
-            FakeAssistantEngine(max_outstanding_confirmations=not_positive)
-
-    # And the smallest admitted value really is one, which is what the shared suite's
-    # bound case is built at.
-    assert FakeAssistantEngine(max_outstanding_confirmations=1) is not None
-
-
 def test_the_payload_limit_is_guarded_exactly_as_the_concrete_engine_guards_it() -> None:
     """ADR-0085 §8c's limit, held to the same shape on the double (#1686).
 
-    The same both-directions argument as the ceiling above, over the argument with the
-    widest blast radius on this surface: *every* argument check and *every* result
+    ADR-0084 §4's substitutability runs in both directions, and this is the argument
+    with the widest blast radius on this surface: *every* argument check and *every* result
     check this double performs measures against this one number, so a value that
     cannot bind does not weaken the contract limit, it removes it. ``float("nan")``
     is the sharp case — it compares ``False`` against every ``>``, so nothing is ever
@@ -812,8 +739,6 @@ def test_an_int_subclass_that_answers_its_own_comparisons_is_refused_as_a_limit(
 
     with pytest.raises(TypeError, match="max_payload_bytes must be an integer"):
         FakeAssistantEngine(max_payload_bytes=_NonBinding(0))
-    with pytest.raises(TypeError, match="max_outstanding_confirmations must be an integer"):
-        FakeAssistantEngine(max_outstanding_confirmations=_NonBinding(0))
 
 
 def test_a_knob_that_cannot_describe_itself_still_gets_the_documented_refusal() -> None:
@@ -833,287 +758,6 @@ def test_a_knob_that_cannot_describe_itself_still_gets_the_documented_refusal() 
 
     with pytest.raises(TypeError, match="max_payload_bytes must be an integer"):
         FakeAssistantEngine(max_payload_bytes=_Unspeakable())  # type: ignore[arg-type]
-
-
-# --- ADR-0189 §2 on the far side of an answer (#1523's knobs, round-1 finding 1) ---
-
-
-async def test_accepting_a_question_writes_a_belief_carrying_the_proposals_own_origin() -> None:
-    """ADR-0189 §2 makes these facts about the record acceptance **writes**.
-
-    So an ``answer`` that dropped them would leave this engine holding a belief whose
-    origin differs from the question it came from — and on the attested band it would
-    not merely differ, it would be unconstructable: ``Provenance`` makes an
-    ``Attestation`` mandatory exactly there (ADR-0092 §1), so writing the proposal's
-    band without the proposal's attestation raises rather than lying quietly.
-
-    Unreachable until #1523's knobs landed, because :meth:`ask` fixed the band at
-    ``ASSERTED`` and no question could carry an attestation at all. Making the state
-    scriptable is what puts an engine on the far side of it.
-    """
-    engine = FakeAssistantEngine()
-    engine.ask(
-        "q-1",
-        content="the board dine at Nopa on Thursday",
-        state=QuestionState.OPEN,
-        band=BeliefBand.ATTESTED,
-        attestation=_REPORTED,
-    )
-
-    outcome = await engine.answer("q-1", accept=True)
-    assert outcome.record_id is not None
-    written = await engine.belief(outcome.record_id)
-
-    assert outcome.kind is AnswerKind.APPLIED
-    assert written is not None
-    assert written.band is BeliefBand.ATTESTED
-    assert written.attestation == _REPORTED
-    assert written.rests_on_recorded_external_content is True
-
-
-async def test_accepting_a_tainted_proposal_keeps_the_warrant_it_was_deferred_for() -> None:
-    """The predicate is what #746 exists for, and it is the one an answer would drop.
-
-    A tainted consolidation reaches the user as an ``ASK_USER`` question precisely
-    because its warrant rests on recorded external content (ADR-0106 §6). A belief
-    written from accepting it that reported ``False`` would have laundered the one fact
-    the question was raised about — and on the ``DERIVED`` band nothing else on the
-    projection supplies it.
-    """
-    engine = FakeAssistantEngine()
-    engine.ask(
-        "q-1",
-        content="they consolidate travel around board weeks",
-        state=QuestionState.OPEN,
-        band=BeliefBand.DERIVED,
-        derived_from_external=True,
-    )
-
-    outcome = await engine.answer("q-1", accept=True)
-    assert outcome.record_id is not None
-    written = await engine.belief(outcome.record_id)
-
-    assert written is not None
-    assert written.rests_on_recorded_external_content is True
-    assert written.attestation is None, "a derived belief names no reporting source"
-
-
-async def test_a_stray_externality_answer_is_discarded_by_the_band_and_not_by_this_engine() -> None:
-    """ADR-0106 §2's band guard, reached through the answer rather than restated in it.
-
-    ADR-0106 §7 forbids a band-keyed validator on ``derived_from_external``, so a
-    ``USER_ASSERTED`` provenance carrying ``True`` stays constructible, and ADR-0189 §2
-    adds no validator to ``Question`` either — so a proposal banded ``ASSERTED`` with
-    the predicate ``True`` is model-valid and reaches this method. What answers it is
-    the classifier: "the user's own utterance is not [external], however it was
-    composed" (ADR-0098 §1), so the written belief reports ``False``.
-
-    Asserted here because the alternative repair — this engine zeroing the value before
-    forwarding it — would be a second spelling of a rule ADR-0072 §4 already keys on the
-    source, and a second spelling is a second thing that can disagree.
-    """
-    engine = FakeAssistantEngine()
-    engine.ask(
-        "q-1",
-        content="the office is in Boston",
-        state=QuestionState.OPEN,
-        band=BeliefBand.ASSERTED,
-        derived_from_external=True,
-    )
-
-    outcome = await engine.answer("q-1", accept=True)
-    assert outcome.record_id is not None
-    written = await engine.belief(outcome.record_id)
-
-    assert written is not None
-    assert written.rests_on_recorded_external_content is False
-
-
-async def test_accepting_an_answer_retires_exactly_what_it_said_it_would() -> None:
-    """ADR-0078 §8: ``retires`` is "the exact scope the answer authorises".
-
-    Not decoration — so an engine that applied the correction and left the conflict live
-    would hold two beliefs the user was told could not both stand, and every surface
-    reading it would render the retired one as current. Unreachable until #1523 made
-    ``retires`` scriptable, which is why it is checked now rather than earlier.
-
-    The tombstone arm rides along because it is the same rule rather than an exception:
-    a retirement that no longer resolves names a ``record_id`` like any other, the
-    record is already gone (ADR-0045 §6), and discarding by id is idempotent.
-
-    **The live entry carries resolved content and the tombstone names a record that was
-    never held**, which is what makes this a scenario a producer could actually build.
-    An earlier draft tombstoned the *live* record — so the question said "no longer
-    held … would not touch it" about a belief the answer then destroyed, and the
-    assertion passed while describing a state no store produces. Adversarial review
-    caught it on this lane's round 2.
-    """
-    engine = FakeAssistantEngine()
-    engine.hold("live-1", content="the user works from Madrid")
-    engine.hold("keep-1", content="the office is in Boston")
-    engine.ask(
-        "q-1",
-        content="the user works from Lisbon",
-        state=QuestionState.OPEN,
-        retires=(
-            engine.retirement("live-1", content="the user works from Madrid"),
-            engine.retirement("gone-1"),
-        ),
-    )
-
-    outcome = await engine.answer("q-1", accept=True)
-
-    assert outcome.record_id is not None
-    assert await engine.belief("live-1") is None, "the named conflict is gone"
-    assert await engine.belief("keep-1") is not None, "and nothing else was touched"
-    assert await engine.belief(outcome.record_id) is not None
-
-
-async def test_declining_an_answer_retires_nothing_and_writes_nothing() -> None:
-    """The scope is what **accepting** authorises, so a rejection spends none of it.
-
-    ADR-0078 §8's four outcomes are distinct in what they leave behind, and this is the
-    one that must leave everything: a rejection that retired the conflicts anyway would
-    destroy records on the strength of an answer that declined to make the change.
-    """
-    engine = FakeAssistantEngine()
-    engine.hold("live-1", content="the user works from Madrid")
-    engine.ask(
-        "q-1",
-        content="the user works from Lisbon",
-        state=QuestionState.OPEN,
-        retires=(engine.retirement("live-1"),),
-    )
-
-    outcome = await engine.answer("q-1", accept=False)
-
-    assert outcome.kind is AnswerKind.REJECTED
-    assert outcome.record_id is None
-    assert await engine.belief("live-1") is not None
-
-
-async def test_an_answer_that_retires_never_writes_over_a_record_it_did_not_name() -> None:
-    """The scope is exact in both directions, and the id is where it stopped being.
-
-    ADR-0078 §8 makes ``retires`` "the exact scope the answer authorises", which forbids
-    retiring less than it named *and* touching anything it did not. The id an accepted
-    answer wrote used to be sized from the store — fine while nothing shrank it, and
-    wrong the moment this method began retiring: with ``rec-1`` and ``rec-2`` held,
-    retiring ``rec-1`` frees the number ``rec-2`` and the next write lands on top of the
-    survivor. Two beliefs become one, silently, with no answer having named the loser.
-
-    Adversarial review found it on this lane's round 2, on the path this lane added.
-    """
-    engine = FakeAssistantEngine()
-    engine.ask("q-1", content="first", state=QuestionState.OPEN)
-    engine.ask("q-2", content="second", state=QuestionState.OPEN)
-    first = await engine.answer("q-1", accept=True)
-    second = await engine.answer("q-2", accept=True)
-    assert first.record_id is not None
-    assert second.record_id is not None
-
-    engine.ask(
-        "q-3",
-        content="third",
-        state=QuestionState.OPEN,
-        retires=(engine.retirement(first.record_id, content="first"),),
-    )
-    third = await engine.answer("q-3", accept=True)
-
-    assert third.record_id not in {first.record_id, second.record_id}
-    survivor = await engine.belief(second.record_id)
-    assert survivor is not None, "the record no answer named is still held"
-    assert survivor.content == "second", "and still says what it said"
-    assert await engine.belief(first.record_id) is None, "the one that was named is gone"
-
-
-async def test_an_explicitly_held_id_is_never_minted_over() -> None:
-    """The other direction of the same rule, where a test holds a ``rec-N`` of its own.
-
-    :meth:`hold` takes the id its caller names, so a suite that seeded ``rec-1`` before
-    answering anything would have the first accepted answer land on top of it. Skipping
-    past an id already held keeps ``answer``'s write additive, which is what every
-    caller of this engine assumes when it reads ``record_id`` back.
-    """
-    engine = FakeAssistantEngine()
-    engine.hold("rec-1", content="seeded by hand")
-    engine.ask("q-1", content="answered", state=QuestionState.OPEN)
-
-    outcome = await engine.answer("q-1", accept=True)
-
-    assert outcome.record_id != "rec-1"
-    seeded = await engine.belief("rec-1")
-    assert seeded is not None
-    assert seeded.content == "seeded by hand"
-
-
-async def test_a_correction_never_lands_on_the_id_it_just_retired() -> None:
-    """ADR-0045 §4's id rule, read one implementation over.
-
-    A supersession there writes the correction "as a *new* record, at a freshly-minted
-    unique id … it no longer borrows ``T``'s id", and the requirement is that the minted
-    id is absent from the store with "the retained target ``T`` included" — because §4
-    step 1 keeps the target: "``T`` stays on disk with a closed window — retained, off
-    the read path".
-
-    **This engine has no windows, and that is exactly why the rule needs stating here.**
-    Retiring removes the record outright, so an absence check alone is satisfied by the
-    id that was just freed, and the correction lands on the identity of the belief it
-    overturned. A consumer reading ``record_id`` back would then be told the new belief
-    *is* the old one, which is the confusion §4's "no longer borrows" clause exists to
-    prevent.
-    """
-    engine = FakeAssistantEngine()
-    engine.hold("rec-1", content="the user works from Madrid")
-    engine.ask(
-        "q-1",
-        content="the user works from Lisbon",
-        state=QuestionState.OPEN,
-        retires=(engine.retirement("rec-1", content="the user works from Madrid"),),
-    )
-
-    outcome = await engine.answer("q-1", accept=True)
-
-    assert outcome.record_id != "rec-1", "the correction is a new record, not the old id"
-    assert await engine.belief("rec-1") is None
-    assert outcome.record_id is not None
-    written = await engine.belief(outcome.record_id)
-    assert written is not None
-    assert written.content == "the user works from Lisbon"
-
-
-async def test_an_id_another_open_question_calls_gone_is_never_handed_to_a_new_belief() -> None:
-    """The case only a record of the past catches, and the reason the reservation is one.
-
-    A question that names an unresolved retirement has already told the user that id is
-    "no longer held, so accepting would not touch it" (ADR-0045 §6, ADR-0189 §4). If a
-    *different* answer then mints that id, the first question's promise is retrospectively
-    false: answering it retires a belief that did not exist when it was asked, and ADR-0078
-    §8's exact scope is breached by an ordering rather than by a scope.
-
-    Nothing about the store at mint time can see this coming — the id is absent from it,
-    which is exactly why the question called it gone. Adversarial review found it on this
-    lane's round 4, after two narrower repairs to the present state had each left the next
-    case open.
-    """
-    engine = FakeAssistantEngine()
-    engine.ask(
-        "q-gone",
-        content="a question about something already retired",
-        state=QuestionState.OPEN,
-        retires=(engine.retirement("rec-1"),),
-    )
-    engine.ask("q-new", content="an unrelated correction", state=QuestionState.OPEN)
-
-    written = await engine.answer("q-new", accept=True)
-    assert written.record_id is not None
-    assert written.record_id != "rec-1", "the id a live question calls gone is spoken for"
-
-    await engine.answer("q-gone", accept=True)
-
-    survivor = await engine.belief(written.record_id)
-    assert survivor is not None, "answering the other question touched nothing of it"
-    assert survivor.content == "an unrelated correction"
 
 
 async def test_seeding_over_a_held_id_replaces_its_placement_rather_than_inheriting_one() -> None:
@@ -1146,32 +790,6 @@ async def test_seeding_over_a_held_id_replaces_its_placement_rather_than_inherit
     assert lifted is not None
     assert lifted.reach is PlacementReach.ANYONE
     assert lifted.set_by is PlacementSetter.OWNER_ACT
-
-
-async def test_the_goal_listing_refuses_an_oversized_result() -> None:
-    """ADR-0085 §8c over ADR-0250 §15's listing, in the direction only a sender sees.
-
-    §8c's limit is enforced by *every* implementation, and an oversized **result** is
-    the half that goes unnoticed: it is visible only to whoever tried to send it, so a
-    fake that returned one would certify a client against a page the real engine would
-    refuse to hand over. The concrete engine takes the check through ``_tracked(…,
-    checked=True)``; this is the fake taking the same one.
-
-    A scripted summary rather than a stored goal, because ADR-0250 §19's M1 gives this
-    operation no store to read — it answers ``()`` there, which is issue #2296 — so the
-    only way to put a result on the wire at all is to script one.
-    """
-    engine = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
-    engine.goal_summaries.append(
-        GoalSummary(
-            id="g1",
-            outcome="book a campsite for the long weekend, " * 40,
-            status=GoalStatus.ACTIVE,
-        )
-    )
-
-    with pytest.raises(OversizedValueError):
-        await engine.goals()
 
 
 async def test_two_first_reads_of_a_held_conversation_join_the_chat_space_once() -> None:

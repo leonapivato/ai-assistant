@@ -2560,7 +2560,13 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ADR-0313 §4:6 takes ``TextChannelResult`` out of the ``ChannelResult`` a
 #:     ``receive`` returns, which is ``InformationalEventResult`` alone. A peer at 100
 #:     calls four methods a hub at 101 does not route (ADR-0313 §6:4, ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 101
+#: 102: ADR-0309 §5:1 removes ``goals``, ``withdraw_clarification``, ``abandon_goal``,
+#:     ``standing_authorizations``, ``revoke_authorization``, ``answer``,
+#:     ``questions``, ``interrupted_questions`` and ``forget_question`` from the
+#:     promoted ``AssistantEngine`` method set, and ADR-0313 §5:1 removes
+#:     ``grantable_decisions`` and ``establish_recipient_grant``. A peer at 101 calls
+#:     eleven methods a hub at 102 does not route (ADR-0313 §6:4, ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 102
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

@@ -1,7 +1,8 @@
-"""The recipient-grant operations: the offerable rows, the act, the listings, revocation.
+"""The recipient-grant operations: the listings and revocation.
 
-ADR-0235 §4 puts five operations on
-:class:`~ai_assistant.core.protocols.AssistantEngine` and §12 rules that the
+ADR-0235 §4 put five operations on
+:class:`~ai_assistant.core.protocols.AssistantEngine`, of which ADR-0313 §5:1 took
+the establishing act and its listing off the surface, and §12 rules that the
 implementing lane lands "the engine implementation, including the store's whole
 face reaching ``Engine`` from ``app/composition.py``". This module is the object
 that holds that face, on
@@ -36,7 +37,7 @@ decision of the user made while looking at a recorded call.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -44,17 +45,11 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     DuplicateRecipientGrantError,
     InvalidRecipientGrantError,
-    InvalidResolutionError,
-    PermissionDeniedError,
     PlanningError,
     RecipientGrantCeilingError,
     RecipientGrantError,
-    UngrantableActError,
 )
 from ai_assistant.core.types import (
-    EgressBinding,
-    ParkedReadDisposition,
-    PermissionDecision,
     PermissionOutcome,
     RecipientGrant,
     RecipientGrantNotEstablished,
@@ -62,38 +57,18 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
     from datetime import datetime
 
     from ai_assistant.core.protocols import ActionPolicy, AuditTrail, RecipientGrantStore
-    from ai_assistant.core.types import PermissionRuling
     from ai_assistant.orchestration.parked_reads import ParkedReadOperations
     from ai_assistant.orchestration.runner import EstablishingAnswer
 
 _log = structlog.get_logger(__name__)
 
 
-#: ADR-0244 §5's eighth condition, as a set rather than a disjunction: the three
-#: dispositions on which a park excludes its decision from ``grantable_decisions``.
-#:
-#: **``CANCELLED`` and ``EXPIRED`` are deliberately absent.** Neither writes a
-#: resolution and neither ever will, so the condition stops excluding either; ADR-0235
-#: §3's seven then govern the row, and on an ``EXPIRED`` park the fifth of them fails on
-#: its own because the decision carries the same deadline the park does. So a
-#: **cancelled** park's decision is the one that returns to the listing, and an expired
-#: one's stays out — refused by a condition ADR-0244 does not touch rather than by this
-#: one.
-_PARK_EXCLUDES: Final = frozenset(
-    {
-        ParkedReadDisposition.OPEN,
-        ParkedReadDisposition.APPROVED,
-        ParkedReadDisposition.DENIED,
-    }
-)
-
-
 class RecipientGrantOperations:
-    """The five recipient-grant operations, over one store, the trail and the policy."""
+    """The three recipient-grant operations over one store, and the old path's act."""
 
     def __init__(  # noqa: PLR0913 — one parameter per contract these operations are answered against; ADR-0244 §5's eighth condition adds the sixth and none is derivable from another
         self,
@@ -138,6 +113,11 @@ class RecipientGrantOperations:
                 ``None`` excludes nothing, which is exactly right where no park can
                 exist: ADR-0244 §18's lane order lands the store in Lane 2, and until
                 it does no decision is one a park names.
+
+        **``trail``, ``policy`` and ``parked_reads`` are no longer read.** The
+        establishing act and its listing were their only readers, and both left the
+        engine surface (ADR-0313 §5:1); the parameters stay until the composition root
+        stops passing them.
         """
         self._store = store
         self._trail = trail
@@ -146,164 +126,7 @@ class RecipientGrantOperations:
         self._clock = checked_clock(clock, owner="RecipientGrantOperations")
         self._parked_reads = parked_reads
 
-    # --- the offerable rows (ADR-0235 §3) ------------------------------------
-
-    async def grantable_decisions(self, *, limit: int) -> tuple[PermissionDecision, ...]:
-        """Return the recorded ``CONFIRM``s an establishing act may ride.
-
-        One window read and no second one: the availability conditions and the
-        window-completeness rule are both answered from the rows
-        :meth:`~ai_assistant.core.protocols.AuditTrail.recent` returned, which is
-        what keeps this bounded by the same number that bounds the window (ADR-0235
-        §3).
-
-        **The clock is read exactly once** and every candidate's ``expires_at`` is
-        compared against that one instant, on
-        :meth:`~ai_assistant.core.protocols.RecipientGrantStore.standing`'s reason:
-        a listing reading an advancing clock per row could offer one of two
-        confirmations sharing an ``expires_at`` and withhold the other, which is a
-        set true at no real instant.
-
-        Args:
-            limit: How many trail rows to read, already validated strictly positive
-                by the caller.
-
-        Returns:
-            The offerable rows, most recent first, in the order the trail returned
-            them.
-
-        Raises:
-            AuditError: If the trail could not be read.
-            PlanningError: If the injected clock's reading is not conforming.
-        """
-        rows = await self._trail.recent(limit=limit)
-        now = self._now()
-        # A resolution is at or after the confirmation it answers (`AuditTrail.record`
-        # refuses one "decided *after* the resolution answering it"), so every
-        # resolution of a candidate strictly newer than the oldest returned row is
-        # itself inside this window. Collecting the pointers once is the whole join.
-        resolved = {row.resolves for row in rows if row.resolves is not None}
-        complete = len(rows) < limit
-        oldest = rows[-1].decided_at if rows else None
-        offerable = [
-            row
-            for row in rows
-            if rides_an_establishing_act(row, now=now)
-            and row.id not in resolved
-            and (complete or oldest is None or row.decided_at > oldest)
-        ]
-        # ADR-0244 §5's **eighth** condition, evaluated after §3's seven and in that
-        # position: the decision's id is not named by a ``ParkedRead`` whose disposition
-        # is ``OPEN``, ``APPROVED`` or ``DENIED``. One read per row that survived the
-        # seven, and none for a row that did not — which keeps the extra cost
-        # proportional to what is actually offerable.
-        return tuple([row for row in offerable if not await self._held_by_a_park(row.id)])
-
-    async def _held_by_a_park(self, decision_id: str) -> bool:
-        """Whether ADR-0244 §5's eighth condition excludes this decision.
-
-        **Stated over three dispositions and not over an open park, because the gate is
-        taken before the resolution is written** (ADR-0244 §5, §6). A park that settles
-        ``APPROVED`` or ``DENIED`` holds a resolution the answering call has not yet
-        recorded, and a decision that left this listing at the settlement would be one
-        the establishing act could resolve **first** — recording an ``ALLOW`` the user
-        never gave that answer for, and leaving the answering call's own append to fail.
-        The transition ``OPEN`` → ``APPROVED`` → (recorded) therefore never passes
-        through a grantable state, which is the property this clause exists to have.
-
-        **A park that was ``CANCELLED`` or ``EXPIRED`` does not exclude its decision,
-        and only the first of those makes the act reachable.** Neither disposition
-        writes a resolution and neither ever will, so this condition stops excluding
-        either; §3's seven then govern the row, and on an ``EXPIRED`` park the **fifth**
-        of them fails on its own — the decision carries the same ``expires_at`` the park
-        does (ADR-0244 §3) — so its decision stays out, refused by a condition ADR-0244
-        does not touch. **A cancelled park's decision is therefore the one that returns
-        to this listing**, where the other six conditions hold. **No lane widens the
-        exclusion to every park ever written**, which would take a capability away on
-        the strength of a question nobody answered.
-
-        **One question, one act, and the split is decided rather than incidental.** A
-        decision a park holds is answered through ``resume``, and answering it is what
-        dispatches the read; the establishing act "resumes nothing and services nothing"
-        (ADR-0235 §3), so offering both on one row would let a user perform the act that
-        changes nothing about this lookup while the lookup's own question stood
-        unanswered beside it.
-
-        Args:
-            decision_id: The recorded ``CONFIRM`` under test.
-
-        Returns:
-            Whether a park naming it stands ``OPEN``, ``APPROVED`` or ``DENIED``.
-
-        Raises:
-            AssistantError: If the parked-read store could not be read.
-        """
-        if self._parked_reads is None:
-            return False
-        park = await self._parked_reads.park_of_decision(decision_id)
-        return park is not None and park.disposition in _PARK_EXCLUDES
-
     # --- the act (ADR-0235 §3) -----------------------------------------------
-
-    async def establish_recipient_grant(
-        self, decision_id: str, *, expires_at: datetime
-    ) -> RecipientGrant:
-        """Answer a recorded ``CONFIRM`` no park holds, and record the grant it establishes.
-
-        The seven availability conditions are checked in ADR-0235 §3's own order, so
-        that where more than one fails the first is the one named and the refusal is
-        deterministic across implementations. Every one of them raises
-        :class:`~ai_assistant.core.errors.UngrantableActError` and **records
-        nothing**.
-
-        **The order of the four writes and reads is ADR-0235 §6's**: the policy
-        rules, the answer is recorded, the grant is built from the two records by
-        ``core``, and the store admits it. An answer the trail refuses leaves no
-        grant, and a store refusal leaves the answer recorded — the trail is
-        append-only and nothing retracts it.
-
-        Args:
-            decision_id: The recorded ``CONFIRM``, already validated and stripped by
-                the caller (ADR-0085 §3c).
-            expires_at: The instant the user chose, past which the grant ceases to
-                be live.
-
-        Returns:
-            The grant the store accepted.
-
-        Raises:
-            UngrantableActError: If any of the seven conditions fails, at the check
-                or late against the trail's own resolution invariant, or if the
-                expiry is not strictly after the instant the answer will carry.
-            PermissionDeniedError: If the policy answered other than an ``ALLOW``.
-                That answer **is** recorded first.
-            AuditError: If the trail could not be read, or refused the answer on a
-                ground that is not a resolution recorded in the interval.
-            InvalidRecipientGrantError: If the store refused the grant.
-            RecipientGrantError: If the store could not be written.
-            PlanningError: If the injected clock's reading is not conforming.
-        """
-        confirmed = await self._offerable(decision_id)
-        ruling = await self._policy.resolve(confirmed.model_copy(deep=True), approved=True)
-        answer = await self._record_answer(confirmed, ruling, expires_at=expires_at)
-        if answer.ruling.outcome is not PermissionOutcome.ALLOW:
-            # **Recorded and then refused, in that order** (ADR-0235 §3). Suppressing
-            # the record would be the failure ADR-0042 §4's guarantee exists to
-            # prevent, read one operation over: the policy ruled on a question the
-            # user answered, and a ruling the trail never sees is a decision nobody
-            # can audit. The confirmation is thereby settled, and §3's fourth
-            # condition keeps the act from being offered on it again.
-            msg = (
-                f"the permission layer answered {answer.ruling.outcome} to this confirmation, so "
-                f"no standing recipient grant was established; the answer is recorded as "
-                f"decision {answer.id!r} and the confirmation is settled: {answer.ruling.reason}"
-            )
-            raise PermissionDeniedError(msg)
-        grant = RecipientGrant.established_from(
-            confirmed, answer, id=self._id_factory(), expires_at=expires_at
-        )
-        await self._store.record(grant)
-        return grant
 
     async def establish_from_answer(
         self, establishing: EstablishingAnswer, *, expires_at: datetime
@@ -463,164 +286,6 @@ class RecipientGrantOperations:
 
     # --- the availability check (ADR-0235 §3) --------------------------------
 
-    async def _offerable(self, decision_id: str) -> PermissionDecision:
-        """Read the named decision and refuse it unless all seven conditions hold.
-
-        In ADR-0235 §3's stated order, so the refusal is deterministic where more
-        than one fails. **No lane branches on the message.**
-
-        Raises:
-            UngrantableActError: If any condition fails.
-            AuditError: If the trail could not be read.
-            PlanningError: If the injected clock's reading is not conforming.
-        """
-        confirmed = await self._trail.get(decision_id)
-        if confirmed is None:
-            msg = (
-                f"the permission trail holds no decision {decision_id!r}, so there is no "
-                f"recorded confirmation for an establishing act to ride (ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg)
-        if confirmed.ruling.outcome is not PermissionOutcome.CONFIRM:
-            msg = (
-                f"decision {decision_id!r} ruled {confirmed.ruling.outcome} and was never shown "
-                f"as a question, so an answer to it establishes nothing (ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg)
-        if confirmed.step_id is not None or confirmed.execution_id is not None:
-            # **Structural rather than a rule to remember** (ADR-0235 §3). A
-            # confirmation carrying either field belongs to a step of an execution;
-            # its answer is the resuming one, which rebinds the call before it seeks
-            # a ruling (ADR-0152 §7), and `resume` is the only door to it. No lane
-            # reaches this operation from a park by clearing either field.
-            msg = (
-                f"decision {decision_id!r} belongs to a step of an execution, so a park holds "
-                f"it and its answer rides resume rather than this operation (ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg)
-        resolution = await self._resolution_of(decision_id)
-        if resolution is not None:
-            msg = (
-                f"decision {decision_id!r} was already answered by decision {resolution.id!r}; a "
-                f"confirmation has one answer, so this one is spent and the next such call is "
-                f"the one that may be made standing (ADR-0044 §2b, ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg)
-        now = self._now()
-        if confirmed.expires_at is not None and confirmed.expires_at <= now:
-            msg = (
-                f"decision {decision_id!r} stopped being answerable at "
-                f"{confirmed.expires_at.isoformat()}, which is at or before "
-                f"{now.isoformat()} (ADR-0059 §1, ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg)
-        binding = confirmed.egress_binding
-        if not isinstance(binding, EgressBinding):
-            # Stated over the binding's **type** and refused here rather than
-            # inherited (ADR-0235 §3). `ActionPolicy.resolve` returns no `ALLOW` on
-            # either unrecorded epoch, so the act could not complete in any case;
-            # refusing before the policy is asked keeps the act from being offered on
-            # a row it can never ride.
-            msg = (
-                f"decision {decision_id!r} records no egress call whose recipients could be "
-                f"made standing, so there is no account and no destination set to transcribe "
-                f"(ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg)
-        if binding.planned_with_external_content:
-            # Refused **here** rather than left to the constructor, because the
-            # constructor runs too late: `resolve` returns an `ALLOW` on an approved
-            # confirmation carrying this, so an operation that checked nothing would
-            # record the answer and only then meet `established_from`'s refusal
-            # (ADR-0235 §3).
-            msg = (
-                f"decision {decision_id!r} records a call planned over external content; you "
-                f"may approve such a call, and may not in that act make its recipients "
-                f"standing (ADR-0193 §2, §4; ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg)
-        if await self._held_by_a_park(decision_id):
-            # ADR-0244 §5's **eighth** condition, evaluated after §3's seven and in that
-            # position, and named exactly as the seven are — so where more than one
-            # fails the first is the one named and the refusal is deterministic across
-            # implementations.
-            msg = (
-                f"decision {decision_id!r} is the question a parked read holds, or has just "
-                f"taken the answer to, so it is answered through resume rather than through "
-                f"this operation (ADR-0244 §5)"
-            )
-            raise UngrantableActError(msg)
-        return confirmed
-
-    async def _record_answer(
-        self,
-        confirmed: PermissionDecision,
-        ruling: PermissionRuling,
-        *,
-        expires_at: datetime,
-    ) -> PermissionDecision:
-        """Stamp the answer, check the expiry against that instant, and append it.
-
-        **One clock reading, used for both the comparison and the record** (ADR-0235
-        §1). Two reads admit an expiry that passes the check and fails
-        :meth:`~ai_assistant.core.types.RecipientGrant.established_from`'s
-        constructor, which is the failure that clause exists to remove rather than
-        to narrow.
-
-        **The check is scoped to a ruling that is going to be an ``ALLOW``**, and it
-        runs **after** the policy has ruled: where the ruling is anything else the
-        answer is recorded exactly as it would be had no expiry been supplied at
-        all, and the supplied instant is not consulted (ADR-0235 §1, §12).
-
-        Raises:
-            UngrantableActError: If the expiry is not strictly after the instant this
-                answer would carry, or if a resolution of ``confirmed`` was recorded
-                between the availability check and this append.
-            AuditError: If the trail refused the answer on any other ground.
-            PlanningError: If the injected clock's reading is not conforming.
-        """
-        decided_at = self._now()
-        if ruling.outcome is PermissionOutcome.ALLOW and expires_at <= decided_at:
-            msg = (
-                f"a standing recipient grant expires strictly after the answer that "
-                f"establishes it; {expires_at.isoformat()} is at or before "
-                f"{decided_at.isoformat()}, the instant this answer would carry, so nothing "
-                f"was recorded and the confirmation may still be answered (ADR-0235 §1)"
-            )
-            raise UngrantableActError(msg)
-        answer = PermissionDecision.from_confirmation(
-            confirmed, ruling, id=self._id_factory(), decided_at=decided_at
-        )
-        try:
-            await self._trail.record(answer)
-        except InvalidResolutionError as exc:
-            # **The fourth condition failing late** (ADR-0235 §3). A second caller
-            # may resolve the same `CONFIRM` between the check above and this append,
-            # and the trail's resolution invariant is where a confirmation's
-            # one-answer rule is really enforced. The **read** decides it rather than
-            # the class, because `InvalidResolutionError` is one class over seven
-            # grounds and no lane branches on its message; six of the seven are
-            # closed by construction on this operation, which is why the read finds
-            # the seventh and nothing else.
-            #
-            # The re-read is decisive here for a reason a listing read after an act
-            # would not be: the trail is append-only and write-once, so "a resolution
-            # of this confirmation exists" is **monotonic** — once true it stays
-            # true — and a resolution recorded during the interval is newer than
-            # every row the first read returned, so it is inside any window of at
-            # least one row and the window-completeness rule does not arise.
-            if await self._resolution_of(confirmed.id) is None:
-                # A fault is not a settled decision, and converting one into the
-                # other would hide it.
-                raise
-            msg = (
-                f"decision {confirmed.id!r} was answered while this act was being performed; a "
-                f"confirmation has one answer, so this one is spent, nothing was recorded here "
-                f"and the next such call is the one that may be made standing (ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg) from exc
-        return answer
-
     def _now(self) -> datetime:
         """The guarded clock's reading, as the reading stage's own error.
 
@@ -644,50 +309,6 @@ class RecipientGrantOperations:
         except ClockReadingError as exc:
             msg = f"the recipient-grant operations' clock returned a non-conforming reading: {exc}"
             raise PlanningError(msg) from exc
-
-    async def _resolution_of(self, decision_id: str) -> PermissionDecision | None:
-        """The decision resolving ``decision_id``, or ``None`` — conclusively.
-
-        **A whole read and never a bounded one, and the difference is load-bearing**
-        (ADR-0235 §3). This answer is what §3's fourth condition is decided from at
-        the check *and* what its late-failure clause converts an
-        :class:`~ai_assistant.core.errors.InvalidResolutionError` on — "the operation
-        reads the trail once more for a resolution of the named confirmation, and
-        raises ``UngrantableActError`` where one is now recorded". A bounded scan
-        cannot support that conversion: a confirmation resolved long enough ago that
-        its answer has scrolled past the window would be reported as an
-        ``InvalidResolutionError``, which is §3's refusal wearing the wrong type, and
-        the ADR's own account of why the conversion is sound — six of
-        ``InvalidResolutionError``'s seven grounds closed by construction, so "the
-        read finds the seventh and nothing else" — is what a scan that can *miss* the
-        seventh falsifies.
-
-        **This is not the bound ADR-0235 §3 places on the listing, and the asymmetry
-        is the decision rather than an inconsistency.**
-        :meth:`grantable_decisions` is a **page**: its ``limit`` bounds the rows read
-        so that "the operation makes no unbounded read of a Tier 1 store", and §3's
-        window-completeness rule is what makes the fourth condition decidable *within
-        a page* — a decision the window is not complete for is simply not offered,
-        and the recourse is a larger ``limit``. This operation is about **one named
-        decision** and has no ``limit`` to widen, so the only conclusive answer
-        available on the declared contract is the whole read.
-
-        **``export`` rather than a member of its own**, because ADR-0235 §4 adds no
-        member to :class:`~ai_assistant.core.protocols.AuditTrail` and §11 declines
-        "a durable, filtered or indexed read of the permission trail" — the one that
-        would make this cheap — with the condition that fires it: "a measurement
-        showing that real use loses decisions to the window".
-        :meth:`~ai_assistant.core.protocols.AuditTrail.resolution_of` is not it
-        either: it answers only for a decision carrying **both** an ``execution_id``
-        and a ``step_id``, which §3's third condition requires this population to
-        carry neither of.
-
-        **The cost is stated rather than hidden**: this is a read of the whole trail,
-        on an act a user performs deliberately and rarely, and it is the same read
-        ``export_decisions`` already offers that user. It is not on any turn's path.
-        """
-        rows: Sequence[PermissionDecision] = await self._trail.export()
-        return next((row for row in rows if row.resolves == decision_id), None)
 
 
 async def record_the_grant(
@@ -740,32 +361,7 @@ async def record_the_grant(
     return RecipientGrantOutcome(established=grant)
 
 
-def rides_an_establishing_act(decision: PermissionDecision, *, now: datetime) -> bool:
-    """Whether ``decision`` meets every availability condition decidable from the row.
-
-    ADR-0235 §3's conditions two, three, five, six and seven. The first is true of
-    every row the trail returned, and the fourth is decided over the window rather
-    than over one row (:meth:`RecipientGrantOperations.grantable_decisions`).
-
-    Args:
-        decision: One row of the trail's window.
-        now: The one clock reading the whole window is judged against.
-
-    Returns:
-        Whether an establishing act may ride this row.
-    """
-    if decision.ruling.outcome is not PermissionOutcome.CONFIRM:
-        return False
-    if decision.step_id is not None or decision.execution_id is not None:
-        return False
-    if decision.expires_at is not None and decision.expires_at <= now:
-        return False
-    binding = decision.egress_binding
-    return isinstance(binding, EgressBinding) and not binding.planned_with_external_content
-
-
 __all__ = [
     "RecipientGrantOperations",
     "record_the_grant",
-    "rides_an_establishing_act",
 ]

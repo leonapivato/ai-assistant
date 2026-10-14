@@ -56,7 +56,6 @@ from ai_assistant.core.errors import (
     OversizedValueError,
     PlanningError,
     StoryStoreError,
-    UngrantableActError,
     UngrantableSourceError,
     UntrustableDestinationError,
 )
@@ -65,15 +64,9 @@ from ai_assistant.core.types import (
     ActionPlan,
     ActivationEnding,
     ActivationStop,
-    AnswerKind,
-    AnswerOutcome,
     AttemptOutcome,
     AttemptReport,
     Attestation,
-    Authorization,
-    AuthorizationDisposition,
-    AuthorizationProjection,
-    AuthorizationSettlement,
     AuthorizationView,
     Belief,
     BeliefBand,
@@ -81,10 +74,6 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
     ChannelResult,
-    ClarificationWithdrawal,
-    Confirmation,
-    ConfirmationEgress,
-    ContinuationToken,
     ConversationDigest,
     ConversationSummary,
     CurrentContext,
@@ -97,10 +86,8 @@ from ai_assistant.core.types import (
     EpisodePage,
     ForecastNotRead,
     Goal,
-    GoalAbandonment,
     GoalBrief,
     GoalInterpretation,
-    GoalSummary,
     GrantableSource,
     GrantScope,
     Ground,
@@ -111,21 +98,15 @@ from ai_assistant.core.types import (
     OutboundReach,
     OutboundStatement,
     PermissionDecision,
-    PermissionOutcome,
-    PermissionRuling,
     Placement,
     PlacementReach,
     PlacementSetter,
     ProcessingStatus,
     Provenance,
-    Question,
-    QuestionState,
-    ReadKind,
     RecipientGrant,
     RecordedChannelTrigger,
     RecordedInvocation,
     RecordedSpeechInput,
-    Retirement,
     SourceGrant,
     SpendTotal,
     SpokenAudio,
@@ -145,7 +126,6 @@ from ai_assistant.core.types import (
     TimeOfDay,
     TurnOutcome,
     TurnResult,
-    Warrant,
     WholeTextReply,
     chat_conversation_ids,
     check_chat_cursor,
@@ -162,7 +142,6 @@ from ai_assistant.core.types import (
     story_note_text,
     user_message,
 )
-from ai_assistant.orchestration.authorization_surface import is_live, view_of
 from ai_assistant.orchestration.change_stream import Activity, ChangeStream
 from ai_assistant.orchestration.channels import (
     UNCAPTURED,
@@ -206,10 +185,6 @@ from ai_assistant.orchestration.payloads import (
     non_blank_text,
     page_argument,
     positive_page_argument,
-    utc_instant,
-)
-from ai_assistant.orchestration.recipient_grants import (
-    rides_an_establishing_act,
 )
 from ai_assistant.orchestration.stories import (
     fitted,
@@ -223,10 +198,6 @@ from ai_assistant.testing.activation import FakeActivation
 from ai_assistant.testing.connections import FakeConnectionProvisioner
 from ai_assistant.testing.conversations import FakeConversationStore
 from ai_assistant.testing.destination_trust import FakeDestinationTrustStore
-from ai_assistant.testing.goal_authorizations import (
-    AUTHORIZATION_NOW,
-    FakeGoalAuthorizationStore,
-)
 from ai_assistant.testing.memory import FakeMemoryStore
 from ai_assistant.testing.notifications import (
     FakeNotificationOutbox,
@@ -268,7 +239,6 @@ if TYPE_CHECKING:
         StoryView,
         TranscriptPage,
         UserMessage,
-        UtcInstant,
     )
 
 #: A fixed instant, so a fake engine's output is deterministic without a clock.
@@ -283,13 +253,6 @@ _TICK = timedelta(seconds=1)
 #: ``DERIVED``-banded record would still validate, and unadjusted because nothing
 #: in this fake loses evidence.
 _CONFIDENCE = 0.9
-
-
-#: The retention bound §4 of ADR-0198 reuses, and the ceiling the real engine
-#: defaults to. Stated here rather than imported, because it is a deployment
-#: default rather than a contract value — what the contract fixes is that the two
-#: numbers are **one**, not what the number is.
-_DEFAULT_MAX_OUTSTANDING: Final = 1024
 
 
 def _check_positive_int(value: int, *, name: str) -> None:
@@ -379,15 +342,12 @@ class FakeAssistantEngine:
             claim and so meets no ``ClaimRefused``. Script it to drive a rendering
             surface over each of the seven ``DriveWithheld`` members a fixed statement
             is owed for.
-        answered: What :meth:`answer` returns, or ``None`` to synthesise one from
-            the question's own state.
     """
 
     def __init__(  # noqa: PLR0915 — one assignment per table this fake keeps, and each is a distinct population a `resume` presenting a handle is decided from; ADR-0244 §5 adds a fourth
         self,
         *,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
-        max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
         chat_reader: bool = True,
     ) -> None:
         """Create an engine holding nothing.
@@ -400,36 +360,21 @@ class FakeAssistantEngine:
                 Guarded exactly as the concrete engine guards it, for the reason
                 below: a limit that cannot bind fails *open* across every argument
                 check and every result check this double performs (#1686).
-            max_outstanding_confirmations: The concrete engine's confirmation
-                ceiling. It bound the settled records a ``resume`` restated (ADR-0198
-                §4), which left with ``resume`` (ADR-0309 §5:1), so nothing here reads
-                it now. Guarded exactly as the concrete
-                engine guards it, **classification included**: ADR-0084 §4's
-                substitutability runs in both directions, so a fake that admitted a
-                deployment no engine admits would let a consumer's tests pass over a
-                configuration production cannot be built into — and a fake that
-                refused the same value with a different class would make the two
-                disagree about what kind of failure it is. Unrefused, the value
-                surfaces later and as something else: ``1.5`` would bound the
-                retention at two, and ``0`` would discard from an empty table on the
-                first settlement.
             chat_reader: Whether a message written into a conversation is answered
                 (ADR-0293 §6, §10), as the engine's ``chat_reader`` says the same; the
                 initial value of :attr:`chat_reader`.
 
         Raises:
-            TypeError: If ``max_outstanding_confirmations`` or ``max_payload_bytes``
-                is not an **exact** ``int``. A
+            TypeError: If ``max_payload_bytes`` is not an **exact** ``int``. A
                 ``bool`` is the named case — it is an ``int`` subclass, and a flag is
                 not a count — and a ``float`` like ``1.5`` is refused rather than
                 compared, which is the guard the concrete engine states in these
                 words (:func:`_check_positive_int`).
-            ValueError: If either is not positive.
+            ValueError: If it is not positive.
         """
-        _check_positive_int(max_outstanding_confirmations, name="max_outstanding_confirmations")
-        # ADR-0085 §8c's limit, guarded on the same terms — the widest of the two,
-        # since every argument check and every result check this double performs
-        # measures against this one number (#1686).
+        # ADR-0085 §8c's limit, guarded on the concrete engine's terms, since every
+        # argument check and every result check this double performs measures against
+        # this one number (#1686).
         _check_positive_int(max_payload_bytes, name="max_payload_bytes")
         self._max_payload_bytes = max_payload_bytes
         #: The notification surface's whole state, public so a consumer can
@@ -465,12 +410,6 @@ class FakeAssistantEngine:
         #: can have one.
         placement_ticks = count(1)
         self.placement_clock: Callable[[], datetime] = lambda: _AT + _TICK * next(placement_ticks)
-        self.questions_open: dict[str, Question] = {}
-        self.questions_interrupted: dict[str, Question] = {}
-        #: Questions in a terminal state — declined, applied, stale, re-deferred.
-        #: Neither enumeration shows one and :meth:`answer` refuses it, because
-        #: "that question is not open" is what the surface has to say about it.
-        self.questions_settled: dict[str, Question] = {}
         self.conversations_held: dict[str, ConversationDigest] = {}
         self._used_conversation_ids: set[str] = set()
         #: The chat space (ADR-0293): transcripts, devices, the change stream — the
@@ -513,38 +452,6 @@ class FakeAssistantEngine:
             UUID(int=next(activation_ids), version=4)
         )
         self._ticks = count(1)
-        #: Where :meth:`answer` draws the id of the belief an accepted answer writes.
-        #: A **counter rather than the store's size**, because the store shrinks: a
-        #: ``forget``, or an answer that retires what it names, frees a number the size
-        #: would then hand to the next write, and the write would land on top of an
-        #: unrelated survivor. Adversarial review found it on this lane's round 2, on
-        #: the retirement path — which is the one that made a shrink routine.
-        self._written = count(1)
-        #: Every id this engine has held, written, or seen a question name as something
-        #: an answer would retire. :meth:`answer` mints past it, which is the "globally
-        #: non-reusing id source" ADR-0045 §4 asks a supersession's id to come from.
-        #:
-        #: **A set rather than an absence check, because absence is a fact about *now*
-        #: and reuse is a fact about *ever*.** Three rounds of this lane's review each
-        #: found a different way for a freed number to come back: sizing the store after
-        #: shrinking it, minting the id an answer had just retired, and — the one only a
-        #: record of the past can catch — minting an id that another *open* question has
-        #: already told the user is "no longer held, so accepting would not touch it",
-        #: whose later answer then retires the belief that took it. Each repair to the
-        #: present state left the next case open, so what is kept is the history.
-        self._spent: set[str] = set()
-        #: The **read** parks this engine holds, by handle (ADR-0244 §5), populated by
-        #: :meth:`park_read`. What ``resume``, ``pending_confirmations`` and
-        #: ``cancel_read`` did with one left with them (ADR-0309 §5:1); what is left is
-        #: :meth:`hold_confirmation_decision`'s binding, which ``grantable_decisions``
-        #: reads.
-        self.read_parked: dict[str, Confirmation] = {}
-        #: The decision each **live** read park names, by handle (ADR-0244 §5). What
-        #: §5's eighth ``grantable_decisions`` condition is decided from: a decision a
-        #: park holds ``OPEN``, ``APPROVED`` or ``DENIED`` is not one the establishing
-        #: act may ride. A cancellation removes the entry, because a cancelled park's
-        #: decision is the one that returns to the listing.
-        self._read_decisions: dict[str, str] = {}
         self.turn_outcome: TurnOutcome | None = None
         #: ADR-0264 §7's statement, for every outcome this engine composes itself, or
         #: ``None`` — the default — for :meth:`_outbound`'s fresh ``NOT_REACHED``.
@@ -604,25 +511,6 @@ class FakeAssistantEngine:
         #: **A scripted outcome that already carries the member keeps what it carries**,
         #: which is :attr:`forecast_not_read`'s own arrangement.
         self.drive_withheld: DriveWithheld | None = None
-        self.answered: AnswerOutcome | None = None
-        # ADR-0250 §§12, 15's three operations, each defaulting to what the concrete
-        # engine answers in that decision's M1: an empty listing, and the non-acting
-        # member of each closed vocabulary.
-        self.goal_summaries: list[GoalSummary] = []
-        self.withdrawal: ClarificationWithdrawal = ClarificationWithdrawal.NOTHING_TO_WITHDRAW
-        self.abandonment: GoalAbandonment = GoalAbandonment.NO_SUCH_GOAL
-        #: ADR-0254 §11's two operations, answered from a real canonical store rather
-        #: than from a scripted list — so a client's own paths are exercised against the
-        #: store's real vocabulary: a revocation of a ``PROPOSED`` row answers
-        #: ``NOT_AT_SOURCE`` here exactly as it does one store over, and a revoked row
-        #: is absent from the next listing because ``standing`` no longer returns it.
-        #: Seed it with :meth:`hold_authorization`.
-        self.goal_authorizations = FakeGoalAuthorizationStore()
-        #: The goal statement each listed authority is rendered by (ADR-0254 §11 — "the
-        #: goal's **statement** (never its id)"), keyed by goal id. A goal absent here
-        #: is the concrete engine's ``PlanStore.get_goal`` answering ``None``, which §11
-        #: makes an **empty answer** rather than a raise, so this fake answers empty too.
-        self.goal_statements: dict[str, str] = {}
         #: What :attr:`~ai_assistant.core.types.TurnOutcome.authorizations` carries on
         #: the next turn — ADR-0254 §11's announcement for the rows an act opened
         #: without a question. **Empty by default**, because a fake opens no row: §11
@@ -652,12 +540,6 @@ class FakeAssistantEngine:
         #: report keeps what it carries, exactly as a scripted
         #: :attr:`authorizations` does.
         self.attempt_report: AttemptReport | None = None
-        #: What decides whether a listed row reads **live** or **lapsed** (ADR-0254 §16,
-        #: ADR-0193 §9: one reading for a whole listing), and what stamps a withdrawal's
-        #: ``settled_at``. Its own lever rather than :attr:`recipient_grant_clock`, and
-        #: defaulted to the instant the shipped row builders are arranged around.
-        self.authorization_clock: Callable[[], datetime] = lambda: AUTHORIZATION_NOW
-        self._pending_authorizations: list[Authorization] = []
         #: The grantable sources this engine holds, by declared identity, each
         #: mapped to its configured location or to ``None`` where it has none
         #: (ADR-0102 §6). Scriptable with :meth:`hold_source`, so a client's own
@@ -763,8 +645,7 @@ class FakeAssistantEngine:
         #: fake offering the policy's narrow face would let a consumer's test
         #: authorise a send through an adapter.
         self.recipient_grants = FakeRecipientGrantStore()
-        #: What stamps ``decided_at`` on an answer this engine records for an
-        #: establishing act, and what ADR-0235 §1's expiry is compared against.
+        #: What stamps ``decided_at`` on a revoking record this engine appends.
         #: Scriptable on :attr:`grant_clock`'s reason and **separate from it**,
         #: because recipient grants and source grants are two vocabularies and never
         #: one (ADR-0235 §7) — one clock over two stores is the shape that invites a
@@ -793,14 +674,6 @@ class FakeAssistantEngine:
         #: **base** class where §2 fixes the subclass for a live duplicate, making the
         #: *already chosen* rendering unreachable in a consumer's test.
         self._trust_ids = count(1)
-        #: The recorded ``CONFIRM`` each park stands for, by handle, where a test
-        #: has bound one with :meth:`hold_confirmation_decision`. ``Confirmation``
-        #: carries the **reduced** ``ConfirmationEgress`` and not the binding
-        #: (ADR-0178 §5), and the establishing act transcribes its account and
-        #: destination set from the binding — so the decision is *bound* rather than
-        #: reconstructed here, since a fake assembling a call-level fact would be
-        #: rendering the unobtainable bound ADR-0098 §6 forbids.
-        self._parked_decisions: dict[str, PermissionDecision] = {}
         #: Every call, in order, as ``(method, arguments)`` — so a test can assert
         #: what reached the engine without reaching into its state.
         #:
@@ -1268,46 +1141,6 @@ class FakeAssistantEngine:
         ):
             self.deliveries[episode] = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
 
-    def hold_confirmation_decision(self, handle: str, decision: PermissionDecision) -> None:
-        """Bind a recorded ``CONFIRM`` to a park, so an establishing act can ride it.
-
-        **A lever, because no sequence of surface calls reaches the state**, which is
-        :meth:`park_read`'s own reason one record over. ADR-0235 §2 has the act ride *the
-        answer to a recorded ``CONFIRM``*, and
-        :meth:`~ai_assistant.core.types.RecipientGrant.established_from` transcribes
-        the grant's ``tool``, ``account`` and destination set **from that decision**
-        — while a :class:`~ai_assistant.core.types.Confirmation` carries the reduced
-        ``ConfirmationEgress`` and no binding at all (ADR-0178 §5). So a test that
-        means to drive the act hands over the decision it recorded, rather than
-        having this fake assemble a call-level fact it was never given (ADR-0098 §6).
-
-        The decision is **not** appended to :attr:`trail` here: a park that wrote a
-        row would change what ``recent_decisions`` says for every consumer that never
-        asked about recipient grants. A test that wants it in the trail — which the
-        establishing path needs, because the answer ``resolves`` it — records it
-        there itself, exactly as it seeds every other row.
-
-        **It binds a read park exactly as it binds a step's** (ADR-0244 §5). The act
-        rides a read park's answer "exactly as ADR-0235 §2 rules it, unchanged", and a
-        read park this fake holds no decision for meets §2's binding refusal on its
-        first shape — there is no ``EgressBinding`` to transcribe from — so a consumer
-        driving the act's *successful* path over a parked read hands the decision over
-        here, as it does for a step.
-
-        Args:
-            handle: The continuation handle the park is answered by.
-            decision: The recorded ``CONFIRM``, as the trail holds it.
-        """
-        self._parked_decisions[handle] = decision
-        if handle in self.read_parked:
-            # **ADR-0244 §5's eighth condition becomes reachable the moment a read park
-            # names a decision.** A fake that bound one and went on offering it to
-            # ``grantable_decisions`` would certify a consumer against an engine that
-            # refuses — and against the very failure §5 exists to prevent, a user
-            # performing the act that changes nothing about this lookup while the
-            # lookup's own question stands unanswered beside it.
-            self._read_decisions[handle] = decision.id
-
     def _recipient_now(self) -> datetime:
         """The guarded reading of :attr:`recipient_grant_clock` (ADR-0026 §2, §4).
 
@@ -1360,62 +1193,6 @@ class FakeAssistantEngine:
             ActivationStop.NO_SUCH_ACTIVATION if episode is None else ActivationStop.ALREADY_ENDED,
             "stop_activation",
         )
-
-    async def goals(
-        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
-    ) -> tuple[GoalSummary, ...]:
-        """Return the scripted goal listing (ADR-0250 §15).
-
-        Empty by default, which is what the concrete engine answers in ADR-0250
-        §19's M1 — that lane changes no behaviour, and ``PlanStore`` carries no goal
-        listing for the operation to read.
-
-        Args:
-            limit: How many summaries to return.
-            offset: How many to skip.
-
-        Returns:
-            The scripted page, sliced by the paging arguments.
-        """
-        self._check_page("goals", limit=limit, offset=offset)
-        return self._checked(tuple(self.goal_summaries[offset : offset + limit]), "goals")
-
-    async def withdraw_clarification(self, question_id: Identifier, /) -> ClarificationWithdrawal:
-        """Return what became of a withdrawal (ADR-0250 §12).
-
-        ``NOTHING_TO_WITHDRAW`` unless a consumer scripts otherwise, which is both
-        the vocabulary's non-acting member and what an unknown id answers — "an
-        unknown id is ``NOTHING_TO_WITHDRAW`` and never a raise".
-
-        Args:
-            question_id: The clarification to withdraw.
-
-        Returns:
-            The scripted answer.
-        """
-        named = identifier(question_id, name="question_id")
-        check_arguments(
-            "withdraw_clarification", max_bytes=self._max_payload_bytes, question_id=named
-        )
-        self.calls.append(("withdraw_clarification", {"question_id": named}))
-        return self.withdrawal
-
-    async def abandon_goal(self, goal_id: Identifier, /) -> GoalAbandonment:
-        """Return what became of an abandonment (ADR-0250 §12).
-
-        ``NO_SUCH_GOAL`` unless a consumer scripts otherwise, which is the
-        vocabulary's non-acting member and what an unknown id answers.
-
-        Args:
-            goal_id: The goal to abandon.
-
-        Returns:
-            The scripted answer.
-        """
-        named = identifier(goal_id, name="goal_id")
-        check_arguments("abandon_goal", max_bytes=self._max_payload_bytes, goal_id=named)
-        self.calls.append(("abandon_goal", {"goal_id": named}))
-        return self.abandonment
 
     # --- the inspection surface -------------------------------------------
 
@@ -1821,124 +1598,6 @@ class FakeAssistantEngine:
         )
         self.placements[named] = acted
         return self._checked(acted, method)
-
-    # --- the deferred-question surface ------------------------------------
-
-    async def questions(
-        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
-    ) -> tuple[Question, ...]:
-        """List the questions waiting for an answer."""
-        self._check_page("questions", limit=limit, offset=offset)
-        held = tuple(self.questions_open.values())
-        return self._checked(held[offset : offset + limit], "questions")
-
-    async def interrupted_questions(
-        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
-    ) -> tuple[Question, ...]:
-        """List the questions whose answer was begun and never recorded."""
-        self._check_page("interrupted_questions", limit=limit, offset=offset)
-        held = tuple(self.questions_interrupted.values())
-        return self._checked(held[offset : offset + limit], "interrupted_questions")
-
-    async def answer(self, question_id: Identifier, *, accept: bool) -> AnswerOutcome:
-        """Answer one question, applying it or declining it.
-
-        **What an accepted answer writes carries the proposal's own origin, and what it
-        authorises is retired.** ADR-0189 §2 defines a ``Question``'s ``attestation`` and
-        ``rests_on_recorded_external_content`` as facts about *the record acceptance
-        would write*, so an answer that dropped them would leave this fake holding a
-        belief whose origin differs from the question it came from. And ADR-0078 §8
-        makes ``retires`` "the exact scope the answer authorises" rather than
-        decoration, so an answer that left a named conflict live would apply a
-        correction and keep the thing it corrected.
-
-        Neither could arise while :meth:`ask` fixed the band at ``ASSERTED`` and built
-        ``retires=()``: no question could carry an attestation and none could name a
-        retirement. Making both scriptable (#1523) is what puts an engine on the far
-        side of them, and this is the whole of what that costs — a working in-memory
-        engine is the point of this class, and an ``answer`` that wrote the wrong record
-        would let a conformance suite pass against behaviour no real engine has.
-
-        The externality answer is forwarded as the ``Provenance`` field it came from
-        rather than as the answer it produced, because :meth:`hold` derives the answer
-        through :func:`~ai_assistant.core.types.rests_on_recorded_external_content` and
-        the band guards it there: a stray ``True`` on a proposal whose band makes the
-        predicate ``False`` is discarded by the classifier, which is ADR-0072 §4 and
-        ADR-0106 §2 doing their job rather than this method second-guessing them.
-
-        **A retirement that no longer resolves retires nothing**, which is not a special
-        case but the same rule: the retirement names a ``record_id`` either way, and
-        where ``MemoryStore.get`` hid a closed window (ADR-0045 §6) the record is
-        already gone, so discarding by id is idempotent. The scope is what the answer
-        *names*, not what the projection managed to resolve.
-
-        **The written id comes from a counter and not from the store's size**, because
-        this method now shrinks the store. With ``rec-1`` and ``rec-2`` held, retiring
-        ``rec-1`` and sizing the next id would mint ``rec-2`` and write on top of the
-        unrelated survivor — an answer destroying a record outside the scope it
-        presented, which is the opposite of ADR-0078 §8's guarantee.
-
-        **And it mints past every id this engine has ever spent** — see
-        :attr:`_spent` — not merely past the ones live at this instant. That is
-        ADR-0045 §4's rule about a correction's id, read one implementation over: there
-        a superseded target is *retained* with a closed window ("``T`` stays on disk with
-        a closed window — retained, off the read path"), so §4's freshly-minted id must
-        be "absent from the store" with "the retained target ``T`` included", and the new
-        record "no longer borrows ``T``'s id". This engine has no windows, so retiring
-        removes the record outright and any check against the *present* store is
-        satisfied by a number that has just been freed.
-
-        Three review rounds each found a different way for that to bite, and the last is
-        why the reservation is a history rather than a wider snapshot: a question still
-        open may already have told the user that some id is "no longer held, so accepting
-        would not touch it", and if a later answer mints that id, answering the first
-        question then destroys the belief that took it. No fact about the store at mint
-        time can see that coming; a record of what has been named can.
-        """
-        named = identifier(question_id, name="question_id")
-        check_arguments(
-            "answer", max_bytes=self._max_payload_bytes, question_id=named, accept=accept
-        )
-        self.calls.append(("answer", {"question_id": named, "accept": accept}))
-        if self.answered is not None:
-            return self._checked(self.answered, "answer")
-        question = self.questions_open.pop(named, None)
-        if question is None:
-            return self._checked(
-                AnswerOutcome(kind=AnswerKind.NOT_OPEN, question_id=named), "answer"
-            )
-        if not accept:
-            return self._checked(
-                AnswerOutcome(kind=AnswerKind.REJECTED, question_id=named), "answer"
-            )
-        for retirement in question.retires:
-            self.beliefs_held.pop(retirement.record_id, None)
-        record_id = f"rec-{next(self._written)}"
-        while record_id in self._spent:
-            record_id = f"rec-{next(self._written)}"
-        self.hold(
-            record_id,
-            content=question.content,
-            kind=question.kind,
-            band=question.band,
-            attestation=question.attestation,
-            derived_from_external=question.rests_on_recorded_external_content,
-        )
-        return self._checked(
-            AnswerOutcome(kind=AnswerKind.APPLIED, question_id=named, record_id=record_id), "answer"
-        )
-
-    async def forget_question(self, question_id: Identifier) -> bool:
-        """Destroy one question, reporting whether there was one to destroy."""
-        named = identifier(question_id, name="question_id")
-        check_arguments("forget_question", max_bytes=self._max_payload_bytes, question_id=named)
-        self.calls.append(("forget_question", {"question_id": named}))
-        gone = (
-            self.questions_open.pop(named, None)
-            or self.questions_interrupted.pop(named, None)
-            or self.questions_settled.pop(named, None)
-        )
-        return self._checked(gone is not None, "forget_question")
 
     # --- the notification surface (ADR-0130 §7, §9) -----------------------
     # Backed by the canonical :class:`FakeNotificationStore` and
@@ -2792,84 +2451,6 @@ class FakeAssistantEngine:
 
     # --- the recipient-grant surface (ADR-0235 §3, §7) ---------------------
 
-    async def grantable_decisions(
-        self, *, limit: int = DEFAULT_PAGE_SIZE
-    ) -> tuple[PermissionDecision, ...]:
-        """List the recorded ``CONFIRM``s an establishing act may ride (ADR-0235 §3).
-
-        **The conditions and the window rule are implemented rather than assumed
-        away**, which is what a canonical fake owes: the shared suite holds this
-        class to the same clauses it holds every other implementation to, and a fake
-        that returned whatever a test had seeded would certify a consumer against a
-        hub answering a different question. In particular a decision sharing the
-        oldest returned row's ``decided_at`` is **not** offered on an incomplete
-        window, and a decision a park holds — one carrying a ``step_id`` or an
-        ``execution_id`` — is never offered at all.
-        """
-        positive_page_argument(limit, name="limit")
-        check_arguments("grantable_decisions", max_bytes=self._max_payload_bytes, limit=limit)
-        self.calls.append(("grantable_decisions", {"limit": limit}))
-        rows = await self.trail.recent(limit=limit)
-        now = self._recipient_now()
-        resolved = {row.resolves for row in rows if row.resolves is not None}
-        complete = len(rows) < limit
-        oldest = rows[-1].decided_at if rows else None
-        offerable = [
-            row
-            for row in rows
-            if rides_an_establishing_act(row, now=now)
-            and row.id not in resolved
-            and (complete or oldest is None or row.decided_at > oldest)
-            # ADR-0244 §5's **eighth** condition, evaluated after §3's seven and in that
-            # position — so a decision a read park holds is answered through ``resume``
-            # and is not offered beside an act that resumes nothing.
-            and not self._park_excludes(str(row.id))
-        ]
-        return self._checked(tuple(offerable), "grantable_decisions")
-
-    async def establish_recipient_grant(
-        self, decision_id: DurableIdentifier, *, expires_at: UtcInstant
-    ) -> RecipientGrant:
-        """Answer a recorded ``CONFIRM`` no park holds and record the grant.
-
-        The seven availability conditions in ADR-0235 §3's own order, so that where
-        more than one fails the first is the one named. This engine holds no
-        ``ActionPolicy``, so the ruling it records is the ``ALLOW`` an approving
-        answer produces — a client's ``PermissionDeniedError`` path is reached by
-        seeding a decision the policy would decline in a hub, and is not something
-        this double invents a lever for.
-        """
-        named = identifier(decision_id, name="decision_id")
-        until = utc_instant(expires_at, name="expires_at")
-        check_arguments(
-            "establish_recipient_grant",
-            max_bytes=self._max_payload_bytes,
-            decision_id=named,
-            expires_at=until,
-        )
-        self.calls.append(
-            ("establish_recipient_grant", {"decision_id": named, "expires_at": until})
-        )
-        confirmed = await self._offerable_decision(named)
-        decided_at = self._recipient_now()
-        if until <= decided_at:
-            msg = (
-                f"a standing recipient grant expires strictly after the answer that "
-                f"establishes it; {until.isoformat()} is at or before "
-                f"{decided_at.isoformat()}, the instant this answer would carry, so nothing "
-                f"was recorded (ADR-0235 §1)"
-            )
-            raise UngrantableActError(msg)
-        answer = PermissionDecision.from_confirmation(
-            confirmed, _approving(confirmed), id=f"decision-{named}-answer", decided_at=decided_at
-        )
-        await self.trail.record(answer)
-        grant = RecipientGrant.established_from(
-            confirmed, answer, id=f"recipient-grant-{named}", expires_at=until
-        )
-        await self.recipient_grants.record(grant)
-        return self._checked(grant, "establish_recipient_grant")
-
     async def standing_recipient_grants(self) -> tuple[RecipientGrant, ...]:
         """List every standing recipient grant that is live now (ADR-0235 §7).
 
@@ -2927,122 +2508,6 @@ class FakeAssistantEngine:
                 return None
             raise
         return self._checked(record, "revoke_recipient_grant")
-
-    # --- the goal-authorization surface (ADR-0254 §11) -----------------------
-
-    def hold_authorization(self, row: Authorization, *, goal_statement: str | None = None) -> None:
-        """Seed one record, and the statement its goal is rendered by.
-
-        **Written through the store's own ``record``**, so a row this fake will not
-        accept is one the real store would not accept either — the shapes ADR-0254 §1
-        forbids are refused here at seeding rather than discovered at the listing.
-
-        Args:
-            row: The record to hold.
-            goal_statement: What §11's listing renders the goal as. Defaults to a
-                statement derived from the goal's id; pass ``None`` explicitly and then
-                delete the key to exercise the goal the plan store does not hold, which
-                §11 makes an **empty answer**.
-        """
-        self.goal_statements[row.goal] = goal_statement or f"work on {row.goal}"
-        self._pending_authorizations.append(row)
-
-    async def standing_authorizations(self, goal_id: Identifier) -> tuple[AuthorizationView, ...]:
-        """What one goal's recorded acts still authorise (ADR-0254 §11).
-
-        The ``ESTABLISHED`` rows of that goal, **live and lapsed**, read from
-        ``standing`` and projected — never a ``PROPOSED``, ``DECLINED``, ``EXPIRED``,
-        ``REVOKED`` or ``SUPERSEDED`` one, because ``standing`` does not offer them.
-
-        **One clock reading for the whole listing** (§16), taken here because
-        ``standing`` evaluates no liveness and reports none — and taken **after** the
-        snapshot, which is where the concrete engine takes it and for its reason: a row
-        settled while ``standing`` is suspended comes back carrying a ``settled_at``
-        after a reading taken first, and §1's predicate would then report a live row as
-        lapsed. A fake that judged over a different boundary would let a consumer's test
-        pass here and fail against a hub, which is the looseness ADR-0026 §7 forbids.
-        Adversarial and architecture review, round 3.
-
-        **A goal this fake holds no statement for is an empty answer and not a raise**,
-        which is what the concrete engine does where ``PlanStore.get_goal`` answers
-        ``None`` — and, as there, it is answered **before** the clock is read, so the
-        clause holds on a deployment whose clock is non-conforming.
-        """
-        named = identifier(goal_id, name="goal_id")
-        check_arguments("standing_authorizations", max_bytes=self._max_payload_bytes, goal_id=named)
-        self.calls.append(("standing_authorizations", {"goal_id": named}))
-        await self._flush_authorizations()
-        statement = self.goal_statements.get(named)
-        if statement is None:
-            return self._checked((), "standing_authorizations")
-        rows = await self.goal_authorizations.standing(named)
-        reading = self._authorization_now()
-        return self._checked(
-            tuple(
-                view_of(row, goal_statement=statement, live=is_live(row, reading)) for row in rows
-            ),
-            "standing_authorizations",
-        )
-
-    async def revoke_authorization(
-        self, authorization_id: DurableIdentifier
-    ) -> AuthorizationSettlement:
-        """Withdraw one standing authorization (ADR-0254 §11).
-
-        ``settle`` to ``REVOKED`` on ADR-0254 §1's one edge out of ``ESTABLISHED``, its
-        answer returned **unmapped**. **No call raises**: an unknown id is
-        ``NO_SUCH_AUTHORIZATION`` and a row not at that edge's source is
-        ``NOT_AT_SOURCE``, which is
-        ``AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception``'s
-        rule. **``WOULD_DUPLICATE`` is unreachable here** — it is reachable only on a
-        settlement **to** ``ESTABLISHED`` — and this fake maps nothing, so a client
-        tested against it meets exactly the vocabulary the hub sends.
-        """
-        named = identifier(authorization_id, name="authorization_id")
-        check_arguments(
-            "revoke_authorization", max_bytes=self._max_payload_bytes, authorization_id=named
-        )
-        self.calls.append(("revoke_authorization", {"authorization_id": named}))
-        await self._flush_authorizations()
-        return await self.goal_authorizations.settle(
-            named,
-            to=AuthorizationDisposition.REVOKED,
-            settled_at=self._authorization_now(),
-        )
-
-    async def _flush_authorizations(self) -> None:
-        """Write the rows :meth:`hold_authorization` took, once.
-
-        Seeding is synchronous because a test's arrangement is, and ``record`` is
-        ``async`` because a store is — so the write is deferred to the first operation
-        that reads. It is **not** re-run per row on later calls: the queue is drained.
-        """
-        while self._pending_authorizations:
-            await self.goal_authorizations.record(self._pending_authorizations.pop(0))
-
-    def _authorization_now(self) -> datetime:
-        """This engine's one clock reading for an authorization operation.
-
-        **Its own lever and not :attr:`recipient_grant_clock`**, for that attribute's
-        own stated reason one store over: one clock over two vocabularies is the shape
-        that invites a test to reason about one and move the other. It defaults to
-        :data:`~ai_assistant.testing.AUTHORIZATION_NOW`, the instant the shipped row
-        builders are arranged around, so a row built with ``authorization(...)`` and a
-        listing taken from this engine sit on **one** timeline rather than two that
-        happen to agree.
-
-        Guarded at the read rather than at construction, exactly as
-        :meth:`_recipient_now` is and for its reason: the attribute is a public lever a
-        case replaces, so a wrapper installed in ``__init__`` would be thrown away by
-        the next assignment.
-
-        Raises:
-            PlanningError: If the clock's reading is not conforming.
-        """
-        try:
-            return checked_clock(self.authorization_clock, owner="FakeAssistantEngine")()
-        except ClockReadingError as exc:
-            raise PlanningError(str(exc)) from exc
 
     # --- the destination-trust surface (ADR-0242 §2, §4) --------------------
 
@@ -3141,83 +2606,6 @@ class FakeAssistantEngine:
                 f"reading: {exc}"
             )
             raise PlanningError(msg) from exc
-
-    async def _offerable_decision(self, decision_id: str) -> PermissionDecision:
-        """Read the named decision and refuse it unless all seven conditions hold.
-
-        In ADR-0235 §3's stated order, so the refusal is deterministic where more
-        than one fails.
-
-        Raises:
-            UngrantableActError: If any condition fails.
-        """
-        confirmed = await self.trail.get(decision_id)
-        if confirmed is None:
-            msg = (
-                f"the permission trail holds no decision {decision_id!r}, so there is no "
-                f"recorded confirmation for an establishing act to ride (ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg)
-        if confirmed.ruling.outcome is not PermissionOutcome.CONFIRM:
-            msg = (
-                f"decision {decision_id!r} ruled {confirmed.ruling.outcome} and was never shown "
-                f"as a question, so an answer to it establishes nothing (ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg)
-        if confirmed.step_id is not None or confirmed.execution_id is not None:
-            msg = (
-                f"decision {decision_id!r} belongs to a step of an execution, so a park holds "
-                f"it and its answer rides resume rather than this operation (ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg)
-        # **The whole trail and never a page** (ADR-0235 §3). This answer is what §3's
-        # fourth condition is decided from, and a bounded scan would report a
-        # confirmation whose answer has scrolled past the window as *offerable* — the
-        # one refusal that would then arrive as the trail's `InvalidResolutionError`
-        # instead of as this operation's own type. `grantable_decisions` above is a
-        # page and is bounded by its `limit` with §3's window-completeness rule; this
-        # is about one named decision and has no `limit` to widen.
-        rows = await self.trail.export()
-        resolution = next((row for row in rows if row.resolves == decision_id), None)
-        if resolution is not None:
-            msg = (
-                f"decision {decision_id!r} was already answered by decision {resolution.id!r}; a "
-                f"confirmation has one answer, so this one is spent (ADR-0044 §2b, ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg)
-        now = self._recipient_now()
-        if confirmed.expires_at is not None and confirmed.expires_at <= now:
-            msg = (
-                f"decision {decision_id!r} stopped being answerable at "
-                f"{confirmed.expires_at.isoformat()}, which is at or before {now.isoformat()} "
-                f"(ADR-0059 §1, ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg)
-        binding = confirmed.egress_binding
-        if not isinstance(binding, EgressBinding):
-            msg = (
-                f"decision {decision_id!r} records no egress call whose recipients could be "
-                f"made standing (ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg)
-        if binding.planned_with_external_content:
-            msg = (
-                f"decision {decision_id!r} records a call planned over external content; you "
-                f"may approve such a call, and may not in that act make its recipients "
-                f"standing (ADR-0193 §2, §4; ADR-0235 §3)"
-            )
-            raise UngrantableActError(msg)
-        if self._park_excludes(decision_id):
-            # ADR-0244 §5's **eighth** condition, named exactly as the seven are and
-            # evaluated after them, so where more than one fails the first is the one
-            # named and the refusal is deterministic across implementations.
-            msg = (
-                f"decision {decision_id!r} is the question a parked read holds, or has just "
-                f"taken the answer to, so it is answered through resume rather than through "
-                f"this operation (ADR-0244 §5)"
-            )
-            raise UngrantableActError(msg)
-        return confirmed
 
     # --- the connection surface (ADR-0151 §1) ------------------------------
 
@@ -3505,63 +2893,7 @@ class FakeAssistantEngine:
         self.placements.pop(record_id, None)
         if placement is not None:
             self.placements[record_id] = placement
-        self._spent.add(record_id)
         return held
-
-    @staticmethod
-    def retirement(
-        record_id: str,
-        *,
-        content: str | None = None,
-        band: BeliefBand = BeliefBand.ASSERTED,
-        attestation: Attestation | None = None,
-        derived_from_external: bool = False,
-    ) -> Retirement:
-        """Build one record a question's answer would retire (ADR-0189 §2).
-
-        **The producer obligation is structural here rather than remembered.**
-        ADR-0189 §2 rules that a producer sets ``warrant`` "**exactly when** it sets
-        ``content``: both are resolved from one ``MemoryStore.get``, and ``None`` on
-        both is the case ADR-0045 §6 produces" — and it deliberately puts *no*
-        cross-field validator on :class:`~ai_assistant.core.types.Retirement`, for the
-        ordering reason §2 gives. So nothing in ``core`` refuses the half-state, and
-        this builder refuses it by construction instead: a ``content`` yields a whole
-        warrant, no ``content`` yields none, and the two arms a surface must tell
-        apart are the only two that can be scripted through it.
-
-        A test that deliberately wants the half-state builds
-        :class:`~ai_assistant.core.types.Retirement` directly — which is the honest
-        division, since that state is off-contract rather than unrepresentable.
-
-        The warrant's three facts come from one provenance for :meth:`hold`'s reason,
-        and :class:`~ai_assistant.core.types.Warrant`'s own band-keyed validator then
-        refuses every combination the band forecloses (ADR-0189 §3).
-
-        Args:
-            record_id: The retired record's id.
-            content: What it says, or ``None`` where it no longer resolves.
-            band: The standing it was held with.
-            attestation: What reported it and when that source said so.
-            derived_from_external: Whether a ``DERIVED`` record's warrant traces to
-                recorded external content.
-
-        Returns:
-            The retirement, resolved with its whole warrant or tombstoned with none.
-        """
-        if content is None:
-            return Retirement(record_id=record_id, content=None, warrant=None)
-        provenance = _provenance_for(
-            band, attestation=attestation, derived_from_external=derived_from_external
-        )
-        return Retirement(
-            record_id=record_id,
-            content=encodable_text(content),
-            warrant=Warrant(
-                band=band,
-                rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
-                attestation=provenance.attestation,
-            ),
-        )
 
     def _tick(self) -> datetime:
         """The next instant on this engine's logical clock.
@@ -3571,77 +2903,6 @@ class FakeAssistantEngine:
         started after it and leave the ordering to the tie-break.
         """
         return _AT + _TICK * next(self._ticks)
-
-    def ask(  # noqa: PLR0913 — a content, a state, a band, ADR-0189 §2's two origin facts and what accepting would retire; each is one thing a caller decides on its own
-        self,
-        question_id: str,
-        *,
-        content: str,
-        state: QuestionState,
-        band: BeliefBand = BeliefBand.ASSERTED,
-        attestation: Attestation | None = None,
-        derived_from_external: bool = False,
-        retires: Sequence[Retirement] = (),
-    ) -> Question:
-        """Put one deferred question in the queue, and return it.
-
-        ``state`` decides which enumeration it lands in, and **only ``OPEN`` is
-        answerable**. An ``INTERRUPTED`` question is a *second*, separate list all
-        the way to the surface, because offering it beside the answerable ones would
-        present a claim that cannot be taken (ADR-0078 §8); every terminal state —
-        declined, applied, stale, re-deferred — appears in neither list and answers
-        ``NOT_OPEN``, because those are questions the user has no move left on.
-
-        **``band`` was fixed at ``ASSERTED`` and is now scriptable, because the band
-        is what a surface renders the origin off** (#1523). ``attestation`` and
-        ``derived_from_external`` describe the **proposal** — the record that would be
-        written if the question were accepted — on the same reading ``band`` already
-        has here, and describe no entry in ``retires`` (ADR-0189 §2). Each retirement
-        answers for itself through its own :attr:`Retirement.warrant`, which is why
-        they are built by :meth:`retirement` and passed in whole rather than derived
-        from the question's own arguments: a question proposing the user's own
-        assertion routinely retires an attested record, and a fake that borrowed one
-        answer for the other would make that case unscriptable.
-
-        Args:
-            question_id: The question's id.
-            content: What accepting would have the assistant believe.
-            state: Where the question stands.
-            band: The band the proposal **would** enter if accepted.
-            attestation: What reported the proposal and when that source said so.
-            derived_from_external: Whether a ``DERIVED`` proposal's warrant traces to
-                recorded external content.
-            retires: What accepting would retire, built by :meth:`retirement`.
-
-        Returns:
-            The question now queued.
-        """
-        provenance = _provenance_for(
-            band, attestation=attestation, derived_from_external=derived_from_external
-        )
-        question = Question(
-            id=question_id,
-            state=state,
-            content=content,
-            kind=MemoryKind.SEMANTIC,
-            band=band,
-            rationale="the fake engine was told to ask",
-            reason="the policy wants a human answer",
-            retires=tuple(retires),
-            asked_at=_AT,
-            expires_at=None,
-            attestation=provenance.attestation,
-            rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
-        )
-        self._spent.update(retirement.record_id for retirement in question.retires)
-        match state:
-            case QuestionState.OPEN:
-                self.questions_open[question_id] = question
-            case QuestionState.INTERRUPTED:
-                self.questions_interrupted[question_id] = question
-            case _:
-                self.questions_settled[question_id] = question
-        return question
 
     def hold_conversation(self, conversation_id: str) -> str:
         """Record one conversation, and return its id.
@@ -3747,91 +3008,6 @@ class FakeAssistantEngine:
         self.grants_recorded.append(record)
         return record
 
-    def park_read(
-        self,
-        handle: str,
-        *,
-        query: str,
-        origin: str = "search.example",
-        egress: EgressBinding | None = None,
-        authorization: AuthorizationProjection | None = None,
-    ) -> Confirmation:
-        """Park one **read** this engine will answer, and return its question (§4, §5).
-
-        A lever, because a park is reached inside a turn, so an implementation has to
-        be handed to a suite that drives one — and a surface lane needs a question to
-        render without a search account, a policy and a trail behind it.
-
-        **``parameters`` carry the exact query**, because ADR-0244 §13 makes that what a
-        surface renders and forbids a summary, an abbreviation, a truncation, a re-cased
-        form or a paraphrase of it. A fake whose question carried a placeholder would
-        certify a surface that renders one.
-
-        **``read`` is** :attr:`~ai_assistant.core.types.ReadKind.WEB_SEARCH`, which is
-        the one kind ADR-0244 parks; §20 defers the rest by name.
-
-        Args:
-            handle: The continuation handle this park is answered by.
-            query: The composed query, byte for byte as a ruling was taken over it.
-            origin: The origin the request names.
-            egress: The binding the ruling was taken over, reduced here by the rule
-                the real engine uses (ADR-0178 §5). ``None`` builds a question with no egress
-                member, which ADR-0244 §4 says a real ``WEB_SEARCH`` park never has —
-                and which a surface must still not crash on.
-            authorization: What answering would establish (ADR-0254 §11), or
-                ``None`` where answering proposes no row.
-
-        Returns:
-            The parked read's confirmation.
-        """
-        confirmation = Confirmation(
-            tool_id="web_search",
-            tool_description="asks one connected search account a question",
-            parameters={"origin": origin, "query": query},
-            reason="this lookup would leave the device, so it is put to you as a question",
-            token=ContinuationToken(handle=handle),
-            egress=(
-                None
-                if egress is None
-                else ConfirmationEgress(
-                    account_identity=egress.account.identity,
-                    spans=egress.spans,
-                    planned_with_external_content=egress.planned_with_external_content,
-                    coverage=egress.coverage,
-                )
-            ),
-            read=ReadKind.WEB_SEARCH,
-            # ADR-0254 §11, absent unless the caller states one.
-            authorization=authorization,
-        )
-        self.read_parked[handle] = confirmation
-        return confirmation
-
-    def _park_excludes(self, decision_id: str) -> bool:
-        """Whether ADR-0244 §5's eighth condition excludes ``decision_id``.
-
-        **Stated over three dispositions and not over an open park**, which is §5's own
-        clause and the property it exists to have: a park that settles ``APPROVED`` or
-        ``DENIED`` holds a resolution the answering call has not yet recorded, so a
-        decision that left the listing at the settlement would be one the establishing
-        act could resolve **first** — recording an ``ALLOW`` the user never gave that
-        answer for.
-
-        A ``CANCELLED`` park's decision returns to the listing, because a cancellation
-        writes no resolution and never will; an ``EXPIRED`` one's stays out, refused by
-        ADR-0235 §3's **fifth** condition on the shared deadline rather than by this one.
-        This fake models the first two members it can reach — a question still open, and
-        one an answer took — and a cancellation removes the exclusion by removing the
-        decision from :attr:`_read_decisions`.
-
-        Args:
-            decision_id: The recorded ``CONFIRM`` under test.
-
-        Returns:
-            Whether a read park this engine holds excludes it.
-        """
-        return decision_id in self._read_decisions.values()
-
     def _checked[T](self, result: T, method: str) -> T:
         """Refuse a result the contract does not admit, before returning it (§8c)."""
         check_payload(
@@ -3867,30 +3043,6 @@ def _stopped_failure(
     stopped = ActivationStoppedError("the activation was stopped before it finished (ADR-0297 §4)")
     stopped.__cause__ = failure
     return stopped
-
-
-def _approving(confirmed: PermissionDecision) -> PermissionRuling:
-    """The resolving ``ALLOW`` an approving answer to ``confirmed`` produces.
-
-    **``authorised_by`` names the confirmation and is not optional here**:
-    ``AuditTrail.record`` refuses a resolving ``ALLOW`` that does not rest on the
-    question it answers, so a ruling without it is one no conforming trail accepts
-    (ADR-0193 §6's route-(a) discriminator). Shipping policies author it —
-    ``ActionPolicy.resolve``'s own obligation — and this fake authors no ruling
-    anywhere else, so the one place it stands in for a policy is stated once rather
-    than twice.
-
-    Args:
-        confirmed: The recorded ``CONFIRM`` being answered.
-
-    Returns:
-        The ruling, resting on that confirmation.
-    """
-    return PermissionRuling(
-        outcome=PermissionOutcome.ALLOW,
-        reason="the fake engine records the answer the user gave",
-        authorised_by=confirmed.id,
-    )
 
 
 def _is_grantable(identity: str, location: str | None) -> bool:

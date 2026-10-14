@@ -28,7 +28,9 @@ from ai_assistant.core.types import (
     RequestingDevice,
     TextChannelPayload,
 )
-from ai_assistant.wire.routes import ROWS, TARGETED, Route, check_request, route_of
+from ai_assistant.wire.errors import UndecodableFrameError
+from ai_assistant.wire.routes import ROWS, Route, check_request, route_of
+from ai_assistant.wire.server import _decode_arguments
 from ai_assistant.wire.surface import METHODS
 
 _NOBODY: Final = RequestingDevice(device_id="new-phone")
@@ -59,19 +61,16 @@ _EVENT_INPUT: Final = _input(ChannelIdentity(channel_type="informational_event",
 def test_every_method_on_the_surface_is_in_exactly_the_rows_the_table_allows() -> None:
     """§5:4: a test fails while any member of ``METHODS`` is in no row, or in more.
 
-    One method is the table's own exception (§5:1): ``receive`` sits in exactly two
-    rows, the legacy turn and spoke traffic, and the input's target decides which.
-    ``receive_streaming`` was the other until ADR-0293 §11 retired it.
+    ``receive`` was the table's own exception (§5:1), in the legacy-turn row and the
+    spoke-traffic row by its input's target; the legacy-turn row left with its last
+    member (ADR-0309 §5:1), so every method now sits in exactly one row.
     """
     held = Counter(name for methods in ROWS.values() for name in methods)
     unplaced = sorted(METHODS - set(held))
     assert not unplaced, f"methods in no row of ADR-0298 §5's table: {unplaced}"
     for name in METHODS:
         rows = {route for route, methods in ROWS.items() if name in methods}
-        if name in TARGETED:
-            assert rows == {Route.LEGACY_TURN, Route.SPOKE_TRAFFIC}, name
-        else:
-            assert len(rows) == 1, f"{name} is in {sorted(rows)}"
+        assert len(rows) == 1, f"{name} is in {sorted(rows)}"
 
 
 def test_no_row_names_a_method_the_surface_does_not_have() -> None:
@@ -82,38 +81,48 @@ def test_no_row_names_a_method_the_surface_does_not_have() -> None:
 
 def test_stop_activation_is_a_command() -> None:
     """§5's commentary: ADR-0295 §1:4 accepts a stop only from a device that commands."""
-    assert route_of("stop_activation", {}) is Route.COMMAND
+    assert route_of("stop_activation") is Route.COMMAND
 
 
 @pytest.mark.parametrize(
-    ("arguments", "route"),
-    [
-        (_CONVERSATION_INPUT, Route.LEGACY_TURN),
-        (_NEW_CONVERSATION_INPUT, Route.LEGACY_TURN),
-        (_EVENT_INPUT, Route.SPOKE_TRAFFIC),
-    ],
+    "arguments", [_CONVERSATION_INPUT, _NEW_CONVERSATION_INPUT], ids=["channel", "new"]
 )
-@pytest.mark.parametrize("method", sorted(TARGETED))
-def test_a_targeted_methods_row_is_its_inputs_target(
-    method: str, arguments: dict[str, Any], route: Route
+def test_a_conversational_receive_routes_as_any_receive_and_is_refused_first(
+    arguments: dict[str, Any],
 ) -> None:
-    """§5:2: for ``receive`` the kind is the target's ``kind`` and ``channel_type``.
+    """The legacy-turn row is gone, so every ``receive`` is spoke traffic (ADR-0309 §5:1).
 
-    An informational event carries the same text payload a conversation does
-    (ADR-0274), so only the target can tell them apart, and it does.
+    That a conversational one now routes there too is moot, and this pins why: the
+    hub refuses the conversational combination at decode (ADR-0313 §4:1), before
+    :func:`~ai_assistant.wire.routes.check_request` reads any row, so no such request
+    ever reaches the table. Were it to, it would meet the spoke-traffic row's role
+    check like an event, not pass as a conversation's turn.
     """
-    assert route_of(method, arguments) is route
+    assert route_of("receive") is Route.SPOKE_TRAFFIC
+    held = arguments["input"]
+    payload = {
+        "input": held.model_dump(mode="json"),
+        "reply": None,
+        "timeout": "PT10S",
+    }
+    with pytest.raises(UndecodableFrameError):
+        _decode_arguments("receive", payload)
+    with pytest.raises(DeviceRefusedError) as refused:
+        check_request(
+            "receive", arguments, device=_NOBODY, acting_for=None, knows=_everything_known
+        )
+    assert refused.value.reason is DeviceRefusal.NOT_ALLOWED
 
 
 def test_a_method_in_no_row_has_no_route() -> None:
     """§5:3's subject, which the closure test keeps hypothetical on this surface."""
-    assert route_of("not_a_method", {}) is None
+    assert route_of("not_a_method") is None
 
 
 # --- the wire server's checks (§5:6) ------------------------------------------
 
 
-@pytest.mark.parametrize("method", sorted(METHODS - TARGETED))
+@pytest.mark.parametrize("method", sorted(METHODS))
 def test_the_hubs_own_machine_passes_every_check(method: str) -> None:
     """§3:2: on its own socket, or before the cutover (§9:2), nothing is refused."""
     check_request(
@@ -150,7 +159,6 @@ def test_a_command_row_needs_the_command_role(method: str) -> None:
         | ROWS[Route.WRITING]
         | ROWS[Route.READING_ONE]
         | ROWS[Route.READING_MANY]
-        | (ROWS[Route.LEGACY_TURN] - TARGETED)
     ),
 )
 def test_a_membership_row_is_left_to_the_engine(method: str) -> None:
@@ -158,19 +166,15 @@ def test_a_membership_row_is_left_to_the_engine(method: str) -> None:
     check_request(method, {}, device=_NOBODY, acting_for="new-phone", knows=_nothing_known)
 
 
-@pytest.mark.parametrize("method", sorted(TARGETED))
-def test_spoke_traffic_needs_the_spoke_role_and_a_conversation_does_not(method: str) -> None:
+def test_spoke_traffic_needs_the_spoke_role() -> None:
     """§5's spoke-traffic row, which the command role does not satisfy."""
     with pytest.raises(DeviceRefusedError) as refused:
         check_request(
-            method, _EVENT_INPUT, device=_COMMANDER, acting_for=None, knows=_everything_known
+            "receive", _EVENT_INPUT, device=_COMMANDER, acting_for=None, knows=_everything_known
         )
     assert refused.value.reason is DeviceRefusal.NOT_ALLOWED
     check_request(
-        method, _EVENT_INPUT, device=_SPOKE_HOST, acting_for=None, knows=_everything_known
-    )
-    check_request(
-        method, _CONVERSATION_INPUT, device=_NOBODY, acting_for=None, knows=_everything_known
+        "receive", _EVENT_INPUT, device=_SPOKE_HOST, acting_for=None, knows=_everything_known
     )
 
 
