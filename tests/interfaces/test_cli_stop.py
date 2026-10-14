@@ -109,7 +109,8 @@ def test_a_stop_promises_no_halt_mid_step_and_no_recall(
 
     A stage already running finishes under its own deadlines (ADR-0297 §4) and an effect
     already sent is not cut off (ADR-0295 §2:3), so the sentence says both rather than
-    promising that everything halted.
+    promising that everything halted. It says nothing of a goal: ADR-0319 retired
+    ADR-0295 §4:1, the goal a stopped activation was working on, with the goals.
     """
     _wire(monkeypatch, _Answering(ActivationStop.STOPPED))
 
@@ -118,7 +119,7 @@ def test_a_stop_promises_no_halt_mid_step_and_no_recall(
     said = _flat(output.getvalue())
     assert "What it was in the middle of finishes first" in said
     assert "not called back" in said
-    assert "No goal is given up" in said
+    assert "goal" not in said.lower()
 
 
 def test_an_id_nothing_says_ran_is_the_fakes_own_answer(

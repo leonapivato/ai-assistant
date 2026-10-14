@@ -1654,7 +1654,7 @@ _STOP_PHRASES: Final = {
         "[bold]Stopped.[/] Nothing new starts in that work from now on, and it writes "
         "nothing more into its conversation. What it was in the middle of finishes "
         "first, and anything it had already sent is not called back; how that turned "
-        "out is recorded. No goal is given up by stopping."
+        "out is recorded."
     ),
     ActivationStop.ALREADY_ENDED: (
         "[yellow]That had already ended,[/] so this stopped nothing and recorded nothing."
