@@ -1,18 +1,16 @@
-"""ADR-0254's ten `core` types, and every refusal true of a persisted row.
+"""What of ADR-0254's `core` vocabulary outlives the goal authorizations.
 
-The **model validators** ADR-0254 §1's division of refusals assigns to the type —
-rules true of *every state a row is ever persisted in*. The two other kinds are
-elsewhere by that same division and are named here so their absence does not read
-as a gap:
+ADR-0309 §5 deletes the old path, and with it the goal-authorization Protocols, their
+contract suites and their canonical fakes. The row family those Protocols stored —
+``Authorization``, ``CoverageMember``, ``AuthorizationBasis``, ``ValueResolution`` and
+their vocabularies — has no consumer left, so its tests left with the Protocols and the
+types follow in their own lane.
 
-* a rule about the state a row may be **first written in**, and every rule
-  comparing **two rows**, is the store's, at ``record`` and ``settle``
-  (``tests/permissions/goal_authorization_contract.py``);
-* a rule comparing a basis against a **recorded turn** — §8's *"``span`` is a span
-  of that turn's own ``TurnResult.utterance``"* and §9 clause (i)'s *"``act`` names
-  a recorded turn"* — is ``orchestration``'s, which is ADR-0254 §20's **Lane 2**
-  and not this one. §1 puts it there in terms: *"No `core` type reads a store, a
-  trail or a turn"*, which is golden rule 2.
+What stays is pinned here, each value built locally rather than from a fake that no
+longer exists: the bound a user can state (``BoundKind``, ``ValueBound``), the tool
+declaration's own refusals (``system_supplied``, ``bounded_arguments``), the fields
+``ActionRequest`` and ``PermissionRuling`` still carry, the one canonical encoding, and
+``Settings``' absence of any authorization field.
 """
 
 from __future__ import annotations
@@ -27,278 +25,90 @@ from pydantic import ValidationError
 from ai_assistant.core.config import Settings
 from ai_assistant.core.types import (
     ActionRequest,
-    Authorization,
-    AuthorizationBasis,
-    AuthorizationDisposition,
-    AuthorizationOrigin,
-    AuthorizationSettlement,
     BoundedArgument,
     BoundKind,
-    CoverageMember,
+    CapabilityEffect,
+    CapabilityResult,
+    CostBasis,
+    DataTier,
+    Idempotency,
     PermissionOutcome,
     PermissionRuling,
-    ResolutionRule,
+    Reversibility,
+    RiskLevel,
+    ToolCost,
     ToolDefinition,
     ValueBound,
-    ValueResolution,
     canonical_json_bytes,
 )
-from ai_assistant.testing import (
-    AUTHORIZATION_PROPOSED_AT,
-    AUTHORIZATION_TOOL,
-    authorization,
-    authorization_basis,
-    coverage_member,
-    money_bound,
-    opening_act,
-    period_bound,
-    terms_bound,
+
+#: The instant every bound below is stated from.
+STARTS_AT: Final = datetime(2026, 9, 13, 9, 0, tzinfo=UTC)
+LATER: Final = STARTS_AT + timedelta(hours=1)
+
+#: A declaration that classifies nothing system-supplied and declares no bounded
+#: argument, so a case about either field raises it on a copy of this.
+TOOL: Final = ToolDefinition(
+    id="book_site",
+    capability="book_site",
+    description="Book a pitch at a campsite through the connected account.",
+    risk_level=RiskLevel.LOW,
+    reversibility=Reversibility.REVERSIBLE,
+    side_effecting=True,
+    reads=(),
+    writes=(),
+    discloses=(DataTier.PERSONAL,),
+    cost=ToolCost(basis=CostBasis.FREE),
+    idempotency=Idempotency.NONE,
+    effect=CapabilityEffect.WORLD,
+    leaves_hub=True,
+    result=CapabilityResult.NO_OUTSIDE_TEXT,
+    outcome_can_be_unknown=True,
+    safe_to_repeat=False,
 )
 
-LATER = AUTHORIZATION_PROPOSED_AT + timedelta(hours=1)
+
+def money_bound(
+    maximum: str | Decimal = "60",
+    *,
+    currency: str = "GBP",
+    minimum: str | Decimal | None = None,
+    maximum_exclusive: bool = False,
+) -> ValueBound:
+    """A ``MONEY`` bound: at most ``maximum`` of ``currency``, by default inclusive."""
+    return ValueBound(
+        kind=BoundKind.MONEY,
+        currency=currency,
+        maximum=Decimal(maximum),
+        minimum=None if minimum is None else Decimal(minimum),
+        maximum_exclusive=maximum_exclusive,
+    )
 
 
-# --- the vocabularies are closed (§1, §2, §8, §16) ---------------------------
+def period_bound(
+    *,
+    starts_at: datetime = STARTS_AT,
+    ends_at: datetime = STARTS_AT + timedelta(hours=12),
+    timezone: str = "Europe/London",
+) -> ValueBound:
+    """A ``PERIOD`` bound over the half-open interval ``[starts_at, ends_at)``."""
+    return ValueBound(
+        kind=BoundKind.PERIOD, starts_at=starts_at, ends_at=ends_at, timezone=timezone
+    )
 
 
-def test_the_four_vocabularies_are_closed_at_the_membership_the_adr_fixes() -> None:
-    """§1, §2, §8 and §16 each close an enumeration at a stated membership.
+def terms_bound(*terms: str) -> ValueBound:
+    """A ``TERMS`` bound over the set the user named, in their order."""
+    return ValueBound(kind=BoundKind.TERMS, terms=terms)
 
-    Pinned by **value** and not only by count, because the values are what cross a
-    wire and what a stored row decodes from: each is *"valued by lower-cased member
-    name"* and each *"is added to and never renamed"*.
-    """
-    assert [member.value for member in AuthorizationDisposition] == [
-        "proposed",
-        "established",
-        "declined",
-        "expired",
-        "revoked",
-        "superseded",
-        # **Seven and not six** (ADR-0268 §2): the ending a closure of the row's goal
-        # takes over the rows standing when it is taken. Appended, so the six
-        # ratified members keep the values a stored row decodes from, which is §1's
-        # own *"added to and never renamed"* rule and the licence for it.
-        "goal_closed",
-    ]
-    assert [member.value for member in AuthorizationOrigin] == ["confirmed", "opening_act"]
-    assert [member.value for member in AuthorizationSettlement] == [
-        "settled",
-        "not_at_source",
-        "would_duplicate",
-        "no_such_authorization",
-    ]
+
+# --- §2: the vocabulary is closed --------------------------------------------
+
+
+def test_the_bound_kinds_are_closed_at_the_membership_the_adr_fixes() -> None:
+    """§2 closes ``BoundKind`` at three members, pinned by **value** because the
+    values are what cross a wire and what a stored row decodes from."""
     assert [member.value for member in BoundKind] == ["money", "period", "terms"]
-    assert [member.value for member in ResolutionRule] == [
-        "as_stated",
-        "date_from_context",
-        "from_shown_record",
-        # **Four and not three** (ADR-0266 §4): ADR-0254 §19 books *"A fourth
-        # ``ResolutionRule``"* by name and ADR-0266 fires it, appended so the three
-        # ratified readings keep the values a stored row decodes from.
-        "stated_bound",
-    ]
-
-
-def test_the_field_list_is_closed_and_a_lane_adding_a_member_is_changing_the_decision() -> None:
-    """§1: *"The field list is **closed**"*, so a fifteenth field is a red test.
-
-    **Fourteen since ADR-0267 §7**, which partially supersedes §1's field list in that
-    limb alone: the row gains ``quoted``, the governing quote for the request's
-    intended action in the goal the row was built from. Its producer is ADR-0254 §20's
-    Lane 2 (ADR-0267 §11), so every row this tree writes carries ``None``.
-    """
-    assert set(Authorization.model_fields) == {
-        "id",
-        "goal",
-        "tool",
-        "account",
-        "destinations",
-        "origin",
-        "coverage",
-        "proposed_at",
-        "expires_at",
-        "confirmation",
-        "supersedes",
-        "disposition",
-        "settled_at",
-        "quoted",
-    }
-
-
-# --- §2: a member fixes a value or states a bound, and there is no third kind -
-
-
-def test_a_member_carrying_both_a_fixed_value_and_a_bound_is_not_constructible() -> None:
-    """§2: a model validator admits exactly two shapes."""
-    with pytest.raises(ValidationError, match="fixes a value or states a bound"):
-        CoverageMember(
-            kind=BoundKind.MONEY,
-            fixed="60",
-            bound=money_bound(),
-            basis=authorization_basis(),
-        )
-
-
-def test_a_member_carrying_neither_is_not_constructible() -> None:
-    """§2: *"one that does neither records nothing the user said"*."""
-    with pytest.raises(ValidationError, match="fixes a value or states a bound"):
-        CoverageMember(kind=BoundKind.MONEY, basis=authorization_basis())
-
-
-def test_a_member_without_a_basis_is_not_constructible() -> None:
-    """§9 clause (i): *"a member without one is not constructible"* (arm 21).
-
-    The **type's** half of that clause. Its other two arms — a basis whose ``act``
-    names no recorded turn, and one whose ``span`` is not a span of that turn's
-    ``TurnResult.utterance`` — compare a basis against a **store** and are
-    ``orchestration``'s, which §1's division of refusals states in terms.
-    """
-    with pytest.raises(ValidationError):
-        CoverageMember.model_validate({"kind": "terms", "fixed": "60"})
-
-
-def test_no_two_members_of_one_row_carry_the_same_kind() -> None:
-    """ADR-0266 §3, restating §2's rule over the value that now identifies a member:
-    *"A precedence rule between two members about one argument is a rule somebody
-    would have to remember at the comparison"* (arm 4(a))."""
-    with pytest.raises(ValidationError, match="same kind"):
-        authorization(
-            coverage=(
-                coverage_member(BoundKind.MONEY, bound=money_bound("40")),
-                coverage_member(BoundKind.MONEY, bound=money_bound()),
-            )
-        )
-
-
-@pytest.mark.parametrize(
-    "fixed",
-    [
-        "2026-02-30",
-        "2026-13-01",
-        "2026-09-13T25:00:00Z",
-        "2026-09-13T10:70:00Z",
-        "2026-02-29",
-        # **The offset's own ranges**, which the parse *normalises* rather than
-        # refusing: ``+00:60`` reads back as ``+01:00``, so the record would say one
-        # thing and the reading another — ADR-0150's two-shapes hazard at the one
-        # comparison that decides whether a call is authorised. Adversarial review,
-        # round 5, ``blocker``.
-        "2026-01-01T12:00:00+00:60",
-        "2026-01-01T12:00:00+24:00",
-        "2026-01-01T12:00:00+99:99",
-    ],
-)
-def test_a_period_member_fixing_a_date_the_reading_refuses_is_not_constructible(
-    fixed: str,
-) -> None:
-    """ADR-0266 §3: a ``PERIOD`` ``fixed`` is *"a value that reading accepts"*.
-
-    **Shape is not enough, and the cost of treating it as enough is a covered
-    call.** A fixed value is compared by **byte equality**, so a member holding
-    ``"2026-02-30"`` would cover a request carrying that same impossible string —
-    a value ADR-0254 §4's reading accepts nowhere, since it denotes no day. The
-    construction and the comparison read **one** parser
-    (``period_reading_form``), so a string one refuses is a string the other never
-    sees. Adversarial review, round 1, ``blocker``.
-    """
-    with pytest.raises(ValidationError, match="reading accepts"):
-        CoverageMember(kind=BoundKind.PERIOD, fixed=fixed, basis=authorization_basis())
-
-
-@pytest.mark.parametrize(
-    "fixed",
-    [
-        "2026-09-13",
-        "2026-02-28",
-        "2028-02-29",
-        "0099-01-01",
-        "2026-09-13T10:00:00+01:00",
-        # The widest offsets RFC 3339 §4.2 admits, either side of the line the
-        # refusals above are stated over.
-        "2026-01-01T12:00:00+23:59",
-        "2026-01-01T12:00:00-23:59",
-    ],
-)
-def test_a_period_member_fixing_a_date_the_reading_accepts_is_constructible(fixed: str) -> None:
-    """The control beside the refusal above: a real calendar date and a real
-    instant carrying an offset are both values §4's reading reads."""
-    assert (
-        CoverageMember(kind=BoundKind.PERIOD, fixed=fixed, basis=authorization_basis()).fixed
-        == fixed
-    )
-
-
-#: One bound of each kind, so the pair matrix below is written over kinds rather
-#: than over three hand-built values (ADR-0266 §11's arm 6(b)).
-def _bound_of(kind: BoundKind) -> ValueBound:
-    """A well-formed :class:`ValueBound` of ``kind``."""
-    return {
-        BoundKind.MONEY: money_bound(),
-        BoundKind.PERIOD: period_bound(),
-        BoundKind.TERMS: terms_bound("flexible"),
-    }[kind]
-
-
-@pytest.mark.parametrize(
-    ("kind", "fixed"),
-    [(BoundKind.MONEY, "60"), (BoundKind.TERMS, 60), (BoundKind.TERMS, True)],
-)
-def test_a_member_fixing_a_value_its_kind_does_not_state_is_not_constructible(
-    kind: BoundKind, fixed: object
-) -> None:
-    """ADR-0266 §3, arm 6(b): a ``MONEY`` ``fixed`` outright — *"an amount carries
-    no currency on a fixed member"* — and a ``TERMS`` ``fixed`` that is not a
-    string, ``True`` among them, since ``bool`` is an ``int`` in Python."""
-    with pytest.raises(ValidationError):
-        CoverageMember(
-            kind=kind,
-            fixed=fixed,  # type: ignore[arg-type]  # the refusal is what is asserted
-            basis=authorization_basis(),
-        )
-
-
-@pytest.mark.parametrize(
-    ("kind", "bound"),
-    [(one, other) for one in BoundKind for other in BoundKind if one is not other],
-)
-def test_a_member_whose_bound_is_of_another_kind_is_not_constructible(
-    kind: BoundKind, bound: BoundKind
-) -> None:
-    """ADR-0266 §11's arm 6(b): **every unequal pair of the three kinds**.
-
-    **Generated from the vocabulary rather than listed**, so the matrix is complete
-    by construction and a fourth ``BoundKind`` would widen it without anyone
-    remembering to. Adversarial review, round 7, ``blocker``: three of the six pairs
-    were exercised and the arm asks for all of them.
-    """
-    with pytest.raises(ValidationError, match="states a bound of that kind"):
-        CoverageMember(kind=kind, bound=_bound_of(bound), basis=authorization_basis())
-
-
-@pytest.mark.parametrize("kind", list(BoundKind))
-def test_a_member_whose_bound_is_of_its_own_kind_is_constructible(kind: BoundKind) -> None:
-    """Arm 6(b)'s *"beside one equal pair of each that is"* — the three controls,
-    without which the matrix above would pass on a validator refusing everything."""
-    member = CoverageMember(kind=kind, bound=_bound_of(kind), basis=authorization_basis())
-    assert member.bound is not None
-    assert member.bound.kind is kind
-
-
-def test_a_row_carrying_two_members_of_different_kinds_is_constructible() -> None:
-    """ADR-0266 §3's rule is one **per kind** and not one per row (arm 4(a)).
-
-    The control beside the refusal above: a ``MONEY`` member beside a ``TERMS`` one
-    is two statements about two different things the user said, and nobody has to
-    remember a precedence between them.
-    """
-    row = authorization(
-        coverage=(
-            coverage_member(BoundKind.MONEY, bound=money_bound()),
-            coverage_member(BoundKind.TERMS, bound=terms_bound("refundable")),
-        )
-    )
-    assert {member.kind for member in row.coverage} == {BoundKind.MONEY, BoundKind.TERMS}
 
 
 # --- §2: the three bound kinds, and every other shape refused ----------------
@@ -310,7 +120,7 @@ def test_a_row_carrying_two_members_of_different_kinds_is_constructible() -> Non
 _ARGUMENTS_OF: Final[dict[BoundKind, dict[str, object]]] = {
     BoundKind.MONEY: {"currency": "GBP", "maximum": Decimal("60")},
     BoundKind.PERIOD: {
-        "starts_at": AUTHORIZATION_PROPOSED_AT,
+        "starts_at": STARTS_AT,
         "ends_at": LATER,
         "timezone": "Europe/London",
     },
@@ -322,7 +132,7 @@ _ARGUMENTS_OF: Final[dict[BoundKind, dict[str, object]]] = {
     ("kind", "kwargs"),
     [
         (BoundKind.MONEY, {"terms": ("flexible",)}),
-        (BoundKind.MONEY, {"starts_at": AUTHORIZATION_PROPOSED_AT}),
+        (BoundKind.MONEY, {"starts_at": STARTS_AT}),
         (BoundKind.PERIOD, {"maximum": Decimal("60")}),
         (BoundKind.TERMS, {"currency": "GBP"}),
     ],
@@ -452,7 +262,7 @@ def test_a_money_bounds_currency_is_iso_4217_shaped_and_is_not_normalised(code: 
 
 def test_a_period_bound_is_half_open_and_refuses_an_empty_interval() -> None:
     """§2: ``ends_at`` **strictly after** ``starts_at``; ADR-0194 §1's convention."""
-    assert period_bound(starts_at=AUTHORIZATION_PROPOSED_AT, ends_at=LATER).ends_at == LATER
+    assert period_bound(starts_at=STARTS_AT, ends_at=LATER).ends_at == LATER
     with pytest.raises(ValidationError, match="ends strictly after it starts"):
         period_bound(starts_at=LATER, ends_at=LATER)
 
@@ -507,146 +317,7 @@ def test_a_terms_bound_is_non_empty_duplicate_free_and_keeps_the_users_order() -
         terms_bound("flexible", "flexible")
 
 
-# --- §8, §10: the resolution admits exactly the shapes the rule names --------
-
-#: A well-formed value for each argument a :class:`ValueResolution` can carry.
-_RESOLUTION_ARGUMENTS: dict[str, object] = {
-    "now": AUTHORIZATION_PROPOSED_AT,
-    "timezone": "Europe/London",
-    "record": "rec-1",
-}
-
-#: What each :class:`ResolutionRule` takes, in both directions (§8).
-#:
-#: **``STATED_BOUND`` takes neither** (ADR-0266 §4): its one input is the span the
-#: basis already names, so there is nothing further to record.
-_RESOLUTION_SHAPES: dict[ResolutionRule, frozenset[str]] = {
-    ResolutionRule.AS_STATED: frozenset(),
-    ResolutionRule.DATE_FROM_CONTEXT: frozenset({"now", "timezone"}),
-    ResolutionRule.FROM_SHOWN_RECORD: frozenset({"record"}),
-    ResolutionRule.STATED_BOUND: frozenset(),
-}
-
-
-def test_every_resolution_rule_has_a_stated_shape() -> None:
-    """The matrix below is over the **enum**, so a fifth rule is a red test.
-
-    Written as a set comparison rather than as four keys anyone could forget to
-    extend: ADR-0266 §4 added the fourth rule and nothing obliged the suite to
-    exercise it, which left ``STATED_BOUND``'s validator branch pinned by its
-    spelling alone. Adversarial review, round 8, ``major``.
-    """
-    assert set(_RESOLUTION_SHAPES) == set(ResolutionRule)
-
-
-@pytest.mark.parametrize("rule", list(ResolutionRule))
-def test_a_resolution_carries_its_own_rules_arguments_and_no_others(rule: ResolutionRule) -> None:
-    """§8, §10, arm 34: *"both required and neither absent"*, per rule and in both
-    directions — the shape constructs, every argument the rule does not take is
-    refused where present, and every argument it does take is refused where absent.
-
-    A zero-argument rule exercises the first two limbs and has no third, which is
-    what a driven case for it looks like: ``STATED_BOUND`` and ``AS_STATED`` are
-    **constructible bare** and refuse each of ``now``, ``timezone`` and ``record``.
-    """
-    taken = _RESOLUTION_SHAPES[rule]
-    payload = {name: _RESOLUTION_ARGUMENTS[name] for name in sorted(taken)}
-    resolution = ValueResolution.model_validate({"rule": rule, **payload})
-    assert resolution.rule is rule
-    carried = {name for name in _RESOLUTION_ARGUMENTS if getattr(resolution, name) is not None}
-    assert carried == taken
-    for stray in sorted(set(_RESOLUTION_ARGUMENTS) - taken):
-        with pytest.raises(ValidationError, match="carries no"):
-            ValueResolution.model_validate(
-                {"rule": rule, **payload, stray: _RESOLUTION_ARGUMENTS[stray]}
-            )
-    for absent in sorted(taken):
-        without = {name: value for name, value in payload.items() if name != absent}
-        with pytest.raises(ValidationError, match="states its"):
-            ValueResolution.model_validate({"rule": rule, **without})
-
-
-def test_a_basis_keeps_both_halves_and_neither_is_derivable_from_the_other() -> None:
-    """§8: the words the user said **and** the value the system took them to mean."""
-    basis = AuthorizationBasis(
-        act="turn-9",
-        span="up to fifty pounds",
-        resolution=ValueResolution(
-            rule=ResolutionRule.DATE_FROM_CONTEXT,
-            now=AUTHORIZATION_PROPOSED_AT,
-            timezone="Europe/London",
-        ),
-    )
-    assert (basis.act, basis.span) == ("turn-9", "up to fifty pounds")
-    assert basis.resolution.now == AUTHORIZATION_PROPOSED_AT
-
-
-def test_a_period_bounds_zone_and_a_resolutions_zone_are_two_facts() -> None:
-    """§8: *"neither is derived from the other"*, and nothing requires them equal.
-
-    A configuration changed after the act leaves the record saying what it said,
-    which is ADR-0193 §9's prospectivity in the one place a zone could otherwise be
-    re-read.
-    """
-    member = coverage_member(
-        BoundKind.PERIOD,
-        bound=period_bound(timezone="Europe/London"),
-        basis=authorization_basis(
-            resolution=ValueResolution(
-                rule=ResolutionRule.DATE_FROM_CONTEXT,
-                now=AUTHORIZATION_PROPOSED_AT,
-                timezone="Australia/Sydney",
-            )
-        ),
-    )
-    row = authorization(coverage=(member,))
-    assert row.coverage[0].bound is not None
-    assert row.coverage[0].bound.timezone == "Europe/London"
-    assert row.coverage[0].basis.resolution.timezone == "Australia/Sydney"
-
-
-# --- §1, §12: the row's own invariants ---------------------------------------
-
-
-def test_a_proposed_row_states_no_settled_at_and_a_settled_one_states_one() -> None:
-    """§1: ``settled_at`` is present **exactly** on a row whose disposition is not
-    ``PROPOSED``, stated in both directions."""
-    with pytest.raises(ValidationError, match="has not been settled"):
-        authorization(disposition=AuthorizationDisposition.PROPOSED, settled_at=LATER)
-    with pytest.raises(ValidationError, match="states the instant it was settled"):
-        Authorization.model_validate(
-            {
-                **authorization().model_dump(),
-                "disposition": AuthorizationDisposition.ESTABLISHED,
-                "settled_at": None,
-            }
-        )
-
-
-def test_a_row_expiring_at_or_before_it_was_proposed_is_not_constructible() -> None:
-    """§12, on ADR-0193 §9: *"a grant in shape and nothing in effect"*.
-
-    **This is also what refuses a path-(ii) correction of a lapsed row** (arm 42): a
-    correction transcribes the superseded row's ``expires_at``, so one recorded
-    after that instant would be born expired — and the refusal falls out of the type
-    without the store reading a clock.
-    """
-    for expires_at in (AUTHORIZATION_PROPOSED_AT, AUTHORIZATION_PROPOSED_AT - timedelta(hours=1)):
-        with pytest.raises(ValidationError, match="expires strictly after it was proposed"):
-            authorization(expires_at=expires_at)
-
-
-def test_an_opening_act_that_fixed_nothing_is_not_constructible() -> None:
-    """§1: path (iii)'s invariant — a row carrying **neither** pointer carries a
-    **non-empty** coverage (arm 64)."""
-    with pytest.raises(ValidationError, match="opening act that fixed nothing"):
-        opening_act(coverage=())
-
-
-def test_an_empty_coverage_is_constructible_on_a_path_one_proposal() -> None:
-    """§1: an empty ``coverage`` *"is only ever a path-(i) proposal about an
-    argument-free call"* (arm 54)."""
-    assert authorization(coverage=()).coverage == ()
+# --- ADR-0266 §7: the declaration's own refusals -----------------------------
 
 
 def test_a_declaration_declaring_a_system_supplied_key_at_a_kind_is_not_constructible() -> None:
@@ -659,9 +330,9 @@ def test_a_declaration_declaring_a_system_supplied_key_at_a_kind_is_not_construc
     idempotency key"* true — no member can be met against one, on either route.
     """
     with pytest.raises(ValidationError, match="name no key it fills itself"):
-        AUTHORIZATION_TOOL.model_copy(update={"system_supplied": ()}).model_validate(
+        ToolDefinition.model_validate(
             {
-                **AUTHORIZATION_TOOL.model_dump(),
+                **TOOL.model_dump(),
                 "system_supplied": ("locale",),
                 "bounded_arguments": (
                     {"argument": "locale", "kind": "terms", "currency_argument": None},
@@ -723,7 +394,7 @@ def test_a_declaration_declaring_one_argument_twice_is_not_constructible() -> No
     with pytest.raises(ValidationError, match="name the same argument"):
         ToolDefinition.model_validate(
             {
-                **AUTHORIZATION_TOOL.model_dump(),
+                **TOOL.model_dump(),
                 "bounded_arguments": (
                     {"argument": "amount", "kind": "money", "currency_argument": "currency"},
                     {"argument": "amount", "kind": "terms", "currency_argument": None},
@@ -738,7 +409,7 @@ def test_a_declaration_declaring_two_arguments_at_one_kind_is_constructible() ->
     admits and the comparison answers (ADR-0266 §7)."""
     declared = ToolDefinition.model_validate(
         {
-            **AUTHORIZATION_TOOL.model_dump(),
+            **TOOL.model_dump(),
             "bounded_arguments": (
                 {"argument": "amount", "kind": "money", "currency_argument": "currency"},
                 {"argument": "fee", "kind": "money", "currency_argument": "currency"},
@@ -759,7 +430,7 @@ def test_a_declaration_filling_the_currency_key_itself_declares_no_money_argumen
     with pytest.raises(ValidationError, match="name no key it fills itself"):
         ToolDefinition.model_validate(
             {
-                **AUTHORIZATION_TOOL.model_dump(),
+                **TOOL.model_dump(),
                 "system_supplied": ("currency",),
                 "bounded_arguments": (
                     {"argument": "amount", "kind": "money", "currency_argument": "currency"},
@@ -768,91 +439,7 @@ def test_a_declaration_filling_the_currency_key_itself_declares_no_money_argumen
         )
 
 
-def test_the_destination_set_takes_adr_0193s_canonical_tuple_by_the_same_validator() -> None:
-    """§1: non-empty, duplicate-free, in the one canonical order."""
-    with pytest.raises(ValidationError, match="at least one canonical destination"):
-        authorization(destinations=())
-
-
-# --- §7: the subject digest --------------------------------------------------
-
-
-def test_the_subject_digest_is_taken_over_exactly_the_five_fields_section_7_names() -> None:
-    """§7: *"the canonical form of the ``Authorization``'s ``goal``, ``tool``,
-    ``account``, ``destinations`` and ``coverage``"*.
-
-    A **selection** rather than a removal, which is where it departs from
-    ``RecipientGrant.subject_digest``. Pinned off ``model_fields`` so a field added
-    later without deciding its place is a red test rather than a silent inclusion or
-    exclusion.
-    """
-    subject = {"goal", "tool", "account", "destinations", "coverage"}
-    outside = set(Authorization.model_fields) - subject
-    assert outside == {
-        "id",
-        "origin",
-        "proposed_at",
-        "expires_at",
-        "confirmation",
-        "supersedes",
-        "disposition",
-        "settled_at",
-        # ADR-0267 §7 puts ``quoted`` **outside** the subject deliberately: it is
-        # provenance, *"no comparison of any decision reads it"*, and leaving it in
-        # would move the digest of a row whose subject had not changed.
-        "quoted",
-    }
-    row = authorization(id="a1")
-    for name, value in (
-        ("id", "a2"),
-        ("origin", AuthorizationOrigin.OPENING_ACT),
-        ("expires_at", LATER + timedelta(days=9)),
-        ("confirmation", "confirm-9"),
-        ("supersedes", "a0"),
-    ):
-        moved = Authorization.model_validate({**row.model_dump(), name: value})
-        assert moved.subject_digest == row.subject_digest, name
-
-
-def test_settling_a_proposal_leaves_its_subject_digest_where_it_was() -> None:
-    """§7: the settled row fingerprints exactly as the proposal did.
-
-    That is what lets the policy compute the digest from the record ``live_for``
-    returned and the trail **recompute** it from the record ``resolve`` returns.
-    """
-    proposal = authorization()
-    settled = Authorization.model_validate(
-        {
-            **proposal.model_dump(),
-            "disposition": AuthorizationDisposition.ESTABLISHED,
-            "settled_at": LATER,
-        }
-    )
-    assert settled.subject_digest == proposal.subject_digest
-
-
-@pytest.mark.parametrize("name", ["goal", "coverage"])
-def test_moving_a_subject_field_moves_the_digest(name: str) -> None:
-    """§7: a mismatch is conclusive — *"this record is not the one the row rested on"*."""
-    row = authorization()
-    moved = {
-        "goal": "goal-0002",
-        "coverage": (coverage_member(BoundKind.TERMS, fixed="refundable"),),
-    }[name]
-    other = Authorization.model_validate({**row.model_dump(), name: moved})
-    assert other.subject_digest != row.subject_digest
-
-
-def test_the_digest_survives_a_serialisation_round_trip() -> None:
-    """§7: the two sides of the comparison are a decision read back out of a trail
-    and a row read back out of a store."""
-    row = authorization()
-    assert Authorization.model_validate_json(row.model_dump_json()).subject_digest == (
-        row.subject_digest
-    )
-
-
-# --- §6, §7: the three new fields --------------------------------------------
+# --- §3, §6, §7: what the ruling, the request and the declaration carry -------
 
 
 def test_a_ruling_scoping_a_goal_it_names_no_authorisation_for_is_refused() -> None:
@@ -879,8 +466,8 @@ def test_the_converse_is_not_required_because_three_routes_carry_no_goal_scope()
 def test_an_action_request_carries_no_goal_unless_orchestration_sets_one() -> None:
     """§6: ``goal`` defaults to ``None``, and such a request reaches route (d) in no
     case — the fail-closed direction."""
-    assert ActionRequest(tool=AUTHORIZATION_TOOL).goal is None
-    assert ActionRequest(tool=AUTHORIZATION_TOOL, goal="goal-0001").goal == "goal-0001"
+    assert ActionRequest(tool=TOOL).goal is None
+    assert ActionRequest(tool=TOOL, goal="goal-0001").goal == "goal-0001"
 
 
 def test_a_declaration_classifies_nothing_system_supplied_by_default() -> None:
@@ -890,7 +477,7 @@ def test_a_declaration_classifies_nothing_system_supplied_by_default() -> None:
     needs coverage for every argument and asks where it has none: *"It costs a
     question and can never authorise a call"*.
     """
-    assert AUTHORIZATION_TOOL.system_supplied == ()
+    assert TOOL.system_supplied == ()
     assert ToolDefinition.model_fields["system_supplied"].default == ()
 
 
@@ -898,7 +485,7 @@ def test_a_declaration_classifies_each_key_system_supplied_once() -> None:
     """§3: duplicate-free — *"a duplicate is a second spelling of one classification"*."""
     with pytest.raises(ValidationError, match="each key system-supplied once"):
         ToolDefinition.model_validate(
-            {**AUTHORIZATION_TOOL.model_dump(), "system_supplied": ("locale", "locale")}
+            {**TOOL.model_dump(), "system_supplied": ("locale", "locale")}
         )
 
 
@@ -942,54 +529,3 @@ def test_settings_carries_no_authorization_field_at_all() -> None:
     }
     assert named == set(), named
     assert "episode_retention" in Settings.model_fields
-
-
-# --- the cost this shape carries, said rather than discovered ----------------
-
-
-def test_a_fixed_value_of_json_null_is_not_representable_and_leaves_the_argument_uncovered() -> (
-    None
-):
-    """§2 closes the field list at ``fixed: FrozenJsonValue | None``.
-
-    ``None`` is that field's spelling of *"states a bound instead"*, so an act that
-    fixed JSON ``null`` mints **no member** — and the argument it would have covered
-    is then left **uncovered**, which is the fail-closed direction: the user is
-    asked about the concrete call.
-
-    Recorded as a test rather than left to be discovered, because the alternative
-    reading — that such a member is constructible — is the one a lane would reach
-    for and it is not available.
-    """
-    with pytest.raises(ValidationError, match="fixes a value or states a bound"):
-        CoverageMember(kind=BoundKind.TERMS, fixed=None, basis=authorization_basis())
-
-
-def test_an_authorization_round_trips_through_json_in_every_disposition() -> None:
-    """Every persisted state decodes (arm 38's type half).
-
-    The store's own round-trip arms are
-    ``tests/permissions/goal_authorization_contract.py``'s; this is the type's, and
-    it is what makes *"``resolve``, ``recent`` and ``export`` must return every row
-    whatever its disposition"* a property of the model rather than of one store.
-    """
-    for disposition in AuthorizationDisposition:
-        settled = None if disposition is AuthorizationDisposition.PROPOSED else LATER
-        row = authorization(disposition=disposition, settled_at=settled)
-        assert Authorization.model_validate_json(row.model_dump_json()) == row
-
-
-def test_an_utc_instant_is_required_and_a_naive_one_is_refused() -> None:
-    """The store is durable *and* ordered, so a naive instant is refused at the type."""
-    with pytest.raises(ValidationError):
-        authorization(proposed_at=datetime(2026, 9, 13, 9, 0))  # noqa: DTZ001 — the point
-
-
-def test_the_default_builder_reads_as_the_worked_case_the_adr_is_about() -> None:
-    """A sanity pin on the fixture every other case varies from."""
-    row = authorization()
-    assert row.disposition is AuthorizationDisposition.PROPOSED
-    assert row.origin is AuthorizationOrigin.CONFIRMED
-    assert row.proposed_at.tzinfo is UTC
-    assert row.coverage[0].bound is not None
-    assert row.coverage[0].bound.maximum == Decimal("60")

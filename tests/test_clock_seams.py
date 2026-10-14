@@ -168,8 +168,6 @@ from ai_assistant.testing import (
     FakeEmbedder,
     FakeFeedbackProcessor,
     FakeFetcher,
-    FakeGoalAuthorizations,
-    FakeGoalAuthorizationStore,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -791,16 +789,6 @@ async def _fake_recipient_grants(now: Clock) -> None:
     await FakeRecipientGrants(now=now).covering(_request())
 
 
-async def _fake_goal_authorizations(now: Clock) -> None:
-    """``live_for`` is the one member that evaluates liveness (ADR-0254 §16)."""
-    await FakeGoalAuthorizations(now=now).live_for("goal-1", "tool-1")
-
-
-async def _fake_goal_authorization_store(now: Clock) -> None:
-    """The store fake answers the query face's one liveness-evaluating member."""
-    await FakeGoalAuthorizationStore(now=now).live_for("goal-1", "tool-1")
-
-
 async def _rule_based_processor(now: Clock) -> None:
     """Every proposal the rules produce carries a provenance stamped from the clock."""
     await RuleBasedFeedbackProcessor(now=now).process(_feedback())
@@ -1032,8 +1020,6 @@ SEAMS = [
     Seam("FakeFeedbackProcessor", _fake_feedback_processor, ClockReadingError),
     Seam("FakeNotificationOutbox", _fake_notification_outbox, NotificationOutboxError),
     Seam("FakeNotificationStore", _fake_notification_store, NotificationStoreError),
-    Seam("FakeGoalAuthorizationStore", _fake_goal_authorization_store, ClockReadingError),
-    Seam("FakeGoalAuthorizations", _fake_goal_authorizations, ClockReadingError),
     Seam("FakeRecipientGrantStore", _fake_recipient_grant_store, ClockReadingError),
     Seam("FakeRecipientGrants", _fake_recipient_grants, ClockReadingError),
     Seam("RuleBasedFeedbackProcessor", _rule_based_processor, ClockReadingError),
@@ -1357,12 +1343,6 @@ PROPAGATED: Final[dict[str, str]] = {
     "FakeFeedbackProcessor": (
         "documented at ``testing/learning.py:207``, doubling a `learning` seam that propagates"
     ),
-    "FakeGoalAuthorizationStore": (
-        "documented at ``testing/goal_authorizations.py``'s constructors, doubling the "
-        "store seam above, whose clause it quotes: a double that translated what the store "
-        "propagates would leave a consumer's own handling untested"
-    ),
-    "FakeGoalAuthorizations": ("the second face of that same double, with its clause verbatim"),
     "FakeRecipientGrantStore": _UNDECLARED,
     "FakeRecipientGrants": _UNDECLARED,
     "RuleBasedFeedbackProcessor": (

@@ -27,7 +27,6 @@ from ai_assistant.testing.connections import (
     FakeConnectionPurger,
 )
 from ai_assistant.testing.conversations import FakeConversationStore
-from ai_assistant.testing.coverage_answers import FakeCoverageAnswers
 from ai_assistant.testing.destination_trust import FakeDestinationTrustStore
 from ai_assistant.testing.diagnostics import (
     FakeDiagnosticRetention,
@@ -53,27 +52,6 @@ from ai_assistant.testing.forecasting import (
     ScriptedDay,
     forecast_day,
 )
-from ai_assistant.testing.goal_authorizations import (
-    AUTHORIZATION_ACCOUNT,
-    AUTHORIZATION_ACT,
-    AUTHORIZATION_DESTINATION,
-    AUTHORIZATION_EXPIRES_AT,
-    AUTHORIZATION_GOAL,
-    AUTHORIZATION_NOW,
-    AUTHORIZATION_PROPOSED_AT,
-    AUTHORIZATION_TOOL,
-    FakeAuthorizationResolution,
-    FakeGoalAuthorizations,
-    FakeGoalAuthorizationStore,
-    authorization,
-    authorization_basis,
-    coverage_member,
-    money_bound,
-    opening_act,
-    period_bound,
-    terms_bound,
-)
-from ai_assistant.testing.goal_quotes import FakeGoalQuotes
 from ai_assistant.testing.grants import (
     DEFAULT_DECIDED_AT,
     DEFAULT_GRANTED_SOURCE,
@@ -194,14 +172,6 @@ from ai_assistant.testing.writer import FakeMemoryWriter
 
 __all__ = [
     "APPEND_FAILED",
-    "AUTHORIZATION_ACCOUNT",
-    "AUTHORIZATION_ACT",
-    "AUTHORIZATION_DESTINATION",
-    "AUTHORIZATION_EXPIRES_AT",
-    "AUTHORIZATION_GOAL",
-    "AUTHORIZATION_NOW",
-    "AUTHORIZATION_PROPOSED_AT",
-    "AUTHORIZATION_TOOL",
     "CLAIM",
     "COMPLETION",
     "DEFAULT_BATCH_ISSUER",
@@ -253,14 +223,12 @@ __all__ = [
     "FakeActionPolicy",
     "FakeAssistantEngine",
     "FakeAuditTrail",
-    "FakeAuthorizationResolution",
     "FakeBatchCompleter",
     "FakeByteChannel",
     "FakeConnectionEntry",
     "FakeConnectionProvisioner",
     "FakeConnectionPurger",
     "FakeConversationStore",
-    "FakeCoverageAnswers",
     "FakeDestinationTrustStore",
     "FakeDiagnosticRetention",
     "FakeDiagnosticSink",
@@ -269,9 +237,6 @@ __all__ = [
     "FakeFeedbackProcessor",
     "FakeFetcher",
     "FakeForecaster",
-    "FakeGoalAuthorizationStore",
-    "FakeGoalAuthorizations",
-    "FakeGoalQuotes",
     "FakeIdentifierSpace",
     "FakeIdentifiers",
     "FakeInvocationCompleter",
@@ -320,17 +285,11 @@ __all__ = [
     "account_member",
     "attested_proposal",
     "authorised",
-    "authorization",
-    "authorization_basis",
-    "coverage_member",
     "diagnostic_entry",
     "disclosure_of",
     "evaluation_trace",
     "forecast_day",
     "invoker_over",
-    "money_bound",
-    "opening_act",
-    "period_bound",
     "recipient",
     "recipient_grant",
     "recipient_revocation_of",
@@ -338,6 +297,5 @@ __all__ = [
     "source_grant",
     "source_read_record",
     "succeeds",
-    "terms_bound",
     "with_phase_declaration",
 ]
