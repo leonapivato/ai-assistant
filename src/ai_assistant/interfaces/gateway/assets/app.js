@@ -1862,24 +1862,17 @@ function renderDriveWithheld(body, member) {
 // no word it would be an announcement §5 rules silent — "announcing it would be noise
 // on every turn … told every time, the sentence stops being read".
 //
-// What is added instead is the half a composed reply cannot carry: where the owner goes
-// next. That is ADR-0242 §9's split at a render site — the reply says what happened and
-// the surface says what can be done about it — and it is why each of the four names the
-// listing rather than describing the goal again.
+// What is added instead is the act, named, and not the goal described again. Each of
+// the four once also sent the owner to the goals listing; that listing retired with its
+// panel (ADR-0309 §5), and a sentence pointing at it would name a place that is not
+// there.
 const ENGAGEMENT_WORDS = {
-  opened:
-    "I am treating this as a new piece of work of its own. What I am working on lists " +
-    "everything outstanding.",
-  continued:
-    "This carried on the work this conversation was already on. What I am working on " +
-    "lists everything outstanding.",
-  resumed:
-    "This took up something you already had open rather than starting anything new. " +
-    "What I am working on lists everything outstanding.",
+  opened: "I am treating this as a new piece of work of its own.",
+  continued: "This carried on the work this conversation was already on.",
+  resumed: "This took up something you already had open rather than starting anything new.",
   reopened:
     "This took up work that had been closed. Everything it had recorded before is kept " +
-    "as it stands — nothing it did was replayed or undone. What I am working on lists " +
-    "everything outstanding.",
+    "as it stands — nothing it did was replayed or undone.",
 };
 
 // What became of the reference this turn carried (ADR-0250 §11).
@@ -1909,88 +1902,6 @@ const REFERENCE_WORDS = {
     "here. What you said was taken as an ordinary turn about the work it was on.",
 };
 
-// What a withdrawal did (ADR-0250 §12).
-//
-// **It says it recorded no answer, because that is the whole difference from one**, on
-// ADR-0244 §11's distinction between a denial and a cancellation — a withdrawal
-// "records no answer, revises no interpretation and engages no goal". **And it says the
-// pause is still there**: "withdrawing removes the question and not the pause … what
-// the act buys is the freedom to ask again".
-const CLARIFICATION_WITHDRAWAL_WORDS = {
-  withdrawn:
-    "That question is withdrawn. No answer was recorded — taking a question back is " +
-    "not the same as answering it — and the words it held are gone. The work it was " +
-    "about is still open and still waiting: what this frees me to do is ask a better " +
-    "question about it.",
-  nothing_to_withdraw:
-    "There was nothing here for this to take. That question is already settled, or I " +
-    "hold none of that id, so this took nothing back and changed nothing. Whatever " +
-    "settled it stands unchanged.",
-};
-
-// What an abandonment did (ADR-0250 §12).
-//
-// **It says what it did not touch, and that is the load-bearing half**: abandoning
-// "does not end an execution and does not cancel anything in flight". A sentence
-// promising everything stopped would be false on a reachable state, and one promising
-// work already done was undone would be false always. ADR-0261 §2 is why the
-// *attempt* half of that sentence is gone: the act now ends every live attempt of the
-// goal in the step that closes it, so "nothing under way was cancelled" is said of
-// **executions** and of nothing else.
-//
-// **`already_closed` names no reason**, because the member carries none: §12 reaches it
-// from `achieved` and from `abandoned` alike, and guessing which would be a diagnosis a
-// member is not.
-//
-// **`abandoned_effect_in_flight` is ADR-0261 §6's fourth member, and this entry is the
-// minimum ADR-0250 §15's non-degradation clause requires** — "a surface that renders no
-// statement for a member it was given has not implemented this section; it is not
-// permissibly degraded" — landed here because the member itself lands in L1 while §13
-// books this surface on L3 (issue #2435). §6 fixes **which fact** it names and leaves
-// the wording to the lane: the goal was given up **and an action of it had been claimed
-// and may have been sent**, and where that goal's state, and any outcome since
-// established, is read. **No statement says the action did not happen, that it did, or
-// that anything the user does will withdraw it**, and *in flight* means the claim
-// landed rather than that the call left. Producing the member is L2's, so nothing on
-// this page can receive one yet.
-//
-// **It names this listing and not `assistant goals`**, which §6's own last clause
-// admits — "the exact wording is the lane's; what is fixed is which fact each names".
-// §6 names the terminal's command because that is where a terminal reader looks; this
-// statement is rendered directly above the listing it would be pointing at, so naming
-// a command a browser user cannot run would send them somewhere else to read what is
-// already on screen. Found by driving the page rather than by reading the diff.
-const GOAL_ABANDONMENT_WORDS = {
-  abandoned:
-    "That goal is given up. I will not take it up again on my own and nothing more is " +
-    "planned for it, and any question it had open is withdrawn. Nothing already done " +
-    "for it was undone, reversed or replayed, and nothing under way was cancelled.",
-  abandoned_effect_in_flight:
-    "That goal is given up, and an action of it had already been claimed and may have " +
-    "been sent. I cannot tell you yet whether it happened. Nothing already done for it " +
-    "was undone, reversed or replayed by this. This listing is where that goal stands, " +
-    "and any outcome since established.",
-  already_closed:
-    "That goal was already closed, so this moved nothing and recorded nothing. However " +
-    "it was closed before is how it still reads.",
-  no_such_goal: "I hold no goal of that id, so nothing was given up.",
-};
-
-// What each `GoalStatus` member reads as in the listing.
-//
-// **Not one of the vocabularies ADR-0250 adds** — ADR-0014 §1 declares it and ADR-0249
-// §4 gives it its meanings — and two of its members have no producer anywhere in the
-// tree today (ADR-0250 §20's arm 23 asserts exactly that). They are given words anyway,
-// because what this map is for is that a member arriving from a gateway is rendered
-// rather than shown raw, and "no producer today" is not a property of the value this
-// page receives.
-const GOAL_STATUS_WORDS = {
-  active: "open",
-  achieved: "done",
-  abandoned: "given up",
-  blocked: "blocked",
-};
-
 // What the page says for a value it has no words for, said once for all five maps.
 //
 // `READ_ANSWER_UNREADABLE`'s position, one decision over: silence is refused by §15's
@@ -1999,8 +1910,7 @@ const GOAL_STATUS_WORDS = {
 // report it, rather than a sentence for one of the members it might not be.
 const GOAL_MEMBER_UNREADABLE =
   "That arrived as something this browser has no words for, so it is not reported here " +
-  "rather than reported as something it may not be. Press What I am working on to read " +
-  "what is outstanding.";
+  "rather than reported as something it may not be.";
 
 // Whether a value is a member of one of these vocabularies.
 //
@@ -7687,10 +7597,6 @@ const STATE_UNREAD =
   "Nothing above says what this source is granted for now. An act's outcome is a " +
   "fact about that act; what stands is a fact only the hub can state.";
 
-const QUESTION_GONE =
-  "That question was not in the list I just read, so I sent nothing. It may have " +
-  "been answered or destroyed since the page last showed it.";
-
 // Say what a scope allows, in words rather than in the values on the wire.
 //
 // **Exactly the uses the grant names** (ADR-0139 §3's third clause): nothing is
@@ -8184,7 +8090,7 @@ const PAGE = 25;
 
 // How far each listing has read. Not a count of what exists: a total is not available
 // and would be a claim this page cannot make.
-const readSoFar = { beliefs: 0, questions: 0, interrupted: 0, notifications: 0, goals: 0 };
+const readSoFar = { beliefs: 0, notifications: 0 };
 
 // Which run of each listing is current. An offset is only meaningful against the
 // question that produced it, so starting a listing again — a band unchecked, the
@@ -8195,7 +8101,7 @@ const readSoFar = { beliefs: 0, questions: 0, interrupted: 0, notifications: 0, 
 // did not ask for and moves the offset the *next* page is read at, which skips
 // beliefs — and a belief with no rendered row has no `Forget` control, so the failure
 // costs the owner a control rather than a little tidiness.
-const runs = { beliefs: 0, questions: 0, interrupted: 0, notifications: 0, goals: 0 };
+const runs = { beliefs: 0, notifications: 0 };
 
 // A full page says so and offers the next one.
 //
@@ -8653,91 +8559,6 @@ async function forgetBelief(id) {
 
 // --- the deferred-question surface (ADR-0078 §8, §9) -------------------------
 
-// Start both question listings again.
-//
-// **One generation is taken for the whole invocation and carried into each read.**
-// Two listings means two awaits, and a run that is retired during the first one would
-// otherwise reach the second and snapshot whatever number is current *then* — so two
-// overlapping refreshes would both be accepted, both read offset zero, and both
-// advance the same counter, putting the next page past a whole page of questions
-// nobody can answer or destroy.
-async function listQuestions() {
-  const generation = {};
-  Object.values(QUESTION_LISTS).forEach((listing) => {
-    runs[listing.counter] += 1;
-    generation[listing.counter] = runs[listing.counter];
-    readSoFar[listing.counter] = 0;
-  });
-  for (const path of Object.keys(QUESTION_LISTS)) {
-    await readQuestions(path, false, generation[QUESTION_LISTS[path].counter]);
-  }
-}
-
-//: Which listing is which, in one place: the path it is read from, the node it is
-//: rendered into, the counter it advances, and what an empty one says. Two listings
-//: rather than one filtered, because they answer different questions (ADR-0078 §9).
-const QUESTION_LISTS = {
-  "/questions": {
-    node: "question-list",
-    counter: "questions",
-    empty: "Nothing is waiting for you.",
-  },
-  "/questions/interrupted": {
-    node: "interrupted-list",
-    counter: "interrupted",
-    empty: "No answer was begun and left unrecorded.",
-  },
-};
-
-// One page of one question listing. Paged for `readBeliefs`' reason one surface over:
-// a question past the first page would be one the owner can neither answer nor
-// destroy, and a rendered row is the only route to either.
-async function readQuestions(path, more, run) {
-  fault(null, "questions");
-  const listing = QUESTION_LISTS[path];
-  if (run !== runs[listing.counter]) {
-    return;
-  }
-  const half = headerHalf();
-  if (half === null) {
-    showBootstrap();
-    return;
-  }
-  const offset = readSoFar[listing.counter];
-  const era = sessionEra;
-  try {
-    const body = await relay(half, path, { limit: PAGE, offset }, "questions");
-    // Not this session's answer (#2404).
-    if (!sameSession(half, era)) {
-      return;
-    }
-    if (body === null || run !== runs[listing.counter]) {
-      return;
-    }
-    const list = el(listing.node);
-    if (!more) {
-      clearNode(list);
-    }
-    if (body.questions.length === 0 && !more) {
-      line(list, listing.empty, "hint");
-    }
-    // The offset each row was read at travels with it, because the ceremony that
-    // destroys a question re-reads the listing it came from and must ask for the same
-    // window — a re-read of the first page would report a question on the second as
-    // gone (ADR-0177 §5's fifth clause).
-    body.questions.forEach((one) => renderQuestion(list, one, path, offset));
-    readSoFar[listing.counter] += body.questions.length;
-    offerMore(list, body.questions.length, () => readQuestions(path, true, run));
-    show("questions", true);
-  } catch (_) {
-    // Not this session's condition to report (#2404).
-    if (!sameSession(half, era)) {
-      return;
-    }
-    fault(GATEWAY_GONE, "questions");
-  }
-}
-
 // One question, with everything ADR-0078 §8 requires it to convey — worded as the
 // conditional it is, because a pending question is not a belief of any band.
 // Everything ADR-0078 §8 requires a question to convey, without the controls the
@@ -8778,22 +8599,6 @@ function renderQuestionFields(item, question) {
       "notice"
     );
   }
-}
-
-function renderQuestion(list, question, path, offset) {
-  const item = document.createElement("div");
-  item.className = "question-row";
-  renderQuestionFields(item, question);
-  if (question.state !== "interrupted") {
-    offerAnswer(item, question);
-  }
-  renderSuccessor(item, question.successor);
-  const destroy = document.createElement("button");
-  destroy.type = "button";
-  destroy.textContent = "Forget the question";
-  destroy.addEventListener("click", () => forgetQuestion(question.id, path, offset));
-  item.appendChild(destroy);
-  list.appendChild(item);
 }
 
 // Where the **proposal** came from, or nothing to say (ADR-0189 §4, §9).
@@ -8956,184 +8761,6 @@ function renderRetirements(item, question) {
     line(item, `${origin.lead} ${one.content} (${one.record_id})`, origin.className);
     line(item, origin.note, "hint");
   });
-}
-
-// The question an answer already raised, rendered **by its own state** (ADR-0078
-// §9): only a waiting successor is something the user can go and answer, and
-// calling a declined or interrupted one "the follow-on question" advertises
-// something they cannot act on.
-function renderSuccessor(item, successor) {
-  if (successor === null) {
-    return;
-  }
-  if (successor.state === "open") {
-    line(item, `Your answer raised a further question, which is waiting: ${successor.id}`, "notice");
-    return;
-  }
-  if (successor.state === "declined") {
-    line(
-      item,
-      `Your answer landed on a question you had already declined: ${successor.id} ` +
-        "(forget it to be asked again)",
-      "notice"
-    );
-    return;
-  }
-  if (successor.state === "interrupted") {
-    line(
-      item,
-      `Your answer landed on another interrupted answer: ${successor.id} (dispose of that one too)`,
-      "notice"
-    );
-    return;
-  }
-  line(item, `Your answer raised a further question, since settled: ${successor.id}`, "hint");
-}
-
-function offerAnswer(item, question) {
-  const accept = document.createElement("button");
-  accept.type = "button";
-  accept.textContent = "Yes, believe it";
-  accept.addEventListener("click", () => answerQuestion(question.id, true));
-  const reject = document.createElement("button");
-  reject.type = "button";
-  reject.textContent = "No";
-  reject.addEventListener("click", () => answerQuestion(question.id, false));
-  item.appendChild(accept);
-  item.appendChild(reject);
-}
-
-async function answerQuestion(id, accept) {
-  fault(null, "questions");
-  const half = headerHalf();
-  if (half === null) {
-    showBootstrap();
-    return;
-  }
-  const panel = beginActs("Answering.");
-  try {
-    const body = await relay(half, "/question/answer", { question_id: id, accept }, "questions");
-    if (body === null) {
-      return;
-    }
-    renderAnswer(panel, body.answered);
-    await listQuestions();
-  } catch (_) {
-    fault(GATEWAY_GONE, "questions");
-  }
-}
-
-// What one answer did, as one of five outcomes (ADR-0078 §5, §9). A re-deferral is
-// reported as a **completed** answer carrying the next question rather than as a
-// failure: the answer was used, and it raised something new.
-function renderAnswer(panel, outcome) {
-  if (outcome.kind === "applied") {
-    line(panel, `Applied. That is what I believe now (${outcome.record_id}).`, "reply");
-  } else if (outcome.kind === "rejected") {
-    line(
-      panel,
-      "Declined. Nothing was written, and I will not ask you this again — forget " +
-        "the question if you want to be asked.",
-      "reply"
-    );
-  } else if (outcome.kind === "stale") {
-    line(
-      panel,
-      "Not applied. What that question was about no longer applies, so accepting it " +
-        "would have stored a belief that was already out of date.",
-      "notice"
-    );
-  } else if (outcome.kind === "not_open") {
-    line(
-      panel,
-      "That question is not open. It may never have existed, or it may have lapsed, " +
-        "been answered, or have an answer already in flight.",
-      "notice"
-    );
-  } else {
-    line(
-      panel,
-      "Not applied yet. Your answer was used, but it turned out to contradict " +
-        "something else you told me that you had not been shown.",
-      "notice"
-    );
-    if (outcome.successor === null && outcome.successor_refused) {
-      line(
-        panel,
-        "The question queue is full, so I could not put the follow-up to you. Answer " +
-          "or forget some of what is waiting, then teach me the correction again.",
-        "notice"
-      );
-    }
-  }
-  renderSuccessor(panel, outcome.successor);
-  if (outcome.disposed) {
-    line(
-      panel,
-      "That question was destroyed while your answer was being applied, so no record " +
-        "of the answer was kept.",
-      "hint"
-    );
-  }
-}
-
-// The ceremony ADR-0177 §5 gives this verb at this surface: the question is
-// rendered from a listing read **immediately before** the confirmation, and
-// `forget_question` is sent only for a question that read returned.
-//
-// No single-question read is added and none is needed (#495's third ground, cited
-// and not absorbed): the two listings ADR-0078 §8 already gives return the question
-// whole, and re-reading one is a call this page already makes.
-async function forgetQuestion(id, path, offset) {
-  fault(null, "questions");
-  const half = headerHalf();
-  if (half === null) {
-    showBootstrap();
-    return;
-  }
-  const era = sessionEra;
-  try {
-    const body = await relay(half, path, { limit: PAGE, offset }, "questions");
-    // Not this session's answer (#2404). **The confirmation is the display here**: this
-    // read exists only to put the record in front of the owner before it is destroyed,
-    // and a `window.confirm` carrying a belief's content, a conversation's turn count or
-    // a notification's summary is that content on screen over a form asking for a
-    // session. Nothing has been destroyed at this point, so there is nothing this owes
-    // an account of. Adversarial review, round 2, `major`.
-    if (!sameSession(half, era)) {
-      return;
-    }
-    if (body === null) {
-      return;
-    }
-    const question = body.questions.find((one) => one.id === id);
-    if (question === undefined) {
-      fault(QUESTION_GONE, "questions");
-      await listQuestions();
-      return;
-    }
-    const asked = window.confirm(
-      `About to destroy this question.\n\n${question.content}\n\n` +
-        `Would be held as: ${bandWords(question.band)} · ${question.kind}\n` +
-        `Why I am asking: ${question.reason}\nAsked: ${question.asked_at}\n\n` +
-        "Destroying it means I will not put it to you again, and its subject can be " +
-        "raised afresh. It does not answer it, and it writes nothing."
-    );
-    if (!asked) {
-      return;
-    }
-    const done = await relay(half, "/question/forget", { question_id: id }, "questions");
-    if (done === null) {
-      return;
-    }
-    await listQuestions();
-  } catch (_) {
-    // Not this session's condition to report (#2404).
-    if (!sameSession(half, era)) {
-      return;
-    }
-    fault(GATEWAY_GONE, "questions");
-  }
 }
 
 // --- the notification review surface (ADR-0177 §10; ADR-0130 §6, §7, §9) -----
@@ -9365,150 +8992,6 @@ function offerNotificationActs(item, record, offset) {
 // carrying a `goal_id`, performed from a surface listing the user was shown". Neither
 // is minted here; both are durable record ids and a reload changes nothing about them.
 
-// What the last act on this panel did, in that vocabulary's own words.
-//
-// **Not the fault slot**, because neither act failing is what these sentences are
-// about: every member of both vocabularies is something the hub *established*, the two
-// that moved nothing included, and writing "there was nothing here for this to take"
-// into a fault slot would report a working act as a broken one. `answer-said` and
-// `cancellation-said` hold the same position one panel over.
-function sayGoalAct(said) {
-  const node = el("goal-said");
-  node.textContent = said === null ? "" : said;
-  node.hidden = said === null;
-}
-
-// Start the listing again.
-//
-// The account of the last act is left alone here, because `withdrawClarification` and
-// `abandonGoal` each re-read the listing immediately after writing one — clearing it
-// would erase the sentence at the moment it was written. Every other route into the
-// panel clears it first.
-async function listGoals() {
-  runs.goals += 1;
-  readSoFar.goals = 0;
-  await readGoals(false, runs.goals);
-}
-
-// One page of goals, most recently taken up first (ADR-0250 §15).
-//
-// Paged for `readBeliefs`' reason one surface over: a goal past the first page would be
-// one the owner can neither answer nor give up, and a rendered row is the only route to
-// either. **There is no total**, and none is available to show — §15 makes the operation
-// answer none, on ADR-0074 §2's ground — so "is there more" is answered by asking.
-async function readGoals(more, run) {
-  fault(null, "goals");
-  if (run !== runs.goals) {
-    return;
-  }
-  const half = headerHalf();
-  if (half === null) {
-    showBootstrap();
-    return;
-  }
-  const offset = readSoFar.goals;
-  const era = sessionEra;
-  try {
-    const body = await relay(half, "/goals", { limit: PAGE, offset }, "goals");
-    // Not this session's answer (#2404).
-    if (!sameSession(half, era)) {
-      return;
-    }
-    if (body === null || run !== runs.goals) {
-      return;
-    }
-    const list = el("goal-list");
-    if (!more) {
-      clearNode(list);
-    }
-    if (body.goals.length === 0 && !more) {
-      line(
-        list,
-        "Nothing outstanding. Whatever you ask for next shows up here while I am " +
-          "working on it.",
-        "hint"
-      );
-    }
-    body.goals.forEach((one) => renderGoal(list, one));
-    readSoFar.goals += body.goals.length;
-    offerMore(list, body.goals.length, () => readGoals(true, run));
-    show("goals", true);
-  } catch (_) {
-    // Not this session's condition to report (#2404).
-    if (!sameSession(half, era)) {
-      return;
-    }
-    fault(GATEWAY_GONE, "goals");
-  }
-}
-
-// ADR-0261 §6's statement for a listing row whose `effect_in_flight` is **true**.
-//
-// §6 fixes which fact it names and leaves the wording to the lane: that an action of
-// this goal **is outstanding — claimed, possibly sent, outcome unknown**. Byte for byte
-// the terminal's, which is what makes ADR-0262 §11's parity point checkable here.
-//
-// **It says none of the three things §6 bars**: not that the action did not happen, not
-// that it did, and not that anything the user does will withdraw it.
-//
-// ***In flight* means the claim landed, never that the call left** (§6). The field is
-// true where a step stands `indeterminate` or `running` and asserts nothing about
-// whether the invoker was entered, so "may have been sent" is the strongest thing this
-// sentence is allowed to say.
-//
-// **And it names no tool, no call, no destination and no effect key** — §6 makes
-// *outstanding* "the step's status and never the presence of an effect key", includes a
-// **read** deliberately, and fixes that the word *effect* in the field's own name
-// "asserts that an `EffectKey` exists" nowhere. Which is why this says *an action*.
-const EFFECT_IN_FLIGHT =
-  "An action of this goal is outstanding: it was claimed, it may have been sent, " +
-  "and its outcome is not known.";
-
-// One goal, with everything `GoalSummary` carries and nothing it does not.
-//
-// **Paused and open are two facts and are shown as two.** The status says whether the
-// work is still live; `paused` says whether it is waiting on the owner. A goal can be
-// open and running, open and waiting, or closed — and collapsing the pair would lose
-// exactly the state this listing exists to make visible (#2286).
-//
-// **`effect_in_flight` is a third fact and is shown as a third** (ADR-0261 §6), on
-// `paused`'s own ground: "the engine computes it, so that two surfaces cannot render it
-// differently, and no adapter derives it". So this renders the boolean it was handed and
-// walks no attempt, execution or step. It is goal-wide and not per-attempt, which is why
-// it sits on the row rather than beside any one act.
-//
-// **And it is why the listing carries it at all**: the act's answer is heard once, and
-// "a listing showing an `abandoned` goal with nothing beside it would have lost the fact
-// R78 requires". The row and the act are the same predicate read at **two instants** —
-// they "cannot disagree about one instant, and are never required to agree across two" —
-// so a row reading false beside a goal the act reported an in-flight effect for is the
-// accurate answer to a different question. Nothing here re-reads or reconciles them.
-//
-// **The elements, the grounds, the attempts and the plans are not here and cannot be**:
-// the type "carries no attempt id, no revision number, no element, no ground, no
-// evidence reference and no plan", so this renders every field it has and invents none.
-function renderGoal(list, goal) {
-  const item = document.createElement("div");
-  item.className = "notification-row";
-  line(item, goal.outcome, "reply");
-  const waiting = goal.paused ? " — waiting on you" : "";
-  line(item, `State: ${goalMemberWords(GOAL_STATUS_WORDS, goal.status)}${waiting}`, "hint");
-  if (goal.effect_in_flight) {
-    line(item, EFFECT_IN_FLIGHT, "notification-summary");
-  }
-  line(
-    item,
-    goal.last_engaged_at === null
-      ? "No turn has taken it up yet."
-      : `Last taken up: ${goal.last_engaged_at}`,
-    "hint"
-  );
-  line(item, `id: ${goal.id}`, "hint");
-  renderGoalQuestion(item, goal.clarification);
-  offerGoalActs(item, goal);
-  list.appendChild(item);
-}
-
 // The open question a goal is waiting on, shared by the listing and by a raised
 // clarification — so a question read in an answer and the same question read back from
 // the listing say the same three things: the words, the deadline, and the act.
@@ -9532,190 +9015,6 @@ function renderGoalQuestion(item, clarification) {
   line(item, `question id: ${clarification.question_id}`, "hint");
 }
 
-// The statuses ADR-0250 §1 calls **closed**, which are the ones the abandonment is not
-// offered on.
-//
-// **§1 states the rule and it names two open statuses, not one**: *"A goal is **open**
-// where its `GoalStatus` is `ACTIVE` or `BLOCKED`, and **closed** where it is `ACHIEVED`
-// or `ABANDONED`. No lane reads a third state off the status, and **`BLOCKED` is
-// open**"*. This page previously tested `status === "active"`, which withheld the control
-// from a blocked goal — one that "cannot **currently** be achieved", which is the kind an
-// owner most wants to give up — while `abandon_goal`, which tests
-// `orchestration.goals.is_open` over `{ACTIVE, BLOCKED}`, would have abandoned it.
-// Adversarial review, round 8, `blocker`.
-//
-// **Keyed on the closed pair rather than the open one, because the two fail
-// differently.** A status this build does not know — a member from a hub at another
-// version, which `GOAL_STATUS_WORDS` already exists for — is then offered the control and
-// answered honestly by the engine, rather than having the act silently withheld.
-const CLOSED_GOAL_STATUSES = ["achieved", "abandoned"];
-
-// The acts one row offers (ADR-0250 §12).
-//
-// **Answering and taking up are not offered** (ADR-0309 §5:4): each attached a reference
-// to the Ask form's turn, and the Ask panel retired with that form.
-//
-// **Each statement carries every clause §12 gives it, which is what the round-9 parity
-// sweep settled.** `withdrawn` says what the act *buys* — §12: "withdrawing removes the
-// question and not the pause … **What the act buys is the freedom to ask again**" — and
-// `nothing_to_withdraw` says that whatever settled the question stands, which is the
-// half that stops a no-op reading as damage. Both were on the command line's twin and
-// not here; a clause of the decision stated on one surface and not the other is the
-// defect rounds 7, 8 and 9 each were.
-//
-// **Giving the goal up is offered on a goal that is still open and on no other**, which
-// is what the members say: §12 answers `ALREADY_CLOSED` on a goal that is `achieved` or
-// `abandoned`, so a control there would be one that reports having done nothing. That is
-// a rendering decision taken on the status the engine sent and not a rule derived here —
-// pressing it on a row that closed since is still answered honestly.
-function offerGoalActs(item, goal) {
-  const row = document.createElement("p");
-  row.className = "choice";
-  if (goal.clarification !== null) {
-    const withdraw = document.createElement("button");
-    withdraw.type = "button";
-    withdraw.textContent = "Take the question back";
-    withdraw.addEventListener("click", () =>
-      withdrawClarification(goal.clarification.question_id)
-    );
-    row.appendChild(withdraw);
-  }
-  // ADR-0254 §11's listing, reached from the goal it is about. **Offered on every row,
-  // open or closed**: a closed goal may still hold a standing authority, and the
-  // withdrawal is the owner's remedy — a control withheld there would leave an
-  // authority visible through no route on this page. The listing answers empty where
-  // there is none, which is the honest answer rather than a reason to hide the button.
-  const authorities = document.createElement("button");
-  authorities.type = "button";
-  authorities.textContent = "What this authorises";
-  authorities.addEventListener("click", () => listAuthorizations(goal));
-  row.appendChild(authorities);
-  if (!CLOSED_GOAL_STATUSES.includes(goal.status)) {
-    const give = document.createElement("button");
-    give.type = "button";
-    give.textContent = "Give this up";
-    give.addEventListener("click", () => abandonGoal(goal));
-    row.appendChild(give);
-  }
-  item.appendChild(row);
-}
-
-// Take one clarification back without answering it (ADR-0250 §12).
-//
-// **This is not a denial and this page does not present it as one**: a withdrawal
-// "records no answer, revises no interpretation and engages no goal". The page renders
-// one fixed statement for the member that comes back and rules on nothing.
-async function withdrawClarification(questionId) {
-  fault(null, "goals");
-  sayGoalAct(null);
-  const half = headerHalf();
-  if (half === null) {
-    showBootstrap();
-    return;
-  }
-  try {
-    const done = await relay(half, "/clarification/withdraw", { question_id: questionId }, "goals");
-    if (done === null) {
-      return;
-    }
-    // Said as a fault rather than in the row, because the row is about to be replaced
-    // by a fresh read and a sentence written into it would be gone before it was read.
-    sayGoalAct(goalMemberWords(CLARIFICATION_WITHDRAWAL_WORDS, done.withdrawal));
-    await listGoals();
-  } catch (_) {
-    fault(GATEWAY_GONE, "goals");
-  }
-}
-
-// Give one goal up (ADR-0250 §12).
-//
-// **The confirmation is show-then-confirm at the unit the owner thinks in** (ADR-0073
-// §5), from the row they are looking at: what it shows is the outcome statement, which
-// is what a goal *is* to a reader, and it says in terms what the act does not do.
-// ADR-0250 §12 is the source of every clause in it — the goal leaves what is
-// considered, its open question is withdrawn, and nothing already done is undone.
-async function abandonGoal(goal) {
-  const asked = window.confirm(
-    `About to give this up.\n\n${goal.outcome}\n\nI will not take it up again on my ` +
-      "own and nothing more will be planned for it, and any question it has open is " +
-      "withdrawn.\n\nNothing already done for it is undone, reversed or replayed, and " +
-      "nothing under way is cancelled. The record stays and this listing still shows " +
-      "it, so you can point at it again later.\n\nYou are giving up whatever goal that " +
-      "id names when you answer, which may have changed since it was shown."
-  );
-  if (!asked) {
-    return;
-  }
-  fault(null, "goals");
-  sayGoalAct(null);
-  const half = headerHalf();
-  if (half === null) {
-    showBootstrap();
-    return;
-  }
-  try {
-    const done = await relay(half, "/goal/abandon", { goal_id: goal.id }, "goals");
-    if (done === null) {
-      return;
-    }
-    sayGoalAct(goalMemberWords(GOAL_ABANDONMENT_WORDS, done.abandonment));
-    await listGoals();
-  } catch (_) {
-    fault(GATEWAY_GONE, "goals");
-  }
-}
-
-// How many listings this page has started. The panel is opened from a goal row, and two
-// rows pressed in quick succession are two requests that can land in either order — so
-// the count is captured when a request starts and compared when it returns, and a
-// response that is not the latest is dropped rather than rendered.
-//
-// **Without it one goal's rows are drawn under another's name**: a slow request for A
-// landing after a fast one for B leaves B's statement at the head of the panel and A's
-// rows beneath it. This is `runs.goals`' own arrangement one panel over. Adversarial
-// review, round 2, `major`.
-//
-// **It bounds no act.** A withdrawal reports on the record it was taken on and
-// re-reads nothing, so it neither races a listing nor is lost to one (see `actResult`).
-let authorizationRuns = 0;
-
-// The listing read in flight, or `null` — `listing`'s twin one panel over, and it is
-// there for the reason that one states: *"Stopping the read closes both, which a
-// comparison after the `await` closes only the first of."*
-//
-// **A comparison after the `await` is too late, because `relay` has already written to
-// the page by then.** It renders a refusal before it returns — `refused` → `report` →
-// `sessionLost` — so a superseded listing that comes back refused puts a stale fault
-// over the newer listing's rows, and one refused `no-live-session` after the owner has
-// re-entered forgets the **new** session's header half and throws the page back to the
-// bootstrap form: a dead request ending a live session. Neither is reachable once the
-// superseded request is stopped: it produces no response to classify. Adversarial
-// review, round 12, `major`.
-let authorizationListing = null;
-
-// What this page knows about a record beyond what the last listing said.
-//
-// **A row's state is a function of the record, not of a node captured when it was
-// drawn.** Six rounds chased one shape: the act reached into elements it had closed
-// over, so every listing that redrew those elements detached the act's own report from
-// the screen. The last variant was the worst, because the replacement was *wrong* and
-// not merely silent — re-open the same goal while a withdrawal is out and the rebuilt
-// row reads "still stands" beside an enabled control that can issue a second
-// revocation. Adversarial review, round 7, `blocker`.
-//
-// Keyed by authorization id, consulted by `showAuthorizationState` at **every** render,
-// these make the answer correct by construction rather than one node at a time: a row
-// drawn during the act is drawn out of reach, a row drawn after it is drawn withdrawn,
-// and it does not matter which listing drew it or whether the act's own row survived.
-//
-// **`withdrawn` records the hub's word and not the page's hope.** Only a `settled`
-// settlement puts an id here — the store's statement that the record is now `REVOKED` —
-// so a listing fetched before the act and rendered after it does not put an enabled
-// control back under a record that no longer stands. Every other settlement left the
-// record where it was, and so leaves the row where it was.
-const authorizationWithdrawn = new Set();
-const authorizationInFlight = new Set();
-
 // --- what an authorization says, on this page (ADR-0254 §11) ----------------
 //
 // **One reader and one renderer for a coverage member**, shared by the question, the
@@ -9733,34 +9032,6 @@ const authorizationInFlight = new Set();
 // **Instants are rendered as the gateway sent them**, which is this page's existing
 // convention for every instant it shows and is issue #1392's open lane, not this one's:
 // a second format here would make one page speak two.
-
-// What each `AuthorizationSettlement` member reads as, in the words the vocabulary
-// itself carries (ADR-0254 §16).
-//
-// **All four, and `would_duplicate` among them although it is unreachable here**: it is
-// reachable only on a settlement to `ESTABLISHED` and a withdrawal settles to
-// `REVOKED`, but the vocabulary crosses a version boundary and a member with no
-// sentence renders as silence. `goalMemberWords` answers the unknown-member refusal for
-// anything else, so a hub at another version is reported rather than misreported.
-//
-// **Not one of them is a fault**, the two that moved nothing included: each says what
-// the store found, which is the act working rather than the act failing. They take the
-// quiet `notice` slot for `goal-said`'s stated reason one panel over.
-const AUTHORIZATION_SETTLEMENT_WORDS = {
-  settled:
-    "Withdrawn. Calls that authority covered will be put to you again. Nothing already " +
-    "decided is rewritten, nothing already done is undone, and a call already going out " +
-    "is not stopped.",
-  not_at_source:
-    "I hold that record and it is not a standing authority, so nothing was withdrawn. It " +
-    "may have been withdrawn already, replaced by a later one, lapsed, or be a question " +
-    "you never answered — a question you have not answered is withdrawn by declining it, " +
-    "not here.",
-  no_such_authorization: "I hold no record of that id at all, so nothing was withdrawn.",
-  would_duplicate:
-    "The hub answered with an outcome a withdrawal cannot produce, so nothing was " +
-    "changed here and this page is not guessing at what it meant.",
-};
 
 // One bound, as a sentence (ADR-0254 §2's three kinds and no fourth).
 //
@@ -10041,8 +9312,7 @@ function renderAuthorizationProjection(item, projection) {
   line(
     item,
     `It lapses at ${projection.expires_at}. Until then I can make this call for this ` +
-      "piece of work again without asking, and you can withdraw it at any time from " +
-      "What this authorises.",
+      "piece of work again without asking.",
     "hint"
   );
 }
@@ -10095,160 +9365,23 @@ function readAuthorizationView(view) {
 // what the user authorised and is not a promise that the next call will be allowed", so
 // nothing here says the next call goes through — and a record resting on a recipient
 // authority that has since lapsed still reads as standing, because that is what it is.
-// **`withGoal` because the goal is named once and not once per row**, which is what
-// driving the page settled: §11's listing is *per goal*, so every row of one listing
-// carries the same statement and repeating it turns the fact that distinguishes the
-// rows — the declaration — into the third line of each. The panel names the goal in its
-// own subject line and the rows lead with the declaration; the **announcement** passes
-// `true`, because it has no subject line and a reader meeting it inside a reply needs to
-// know which piece of work it is about.
-function renderAuthorization(list, view, withGoal) {
+// One authority, as the announcement shows it (ADR-0254 §11).
+//
+// **The goal leads**, because an announcement has no subject line and a reader meeting
+// it inside a reply needs to know which piece of work it is about. The id is the
+// handle §11 asks to have in front of the owner. **No act is offered or pointed to**:
+// the authorizations listing this once sent the owner to, and the withdrawal it
+// offered, retired with the goals and authorizations panels (ADR-0309 §5).
+function renderAuthorization(list, view) {
   const item = document.createElement("div");
   item.className = "notification-row";
-  // The record this row is about, so that the act can restate **every** row drawn for
-  // it — this listing's, a listing drawn after it, and an announcement of the same
-  // record sitting in a reply above — without holding a reference to any of them.
-  item.dataset.authorization = view.id;
-  if (withGoal) {
-    line(item, view.goal_statement, "reply");
-    line(item, `Through: ${view.tool_id} — ${view.tool_description}`, "hint");
-  } else {
-    line(item, `${view.tool_id} — ${view.tool_description}`, "reply");
-  }
+  line(item, view.goal_statement, "reply");
+  line(item, `Through: ${view.tool_id} — ${view.tool_description}`, "hint");
   renderCoverage(item, view.coverage);
-  line(item, "", "hint authorization-standing");
-  line(item, `id: ${view.id}`, "hint");
-  // **The act is offered where its outcome can be read, and nowhere else.** An
-  // announcement sits in a reply the next turn replaces, so a withdrawal taken there
-  // would report into DOM the page has already thrown away — the fifth way a settlement
-  // could be lost (r6). So the announcement names the handle and says where the act is
-  // taken, which is exactly what the command line's announcement does: it prints
-  // `assistant revoke-authorization <id>` rather than performing the withdrawal.
-  // ADR-0254 §11 asks for the **handle** in front of the owner at the act, and the id
-  // above is that.
-  if (!withGoal) {
-    const row = document.createElement("p");
-    row.className = "choice authorization-act";
-    const withdraw = document.createElement("button");
-    withdraw.type = "button";
-    withdraw.textContent = "Withdraw this";
-    withdraw.addEventListener("click", () => revokeAuthorization(view, list));
-    row.appendChild(withdraw);
-    item.appendChild(row);
-  } else {
-    line(
-      item,
-      "Withdraw it whenever you like, under What I am working on — this piece of work, " +
-        "then What this authorises.",
-      "hint authorization-act"
-    );
-  }
-  list.appendChild(item);
-  showAuthorizationState(item, view);
-}
-
-// What one drawn row says about the record, given everything this page knows.
-//
-// **The single place a row's standing is written**, reached from `renderAuthorization`
-// as the row is built and from `restateAuthorization` when the act settles — so a row
-// drawn before, during or after a withdrawal says the same thing about it.
-//
-// **A withdrawn record loses the act rather than keeping it disabled**, because the act
-// is gone rather than momentarily unavailable: the announcement's "withdraw it under
-// What this authorises" is as wrong under a withdrawn record as an enabled button, and
-// both are the same `authorization-act` element.
-function showAuthorizationState(item, view) {
-  const standing = item.querySelector(".authorization-standing");
-  const act = item.querySelector(".authorization-act");
-  if (authorizationWithdrawn.has(view.id)) {
-    standing.textContent = "You withdrew this.";
-    if (act !== null) {
-      act.remove();
-    }
-    return;
-  }
   const stands = view.live ? "still stands" : "has lapsed";
-  standing.textContent = `It ${stands}; the horizon is ${view.expires_at}.`;
-  const withdraw = item.querySelector(".authorization-act button");
-  if (withdraw !== null) {
-    withdraw.disabled = authorizationInFlight.has(view.id);
-  }
-}
-
-// Say again what every row drawn for this record says.
-//
-// **Found by the record and never held**, which is the whole of round 7's fix: the rows
-// on screen at the end of an act are not the rows that were on screen when it started,
-// and an act that writes into the ones it remembers writes into DOM the page has thrown
-// away.
-//
-// **Matched by comparing the attribute, never by building a selector out of it**, for
-// `actResult`'s stated reason one function over: `CSS.escape` maps U+0000 to U+FFFD, so
-// a selector built from an id the type admits can silently match no row — and the row
-// the act settled would go on reading "still stands" beside a live control, which is
-// the very state round 7 closed. Adversarial review, round 8, `major`.
-function restateAuthorization(view) {
-  document.querySelectorAll("[data-authorization]").forEach((item) => {
-    if (item.dataset.authorization === view.id) {
-      showAuthorizationState(item, view);
-    }
-  });
-}
-
-// Where the settlement of one act is written, and what it says.
-//
-// **Outside anything a surface replaces, and one entry per record.** Five rounds each
-// ruled out a placement. A panel-wide slot with an unattributed sentence is read as
-// being about whatever listing the panel holds when the answer lands (r3). Dropping the
-// sentence because the panel moved on is silence about an act that happened (r4). A node
-// **inside** the row is detached with the row the moment the listing is cleared (r5). And
-// **one** node shared by the panel is overwritten when two rows are withdrawn at once,
-// losing which of them answered what (r6).
-//
-// What is true under all of them: an entry of its own, keyed by the record it is about,
-// in a region the listing does not own — so it cannot be detached, cannot be
-// mis-attributed, and cannot be overwritten by another record's act. A second press on
-// the same record replaces **its own** entry rather than stacking.
-//
-// The region is a sibling of the listing inside the panel, which is where an owner
-// taking an act in the panel is looking. **Nothing outside the panel takes this act**:
-// an announcement names the handle and says where the act is taken, exactly as the
-// command line's announcement prints the command rather than performing it.
-function actResult(list, view) {
-  let region = list.parentElement.querySelector(".authorization-results");
-  if (region === null) {
-    region = document.createElement("div");
-    region.className = "authorization-results";
-    list.parentElement.insertBefore(region, list);
-  }
-  // **The record is matched by comparing the value, never by building a selector out
-  // of it.** An `Identifier` refuses only a blank and requires a UTF-8 encoding — issue
-  // #62 holds the control-character question open — and `CSS.escape` replaces U+0000
-  // with U+FFFD, which is a *lossy* escape rather than a failing one: the selector then
-  // matches nothing and quietly builds a second entry for a record that already has
-  // one. Comparing `dataset` values compares the strings the page actually holds, for
-  // every id the type admits. Adversarial review, round 8, `major`.
-  const key = `said-${view.id}`;
-  let node = [...region.children].find((one) => one.dataset.record === key) ?? null;
-  if (node === null) {
-    node = document.createElement("p");
-    node.className = "notice authorization-said";
-    node.dataset.record = key;
-    region.appendChild(node);
-  }
-  return node;
-}
-
-// One settlement, as a sentence that names the record it is about.
-//
-// **The attribution is what makes an entry outside the list honest**: the listing under
-// it may by then be another goal's, and a bare "Withdrawn." there would read as being
-// about those rows. Naming the goal and the declaration says which record moved,
-// whatever is on screen beneath it — and it is what tells two entries apart when two
-// records are withdrawn at once.
-function statedSettlement(view, settlement) {
-  const said = goalMemberWords(AUTHORIZATION_SETTLEMENT_WORDS, settlement);
-  return `${view.goal_statement} — ${view.tool_id}: ${said}`;
+  line(item, `It ${stands}; the horizon is ${view.expires_at}.`, "hint");
+  line(item, `id: ${view.id}`, "hint");
+  list.appendChild(item);
 }
 
 // ADR-0254 §11's announcement: authorities a turn opened **without asking**.
@@ -10279,198 +9412,7 @@ function renderOpenedAuthorizations(body, opened) {
     return;
   }
   line(body, "I have taken that as standing permission:", "notice");
-  // Each announcement reports its own withdrawal beside itself: this row is in the
-  // reply, and the panel's slot is in a section this owner may never have opened.
-  opened.forEach((view) => renderAuthorization(body, view, true));
-}
-
-// What one piece of work still authorises (ADR-0254 §11).
-//
-// **Unpaged, because the operation takes no limit**: "a truncated answer to 'what do I
-// authorise' is a false answer rather than a partial one", so there is no more-button
-// here and a listing too large for the frame comes back as a refusal rather than short.
-//
-// **Per goal, and reached from the goal it is about** — §11 adds no cross-goal read,
-// and the id this sends is the row's own rather than one typed here.
-async function listAuthorizations(goal) {
-  fault(null, "authorizations");
-  authorizationRuns += 1;
-  if (authorizationListing !== null) {
-    const superseded = authorizationListing;
-    authorizationListing = null;
-    superseded.abort();
-  }
-  const run = authorizationRuns;
-  const half = headerHalf();
-  if (half === null) {
-    showBootstrap();
-    return;
-  }
-  const era = sessionEra;
-  const stopping = new AbortController();
-  authorizationListing = stopping;
-  try {
-    const body = await relay(
-      half,
-      "/authorizations",
-      { goal_id: goal.id },
-      "authorizations",
-      stopping
-    );
-    // Not this session's answer (#2404). This is the listing adversarial review found
-    // the shape at (round 9, `major`); what was three lines local to this function is
-    // now the one check every listing makes, and it asks a question the local
-    // comparison could not: a session this page lost and re-entered under an identical
-    // value is a different session, and `sessionEra` is what counts it.
-    if (!sameSession(half, era)) {
-      return;
-    }
-    // A response that is not the latest is dropped whole: the run that overtook it owns
-    // the panel, and rendering this one would draw one goal's rows under another's name.
-    if (body === null || run !== authorizationRuns) {
-      return;
-    }
-    authorizationListing = null;
-    const list = el("authorization-list");
-    clearNode(list);
-    if (!Array.isArray(body.authorizations) || !body.authorizations.every(readAuthorizationView)) {
-      const unreadable = el("authorization-goal");
-      unreadable.textContent = goal.outcome;
-      unreadable.hidden = false;
-      line(list, GOAL_MEMBER_UNREADABLE, "notice");
-      show("authorizations", true);
-      return;
-    }
-    // **The statement comes from what the listing returned, and never from the row the
-    // owner pressed.** ADR-0254 §11 has the engine read the goal's statement and the
-    // surface render *that*; the goal listing this panel was opened from is a page of
-    // summaries fetched earlier, and a statement revised in between would leave the
-    // panel labelling this goal's authorities with the goal's previous outcome. The
-    // cached summary is used only where the listing came back empty and there is no
-    // returned statement to use. Adversarial review, round 1, `blocker`.
-    //
-    // **It is written outside the list**, so that it sits above the settlements of acts
-    // taken on it rather than below them, and so that a re-read replaces it rather than
-    // appending a second one.
-    const named = el("authorization-goal");
-    named.textContent =
-      body.authorizations.length === 0 ? goal.outcome : body.authorizations[0].goal_statement;
-    named.hidden = false;
-    if (body.authorizations.length === 0) {
-      line(
-        list,
-        "Nothing standing for this piece of work. Every call for it is put to you as it " +
-          "comes up.",
-        "hint"
-      );
-    } else {
-      body.authorizations.forEach((one) =>
-        renderAuthorization(list, one, false)
-      );
-      line(
-        list,
-        "These are records of what you authorised. They are not a promise that the next " +
-          "call will go through — I check every call against everything else at the " +
-          "moment I make it.",
-        "hint"
-      );
-    }
-    show("authorizations", true);
-  } catch (_) {
-    // Not this session's condition to report (#2404).
-    if (!sameSession(half, era)) {
-      return;
-    }
-    // An abort is not a transport failure, and only the newest read is entitled to say
-    // the gateway has gone — `listConversations`' own comparison, for its own reason.
-    if (run === authorizationRuns) {
-      fault(GATEWAY_GONE, "authorizations");
-    }
-  }
-}
-
-// The ceremony before one withdrawal, asked once and shared by both acts below.
-//
-// **Show-then-confirm at the unit the owner thinks in** (ADR-0073 §5), from the row
-// they are looking at: what it shows is the goal's statement and the declaration, and it
-// says in terms what the act does not do. **Whole and never narrowing**, so the ceremony
-// does not imply a narrowing that does not exist.
-function confirmWithdrawal(view) {
-  return window.confirm(
-    `About to withdraw this authority.\n\n${view.goal_statement}\n${view.tool_id}\n\n` +
-      "Calls it covered will be put to you again.\n\nNothing already decided is " +
-      "rewritten, nothing already done is undone, and a call already going out is not " +
-      "stopped.\n\nWithdrawal is whole: there is no narrowing, and changing what you " +
-      "authorise means withdrawing this and answering a fresh question later."
-  );
-}
-
-// Withdraw one standing authority (ADR-0254 §11).
-//
-// **One act for both places a row is offered from**, reporting into a node the listing
-// does not own and naming the record it moved: see `actResult` for the four rounds that
-// settled that, and `statedSettlement` for why the sentence carries the attribution.
-//
-// **It re-reads no listing.** A refresh here is one more request to race the owner's
-// next, and what the record now says is written into the page's own state instead.
-//
-// **It holds no element of the row it was taken on.** The listing can be cleared and
-// rebuilt while the request is out — the owner has only to re-open the same goal — and
-// an act writing into the elements it closed over then reports into detached DOM while
-// the rebuilt row on screen still offers the act. So the id goes into `inFlight` and,
-// where the hub settled it, into `withdrawn`, and every row drawn for the record is
-// restated from those. Adversarial review, round 7, `blocker`.
-//
-// **The control is out of reach for the duration of the request.** Two accepted presses
-// race otherwise, and the loser's `NOT_AT_SOURCE` lands after the winner's `SETTLED`
-// and overwrites it — a row reading "You withdrew this" under a sentence saying nothing
-// was withdrawn. `inFlight` is the guard and the rendering both, so it holds on a row
-// the listing redrew mid-act, which a `disabled` property on one button did not.
-//
-// **The row is retired on `settled` and on nothing else.** A record the store says is
-// now `REVOKED` must not go on reading "still stands" beside an enabled control. Every
-// other member left the record where it was, so the row is left where it was too.
-async function revokeAuthorization(view, list) {
-  if (
-    authorizationInFlight.has(view.id) ||
-    authorizationWithdrawn.has(view.id) ||
-    !confirmWithdrawal(view)
-  ) {
-    return;
-  }
-  fault(null, "authorizations");
-  const said = actResult(list, view);
-  said.textContent = "";
-  said.hidden = true;
-  const half = headerHalf();
-  if (half === null) {
-    showBootstrap();
-    return;
-  }
-  authorizationInFlight.add(view.id);
-  restateAuthorization(view);
-  try {
-    const done = await relay(
-      half,
-      "/authorization/revoke",
-      { authorization_id: view.id },
-      "authorizations"
-    );
-    if (done !== null && done.settlement === "settled") {
-      authorizationWithdrawn.add(view.id);
-    }
-    authorizationInFlight.delete(view.id);
-    restateAuthorization(view);
-    if (done === null) {
-      return;
-    }
-    said.textContent = statedSettlement(view, done.settlement);
-    said.hidden = false;
-  } catch (_) {
-    authorizationInFlight.delete(view.id);
-    restateAuthorization(view);
-    fault(GATEWAY_GONE, "authorizations");
-  }
+  opened.forEach((view) => renderAuthorization(body, view));
 }
 
 // Deal with one notification and keep the record (ADR-0130 §9).
@@ -11551,21 +10493,10 @@ const CONTROL_PANELS = [
   "history",
   "acts",
   "beliefs",
-  "questions",
   "review",
   "tuning",
   "connections",
   "connection-log",
-  // ADR-0250's listing, omitted here when it was written (#2395) although `readGoals`
-  // reveals it and it renders goal outcome statements, clarification text and goal ids
-  // — Tier 1 content about the owner's outstanding work, which is exactly what a page
-  // with no session may not be showing. `test_bundle.py` takes the census that would
-  // have caught it.
-  "goals",
-  // ADR-0254 §11's listing. It is hidden when a session ends for every other panel's
-  // reason: what it shows is one goal's standing authorities, which is exactly the
-  // content a page with no session may not be showing.
-  "authorizations",
   // ADR-0293's chat: the owner's messages and the assistant's, which a page with no
   // session may not be showing. `closeChat` stops its following with it.
   "chat",
@@ -11665,13 +10596,6 @@ el("beliefs-button").addEventListener("click", listBeliefs);
 // hub is what answers which ones match.
 ["band-asserted", "band-derived", "band-attested"].forEach((box) => {
   el(box).addEventListener("change", listBeliefs);
-});
-el("questions-button").addEventListener("click", listQuestions);
-el("goals-button").addEventListener("click", () => {
-  // The control is a fresh question, so the account of whatever act was last taken
-  // stops standing at the moment the owner asks it again.
-  sayGoalAct(null);
-  return listGoals();
 });
 el("review-button").addEventListener("click", listNotifications);
 el("tuning-button").addEventListener("click", listTuning);

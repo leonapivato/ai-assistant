@@ -1,9 +1,10 @@
 """The browser's control surface end to end (ADR-0177).
 
-The grant surface, the belief surface and the deferred-question surface reach a
-browser here. ADR-0177 §1 admits them by name; §2 keeps the four request classes;
-§5, §6 and §7 say what the surfaces owe once they are reachable. ``observe``, which
-this lane added beside them, left the surface with ADR-0285 §6.
+The grant surface and the belief surface reach a browser here. ADR-0177 §1 admits
+them by name; §2 keeps the four request classes; §5, §6 and §7 say what the surfaces
+owe once they are reachable. ``observe``, which this lane added beside them, left the
+surface with ADR-0285 §6, and the deferred-question surface left with its panel
+(ADR-0309 §5).
 
 **Driven through a real socket** for ``test_gateway.py``'s reason: what is under
 test is a request the browser makes and a body it renders, and the router, the door
@@ -24,17 +25,13 @@ from test_gateway_streams import _harness
 
 from ai_assistant.core.errors import GrantError, UngrantableSourceError
 from ai_assistant.core.types import (
-    AnswerKind,
-    AnswerOutcome,
     Attestation,
     Belief,
     BeliefBand,
     Evidence,
     GrantScope,
     MemoryKind,
-    QuestionState,
     ReportedExtent,
-    SuccessorLink,
 )
 from ai_assistant.interfaces.gateway.http import Request
 from ai_assistant.interfaces.gateway.records import RequestClass
@@ -63,10 +60,6 @@ _ADDED: dict[str, str] = {
     "/beliefs": "beliefs",
     "/belief": "belief",
     "/belief/forget": "forget",
-    "/questions": "questions",
-    "/questions/interrupted": "interrupted_questions",
-    "/question/answer": "answer",
-    "/question/forget": "forget_question",
 }
 
 #: One well-formed body per path, so a case can drive any of them without inventing
@@ -82,10 +75,6 @@ _WELL_FORMED: dict[str, dict[str, Any]] = {
     "/beliefs": {},
     "/belief": {"record_id": "rec-1"},
     "/belief/forget": {"record_id": "rec-1"},
-    "/questions": {},
-    "/questions/interrupted": {},
-    "/question/answer": {"question_id": "q-1", "accept": True},
-    "/question/forget": {"question_id": "q-1"},
 }
 
 
@@ -445,8 +434,8 @@ async def test_a_listing_carries_every_field_the_floor_requires_and_no_citation(
 
 # --- ADR-0189 §2's fields on the wire the browser reads ----------------------
 #
-# The page has no other source for them: `_belief_fields` and `_question_view` are
-# what a belief and a question *are* by the time `app.js` sees one, so a field that
+# The page has no other source for them: `_belief_fields` is what a belief *is* by
+# the time `app.js` sees one, so a field that
 # does not cross here cannot be rendered there however §9 words the obligation.
 
 
@@ -558,50 +547,6 @@ async def test_the_extent_rides_on_the_record_and_crosses_to_no_browser() -> Non
         assert set(single["belief"]["attestation"]) == {"reported_by", "reported_at"}
 
 
-async def test_each_retirement_carries_its_own_warrant_and_the_question_its_own_origin() -> None:
-    """ADR-0189 §2's fourth clause, on the one wire that could run the two together.
-
-    The question's own two fields describe the **proposal**; each entry in ``retires``
-    answers for itself through its own ``warrant``. The case is #673's ordinary one: a
-    user's own assertion, deferred by the policy, retiring an attested calendar line.
-    The proposal is ``ASSERTED`` with no attestation and the retirement is ``ATTESTED``
-    with one — so a view that borrowed either answer for the other would be visibly
-    wrong here, and a view that carried only one of them would leave the page unable to
-    tell an attacker-authorable line from this system's own sentence.
-    """
-    engine = FakeAssistantEngine()
-    engine.ask(
-        "q-1",
-        content="the user works from Lisbon",
-        state=QuestionState.OPEN,
-        retires=(
-            engine.retirement(
-                "live-1",
-                content="dinner with the board on Thursday",
-                band=BeliefBand.ATTESTED,
-                attestation=Attestation(reported_by="work-calendar", reported_at=_INSTANT),
-            ),
-            engine.retirement("gone-1"),
-        ),
-    )
-    async with _harness(engine) as one:
-        _, body = await one.whole("POST", "/questions", {})
-
-        held = body["questions"][0]
-        assert held["attestation"] is None, "the proposal is the user's own word"
-        assert held["rests_on_recorded_external_content"] is False
-        attested, tombstone = held["retires"]
-        assert attested["warrant"] == {
-            "band": "attested",
-            "rests_on_recorded_external_content": True,
-            "attestation": {
-                "reported_by": "work-calendar",
-                "reported_at": _INSTANT.isoformat(),
-            },
-        }
-        assert tombstone == {"record_id": "gone-1", "content": None, "warrant": None}
-
-
 async def test_an_absent_band_filter_and_an_empty_one_are_different_questions() -> None:
     """The contract's own words: ``bands`` of ``None`` selects every band, and "an
     empty sequence selects nothing, which is a different answer from ``None``".
@@ -682,130 +627,12 @@ async def test_forgetting_a_belief_reports_whether_there_was_one_to_forget() -> 
         assert again == {"destroyed": False}
 
 
-# --- ADR-0078 §8: the deferred-question surface ------------------------------
-
-
-async def test_the_two_question_listings_answer_two_different_questions() -> None:
-    """ADR-0078 §9: an interrupted question is "not 'failed' and not 'retryable': the
-    system does **not** know whether the memory write landed".
-
-    Two reads and two lists all the way to the surface, because offering an
-    interrupted question beside the answerable ones would present a claim that cannot
-    be taken (ADR-0078 §8).
-    """
-    engine = FakeAssistantEngine()
-    engine.ask("q-1", content="do you run on Tuesdays", state=QuestionState.OPEN)
-    engine.ask("q-2", content="did you move house", state=QuestionState.INTERRUPTED)
-    async with _harness(engine) as one:
-        _, waiting = await one.whole("POST", "/questions", {})
-        _, begun = await one.whole("POST", "/questions/interrupted", {})
-
-        assert [one["id"] for one in waiting["questions"]] == ["q-1"]
-        assert [one["id"] for one in begun["questions"]] == ["q-2"]
-        assert begun["questions"][0]["state"] == "interrupted"
-
-
-async def test_a_question_carries_what_it_would_have_the_assistant_believe() -> None:
-    """ADR-0078 §8's six things, of which the conditional is the one a surface gets
-    wrong: a pending question "is not a belief of any band", so the band it *would*
-    enter travels as the conditional it is, beside why the user is being asked and
-    exactly what accepting would retire."""
-    engine = FakeAssistantEngine()
-    engine.ask("q-1", content="do you run on Tuesdays", state=QuestionState.OPEN)
-    async with _harness(engine) as one:
-        _, body = await one.whole("POST", "/questions", {})
-
-        held = body["questions"][0]
-        assert set(held) == {
-            "id",
-            "state",
-            "content",
-            "kind",
-            "band",
-            "rationale",
-            "reason",
-            "retires",
-            "asked_at",
-            "expires_at",
-            "successor",
-            "attestation",
-            "rests_on_recorded_external_content",
-        }
-        assert held["band"] == "asserted"
-        assert held["retires"] == []
-        assert held["successor"] is None
-
-
-async def test_an_answer_needs_a_boolean_and_is_never_defaulted() -> None:
-    """A default would be this adapter deciding whether the user believes something,
-    which is what ADR-0097 §8's reasoning forbids a surface anywhere in this system.
-
-    ``true`` as a string is refused for the same reason ``_integer`` excludes
-    ``bool``: a value that is *nearly* the right type is the one that reaches the
-    store as the wrong answer.
-    """
-    async with _harness() as one:
-        for payload in ({"question_id": "q-1"}, {"question_id": "q-1", "accept": "yes"}):
-            status, body = await one.whole("POST", "/question/answer", payload)
-
-            assert status == 400, payload
-            assert body["fault"] == "malformed-request", payload
-        assert one.engine.calls == []
-
-
-async def test_an_answer_renders_the_outcome_beside_what_it_left_behind() -> None:
-    """ADR-0078 §5 and §9: five outcomes, and two facts reported *alongside* whichever
-    applies rather than in place of it.
-
-    A re-deferral that could queue no follow-on at all says so — calling it
-    "re-deferred" would claim a question was asked when none was — and a question
-    destroyed while its answer was being applied is a true statement about the
-    bookkeeping and never about the answer.
-    """
-    engine = FakeAssistantEngine()
-    engine.ask("q-1", content="do you run on Tuesdays", state=QuestionState.OPEN)
-    engine.answered = AnswerOutcome(
-        kind=AnswerKind.REDEFERRED,
-        question_id="q-1",
-        successor=SuccessorLink(id="q-2", state=QuestionState.OPEN),
-        disposed=True,
-    )
-    async with _harness(engine) as one:
-        status, body = await one.whole(
-            "POST", "/question/answer", {"question_id": "q-1", "accept": True}
-        )
-
-        assert status == 200
-        assert body["answered"] == {
-            "kind": "redeferred",
-            "question_id": "q-1",
-            "record_id": None,
-            "successor": {"id": "q-2", "state": "open"},
-            "successor_refused": False,
-            "disposed": True,
-        }
-
-
-async def test_forgetting_a_question_reports_whether_there_was_one() -> None:
-    """The contract's own boolean, relayed. The ceremony ADR-0177 §5 gives this verb
-    is the front end's, and it is met with the two listings rather than with the
-    single-question read #495 records as missing."""
-    engine = FakeAssistantEngine()
-    engine.ask("q-1", content="do you run on Tuesdays", state=QuestionState.OPEN)
-    async with _harness(engine) as one:
-        _, destroyed = await one.whole("POST", "/question/forget", {"question_id": "q-1"})
-        _, again = await one.whole("POST", "/question/forget", {"question_id": "q-1"})
-
-        assert destroyed == {"destroyed": True}
-        assert again == {"destroyed": False}
-
-
 # --- what the gateway refuses of its own -------------------------------------
 
 
 @pytest.mark.parametrize(
     "path",
-    ["/grant", "/revoke", "/belief", "/belief/forget", "/question/forget"],
+    ["/grant", "/revoke", "/belief", "/belief/forget"],
 )
 async def test_a_missing_required_argument_is_refused_before_the_hub(path: str) -> None:
     """ADR-0168 §1: the gateway "derives none of them, defaults none of them".

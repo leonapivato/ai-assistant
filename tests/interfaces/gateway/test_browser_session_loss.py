@@ -45,7 +45,6 @@ import asyncio
 import contextlib
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -56,8 +55,6 @@ from playwright.async_api import expect
 from test_browser_confirmations import _email, _read
 from test_browser_conversations import _open_listing
 from test_browser_conversations import _seed as _seed_conversation
-
-from ai_assistant.core.types import GoalStatus, GoalSummary
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -72,9 +69,6 @@ pytestmark = [
     pytest.mark.xdist_group("gateway_browser"),
     pytest.mark.asyncio(loop_scope="session"),
 ]
-
-GOAL_ID: Final = "goal-late-4041"
-OUTCOME: Final = "Find somewhere for the Tuesday dinner"
 
 
 @dataclass(frozen=True)
@@ -98,12 +92,11 @@ class _Listing:
 
 #: Every listing that calls ``show(...)`` after an ``await`` — the audit #2404 asked for.
 #:
-#: ``authorizations`` is not here because it already has its own arm, written with the
-#: fix PR #2393 made and now exercising the shared guard that replaced it. Two acts read
-#: a listing after an ``await`` as well — ``forgetQuestion`` and ``forgetNotification``
-#: re-read their listing to confirm against — and neither is here because neither renders
-#: rows or reveals a panel on its success path: what they do with the answer is put a
-#: ``window.confirm`` in front of the owner.
+#: One act reads a listing after an ``await`` as well — ``forgetNotification`` re-reads
+#: its listing to confirm against — and it is not here because it renders no rows and
+#: reveals no panel on its success path: what it does with the answer is put a
+#: ``window.confirm`` in front of the owner. The questions, goals and authorizations
+#: listings retired with their panels (ADR-0309 §5).
 _AUDITED: Final = (
     _Listing("confirmations", "#confirmations-button", "**/confirmations", "confirmation-list"),
     _Listing("conversations", "#conversations-button", "**/conversations", "conversation-list"),
@@ -111,9 +104,7 @@ _AUDITED: Final = (
     _Listing("standing", "#standing-button", "**/grants/standing", "standing-list"),
     _Listing("history", "#history-button", "**/grants/recent", "history-list"),
     _Listing("beliefs", "#beliefs-button", "**/beliefs", "belief-list"),
-    _Listing("questions", "#questions-button", "**/questions", "question-list"),
     _Listing("review", "#review-button", "**/notifications", "review-list"),
-    _Listing("goals", "#goals-button", "**/goals", "goal-list"),
     _Listing("tuning", "#tuning-button", "**/notification/preferences", "tuning-body"),
     _Listing("connections", "#connections-button", "**/connections", "connection-list"),
     _Listing(
@@ -224,18 +215,6 @@ _KILLER: Final = ("#sources-button", "**/sources")
 _OTHER_KILLER: Final = ("#beliefs-button", "**/beliefs")
 
 
-def _summary() -> GoalSummary:
-    """One outstanding goal, so that "rendered nothing" is a statement about content."""
-    return GoalSummary(
-        id=GOAL_ID,
-        outcome=OUTCOME,
-        status=GoalStatus.ACTIVE,
-        paused=False,
-        last_engaged_at=datetime(2026, 9, 15, 9, 0, tzinfo=UTC),
-        clarification=None,
-    )
-
-
 async def _ends_the_session(one: Route) -> None:
     """Answer one request the way a gateway answers a session that is gone."""
     await one.fulfill(
@@ -341,7 +320,7 @@ async def test_a_listing_that_outlives_its_session_renders_nothing_and_reveals_n
     opener, killer = _OTHER_KILLER if listing.path == _KILLER[1] else _KILLER
 
     async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
-        drive.engine.goal_summaries = [_summary()]
+        _seed_conversation(drive, "c-1", turns=3)
         await drive.page.route(listing.path, hang)
         async with drive.page.expect_request(listing.path):
             await drive.page.click(listing.opener)
@@ -380,10 +359,10 @@ async def test_a_listing_released_after_re_entry_is_not_the_new_session_s_answer
     release, hang = _held(loop)
 
     async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
-        drive.engine.goal_summaries = [_summary()]
-        await drive.page.route("**/goals", hang)
-        async with drive.page.expect_request("**/goals"):
-            await drive.page.click("#goals-button")
+        _seed_conversation(drive, "c-1", turns=3)
+        await drive.page.route("**/conversations", hang)
+        async with drive.page.expect_request("**/conversations"):
+            await drive.page.click("#conversations-button")
 
         await drive.page.route("**/sources", _ends_the_session)
         await drive.page.click("#sources-button")
@@ -391,7 +370,7 @@ async def test_a_listing_released_after_re_entry_is_not_the_new_session_s_answer
 
         # Re-entry, and only then the old session's answer.
         await drive.admit()
-        async with drive.page.expect_response("**/goals") as stale:
+        async with drive.page.expect_response("**/conversations") as stale:
             release.set_result(None)
         await (await stale.value).finished()
         async with drive.page.expect_response("**/beliefs"):
@@ -404,33 +383,8 @@ async def test_a_listing_released_after_re_entry_is_not_the_new_session_s_answer
         # a live session.
         await expect(drive.page.locator("#bootstrap")).to_be_hidden()
         await expect(drive.page.locator("#console")).to_be_visible()
-        await expect(drive.page.locator("#goals")).to_be_hidden()
-        assert OUTCOME not in await drive.page.locator("#goal-list").evaluate(
-            "node => node.textContent"
-        )
-
-
-@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
-async def test_the_goals_panel_is_hidden_when_the_session_ends(
-    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
-) -> None:
-    """#2395: ``CONTROL_PANELS`` omitted ``goals``, so the sweep never reached it.
-
-    Nothing about a request in flight here: the panel is open and full, the session ends
-    through the next act the owner takes, and the goal's outcome statement stayed on
-    screen behind the bootstrap form for as long as they left it there.
-    """
-    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
-        drive.engine.goal_summaries = [_summary()]
-        await drive.page.click("#goals-button")
-        await expect(drive.page.locator("#goal-list")).to_contain_text(OUTCOME)
-
-        await drive.page.route("**/sources", _ends_the_session)
-        await drive.page.click("#sources-button")
-        await drive.page.wait_for_selector("#bootstrap:not([hidden])")
-
-        await expect(drive.page.locator("#goals")).to_be_hidden()
-        assert OUTCOME not in await drive.page.inner_text("body")
+        await expect(drive.page.locator("#conversations")).to_be_hidden()
+        assert await _empty(drive, "conversation-list") == 0
 
 
 @pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])

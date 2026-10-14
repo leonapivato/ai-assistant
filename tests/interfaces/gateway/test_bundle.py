@@ -26,13 +26,11 @@ from ai_assistant.core.types import (
     AttemptOutcome,
     BeliefBand,
     BeliefSummary,
-    ClarificationWithdrawal,
     DiscloserProvenance,
     DriveWithheld,
     EngagementDisposition,
     ForecastNotRead,
     ForecastRefusal,
-    GoalAbandonment,
     GoalStatus,
     GrantScope,
     MemoryKind,
@@ -345,10 +343,10 @@ def test_every_control_on_the_page_meets_the_touch_floor() -> None:
 
     ``button`` is the load-bearing one. Every button on the surface is built through it
     — the panel openers in the document, and the ones a listing builds beside a row: a
-    belief's Forget, a notification's Dismiss and Forget, a question's Accept and
-    Reject, a confirmation's Yes and No, the fault slot's Dismiss and "Start a new
-    conversation". None of them has a size rule of its own, which is the point: there
-    is no button that can be added to this page without the floor.
+    belief's Forget, a notification's Dismiss and Forget, a confirmation's Yes and No,
+    the fault slot's Dismiss and "Start a new conversation". None of them has a size rule
+    of its own, which is the point: there is no button that can be added to this page
+    without the floor.
 
     ``select`` had no rule at all before this and took the browser's own font, which on
     iOS is under 16px — the size at which Safari zooms the page on focus and leaves it
@@ -938,7 +936,8 @@ _OUTSIDE_THE_HIDE_SWEEP: Final = frozenset({"answer"})
 
 
 def test_every_panel_a_session_less_page_may_not_show_is_in_the_hide_sweep() -> None:
-    """#2395: ``goals`` was in every census of this page except the one that hides it.
+    """#2395: ``goals`` was in every census of this page except the one that hides it
+    (the goals panel has since retired, ADR-0309 §5).
 
     ``showBootstrap`` names four panels itself and sweeps ``CONTROL_PANELS`` for the
     rest, so a panel added to the document and left out of that list is not hidden when
@@ -959,7 +958,6 @@ def test_every_panel_a_session_less_page_may_not_show_is_in_the_hide_sweep() -> 
     swept = set(re.findall(r'"([a-z-]+)"', script[opened : script.index("];", opened)]))
     sweeping = _functions(script)["showBootstrap"]
 
-    assert "goals" in swept
     assert sections - _NAMED_BY_SHOW_BOOTSTRAP - _OUTSIDE_THE_HIDE_SWEEP == swept
     assert swept <= sections
     assert "CONTROL_PANELS.forEach((panel) => show(panel, false));" in sweeping
@@ -979,15 +977,7 @@ def test_every_panel_a_session_less_page_may_not_show_is_in_the_hide_sweep() -> 
 #: whether the account may re-open its panel to be read — ``fault`` shows the panel it
 #: writes into — and that is a ruling about what a session-less page owes rather than an
 #: extension of this sweep. Filed as #2451, which names this set.
-_ACTS_THAT_ACCOUNT_FOR_THEMSELVES: Final = frozenset(
-    {
-        "answerQuestion",
-        "withdrawClarification",
-        "abandonGoal",
-        "revokeAuthorization",
-        "dismissNotification",
-    }
-)
+_ACTS_THAT_ACCOUNT_FOR_THEMSELVES: Final = frozenset({"dismissNotification"})
 
 
 #: The one *success path* left outside the rule below, as a (function, which
@@ -1095,8 +1085,8 @@ def test_every_resumed_relay_that_displays_anything_compares_its_session() -> No
             assert part.index("if (!sameSession(half, era)) {") < displayed, where
 
     assert {
-        ("readGoals", 1, "resumed"),
-        ("readGoals", 1, "failing"),
+        ("readBeliefs", 1, "resumed"),
+        ("readBeliefs", 1, "failing"),
         ("forgetBelief", 1, "resumed"),
         ("forgetBelief", 2, "failing"),
         ("writePreferences", 2, "resumed"),
@@ -1115,7 +1105,7 @@ def test_every_listing_that_resumes_asks_whether_its_session_still_stands() -> N
     forgets the header half and puts the bootstrap entry back — and the hanging run is
     still the latest, so it resumes, renders, and reveals its panel beside a form asking
     the owner to start a session. PR #2393's adversarial review found it at round 9 in
-    ``listAuthorizations``; this is the sweep.
+    ``listAuthorizations``, since retired with its panel (ADR-0309 §5); this is the sweep.
 
     **Universally quantified rather than listed**, so a listing added after this is
     covered by the rule instead of by an enumeration somebody has to remember to
@@ -1146,7 +1136,7 @@ def test_every_listing_that_resumes_asks_whether_its_session_still_stands() -> N
         assert "if (!sameSession(half, era)) {" in failing, name
         assert failing.index("sameSession(half, era)") < failing.index("fault("), name
 
-    assert {"readGoals", "readBeliefs", "listConnections", "listAuthorizations"} <= set(checked)
+    assert {"readBeliefs", "listConversations", "listConnections"} <= set(checked)
     # The one listing that reveals its panel *before* it sends: nothing it does after
     # the await is a reveal, so what the guard has to precede there is the render.
     standing = functions["listStanding"]
@@ -2283,7 +2273,8 @@ def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> Non
     different reason now that the CONFIRM pair is served — a shape is a method and a
     path together (ADR-0168 §6), and the pair's paths are ``/confirmation/resume`` and
     ``/confirmations``, so a page reaching for the operation names would get §6's
-    residual fourth class.
+    residual fourth class. And the routes ADR-0309 §5 retires with the questions, goals
+    and authorizations panels are served by nothing, so they are in that half too.
     """
     script = _code("app.js")
 
@@ -2299,10 +2290,6 @@ def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> Non
         '"/beliefs"',
         '"/belief"',
         '"/belief/forget"',
-        '"/questions"',
-        '"/questions/interrupted"',
-        '"/question/answer"',
-        '"/question/forget"',
         '"/notifications"',
         '"/notification/dismiss"',
         '"/notification/forget"',
@@ -2317,8 +2304,13 @@ def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> Non
         '"/confirmation/resume"',
     ):
         assert served in script, served
-    for later in ('"/learn"', '"/resume"', '"/pending_confirmations"'):
-        assert later not in script, later
+    for unserved in (
+        '"/learn"',
+        '"/resume"',
+        '"/pending_confirmations"',
+        *(f'"{path}"' for path in _RETIRED_WITH_THEIR_PANELS),
+    ):
+        assert unserved not in script, unserved
     # ADR-0285 §6 removed the route, and a page still reaching for it would get the
     # residual fourth class the paragraph above describes.
     assert '"/observe"' not in script
@@ -2495,9 +2487,6 @@ _RELAY_ENTRIES: Final = (
     "listGrantHistory",
     "readBeliefs",
     "forgetBelief",
-    "readQuestions",
-    "answerQuestion",
-    "forgetQuestion",
     "readNotifications",
     "dismissNotification",
     "forgetNotification",
@@ -2524,13 +2513,10 @@ _FAULT_PANELS: Final = frozenset(
         "standing",
         "history",
         "beliefs",
-        "questions",
-        "goals",
         "review",
         "tuning",
         "connections",
         "connection-log",
-        "authorizations",
         "chat",
     }
 )
@@ -2907,40 +2893,6 @@ def test_the_forget_warning_is_band_appropriate_and_total_over_the_bands() -> No
     assert "Forgetting it is permanent" in warning
     assert "destroys my copy but not the " in warning
     assert "destroys the belief but not what I worked it " in warning
-
-
-def test_forgetting_a_question_sends_only_for_one_the_read_returned() -> None:
-    """ADR-0177 §5's fifth clause.
-
-    "The browser renders the question it is about to destroy, from a ``questions`` or
-    ``interrupted_questions`` read issued immediately before the confirmation, and
-    takes the user's answer before calling ``forget_question``. It sends
-    ``forget_question`` only for a question that read returned."
-
-    #495's third ground — that a ceremony needs a read the façade does not have — is
-    met without adding one: the two list reads return the question whole.
-    """
-    forgetting = _functions(_code("app.js"))["forgetQuestion"]
-
-    assert 'relay(half, path, { limit: PAGE, offset }, "questions")' in forgetting
-    assert "body.questions.find((one) => one.id === id)" in forgetting
-    assert "if (question === undefined)" in forgetting
-    assert forgetting.index("window.confirm(") < forgetting.index('"/question/forget"')
-
-
-def test_the_re_read_before_a_question_is_destroyed_asks_for_the_page_it_came_from() -> None:
-    """The ceremony's re-read and the listing's paging have to agree.
-
-    ADR-0177 §5's fifth clause has the browser send ``forget_question`` "only for a
-    question that read returned" — so a re-read of the *first* page would report a
-    question rendered from the second as gone, and the owner would be unable to
-    destroy it at all. The offset each row was read at travels with the row.
-    """
-    functions = _functions(_code("app.js"))
-
-    assert "renderQuestion(list, one, path, offset)" in functions["readQuestions"]
-    assert "function renderQuestion(list, question, path, offset)" in functions["renderQuestion"]
-    assert "forgetQuestion(question.id, path, offset)" in functions["renderQuestion"]
 
 
 # --- ADR-0189 §9: the origin reaches the three browser render paths ---------
@@ -3373,9 +3325,9 @@ def test_the_browser_renders_an_attested_questions_source_and_its_clock() -> Non
     *is* held, because a pending question is not a belief of any band.
     """
     functions = _functions(_code("app.js"))
-    # The fields are `renderQuestionFields`', which is what both the questions panel
-    # and a routed `questions` or `forget_question` listing render through (ADR-0197
-    # §12) — so §9's clause is checked where it holds for every surface at once.
+    # The fields are `renderQuestionFields`', which is what a routed `questions` or
+    # `forget_question` listing renders through (ADR-0197 §12) now that the questions
+    # panel has retired (ADR-0309 §5).
     question, origin = functions["renderQuestionFields"], functions["proposalOrigin"]
 
     assert "const origin = proposalOrigin(question);" in question
@@ -3467,40 +3419,19 @@ def test_a_listing_offers_the_next_page_rather_than_stopping_at_a_full_one() -> 
     assert "const PAGE = 25;" in script
     assert "if (returned < PAGE)" in offering
     assert "That is a full page; there may be more." in offering
-    for paged in ("readBeliefs", "readQuestions"):
-        assert "offerMore(list, body." in _functions(script)[paged], paged
-        assert "limit: PAGE" in _functions(script)[paged], paged
-
-
-def test_an_offset_is_only_spent_against_the_question_that_produced_it() -> None:
-    """An offset counted against one filter means nothing against another.
-
-    Unchecking a band between two pages would otherwise skip the beliefs the narrower
-    question puts first — and a belief with no rendered row has no ``Forget`` control,
-    so the failure costs the owner a control rather than a little tidiness.
-
-    Two mechanisms, because there are two ways to get there. A band change **starts
-    the listing again**, which is what makes the offset meaningful; and a page still in
-    flight when that happens is **retired**, so a stale answer neither appends rows the
-    current filter did not ask for nor moves the offset the next page is read at.
-    """
-    script = _code("app.js")
-    functions = _functions(script)
-
-    assert 'el(box).addEventListener("change", listBeliefs);' in script
-    assert "runs.beliefs += 1;" in functions["listBeliefs"]
-    assert "run !== runs.beliefs" in functions["readBeliefs"]
-    assert "run !== runs[listing.counter]" in functions["readQuestions"]
+    reading = _functions(script)["readBeliefs"]
+    assert "offerMore(list, body." in reading
+    assert "limit: PAGE" in reading
 
 
 def test_one_generation_is_taken_for_a_whole_listing_and_carried_into_each_read() -> None:
     """The gap between "check the run" and "check the *right* run".
 
-    ``listQuestions`` starts two listings, so it has two awaits — and a run retired
-    during the first would otherwise reach the second and snapshot whatever number is
-    current *then*. Two overlapping refreshes would both be accepted, both read offset
-    zero, and both advance the same counter, putting the next page past a whole page of
-    questions nobody can answer or destroy.
+    A run read back from the shared counter after an ``await`` is whatever number is
+    current *then*, so two overlapping refreshes would both be accepted, both read
+    offset zero, and both advance the same counter, putting the next page past a whole
+    page of beliefs nobody can forget. (``listQuestions``, whose two listings made this
+    sharpest, retired with the questions panel, ADR-0309 §5.)
 
     So the generation is taken once, before any await, and travels into every read and
     into the "Show more" each read offers — never re-read from the shared counter
@@ -3508,13 +3439,6 @@ def test_one_generation_is_taken_for_a_whole_listing_and_carried_into_each_read(
     """
     functions = _functions(_code("app.js"))
 
-    assert "generation[listing.counter] = runs[listing.counter];" in functions["listQuestions"]
-    assert (
-        "readQuestions(path, false, generation[QUESTION_LISTS[path].counter])"
-        in functions["listQuestions"]
-    )
-    assert "async function readQuestions(path, more, run)" in functions["readQuestions"]
-    assert "readQuestions(path, true, run)" in functions["readQuestions"]
     assert "readBeliefs(false, runs.beliefs)" in functions["listBeliefs"]
     assert "readBeliefs(true, run)" in functions["readBeliefs"]
 
@@ -6608,37 +6532,6 @@ def test_the_two_pairs_the_adr_forbids_collapsing_read_differently_on_the_page()
     assert said[DriveWithheld.ATTEMPT_CANCELLED.value] == said[DriveWithheld.ATTEMPT_ENDED.value]
 
 
-def test_the_listing_row_says_an_action_is_outstanding_and_asserts_no_outcome() -> None:
-    """ADR-0261 §6's statement for a row whose ``effect_in_flight`` is true.
-
-    §6 fixes which fact it names — that an action of this goal "is outstanding — claimed,
-    possibly sent, outcome unknown" — and bars the three an adapter would be tempted into:
-    "**No statement says that the action did not happen, that it did, or that anything the
-    user does will withdraw it.**"
-
-    ***In flight* means the claim landed, never that the call left**, so "may have been
-    sent" is the strongest thing the sentence is allowed to say — and it names no tool, no
-    destination and no effect key, §6 making *outstanding* "the step's status and never the
-    presence of an effect key" with a **read** included deliberately.
-
-    **And it is rendered on the field and on nothing else**: a page that compared a status
-    against an attempt state would be deriving a fact the engine already computed, which is
-    ``paused``'s own clause one fact over.
-    """
-    script = _code("app.js")
-    said = _constant(script, "EFFECT_IN_FLIGHT")
-    render = _functions(script)["renderGoal"]
-
-    assert "outstanding" in said
-    assert "claimed" in said
-    assert "may have been sent" in said
-    for barred in ("did not", "was sent", "withdraw", "undo", "cancel", "key", "tool", "http"):
-        assert barred not in said.lower(), barred
-    assert "if (goal.effect_in_flight) {" in render
-    assert "EFFECT_IN_FLIGHT" in render
-    assert "status" not in render.split("effect_in_flight")[1].split("}")[0]
-
-
 def test_both_accounts_a_park_owes_are_written_where_no_refresh_reaches_them() -> None:
     """ADR-0244 §11 and ADR-0177 §7, and the rule that ends what eight review rounds kept
     finding.
@@ -6844,10 +6737,9 @@ def test_one_fixed_statement_per_member_of_every_vocabulary_adr_0250_adds() -> N
 
     "A surface that renders no statement for a ``ReferenceOutcome``, an
     ``EngagementDisposition`` or a ``ClarificationWithdrawal`` member it was given has
-    not implemented this section — **it is not permissibly degraded**." ``GoalAbandonment``
-    is the fourth vocabulary this decision adds and is held to the same bar, because
-    ``abandon_goal``'s answer is nothing else: §12 closes it "at exactly three members"
-    and the act has no other result to render.
+    not implemented this section — **it is not permissibly degraded**." The withdrawal's
+    and the abandonment's answers reach this page no longer: their acts retired with the
+    goals panel (ADR-0309 §5). The two a reply carries stay.
 
     So each map is **total over its enumeration and closed at its count**, which is
     ``READ_ANSWER_WORDS``' own arrangement: a fifth member fails here rather than
@@ -6866,18 +6758,15 @@ def test_one_fixed_statement_per_member_of_every_vocabulary_adr_0250_adds() -> N
         member.value for member in EngagementDisposition
     }
     assert _keys(_map(script, "REFERENCE_WORDS")) == {member.value for member in ReferenceOutcome}
-    assert _keys(_map(script, "CLARIFICATION_WITHDRAWAL_WORDS")) == {
-        member.value for member in ClarificationWithdrawal
-    }
-    assert _keys(_map(script, "GOAL_ABANDONMENT_WORDS")) == {
-        member.value for member in GoalAbandonment
-    }
-    # The listing's status words are total over ``GoalStatus`` too. It is **not** one of
-    # the vocabularies this decision adds — ADR-0014 §1 declares it — and two of its
-    # members have no producer in the tree today (ADR-0250 §20's arm 23), but what the
-    # map is for is that a member arriving from a gateway is rendered rather than shown
-    # raw, and "no producer today" is not a property of the value this page receives.
-    assert _keys(_map(script, "GOAL_STATUS_WORDS")) == {member.value for member in GoalStatus}
+    # `ClarificationWithdrawal` and `GoalAbandonment` answered the goals panel's two
+    # acts, and `GoalStatus` its rows; the panel retired with them (ADR-0309 §5), so no
+    # member of the three reaches this page to be given a sentence.
+    for retired in (
+        "CLARIFICATION_WITHDRAWAL_WORDS",
+        "GOAL_ABANDONMENT_WORDS",
+        "GOAL_STATUS_WORDS",
+    ):
+        assert f"const {retired} =" not in script, retired
 
     assert (
         'return typeof member === "string" && Object.hasOwn(words, member);'
@@ -6907,15 +6796,7 @@ def test_no_goal_statement_carries_a_record_identifier_or_a_configuration() -> N
     is rendered by ``renderGoalQuestion`` and by no statement.
     """
     script = _code("app.js")
-    maps = [
-        _map(script, name)
-        for name in (
-            "ENGAGEMENT_WORDS",
-            "REFERENCE_WORDS",
-            "CLARIFICATION_WITHDRAWAL_WORDS",
-            "GOAL_ABANDONMENT_WORDS",
-        )
-    ]
+    maps = [_map(script, name) for name in ("ENGAGEMENT_WORDS", "REFERENCE_WORDS")]
 
     for block in maps:
         # No interpolation of any kind: a statement is a literal or it is not fixed.
@@ -6964,149 +6845,6 @@ def test_an_undecided_turn_and_a_raised_question_are_not_reported_as_needing_no_
     guard = render[render.index("outcome.steps.length === 0") : render.index('"No action')]
     assert "outcome.clarification === null" in guard
     assert "outcome.disambiguation === null" in guard
-
-
-def test_the_goal_surface_is_not_the_deferred_question_surface() -> None:
-    """ADR-0250 §20's arm 30 at this surface, over the page's own panels and paths.
-
-    "``assistant questions`` and ``assistant answer`` list and answer **memory**
-    questions only, and neither lists nor accepts a ``GoalQuestion``; the clarification
-    acts neither list nor accept an ADR-0078 ``Question``." §15 states it as a bar on the
-    surface: no surface "presents a goal clarification in the same list, the same command
-    or the same vocabulary as a memory question".
-
-    Two panels, two controls, two sets of paths — and the goal panel reaches neither of
-    the memory question paths, nor the reverse.
-    """
-    script = _code("app.js")
-    document = _asset("index.html")
-
-    assert '<section id="goals"' in document
-    assert '<section id="questions"' in document
-    assert 'id="goals-button"' in document
-    assert 'id="questions-button"' in document
-
-    goals = "".join(
-        _functions(script)[name]
-        for name in ("readGoals", "renderGoal", "offerGoalActs", "withdrawClarification")
-    )
-    assert "/questions" not in goals
-    assert "/question/answer" not in goals
-    assert "/question/forget" not in goals
-
-    questions = "".join(_functions(script)[name] for name in ("readQuestions", "renderQuestion"))
-    assert "/goals" not in questions
-    assert "/clarification/withdraw" not in questions
-    assert "/goal/abandon" not in questions
-
-
-def test_the_authorization_surface_is_its_own_panel_reached_from_the_goal_it_is_about() -> None:
-    """ADR-0254 §11's listing is **per goal**, and the page's shape says so.
-
-    §11 adds no cross-goal read — *"a cross-goal read would have to choose between a
-    truncated answer and an unbounded one"* — so there is no button in the choice row
-    that would open one, and the panel is reached from a goal row. The id the request
-    carries is therefore the row's own rather than one typed into a field.
-
-    **Two paths and no third** (§16's closed roster), and neither reaches the goal acts:
-    a page that posted ``/goal/abandon`` from a withdrawal control would give up the
-    work when the owner meant to withdraw an authority.
-    """
-    script = _code("app.js")
-    document = _asset("index.html")
-
-    assert '<section id="authorizations"' in document
-    assert 'id="authorizations-button"' not in document
-    assert 'id="authorization-list"' in document
-    # The goal line and the settlements sit **outside** the list, which the listing
-    # clears: inside it, a settlement is detached before the owner can read it.
-    assert 'id="authorization-goal"' in document
-
-    authorities = "".join(
-        _functions(script)[name]
-        for name in ("listAuthorizations", "revokeAuthorization", "renderAuthorization")
-    )
-    assert "/authorizations" in authorities
-    assert "/authorization/revoke" in authorities
-    assert "/goal/abandon" not in authorities
-    assert "/clarification/withdraw" not in authorities
-
-    goals = "".join(_functions(script)[name] for name in ("readGoals", "withdrawClarification"))
-    assert "/authorization/revoke" not in goals
-
-
-def test_one_withdrawal_act_reports_where_no_listing_can_detach_it() -> None:
-    """ADR-0254 §11's withdrawal, offered from two places and reported in one way.
-
-    **One act and one result placement**, which is where rounds 1, 3, 4 and 5 converged.
-    A panel-wide slot is invisible to an owner who reached the row through a reply
-    (r1); an **unattributed** sentence there is read as being about whatever listing the
-    panel holds when the answer lands (r3); dropping it because the panel moved on is
-    silence about an act that happened (r4); and a node **inside** the row is detached
-    with the row the moment the listing is cleared (r5). What survives all four is a node
-    the listing does not own carrying a sentence that names the record — which is
-    ``actResult`` and ``statedSettlement``.
-
-    **And it re-reads nothing.** A refresh here is one more request to race the owner's
-    next, and what the record now says goes into the page's own state instead — which is
-    also what retires a record the store says is now ``REVOKED``. **The control is out of
-    reach for the duration**, so two presses cannot produce two answers that contradict
-    each other.
-
-    **And it holds no element of the row it was taken on**, which is round 7's
-    ``blocker``: re-open the same goal mid-act and the listing is rebuilt, so an act
-    writing into the elements it closed over reports into detached DOM while the row on
-    screen still reads *"still stands"* beside an enabled control. The id goes into the
-    two sets and every row drawn for the record is restated from them.
-    """
-    script = _code("app.js")
-    act = _functions(script)["revokeAuthorization"]
-    result = _functions(script)["actResult"]
-
-    assert "confirmWithdrawal(view)" in act
-    assert "actResult(list, view)" in act
-    assert "statedSettlement(view, done.settlement)" in act
-    assert "authorizationInFlight.add(view.id)" in act
-    assert '"/authorization/revoke",' in act
-    assert 'done.settlement === "settled"' in act
-    assert "authorizationWithdrawn.add(view.id)" in act
-    assert "restateAuthorization(view)" in act
-    assert "listAuthorizations" not in act, "an act does not re-read a listing"
-    # Nothing the listing can detach is reachable from here: the act names the record
-    # and the region, and no element of the row it was pressed on.
-    for held in ("row.status", "row.controls", "row.withdraw"):
-        assert held not in act, f"the act holds {held}, which a relist detaches"
-    # One entry per record, in a region the listing does not own.
-    assert "list.parentElement.insertBefore(region, list)" in result
-    assert "node.dataset.record = key" in result
-    assert 'id="authorization-said"' not in _asset("index.html"), "no slot in the markup"
-
-
-def test_the_act_is_offered_in_the_panel_and_named_in_a_reply() -> None:
-    """ADR-0254 §11 puts the **handle** in front of the owner at the act.
-
-    An announcement sits in a reply the next turn replaces, so a withdrawal taken there
-    would report into DOM the page has already thrown away. It names the handle and where
-    the act is taken instead — which is what the command line's announcement does, and is
-    what keeps the two surfaces stating the same act in the same place. Adversarial
-    review, round 6, ``blocker``.
-    """
-    script = _code("app.js")
-    row = _functions(script)["renderAuthorization"]
-
-    assert "if (!withGoal) {" in row
-    assert "Withdraw this" in row
-    assert "What this authorises" in row
-    # Every row names the record it is about and takes its standing from the record,
-    # so a row drawn before, during or after an act says the same thing about it.
-    assert "item.dataset.authorization = view.id" in row
-    assert "showAuthorizationState(item, view)" in row
-
-    state = _functions(script)["showAuthorizationState"]
-    assert "authorizationWithdrawn.has(view.id)" in state
-    assert "authorizationInFlight.has(view.id)" in state
-    assert '"You withdrew this."' in state
-    assert "restateAuthorization" in script
 
 
 def test_a_view_the_record_could_not_have_produced_is_not_rendered() -> None:
@@ -7204,22 +6942,6 @@ def test_only_an_empty_array_is_an_empty_announcement() -> None:
     assert "GOAL_MEMBER_UNREADABLE" in announcement
 
 
-def test_every_settlement_member_has_a_sentence_on_the_page() -> None:
-    """ADR-0254 §16's vocabulary is closed at four, and a member with no sentence renders
-    as silence.
-
-    ``would_duplicate`` is unreachable on this surface — it is reachable only on a
-    settlement to ``ESTABLISHED`` and a withdrawal settles to ``REVOKED`` — and it is
-    given a sentence anyway, because the vocabulary crosses a version boundary.
-    """
-    script = _code("app.js")
-    start = script.index("const AUTHORIZATION_SETTLEMENT_WORDS = {")
-    words = script[start : script.index("\n};", start)]
-
-    for member in ("settled", "not_at_source", "no_such_authorization", "would_duplicate"):
-        assert f"  {member}:" in words, member
-
-
 def test_the_chat_follows_the_stream_and_reopens_it_only_on_an_event() -> None:
     """ADR-0296 §4 and ADR-0182 §7, read together (the PR description records the reading).
 
@@ -7310,7 +7032,20 @@ def test_a_device_drops_what_it_held_on_removal_and_on_holding_no_role() -> None
     assert "named === HUB_DEVICE" in functions["readsHere"]
 
 
-# --- ADR-0309 §5:4 and ADR-0313 §3: what retired from the page -----------------
+# --- ADR-0309 §5 and ADR-0313 §3: what retired from the page --------------------
+
+#: The routes ADR-0309 §5 retires with the questions, goals and authorizations panels.
+_RETIRED_WITH_THEIR_PANELS: Final = (
+    "/questions",
+    "/questions/interrupted",
+    "/question/answer",
+    "/question/forget",
+    "/goals",
+    "/clarification/withdraw",
+    "/goal/abandon",
+    "/authorizations",
+    "/authorization/revoke",
+)
 
 
 def test_the_page_offers_no_ask_form_and_no_push_to_talk() -> None:
@@ -7351,3 +7086,48 @@ def test_a_notification_is_shown_as_text_and_never_played() -> None:
     assert "value.spoken" not in script
     for playback in ("AudioContext", "decodeAudioData", "playNotification", "AudioBuffer"):
         assert playback not in script, playback
+
+
+def test_the_page_offers_none_of_the_questions_goals_or_authorizations_panels() -> None:
+    """ADR-0309 §5: the gateway loses the questions, goals and authorizations panels,
+    "and their routes with them".
+
+    Read off both files, for the reason the case above gives: a panel or control left in
+    the document is one the owner could open, and a path left in the script is a request
+    the gateway now answers with a ``404``. The panels' acts go with them — answering and
+    forgetting a question, withdrawing a clarification, abandoning a goal, withdrawing an
+    authority.
+    """
+    script = _code("app.js")
+    document = _markup("index.html")
+
+    for path in _RETIRED_WITH_THEIR_PANELS:
+        assert f'"{path}"' not in script, path
+    for panel in ("questions", "goals", "authorizations"):
+        assert f'<section id="{panel}"' not in document, panel
+        assert f'"{panel}"' not in script, panel
+    for control in ("questions-button", "goals-button"):
+        assert f'id="{control}"' not in document, control
+        assert f'el("{control}")' not in script, control
+    for act in ("answerQuestion", "forgetQuestion", "withdrawClarification", "abandonGoal"):
+        assert act not in script, act
+    assert "revokeAuthorization" not in script
+
+
+def test_a_reply_names_no_panel_this_page_no_longer_has() -> None:
+    """The reply's goal and authority sentences outlive the panels they pointed at.
+
+    What happened still renders a turn's goal engagement, an authority it opened and a
+    read's standing-authority projection, and each of those once sent the owner to "What
+    I am working on" or "What this authorises" — panels ADR-0309 §5 retires. A sentence
+    naming a place that is not there is a dead end on the screen, so none does; and the
+    announcement offers no withdrawal, because the act that took it retired too.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    for gone in ("What I am working on", "What this authorises"):
+        assert gone not in script, gone
+    announcement = functions["renderAuthorization"]
+    assert "button" not in announcement
+    assert "${view.id}" in announcement, "the handle is still in front of the owner"
