@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
+import reprlib
 import subprocess
 import sys
 from collections import ChainMap, UserDict, deque
@@ -975,9 +977,103 @@ def test_a_class_name_put_in_is_not_matched_again() -> None:
     stream = _configured_on_a_bare_root()
     failure = ValueError("Error")
 
-    logging.getLogger("thirdparty").error(f"read failed: {failure!r} / {failure}", exc_info=failure)
+    logging.getLogger("thirdparty").error(f"read failed: {failure} / {failure}", exc_info=failure)
 
     assert stream.getvalue().splitlines()[0] == "read failed: ValueError / ValueError"
+
+
+def test_a_repr_is_cut_before_a_word_inside_its_class_name_is_replaced() -> None:
+    # Adversarial review, round 6: replacing "Error" first turned ``ValueError('E…``
+    # into ``ValueValueError('E…``, which the cut no longer recognised.
+    stream = _configured_on_a_bare_root()
+    failure = ValueError("Error", _MESSAGE + "x" * 100 + _CHAINED)
+
+    logging.getLogger("thirdparty").error(
+        "read failed: %s", reprlib.repr(failure), exc_info=failure
+    )
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert out.splitlines()[0] == f"read failed: ValueError({REDACTED})"
+
+
+def test_a_repr_after_an_escape_is_cut_too() -> None:
+    # The cut needs no word boundary: ``!r`` of a multi-line text puts ``\n`` right
+    # before a repr it holds.
+    stream = _configured_on_a_bare_root()
+    failure = ValueError(_MESSAGE + "x" * 100 + _CHAINED)
+    held = f"first line\n{reprlib.repr(failure)}"
+
+    logging.getLogger("thirdparty").error(f"read failed: {held!r}", exc_info=failure)
+
+    _assert_no_content(stream.getvalue())
+
+
+@pytest.mark.parametrize(
+    "shown",
+    [
+        pytest.param(lambda text: text[:40], id="start"),
+        pytest.param(lambda text: text[-40:], id="end"),
+        pytest.param(lambda text: json.dumps({"error": text}), id="json"),
+        pytest.param(reprlib.repr, id="reprlib"),
+    ],
+)
+def test_an_exceptions_text_cut_short_or_json_escaped_carries_no_words(
+    shown: Callable[[str], str],
+) -> None:
+    # A call site bounds a line by slicing the text, or logs a payload whole.
+    stream = _configured_on_a_bare_root()
+    failure = ValueError(f'{_MESSAGE} said "{_LOCAL}" and {_CHAINED} ' + "y" * 60)
+
+    logging.getLogger("thirdparty").error(f"read failed: {shown(str(failure))}", exc_info=failure)
+
+    _assert_no_content(stream.getvalue())
+
+
+def test_a_message_another_handler_cached_is_not_handed_on() -> None:
+    # A formatter caches ``message`` on the record it formats; the copy drops it, so
+    # a format reading it gets the cleared message.
+    root = logging.getLogger()
+    for one in list(root.handlers):
+        root.removeHandler(one)
+    first = logging.StreamHandler(io.StringIO())
+    root.addHandler(first)
+    stream = io.StringIO()
+    hosts = logging.StreamHandler(stream)
+    root.addHandler(hosts)
+    configure_logging(Settings())
+    first.filters.clear()  # a handler the net never reached formats the record first
+    failure = ValueError(_MESSAGE)
+
+    logging.getLogger("thirdparty").error("read failed: %s", failure)
+
+    _assert_no_content(stream.getvalue())
+    assert stream.getvalue() == "read failed: ValueError\n"
+
+
+def test_a_standard_field_prints_as_the_string_it_holds() -> None:
+    # Adversarial review, round 6: a logger named by a string subclass rendered its
+    # own repr through a host's ``%(name)r``.
+    class Faked(str):
+        __slots__ = ()
+
+        def __repr__(self) -> str:
+            return repr(ValueError(_MESSAGE))
+
+    root = logging.getLogger()
+    for one in list(root.handlers):
+        root.removeHandler(one)
+    stream = io.StringIO()
+    hosts = logging.StreamHandler(stream)
+    hosts.setFormatter(logging.Formatter("%(name)r %(message)s"))
+    root.addHandler(hosts)
+    configure_logging(Settings())
+    log = logging.getLogger("thirdparty-faked")
+    log.name = Faked("plain")
+
+    log.error("operation failed")
+
+    assert stream.getvalue() == "'plain' operation failed\n"
 
 
 @pytest.mark.parametrize(
