@@ -77,8 +77,9 @@ TARGETED: Final[frozenset[str]] = frozenset({"receive"})
 #: ADR-0298 §5's table, row by row, with ``receive`` in both rows its target may place
 #: it in. ``converse_streaming``, ``learn`` and ``receive_streaming`` left the surface
 #: under ADR-0293 §11, and their names left this table with them, which the closure
-#: test asks of a removal. ``receive`` keeps the legacy-turn row for a spoken input to
-#: a conversation, the text combination being refused before any row is read.
+#: test asks of a removal; ``converse_spoken`` left with spoken conversation (ADR-0313
+#: §3:1). ``receive``'s legacy-turn row is one no request reaches: a conversational
+#: input is refused at decode, before any row is read (§4:1).
 #:
 #: ADR-0300 §8's four story commands, ``story_summary``, ``story_standing``,
 #: ``add_story_note`` and ``move_story_members``, postdate the table and are placed
@@ -160,7 +161,7 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.READING_ONE: frozenset({"transcript", "conversation"}),
     # ADR-0298 §5 names "the change stream" in this row; `follow_chat` is its name.
     Route.READING_MANY: frozenset({"recent_conversations", "chat_changes", "follow_chat"}),
-    Route.LEGACY_TURN: frozenset({"converse", "converse_spoken", "answer", *TARGETED}),
+    Route.LEGACY_TURN: frozenset({"converse", "answer", *TARGETED}),
     Route.SPOKE_TRAFFIC: TARGETED,
     Route.NOTIFICATION_POLL: frozenset({"next_notification"}),
 }

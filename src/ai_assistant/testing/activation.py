@@ -16,7 +16,6 @@ from ai_assistant.core.errors import (
     MemoryStoreConflictError,
     ModelTimeoutError,
     OversizedValueError,
-    TranscriptionFailedError,
 )
 from ai_assistant.core.types import (
     ActivationLinks,
@@ -44,7 +43,6 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     RouteOutcome,
     SpeechChannelPayload,
-    SpokenTurn,
     StageEntry,
     StageOutcome,
     TurnOutcome,
@@ -236,7 +234,7 @@ class FakeActivation:
         """
         self.understood = True
 
-    def observe(self, result: TurnOutcome | SpokenTurn | ChannelResult) -> None:
+    def observe(self, result: TurnOutcome | ChannelResult) -> None:
         """Observe the fake's produced result before a size check can refuse it."""
         if isinstance(result, ChannelResult):
             if isinstance(result.result, InformationalEventResult):
@@ -244,11 +242,6 @@ class FakeActivation:
                 # and nothing it wrote is returned; its episode keeps no outcome.
                 return
             result = result.result.outcome
-        if isinstance(result, SpokenTurn):
-            self.spoken_degraded = result.spoken_degraded
-            if result.outcome is None:
-                return
-            result = result.outcome
         self.outcome = result
         self.response = result.reply
 
@@ -278,8 +271,6 @@ class FakeActivation:
             return ProcessingStatus.INTERRUPTED, ProcessingReason.CANCELLED
         if isinstance(failure, ChannelProcessingTimeoutError | ModelTimeoutError):
             return ProcessingStatus.FAILED, ProcessingReason.TIMEOUT
-        if isinstance(failure, TranscriptionFailedError):
-            return ProcessingStatus.FAILED, ProcessingReason.TRANSCRIPTION_FAILED
         if isinstance(failure, OversizedValueError):
             return ProcessingStatus.FAILED, ProcessingReason.OUTPUT_OVERSIZED
         outcome = self.outcome
@@ -349,7 +340,7 @@ class FakeActivation:
         outcome, or ``drive`` with the step's disposition (§5:2) — and the pass's one
         end entry, choosing the rule from what it knows: ``stopped`` where its stop
         mark is set (ADR-0297 §4); ``interrupted`` on a cancellation;
-        ``no_text_input`` for speech with no words or a failed transcription;
+        ``no_text_input`` for speech with no words;
         ``stage_failed`` on any other failure; ``route_taken`` for a routed turn; and
         ``nothing_due`` otherwise.
 
@@ -390,7 +381,7 @@ class FakeActivation:
             rule = ControllerRule.STOPPED
         elif isinstance(failure, asyncio.CancelledError):
             rule = ControllerRule.INTERRUPTED
-        elif not resume and (self.no_words or isinstance(failure, TranscriptionFailedError)):
+        elif not resume and self.no_words:
             rule = ControllerRule.NO_TEXT_INPUT
         elif failure is not None:
             rule = ControllerRule.STAGE_FAILED

@@ -91,18 +91,18 @@ def _retired_call(harness: Harness, member: str) -> Awaitable[object]:
     """A call to ``member``, one of the old path's entries the switch retired."""
     if member == "converse":
         return harness.engine.converse("hello", timeout=_BUDGET)
-    if member == "converse_spoken":
-        return harness.engine.converse_spoken(
-            _RECORDING, plays=(SpokenAudioFormat.MP4,), timeout=_BUDGET
-        )
     return harness.engine.resume(
         ContinuationToken(handle="token-1"), approved=True, timeout=_BUDGET
     )
 
 
-@pytest.mark.parametrize("member", ["converse", "converse_spoken", "resume"])
+@pytest.mark.parametrize("member", ["converse", "resume"])
 async def test_a_retired_member_refuses_before_any_work(member: str) -> None:
-    """§5:1, ADR-0313 §3:1: a clear refusal, never a half-run activation."""
+    """§5:1: a clear refusal, never a half-run activation.
+
+    ``converse_spoken`` refused here too until ADR-0313 §3:1 took it off the surface,
+    which ``ChannelReceiverContract`` pins on every implementation.
+    """
     completer = FakeToolCallingCompleter()
     harness = phases_harness(completer)
     await open_conversation(harness)
@@ -120,7 +120,11 @@ async def test_a_retired_member_refuses_before_any_work(member: str) -> None:
 async def test_a_spoken_input_to_a_conversation_is_refused_and_starts_nothing(
     fresh: bool,
 ) -> None:
-    """ADR-0313 §3:1: spoken conversation retired, as the typed one did (ADR-0293 §11)."""
+    """ADR-0313 §3:2, §4:1: spoken conversation retired, as the typed one did (ADR-0293 §11).
+
+    Refused at admission, before processing: no activation, no model call and no
+    conversation.
+    """
     completer = FakeToolCallingCompleter()
     harness = phases_harness(completer)
     conversation = await open_conversation(harness)
@@ -130,7 +134,9 @@ async def test_a_spoken_input_to_a_conversation_is_refused_and_starts_nothing(
         else ChannelIdentity(channel_type="conversation", instance_id=conversation)
     )
 
-    with pytest.raises(ValueError, match="spoken conversation retired"):
+    before = await harness.conversations.recent(limit=50)
+
+    with pytest.raises(ValueError, match="unsupported channel input and reply combination"):
         await harness.engine.receive(
             ChannelInput(target=target, payload=SpeechChannelPayload(audio=_RECORDING)),
             reply=SpokenReply(plays=(SpokenAudioFormat.MP4,)),
@@ -139,6 +145,7 @@ async def test_a_spoken_input_to_a_conversation_is_refused_and_starts_nothing(
 
     assert await episodes(harness.memory) == []
     assert completer.calls == []
+    assert await harness.conversations.recent(limit=50) == before
 
 
 async def test_an_engine_without_the_phases_refuses_an_event_and_runs_no_reader() -> None:

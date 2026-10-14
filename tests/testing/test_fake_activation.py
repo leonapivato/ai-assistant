@@ -1,4 +1,4 @@
-"""Faults and empty speech retain the fake's independent M36 contract behavior."""
+"""Faults retain the fake's independent M36 contract behavior."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from ai_assistant.core.types import (
     ActionPlan,
     ChannelIdentity,
     ChannelInput,
+    ChannelResult,
     CurrentContext,
     Disposition,
     EpisodicMemory,
@@ -21,24 +22,20 @@ from ai_assistant.core.types import (
     Ground,
     NewConversation,
     ProcessingReason,
-    ProcessingStatus,
-    RecordedChannelTrigger,
-    RecordedSpeechInput,
     RoutableOperation,
     RoutedOperation,
     RouteOutcome,
-    SpeechChannelPayload,
-    SpokenAudio,
-    SpokenAudioFormat,
-    SpokenChannelResult,
-    SpokenReply,
     StepExecution,
     StepOutcome,
     StepStatus,
+    TextChannelPayload,
+    TextChannelResult,
     TimeOfDay,
     TurnOutcome,
     TurnResult,
+    WholeTextReply,
 )
+from ai_assistant.orchestration.channels import ChannelProjection
 from ai_assistant.testing import FakeAssistantEngine, FakeMemoryStore
 
 if TYPE_CHECKING:
@@ -48,52 +45,27 @@ if TYPE_CHECKING:
 
 _BUDGET = timedelta(seconds=10)
 _AT = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
-_AUDIO = SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
-#: Every conversational ``receive`` here is spoken: ADR-0293 §11 takes the text
-#: conversational combination off the surface.
-_PLAYS = SpokenReply(plays=(SpokenAudioFormat.MP4,))
 
 
-@pytest.mark.parametrize("target", ["new", "existing", "missing"])
-async def test_empty_speech_keeps_exact_transcript_and_never_falls_back(target: str) -> None:
-    engine = FakeAssistantEngine()
-    engine.spoken_transcript = " \t\n"
-    if target == "existing":
-        engine.hold_conversation("room")
-    result = await engine.receive(
+async def _typed(
+    engine: FakeAssistantEngine, target: ChannelIdentity | NewConversation | None = None
+) -> ChannelResult:
+    """One typed turn through the admission ``converse`` runs, and its receipt.
+
+    ``receive`` admits no conversational input (ADR-0313 §4:1) and ``converse``
+    returns the bare outcome; these cases are about how a conversation's episode is
+    captured, so they drive the same admission ``converse`` does and read its receipt.
+    """
+    return await engine._receive(
         ChannelInput(
-            target=NewConversation()
-            if target == "new"
-            else ChannelIdentity(channel_type="conversation", instance_id="room"),
-            payload=SpeechChannelPayload(audio=_AUDIO),
+            target=NewConversation() if target is None else target,
+            payload=TextChannelPayload(text="hello"),
         ),
-        reply=SpokenReply(plays=(SpokenAudioFormat.MP4,)),
+        reply=WholeTextReply(),
         timeout=_BUDGET,
+        projection=ChannelProjection("converse"),
+        typed_turn=True,
     )
-    assert isinstance(result.result, SpokenChannelResult)
-    assert result.channel is None
-    assert result.result.outcome.outcome is None
-    assert result.result.outcome.episode_id is None
-    episodes = await engine.episode_memory.export()
-    if target == "missing":
-        # ADR-0293 §2:7: an absent conversation does not cost the activation its
-        # episode; the conversation never recorded it, so the capture is degraded.
-        assert result.capture.state == "degraded"
-        assert result.capture.episode_id is None
-        assert [one.id for one in episodes] == [f"activation:{result.capture.activation_id}"]
-        return
-    assert result.capture.state == "recorded"
-    (episode,) = episodes
-    assert isinstance(episode, EpisodicMemory)
-    assert episode.id == result.capture.episode_id
-    processing = episode.processing_record
-    assert processing is not None
-    assert processing.status is ProcessingStatus.COMPLETED
-    assert processing.reason is ProcessingReason.NO_CONTENT
-    assert isinstance(processing.trigger, RecordedChannelTrigger)
-    assert isinstance(processing.trigger.payload, RecordedSpeechInput)
-    assert processing.trigger.payload.transcript == " \t\n"
-    assert (processing.trigger.channel is None) == (target == "new")
 
 
 class RefusingMemory(FakeMemoryStore):
@@ -112,16 +84,11 @@ async def test_capture_failure_retains_reply_and_reports_only_confirmed_addresse
         engine.activation_id_factory = lambda: "not-a-uuid"
     else:
         engine.episode_memory = RefusingMemory()
-    result = await engine.receive(
-        ChannelInput(target=NewConversation(), payload=SpeechChannelPayload(audio=_AUDIO)),
-        reply=_PLAYS,
-        timeout=_BUDGET,
-    )
-    assert isinstance(result.result, SpokenChannelResult)
-    spoken = result.result.outcome.outcome
-    assert spoken is not None
-    assert spoken.reply
-    assert spoken.capture_degraded
+    result = await _typed(engine)
+    assert isinstance(result.result, TextChannelResult)
+    typed = result.result.outcome
+    assert typed.reply
+    assert typed.capture_degraded
     assert result.capture.state == "degraded"
     assert await engine.episode_memory.export() == []
     if fault == "id":
@@ -161,11 +128,7 @@ async def test_a_colliding_activation_id_moves_no_episode_to_the_second_conversa
     engine.activation_id_factory = lambda: "00000000-0000-4000-8000-0000000000aa"
 
     async def new_conversation() -> tuple[str, str]:
-        result = await engine.receive(
-            ChannelInput(target=NewConversation(), payload=SpeechChannelPayload(audio=_AUDIO)),
-            reply=_PLAYS,
-            timeout=_BUDGET,
-        )
+        result = await _typed(engine)
         assert result.channel is not None
         return result.channel.instance_id, result.capture.state
 
@@ -188,28 +151,24 @@ async def test_a_colliding_activation_id_moves_no_episode_to_the_second_conversa
 async def test_a_conversation_colliding_with_a_standalone_episode_cannot_claim_it() -> None:
     """ADR-0283 §7:3: the standalone episode keeps its address and leaves with no forget.
 
-    Empty speech records a standalone episode; a conversation's capture at the same
+    An event records a standalone episode; a conversation's capture at the same
     address degrades, and forgetting that conversation leaves the standalone one.
     """
     engine = FakeAssistantEngine()
     engine.activation_id_factory = lambda: "00000000-0000-4000-8000-0000000000bb"
-    engine.spoken_transcript = " \t\n"
     address = "activation:00000000-0000-4000-8000-0000000000bb"
-    spoken = await engine.receive(
-        ChannelInput(target=NewConversation(), payload=SpeechChannelPayload(audio=_AUDIO)),
-        reply=SpokenReply(plays=(SpokenAudioFormat.MP4,)),
+    event = await engine.receive(
+        ChannelInput(
+            target=ChannelIdentity(channel_type="informational_event", instance_id="door"),
+            payload=TextChannelPayload(text="the door opened"),
+        ),
+        reply=None,
         timeout=_BUDGET,
     )
-    assert spoken.channel is None
-    assert spoken.capture.state == "recorded"
+    assert event.capture.state == "recorded"
     assert await engine.episode_memory.get(address) is not None
 
-    engine.spoken_transcript = "hello"
-    texted = await engine.receive(
-        ChannelInput(target=NewConversation(), payload=SpeechChannelPayload(audio=_AUDIO)),
-        reply=_PLAYS,
-        timeout=_BUDGET,
-    )
+    texted = await _typed(engine)
 
     assert texted.capture.state == "degraded"
     assert texted.channel is not None

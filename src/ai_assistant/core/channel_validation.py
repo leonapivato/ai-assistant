@@ -5,12 +5,12 @@ and wire entry points apply the same closed set of representable combinations,
 and read the same declaration of where each channel type's input comes from
 (ADR-0284 §2:2).
 
-**The text conversational combination is no longer on the surface** (ADR-0293 §11):
-a typed message is written into a conversation as an act in the medium, and
-``receive`` refuses it. The one input that still carries it is the one
-``converse`` builds for itself, kept for the turn that carries a reference until
-question messages do (the owner's cut (a), 2026-10-05), and that caller alone
-says so with ``typed_turn``.
+**No conversational combination is on the surface.** A typed message is written
+into a conversation as an act in the medium (ADR-0293 §11), and spoken
+conversation retired at the cutover (ADR-0313 §3:2), so ``receive`` admits an
+event alone (§4:1). The one input that still carries the text conversational
+combination is the one ``converse`` builds for itself, until ``converse`` leaves
+(ADR-0309 §5:1), and that caller alone says so with ``typed_turn``.
 """
 
 from __future__ import annotations
@@ -22,13 +22,9 @@ from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
     ChannelInput,
-    ConversationInputOptions,
     InputOrigin,
     NewConversation,
     ReplyCapability,
-    SpeechChannelPayload,
-    SpokenDeliveryState,
-    SpokenReply,
     TextChannelPayload,
     WholeTextReply,
 )
@@ -96,11 +92,12 @@ def validate_combination(
 ) -> None:
     """Refuse every combination outside the dispatch table this entry admits.
 
-    ADR-0274 §4's table, less the text conversational combination ADR-0293 §11
-    takes off the surface: an informational event is text with no reply, and a
-    conversation's input is speech with a spoken reply. ``typed_turn`` admits the
-    text conversational combination with a whole text reply as well, for
-    ``converse``'s own input alone; no streaming combination remains.
+    ADR-0274 §4's table, less its conversational rows: ADR-0293 §11 takes the text
+    one off the surface and ADR-0313 §3:2 retires the spoken one, so an
+    informational event with text and no reply is the one combination admitted
+    (§4:1). ``typed_turn`` admits the text conversational combination with a whole
+    text reply as well, for ``converse``'s own input alone; no streaming
+    combination remains.
 
     Args:
         supplied: The detached channel input.
@@ -112,24 +109,12 @@ def validate_combination(
     """
     target = supplied.target
     kind = "conversation" if isinstance(target, NewConversation) else target.channel_type
-    options = supplied.conversation
+    text = isinstance(supplied.payload, TextChannelPayload)
     valid = False
     if kind == "informational_event":
-        valid = (
-            isinstance(supplied.payload, TextChannelPayload) and reply is None and options is None
-        )
+        valid = text and reply is None
     elif kind == "conversation":
-        options = options or ConversationInputOptions()
-        if isinstance(supplied.payload, TextChannelPayload):
-            valid = typed_turn and options.delivery is None and isinstance(reply, WholeTextReply)
-        elif isinstance(supplied.payload, SpeechChannelPayload):
-            valid = isinstance(reply, SpokenReply) and options.reference is None
-            if options.delivery is not None:
-                valid = (
-                    valid
-                    and not isinstance(target, NewConversation)
-                    and (options.delivery.delivery.state is not SpokenDeliveryState.UNKNOWN)
-                )
+        valid = typed_turn and text and isinstance(reply, WholeTextReply)
     if not valid:
         msg = "unsupported channel input and reply combination"
         raise ValueError(msg)

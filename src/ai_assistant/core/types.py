@@ -2911,14 +2911,6 @@ class ChannelContext(BaseModel):
         return self
 
 
-class ConversationInputOptions(BaseModel):
-    """Existing conversation control references and playback reports."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    reference: TurnReference | None = None
-    delivery: SpokenDeliveryReport | None = None
-
-
 class WholeTextReply(BaseModel):
     """Return a whole textual outcome on the originating request."""
 
@@ -30404,10 +30396,10 @@ def is_live_confirmation_park(outcome: TurnOutcome | None) -> bool:
     durable state both leave ``reply`` ``None``; neither is a park, and ADR-0207 §3
     keeps ADR-0200 §4's silence over both of them word for word.
 
-    **One definition, read from two sides.** :class:`SpokenTurn`'s validator reads it
-    to decide which shapes the type admits (ADR-0207 §6), and ``orchestration``
-    reads it to decide whether the turn speaks (§1) — the same rule, so a second
-    spelling of it in either place would be a rule that can drift. It is a module
+    **One definition.** ``SpokenTurn``'s validator read it to decide which shapes the
+    type admitted (ADR-0207 §6) until ADR-0313 §3:1 retired that type, and
+    ``orchestration`` reads it — a second spelling of it would be a rule that can
+    drift. It is a module
     function over values the type already carries rather than a member of one: no
     type, field, enum member, Protocol or method signature moves for it, exactly as
     :func:`rests_on_recorded_external_content` reads a :class:`Provenance`.
@@ -32899,10 +32891,10 @@ class TransportEndpoint(BaseModel):
     )
 
 
-# --- speech: what a failure is called, and what one spoken turn produced ------
-# The half of ADR-0200 §9's block that stays at the foot of this module, because
-# `SpokenTurn` depends on `TurnOutcome` (ADR-0206 §6). The recording and the
-# rendering themselves moved up to the speech block above.
+# --- speech: what a failure is called ------------------------------------------
+# The half of ADR-0200 §9's block that stayed at the foot of this module beside
+# `SpokenTurn`, which ADR-0313 §3:1 retired with `converse_spoken`. The recording and
+# the rendering themselves moved up to the speech block above.
 
 
 class SpeechFailure(StrEnum):
@@ -32913,15 +32905,15 @@ class SpeechFailure(StrEnum):
     at two classes — the base and ``SpeechTimeoutError`` — so this enum has exactly
     two members, and a lane that adds a third ``SpeechError`` subclass adds its
     member here in the same change. The two vocabularies do not drift apart, and
-    ``tests/core/test_speech_failure_bijection.py`` is what stops one landing
+    ``tests/core/test_speech_errors.py`` is what stops one landing
     without the other.
 
-    **It is what crosses the promoted surface in place of the seam's exception.**
-    ADR-0200 §4 raises :class:`~ai_assistant.core.errors.TranscriptionFailedError`
-    ``from None``, so neither the seam's message, nor its class name, nor its
-    traceback reaches a caller — a speech implementation takes arbitrary text and
-    could have interpolated the recording into it, which is the one place ADR-0200
-    §8's retention rule cannot see. What a caller can act on travels here instead.
+    **It is what is logged in place of the seam's exception.** A speech
+    implementation takes arbitrary text and could have interpolated the recording
+    into its message, which is the one place ADR-0200 §8's retention rule cannot
+    see, so the classification is recorded and the message is not. It crossed the
+    promoted surface inside ``TranscriptionFailedError`` until ADR-0313 §3:1 retired
+    ``converse_spoken``, the one member that declared that error.
 
     **The member is chosen by an identity-matched walk of the caught exception's
     MRO** over a mapping frozen at import, never from the exception's ``__name__``,
@@ -32932,213 +32924,13 @@ class SpeechFailure(StrEnum):
 
     Attributes:
         UNCLASSIFIED: A bare :class:`~ai_assistant.core.errors.SpeechError`, or a
-            subclass this build's mapping does not name. Also what a **reduced**
-            delivery reconstructs (ADR-0085 §10a), where it is read beside
-            ``details_elided`` ``True`` rather than on its own.
+            subclass this build's mapping does not name.
         TIMED_OUT: A :class:`~ai_assistant.core.errors.SpeechTimeoutError` — the
             deadline decorator's, since no seam takes a timeout (ADR-0200 §1).
     """
 
     UNCLASSIFIED = "unclassified"
     TIMED_OUT = "timed_out"
-
-
-class SpokenTurn(BaseModel):
-    """What one spoken turn produced (ADR-0200 §4, ADR-0205 §1).
-
-    **Five members** since ADR-0205 §1, which partially supersedes ADR-0200 §4's
-    count and nothing else about it — the addition is ``episode_id`` and every
-    other clause of §4 binds unchanged, the ``heard``/``outcome`` biconditional and
-    the degradation ladder included.
-
-    **Two shapes a reader should be able to name from them alone**: a recording
-    that carried no words is ``heard`` ``None``; a turn whose answer could not be
-    spoken is ``spoken`` ``None`` with ``spoken_degraded`` ``True`` beside an
-    ``outcome`` whose ``reply`` is present — or beside a live confirmation park,
-    whose sentence is what could not be spoken (ADR-0207 §4). Neither is reachable
-    from ``converse``, and both are legible without decoding a payload.
-
-    **``heard`` is ``None`` exactly when ``outcome`` is ``None``**, and that pair
-    is the recording that carried no words: nothing was asked, so nothing was
-    answered, no turn ran, no episode was captured and no conversation was created.
-    It is not an error and no exception is raised for it (ADR-0200 §4).
-
-    **``spoken`` is the rendering of ``outcome.reply``, and on a park the rendering
-    of one fixed sentence** — what
-    :meth:`~ai_assistant.core.protocols.SpeechSynthesizer.synthesize` returned when
-    handed exactly that value. On every pass that composed an answer there is one
-    answer and ``outcome.reply`` is it, so nothing here carries a second copy of the
-    spoken words, and a caller that cannot play audio reads ``outcome.reply`` and
-    holds exactly what was said. **On a live confirmation park that parity does not
-    hold** (ADR-0207 §3): no answer was composed, ``outcome.reply`` stays ``None``,
-    and what was spoken is the sentence ADR-0207 §2 fixes — a project-authored
-    constant that ``ai_assistant.orchestration`` owns, is never written to ``reply``,
-    and is not carried anywhere on this type but as audio. The park is legible from
-    ``outcome`` itself, through :func:`is_live_confirmation_park`. That the audio is
-    an *audible* rendering of the text handed over is the synthesizer's obligation,
-    discharged in its conformance suite; no component decodes or re-transcribes a
-    rendering to check it.
-
-    **The answer was composed for a channel of unbounded audience** (ADR-0200 §3,
-    §7). Where a class was withheld under ADR-0199 §3, ``outcome.reply`` *is* the
-    deflection ADR-0199 §5 shapes — composed for this channel rather than filtered
-    after the fact — and nothing on this type carries what was withheld.
-
-    Frozen and ``extra="forbid"`` like every other value on the promoted surface,
-    so its members are the whole of it.
-
-    Attributes:
-        heard: The transcript the recording carried, or ``None`` where it carried
-            no words. Disclosed on every call that produced one: a push-to-talk
-            surface that cannot show the user what it heard cannot be corrected by
-            them (ADR-0200 §4). Carried **byte for byte** — nothing on this path
-            strips, trims, case-folds or otherwise normalises it.
-        outcome: The turn that transcript drove, or ``None`` beside a ``heard`` of
-            ``None``. An ordinary :class:`TurnOutcome` under every clause ADR-0170
-            §4, ADR-0173 §6 and ADR-0197 §8 place on one; a spoken call composes a
-            turn rather than creating a second kind of one.
-        spoken: The rendering of ``outcome.reply``, or of ADR-0207 §2's fixed
-            sentence on a live confirmation park, or ``None`` where there was
-            nothing to say or saying it did not complete.
-        spoken_degraded: Whether something to say existed and speaking it did not
-            complete — synthesis raised, the format intersection was empty, the
-            rendering breached ADR-0200 §6's bound, or the whole result carrying it
-            would have breached ADR-0085 §8c. The four cases are ADR-0200 §4's and
-            ADR-0207 §4 reads them over the wider subject: an answer on every other
-            pass, and §2's sentence on a park. It is never ``True`` beside a
-            non-``None`` ``spoken``, because this call streams nothing and so has no
-            partial rendering to carry.
-        episode_id: The id of the episode recording the turn this call ran, so
-            that a caller has a name to give back on the next one (ADR-0205 §1).
-            ``None`` **exactly when** the call recorded no turn — a recording that
-            carried no words, or a capture whose index entry did not land — and
-            **not** ``None`` merely because the episode write failed, since the
-            turn's index row exists either way and is what carries the delivery
-            (ADR-0074 §3's intent log). Disclosing it confers nothing: there is one
-            principal on this hub (ADR-0099 §1), no operation of the promoted
-            surface takes an episode id, and ADR-0205 adds none that does — the id
-            reaches the caller so that it can be handed back and for no other
-            purpose. Bounded, and **never dropped to make a result fit**
-            (ADR-0205 §10b): ADR-0200 §4's degradation ladder still has exactly one
-            step before ADR-0085 §8c's ``OversizedValueError``.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    heard: NonBlankEncodableText | None = Field(
-        default=None,
-        description="The transcript, byte for byte, or None where the recording carried no words.",
-    )
-    outcome: TurnOutcome | None = Field(
-        default=None,
-        description="The turn the transcript drove, or None where there was no transcript.",
-    )
-    spoken: SpokenAudio | None = Field(
-        default=None,
-        description=(
-            "The rendering of the outcome's reply, or of ADR-0207 §2's sentence on a "
-            "park, or None where there is none."
-        ),
-    )
-    spoken_degraded: bool = Field(
-        default=False,
-        description="Whether there was something to say and speaking it did not complete.",
-    )
-    episode_id: Identifier | None = Field(
-        default=None,
-        description="The episode recording this turn, for a later report to name (ADR-0205 §1).",
-    )
-
-    @model_validator(mode="after")
-    def _shapes_are_the_ones_adr_0200_admits(self) -> Self:
-        """Refuse every shape ADR-0200 §4 and ADR-0207 §6 do not describe.
-
-        Stated **both ways**, because each direction rules out a different lie. A
-        transcript with no turn would say the engine heard words and answered
-        nothing; a turn with no transcript would say it answered a recording that
-        carried none. A rendering beside nothing to say would be audio of something
-        this type does not hold, and ``spoken_degraded`` beside a rendering would
-        report a partial delivery a call that streams nothing cannot make.
-
-        **The admissibility test is widened, not deleted** (ADR-0207 §6). What may
-        be spoken is an answer *or* ADR-0207 §2's fixed sentence on a live
-        confirmation park, so the test reads "an answer existed **or** this is a
-        park" — and every other arm stands. A rendering beside a ``reply``-less
-        outcome that is **not** a park, which is a composition failure or a resume
-        recovered from durable state, is refused exactly as before: those two keep
-        ADR-0200 §4's silence in full (§3). The cheap implementation of §1 is to drop
-        the two checks, and it would readmit precisely the shapes they were built to
-        refuse.
-
-        **And a third arm keeps it total in the other direction** (§6). On an outcome
-        that *is* a live confirmation park, the sentence is either rendered (§1) or
-        one of §4's four degradation cases fired, and there is no third state — so
-        ``spoken`` ``None`` beside ``spoken_degraded`` ``False`` is refused there.
-        That pair is the result #1699 measured, and without the arm a regression that
-        skipped the park branch would construct, project and cross the wire as an
-        ordinary result.
-
-        **And an ``episode_id`` beside no outcome would name a turn that never ran**
-        (ADR-0205 §1). Its "exactly when" is a biconditional about the *call*, and
-        one direction of it is a property this type can hold: an id is present only
-        where a turn was recorded, and ``outcome`` being ``None`` proves none was.
-        The other direction is deliberately **not** enforced, because it is false of
-        a shape §1 admits — a capture whose index entry did not land leaves an
-        outcome standing beside no id. Refusing the first direction matters beyond
-        tidiness: the id is the name a device hands back on the next call, so a
-        result carrying one for a turn that never ran would invite a report against
-        a turn nothing can stamp.
-
-        Raises:
-            ValueError: If the five members do not describe one of §4's shapes as
-                ADR-0207 §6 widened them, or if an ``episode_id`` stands beside no
-                outcome (ADR-0205 §1).
-        """
-        if (self.heard is None) != (self.outcome is None):
-            msg = (
-                "heard and outcome are present together or absent together: a transcript "
-                "with no turn and a turn with no transcript are both shapes ADR-0200 §4 "
-                "does not admit"
-            )
-            raise ValueError(msg)
-        answered = self.outcome is not None and self.outcome.reply is not None
-        parked = is_live_confirmation_park(self.outcome)
-        speakable = answered or parked
-        if not speakable and self.spoken is not None:
-            msg = (
-                "spoken is the rendering of the outcome's reply, or of ADR-0207 §2's "
-                "sentence on a live confirmation park, so it is None wherever there is "
-                "neither to render (ADR-0200 §4, ADR-0207 §6)"
-            )
-            raise ValueError(msg)
-        if not speakable and self.spoken_degraded:
-            msg = (
-                "spoken_degraded says there was something to say and speaking it did not "
-                "complete, so it is False wherever there was neither an answer nor a park "
-                "(ADR-0200 §4, ADR-0207 §6)"
-            )
-            raise ValueError(msg)
-        if parked and self.spoken is None and not self.spoken_degraded:
-            msg = (
-                "a live confirmation park says one fixed sentence: it is either rendered "
-                "or one of the four degradation cases fired, and silence beside a clear "
-                "spoken_degraded is the shape #1699 measured (ADR-0207 §1, §6)"
-            )
-            raise ValueError(msg)
-        if self.spoken_degraded and self.spoken is not None:
-            msg = (
-                "spoken_degraded is never True beside a rendering: this call streams "
-                "nothing, so it has no partial rendering to carry (ADR-0200 §4)"
-            )
-            raise ValueError(msg)
-        if self.episode_id is not None and self.outcome is None:
-            msg = (
-                "episode_id names the episode recording the turn this call ran, and a "
-                "call with no outcome ran none: ADR-0205 §1 makes it None exactly when "
-                "the call recorded no turn, and the no-words pair is one of those cases"
-            )
-            raise ValueError(msg)
-        return self
 
 
 # ADR-0274 §3: channel identity and modality are independent values.
@@ -33166,29 +32958,29 @@ ChannelPayload = Annotated[
 
 
 class ChannelInput(BaseModel):
-    """One supplied input with channel identity, modality, and local context."""
+    """One supplied input with channel identity, modality, and local context.
+
+    It carries no conversation options: ADR-0313 §4:2 took ``conversation`` off it with
+    spoken conversation, whose report and whose goal or question reference were all
+    it held.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     target: ChannelTarget
     payload: ChannelPayload
     context: ChannelContext = Field(default_factory=ChannelContext)
-    conversation: ConversationInputOptions | None = None
 
 
 class TextChannelResult(BaseModel):
-    """The existing textual turn outcome."""
+    """The existing textual turn outcome.
+
+    It leaves with ``converse`` (ADR-0313 §4:6), whose own input is the one that
+    still produces it; ``receive`` refuses every conversational input (§4:1).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     kind: Literal["text"] = "text"
     outcome: TurnOutcome
-
-
-class SpokenChannelResult(BaseModel):
-    """The existing spoken turn, including the no-words result."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: Literal["spoken"] = "spoken"
-    outcome: SpokenTurn
 
 
 class InformationalEventResult(BaseModel):
@@ -33208,7 +33000,7 @@ class InformationalEventResult(BaseModel):
 
 
 ChannelOutcome = Annotated[
-    TextChannelResult | SpokenChannelResult | InformationalEventResult,
+    TextChannelResult | InformationalEventResult,
     Field(discriminator="kind"),
 ]
 
@@ -33229,14 +33021,8 @@ class ChannelResult(BaseModel):
                 msg = "an informational result requires an informational_event channel"
                 raise ValueError(msg)
             return self
+        # A text result's check leaves with it and ``converse`` (ADR-0313 §4:6).
         outcome = result.outcome
-        if isinstance(outcome, SpokenTurn):
-            if outcome.outcome is None:
-                if self.channel is not None:
-                    msg = "a blank spoken result has no resolved channel"
-                    raise ValueError(msg)
-                return self
-            outcome = outcome.outcome
         if (
             self.channel is None
             or self.channel.channel_type != "conversation"

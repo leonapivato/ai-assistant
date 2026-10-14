@@ -2547,7 +2547,15 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``schema_version`` to ``Literal[10]``: a peer at 98 refuses the version as
 #:     unknown, and a version-9 record, whose rounds carry the mark, does not validate
 #:     here (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 99
+#: 100: ADR-0313 §3:1 removes ``converse_spoken`` from the promoted ``AssistantEngine``
+#:     method set, ``SpokenTurn`` with it, and ``TranscriptionFailedError``, which only
+#:     that member declared, from the error mapping; §4:2 takes ``conversation`` off
+#:     ``ChannelInput``, and ``ConversationInputOptions`` with it; §4:6 takes
+#:     ``SpokenChannelResult`` out of the ``ChannelResult`` a ``receive`` returns; and
+#:     §4:1 has ``receive`` refuse the spoken conversational combination, which a hub
+#:     at 99 accepted. A peer at 99 calls a method a hub at 100 does not route and
+#:     sends a member it refuses as extra (§6:4, ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 100
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

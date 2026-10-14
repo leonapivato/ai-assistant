@@ -102,7 +102,6 @@ from ai_assistant.core.types import (
     ActionRequest,
     AnswerKind,
     AuthorizationSettlement,
-    Belief,
     BeliefBand,
     BeliefSummary,
     CapabilityEffect,
@@ -119,11 +118,9 @@ from ai_assistant.core.types import (
     GrantScope,
     Ground,
     Idempotency,
-    MemoryKind,
     MemorySource,
     NotificationCandidate,
     NotificationDelivery,
-    OperationConfirmation,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -135,9 +132,6 @@ from ai_assistant.core.types import (
     RecordedInvocation,
     Reversibility,
     RiskLevel,
-    RoutableOperation,
-    RoutedOperation,
-    RouteOutcome,
     SourceReadRecord,
     SpendPeriod,
     SpokenAudioFormat,
@@ -210,11 +204,8 @@ _PARK_AT = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
 def _park_turn() -> TurnResult:
     """One live turn, so a scripted step park is a park and not a recovered one.
 
-    ADR-0207 §1's shapes are reached inside a ``converse_spoken`` pass, which resumes
-    nothing — so the outcome a binding scripts must carry the turn a live park has.
     A ``turn`` of ``None`` beside a parked step is the *recovered* park (ADR-0052 §3),
-    a shape ADR-0207 explicitly does not reach, and a fixture built that way would
-    certify the wrong thing.
+    so the outcome a consumer scripts carries the turn a live park has.
     """
     goal = Goal(
         id="g-park",
@@ -248,13 +239,12 @@ def _park_turn() -> TurnResult:
 
 
 def spoken_step_park_outcome() -> TurnOutcome:
-    """ADR-0207 §1's first shape, for a binding that scripts its subject's turn.
+    """ADR-0207 §1's first shape, for a consumer that scripts a turn with no reply.
 
     A step the permission gate parked (ADR-0037 §4): ``AWAITING_CONFIRMATION``, the
-    card that answers it, and no composed reply. Exposed from this module rather than
-    written out in each binding, so the three implementations are held to **one**
-    statement of the shape — which is the whole reason §1's cases live in the shared
-    suite.
+    card that answers it, and no composed reply. Its spoken fixture slot left with
+    ``converse_spoken`` (ADR-0313 §3:1); the shape stays for a test that needs a
+    reply-less outcome.
     """
     return TurnOutcome(
         turn=_park_turn(),
@@ -274,39 +264,6 @@ def spoken_step_park_outcome() -> TurnOutcome:
             ),
         ),
         conversation_id="c-park",
-    )
-
-
-def spoken_routed_park_outcome() -> TurnOutcome:
-    """ADR-0207 §1's second shape, for a binding that scripts its subject's turn.
-
-    A confirm-owed route the routing stage parked (ADR-0197 §7): no turn, no step, the
-    operation and its resolved subject on the card, and no composed reply. §1 rules
-    this shape together with the step park "because they are one thing to the person
-    who asked", and a suite exercising only the step park would leave the routed half
-    — the operations ``track:voice`` exists to make reachable by voice — untested.
-    """
-    return TurnOutcome(
-        turn=None,
-        conversation_id="c-park",
-        routed=RoutedOperation(
-            operation=RoutableOperation.FORGET,
-            outcome=RouteOutcome.AWAITING_CONFIRMATION,
-            confirmation=OperationConfirmation(
-                operation=RoutableOperation.FORGET,
-                subject=(
-                    Belief(
-                        id="rec-routed",
-                        band=BeliefBand.ASSERTED,
-                        kind=MemoryKind.SEMANTIC,
-                        content="the user likes jazz",
-                        confidence=1.0,
-                        last_updated=_PARK_AT,
-                    ),
-                ),
-                token=ContinuationToken(handle="routed-park-1"),
-            ),
-        ),
     )
 
 
@@ -1611,36 +1568,6 @@ class AssistantEngineContract(
         and still pass a suite. What the confirmation carries is otherwise
         unconstrained: which account, which arguments and how many occurrences are
         each implementation's own.
-        """
-
-    @pytest.fixture
-    @abstractmethod
-    def spoken_step_park(self) -> AssistantEngine:
-        """A subject whose ``converse_spoken`` pass parks the **step** it drove.
-
-        ADR-0207 §1's first shape, and a fixture for :attr:`parked_engine`'s reason:
-        parking is the permission stage's ruling reached inside a turn, so an
-        implementation has to be handed to the suite already arranged to reach it. It
-        differs from :attr:`parked_engine` in what the suite then does — that one holds
-        a park to *answer*, and this one produces a fresh one on a **spoken** call, so
-        the pass under test is the one ADR-0207 makes audible.
-
-        A ``converse_spoken`` on it must return an ``outcome`` whose ``step.disposition``
-        is ``AWAITING_CONFIRMATION``, carrying its confirmation, with ``reply`` ``None``.
-        """
-
-    @pytest.fixture
-    @abstractmethod
-    def spoken_routed_park(self) -> AssistantEngine:
-        """A subject whose ``converse_spoken`` pass parks a confirm-owed **route**.
-
-        ADR-0207 §1's second shape. §1 defines a live confirmation park as exactly two
-        shapes and no others, and every clause of that decision ranges over the
-        definition rather than over one member of it — so both are fixtures, and the
-        half #1699 never measured is exercised by the same cases as the half it did.
-
-        A ``converse_spoken`` on it must return an ``outcome`` whose ``routed.outcome``
-        is ``AWAITING_CONFIRMATION``, carrying its card, with ``reply`` ``None``.
         """
 
     @pytest.fixture

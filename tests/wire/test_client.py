@@ -29,11 +29,14 @@ from ai_assistant.core.errors import (
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
+    ChannelIdentity,
+    ChannelInput,
+    NewConversation,
+    SpeechChannelPayload,
     SpokenAudio,
     SpokenAudioFormat,
-    SpokenDelivery,
-    SpokenDeliveryReport,
-    SpokenDeliveryState,
+    SpokenReply,
+    TextChannelPayload,
 )
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import ENVELOPE_RESERVE_BYTES, HubEngineClient, serve_connection
@@ -120,63 +123,41 @@ async def test_a_closed_door_is_never_a_fallback(tmp_path: Path) -> None:
     assert not (tmp_path / "hub.sock").exists()
 
 
-async def test_an_unusable_delivery_report_never_reaches_a_socket(tmp_path: Path) -> None:
-    """ADR-0205 §1, §2: both refusals are local, "before any I/O".
+async def test_a_spoken_conversational_input_never_reaches_a_socket(tmp_path: Path) -> None:
+    """ADR-0313 §3:2, §4:1: refused locally, "before any I/O".
 
-    Adversarial review, round 3, ``blocker``. The client hand-implements the promoted
-    surface, so a value the engine refuses locally must be refused here too — and on
-    *this* method the cost of deferring it is not a wasted round trip but a
-    **recording** crossing the network for a call the hub is bound to refuse.
+    The client hand-implements the promoted surface, so a combination the engine
+    refuses must be refused here too — and on a spoken input the cost of deferring it
+    would be a **recording** crossing the network for a call the hub is bound to
+    refuse.
 
     **The socket does not exist**, which is what makes this an assertion about I/O
     rather than about a message: any attempt to connect raises
     :class:`~ai_assistant.wire.errors.HubUnavailableError`, so a ``ValueError``
-    arriving instead proves nothing was sent. The third case is the control — a
-    well-formed report is *not* refused here, and reaches for the socket that is not
-    there.
+    arriving instead proves nothing was sent. The event is the control — the one
+    combination admitted is *not* refused here, and reaches for the socket that is
+    not there.
     """
     client = HubEngineClient(tmp_path / "hub.sock", read_timeout=_PATIENT)
     recording = SpokenAudio(
         content=b64encode(b"an utterance").decode("ascii"), media_type=SpokenAudioFormat.MP4
     )
-    plays = (SpokenAudioFormat.MP4,)
-    interrupted = SpokenDelivery(
-        state=SpokenDeliveryState.INTERRUPTED,
-        played=timedelta(seconds=3),
-        rendered=timedelta(seconds=9),
+    plays = SpokenReply(plays=(SpokenAudioFormat.MP4,))
+    for target in (
+        NewConversation(),
+        ChannelIdentity(channel_type="conversation", instance_id="c-1"),
+    ):
+        spoken = ChannelInput(target=target, payload=SpeechChannelPayload(audio=recording))
+        with pytest.raises(ValueError, match="unsupported channel"):
+            await client.receive(spoken, reply=plays, timeout=_PATIENT)
+
+    # The control: an event is admitted here, and looks for the hub.
+    event = ChannelInput(
+        target=ChannelIdentity(channel_type="informational_event", instance_id="e-1"),
+        payload=TextChannelPayload(text="the door opened"),
     )
-
-    # §1: a report beside no conversation names a turn that cannot exist.
-    with pytest.raises(ValueError, match="fresh conversation"):
-        await client.converse_spoken(
-            recording,
-            plays=plays,
-            timeout=_PATIENT,
-            delivery=SpokenDeliveryReport(episode_id="conv:c-1:1", delivery=interrupted),
-        )
-
-    # §2: UNKNOWN is what the hub writes, never what a caller supplies.
-    with pytest.raises(ValueError, match="reports nothing"):
-        await client.converse_spoken(
-            recording,
-            plays=plays,
-            timeout=_PATIENT,
-            conversation_id="c-1",
-            delivery=SpokenDeliveryReport(
-                episode_id="conv:c-1:1",
-                delivery=SpokenDelivery(state=SpokenDeliveryState.UNKNOWN),
-            ),
-        )
-
-    # The control: a usable report is not refused here, and looks for the hub.
     with pytest.raises(HubUnavailableError):
-        await client.converse_spoken(
-            recording,
-            plays=plays,
-            timeout=_PATIENT,
-            conversation_id="c-1",
-            delivery=SpokenDeliveryReport(episode_id="conv:c-1:1", delivery=interrupted),
-        )
+        await client.receive(event, reply=None, timeout=_PATIENT)
 
     assert not (tmp_path / "hub.sock").exists()
 

@@ -185,24 +185,22 @@ _NAMESPACE: Final = {
 #: returns one and the walk is right not to reach it. They are ``core`` surface the
 #: read-surface ADR §11 defers will promote when it gives them a door.
 #:
-#: The three after those are ADR-0200's — ``SpokenTurn``, which ``converse_spoken``
-#: returns, and the ``SpokenAudio`` and ``SpokenAudioFormat`` it carries. The walk
-#: reaches ``SpokenTurn`` through that method's return annotation and its argument
-#: annotations alike, and terminates almost immediately: ``TurnOutcome`` is already
-#: here, ``NonBlankEncodableText`` is a scalar, and ``SpokenAudio`` carries exactly
-#: two members — ``SpokenAudioFormat``, a closed ``StrEnum``, and ``Base64Audio``,
-#: which is an ``Annotated`` refinement of a scalar rather than a promoted model and
-#: so is a leaf ADR-0087 §2c already spells.
+#: The two after those are ADR-0200's — the ``SpokenAudio`` and ``SpokenAudioFormat``
+#: a recording and a rendering are carried as. ``SpokenTurn``, which ``converse_spoken``
+#: returned, left this roster with that member (ADR-0313 §3:1); the walk now reaches
+#: ``SpokenAudio`` through ``receive``'s ``SpeechChannelPayload`` and through
+#: ``NotificationDelivery.spoken``. ``SpokenAudio`` carries exactly two members —
+#: ``SpokenAudioFormat``, a closed ``StrEnum``, and ``Base64Audio``, which is an
+#: ``Annotated`` refinement of a scalar rather than a promoted model and so is a leaf
+#: ADR-0087 §2c already spells.
 #:
-#: ``SpeechFailure`` is **not** here and its absence is the shape of ADR-0200 §4
-#: rather than an omission: it is carried by
-#: :class:`~ai_assistant.core.errors.TranscriptionFailedError`, an *exception*, and
-#: reaches a client through ADR-0085 §10a's error payload rather than through any
-#: method's return type. The walk is over the field graph of what the surface
-#: returns, so it is right not to reach it; what holds it to the surface is
-#: ``wire/errors.py``'s reconstruction, which
-#: ``test_every_error_s_structured_state_round_trips_through_its_constructor``
-#: exercises over every subtype.
+#: ``SpeechFailure`` is **not** here: it crossed only inside
+#: ``TranscriptionFailedError``, an *exception*, which left with ``converse_spoken``
+#: (ADR-0313 §3:1), and no method's return type reaches it.
+#:
+#: ``ConversationInputOptions`` and ``SpokenChannelResult`` left with spoken
+#: conversation too (ADR-0313 §4:2, §4:6): ``ChannelInput`` no longer names the one and
+#: ``ChannelOutcome`` no longer names the other.
 #:
 #: ``SpokenRendering`` is ADR-0206 §6's, reached through the ``spoken_rendering``
 #: member it gives ``NotificationDelivery``, and it is the second type this roster
@@ -289,13 +287,11 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "SpeechChannelPayload",
         "ChannelContextItem",
         "ChannelContext",
-        "ConversationInputOptions",
         "ChannelInput",
         "WholeTextReply",
         "StreamingTextReply",
         "SpokenReply",
         "TextChannelResult",
-        "SpokenChannelResult",
         "InformationalEventResult",
         "ChannelResult",
         "Clarification",
@@ -310,7 +306,6 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "ReadAnswerOutcome",
         "ReadCancellation",
         "SpokenRendering",
-        "SpokenTurn",
         "SpokenAudio",
         "SpokenAudioFormat",
         "RoutedOperation",
@@ -829,8 +824,12 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
 
     **ADR-0304 §2 renames one**, ``story_page`` to ``story_summary``, so the count
     does not move.
+
+    **ADR-0313 §3:1 removes one**, ``converse_spoken``, with spoken conversation — so
+    the count falls to seventy-nine. Its gateway route left with push-to-talk (§3:4).
     """
-    assert len(_method_names()) == 80
+    assert len(_method_names()) == 79
+    assert "converse_spoken" not in _method_names()
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -1638,6 +1637,13 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     10, so a peer at 98 refuses a record a hub at 99 sends (ADR-0124 §9:2). **The
     method set does not move and stays at 80.**
 
+    **100 is ADR-0313 §3:1, §4:2 and §4:6, under both limbs.** ``AssistantEngine``
+    loses ``converse_spoken``, so the method set falls to **79** and a client at 99 may
+    call an operation a hub at 100 no longer answers; and ``ChannelInput`` loses
+    ``conversation`` and ``ChannelOutcome`` loses ``SpokenChannelResult``, wire-carried
+    core types a peer at 99 sends and accepts in shapes a hub at 100 refuses (§6:4,
+    ADR-0124 §9:2).
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1646,7 +1652,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (80, 99), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (79, 100), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

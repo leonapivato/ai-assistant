@@ -20,11 +20,7 @@ from ai_assistant.core.types import (
     InformationalEventResult,
     Message,
     Modality,
-    NewConversation,
-    SpeechChannelPayload,
-    SpokenAudio,
-    SpokenAudioFormat,
-    SpokenReply,
+    TextChannelPayload,
 )
 from ai_assistant.orchestration import informational_events
 from ai_assistant.orchestration.channels import ResolvedChannelInput
@@ -36,10 +32,6 @@ if TYPE_CHECKING:
 
 
 _BUDGET = timedelta(seconds=10)
-_SPEECH = SpeechChannelPayload(
-    audio=SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
-)
-_PLAYS = SpokenReply(plays=(SpokenAudioFormat.MP4,))
 
 
 class ControlledModel(FakeModelProvider):
@@ -67,18 +59,21 @@ class ControlledModel(FakeModelProvider):
 
 
 async def test_new_context_counts_towards_payload_limit_without_truncation() -> None:
+    # An event: every conversational input is refused before it is measured
+    # (ADR-0313 §4:1), so the one admitted combination carries the context here.
     harness = Harness(max_payload_bytes=1024)
     with pytest.raises(OversizedValueError):
         await harness.engine.receive(
             ChannelInput(
-                target=NewConversation(),
-                payload=_SPEECH,
+                target=ChannelIdentity(channel_type="informational_event", instance_id="source"),
+                payload=TextChannelPayload(text="event"),
                 context=ChannelContext(history=(ChannelContextItem(text="x" * 1024),)),
             ),
-            reply=_PLAYS,
+            reply=None,
             timeout=_BUDGET,
         )
     assert await harness.conversation_store.recent() == []
+    assert await harness.memory.export() == []
 
 
 @pytest.mark.parametrize("expires", [False, True])

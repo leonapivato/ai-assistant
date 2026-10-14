@@ -15,16 +15,13 @@ import pytest
 from ai_assistant.core.errors import ActivationStoppedError, ChannelProcessingError
 from ai_assistant.core.types import (
     ActivationStop,
+    ChannelIdentity,
     ChannelInput,
     ControllerRule,
     ControllerStage,
     NewConversation,
     ProcessingReason,
     ProcessingStatus,
-    SpeechChannelPayload,
-    SpokenAudio,
-    SpokenAudioFormat,
-    SpokenReply,
     TextChannelPayload,
     WholeTextReply,
 )
@@ -105,12 +102,10 @@ async def test_an_unmarked_pass_is_answered_as_it_ended() -> None:
     engine = FakeAssistantEngine()
     result = await engine.receive(
         ChannelInput(
-            target=NewConversation(),
-            payload=SpeechChannelPayload(
-                audio=SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
-            ),
+            target=ChannelIdentity(channel_type="informational_event", instance_id="door"),
+            payload=TextChannelPayload(text="the door opened"),
         ),
-        reply=SpokenReply(plays=(SpokenAudioFormat.MP4,)),
+        reply=None,
         timeout=_BUDGET,
     )
     assert result.capture.state == "recorded"
