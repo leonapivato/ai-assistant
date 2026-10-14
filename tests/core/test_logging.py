@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import io
+import logging
 import subprocess
 import sys
 from collections import ChainMap, UserDict, deque
@@ -28,7 +31,7 @@ from ai_assistant.core.logging import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, MutableMapping
+    from collections.abc import Callable, Iterator, Mapping, MutableMapping
 
 
 def _redact(**event: object) -> dict[str, object]:
@@ -859,5 +862,274 @@ def test_a_host_that_formats_exceptions_upstream_has_the_rendering_masked(
         structlog.get_logger("host").warning("read_failed", exc_info=True)
 
     out = capsys.readouterr().out
+    _assert_no_content(out)
+    assert REDACTED in out
+
+
+# --- A standard-library record carries no exception's words either (#2928) ---
+#
+# Records from the ``logging`` module — a third-party library's, asyncio's — never
+# pass through structlog's chain. Every assertion is over what a handler writes.
+
+
+@pytest.fixture(autouse=True)
+def root_logging_is_this_test_s_own() -> Iterator[None]:
+    """Give back the root logger's handlers, level and handler filters as found.
+
+    ``configure_logging`` attaches the scrubbing filter to every root handler, and
+    pytest's own capture handlers are made once per session and reused, so a filter
+    left on one would reach every later test on the worker.
+    """
+    root = logging.getLogger()
+    handlers = list(root.handlers)
+    level = root.level
+    held = [one for one in (*handlers, logging.lastResort) if one is not None]
+    filters = [(one, list(one.filters)) for one in held]
+    yield
+    for one in list(root.handlers):
+        if one not in handlers:
+            root.removeHandler(one)
+    for one in handlers:
+        if one not in root.handlers:
+            root.addHandler(one)
+    root.setLevel(level)
+    for one, kept in filters:
+        one.filters[:] = kept
+
+
+def _ours() -> logging.StreamHandler[io.StringIO]:
+    """This module's handler on the root logger, now writing to a fresh buffer."""
+    ours = [
+        one for one in logging.getLogger().handlers if type(one).__name__ == "_ContentFreeHandler"
+    ]
+    assert len(ours) == 1, "exactly one of this module's handlers is installed"
+    handler = ours[0]
+    assert isinstance(handler, logging.StreamHandler)
+    handler.setStream(io.StringIO())
+    return handler
+
+
+def _configured_on_a_bare_root() -> io.StringIO:
+    """Configure logging where the root logger has no handler, as the hub's has none.
+
+    Done in the test body: pytest attaches its capture handlers to the root for each
+    phase, so a root emptied by a fixture would be filled again before the test ran.
+    """
+    root = logging.getLogger()
+    for one in list(root.handlers):
+        root.removeHandler(one)
+    configure_logging(Settings())
+    return _ours().stream
+
+
+def _record(msg: str, args: tuple[object, ...], failure: BaseException) -> logging.LogRecord:
+    return logging.LogRecord(
+        "thirdparty",
+        logging.ERROR,
+        __file__,
+        1,
+        msg,
+        args,
+        (type(failure), failure, failure.__traceback__),
+    )
+
+
+def test_a_stdlib_exception_line_carries_the_class_and_frames_and_never_the_words() -> None:
+    stream = _configured_on_a_bare_root()
+
+    try:
+        _raise_with_content()
+    except _ReadFailedError:
+        logging.getLogger("thirdparty").exception("read failed")
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert "read failed" in out
+    assert "_ReadFailedError" in out, "the class says what happened"
+    assert "test_logging.py" in out, "the frames say where"
+    assert "in _raise_with_content" in out
+
+
+@pytest.mark.parametrize("shape", ["argument", "repr argument", "f-string", "message"])
+def test_a_stdlib_message_naming_the_exception_names_only_its_class(shape: str) -> None:
+    stream = _configured_on_a_bare_root()
+    log = logging.getLogger("thirdparty")
+    failure = _caught(_raise_chained)
+
+    if shape == "argument":
+        log.error("read failed: %s", failure, exc_info=failure)
+    elif shape == "repr argument":
+        log.error("read failed: %r", failure)
+    elif shape == "f-string":
+        log.error(f"read failed: {failure!r} ({failure.__cause__})", exc_info=failure)
+    else:
+        log.error(failure)
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert "RuntimeError" in out
+
+
+async def _fail_with_content() -> None:
+    _raise_with_content()
+
+
+def test_asyncios_unretrieved_task_line_carries_no_words() -> None:
+    # asyncio's own message embeds the task's repr, and that holds the exception's:
+    # ``exception=_ReadFailedError('MARKER…')``. Emitted by the loop's real default
+    # handler, over a real finished task.
+    stream = _configured_on_a_bare_root()
+
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(_fail_with_content())
+        await asyncio.wait([task])
+        failure = task.exception()
+        assert failure is not None
+        loop.default_exception_handler(
+            {"message": "Task exception was never retrieved", "exception": failure, "future": task}
+        )
+
+    asyncio.run(run())
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert "Task exception was never retrieved" in out
+    assert "exception=" in out, "the task's repr is kept, the exception named by its class"
+    assert "_ReadFailedError" in out
+    assert "in _raise_with_content" in out
+
+
+def test_the_net_holds_where_the_root_already_has_a_handler() -> None:
+    # ``basicConfig`` does nothing at all where the root has a handler, so under
+    # pytest, or in a host that configured logging first, the stdlib's formatter
+    # went on printing the exception's message.
+    root = logging.getLogger()
+    for one in list(root.handlers):
+        root.removeHandler(one)
+    stream = io.StringIO()
+    hosts = logging.StreamHandler(stream)
+    hosts.setFormatter(logging.Formatter("HOST %(levelname)s %(message)s"))
+    root.addHandler(hosts)
+
+    configure_logging(Settings())
+
+    assert root.handlers == [hosts], "a host's handler is composed with, not joined"
+    try:
+        _raise_with_content()
+    except _ReadFailedError:
+        logging.getLogger("thirdparty").exception("read failed: %s", _caught(_raise_chained))
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert out.startswith("HOST ERROR read failed: RuntimeError"), "the host's format is kept"
+    assert "_ReadFailedError" in out
+
+
+def test_a_host_that_configured_structlog_has_its_root_handlers_scrubbed() -> None:
+    stream = io.StringIO()
+    logging.getLogger().addHandler(logging.StreamHandler(stream))
+    structlog.configure(processors=[structlog.processors.KeyValueRenderer()])
+
+    install_redaction()
+
+    logging.getLogger("thirdparty").error("read failed", exc_info=_caught(_raise_with_content))
+    _assert_no_content(stream.getvalue())
+    assert "_ReadFailedError" in stream.getvalue()
+
+
+def test_the_last_resort_handler_is_scrubbed_too() -> None:
+    # With no handler anywhere, the logging module writes through ``lastResort``,
+    # whose formatter is the stdlib's default.
+    configure_logging(Settings())
+    last = logging.lastResort
+    assert last is not None
+
+    scrubbed = last.filter(_record("read failed", (), _caught(_raise_with_content)))
+
+    assert isinstance(scrubbed, logging.LogRecord)
+    out = logging.Formatter().format(scrubbed)
+    _assert_no_content(out)
+    assert "_ReadFailedError" in out
+
+
+def test_other_handlers_are_handed_the_record_as_logged() -> None:
+    _configured_on_a_bare_root()
+    seen: list[logging.LogRecord] = []
+
+    class Keep(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            seen.append(record)
+
+    logging.getLogger().addHandler(Keep())
+    failure = _caught(_raise_with_content)
+
+    logging.getLogger("thirdparty").error("read failed: %s", failure, exc_info=failure)
+
+    assert seen[0].args == (failure,), "the scrubbing is a copy, not the record itself"
+
+
+def test_configuring_twice_installs_one_handler_and_one_filter() -> None:
+    _configured_on_a_bare_root()
+    configure_logging(Settings())
+    install_redaction()
+
+    _ours()
+    for handler in logging.getLogger().handlers:
+        assert sum(type(one).__name__ == "_ScrubRecords" for one in handler.filters) == 1
+
+
+def test_a_stdlib_formatting_failure_drops_the_record(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Fail closed, as the structlog chain does. The stdlib's own reaction to a
+    # handler's failure prints the record's message and arguments to stderr, so that
+    # path is closed too.
+    def explode(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("formatting failed")
+
+    stream = _configured_on_a_bare_root()
+    failure = _caught(_raise_with_content)
+    monkeypatch.setattr("traceback.extract_tb", explode)
+
+    logging.getLogger("thirdparty").error("read failed: %s", failure, exc_info=failure)
+    assert stream.getvalue() == "", "the filter drops it"
+
+    handler = _ours()
+    handler.emit(_record("read failed: %s", (failure,), failure))
+    assert handler.stream.getvalue() == "", "and so does the formatter, past the filter"
+
+    captured = capsys.readouterr()
+    _assert_no_content(captured.out + captured.err)
+    assert "Logging error" not in captured.err
+
+
+def test_the_formatter_is_the_second_net() -> None:
+    # Were a record to reach the handler past its filter (``emit`` called directly),
+    # the formatter scrubs it itself.
+    _configured_on_a_bare_root()
+    formatter = _ours().formatter
+    assert formatter is not None
+    failure = _caught(_raise_chained)
+
+    out = formatter.format(_record("read failed: %r", (failure,), failure))
+
+    _assert_no_content(out)
+    assert "RuntimeError" in out
+    _assert_no_content(formatter.formatException((type(failure), failure, None)))
+
+
+def test_a_traceback_formatted_before_the_net_is_masked() -> None:
+    # A record sent over a socket carries its traceback as text alone, with no
+    # exception left to render; its words cannot be told from its frames.
+    stream = _configured_on_a_bare_root()
+    record = logging.makeLogRecord(
+        {"name": "remote", "levelno": logging.ERROR, "levelname": "ERROR", "msg": "read failed"}
+    )
+    record.exc_text = f"Traceback (most recent call last):\n_ReadFailedError: {_MESSAGE}"
+
+    logging.getLogger("remote").handle(record)
+
+    out = stream.getvalue()
     _assert_no_content(out)
     assert REDACTED in out
