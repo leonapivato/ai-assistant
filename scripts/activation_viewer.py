@@ -80,7 +80,12 @@ PHASE_LANES: Final = ("recall", "understanding", "planning", "authorizing", "act
 #: Every lane the timeline always draws, in order (ADR-0316 §3:2).
 LANES: Final = ("controller", *PHASE_LANES)
 
-#: End rules under which the activation could not finish what it was asked.
+#: End rules under which the activation could not finish what it was asked: the badge
+#: is read off the end entry alone (ADR-0317 §4:4). The round limit, a stage's failure,
+#: a deadline (which ends ``stage_timed_out``) and the loop guard are ADR-0317 §3's
+#: causes; a cancellation and a restart also cut the activation off before it finished.
+#: A step that failed or timed out ends nothing where its stage tolerated it (ADR-0281
+#: §5): the pass went on, and the step is shown as it ended.
 COULD_NOT_FINISH_RULES: Final = frozenset(
     {
         "stage_failed",
@@ -91,9 +96,6 @@ COULD_NOT_FINISH_RULES: Final = frozenset(
         "hub_stopped",
     }
 )
-
-#: A controller step's outcomes that mean the step did not finish.
-UNFINISHED_OUTCOMES: Final = frozenset({"failed", "timed_out"})
 
 #: How much of the input the list shows.
 INPUT_CHARS: Final = 160
@@ -408,8 +410,6 @@ class Tally:
             self.rounds += 1
         # Every hint is type-checked before it is used: a body of an unexpected shape
         # loses its hint and is still shown whole (ADR-0316 §5:2).
-        if _text(body.get("outcome")) in UNFINISHED_OUTCOMES or "failure" in body:
-            self.could_not_finish = True
         if stage == "end":
             rule = _text(body.get("due"))
             self.ended, self.ended_at = rule, ended
@@ -427,8 +427,6 @@ class Tally:
             self.refused = True
         if body.get("read_outside_content") is True:
             self.outside = True
-        if "failure" in body:
-            self.could_not_finish = True
 
     def badges(self) -> list[str]:
         """The badges the list shows, in a fixed order."""
