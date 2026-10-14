@@ -37,7 +37,7 @@ import hashlib
 from base64 import b64encode
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from typing import TYPE_CHECKING, Final, assert_never
+from typing import TYPE_CHECKING, assert_never
 from uuid import UUID, uuid4
 
 from ai_assistant.core.channel_validation import snapshot
@@ -61,13 +61,10 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
-    ActionPlan,
+    TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEnding,
     ActivationStop,
-    AttemptOutcome,
-    AttemptReport,
     Attestation,
-    AuthorizationView,
     Belief,
     BeliefBand,
     BeliefSummary,
@@ -76,27 +73,20 @@ from ai_assistant.core.types import (
     ChannelResult,
     ConversationDigest,
     ConversationSummary,
-    CurrentContext,
     DestinationTrust,
     DestinationTrustRecord,
-    DriveWithheld,
     EgressBinding,
     EpisodeCaptureReport,
     EpisodeChunk,
     EpisodePage,
-    ForecastNotRead,
-    Goal,
-    GoalBrief,
-    GoalInterpretation,
     GrantableSource,
     GrantScope,
-    Ground,
     InformationalEventResult,
     MemoryKind,
     MemorySource,
+    MessageAuthor,
+    NewMessage,
     NotificationDelivery,
-    OutboundReach,
-    OutboundStatement,
     PermissionDecision,
     Placement,
     PlacementReach,
@@ -104,18 +94,14 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     Provenance,
     RecipientGrant,
-    RecordedChannelTrigger,
     RecordedInvocation,
-    RecordedSpeechInput,
+    SendOutcome,
     SourceGrant,
     SpendTotal,
     SpokenAudio,
     SpokenAudioFormat,
-    SpokenDelivery,
-    SpokenDeliveryState,
     SpokenRendering,
     SpokenReply,
-    StepStatus,
     StoryActor,
     StoryMember,
     StoryMemberKind,
@@ -123,9 +109,6 @@ from ai_assistant.core.types import (
     StoryNoteId,
     StoryOutcome,
     TextChannelPayload,
-    TimeOfDay,
-    TurnOutcome,
-    TurnResult,
     WholeTextReply,
     chat_conversation_ids,
     check_chat_cursor,
@@ -152,8 +135,7 @@ from ai_assistant.orchestration.chat import (
     ChatInput,
     ChatReader,
     ChatWriter,
-    chat_effects,
-    chat_reply,
+    couldnt_finish,
 )
 from ai_assistant.orchestration.conversations import (
     check_devices_fit,
@@ -295,20 +277,6 @@ def _check_positive_int(value: int, *, name: str) -> None:
         raise ValueError(msg)
 
 
-#: The step statuses ADR-0262 §4's **third** ending condition admits, stated as the
-#: three it names rather than as the four it excludes: *"every step of every execution
-#: it names stands ``SUCCEEDED``, ``FAILED`` or ``SKIPPED`` — so none stands
-#: ``PENDING``, ``AWAITING_APPROVAL``, ``RUNNING`` or ``INDETERMINATE``"*.
-#:
-#: **Not** :data:`~ai_assistant.core.types.TERMINAL_STEP_STATUSES`, which is a different
-#: set for a different question — ``FAILED`` sits outside it *"(it may still be
-#: retried)"*, and reading it here would refuse a failed step §4 admits, so the
-#: attempt an implementation could never end is exactly the one §4's limb 1 reports.
-_ENDING_ADMITS: Final[frozenset[StepStatus]] = frozenset(
-    {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.SKIPPED}
-)
-
-
 class FakeAssistantEngine:
     """An in-memory :class:`~ai_assistant.core.protocols.AssistantEngine`.
 
@@ -320,31 +288,9 @@ class FakeAssistantEngine:
     ADR-0084 §6 places the codec in the `wire` package, which does not exist yet,
     and ADR-0085 §8c forecloses a ``core``-owned one; where the encoder finally
     lives is ADR-0087 §9's open question and change 4's to answer.
-
-    Attributes:
-        turn_outcome: The turn the activation the reader runs for a written message
-            ends with (ADR-0293 §6, §10). Defaults to a turn whose plan had no step —
-            a real ratified shape, not a stub.
-        outbound_statement: ADR-0264 §7's statement every outcome this engine
-            *composes* carries, or ``None`` — the default — for a fresh
-            ``NOT_REACHED`` minted per outcome. Script it to drive a rendering
-            surface over ``REACHED`` and ``INDETERMINATE``.
-        attempt_report: ADR-0262 §6's report every outcome this engine *composes a
-            reply for* carries, or ``None`` — the default — because a fake ends no
-            attempt. Script it to drive a rendering surface over each of the six
-            ``AttemptOutcome`` members a fixed statement is owed for.
-        forecast_not_read: ADR-0260 §10's member every outcome this engine *composes*
-            carries, or ``None`` — the default — because a fake services no forecast
-            read. Script it to drive a rendering surface over each of the six
-            ``ForecastNotRead`` members a fixed statement is owed for.
-        drive_withheld: ADR-0261 §7's member every outcome this engine *composes*
-            carries, or ``None`` — the default — because a fake takes no ``→ RUNNING``
-            claim and so meets no ``ClaimRefused``. Script it to drive a rendering
-            surface over each of the seven ``DriveWithheld`` members a fixed statement
-            is owed for.
     """
 
-    def __init__(  # noqa: PLR0915 — one assignment per table this fake keeps, and each is a distinct population a `resume` presenting a handle is decided from; ADR-0244 §5 adds a fourth
+    def __init__(
         self,
         *,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
@@ -439,10 +385,6 @@ class FakeAssistantEngine:
         #: set also names; an empty intersection degrades the rendering, which is how a
         #: consumer reaches that shape without a seam of its own.
         self.spoken_formats: frozenset[SpokenAudioFormat] = frozenset(SpokenAudioFormat)
-        #: The delivery row of each spoken turn's episode (ADR-0205 §3). No spoken turn
-        #: runs since ``converse_spoken`` retired (ADR-0313 §3:1), and the rows leave
-        #: with the conversation store's delivery members (§3:3).
-        self.deliveries: dict[str, SpokenDelivery] = {}
         #: Which conversation each captured episode was recorded in, by episode id.
         #: Every id is ``activation:<activation_id>``, fixed at admission
         #: (ADR-0283 §2), so membership is retained here rather than read off the id.
@@ -452,94 +394,6 @@ class FakeAssistantEngine:
             UUID(int=next(activation_ids), version=4)
         )
         self._ticks = count(1)
-        self.turn_outcome: TurnOutcome | None = None
-        #: ADR-0264 §7's statement, for every outcome this engine composes itself, or
-        #: ``None`` — the default — for :meth:`_outbound`'s fresh ``NOT_REACHED``.
-        #:
-        #: **A lever, because no sequence of surface calls reaches the other two
-        #: members**: this double originates no model call and opens no channel, so
-        #: nothing it does can establish a contact, and ``REACHED`` and
-        #: ``INDETERMINATE`` would be unreachable in a consumer's test without one.
-        #: They are what a surface rendering §7's statement most needs to be driven
-        #: over — the browser's lane (#2237) and the terminal's alike — and the
-        #: ``destinations`` and ``records`` a ``REACHED`` names come with the value a
-        #: test hands over rather than from a reach this engine invents.
-        #:
-        #: **It is the value for a pass this engine composed and never a rewrite of a
-        #: scripted one**: an outcome handed to :attr:`turn_outcome` is returned as the
-        #: caller built it, that member included, exactly as every other member of a
-        #: scripted outcome is.
-        self.outbound_statement: OutboundStatement | None = None
-        #: ADR-0260 §10's member, for every outcome this engine composes, or ``None`` —
-        #: the default.
-        #:
-        #: **A lever, because no sequence of surface calls reaches any of the six**:
-        #: this double wires no forecaster, services no read and records no
-        #: ``ForecastDisposition``, so every member would be unreachable in a consumer's
-        #: test without one — and they are exactly what a surface rendering §10's six
-        #: fixed statements has to be driven over, on the terminal and on the browser
-        #: alike (#2474).
-        #:
-        #: **``None`` is the honest default here and is not :attr:`outbound_statement`'s
-        #: case.** §10 fixes the meaning of the absence — "``None`` means the servicing
-        #: recorded no ``ForecastDisposition``, and means nothing else" — and a fake that
-        #: services no read has recorded none, so filling one in would assert something
-        #: no pass of this double established. What #2381 makes obligatory is a *true*
-        #: value for a member a conforming engine always carries, not a value for one it
-        #: leaves absent on every pass it takes.
-        #:
-        #: **A scripted outcome that already carries the member keeps what it carries**,
-        #: which is :attr:`authorizations`' own arrangement: the caller stated the member
-        #: and overwriting it would silently discard what they said.
-        self.forecast_not_read: ForecastNotRead | None = None
-        #: ADR-0261 §7's member, for every outcome this engine composes, or ``None`` —
-        #: the default.
-        #:
-        #: :attr:`forecast_not_read`'s shape one vocabulary over, and a lever for its
-        #: reason: **no sequence of surface calls on this double reaches any of the
-        #: seven.** A withheld drive needs a ``PlanStore`` to refuse a ``→ RUNNING``
-        #: claim on a liveness conjunct, which this engine never takes — so every member
-        #: would be unreachable in a consumer's test, and the seven are exactly what a
-        #: surface rendering §7's seven fixed statements has to be driven over, on the
-        #: terminal and on the browser alike (ADR-0261 §13's L3).
-        #:
-        #: **``None`` is the honest default and §7 fixes what it means.** The member is
-        #: non-``None`` "exactly on a turn that *returned* after a ``ClaimRefused`` whose
-        #: post-refusal read established one of the seven states", and ``None`` on every
-        #: other returned outcome — which is every pass this double takes.
-        #:
-        #: **A scripted outcome that already carries the member keeps what it carries**,
-        #: which is :attr:`forecast_not_read`'s own arrangement.
-        self.drive_withheld: DriveWithheld | None = None
-        #: What :attr:`~ai_assistant.core.types.TurnOutcome.authorizations` carries on
-        #: the next turn — ADR-0254 §11's announcement for the rows an act opened
-        #: without a question. **Empty by default**, because a fake opens no row: §11
-        #: makes the member empty "on every turn that opened none", so the default is
-        #: the honest value and not a stand-in.
-        self.authorizations: tuple[AuthorizationView, ...] = ()
-        #: What :attr:`~ai_assistant.core.types.TurnOutcome.attempt_report` carries on
-        #: a pass this engine **composed a reply for** — ADR-0262 §6's report — or
-        #: ``None``, the default.
-        #:
-        #: **A lever, because no sequence of surface calls reaches a single member of
-        #: it**: this double runs no verification phase and ends no attempt, so §6's
-        #: "non-``None`` exactly on a turn that ended an attempt under §4" is a state
-        #: nothing here can arrive at, and every one of the six
-        #: :class:`~ai_assistant.core.types.AttemptOutcome` members a surface owes a
-        #: fixed statement for would be unreachable in a consumer's test without one.
-        #: That obligation is **not** optional and falls on **both** surfaces at once
-        #: (ADR-0262 §11's L5), which is why the lever lands with the field rather than
-        #: with its first renderer.
-        #:
-        #: **``None`` by default, because a fake ends no attempt**: §6 leaves the member
-        #: absent on every turn that did not, so the default is the honest value and not
-        #: a stand-in — :attr:`authorizations`'s ground one member over.
-        #:
-        #: **It is the value for a pass this engine composed and never a rewrite of a
-        #: scripted one**: an outcome handed to :attr:`turn_outcome` already carrying a
-        #: report keeps what it carries, exactly as a scripted
-        #: :attr:`authorizations` does.
-        self.attempt_report: AttemptReport | None = None
         #: The grantable sources this engine holds, by declared identity, each
         #: mapped to its configured location or to ``None`` where it has none
         #: (ADR-0102 §6). Scriptable with :meth:`hold_source`, so a client's own
@@ -687,14 +541,13 @@ class FakeAssistantEngine:
         #: written message recorded and waiting, so no assistant message lands in a
         #: transcript or the change stream behind the case's back.
         self.chat_reader = chat_reader
-        #: ADR-0293 §6's reader and §10's adapter. **The engine's own reader and
+        #: ADR-0293 §6's reader and its writer. **The engine's own reader and
         #: writer** over this fake's chat space, so the interim — one activation at a
         #: time per conversation, and everything that waited taken in together as one
         #: input — and the bookkeeping are the engine's by construction rather than a
         #: copy kept in step by hand; what this fake supplies is the activation
-        #: (:meth:`_read_in`), which runs as its turn calls do and answers with
-        #: :attr:`turn_outcome` where one is scripted. Its reads are tasks held here,
-        #: so none is collected mid-run.
+        #: (:meth:`_read_in`), which writes a canned reply naming its input. Its reads
+        #: are tasks held here, so none is collected mid-run.
         self._chat_reads: set[asyncio.Task[None]] = set()
         self._chat_writer = ChatWriter(conversations=self.chat, max_payload_bytes=max_payload_bytes)
         self._reader = ChatReader(
@@ -721,272 +574,6 @@ class FakeAssistantEngine:
         )
 
     # --- the two turn calls -----------------------------------------------
-
-    @staticmethod
-    def _detached(statement: OutboundStatement) -> OutboundStatement:
-        """One exact ``OutboundStatement`` of this value, sharing nothing with it.
-
-        **The detachment ADR-0264 §7's "composed once per turn" needs of the object as
-        well as of the computation.** ``frozen=True`` stops ``statement.reach = ...``
-        but not ``statement.__dict__["reach"] = ...`` (ADR-0018 §3, §4), so an instance
-        handed to two outcomes lets a consumer holding either rewrite what the other
-        says this system did — the aliasing bug PR #2377's round 4 found in the concrete
-        engine, which mints per pass for this reason. Every statement this engine hands
-        out goes through here, so no two outcomes it returns can share one.
-
-        **The value is read from the object's stored state and rebuilt as the base
-        model**, rather than taken through ``model_copy``, ``model_dump`` or a plain
-        attribute read. Each of those is a hook a subclassing caller controls: an
-        override returning ``self`` reopens the aliasing above, and one intercepting
-        field access hands back a value the object does not hold. ``__dict__`` is where
-        a pydantic model keeps its fields, ``OutboundStatement.model_fields`` is read
-        off the base class rather than the subject, and the result is validated exactly
-        as a decoded frame's would be — so what an outcome carries is this value,
-        typed as every consumer of the wire will see it.
-
-        Args:
-            statement: The value to detach, of this type or any subclass of it.
-
-        Returns:
-            An exact ``OutboundStatement`` equal to it.
-        """
-        state = object.__getattribute__(statement, "__dict__")
-        return OutboundStatement(**{name: state[name] for name in OutboundStatement.model_fields})
-
-    def _outbound(self) -> OutboundStatement:
-        """ADR-0264 §7's statement for **one** outcome this engine composed.
-
-        §7 leaves the member ``None`` "on exactly the passes that neither established a
-        contact nor composed a reply", so every shape this double composes owes one —
-        and ``NOT_REACHED`` is the honest default here rather than a stand-in: a fake
-        originates no model call, services no read and opens no channel, so no pass of
-        it can have reached outside this system. Issue #2381 is what this closes: a
-        canonical fake that supplied none let a surface be written, tested green against
-        it and never read the field at all, which is the failure the fake exists to
-        prevent.
-
-        A scripted value (:attr:`outbound_statement`) is detached per outcome for
-        :meth:`_detached`'s reason, so scripting cannot reopen the aliasing the default
-        closes.
-
-        Returns:
-            The scripted statement, detached, or a fresh ``NOT_REACHED``.
-        """
-        scripted = self.outbound_statement
-        if scripted is None:
-            return OutboundStatement(reach=OutboundReach.NOT_REACHED)
-        return self._detached(scripted)
-
-    def _stating(self, outcome: TurnOutcome) -> TurnOutcome:
-        """Carry ADR-0264 §7's member on the outcome a turn call is about to return.
-
-        **The one site of §7's rule for the three calls that take a scripted outcome**,
-        so a synthesised outcome and a scripted one are held to it alike.
-        :attr:`turn_outcome` is the lever every consumer drives a surface from, so an
-        outcome scripted through it reaching a surface with ``reply`` and no statement
-        is issue #2381 exactly, merely one lever further along: a renderer would be
-        written, tested green against this double, and never read the field. §7 leaves
-        the member ``None`` "on exactly the passes that neither established a contact
-        nor composed a reply", and this engine establishes none — so an outcome that
-        composed a reply owes one, and a fake handing back a shape no conforming engine
-        produces is the looseness ADR-0026 §7 forbids.
-
-        **A statement the caller stated is kept at its value and detached at its
-        object** (:meth:`_detached`). A scripted outcome is one object this engine
-        returns from every call, so carrying its statement through would put one
-        instance on every outcome a consumer holds — which is the aliasing the default
-        path closes, reached by the other lever.
-
-        **A reply-less outcome is given none.** §7 admits both values on a pass that
-        composed nothing — a recovered park carries ``None`` and ADR-0198 §1's
-        restatement carries ``NOT_REACHED`` — and nothing in an outcome's shape tells
-        the two apart, so filling one in there would assert what the caller did not.
-
-        **The outcome's other members are carried across untouched, and that includes
-        their objects**: a scripted ``turn`` or ``routed`` is the same instance on every
-        outcome this engine returns, exactly as it is today
-        (`#2386 <https://github.com/leonapivato/ai-assistant/issues/2386>`_). What is
-        detached here is the member this decision makes load-bearing, and widening that
-        to the whole outcome is a change to what scripting means rather than this lane's.
-
-        **ADR-0260 §10's member rides the same site, on ADR-0254 §11's terms rather
-        than §7's**: a scripted outcome carrying the member keeps it, and the attribute
-        fills in only where the outcome states none. §10 fixes the absence's meaning —
-        ``None`` "means the servicing recorded no ``ForecastDisposition``, and means
-        nothing else" — so there is nothing to synthesise for a pass that serviced no
-        read, and the member is a lever rather than a default for the reason
-        :attr:`forecast_not_read` records.
-
-        **ADR-0261 §7's member rides the same site, on ADR-0260 §10's terms exactly**: a
-        scripted outcome carrying the member keeps it, and the attribute fills in only
-        where the outcome states none. §7 fixes the absence's meaning — the member is
-        non-``None`` "exactly on a turn that *returned* after a ``ClaimRefused``" — so
-        there is nothing to synthesise for a pass that met no refusal, and the member is
-        a lever rather than a default for the reason :attr:`drive_withheld` records.
-
-        **ADR-0254 §11's announcement rides the same site**, and its default is the
-        opposite one for the opposite reason: §7's member states a fact about the pass
-        and so must be filled in, while §11's states *which rows this turn opened* and a
-        fake opens none — so ``()`` is the honest value and a scripted
-        :attr:`authorizations` is carried through unchanged. A scripted **outcome** that
-        already carries the member keeps what it carries: the announcement is
-        transcribed from rows, so a caller who stated them on the outcome has stated the
-        rows, and overwriting that with this engine's attribute would silently discard
-        the arrangement (`#2386 <https://github.com/leonapivato/ai-assistant/issues/2386>`_
-        is the aliasing note one member over and is not what this is).
-
-        Args:
-            outcome: The outcome this call is about to return.
-
-        Returns:
-            The outcome, carrying §7's member where the pass composed a reply and
-            §11's where this engine was scripted with one.
-        """
-        stated = outcome.outbound_statement
-        announced = outcome.authorizations or self.authorizations
-        reported = self._reported(outcome)
-        forecast = outcome.forecast_not_read or self.forecast_not_read
-        withheld_drive = outcome.drive_withheld or self.drive_withheld
-        if (
-            stated is None
-            and outcome.reply is None
-            and announced == outcome.authorizations
-            and reported == outcome.attempt_report
-            and forecast == outcome.forecast_not_read
-            and withheld_drive == outcome.drive_withheld
-        ):
-            return outcome
-        carried = {name: getattr(outcome, name) for name in TurnOutcome.model_fields}
-        carried["authorizations"] = announced
-        carried["attempt_report"] = reported
-        carried["forecast_not_read"] = forecast
-        carried["drive_withheld"] = withheld_drive
-        if stated is None and outcome.reply is None:
-            return TurnOutcome(**carried)
-        statement = self._outbound() if stated is None else self._detached(stated)
-        return TurnOutcome(**{**carried, "outbound_statement": statement})
-
-    def _reported(self, outcome: TurnOutcome) -> AttemptReport | None:
-        """ADR-0262 §6's report for the outcome a turn call is about to return.
-
-        **The lever reaches exactly the one shape a conforming engine puts a report
-        on**, and the enumeration is §6's own: the member is ``None`` on "a turn that
-        engaged no goal, a routed operation (ADR-0197 §7), ADR-0198 §1's restatement,
-        and every turn whose attempt stayed live". The last two are the caller's — the
-        default is ``None`` and a consumer sets the lever for the turn it means — and
-        the first two are shapes, so they are decided here:
-
-        * a **routed** pass carries none, whatever prose it has. It "mints no goal,
-          assembles no context and makes no plan" (ADR-0197 §8), so there is no attempt
-          for a report to be about; §6 names it in terms.
-        * a pass whose :attr:`TurnOutcome.turn` is ``None`` carries none. All three such
-          shapes made no ``Planner.plan`` call — a recovered park, a routed pass and an
-          undecided turn — and §6's rule is stated over a turn that *ended an attempt*
-          under §4, whose first condition is a **completed reply** that such a pass did
-          not compose.
-        * a pass that composed no reply, **or whose reply did not complete**, carries
-          none. §4's first ending condition is *"a ``ComposedReply`` carrying text and
-          **not degraded**"* (ADR-0173 §6), so a truncated or failed composition ends no
-          attempt however much text reached the user.
-        * a pass carrying a **clarification** carries none. That member is "the question
-          **this turn raised**" and a question exists only where the store accepted one
-          (ADR-0250 §10), so the attempt stands ``AWAITING_CLARIFICATION`` — which §4's
-          **second** ending condition names among the three paused states an attempt may
-          not end from. ADR-0250 §10's *"A turn that raised a question drives no step of
-          its plan and produces no effect"* is the same fact from the other side.
-        * a pass whose **visible execution holds a non-terminal step** carries none.
-          §4's **third** ending condition is that "every step of every execution it
-          names stands ``SUCCEEDED``, ``FAILED`` or ``SKIPPED``", and
-          :attr:`StepOutcome.state` puts one such execution on the outcome whole — so a
-          step standing ``PENDING``, ``AWAITING_APPROVAL``, ``RUNNING`` or
-          ``INDETERMINATE`` is decisive on its own. **It is a one-way test and not the
-          store's**: an attempt may name executions this outcome does not show, so a
-          clean visible execution proves nothing and the caller still decides. That
-          asymmetry is the right one — the fake refuses only what it can *see* is
-          unreachable.
-
-        **Taken as one pass over §4's three conditions rather than one predicate per
-        finding.** Each is written beside the clause it comes from and the admitted
-        statuses are named in :data:`_ENDING_ADMITS`, which
-        ``tests/testing/test_fake_engine_attempt_report.py`` pins against §4's own
-        enumeration — so a later decision moving that set fails a test here rather than
-        leaving this gate quietly short a status.
-
-        **A fake that filled the member in anywhere else would hand back a shape no
-        conforming engine produces**, which is the looseness ADR-0026 §7 forbids and
-        which this method's caller already refuses one member over.
-
-        **And a report a caller scripted onto an ineligible outcome is refused rather
-        than dropped.** Dropping it would pass the arrangement mistake silently and
-        leave the consumer's test green against an outcome it believed it had built;
-        refusing says which of §6's shapes the outcome actually is. That is
-        :attr:`authorizations`'s *"a scripted outcome keeps what it carries"* held to
-        its own ground — it keeps what it carries on a pass that **could** carry it, and
-        this is not one.
-
-        **And ``CANCELLED`` is refused outright rather than carried.** ADR-0262 §4 is
-        explicit that it "is reached by no limb" of the comparison and that "**no lane
-        writes ``AttemptOutcome.CANCELLED`` from this phase**" — a cancelled attempt is
-        ADR-0261 §2's act, and ADR-0249 §5's "no transition leaves a terminal member" is
-        what keeps it out of reach. So a report naming it is a state no engine reaches,
-        and a double that let a consumer arrange one would certify that consumer against
-        a seventh fixed statement §6 does not authorise. This is
-        :meth:`FakeToolRegistry.register`'s rule read one seam over: the single
-        arrangement mistake a consumer could plausibly make, refused rather than passed
-        silently. **The type still admits the member** — it is handed one rather than
-        computing one, and narrowing it here would be this fake policing a value
-        ADR-0261 owns — which is why the refusal is on the *arrangement* and not on
-        :class:`AttemptReport`.
-
-        Args:
-            outcome: The outcome this call is about to return.
-
-        Returns:
-            The report this pass carries, or ``None``.
-
-        Raises:
-            ValueError: If the report this pass would carry names ``CANCELLED``.
-        """
-        eligible = (
-            # The two structural preconditions: a pass that made a plan, and one that
-            # took no route.
-            outcome.turn is not None
-            and outcome.routed is None
-            # §4's condition 1 — a reply that **completed**.
-            and outcome.reply is not None
-            and not outcome.reply_degraded
-            # §4's condition 2 — the attempt is not paused. ``clarification`` is the one
-            # of its three states the outcome names; the ``AWAITING_APPROVAL`` step it
-            # also excludes is a *status*, so condition 3's sweep is what catches it.
-            and outcome.clarification is None
-            # §4's condition 3 — every step of every execution the attempt names stands
-            # terminal. The outcome shows one execution, which is the whole of what a
-            # double can see, and a non-terminal step there is decisive on its own.
-            and not (
-                outcome.step is not None
-                and any(step.status not in _ENDING_ADMITS for step in outcome.step.state.steps)
-            )
-        )
-        reported = outcome.attempt_report or (self.attempt_report if eligible else None)
-        if reported is None:
-            return None
-        if not eligible:
-            msg = (
-                "this pass ended no attempt, so it carries no report: a report is "
-                "non-None exactly on a turn that ended one, and §4's three conditions "
-                "for that are a reply that completed, an attempt that is not paused, "
-                "and every step of it standing SUCCEEDED, FAILED or SKIPPED — on a "
-                "pass that planned and took no route (ADR-0262 §4, §6)"
-            )
-            raise ValueError(msg)
-        if reported.outcome is AttemptOutcome.CANCELLED:
-            msg = (
-                "no attempt report names CANCELLED: that member is reached by no limb of "
-                "the comparison and no lane writes it from this phase, so a turn carrying "
-                "one is a shape no conforming engine returns (ADR-0262 §4, §6)"
-            )
-            raise ValueError(msg)
-        return reported
 
     async def receive(
         self,
@@ -1094,9 +681,7 @@ class FakeAssistantEngine:
             raise ModelTimeoutError("the event's budget ran out before it was understood")
         activation.understand()
         self.calls.append(("receive", {"input": supplied, "reply": capability}))
-        result = _event_result(target, ActivationEnding.DONE)
-        activation.observe(result)
-        return result
+        return _event_result(target, ActivationEnding.DONE)
 
     @staticmethod
     def _allocate_episode(conversation_id: str, activation: FakeActivation) -> str:
@@ -1118,7 +703,7 @@ class FakeAssistantEngine:
         processing failure is re-raised, so nothing the consumer does next can leave a
         landed episode outside its conversation's deletion. A capture that degraded — a
         colliding address the insert-if-absent write refused (§7:3) among them — moves
-        no membership, digest or delivery, so forgetting its conversation cannot take
+        no membership or digest, so forgetting its conversation cannot take
         another's episode. Membership is retained explicitly, standing in for the
         conversation's channel.
         """
@@ -1134,12 +719,6 @@ class FakeAssistantEngine:
                 "last_turn_at": _AT,
             }
         )
-        if (
-            isinstance(activation.trigger, RecordedChannelTrigger)
-            and isinstance(activation.trigger.payload, RecordedSpeechInput)
-            and activation.outcome is not None
-        ):
-            self.deliveries[episode] = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
 
     def _recipient_now(self) -> datetime:
         """The guarded reading of :attr:`recipient_grant_clock` (ADR-0026 §2, §4).
@@ -1941,7 +1520,6 @@ class FakeAssistantEngine:
             if await self.episode_memory.delete(episode):
                 forgot = True
             self._episode_conversations.pop(episode, None)
-            self.deliveries.pop(episode, None)
         self._count_change(named)  # its state is sent again, as the engine counts it
         digest = self.conversations_held.get(named)
         if digest is not None:
@@ -2113,15 +1691,15 @@ class FakeAssistantEngine:
         return str(uuid4())
 
     async def _read_in(self, taken: ChatInput) -> bool:
-        """Admit one activation for the reader's input, then write what it ends with.
+        """Admit one activation for the reader's input, which writes what it says.
 
         The input is admitted as a typed message on the conversation's channel, with
         the id the reader minted, and is running — "working…", and reachable by a
         stop — from then on. **Its first step marks the messages taken in** (ADR-0293
-        §6:8); it then runs on what it marked alone, as a turn call here runs, and its
-        episode is captured as theirs is. What it ends with is written into the
-        conversation by the engine's own adapter and writer: the reply, or *couldn't
-        finish* listing what did happen (§10:1, §10:2).
+        §6:8); it then runs on what it marked alone, and its episode is captured as an
+        event's is. It writes its message as the phases do, while it runs, through the
+        engine's own writer (ADR-0307 §3): the canned reply, or *couldn't finish* where
+        the pass failed (ADR-0317 §3).
 
         An activation that marked nothing wrote nothing, a stopped one writes nothing
         (ADR-0295 §3:3), and a cancelled one writes nothing and passes the
@@ -2142,7 +1720,6 @@ class FakeAssistantEngine:
         activation.identify(lambda: taken.activation_id)
         self._running_activations.append(activation)
         marked: list[int] = []
-        outcome: TurnOutcome | None = None
         failure: BaseException | None = None
         try:
             await self._reader.take_in(taken, into=marked)
@@ -2150,11 +1727,19 @@ class FakeAssistantEngine:
                 msg = "the reader's input was not taken in"
                 raise RuntimeError(msg)
             # ADR-0297 §4: a stop marked while the input was being taken in starts
-            # nothing after it — no understanding, no reply — and the pass ends.
+            # nothing after it — no understanding, no message — and the pass ends.
             if not activation.stopped:
-                outcome = self._chat_outcome(taken.narrowed(marked), activation)
-        except BaseException as exc:
+                await self._say(activation, self._chat_message(taken.narrowed(marked), activation))
+        except asyncio.CancelledError as exc:
             failure = exc
+        except Exception as exc:
+            failure = exc
+            if marked and not activation.stopped:
+                # ADR-0317 §3: what was marked is consumed, so its failure is written.
+                # Never raising but for a cancellation, as the phases' own write of it:
+                # the pass is already ending on its own error.
+                with contextlib.suppress(Exception):
+                    await self._say(activation, couldnt_finish())
         try:
             report = await activation.finish(
                 memory=self.episode_memory,
@@ -2169,33 +1754,42 @@ class FakeAssistantEngine:
         self._commit_episode(activation, report)
         if isinstance(failure, asyncio.CancelledError):
             raise failure
-        if not marked or activation.stopped:
-            return bool(marked)
-        reply = chat_reply(None if failure is not None else outcome, effects=chat_effects(outcome))
-        # A reply the store would not take is lost, as the engine loses it: the
-        # activation still took its input in, so the reader goes on to what waited.
-        with contextlib.suppress(ConversationStoreError):
-            await self._chat_writer.send(conversation_id, reply)
-        return True
+        return bool(marked)
 
-    def _chat_outcome(self, taken: ChatInput, activation: FakeActivation) -> TurnOutcome:
-        """The turn the reader's input runs as: :attr:`turn_outcome`, or a composed reply."""
+    def _chat_message(self, taken: ChatInput, activation: FakeActivation) -> NewMessage:
+        """The message the reader's input is answered with: a canned reply naming it.
+
+        Cut to the transcript's bound and marked cut off past it, as the phases cut
+        a message they write (ADR-0293 §5:2, §6:16).
+        """
         conversation_id = taken.conversation_id
         activation.resolved(conversation_id)
         if conversation_id in self.activity:
             self.activity[conversation_id] = self._tick()
         activation.understand()
-        text = taken.text
-        outcome = self.turn_outcome or TurnOutcome(
-            turn=_turn(text),
-            conversation_id=conversation_id,
-            reply=f"This fake engine composed no real answer to {text.strip()!r}.",
+        text = f"This fake engine composed no real answer to {taken.text.strip()!r}."
+        return NewMessage(
+            author=MessageAuthor.ASSISTANT,
+            text=text[:TRANSCRIPT_MESSAGE_MAX_CHARS],
+            cut_off=len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS,
         )
-        if outcome.conversation_id is None:
-            outcome = outcome.model_copy(update={"conversation_id": conversation_id})
-        outcome = self._stating(outcome)
-        activation.observe(outcome)
-        return outcome
+
+    async def _say(self, activation: FakeActivation, message: NewMessage) -> None:
+        """Write one message into the activation's conversation, as the phases write it.
+
+        The episode's ``outcome`` is the text as the conversation holds it (ADR-0307
+        §10). A message the store would not take is lost, as the phases lose it: the
+        activation still took its input in, so the reader goes on to what waited.
+        """
+        conversation_id = activation.conversation_id
+        assert conversation_id is not None  # noqa: S101 — a reader's input names its conversation
+        fitted = self._chat_writer.fitted(conversation_id, message)
+        try:
+            receipt = await self._chat_writer.send(conversation_id, fitted)
+        except ConversationStoreError:
+            return
+        if receipt is not None and receipt.outcome is SendOutcome.RECORDED:
+            activation.said(fitted.text)
 
     async def delete_message(self, conversation_id: Identifier, *, position: int) -> bool:
         """Delete one message, leaving its marker (ADR-0293 §5:8)."""
@@ -3194,54 +2788,6 @@ def _pseudo_audio(text: str, media_type: SpokenAudioFormat) -> str:
     """
     return b64encode(hashlib.sha256(f"{media_type.value}\0{text}".encode()).digest()).decode(
         "ascii"
-    )
-
-
-def _turn(utterance: str) -> TurnResult:
-    """A turn whose plan has no step — a real ratified shape, not a stub.
-
-    ``utterance`` is stripped **once** here and that one string reaches both
-    :attr:`TurnResult.utterance` and the brief's ``outcome``, which is the shape of the
-    production path (ADR-0248 §1, ADR-0249 §3): a goal opened by this system carries
-    revision 1 whose outcome *is* the request. So this fake exhibits the byte-equality
-    ADR-0248 §6 asserts rather than two normalisations that happen to agree — and a fake
-    that let the two diverge would certify a consumer the real engine never produces.
-
-    The turn carries the **brief** and not the record (ADR-0249 §11), because that is
-    what a ``TurnResult`` holds: the projection goes over the wire and the record stays
-    inside ``orchestration``.
-    """
-    request = utterance.strip()
-    goal = Goal(
-        id="g-1",
-        conversation_id="c-1",
-        interpretation=(
-            GoalInterpretation(
-                revision=1,
-                outcome=request,
-                outcome_ground=Ground.USER_STATED,
-                outcome_span=request,
-                recorded_at=_AT,
-                raised_by="t-1",
-            ),
-        ),
-        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT),
-        created_at=_AT,
-        last_engaged_at=_AT,
-    )
-    return TurnResult(
-        utterance=request,
-        goal=GoalBrief.of(goal),
-        context=CurrentContext(
-            now=_AT,
-            time_of_day=TimeOfDay.AFTERNOON,
-            is_weekend=False,
-            within_working_hours=True,
-        ),
-        memories=(),
-        plan=ActionPlan(
-            id="p-1", goal_id=goal.id, steps=(), created_at=_AT, targets_revision=goal.revision
-        ),
     )
 
 
