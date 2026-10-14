@@ -10,7 +10,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from ai_assistant.core.errors import (
-    ChannelProcessingError,
+    AssistantError,
     ModelError,
     ModelTimeoutError,
     OversizedValueError,
@@ -317,7 +317,7 @@ def test_a_resume_records_no_input() -> None:
         (None, ControllerRule.NOTHING_DUE),
         (asyncio.CancelledError(), ControllerRule.INTERRUPTED),
         (ModelTimeoutError("the composition timed out"), ControllerRule.STAGE_TIMED_OUT),
-        (ChannelProcessingError("it failed outside a stage"), ControllerRule.STAGE_FAILED),
+        (AssistantError("it failed outside a stage"), ControllerRule.STAGE_FAILED),
     ],
 )
 def test_a_resume_that_continued_no_stage_records_the_end_entry_alone(
@@ -337,7 +337,7 @@ def test_a_resume_that_continued_no_stage_records_the_end_entry_alone(
     [
         (asyncio.CancelledError(), ControllerRule.INTERRUPTED),
         (
-            ChannelProcessingError("a delivery report was refused"),
+            AssistantError("it failed before the controller"),
             ControllerRule.ENDED_BEFORE_CONTROLLER,
         ),
         (None, ControllerRule.ENDED_BEFORE_CONTROLLER),
@@ -400,16 +400,16 @@ def test_an_understanding_error_is_its_own_terminal_reason_and_carries_no_text()
     )
 
 
-def test_the_reason_survives_the_event_paths_outward_mapping() -> None:
-    """The event path raises `ChannelProcessingError`; the record still says why."""
+def test_an_unparseable_understandings_reason_survives_a_later_failure() -> None:
+    """ADR-0276 §6: the reason holds whatever ends the pass; a model failure's does not."""
     state = _admitted()
     state.understanding_failed(UnderstandingError("x"))
-    assert terminal_status(state, ChannelProcessingError("mapped"))[1] is (
+    assert terminal_status(state, AssistantError("later"))[1] is (
         ProcessingReason.UNDERSTANDING_FAILED
     )
     other = _admitted()
     other.understanding_failed(ModelError("x"))
-    assert terminal_status(other, ChannelProcessingError("mapped"))[1] is not (
+    assert terminal_status(other, AssistantError("later"))[1] is not (
         ProcessingReason.UNDERSTANDING_FAILED
     )
     assert other.processing(_AT, ModelError("x")).understanding_omitted is (
@@ -464,7 +464,7 @@ def test_a_marked_stopped_pass_ended_by_the_stops_entry_is_ended_for_a_later_sto
         asyncio.CancelledError(),
         ModelTimeoutError("late"),
         OversizedValueError("too big", limit=1, size=2),
-        ChannelProcessingError("failed"),
+        AssistantError("failed"),
     ],
 )
 def test_a_marked_pass_is_interrupted_stopped_ahead_of_every_other_row(
@@ -501,7 +501,7 @@ def test_a_pass_the_phases_left_unfinished_is_failed_processing_failed() -> None
     )
 
 
-@pytest.mark.parametrize("failure", [None, asyncio.CancelledError(), ChannelProcessingError("x")])
+@pytest.mark.parametrize("failure", [None, asyncio.CancelledError(), AssistantError("x")])
 def test_a_marked_pass_that_never_entered_the_controller_ends_with_the_stops_entry(
     failure: BaseException | None,
 ) -> None:

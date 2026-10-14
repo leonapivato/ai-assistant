@@ -12,7 +12,6 @@ from ai_assistant.core.channel_validation import input_origin
 from ai_assistant.core.episode_encoding import canonical_json, episode_content
 from ai_assistant.core.errors import (
     AssistantError,
-    ChannelProcessingTimeoutError,
     MemoryStoreConflictError,
     ModelTimeoutError,
     OversizedValueError,
@@ -267,7 +266,7 @@ class FakeActivation:
             return ProcessingStatus.INTERRUPTED, ProcessingReason.STOPPED
         if isinstance(failure, asyncio.CancelledError):
             return ProcessingStatus.INTERRUPTED, ProcessingReason.CANCELLED
-        if isinstance(failure, ChannelProcessingTimeoutError | ModelTimeoutError):
+        if isinstance(failure, ModelTimeoutError):
             return ProcessingStatus.FAILED, ProcessingReason.TIMEOUT
         if isinstance(failure, OversizedValueError):
             return ProcessingStatus.FAILED, ProcessingReason.OUTPUT_OVERSIZED

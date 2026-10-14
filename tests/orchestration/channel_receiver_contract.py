@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import pytest
-
-from ai_assistant.core.errors import ChannelProcessingTimeoutError
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine
@@ -111,12 +109,6 @@ async def read_episode(engine: AssistantEngine, address: str) -> EpisodicMemory:
 class ChannelReceiverContract:
     """Channel obligations shared by every AssistantEngine implementation."""
 
-    #: Whether an event whose activation cannot finish raises rather than returning its
-    #: result. ADR-0313 §4:5 makes it a result reading *couldn't finish*, which every
-    #: event the phases run returns; the event-summary path that raised is gone from the
-    #: engine with the switch (ADR-0309 §2:6), so no binding sets this.
-    an_unfinished_event_raises: ClassVar[bool] = False
-
     async def test_a_stop_naming_no_activation_answers_no_such_activation(
         self, engine: AssistantEngine
     ) -> None:
@@ -162,19 +154,11 @@ class ChannelReceiverContract:
         engine: AssistantEngine,
         budget: timedelta,
     ) -> None:
-        """ADR-0313 §4:5: the timeout is the activation's budget, and running out is a result.
-
-        Today's event path still raises its typed failure in its place
-        (:attr:`an_unfinished_event_raises`); the episode is classified alike.
-        """
-        if self.an_unfinished_event_raises:
-            with pytest.raises(ChannelProcessingTimeoutError):
-                await engine.receive(event_input(), reply=None, timeout=budget)
-        else:
-            result = await engine.receive(event_input(), reply=None, timeout=budget)
-            assert result.channel == event_input().target
-            assert isinstance(result.result, InformationalEventResult)
-            assert result.result.ended is ActivationEnding.COULDNT_FINISH
+        """ADR-0313 §4:5: the timeout is the activation's budget, and running out is a result."""
+        result = await engine.receive(event_input(), reply=None, timeout=budget)
+        assert result.channel == event_input().target
+        assert isinstance(result.result, InformationalEventResult)
+        assert result.result.ended is ActivationEnding.COULDNT_FINISH
         (summary,) = (await engine.episodes()).items
         episode = await read_episode(engine, summary.position.episode_id)
         assert episode.processing_record is not None

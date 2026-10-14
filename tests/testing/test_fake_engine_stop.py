@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from ai_assistant.core.errors import ActivationStoppedError, ChannelProcessingError
+from ai_assistant.core.errors import ActivationStoppedError, AssistantError
 from ai_assistant.core.types import (
     ActivationStop,
     ChannelIdentity,
@@ -74,7 +74,7 @@ def test_a_marked_fake_activation_records_the_stops_classification_and_end_entry
         _AT,
     )
     assert activation.stop()
-    for failure in (None, asyncio.CancelledError(), ChannelProcessingError("x")):
+    for failure in (None, asyncio.CancelledError(), AssistantError("x")):
         assert activation.status(failure) == (
             ProcessingStatus.INTERRUPTED,
             ProcessingReason.STOPPED,
@@ -83,7 +83,7 @@ def test_a_marked_fake_activation_records_the_stops_classification_and_end_entry
         assert (end.stage, end.due) == (ControllerStage.END, ControllerRule.STOPPED)
 
 
-@pytest.mark.parametrize("failure", [None, ChannelProcessingError("x")])
+@pytest.mark.parametrize("failure", [None, AssistantError("x")])
 def test_a_turn_call_awaiting_a_stopped_fake_pass_raises_the_stop(
     failure: BaseException | None,
 ) -> None:

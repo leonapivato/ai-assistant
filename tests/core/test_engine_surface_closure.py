@@ -1685,6 +1685,12 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     a client at 101 may call eleven operations a hub at 102 no longer answers
     (ADR-0313 §6:4, ADR-0124 §9:2).
 
+    **103 is ADR-0313 §4:5 and ADR-0309 §5, on the error vocabulary.**
+    ``ChannelProcessingError``, ``ChannelProcessingTimeoutError`` and
+    ``UnknownContinuationError`` leave ``core.errors``, by whose names the wire
+    rebuilds an error, so a hub at 102 may name a class a client at 103 no longer
+    has (ADR-0313 §6:4, ADR-0124 §9:2). **The method set does not move and stays at 64.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1693,7 +1699,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (64, 102), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (64, 103), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
