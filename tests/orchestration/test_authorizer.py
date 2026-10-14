@@ -311,9 +311,6 @@ async def test_an_allowed_call_is_selected_ruled_recorded_and_handed_on() -> Non
     assert allowed.call.decision == recorded
     assert allowed.call.request.tool.id == "lookup"
     assert dict(allowed.call.request.parameters) == {"q": "trains to Lyon"}
-    # §4:11: the phases' request carries no goal and no intended action.
-    assert allowed.call.request.goal is None
-    assert allowed.call.request.intended_action is None
     assert decided.story_activations == ()
     assert decided.read_outside_content is False
     assert decided.round_id == "round:1"

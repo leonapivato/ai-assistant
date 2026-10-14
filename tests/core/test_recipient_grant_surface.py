@@ -1,12 +1,13 @@
-"""The two ``core`` additions the establishing act needs (ADR-0235 §4).
+"""The ``core`` addition the establishing act needs (ADR-0235 §4).
 
 :meth:`~ai_assistant.core.types.PermissionDecision.from_confirmation` — the
 transcribing constructor that authors the *answer* a recorded ``CONFIRM`` no park
-holds gets — and :class:`~ai_assistant.core.types.RecipientGrantOutcome`, the
-carrier that says what became of a standing request collected beside one.
+holds gets. The carrier that said what became of a standing request collected beside
+one, ``RecipientGrantOutcome``, left ``core`` with the establishing act (ADR-0313 §5,
+ADR-0309 §5).
 
-**Both are pure**: nothing here touches a store, a clock or a seam, which is why
-they are pinned in ``tests/core`` rather than beside the operations that use them.
+**It is pure**: nothing here touches a store, a clock or a seam, which is why it is
+pinned in ``tests/core`` rather than beside the operations that use it.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ import inspect
 from datetime import timedelta
 
 import pytest
-from pydantic import ValidationError
 from test_recipient_grant import AT, EXPIRES, _binding, _confirmation
 
 from ai_assistant.core.types import (
@@ -23,8 +23,6 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
     RecipientGrant,
-    RecipientGrantNotEstablished,
-    RecipientGrantOutcome,
 )
 
 #: The one recipient every case here is arranged over.
@@ -133,43 +131,3 @@ def test_the_answer_it_builds_establishes_a_grant() -> None:
     assert grant.established_by == confirmed.id
     assert grant.decided_at == answer.decided_at
     assert grant.destinations == confirmed.egress_binding.canonical_destination_set  # type: ignore[union-attr]
-
-
-# --- §4: the carrier ---------------------------------------------------------
-
-
-def test_the_carrier_refuses_both_arms() -> None:
-    """A value saying a grant was recorded *and* why none was reports something false."""
-    grant = RecipientGrant.established_from(
-        _confirmation(_binding(ALICE)),
-        _answer(_confirmation(_binding(ALICE))),
-        id="g-1",
-        expires_at=EXPIRES,
-    )
-
-    with pytest.raises(ValidationError, match="exactly one of established"):
-        RecipientGrantOutcome(
-            established=grant,
-            not_established=RecipientGrantNotEstablished.REFUSED,
-        )
-
-
-def test_the_carrier_refuses_neither_arm() -> None:
-    """The absent carrier already means "no act was collected", which is a different fact."""
-    with pytest.raises(ValidationError, match="exactly one of established"):
-        RecipientGrantOutcome()
-
-
-@pytest.mark.parametrize("member", list(RecipientGrantNotEstablished))
-def test_every_refusing_member_is_a_carrier_of_its_own(
-    member: RecipientGrantNotEstablished,
-) -> None:
-    """All five of ADR-0235 §4's members are constructible on the refusing arm.
-
-    Parameterised over the enumeration rather than over a list, so a sixth member
-    added later is covered the day it lands rather than the day someone remembers.
-    """
-    outcome = RecipientGrantOutcome(not_established=member)
-
-    assert outcome.established is None
-    assert outcome.not_established is member

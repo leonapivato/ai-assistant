@@ -1225,8 +1225,8 @@ async def test_the_forecast_read_asks_nothing_and_the_turns_other_send_is_unaffe
     **no** grant seam read and ``authorised_subject`` unset — and the same turn's
     search at an unconfigured destination is unaffected."
 
-    The goal is carried on the request, and the ``ALLOW`` still names the connection
-    reference and carries no goal scope: route (c) answers it. The second ruling is
+    The ``ALLOW`` names the connection reference and carries no goal scope: route (c)
+    answers it. The second ruling is
     the same policy in the same turn on a search bound elsewhere —
     ADR-0260 §6's last normative clause, "nothing rides this that is not a forecast
     read at the configured forecast provider".
@@ -1243,7 +1243,6 @@ async def test_the_forecast_read_asks_nothing_and_the_turns_other_send_is_unaffe
         request(
             forecast_binding(external=True, coverage=SpanCoverage.MODEL_ON_EVERY_PATH),
             tool=FORECAST_TOOL,
-            goal="goal-1",
         )
     )
 
@@ -1256,7 +1255,6 @@ async def test_the_forecast_read_asks_nothing_and_the_turns_other_send_is_unaffe
         request(
             search_binding(external=True, canonical="https://elsewhere.example.com:443"),
             tool=SEARCH_TOOL,
-            goal="goal-1",
         )
     )
 

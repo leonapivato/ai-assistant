@@ -10,13 +10,10 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
-    TERMINAL_DEFERRAL_STATES,
     Attestation,
     BeliefBand,
     CurrentContext,
     DataTier,
-    DeferralState,
-    DeferredProposal,
     EpisodicMemory,
     FeedbackEvent,
     FeedbackKind,
@@ -1334,126 +1331,11 @@ def test_every_ex_list_field_is_an_immutable_tuple_that_round_trips() -> None:
         assert getattr(restored, field) == expected, field
 
 
-# --- the deferred question: the values that cross the queue's seam (ADR-0078) --
+# --- a memory proposal: its authority and its question key (ADR-0078) -------
 
 
 def _ask() -> MemoryDecision:
     return MemoryDecision(kind=MemoryDecisionKind.ASK_USER, reason="which of these do you hold?")
-
-
-def _question(**changes: object) -> DeferredProposal:
-    """A well-formed ``PENDING`` question, with ``changes`` applied."""
-    fields: dict[str, object] = {
-        "id": "d1",
-        "proposal": MemoryUpdateProposal(proposed=_semantic("1"), rationale="because"),
-        "decision": _ask(),
-        "state": DeferralState.PENDING,
-        "deferred_at": _WHEN,
-        "retention": timedelta(days=30),
-        "expires_at": _WHEN + timedelta(days=30),
-    }
-    return DeferredProposal(**(fields | changes))  # type: ignore[arg-type]  # the case names its own fields
-
-
-def test_a_deferred_proposal_is_frozen_including_the_question_it_holds() -> None:
-    question = _question()
-    with pytest.raises(ValidationError):
-        question.state = DeferralState.ACCEPTED
-    with pytest.raises(ValidationError):
-        question.proposal.rationale = "rewritten"
-
-
-def test_a_deferred_proposal_refuses_a_field_it_does_not_declare() -> None:
-    # ``extra="forbid"``: a caller inventing ``claim_id`` would otherwise get a
-    # record that silently carried a capability no read is allowed to publish.
-    with pytest.raises(ValidationError):
-        _question(claim_id="a-token")
-
-
-def test_a_deferred_proposal_refuses_a_secret_tier_proposal() -> None:
-    # ADR-0004 §3 is unconditional — Tier 0 secrets live in the OS keyring, never in
-    # a database or a committed file — and a durable queue is a file. Enforced on the
-    # record so no conforming store can hold one however it is called (ADR-0078 §1).
-    secret = MemoryUpdateProposal(
-        proposed=_semantic("1"), rationale="because", sensitivity=DataTier.SECRET
-    )
-    with pytest.raises(ValidationError, match="SECRET"):
-        _question(proposal=secret)
-
-
-def test_answerability_is_half_open_at_the_instant_it_names() -> None:
-    # ``Validity.live_at``'s own convention, adopted for consistency rather than
-    # preference: two deadline notions in one memory system that disagree at the
-    # instant they name is a defect waiting for the first test that lands on it.
-    question = _question(retention=timedelta(days=1), expires_at=_WHEN + timedelta(days=1))
-    assert question.is_answerable_at(_WHEN) is True
-    assert question.is_answerable_at(_WHEN + timedelta(days=1) - timedelta(microseconds=1)) is True
-    assert question.is_answerable_at(_WHEN + timedelta(days=1)) is False
-
-
-def test_ask_me_forever_is_never_answerable_out_and_never_purgeable() -> None:
-    forever = _question(retention=None, expires_at=None)
-    assert forever.is_answerable_at(_WHEN + timedelta(days=10_000)) is True
-    assert forever.is_purgeable_at(_WHEN + timedelta(days=10_000)) is False
-    rejected = _question(
-        retention=None,
-        expires_at=None,
-        state=DeferralState.REJECTED,
-        answered_at=_WHEN,
-    )
-    # The half an implementation handling only the ``PENDING`` case gets wrong.
-    assert rejected.is_purgeable_at(_WHEN + timedelta(days=10_000)) is False
-    assert rejected.speaks_for_its_key_at(_WHEN + timedelta(days=10_000)) is True
-
-
-def test_purges_two_anchors_are_different_on_purpose() -> None:
-    # A terminal row is retained for one further lifetime because the no-nagging rule
-    # reads it; a lapsed one has no such dependant, so giving it the same grace would
-    # hold an unanswered Tier 1 proposal for **twice** the configured lifetime
-    # (ADR-0078 §2).
-    day = timedelta(days=1)
-    lapsed = _question(retention=day, expires_at=_WHEN + day)
-    assert lapsed.is_purgeable_at(_WHEN + day - timedelta(microseconds=1)) is False
-    assert lapsed.is_purgeable_at(_WHEN + day) is True
-    rejected = _question(
-        retention=day,
-        expires_at=_WHEN + day,
-        state=DeferralState.REJECTED,
-        answered_at=_WHEN + day,
-    )
-    assert rejected.is_purgeable_at(_WHEN + 2 * day - timedelta(microseconds=1)) is False
-    assert rejected.is_purgeable_at(_WHEN + 2 * day) is True
-
-
-def test_an_applying_row_is_never_purgeable_at_any_age() -> None:
-    # The only durable record that an answer was begun. Destroying it while its
-    # ingest may still be running would let the memory write commit against a
-    # question that no longer exists, so the fact that an answer was given would
-    # survive nowhere (ADR-0078 §2, §9).
-    applying = _question(state=DeferralState.APPLYING, claimed_at=_WHEN)
-    assert applying.is_purgeable_at(_WHEN + timedelta(days=10_000)) is False
-    assert applying.speaks_for_its_key_at(_WHEN + timedelta(days=10_000)) is True
-
-
-def test_an_applying_row_may_name_the_successor_its_answer_raised() -> None:
-    # Stamped when the successor is admitted, in the same commit, so the parent
-    # carries it while its own answer is still in flight — the state a cancellation
-    # caught after the successor's admission leaves behind (ADR-0078 §9).
-    parent = _question(state=DeferralState.APPLYING, claimed_at=_WHEN, successor_id="d2")
-    assert parent.successor_id == "d2"
-
-
-def test_a_lapsed_or_settled_key_stops_speaking() -> None:
-    day = timedelta(days=1)
-    lapsed = _question(retention=day, expires_at=_WHEN + day)
-    assert lapsed.speaks_for_its_key_at(_WHEN + day) is False
-    accepted = _question(
-        state=DeferralState.ACCEPTED,
-        claimed_at=_WHEN,
-        answered_at=_WHEN,
-        outcome_record_id="r1",
-    )
-    assert accepted.speaks_for_its_key_at(_WHEN) is False
 
 
 def test_a_user_confirmation_requires_a_real_digest_and_a_named_question() -> None:
@@ -1599,27 +1481,6 @@ def test_the_fingerprint_and_the_key_survive_a_json_round_trip() -> None:
 
     assert rebuilt.proposal_fingerprint == proposal.proposal_fingerprint
     assert rebuilt.question_key == proposal.question_key
-
-
-def test_the_terminal_states_are_exactly_the_four_that_record_an_answer() -> None:
-    # Exported as a frozenset so a consumer can branch exhaustively rather than
-    # re-enumerating the members (ADR-0078 §2).
-    assert {
-        DeferralState.ACCEPTED,
-        DeferralState.REJECTED,
-        DeferralState.STALE,
-        DeferralState.REDEFERRED,
-    } == TERMINAL_DEFERRAL_STATES
-    assert DeferralState.PENDING not in TERMINAL_DEFERRAL_STATES
-    assert DeferralState.APPLYING not in TERMINAL_DEFERRAL_STATES
-
-
-def test_there_is_no_expired_deferral_state() -> None:
-    # Expiry is read-time-relative and never stamped, exactly as
-    # ``MemoryRecord.expires_at`` is: nothing has to run for a question to stop
-    # being answerable, and there is no sweep whose failure re-opens one
-    # (ADR-0078 §2, §6).
-    assert "EXPIRED" not in DeferralState.__members__
 
 
 # --- ADR-0217 §1: the question ADR-0204 put on the warrant moved ------------
