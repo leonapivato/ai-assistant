@@ -12,7 +12,6 @@ from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
     Attestation,
     BeliefBand,
-    CurrentContext,
     DataTier,
     EpisodicMemory,
     FeedbackEvent,
@@ -36,7 +35,6 @@ from ai_assistant.core.types import (
     Provenance,
     Role,
     SemanticMemory,
-    TimeOfDay,
     UserConfirmation,
     Validity,
     band_of,
@@ -852,56 +850,6 @@ def test_decision_rejects_fields_foreign_to_its_kind() -> None:
         MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="x", ttl=timedelta(days=1))
 
 
-def test_current_context_constructs_and_forbids_extra_fields() -> None:
-    ctx = CurrentContext(
-        now=_WHEN,
-        time_of_day=TimeOfDay.MORNING,
-        is_weekend=False,
-        within_working_hours=True,
-    )
-    assert ctx.time_of_day is TimeOfDay.MORNING
-
-    with pytest.raises(ValidationError):
-        CurrentContext(
-            now=_WHEN,
-            time_of_day=TimeOfDay.MORNING,
-            is_weekend=False,
-            within_working_hours=True,
-            # A facet field that does *not* exist. ``calendar`` was this test's
-            # subject until ADR-0096 made it real, which is the trap
-            # ``extra="forbid"`` exists to spring: an internal source contributing
-            # an unknown facet fails loudly rather than silently dropping data.
-            tasks="busy",  # type: ignore[call-arg]  # extra field must be rejected
-        )
-
-
-def test_current_context_now_naive_is_refused() -> None:
-    """Advisory or durable makes no difference — ADR-0023 §4 refuses the category.
-
-    ``core`` cannot classify a value's provenance, so the rule follows from where
-    the type sits, not from what the field is later used for.
-    """
-    with pytest.raises(ValidationError, match="now must be timezone-aware"):
-        CurrentContext(
-            now=datetime(2026, 1, 1, 12),  # noqa: DTZ001 — a naive value is the subject
-            time_of_day=TimeOfDay.AFTERNOON,
-            is_weekend=False,
-            within_working_hours=True,
-        )
-
-
-def test_current_context_now_aware_is_converted_to_utc() -> None:
-    """``CurrentContext.now`` used to keep an aware non-UTC value verbatim."""
-    ctx = CurrentContext(
-        now=datetime(2026, 1, 1, 9, tzinfo=ZoneInfo("America/New_York")),
-        time_of_day=TimeOfDay.MORNING,
-        is_weekend=False,
-        within_working_hours=True,
-    )
-    assert ctx.now == datetime(2026, 1, 1, 14, tzinfo=UTC)
-    assert ctx.now.tzinfo is UTC
-
-
 def test_feedback_event_constructs_with_defaults() -> None:
     event = FeedbackEvent(
         kind=FeedbackKind.PREFERENCE,
@@ -1242,14 +1190,6 @@ def test_memory_decision_and_ingest_result_are_frozen() -> None:
         result.record_id = "other"
     with pytest.raises(ValidationError):
         result.decision.reason = "rewritten"  # the nested decision is frozen
-
-
-def test_current_context_is_frozen() -> None:
-    ctx = CurrentContext(
-        now=_WHEN, time_of_day=TimeOfDay.MORNING, is_weekend=False, within_working_hours=True
-    )
-    with pytest.raises(ValidationError):
-        ctx.is_weekend = True
 
 
 def test_feedback_event_is_frozen() -> None:

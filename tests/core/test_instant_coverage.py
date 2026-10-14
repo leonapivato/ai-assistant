@@ -107,7 +107,7 @@ def test_the_scan_actually_finds_the_core_models() -> None:
     assert {
         "Provenance",
         "MemoryBase",
-        "CurrentContext",
+        "SourceReading",
         "ActivationEffect",
         "PermissionDecision",
     } <= names
