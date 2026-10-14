@@ -1403,6 +1403,11 @@ def _stopped_failure(
     ADR-0297 §4: a call awaiting a stopped pass raises :class:`ActivationStoppedError`
     in place of what the pass would otherwise return or raise. A cancellation still
     propagates as itself, and a pass no stop reached is answered as it ended.
+
+    **A defect the stop takes the place of is logged here** (#2927), by its class and
+    frames (:func:`_log_if_defect`): past this point it survives only as the stop's
+    cause, which the event path answers with *stopped* and the chat's path ends on
+    silently, so nothing after it would tell a bug apart from the stop.
     """
     if (
         state is None
@@ -1410,6 +1415,8 @@ def _stopped_failure(
         or isinstance(failure, asyncio.CancelledError | ActivationStoppedError)
     ):
         return failure
+    if failure is not None:
+        _log_if_defect("stopped_activation_failed", failure, state=state, step="activation")
     stopped = ActivationStoppedError(_STOPPED_MESSAGE)
     stopped.__cause__ = failure
     return stopped
