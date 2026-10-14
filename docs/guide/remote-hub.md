@@ -183,15 +183,11 @@ Setting `ASSISTANT_REMOTE_HUB_ADDRESS` is what selects the remote transport. A
 client with it unset uses the local Unix socket and never touches the network.
 
 ```bash
-assistant ask "Say READY."
+assistant chat
 ```
 
-```text
-READY.
-Plan: The goal is simply to say 'READY', which requires only a direct text
-response with no external capability.
-No action was needed.
-```
+Type *Say READY.* and press Enter, and the reply arrives from the hub across the
+overlay. `/quit` leaves.
 
 ## Managing devices
 

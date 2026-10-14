@@ -25,7 +25,7 @@ because every instruction below is about one of them.
 - **The hub** (`ai-assistant-hub`) is the resident process. It owns the data
   directory, holds every store in it, and is the only thing that talks to a
   language model. One hub per data directory.
-- **A client** is anything that asks the hub to do something. `assistant ask`
+- **A client** is anything that asks the hub to do something. `assistant chat`
   on the command line is one. The gateway is another.
 - **The gateway** (`assistant gateway`) is a client that serves a web page to
   the browsers on its own machine. It speaks HTTP to browsers and the hub's own

@@ -1,6 +1,6 @@
-"""The CLI adapter: thin rendering and the converse/resume relay (ADR-0042 §4, §6, §7).
+"""The CLI adapter: thin rendering and the relay to the engine (ADR-0042 §4, §6, §7).
 
-Rendering is checked against captured Rich output; the turn flow is driven against
+Rendering is checked against captured Rich output; commands are driven against
 a real :class:`Engine` assembled from canonical fakes (the adapter cannot tell it
 from the production engine — that is the point of the façade). Nothing here builds
 the production, model-backed engine, so no network or key is needed.
@@ -22,7 +22,6 @@ from itertools import count
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-import click
 import pytest
 import typer.main
 from cli_open_recorder import wire_recording_opens
@@ -51,28 +50,14 @@ from ai_assistant.core.types import (
     BeliefBand,
     BeliefSummary,
     ClassReach,
-    Confirmation,
-    ConfirmationEgress,
-    ContinuationToken,
-    CostBasis,
     CurrentContext,
     DataTier,
-    DestinationProtocol,
-    DiscloserProvenance,
-    Disposition,
-    EgressDestination,
-    EgressSpan,
     Evidence,
     EvidenceDigest,
-    ExecutionState,
-    Goal,
     GoalAssociation,
     GoalBrief,
-    GoalInterpretation,
     GrantScope,
-    Ground,
     HeldNotification,
-    Idempotency,
     MemoryKind,
     MemorySource,
     MemoryWrite,
@@ -82,7 +67,6 @@ from ai_assistant.core.types import (
     NotificationDispositionKind,
     NotificationPreferences,
     NotificationReach,
-    OperationConfirmation,
     PlannerOutput,
     PlanStep,
     ProposedAction,
@@ -92,21 +76,9 @@ from ai_assistant.core.types import (
     QuietWindow,
     ReadAskOutcome,
     Retirement,
-    Reversibility,
-    RiskLevel,
     SemanticMemory,
-    SpanCoverage,
-    StepExecution,
-    StepFailure,
-    StepOutcome,
-    StepStatus,
     SuccessorLink,
-    TimeOfDay,
-    ToolCost,
     ToolDefinition,
-    TurnOutcome,
-    TurnReference,
-    TurnResult,
     Warrant,
     encodable_text,
 )
@@ -151,16 +123,15 @@ from ai_assistant.testing import (
     FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
-    with_phase_declaration,
 )
 from ai_assistant.wire import GRANTABLE_SCOPES, TransportError
 from ai_assistant.wire.address import sun_path_limit
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.protocols import ActionPolicy, AuditTrail
-    from ai_assistant.core.types import FrozenJson, MemoryRecord, ShownFile, SourceGrant
+    from ai_assistant.core.types import MemoryRecord, ShownFile, SourceGrant
 
 
 def _goal_ids(prefix: str) -> Callable[[], str]:
@@ -282,25 +253,8 @@ def _connection_operations() -> ConnectionOperations:
     return ConnectionOperations(provisioner=FakeConnectionProvisioner())
 
 
-#: The route the harness's observation stage reports (ADR-0077 §3). In production
-#: the composition root supplies it from ``Settings``; here it is fixed so a case
-#: can assert the terminal names the route that read the episodes.
-OBSERVER_ROUTE = "anthropic:claude-opus-4-8"
-PATIENT = timedelta(seconds=30)
 CAPABILITY = "send_email"
 PARAMETERS = {"to": "someone@example.com"}
-
-
-def _no_routed_card(_card: OperationConfirmation) -> bool:
-    """The routed approver for a turn that is not expected to route (ADR-0197 §7).
-
-    Every case in this file that predates routing drives an ordinary turn, so
-    reaching this is a case whose engine started parking a routed operation without
-    the case saying what to answer — which would otherwise pass silently on whichever
-    of ``True`` or ``False`` a placeholder happened to return. The cases that *do*
-    answer a routed card pass their own.
-    """
-    raise AssertionError("this turn was not expected to park a routed operation")
 
 
 @pytest.fixture
@@ -309,30 +263,6 @@ def output(monkeypatch: pytest.MonkeyPatch) -> StringIO:
     buffer = StringIO()
     monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=100))
     return buffer
-
-
-def tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
-    """A declaration ``FakeActionPolicy`` allows outright."""
-    fields: dict[str, object] = {
-        "id": tool_id,
-        "capability": CAPABILITY,
-        "description": "Send an email.",
-        "risk_level": RiskLevel.LOW,
-        "reversibility": Reversibility.REVERSIBLE,
-        "side_effecting": True,
-        "reads": (),
-        "writes": (),
-        "discloses": (),
-        "cost": ToolCost(basis=CostBasis.FREE),
-        "idempotency": Idempotency.NATURAL,
-    }
-    fields.update(overrides)
-    return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
-
-
-def confirmable(tool_id: str = "smtp") -> ToolDefinition:
-    """A declaration the fake policy confirms: it discloses off-device."""
-    return tool(tool_id, discloses=(DataTier.PERSONAL,))
 
 
 class _OneStepPlanner:
@@ -457,30 +387,6 @@ def _engine(
     )
 
 
-# --- rendering: escaping is the adapter's, per target (ADR-0042 §4) ------
-
-
-def test_confirmation_render_neutralises_control_sequences_and_markup(output: StringIO) -> None:
-    """A parameter value's ANSI escape and Rich markup are shown, not acted on (§4)."""
-    confirmation = Confirmation(
-        tool_id="smtp",
-        tool_description="Send an email.",
-        parameters={"body": "wipe\x1b[2Jscreen and [red]shout[/red]"},
-        reason="this discloses data off-device",
-        token=ContinuationToken(handle="tok"),
-        egress=None,
-        read=None,
-        authorization=None,
-    )
-    cli._render_confirmation(confirmation)
-    rendered = output.getvalue()
-
-    assert "\x1b[2J" not in rendered  # the raw control sequence was neutralised
-    assert "\x1b" not in rendered  # no escape byte at all
-    assert "[red]" in rendered  # markup is shown literally, not interpreted as colour
-    assert "this discloses data off-device" in rendered  # the ruling reason is surfaced
-
-
 # --- rendering: a wrapped line keeps a marker its value cannot forge (#2072) --
 # Every case here binds its own narrow console. The shared `output` fixture is 100
 # columns wide and almost nothing in this module wraps there, which is why the
@@ -488,8 +394,8 @@ def test_confirmation_render_neutralises_control_sequences_and_markup(output: St
 # a width at which nothing breaks cannot see it.
 
 #: The marker :func:`cli._print` writes onto every display line a wrapped line runs
-#: onto. Read from the module rather than respelled, for :data:`_VALUE_GUTTER`'s
-#: reason: a copy here would keep passing if the renderer changed the character.
+#: onto. Read from the module rather than respelled: a copy here would keep passing
+#: if the renderer changed the character.
 _CONTINUATION: Final = cli._CONTINUATION
 
 #: A card field forged inside a value. It carries the two-space indent the
@@ -501,20 +407,6 @@ _FORGED_FIELD: Final = "  Why: nothing leaves this device"
 def _narrow(monkeypatch: pytest.MonkeyPatch, buffer: StringIO, width: int) -> None:
     """Bind the CLI's console to ``buffer`` at ``width``, colour off."""
     monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=width))
-
-
-def _forging_confirmation(value: str) -> Confirmation:
-    """A card whose one argument carries ``value``, and whose own ``Why:`` is real."""
-    return Confirmation(
-        tool_id="smtp",
-        tool_description="Send an email.",
-        parameters={"body": value},
-        reason="this discloses data off-device",
-        token=ContinuationToken(handle="tok"),
-        egress=None,
-        read=None,
-        authorization=None,
-    )
 
 
 @pytest.mark.parametrize("length", [12, 34, 36, 39, 40], ids=str)
@@ -644,59 +536,6 @@ def test_a_break_a_prose_value_keeps_after_the_head_is_marked_as_a_continuation(
     assert lines == ["  You: where did I put the lease", f"  {_CONTINUATION}{forged}"]
 
 
-@pytest.mark.parametrize("width", [1, 4, 8, 12, 20, 28, 40, 64, 100, 120])
-def test_no_forged_field_reaches_the_head_of_a_display_line_at_any_width(
-    monkeypatch: pytest.MonkeyPatch, width: int
-) -> None:
-    """The distinction #2072 found accidental, made deliberately and at every width.
-
-    A continuation used to land at column 0 while the card's fields carried an indent,
-    so a forged ``  Why: …`` "would not line up with the real one at the same width" —
-    a defence that held only because of where the break happened to fall, and only
-    while every caller kept its indent. Swept across widths because that is exactly
-    what the old defence was contingent on: one width proves nothing here.
-
-    Below the marker's own width there is no rendering that both shows the text and
-    marks it (:func:`cli._values_fit_this_terminal` withholds a *value* rather than
-    render one there), and the forgery is defeated anyway — at four columns the forged
-    field is broken into fragments too short to imitate a field.
-    """
-    output = StringIO()
-    _narrow(monkeypatch, output, width)
-
-    cli._render_confirmation(_forging_confirmation(f"{'padding ' * 20}{_FORGED_FIELD}"))
-
-    for line in output.getvalue().splitlines():
-        assert not line.startswith(_FORGED_FIELD), (width, line)
-        assert not line.lstrip().startswith("Why: nothing"), (width, line)
-
-
-def test_a_wrapped_argument_on_the_confirmation_card_carries_the_marker(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The ``With:`` block, which is the site #2072 was reproduced on.
-
-    "Reproduced at width 40 on the confirmation card's ``With:`` block: a 500-character
-    parameter value renders as a dozen unmarked lines." Its argument lines carry a
-    four-space indent, so the marker sits at that indent too and the block keeps its
-    column.
-
-    The value is the issue's own: an unbroken 500-character run, which has nowhere to
-    break, so Rich moves the whole of it past the ``body = `` it would not fit beside
-    and every line carrying a character of it is a continuation.
-    """
-    output = StringIO()
-    _narrow(monkeypatch, output, 40)
-
-    cli._render_confirmation(_forging_confirmation("x" * 500))
-
-    lines = output.getvalue().splitlines()
-    carrying = [line for line in lines if "x" in line]
-    assert "    body = " in lines  # the argument's own line, at the block's indent
-    assert len(carrying) > 10  # a dozen display lines, as the issue reports
-    assert all(line.startswith(f"    {_CONTINUATION}") for line in carrying), lines
-
-
 def test_a_wrapped_listing_row_carries_the_marker_though_its_content_is_one_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -708,9 +547,6 @@ def test_a_wrapped_listing_row_carries_the_marker_though_its_content_is_one_line
     wrap opens. So the row's own arm goes through :func:`cli._print` like every other
     authored line, and a long single-line content no longer runs to the margin
     unmarked.
-
-    The marker is not :data:`_VALUE_GUTTER`'s ``│``: this line is a continuation rather
-    than a block of value, and the row's multi-line arm still says the other thing.
     """
     output = StringIO()
     _narrow(monkeypatch, output, 40)
@@ -783,977 +619,7 @@ class _UnavailableBeliefEngine:
         """Nothing to release: this stand-in owns no resource."""
 
 
-# --- ADR-0178 §7: the floor an egress confirmation's rendering owes ----------
-# One block, kept together so a rebase across another lane's fixture edits in
-# this module moves it whole rather than through it.
-
-_EGRESS_IDENTITY = "work@example.com"
-
-
-def _egress_span(  # noqa: PLR0913 — one keyword per field of the span being built
-    argument: str,
-    *,
-    index: int | None = None,
-    extent: int = 5,
-    canonical: str | None = None,
-    supplied: str | None = None,
-    tier: DataTier | None = None,
-    provenance: DiscloserProvenance = DiscloserProvenance.SYSTEM_SELECTED,
-) -> EgressSpan:
-    """One span, with a destination exactly where ``canonical`` is given."""
-    destination = (
-        None
-        if canonical is None
-        else EgressDestination(
-            protocol=DestinationProtocol.SMTP,
-            supplied=supplied if supplied is not None else canonical,
-            canonical=canonical,
-        )
-    )
-    return EgressSpan(
-        argument=argument,
-        index=index,
-        provenance=provenance,
-        extent=extent,
-        tier=tier,
-        destination=destination,
-    )
-
-
-def _parameters_for(spans: Sequence[EgressSpan]) -> dict[str, FrozenJson]:
-    """The arguments ``spans`` decompose, built so the fixture is a real request.
-
-    ADR-0150 §4 makes the spans the arguments and
-    :class:`~ai_assistant.core.types.ActionRequest` refuses a binding that does not
-    describe the call's own parameters, so a confirmation whose spans name nothing
-    the parameters hold is a shape production cannot reach. ADR-0233 §8 renders each
-    span's value *from* ``parameters``, which is what makes the correspondence
-    load-bearing here rather than incidental: a fixture that kept a fixed pair of
-    arguments would leave every case in this block testing the withheld-card path.
-
-    An occurrence's own supplied form is used where it carries one, because
-    :func:`~ai_assistant.core.types._span_defect` refuses a span whose destination
-    states a supplied form the argument's value does not hold. Everything else is
-    filled to the span's stated extent.
-    """
-    built: dict[str, FrozenJson] = {}
-    indexed: dict[str, dict[int, str]] = {}
-    for span in spans:
-        occurrence = span.destination
-        value = occurrence.supplied if occurrence is not None else "x" * span.extent
-        if span.index is None:
-            built[span.argument] = value
-        else:
-            indexed.setdefault(span.argument, {})[span.index] = value
-    for argument, elements in indexed.items():
-        built[argument] = [elements[index] for index in sorted(elements)]
-    return built
-
-
-def _egress_confirmation(
-    *spans: EgressSpan,
-    identity: str = _EGRESS_IDENTITY,
-    planned_with_external_content: bool = False,
-    coverage: SpanCoverage = SpanCoverage.NOT_COVERED,
-    parameters: Mapping[str, FrozenJson] | None = None,
-) -> Confirmation:
-    """A parked egress confirmation carrying ``spans``, over the arguments they name."""
-    return Confirmation(
-        tool_id="smtp",
-        tool_description="Send an email.",
-        parameters=_parameters_for(spans) if parameters is None else parameters,
-        reason="this discloses data off-device",
-        token=ContinuationToken(handle="tok"),
-        egress=ConfirmationEgress(
-            account_identity=identity,
-            spans=spans,
-            planned_with_external_content=planned_with_external_content,
-            coverage=coverage,
-        ),
-        read=None,
-        authorization=None,
-    )
-
-
-#: ADR-0181 §6's two arms, spelled here so a reworded renderer fails rather than a
-#: test quietly matching a shorter substring of whichever arm it was handed.
-_PLANNED_OVER_EXTERNAL: Final = (
-    "Planned over: material this assistant selected, which includes a record "
-    "marked as resting on recorded external content"
-)
-_PLANNED_OVER_NOTHING_MARKED: Final = (
-    "Planned over: material this assistant selected, in which no record is "
-    "marked as resting on recorded external content"
-)
-
-
-def test_an_egress_confirmation_names_the_account_the_set_and_every_occurrence(
-    output: StringIO,
-) -> None:
-    """ADR-0178 §7: the floor, before the user's answer is collected.
-
-    ADR-0148 §8's fourth clause in full — the connected account's identity, the
-    canonical destination set in both forms, and the payload description — over
-    the mixed binding the clause is hardest on: ``to`` bearing a destination and
-    ``body`` not, tested as one case rather than assumed away.
-    """
-    cli._render_confirmation(
-        _egress_confirmation(
-            _egress_span("body", extent=5),
-            _egress_span(
-                "to", canonical="alice@example.org", supplied="Alice@Example.ORG", extent=17
-            ),
-        )
-    )
-    rendered = _flowed(output.getvalue())
-
-    assert _EGRESS_IDENTITY in rendered  # the connected account (§8's first noun)
-    assert "alice@example.org" in rendered  # the canonical form (§2's second)
-    assert "Alice@Example.ORG" in rendered  # the supplied form (§2's first)
-    assert "smtp" in rendered  # the protocol the equivalence was computed under
-    assert "to" in rendered  # every occurrence, by the argument it was selected by
-    assert "body" in rendered
-    assert "this discloses data off-device" in rendered  # the ruling's own reason
-
-
-def test_a_destination_less_occurrence_is_rendered_and_names_no_recipient(
-    output: StringIO,
-) -> None:
-    """ADR-0178 §7: both forms for the occurrences that carry a destination, and those only.
-
-    A span with no destination is still rendered — by its argument, its
-    provenance, its extent and its tier — and names no recipient. Dropping it, or
-    rendering it as though it named one, would fail the whole-rendering clause in
-    the two opposite directions.
-    """
-    cli._render_confirmation(
-        _egress_confirmation(
-            _egress_span(
-                "body",
-                extent=11,
-                tier=DataTier.PERSONAL,
-                provenance=DiscloserProvenance.USER_AUTHORED,
-            )
-        )
-    )
-    rendered = _flowed(output.getvalue())
-
-    assert "body" in rendered
-    assert "11 code points" in rendered
-    assert "personal" in rendered  # the tier it states
-    assert "you composed it" in rendered  # ADR-0146 §1's discloser, not a claim about content
-    assert "no destination" in rendered
-
-
-def test_an_account_only_set_names_the_account_as_the_destination(output: StringIO) -> None:
-    """ADR-0178 §7: not "no recipients" — ADR-0148 §2's third clause is the account."""
-    cli._render_confirmation(_egress_confirmation(_egress_span("body", extent=5)))
-    rendered = _flowed(output.getvalue())
-
-    assert "the connected account" in rendered
-    assert rendered.count(_EGRESS_IDENTITY) >= 2  # named as the account and as the destination
-
-
-def test_one_recipient_named_twice_is_one_set_member_and_two_disclosures(
-    output: StringIO,
-) -> None:
-    """ADR-0150 §10's third clause, which is why the occurrences travel at all.
-
-    A confirmation naming one argument for a member reached by two has understated
-    the call, and one showing only the occurrences leaves the user to deduplicate
-    in their head. Both are rendered, and the arithmetic is `core`'s.
-    """
-    confirmation = _egress_confirmation(
-        _egress_span("cc", canonical="alice@example.org", supplied="Alice@Example.ORG", extent=17),
-        _egress_span("to", canonical="alice@example.org", supplied="alice@example.org", extent=17),
-    )
-    assert confirmation.egress is not None
-    assert len(confirmation.egress.canonical_destination_set) == 1
-    cli._render_confirmation(confirmation)
-    rendered = _flowed(output.getvalue())
-
-    assert "cc" in rendered
-    assert "to" in rendered
-    assert "Alice@Example.ORG" in rendered  # the two supplied forms are both shown
-    assert "alice@example.org" in rendered
-
-
-def test_every_occurrence_is_rendered_none_omitted(output: StringIO) -> None:
-    """ADR-0178 §7: occurrences are rendered whole, none truncated or hidden."""
-    spans = tuple(
-        _egress_span("to", index=index, canonical=f"user{index}@example.org", extent=18)
-        for index in range(12)
-    )
-    cli._render_confirmation(_egress_confirmation(*spans))
-    rendered = _flowed(output.getvalue())
-
-    for index in range(12):
-        assert f"user{index}@example.org" in rendered
-        assert f"to[{index}]" in rendered
-
-
-def test_a_non_egress_confirmation_renders_as_it_did_and_claims_nothing(
-    output: StringIO,
-) -> None:
-    """ADR-0178 §7's last clause: it owes none of the floor and asserts none of it.
-
-    In particular it makes no claim about recipients — neither that there are
-    none, nor that the call transmits nothing. ``egress is None`` states that the
-    ruling was taken over no egress binding, and nothing more (§4).
-    """
-    cli._render_confirmation(
-        Confirmation(
-            tool_id="notes",
-            tool_description="Write a note.",
-            parameters={"body": "hello"},
-            reason="an unknown cost",
-            token=ContinuationToken(handle="tok"),
-            egress=None,
-            read=None,
-            authorization=None,
-        )
-    )
-    rendered = _flowed(output.getvalue())
-
-    assert "Write a note." in rendered
-    assert "an unknown cost" in rendered
-    for absent in (
-        "Account:",
-        "Goes to",
-        "Describing",
-        "the connected account",
-        "no destination",
-        # ADR-0181 §6's last clause: a confirmation whose `egress` is `None` owes the
-        # origin line too, and asserts neither of its arms.
-        "Planned over:",
-        "external content",
-        # ADR-0233 §8's last clause, one axis over: neither the coverage line nor the
-        # values block, and no claim in either direction about what it draws on.
-        "What it draws on:",
-        "What it would send",
-        "this assistant stores",
-    ):
-        assert absent not in rendered
-
-
-def test_the_new_members_are_neutralised_on_the_way_out(output: StringIO) -> None:
-    """ADR-0178 §7: inserted as data, neutralised for this target, like the rest.
-
-    Being derived from a binding relaxes nothing: ``argument`` is a
-    caller-influenced key (ADR-0150 §13) and a ``supplied`` form is a string a
-    model produced, so both reach the terminal through :func:`cli._safe` exactly
-    as ``parameters`` already does.
-    """
-    cli._render_confirmation(
-        _egress_confirmation(
-            _egress_span(
-                "wipe\x1b[2Jscreen",
-                canonical="alice@example.org",
-                supplied="[red]shout[/red]",
-                extent=17,
-            ),
-            identity="acct\x1b[2Jname",
-        )
-    )
-    rendered = output.getvalue()
-
-    assert "\x1b" not in rendered  # no escape byte reaches the terminal at all
-    assert "[red]" in rendered  # markup is shown literally, not interpreted as colour
-
-
-def test_a_call_planned_over_external_content_says_so_beside_the_whole_floor(
-    output: StringIO,
-) -> None:
-    """ADR-0181 §10's clause for this lane, in the conjunction it states.
-
-    "A confirmation carrying ``True`` renders the fact **and** every occurrence
-    ADR-0178 §7's floor already requires" — so the floor is asserted here rather
-    than in a separate case, because §6's sixth clause is precisely that nothing of
-    it is suppressed, reordered or de-emphasised on the strength of the new fact. A
-    test asserting only that the marker appears would pass a renderer that had
-    dropped the recipients to make room for it.
-    """
-    cli._render_confirmation(
-        _egress_confirmation(
-            _egress_span("body", extent=5),
-            _egress_span(
-                "to", canonical="alice@example.org", supplied="Alice@Example.ORG", extent=17
-            ),
-            planned_with_external_content=True,
-        )
-    )
-    rendered = _flowed(output.getvalue())
-
-    assert _PLANNED_OVER_EXTERNAL in rendered  # §6's first clause, in the True state
-
-    # ...and the whole of ADR-0178 §7's floor, unmoved.
-    assert _EGRESS_IDENTITY in rendered  # the connected account
-    assert "alice@example.org" in rendered  # the canonical form
-    assert "Alice@Example.ORG" in rendered  # the supplied form
-    assert "smtp" in rendered  # the protocol the equivalence was computed under
-    assert "to" in rendered  # every occurrence, by the argument it was selected by
-    assert "body" in rendered
-    assert "this discloses data off-device" in rendered  # the ruling's own reason
-
-    # §6's sixth clause is an ordering obligation as well as a membership one: the
-    # account and the recipients keep their places, and the new line sits between
-    # them rather than displacing either.
-    assert rendered.index("Account:") < rendered.index(_PLANNED_OVER_EXTERNAL)
-    assert rendered.index(_PLANNED_OVER_EXTERNAL) < rendered.index("Goes to:")
-    assert rendered.index("Goes to:") < rendered.index("Describing:")
-
-
-def test_a_call_no_selected_record_marked_renders_the_fact_too(output: StringIO) -> None:
-    """ADR-0181 §6's fourth clause: rendered in **both** states.
-
-    "A fact shown only when it is alarming is a fact a user learns to read as an
-    alarm, and its absence as clearance" — and §10 makes the ``False`` case its own
-    test in terms, because "a test asserting only that a marker is present when it
-    is ``True`` does not satisfy this clause".
-
-    The wording is asserted whole, which is what holds §6's third clause: this arm
-    states that no *selected record carried the marker*, and a renderer that had
-    shortened it to "no external content" would be issuing the assurance ADR-0181
-    §7 says nothing in this corpus can give.
-    """
-    cli._render_confirmation(
-        _egress_confirmation(
-            _egress_span("to", canonical="alice@example.org", extent=17),
-            planned_with_external_content=False,
-        )
-    )
-    rendered = _flowed(output.getvalue())
-
-    assert _PLANNED_OVER_NOTHING_MARKED in rendered
-    assert _EGRESS_IDENTITY in rendered  # beside the floor here too, not instead of it
-    assert "alice@example.org" in rendered
-
-
-def test_neither_arm_names_a_source_a_span_or_a_verdict(output: StringIO) -> None:
-    """ADR-0181 §6's second, fifth and sixth clauses, as absences on both arms.
-
-    The clauses bar what a renderer would drift toward, so they are checked as
-    absences: no source and no kind of source ("from a source you connected" is
-    named in the ADR in terms), no attribution to an argument or a recipient, and
-    no detection, score, risk level or claim that the call is malicious.
-
-    The floor names the argument each occurrence was selected by, and ADR-0233 §8's
-    block prints that argument's value under the same key, so the span check is
-    scoped to the origin line itself rather than to the whole render.
-    """
-    for planned in (True, False):
-        output.truncate(0)
-        output.seek(0)
-        cli._render_confirmation(
-            _egress_confirmation(
-                _egress_span("to", canonical="alice@example.org", extent=17),
-                planned_with_external_content=planned,
-            )
-        )
-        rendered = _flowed(output.getvalue())
-        origin = rendered[rendered.index("Planned over:") :].split("Goes to:")[0]
-
-        for forbidden in (
-            "source you connected",
-            "connected source",
-            "malicious",
-            "suspicious",
-            "untrusted",
-            "risk",
-            "warning",
-            "attack",
-            "injected",
-            "unsafe",
-        ):
-            assert forbidden not in origin.lower(), (planned, forbidden)
-        # Never a statement about a span (§6's fifth clause).
-        for span_word in ("alice@example.org", "Alice@Example.ORG", "argument", "recipient"):
-            assert span_word not in origin, (planned, span_word)
-
-
-# --- ADR-0233 §8: the floor a content-bearing confirmation owes --------------
-# One block, for the reason the ADR-0178 block above gives. The three floors §15
-# names — rendering, coverage and control — are asserted over this surface's own
-# output, because §9's third condition is discharged by tests over each surface
-# and by nothing a component could check at the ruling.
-
-#: The gutter every line of a rendered value carries. Read from the module rather
-#: than respelled, because :func:`cli._values_fit_this_terminal` measures against the
-#: same constant: a test that carried its own copy would keep passing if the renderer
-#: and the width rule drifted apart, which is the pair the constant exists to hold
-#: together.
-_VALUE_GUTTER: Final = cli._VALUE_GUTTER
-
-
-def _value_lines(rendered: str) -> list[str]:
-    """The rendered value block's lines, gutter stripped, in the order printed."""
-    return [
-        line[len(_VALUE_GUTTER) :]
-        for line in rendered.split("\n")
-        if line.startswith(_VALUE_GUTTER)
-    ]
-
-
-def _coverage_slice(rendered: str) -> str:
-    """Just the coverage line, flowed — the subject of §8's own per-line clauses."""
-    flowed = _flowed(rendered)
-    return flowed[flowed.index("What it draws on:") :].split("What it would send")[0]
-
-
-def test_every_spans_value_is_rendered_whole_before_the_answer(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ADR-0233 §8's first two clauses, over the case the ADR is actually about.
-
-    "For every span the ``spans`` tuple carries, that span's own value, taken from
-    ``Confirmation.parameters`` under ADR-0150 §4's decomposition" — and rendered
-    **before it collects the user's answer**. The ordering is asserted at the moment
-    the control is offered rather than by comparing two offsets in a buffer, because
-    what §8 requires is that the bytes were on the screen when the question was put.
-    """
-    body = "Dear Alice,\n\nYou asked me to remind you about June.\n\nBest,\nLeo"
-    confirmation = _egress_confirmation(
-        _egress_span("body", extent=len(body)),
-        _egress_span("to", canonical="alice@example.org", extent=17),
-        parameters={"body": body, "to": "alice@example.org"},
-    )
-    shown: list[str] = []
-
-    def _at_the_prompt(_text: str, *, default: bool = False) -> bool:
-        shown.append(output.getvalue())
-        return False
-
-    monkeypatch.setattr(typer, "confirm", _at_the_prompt)
-    assert cli._prompt_for_approval(confirmation) is False
-
-    assert len(shown) == 1  # one control, offered once
-    at_the_prompt = shown[0]
-    assert _value_lines(at_the_prompt) == [*body.split("\n"), "alice@example.org"]
-    # Keyed by ADR-0150 §4's own pair, so a reader can carry their eye from the
-    # description to the value it describes.
-    assert "    body:" in at_the_prompt
-    assert "    to:" in at_the_prompt
-
-
-def test_a_value_is_rendered_beside_the_description_and_never_instead_of_it(
-    output: StringIO,
-) -> None:
-    """ADR-0233 §8's fourth clause: ADR-0178 §7's floor is unreduced beneath it.
-
-    Both are on the screen now, which is why §7's sixth clause binds harder than
-    before: a surface that merged them would be claiming the description states what
-    the value says. So the account, the origin, the set, every occurrence and the
-    payload description are all asserted here, in their order, with the values after
-    them and before the reason.
-    """
-    cli._render_confirmation(
-        _egress_confirmation(
-            _egress_span("body", extent=5),
-            _egress_span(
-                "to", canonical="alice@example.org", supplied="Alice@Example.ORG", extent=17
-            ),
-        )
-    )
-    rendered = _flowed(output.getvalue())
-
-    for kept in (
-        _EGRESS_IDENTITY,  # the connected account
-        "Planned over:",  # ADR-0181 §6's origin line
-        "Goes to:",  # the canonical destination set
-        "Describing:",  # the payload description
-        "5 code points",  # which still states an extent rather than the text
-    ):
-        assert kept in rendered
-    assert rendered.index("Describing:") < rendered.index("What it draws on:")
-    assert rendered.index("What it draws on:") < rendered.index("What it would send, whole:")
-    assert rendered.index("What it would send, whole:") < rendered.index("Why:")
-
-
-def test_an_indexed_span_renders_its_own_element_and_not_the_whole_argument(
-    output: StringIO,
-) -> None:
-    """ADR-0233 §8: "that argument's value's element at ``index``".
-
-    An array-valued argument decomposes into one span per element (ADR-0150 §4), so
-    each is shown under its own key. A surface that printed the whole array once
-    against the first span would have rendered the second span's value nowhere the
-    reader could attribute it.
-    """
-    cli._render_confirmation(
-        _egress_confirmation(
-            _egress_span("to", index=0, canonical="alice@example.org", extent=17),
-            _egress_span("to", index=1, canonical="bob@example.org", extent=15),
-        )
-    )
-    rendered = output.getvalue()
-
-    assert "    to[0]:" in rendered
-    assert "    to[1]:" in rendered
-    assert _value_lines(rendered) == ["alice@example.org", "bob@example.org"]
-
-
-def test_a_long_value_is_neither_truncated_elided_nor_collapsed(output: StringIO) -> None:
-    """ADR-0233 §8's second clause, on the value that makes it expensive.
-
-    Not truncated, not elided, not abbreviated, not summarised, not paraphrased and
-    not collapsed behind a control the user must operate to see it. Every line of a
-    two-hundred-line body is asserted individually rather than by a length, because a
-    renderer that kept the first and last twenty would pass a length check on the
-    ends and fail this one in the middle.
-    """
-    body = "\n".join(f"line {number} of the body" for number in range(200))
-    cli._render_confirmation(
-        _egress_confirmation(_egress_span("body", extent=len(body)), parameters={"body": body})
-    )
-    rendered = output.getvalue()
-
-    assert _value_lines(rendered) == body.split("\n")
-    for elision in ("\u2026", "...", "truncated", "show more", "[dim]+", "and 1"):
-        assert elision not in rendered
-
-
-def test_every_wrapped_continuation_of_a_value_keeps_the_gutter(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ADR-0233 §8's second and ninth clauses, on the display line rather than the buffer.
-
-    Rich does not repeat a literal prefix on the continuations it wraps: handed one
-    long line it emits the gutter once and puts the remainder at the margin, so a
-    body would run past the marker within a line or two and those continuations would
-    read as lines this adapter wrote. That is the regression
-    :func:`cli._render_content` records an adversarial ``blocker`` for, one renderer
-    over, and the wrapping is therefore taken by :func:`cli._render_egress_value`
-    rather than left to the console.
-
-    Asserted at a narrow width, over both shapes that wrap — an unbroken run, which
-    folds, and ordinary words, which break at spaces — because they take different
-    paths through Rich's wrapper. The pieces concatenate back to the value, which is
-    §8's whole-rendering clause read on the screen; a lost gutter shows up here as a
-    piece that never reached :func:`_value_lines`, and a lost character as a
-    reconstruction that does not match.
-
-    Adversarial review, round 2, ``minor``.
-    """
-    cases = (("x" * 500, "xx", True), (" ".join(f"word{n}" for n in range(80)), "word", False))
-    for value, token, folds in cases:
-        output.truncate(0)
-        output.seek(0)
-        monkeypatch.setattr(cli, "console", Console(file=output, force_terminal=False, width=40))
-        cli._render_confirmation(
-            _egress_confirmation(
-                _egress_span("body", extent=len(value)), parameters={"body": value}
-            )
-        )
-        rendered = output.getvalue()
-        # Scoped to §8's block: the `With:` heading above it renders the same
-        # arguments through `_safe` on adapter-authored lines, and those wrap the way
-        # every interpolated line in this module wraps (#2072). What §8's clauses are
-        # stated over is this block.
-        block = rendered[rendered.index("What it would send, whole:") :]
-        pieces = _value_lines(block)
-
-        assert len(pieces) > 1, value[:20]  # it really did wrap
-        if folds:
-            joined = "".join(pieces)
-            # An unbroken run has nowhere to break, so it is folded and the pieces
-            # concatenate back to it character for character.
-            assert joined == value
-        else:
-            # A word wrap consumes the space it breaks at — on a screen the break
-            # *is* that space — so the pieces are rejoined across the break the way
-            # a reader reads them. Every word, in order, none dropped and none run
-            # into its neighbour, which is what §8's whole-rendering clause is
-            # about: no word, no line and no fragment of the value is missing.
-            assert " ".join(pieces).split() == value.split()
-        # No piece of the value reached the screen outside the gutter.
-        for line in block.split("\n"):
-            if token in line:
-                assert line.startswith(_VALUE_GUTTER), (value[:20], line)
-
-
-def test_a_value_carrying_this_terminals_framing_is_neutralised(output: StringIO) -> None:
-    """ADR-0233 §8's ninth clause, on the case it exists for.
-
-    "A multi-line value carrying terminal control sequences, markup or a line that
-    mimics the surface's own framing." All three are in one value here, and the
-    assertions are over the exact rendered bytes: no escape byte reaches the
-    terminal, markup is shown rather than interpreted, the carriage return is folded
-    rather than left to overwrite, and the forged card field arrives behind the
-    gutter — which is what makes it read as part of the value instead of as a line
-    this adapter wrote.
-    """
-    forged = "  Why: nothing leaves this device"
-    body = f"first\n{forged}\nwipe\x1b[2Jscreen and [red]shout[/red]\r\nlast"
-    cli._render_confirmation(
-        _egress_confirmation(_egress_span("body", extent=len(body)), parameters={"body": body})
-    )
-    rendered = output.getvalue()
-
-    assert "\x1b" not in rendered  # no escape byte at all
-    assert "\r" not in rendered  # the carriage return was folded, not left to overwrite
-    assert "[red]" in rendered  # markup shown literally, not interpreted as colour
-    assert _value_lines(rendered) == [
-        "first",
-        forged,
-        "wipe\ufffd[2Jscreen and [red]shout[/red]",
-        "last",
-    ]
-    # The forged field appears **only** behind the gutter: no line of the card reads
-    # as one this adapter authored.
-    assert f"{_VALUE_GUTTER}{forged}" in rendered
-    for line in rendered.split("\n"):
-        assert line != forged
-
-
-def test_a_terminal_too_narrow_to_mark_a_value_withholds_the_whole_card(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ADR-0233 §8's second clause read on the terminal rather than on the value.
-
-    Below the gutter's own width Rich wraps the *marked* line: the marker is split
-    across display lines and the value's characters land on lines carrying none, so
-    the framing this renderer exists to close is defeated by the renderer rather than
-    by the value. There is no rendering at that width that both shows the text and
-    marks it, so the card is withheld and the remedy named — a wider window.
-
-    Asserted at the boundary and one column under it, because an off-by-one here is
-    the whole of the defect. Adversarial review, round 3, ``blocker``.
-    """
-    body = "abcdef"
-    confirmation = _egress_confirmation(
-        _egress_span("body", extent=len(body)), parameters={"body": body}
-    )
-
-    for width in (1, len(_VALUE_GUTTER) - 1, len(_VALUE_GUTTER)):
-        output.truncate(0)
-        output.seek(0)
-        monkeypatch.setattr(cli, "console", Console(file=output, force_terminal=False, width=width))
-
-        assert cli._render_confirmation(confirmation) is False, width
-        # Squashed rather than flowed: at one column every character is its own line,
-        # so the words themselves are what survive and the layout is not the subject.
-        # The continuation marker goes with the wrapping that wrote it, as `_flat`
-        # records — below the marker's own width it is on nearly every line (#2072).
-        rendered = "".join(output.getvalue().replace("\u21b3", " ").split())
-        assert "Confirmationwithheld" in rendered, width
-        assert "toonarrow" in rendered, width
-        assert "Nothingwassentandnothingwasdeclined" in rendered, width
-        assert body not in rendered, width  # no character of the value reached the screen
-
-
-def test_the_narrowest_terminal_that_still_marks_a_value_renders_the_card(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The other side of :func:`cli._values_fit_this_terminal`'s boundary.
-
-    One column of value beside the gutter is enough to mark it, so the card is put
-    rather than withheld — and every line of the value still carries the marker,
-    which is what makes the boundary the right one rather than merely a threshold.
-    """
-    body = "abcdef"
-    monkeypatch.setattr(
-        cli, "console", Console(file=output, force_terminal=False, width=len(_VALUE_GUTTER) + 1)
-    )
-
-    assert (
-        cli._render_confirmation(
-            _egress_confirmation(_egress_span("body", extent=len(body)), parameters={"body": body})
-        )
-        is True
-    )
-    rendered = output.getvalue()
-
-    assert "Confirmation withheld" not in rendered  # the card was put, not withheld
-    # The gutter-carrying lines are the value block and nothing else on the card, so
-    # they are the value: one column at a time, all of it, every line marked.
-    assert "".join(_value_lines(rendered)) == body
-
-
-def test_a_value_the_parameters_do_not_locate_withholds_the_whole_card(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ADR-0233 §8's second clause: no confirmation at all, and it says so.
-
-    "A surface that cannot render a value whole renders **no** confirmation and says
-    so" — because a partial content-bearing confirmation is worse than none, it looks
-    like a whole one. The shape is unreachable from a constructed request and
-    reachable over the wire, since ``ConfirmationEgress`` re-checks none of the
-    binding's structural invariants. No part of the payload is rendered, and no
-    control is offered.
-    """
-    monkeypatch.setattr(
-        typer, "confirm", lambda *_a, **_k: pytest.fail("a withheld card offered a control")
-    )
-    confirmation = _egress_confirmation(
-        _egress_span("body", extent=6), parameters={"elsewhere": "secret"}
-    )
-
-    assert cli._render_confirmation(confirmation) is False
-    assert cli._prompt_for_approval(confirmation) is None
-
-    rendered = output.getvalue()
-    assert "Confirmation required" not in rendered
-    assert "Confirmation withheld" in rendered
-    assert "secret" not in rendered  # no part of the payload, whole or otherwise
-    assert "Goes to" not in rendered  # and none of the floor, since there is no card
-
-
-def test_all_three_coverage_states_render_and_none_is_the_same_sentence(
-    output: StringIO,
-) -> None:
-    """ADR-0233 §8's fifth clause: rendered in **all three** states.
-
-    Total over the enum rather than over the states a lane believes it will meet —
-    ``PATH_WITHOUT_MODEL`` is unreachable in a confirmation, because §6 refuses it at
-    binding construction, and is rendered anyway for ADR-0181 §6's fourth clause's
-    reason: a fact shown only when it is alarming is one a user learns to read as an
-    alarm, and its absence as clearance. The iteration is over the enum itself, so a
-    fourth member could not be added without failing here.
-    """
-    sentences: set[str] = set()
-    for coverage in SpanCoverage:
-        output.truncate(0)
-        output.seek(0)
-        cli._render_confirmation(
-            _egress_confirmation(_egress_span("body", extent=5), coverage=coverage)
-        )
-        line = _coverage_slice(output.getvalue())
-        assert line.strip() != "What it draws on:"  # a state, never a blank
-        sentences.add(line)
-
-    assert len(sentences) == len(SpanCoverage) == 3
-
-
-def test_no_coverage_state_is_an_assurance_a_warning_or_a_verdict(output: StringIO) -> None:
-    """ADR-0233 §8's fifth, seventh and eighth clauses, as absences on every arm.
-
-    ``NOT_COVERED`` never says the send is safe or that nothing relates to what the
-    user has told this assistant; no arm is a detection, a score, a risk level, a
-    recommendation or a claim that the call is malicious; and none names a record, a
-    record identifier, an episode, a store-side key, a schema field or a kind of
-    source.
-    """
-    for coverage in SpanCoverage:
-        output.truncate(0)
-        output.seek(0)
-        cli._render_confirmation(
-            _egress_confirmation(_egress_span("body", extent=5), coverage=coverage)
-        )
-        line = _coverage_slice(output.getvalue()).lower()
-
-        for forbidden in (
-            "safe",
-            "secure",
-            "harmless",
-            "nothing to worry",
-            "risk",
-            "warning",
-            "malicious",
-            "suspicious",
-            "untrusted",
-            "unsafe",
-            "detected",
-            "score",
-            "recommend",
-            "you should",
-            # §8: no record identifier, no episode, no store-side key, no field name
-            # of any store's schema and no memory. The *verb* "recorded" is not one
-            # of those and is what ADR-0181 §6's own line already says — the bar is
-            # on naming a thing in a store, not on saying that something was
-            # recorded.
-            "memory",
-            "episode",
-            "belief",
-            "conversation",
-            "field",
-            # ...and no kind of source, in the two forms ADR-0181 §6 names in terms.
-            "source you connected",
-            "connected source",
-        ):
-            assert forbidden not in line, (coverage, forbidden)
-
-
-def test_the_coverage_line_is_never_a_claim_about_a_span(output: StringIO) -> None:
-    """ADR-0233 §8's sixth clause: not attributed to an argument, a position or a destination.
-
-    The recorded fact is a disjunction over the **call**, so a per-span rendering
-    would assert a marker §4 deliberately does not mint. This is ADR-0181 §6's fifth
-    clause read one axis over, and it is checked the same way: over a card whose
-    floor names two arguments and a recipient, none of which may appear in the line.
-    """
-    for coverage in SpanCoverage:
-        output.truncate(0)
-        output.seek(0)
-        cli._render_confirmation(
-            _egress_confirmation(
-                _egress_span("body", extent=5),
-                _egress_span("to", canonical="alice@example.org", extent=17),
-                coverage=coverage,
-            )
-        )
-        line = _coverage_slice(output.getvalue())
-
-        for span_word in ("body", "alice@example.org", "argument", "recipient", "span", "["):
-            assert span_word not in line, (coverage, span_word)
-
-
-def test_the_coverage_line_is_not_the_origin_line_in_either_direction(
-    output: StringIO,
-) -> None:
-    """ADR-0233 §8's eighth clause: no surface conflates the two.
-
-    "The two answer different questions — where what this call would send came from,
-    and whether the material selected into the planning call carried the external
-    mark." Both are on the card in every combination, each in its own words: the
-    origin line's own vocabulary is absent from the coverage line and the coverage
-    line's from the origin line, so neither could be read as a restatement of the
-    other.
-    """
-    for coverage in SpanCoverage:
-        for planned in (True, False):
-            output.truncate(0)
-            output.seek(0)
-            cli._render_confirmation(
-                _egress_confirmation(
-                    _egress_span("body", extent=5),
-                    coverage=coverage,
-                    planned_with_external_content=planned,
-                )
-            )
-            flowed = _flowed(output.getvalue())
-            expected = _PLANNED_OVER_EXTERNAL if planned else _PLANNED_OVER_NOTHING_MARKED
-            assert expected in flowed  # ADR-0181 §6's line, unmoved and unreduced
-            line = _coverage_slice(flowed)
-
-            for origin_word in ("external content", "selected", "marked as resting"):
-                assert origin_word not in line, (coverage, planned, origin_word)
-            origin = flowed[flowed.index("Planned over:") :].split("Goes to:")[0]
-            for coverage_word in ("draws on", "composed by a model", "stores"):
-                assert coverage_word not in origin, (coverage, planned, coverage_word)
-
-
-def test_the_reveal_is_a_separate_step_from_the_approval(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ADR-0233 §8's ninth clause: "no control that both reveals a value and approves it".
-
-    Rendering the card offers nothing to operate — a control raised here would fail —
-    and the values are all on the screen before any control exists. So the two acts
-    are separable in the only sense this surface can be asked for: reading costs
-    nothing and answering is its own act.
-    """
-    monkeypatch.setattr(
-        typer, "confirm", lambda *_a, **_k: pytest.fail("the reveal operated a control")
-    )
-    body = "the whole body, read before anything is offered"
-
-    assert (
-        cli._render_confirmation(
-            _egress_confirmation(_egress_span("body", extent=len(body)), parameters={"body": body})
-        )
-        is True
-    )
-    assert _value_lines(output.getvalue()) == [body]
-
-
-def test_the_prompt_takes_no_affirmative_default_and_needs_the_token_typed(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ADR-0233 §8's ninth clause: no affirmative default, no lower-effort yes.
-
-    Driven through the real prompt with a scripted standard input, because "the
-    default is ``False``" is a claim about what a bare Enter does and only the prompt
-    itself can answer it. A blank line declines; the approving token has to be typed.
-    """
-    confirmation = _egress_confirmation(_egress_span("body", extent=5))
-
-    monkeypatch.setattr("sys.stdin", StringIO("\n"))
-    assert cli._prompt_for_approval(confirmation) is False  # a bare Enter is not approval
-
-    monkeypatch.setattr("sys.stdin", StringIO("y\n"))
-    assert cli._prompt_for_approval(confirmation) is True  # the token, typed
-
-
-def test_one_prompt_answers_one_confirmation(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ADR-0233 §8's ninth clause: "no control that answers more than one confirmation".
-
-    Two cards, two prompts, and each answered on its own — the second is put after the
-    first was answered, so no control reaches past the confirmation it was offered
-    for. A surface that had asked once and applied the answer twice would show one
-    prompt here.
-    """
-    answers = iter([True, False])
-    asked: list[str] = []
-
-    def _one_at_a_time(_text: str, *, default: bool = False) -> bool:
-        asked.append(output.getvalue())
-        return next(answers)
-
-    monkeypatch.setattr(typer, "confirm", _one_at_a_time)
-    first = _egress_confirmation(_egress_span("body", extent=5))
-    second = _egress_confirmation(_egress_span("to", canonical="bob@example.org", extent=15))
-
-    assert cli._prompt_for_approval(first) is True
-    assert cli._prompt_for_approval(second) is False
-    assert len(asked) == 2
-    # The second card was on the screen before its own prompt, and not before the first's.
-    assert "bob@example.org" not in asked[0]
-    assert "bob@example.org" in asked[1]
-
-
-def test_yes_answers_a_confirmation_that_carries_no_egress(output: StringIO) -> None:
-    """ADR-0233 §8's last clause: a confirmation whose ``egress`` is ``None`` owes none of it.
-
-    ``--yes`` is unchanged there, which is the whole of ADR-0052 §4's and ADR-0073
-    §5's idiom: the flag supplies the answer and never the rendering.
-    """
-    assert (
-        cli._assume_yes(
-            Confirmation(
-                tool_id="notes",
-                tool_description="Write a note.",
-                parameters={"body": "hello"},
-                reason="an unknown cost",
-                token=ContinuationToken(handle="tok"),
-                egress=None,
-                read=None,
-                authorization=None,
-            )
-        )
-        is True
-    )
-    assert output.getvalue() == ""  # it answers, and says nothing about a floor it owes none of
-
-
-def test_yes_does_not_answer_an_egress_confirmation_and_declines_nothing(
-    output: StringIO,
-) -> None:
-    """ADR-0233 §8's ninth clause and §9's second condition, on the one control that spans cards.
-
-    §8 bars a control that "answers more than one confirmation" or "pre-selects an
-    affirmative answer", and a flag typed before the request existed does both — on
-    ``resume`` one ``--yes`` answers every pending card. §9's second condition admits
-    a model-composed span only where the ``CONFIRM`` was answered by the user "on
-    **that** request", which a standing flag is not.
-
-    ``None`` rather than ``False``: the user refused nothing, so nothing is recorded
-    as a refusal, and the step stays parked to be answered on a screen.
-    """
-    answer = cli._assume_yes(
-        _egress_confirmation(
-            _egress_span("body", extent=5), coverage=SpanCoverage.MODEL_ON_EVERY_PATH
-        )
-    )
-
-    assert answer is None
-    rendered = _flowed(output.getvalue())
-    assert "--yes does not answer this one" in rendered
-    assert "Nothing was sent and nothing was declined" in rendered
-    # What to do instead, named precisely enough to act on: `assistant resume` alone
-    # is the command that just did this, so the flag to drop is named too.
-    assert "Answer it with assistant resume, run without --yes." in rendered
+# --- the adapter mints no ruling (ADR-0042 §6, ADR-0186 §1) -----------------
 
 
 def test_the_cli_mints_no_ruling_and_authorises_nothing(output: StringIO) -> None:
@@ -1796,9 +662,8 @@ def test_a_recorded_ruling_reaches_the_audit_surface_and_nothing_else() -> None:
     the decision goes instead.
 
     So the walk asserts the whole set rather than spot-checking: a decision, or either
-    binding it may carry, is annotated on exactly the audit surface's seven functions
-    and on no others. An eighth entry — most of all ``_render_confirmation`` or
-    ``_prompt_for_approval`` — fails here, which is the route around ADR-0042 §6 that
+    binding it may carry, is annotated on exactly the audit surface's functions and on
+    no others. Any other entry fails here, which is the route around ADR-0042 §6 that
     ADR-0178 exists to close and that ADR-0186 §8's last clause bars from the other
     direction.
 
@@ -1846,90 +711,6 @@ def test_a_recorded_ruling_reaches_the_audit_surface_and_nothing_else() -> None:
     }
 
 
-def test_disposition_render_names_the_executed_tool(output: StringIO) -> None:
-    """An executed step names the tool that ran (§3)."""
-    cli._render_disposition(Disposition.EXECUTED, "smtp")
-    assert "smtp" in output.getvalue()
-
-
-def test_invalid_parameters_renders_a_line_of_its_own(output: StringIO) -> None:
-    """A step refused for its arguments says so rather than printing nothing (#1113).
-
-    The defect was silence: ``_render_disposition`` reads its mapping with ``.get``,
-    so ADR-0145 §4's new member ended a turn with the CLI saying nothing at all
-    about why nothing ran.
-    """
-    cli._render_disposition(Disposition.INVALID_PARAMETERS, None)
-    rendered = _flowed(output.getvalue())
-
-    assert rendered  # something was printed at all — the whole of #1113
-    assert "arguments" in rendered  # and it names what was at fault
-    # No tool is named: the eligibility filter emptied the candidate set, so there
-    # is no "selected tool" and ``tool_id`` is ``None`` (ADR-0144 §7).
-    assert "the selected tool" not in rendered
-
-
-def test_invalid_parameters_render_claims_only_what_both_causes_support(
-    output: StringIO,
-) -> None:
-    """The line is true on the raise path too, not only on the mismatch (ADR-0145 §4, §7).
-
-    One member, two causes: every capable candidate reported violations, or an
-    evaluation *raised*. Only the first establishes that the arguments do not fit —
-    on the second, §7 says in terms that "a raise establishes no such fact", and the
-    arguments may have satisfied every schema. One phrase is printed for both, so it
-    has to be the weaker claim; asserting a mismatch would be false half the time,
-    which is ``_step_headline``'s ``INDETERMINATE`` hazard one disposition over.
-    """
-    cli._render_disposition(Disposition.INVALID_PARAMETERS, None)
-    rendered = _flowed(output.getvalue())
-
-    assert "not established as acceptable" in rendered
-    # The claims the raise path cannot support. Spelled out rather than left to the
-    # positive assertion above, because the tempting rewordings are exactly these.
-    for overclaim in ("did not fit", "do not fit", "invalid", "rejected", "does not match"):
-        assert overclaim not in rendered.lower()
-
-
-def test_invalid_parameters_render_carries_no_argument_of_its_own(output: StringIO) -> None:
-    """The line is a fixed phrase, never a report of the parameters (ADR-0145 §8).
-
-    §8 forbids a rendering from carrying an argument value *or* key, and the
-    violations that would name the missed constraint stop at ``orchestration``
-    anyway — ``StepOutcome`` has no field for them (#1106). So the same text comes
-    out whatever the step's arguments were, which is what this pins.
-    """
-    cli._render_disposition(Disposition.INVALID_PARAMETERS, None)
-    without_tool = output.getvalue()
-    output.truncate(0)
-    output.seek(0)
-
-    # Even handed a tool id, the line must not start reporting particulars: a
-    # rendering that varies with the call is one that can be made to leak.
-    cli._render_disposition(Disposition.INVALID_PARAMETERS, "smtp")
-    with_tool = output.getvalue()
-
-    assert with_tool == without_tool
-    assert "smtp" not in with_tool
-
-
-def test_every_disposition_but_the_parked_one_renders(output: StringIO) -> None:
-    """Only ``AWAITING_CONFIRMATION`` prints nothing, and that one by design.
-
-    The silent fallback is deliberate for the parked step — the confirm flow renders
-    it from content the verdict does not carry — but #1113 showed that a fallback
-    kept for one member silently absorbs the next one added. This holds the rest of
-    the enum to printing something, so a future member fails here instead of in
-    front of a user.
-    """
-    for disposition in Disposition:
-        output.truncate(0)
-        output.seek(0)
-        cli._render_disposition(disposition, "smtp")
-        expected_silent = disposition is Disposition.AWAITING_CONFIRMATION
-        assert bool(output.getvalue().strip()) is not expected_silent, disposition
-
-
 def test_error_render_shows_no_traceback(output: StringIO) -> None:
     """An error is a one-line message, not a stack trace."""
     cli._render_error(PlanningError("a turn needs a non-empty utterance"))
@@ -1938,40 +719,10 @@ def test_error_render_shows_no_traceback(output: StringIO) -> None:
     assert "Traceback" not in rendered
 
 
-# --- the turn flow (ADR-0042 §3, §7) ------------------------------------
-
-
-async def test_ask_surfaces_an_error_with_a_nonzero_exit(output: StringIO) -> None:
-    """A blank utterance is a PlanningError the CLI surfaces, exit 1 (§7)."""
-    engine = _engine(tools=(tool(),))
-    code = await cli._drive_turn(
-        engine,
-        "   ",
-        timeout=PATIENT,
-        approver=lambda _confirmation: True,
-        confirm_operation=_no_routed_card,
-    )
-    assert code == 1
-    assert "Error" in output.getvalue()
-    await engine.aclose()
-
-
-# --- resume: answering a durably-parked confirmation (ADR-0052) ---------
-
-
-async def test_resume_reports_nothing_awaiting_when_no_park_exists(output: StringIO) -> None:
-    """With no durably-parked confirmation, ``resume`` says so and exits 0."""
-    engine = _engine(tools=(confirmable(),))
-    code = await cli._drive_resume(engine, timeout=PATIENT, approver=lambda _c: True)
-    assert code == 0
-    assert "Nothing is awaiting confirmation" in output.getvalue()
-    await engine.aclose()
-
-
 # --- startup and input error boundaries (ADR-0042 §7) -------------------
 
 
-async def test_ask_renders_a_config_failure_and_exits_nonzero(
+async def test_a_config_failure_at_startup_is_rendered_and_exits_nonzero(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A settings failure at startup is rendered, not dumped as a traceback (§7)."""
@@ -1981,13 +732,13 @@ async def test_ask_renders_a_config_failure_and_exits_nonzero(
         raise ConfigurationError(msg)
 
     monkeypatch.setattr(cli, "load_settings", _bad_settings)
-    code = await cli._ask("hello", timeout_seconds=1.0, assume_yes=True)
+    code = await cli._list_conversations(limit=10, offset=0)
     assert code == 1
     assert "Error" in output.getvalue()
     assert "unknown timezone" in output.getvalue()
 
 
-async def test_ask_reports_a_closed_door_as_an_instruction_and_exits_nonzero(
+async def test_a_closed_door_is_reported_as_an_instruction_and_exits_nonzero(
     output: StringIO, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """No hub, no fallback: an instruction and a non-zero exit (ADR-0084 §9).
@@ -1995,7 +746,7 @@ async def test_ask_reports_a_closed_door_as_an_instruction_and_exits_nonzero(
     The whole of ruling 3 and ruling 5 at the adapter, and the assertions are
     written so that a fallback could not pass them: the message must name the
     socket it tried *and* how to start the hub, and the exit code must be non-zero.
-    An in-process fallback would render a turn and exit ``0``.
+    An in-process fallback would render a listing and exit ``0``.
 
     It is driven through the real client against a directory with no socket in it,
     rather than through a stubbed one, so what is exercised is the actual
@@ -2003,7 +754,7 @@ async def test_ask_reports_a_closed_door_as_an_instruction_and_exits_nonzero(
     """
     monkeypatch.setattr(cli, "load_settings", lambda: Settings(data_dir=tmp_path))
     monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
-    code = await cli._ask("hello", timeout_seconds=1.0, assume_yes=True)
+    code = await cli._list_conversations(limit=10, offset=0)
     assert code == 1
     rendered = output.getvalue()
     assert "hub.sock" in rendered
@@ -2027,33 +778,11 @@ async def test_a_data_directory_too_long_for_the_socket_is_reported_as_itself(
         deep = deep / "aaaaaaaaaa"
     monkeypatch.setattr(cli, "load_settings", lambda: Settings(data_dir=deep))
     monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
-    code = await cli._ask("hello", timeout_seconds=1.0, assume_yes=True)
+    code = await cli._list_conversations(limit=10, offset=0)
     assert code == 1
     rendered = output.getvalue()
     assert "sun_path" in rendered
     assert "ASSISTANT_DATA_DIR" in rendered
-
-
-@pytest.mark.parametrize("bad", ["inf", "nan", "0", "-1", "1e100", "1e-7"])
-def test_ask_rejects_an_unusable_timeout(bad: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A non-finite, non-positive, overflowing, or sub-resolution --timeout is a usage error.
-
-    **And no client is opened**, which is the half the exit code alone does not say
-    (#1970). ``ask`` is the command with the most to build behind it — a hub client
-    and a turn — so a refusal that ran after the connection would be paid for on
-    every mistyped ``--timeout``, and would still exit 2.
-    """
-    opened = _wire_recording_opens(monkeypatch, FakeAssistantEngine())
-
-    result = CliRunner().invoke(cli.app, ["ask", "hello", "--goal", "goal-1", "--timeout", bad])
-
-    assert result.exit_code == 2  # Typer's usage-error code, before the engine is built
-    # The refusal is the timeout's own: the turn carries a valid reference, so it is not
-    # `ask`'s missing-reference refusal standing in for it (ADR-0293 §11).
-    # Read with its styling stripped: a terminal that forces colour (CI does) breaks the
-    # option's name with escape sequences.
-    assert "--timeout" in click.unstyle(result.output)
-    assert opened == []
 
 
 # --- a failed credential read is not a refused credential (#1940) ------------
@@ -2402,8 +1131,7 @@ def _flat(rendered: str) -> str:
     :func:`cli._print` marks every display line a line runs onto — so a helper that
     removed the break and kept the marker would leave a ``↳`` between two words of one
     sentence, which is the failure this helper exists to prevent. It is not the ``│``
-    :func:`_help_text` drops: that one is Typer's own panel border, and
-    :data:`_VALUE_GUTTER`'s marker, which a case here does assert on.
+    :func:`_help_text` drops: that one is Typer's own panel border.
     """
     return " ".join(rendered.replace("\u21b3", " ").split())
 
@@ -3748,26 +2476,6 @@ class _NoStepPlanner:
         )
 
 
-async def test_ask_reports_an_unknown_conversation_rather_than_starting_one(
-    output: StringIO,
-) -> None:
-    """§1: a typo must not quietly land the continuation somewhere unfindable."""
-    engine, conversations = _conversation_engine()
-
-    code = await cli._drive_turn(
-        engine,
-        "hello",
-        timeout=timedelta(seconds=5),
-        approver=lambda _c: True,
-        conversation_id="nobody",
-        confirm_operation=_no_routed_card,
-    )
-
-    assert code == cli._EXIT_ERROR
-    assert "Error" in output.getvalue()
-    assert await conversations.recent() == []
-
-
 # --- the composed answer, beside the account and never in place of it --------
 # ADR-0170 §6's rendering floor and §8's neutralisation, plus §10's
 # contradictory-provider test, which needs both the outcome and the rendered
@@ -3787,153 +2495,6 @@ def test_a_value_sharing_a_line_with_the_adapters_own_text_still_loses_its_newli
 
     assert cli._safe(forged) == "harmless�  \\[dim]Why:\\[/] fabricated"
     assert "\n" not in cli._safe(forged)
-
-
-# --- the answer (ADR-0170 §6, ADR-0173 §6) -----------------------------------
-# A turn answers as one result since ADR-0293 §11 retired ``converse_streaming``:
-# the account is rendered beside the reply, and §6's fourth shape is still rendered
-# as an incomplete answer rather than a silent one.
-
-
-def _outcome_replying(
-    reply: str | None, conversation_id: str | None = None, *, degraded: bool = False
-) -> TurnOutcome:
-    """A turn-carrying outcome with ``reply``, which is the only shape that admits one."""
-    return TurnOutcome(
-        turn=TurnResult(
-            utterance="say something",
-            goal=GoalBrief.of(
-                Goal(
-                    id="g-1",
-                    interpretation=(
-                        GoalInterpretation(
-                            revision=1,
-                            outcome="say something",
-                            outcome_ground=Ground.USER_STATED,
-                            outcome_span="say something",
-                            recorded_at=AT,
-                            raised_by="t-1",
-                        ),
-                    ),
-                    provenance=Provenance(
-                        source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
-                    ),
-                    created_at=AT,
-                )
-            ),
-            context=CurrentContext(
-                now=AT,
-                time_of_day=TimeOfDay.AFTERNOON,
-                is_weekend=False,
-                within_working_hours=True,
-            ),
-            memories=(),
-            plan=ActionPlan(
-                id="g-1-plan",
-                goal_id="g-1",
-                steps=(),
-                created_at=AT,
-                rationale="nothing to do",
-            ),
-        ),
-        conversation_id=conversation_id,
-        reply=reply,
-        reply_degraded=degraded,
-    )
-
-
-def test_the_fourth_shape_is_rendered_the_same_way_off_a_one_result_call(
-    output: StringIO,
-) -> None:
-    """The shared renderer, not just the streaming path, reads four shapes off two values.
-
-    ``_render_reply`` is what ``resume`` renders through as well, and it previously
-    returned on ``reply_degraded`` without looking at ``reply`` — so the fourth shape
-    would have printed "no answer could be composed" over an answer that was right
-    there. Pinned here against the renderer directly, because that is the seam the
-    defect was at.
-    """
-    cli._render_reply(_outcome_replying("Half an ans", degraded=True))
-
-    rendered = output.getvalue()
-    assert "Half an ans" in rendered
-    assert "incomplete" in rendered
-
-
-class _RecordingConverse(FakeAssistantEngine):
-    """The canonical fake, recording the budget and the reference ``converse`` is given."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.timeouts: list[timedelta] = []
-        self.references: list[TurnReference | None] = []
-
-    async def converse(
-        self,
-        utterance: str,
-        *,
-        timeout: timedelta,  # noqa: ASYNC109 — the contract's budget, recorded
-        conversation_id: str | None = None,
-        reference: TurnReference | None = None,
-    ) -> TurnOutcome:
-        """Record the call, then answer as the fake does."""
-        self.timeouts.append(timeout)
-        self.references.append(reference)
-        return await super().converse(
-            utterance, timeout=timeout, conversation_id=conversation_id, reference=reference
-        )
-
-
-async def test_ask_drives_converse_and_relays_its_budget_and_reference_unchanged() -> None:
-    """The turn is one ``converse`` call, and ``--timeout`` and the reference are its own.
-
-    ADR-0293 §11 retires ``converse_streaming``; what is left of ``ask`` is the turn
-    carrying a reference (ADR-0250 §11). Asserted on the call rather than on the
-    rendering, because a lane that dropped the caller's deadline or the reference
-    would look identical on screen.
-    """
-    engine = _RecordingConverse()
-    reference = TurnReference(goal_id="goal-1")
-
-    await cli._drive_turn(
-        engine,
-        "say it",
-        timeout=PATIENT,
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-        reference=reference,
-    )
-
-    assert engine.timeouts == [PATIENT]
-    assert engine.references == [reference]
-    assert "converse_streaming" not in [call[0] for call in engine.calls]
-
-
-def test_an_outcome_owing_no_answer_renders_nothing_for_it(output: StringIO) -> None:
-    """§4's other two ``None`` shapes print no reply line and no degraded notice."""
-    cli._render_reply(TurnOutcome(turn=None, step=None))
-
-    assert output.getvalue() == ""
-
-
-def test_a_degraded_capture_is_reported_beside_the_degraded_memory_note(
-    output: StringIO,
-) -> None:
-    """§9 item 6: the answer is the answer, and the user is told it went unrecorded."""
-    cli._render_turn(
-        TurnOutcome(turn=None, step=None, conversation_id="c-1", capture_degraded=True)
-    )
-
-    rendered = output.getvalue()
-    assert "not recorded" in rendered
-    assert "history" in rendered
-
-
-def test_the_conversation_footer_is_silent_when_nothing_resolved(output: StringIO) -> None:
-    """A recovered resumption whose park predates capture has no id to offer (§3)."""
-    cli._render_conversation_footer(TurnOutcome(turn=None, step=None, conversation_id=None))
-
-    assert output.getvalue() == ""
 
 
 async def test_the_conversations_listing_says_so_when_there_are_none(output: StringIO) -> None:
@@ -3979,6 +2540,41 @@ def test_the_observe_command_is_gone_and_reaches_no_client(
     result = CliRunner().invoke(cli.app, ["observe"])
 
     assert result.exit_code == 2
+    assert opened == []
+
+
+# --- the old path's turn commands are retired (ADR-0309 §5) ------------------
+
+#: The part of ADR-0309 §5's CLI list that took a turn, parked one, or tended a goal.
+_RETIRED_COMMANDS = (
+    "ask",
+    "resume",
+    "cancel-read",
+    "goals",
+    "withdraw-clarification",
+    "abandon-goal",
+)
+
+
+@pytest.mark.parametrize("name", _RETIRED_COMMANDS)
+def test_a_retired_command_is_gone_and_reaches_no_client(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0309 §5 retires these commands; ``assistant chat`` is how to talk (§5:4).
+
+    Asserted over the registered commands, so a hidden command or an alias that kept
+    the name fails here, and by invoking it: an unknown command is a usage error, with
+    no client opened.
+    """
+    group = typer.main.get_command(cli.app)
+    assert isinstance(group, TyperGroup)
+    assert name not in group.commands
+
+    opened = _wire_recording_opens(monkeypatch, FakeAssistantEngine())
+    result = CliRunner().invoke(cli.app, [name])
+
+    assert result.exit_code == 2
+    assert "No such command" in result.output
     assert opened == []
 
 
@@ -4940,109 +3536,6 @@ def test_forget_question_reports_an_id_naming_nothing_with_a_nonzero_exit(
 
     assert result.exit_code == 1
     assert "Nothing to forget" in _flowed(output.getvalue())
-
-
-# --- the disposition is the gate's verdict, not the outcome (#531) ----------
-
-
-def _driven(status: StepStatus) -> StepOutcome:
-    """One executed step whose own record carries ``status``.
-
-    Built directly rather than driven through a turn because the point is the
-    *renderer*: #531's defect was an adapter reading ``disposition`` and discarding
-    ``state``, and what has to be pinned is that every non-successful status the
-    record can carry is rendered as one.
-    """
-    failure = None if status is StepStatus.SUCCEEDED else StepFailure(message="the tool raised")
-    return StepOutcome(
-        disposition=Disposition.EXECUTED,
-        step_id="step-1",
-        tool_id="smtp",
-        state=ExecutionState(
-            id="exec-1",
-            plan_id="plan-1",
-            updated_at=AT,
-            steps=(
-                StepExecution(
-                    step_id="step-1",
-                    status=status,
-                    attempts=1,
-                    bound_tool="smtp",
-                    approval_ref="decision-1",
-                    started_at=AT,
-                    finished_at=AT,
-                    failure=failure,
-                ),
-            ),
-        ),
-    )
-
-
-def test_a_step_refused_for_its_arguments_renders_from_the_disposition(
-    output: StringIO,
-) -> None:
-    """``_render_step`` reaches the verdict for a step whose record says nothing (#1113).
-
-    The sibling of the cases below, taken from the other end. There the disposition
-    is ``EXECUTED`` and the *record* is what has to be read; here the step was
-    refused before anything was committed, so ADR-0145 §4 leaves it ``PENDING`` with
-    no ``bound_tool``, no ``approval_ref`` and no ``failure`` — the record has
-    nothing to say and the verdict is the whole of the news. Built directly rather
-    than driven through a turn for ``_driven``'s reason, and because what makes the
-    runner return this disposition is ``orchestration``'s contract, pinned in
-    ``tests/orchestration/test_runner.py`` where it belongs.
-    """
-    refused = StepOutcome(
-        disposition=Disposition.INVALID_PARAMETERS,
-        step_id="step-1",
-        # ``None`` by construction: ADR-0144 §7's eligibility filter emptied the
-        # candidate set, so no tool was ever bound to the step.
-        tool_id=None,
-        state=ExecutionState(
-            id="exec-1",
-            plan_id="plan-1",
-            updated_at=AT,
-            steps=(StepExecution(step_id="step-1", status=StepStatus.PENDING),),
-        ),
-    )
-
-    # ``False`` is the existing reading of every non-``EXECUTED`` disposition and is
-    # not this change's to revisit: the turn did not fail, it declined to act.
-    assert cli._render_step(refused) is False
-    rendered = _flowed(output.getvalue())
-    assert "not established as acceptable" in rendered
-    assert "Done" not in rendered
-
-
-def test_an_executed_step_that_succeeded_reads_as_done(output: StringIO) -> None:
-    """The discriminating half: success still renders success and still exits 0."""
-    assert cli._render_step(_driven(StepStatus.SUCCEEDED)) is False
-    assert "Done" in output.getvalue()
-
-
-@pytest.mark.parametrize(
-    ("status", "headline"),
-    [(StepStatus.FAILED, "Failed"), (StepStatus.INDETERMINATE, "Unresolved")],
-)
-def test_every_non_successful_status_reads_as_one(
-    output: StringIO, status: StepStatus, headline: str
-) -> None:
-    """ADR-0084 §8: the named step's ``status`` is the outcome, not the disposition.
-
-    **Both** of ``core/types.py``'s ``_FAILURE_STATUSES`` are covered, and that is
-    the point of parametrising rather than testing ``FAILED`` alone: a renderer
-    written as "not ``FAILED`` means done" reproduces #531 exactly one status over —
-    on ``INDETERMINATE``, which ADR-0014 §4 makes durable *because* it must be
-    resolved explicitly and where the tool may in fact have acted.
-
-    They are told apart rather than flattened: "failed" says the call finished
-    badly, "unresolved" says nobody knows whether it took effect.
-    """
-    assert cli._render_step(_driven(status)) is True
-    rendered = output.getvalue()
-    assert headline in rendered
-    assert "the tool raised" in rendered
-    assert "Done" not in rendered
 
 
 # --- the grant surface (ADR-0102 §1, §6, §9) --------------------------------
@@ -6091,10 +4584,6 @@ def _id_invocations(value: str) -> tuple[tuple[str, list[str]], ...]:
         ("answer", ["answer", value, "--accept"]),
         ("forget-question", ["forget-question", value]),
         ("forget-conversation", ["forget-conversation", value, "--yes"]),
-        (
-            "ask --conversation",
-            ["ask", "hello", "--goal", "goal-1", "--conversation", value, "--yes"],
-        ),
         ("dismiss", ["dismiss", value]),
         ("forget-notification", ["forget-notification", value]),
         # `tune --class` is the second id-shaped parameter spelled without an `_id`
@@ -6197,22 +4686,14 @@ def test_an_id_is_stripped_before_it_is_looked_up_or_reported(
     assert "the id no-such." in output.getvalue()
 
 
-def test_an_omitted_optional_id_still_means_no_conversation_was_named(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_an_omitted_optional_id_still_means_no_conversation_was_named() -> None:
     """``None`` is the "no conversation named" state and must survive the callback.
 
     The one thing ``_present_optional_id`` must not do is turn an absent id into a
-    blank one — which would leave ``assistant ask`` unable to start a conversation at
+    blank one — which would leave ``assistant chat`` unable to start a conversation at
     all.
     """
-    engine = FakeAssistantEngine()
-    _wire(monkeypatch, engine)
-
-    invoked = CliRunner().invoke(cli.app, ["ask", "hello", "--goal", "goal-1", "--yes"])
-    assert invoked.exit_code == 0
-    turns = [call for call in engine.calls if call[0] == "converse"]
-    assert [call[1]["conversation_id"] for call in turns] == [None]
+    assert cli._present_optional_id(None) is None
 
 
 def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
@@ -6226,16 +4707,10 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
     its author to it.
 
     **It catches the naming convention this surface follows, not every conceivable
-    parameter.** An id spelled without an ``_id`` suffix — as ``ask``'s
+    parameter.** An id spelled without an ``_id`` suffix — as ``chat``'s
     ``--conversation`` is — has to be recognised by name here, and a second such
     spelling would slip the walk. That residual is why the behavioural cases above
     enumerate them explicitly rather than deriving them from this.
-
-    **ADR-0250 §11's two keywords are the second and third such spellings**, and they
-    are named below rather than left to slip: ``ask --answering`` names a question and
-    ``ask --goal`` names a goal, because the flag reads as what it does to the turn
-    rather than as what kind of record it carries. Naming them here is the whole of what
-    the residual above asks an author to do.
     """
     group = typer.main.get_command(cli.app)
     assert isinstance(group, TyperGroup)
@@ -6250,20 +4725,16 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
         and unwrap(param.callback) in id_callbacks
         for name, command in sorted(group.commands.items())
         for param in command.params
-        if str(param.name).endswith("_id") or param.name in {"answering", "conversation", "goal"}
+        if str(param.name).endswith("_id") or param.name == "conversation"
     }
 
     # Asserted as a mapping rather than with `all(...)`, so a failure names the
     # parameter that is missing its callback instead of reporting `False`.
     assert carried == {
-        "abandon-goal:goal_id": True,
         "answer:question_id": True,
         "authorizations:goal_id": True,
-        "ask:answering": True,
-        "ask:conversation": True,
-        "ask:goal": True,
-        # ADR-0293's chat space: `chat --conversation` is a fourth id spelled without
-        # an `_id` suffix, named here for the reason above.
+        # ADR-0293's chat space: `chat --conversation` is an id spelled without an
+        # `_id` suffix, named here for the reason above.
         "chat:conversation": True,
         "conversation:conversation_id": True,
         "conversation-devices:conversation_id": True,
@@ -6282,7 +4753,6 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
         "revoke-recipient-grant:grant_id": True,
         "stop:activation_id": True,
         "trust-destinations:decision_id": True,
-        "withdraw-clarification:question_id": True,
     }
 
 

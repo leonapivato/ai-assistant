@@ -1,10 +1,10 @@
 """The assistant's message, rendered in a conversation for this terminal (ADR-0042 §4).
 
-``test_cli`` pins these properties on ``ask``'s rendering of a composed answer,
-``_render_reply``, which retires with ``ask`` at the cutover (ADR-0309 §5:1). What the
-assistant says reaches this terminal afterwards as a message in a conversation, rendered
-by the chat surface's ``_render_chat_entry``. Each case here is one of ``test_cli``'s,
-run against that renderer: model output is neutralised — Rich markup escaped and every
+``test_cli`` pinned these properties on ``ask``'s rendering of a composed answer,
+``_render_reply``, which retired with ``ask`` at the cutover (ADR-0309 §5:4). What the
+assistant says reaches this terminal as a message in a conversation, rendered by the
+chat surface's ``_render_chat_entry``. Each case here is one of ``test_cli``'s, run
+against that renderer: model output is neutralised — Rich markup escaped and every
 character a terminal would act on replaced — while its line breaks, whichever ending
 wrote them, stay the breaks they are.
 """

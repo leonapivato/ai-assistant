@@ -127,19 +127,13 @@ Leave the hub running and open a **second terminal**, in the same directory:
 
 ```bash
 cd ~/assistant
-assistant ask "In one short sentence, what is the capital of Italy?"
+assistant chat
 ```
 
-```text
-The capital of Italy is Rome.
-Plan: The question asks for a factual answer about the capital of Italy, which
-can be directly answered from general knowledge without requiring any external
-capability.
-No action was needed.
-
-Conversation: 60a9b895-1e9e-4ca1-8afd-6dfd6e415809  (continue with: assistant
-ask --conversation 60a9b895-1e9e-4ca1-8afd-6dfd6e415809 ...)
-```
+This starts a conversation and holds it open. Type a message, such as *In one
+short sentence, what is the capital of Italy?*, and press Enter. The assistant's
+reply is shown when it arrives. `/quit`, or end of input, leaves; the
+conversation stays, and `assistant chat --conversation <id>` opens it again.
 
 This is the cheapest possible proof that the two hard parts are right: the
 client reached the hub, and the hub reached a model. If this works, everything

@@ -1,6 +1,6 @@
 """The terminal surface for the establishing act (ADR-0235 §9).
 
-Four commands, two flags, and the outcomes a user reads. §9 fixes the names
+Four commands, one flag, and the outcomes a user reads. §9 fixes the names
 **here rather than leaving them to the lane**, for the reason ADR-0186 §9 fixed
 ``assistant decisions`` in terms: "a normative decision an operator cannot derive a
 working command from is one no test can pin, and four commands named by four
@@ -14,7 +14,7 @@ is discharged in what the user reads and nowhere else.
 from __future__ import annotations
 
 import ast
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from typing import Any, Final
@@ -22,8 +22,7 @@ from typing import Any, Final
 import pytest
 import typer.main
 from rich.console import Console
-from test_cli import _egress_confirmation
-from test_cli_decisions import _binding, _decision, _flat, _span
+from test_cli_decisions import _binding, _decision, _flat
 from test_cli_invocations import _help_text
 from typer.testing import CliRunner
 
@@ -36,18 +35,10 @@ from ai_assistant.core.errors import (
     UngrantableActError,
 )
 from ai_assistant.core.types import (
-    Confirmation,
-    ContinuationToken,
     PermissionOutcome,
-    RecipientGrantNotEstablished,
-    RecipientGrantOutcome,
 )
 from ai_assistant.interfaces import cli
-from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.testing.recipient_grants import recipient_grant
-
-#: The instant a case types, and the shape §9 fixes: ISO 8601 with an offset.
-_UNTIL: Final = "2026-10-01T09:00:00Z"
 
 #: A grant a listing renders, at the fakes' own instants so nothing here invents a
 #: second timeline.
@@ -81,11 +72,6 @@ def _resolved_commands() -> dict[str, Any]:
     group = typer.main.get_command(cli.app)
     commands: dict[str, Any] = dict(group.commands)  # type: ignore[attr-defined]
     return commands
-
-
-def _outcome(member: RecipientGrantNotEstablished) -> RecipientGrantOutcome:
-    """The carrier a ``resume`` returns for one refusing member."""
-    return RecipientGrantOutcome(not_established=member)
 
 
 # --- §9: the names, fixed here rather than left to the lane ------------------
@@ -129,23 +115,19 @@ def test_the_source_grant_commands_gain_no_recipient_argument() -> None:
         assert not any("recipient" in parameter for parameter in parameters), command
 
 
-def test_the_two_flag_names_are_the_ones_the_decision_fixed() -> None:
-    """§9's two flags: ``--until`` on the act, the qualified form on ``resume``.
+def test_the_flag_name_is_the_one_the_decision_fixed() -> None:
+    """§9's ``--until`` on the act, named for the argument it supplies.
 
-    Each flag carries the name of the argument it supplies, and on ``resume`` the
-    qualified form is also what keeps it from being read as a retention control over
-    what the assistant remembers — which is what "remember" means everywhere else on
-    this surface (``learn``, ``forget``).
+    §9's second flag, ``--remember-recipients-until``, rode ``resume``, which retired
+    with the old path (ADR-0309 §5).
     """
     resolved = _resolved_commands()
     flags = {
-        name: {option for parameter in resolved[name].params for option in parameter.opts}
-        for name in ("remember-recipients", "resume")
+        option for parameter in resolved["remember-recipients"].params for option in parameter.opts
     }
 
-    assert "--until" in flags["remember-recipients"]
-    assert "--remember-recipients-until" in flags["resume"]
-    assert "--remember-recipients-until" not in flags["remember-recipients"]
+    assert "--until" in flags
+    assert "--remember-recipients-until" not in flags
 
 
 # --- §9: an instant carrying no offset is a usage error ----------------------
@@ -207,110 +189,6 @@ def test_naming_a_decision_without_an_until_is_a_usage_error() -> None:
     assert "--until" in _help_text(result.output)
 
 
-# --- §9: the five renderings, on ``assistant resume`` ------------------------
-
-
-def test_a_ceiling_refusal_names_the_ceiling_and_the_revocation_command(
-    output: StringIO,
-) -> None:
-    """ADR-0193 §1 discharged in the words the user reads (ADR-0235 §9).
-
-    §1 obliges a surface offering the act to refuse it "with a reason visible to the
-    user, naming that the ceiling was reached", with the recourse beside it — and
-    ADR-0235 §9 fixes the recourse as ``assistant revoke-recipient-grant``. A refusal
-    the user is shown, named and given a recourse for is not the dropped act §1
-    forbids.
-
-    It is **not** presented as a fault of the call that was confirmed, which had
-    already been sent by the time the store refused.
-    """
-    cli._render_recipient_grant_outcome(_outcome(RecipientGrantNotEstablished.CEILING_REACHED))
-
-    rendered = _flat(output.getvalue())
-    assert "assistant revoke-recipient-grant" in rendered
-    assert "as many standing recipient authorisations" in rendered
-    assert "evicted" in rendered
-
-
-def test_an_already_standing_refusal_names_the_standing_listing(output: StringIO) -> None:
-    """The user needs **no** act at all: what they asked for is already true (§4)."""
-    cli._render_recipient_grant_outcome(_outcome(RecipientGrantNotEstablished.ALREADY_STANDING))
-
-    rendered = _flat(output.getvalue())
-    assert "already authorised" in rendered
-    assert "assistant recipient-grants" in rendered
-
-
-def test_a_bare_refusal_names_no_cause(output: StringIO) -> None:
-    """§9: on ``REFUSED`` it "says no standing authorisation was created and names no
-    cause it was not given" — the bar ADR-0235 §11 states as "never guessed at"."""
-    cli._render_recipient_grant_outcome(_outcome(RecipientGrantNotEstablished.REFUSED))
-
-    rendered = _flat(output.getvalue())
-    assert "No standing authorisation was created" in rendered
-    assert "ceiling" not in rendered
-    assert "already" not in rendered
-
-
-def test_a_store_fault_says_the_confirmed_call_was_unaffected(output: StringIO) -> None:
-    """The arm that fails against a terminal rendering a storage fault as a refusal.
-
-    ADR-0235 §4: a surface reporting a disk fault as a refusal would be telling the
-    user their request was declined when it was not — so the rendering says the store
-    could not be written **and** that the call itself was unaffected.
-    """
-    cli._render_recipient_grant_outcome(_outcome(RecipientGrantNotEstablished.STORE_UNAVAILABLE))
-
-    rendered = _flat(output.getvalue())
-    assert "could not be written" in rendered
-    assert "not a refusal of what you asked for" in rendered
-
-
-def test_a_declined_ruling_says_recorded_and_settled(output: StringIO) -> None:
-    """§9's fifth sentence, and it is the same one ``remember-recipients`` gives.
-
-    "The call was declined when it was ruled on, the decision is recorded and
-    settled, and nothing was made standing" — because it is the same outcome reaching
-    the user by the other road.
-    """
-    cli._render_recipient_grant_outcome(_outcome(RecipientGrantNotEstablished.DECLINED))
-
-    rendered = _flat(output.getvalue())
-    assert "declined when it was ruled on" in rendered
-    assert "recorded and settled" in rendered
-    assert "nothing was made standing" in rendered
-
-
-def test_a_successful_act_says_what_it_covers_and_until_when(output: StringIO) -> None:
-    """§5's floor on the establishing arm: the account, the recipients, the instant.
-
-    And the statement §5 requires beside them — that calls this grant covers will not
-    be put to the user, so their payload description is not shown again.
-    """
-    cli._render_recipient_grant_outcome(RecipientGrantOutcome(established=_GRANT))
-
-    rendered = _flat(output.getvalue())
-    assert _GRANT.id in rendered
-    assert _GRANT.account.identity in rendered
-    assert "not be put to you again" in rendered
-    assert "never" in rendered
-
-
-def test_a_call_that_collected_no_act_says_nothing_about_standing_grants(
-    output: StringIO,
-) -> None:
-    """ADR-0235 §6: where the carrier is absent the surface says nothing at all.
-
-    The asymmetry with every case above is the decision rather than an omission: a
-    user told nothing about a request they *made* concludes it was granted, and a
-    user told something about a request they never made is being answered a question
-    they did not ask.
-    """
-    cli._render_recipient_grant_outcome(None)
-
-    assert output.getvalue() == ""
-
-
 # --- §9: the same five, on ``assistant remember-recipients`` -----------------
 
 
@@ -347,7 +225,7 @@ async def test_the_act_states_each_outcome_from_the_refusals_own_type(
     """ADR-0235 §12's matching terminal arm, and the gap round 12 of its review found.
 
     ADR-0193 §1's ceiling clause binds **every** surface offering the act, so the
-    five sentences ``assistant resume`` gives from its carrier are the five this
+    five sentences ``assistant resume`` gave from its carrier are the five this
     command gives from the refusal's own type. A lane that rendered the carrier on
     one population and let the refusal propagate on the other would ship a surface
     ADR-0193 §1 does not permit.
@@ -385,93 +263,6 @@ async def test_a_refusal_before_the_answer_says_the_call_is_not_made_by_this_act
     assert code == cli._EXIT_ERROR
     assert "already answered" in rendered
     assert "still waiting for an answer" not in rendered
-
-
-# --- §9: no non-interactive flag establishes a grant -------------------------
-
-
-def _plain_confirmation() -> Confirmation:
-    """A parked card about a call that discloses nothing off-device."""
-    return Confirmation(
-        tool_id="t-1",
-        tool_description="a local tool",
-        parameters={},
-        reason="the policy wants a human answer",
-        token=ContinuationToken(handle="plain-1"),
-        egress=None,
-        read=None,
-        authorization=None,
-    )
-
-
-@pytest.mark.parametrize(
-    "confirmation",
-    [
-        _plain_confirmation(),
-        _egress_confirmation(_span("to", canonical="a@example.com")),
-        _egress_confirmation(
-            _span("to", canonical="a@example.com"), planned_with_external_content=True
-        ),
-    ],
-    ids=["no-egress", "egress", "egress-planned-over-external"],
-)
-def test_yes_answers_no_card_the_standing_control_may_ride(confirmation: Confirmation) -> None:
-    """ADR-0235 §9: ``--yes`` "never supplies the act", and the two halves make it so.
-
-    §9 rules that no non-interactive flag, environment variable, configuration value
-    or scripted default establishes a grant. On this surface that is not a check but
-    a **disjointness**, and it takes both halves to see it, which is why the case
-    asserts the conjunction rather than either side: :func:`cli._assume_yes` answers
-    only a card whose ``egress`` is ``None``, and
-    :func:`cli._may_ride_an_establishing_act` offers the argument only for a card
-    whose ``egress`` is not — and ``_drive_resume`` sends the expiry only where the
-    answer is affirmative *and* the act may ride. So no card is both, the expiry
-    reaches ``resume`` on none of them, and the combination establishes nothing.
-
-    It fails against a ``--yes`` widened to answer an egress card, which is the shape
-    that would make the flag supply the act.
-    """
-    approved = cli._assume_yes(confirmation)
-
-    assert not (approved is True and cli._may_ride_an_establishing_act(confirmation))
-
-
-async def test_yes_beside_the_flag_carries_no_expiry_and_records_no_grant(
-    output: StringIO,
-) -> None:
-    """The other half of §9's rule, driven rather than reasoned about.
-
-    The card ``--yes`` *does* answer is the one the act may not ride, so the run
-    answers it, tells the user the standing request was not offered here, and leaves
-    the store empty. A ``--yes`` that supplied the act would have to establish a
-    grant on this card, since it is the only kind of card the flag answers at all.
-    """
-    engine = FakeAssistantEngine()
-    engine.park("plain-1")
-
-    code = await cli._drive_resume(
-        engine,
-        timeout=timedelta(seconds=30),
-        approver=cli._assume_yes,
-        remember_recipients_until=datetime(2026, 10, 1, 9, 0, tzinfo=UTC),
-    )
-
-    assert code == cli._EXIT_OK
-    assert await engine.recipient_grants.export() == []
-    assert "not a call whose recipients can be made standing" in _flat(output.getvalue())
-
-
-def test_the_held_populations_refusal_says_the_call_is_still_answerable(
-    output: StringIO,
-) -> None:
-    """The other half: on ``resume`` the step stays parked, so the surface says so."""
-    cli._render_ungrantable(
-        UngrantableActError("that expiry is not after the answer"), still_answerable=True
-    )
-
-    rendered = _flat(output.getvalue())
-    assert "still waiting for an answer" in rendered
-    assert "--remember-recipients-until" in rendered
 
 
 # --- §5, §8: the listing that tells the user a search was refused ------------
