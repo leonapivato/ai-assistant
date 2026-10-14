@@ -599,7 +599,7 @@ async def test_a_bad_clock_reaching_a_ruling_rolls_back_and_leaves_the_store_usa
 async def test_an_id_source_returning_a_present_id_raises_and_commits_nothing(
     tmp_path: Path,
 ) -> None:
-    """A collision is a fault, never an overwrite (``DeferralStore.defer``'s rule).
+    """A collision is a fault, never an overwrite (ADR-0078's rule).
 
     Absorbing it would lose a record silently and leave two dispositions naming
     one id. **Nothing is committed by a failed admission** — no record, and no

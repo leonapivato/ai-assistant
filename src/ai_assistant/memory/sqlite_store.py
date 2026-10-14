@@ -108,7 +108,6 @@ if TYPE_CHECKING:
         BeliefBand,
         MemoryKind,
         MemoryWrite,
-        ParkedBinding,
         TimeWindow,
         WalkPosition,
     )
@@ -159,9 +158,9 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: the signed 64-bit ceiling a SQLite bind parameter tops out at (ADR-0073 §2).
 _PAGE_BOUND = 2**63
 #: The two halves of the binding an episode's own step parked, as the expression
-#: ``records_by_parking`` indexes and :meth:`SqliteMemoryStore.episode_parking`
-#: compares — one spelling, because SQLite uses an expression index only for a
-#: query naming the identical expression (ADR-0283 §3:3). Guarded by ``json_valid``
+#: ``records_by_parking`` indexes (ADR-0283 §3:3). The index lost its one reader when
+#: ADR-0309 §5 retired ``episode_parking``, and leaves with ``links.parks`` itself
+#: (ADR-0318). Guarded by ``json_valid``
 #: because SQLite evaluates an indexed expression on every write and delete of a
 #: row: a bare ``json_extract`` would make a corrupt blob refuse its own deletion,
 #: where guarded it indexes as ``NULL`` and the reads report it as they always have.
@@ -1301,9 +1300,10 @@ class SqliteMemoryStore:
         ``records_by_channel`` orders a channel's rows by number, so
         :meth:`channel_episodes` and :meth:`channel_episode_ids` read one index range
         in number order rather than scanning the table (§1). ``records_by_parking``
-        is an expression index over the binding an episode's own step parked, so
-        :meth:`episode_parking` is a lookup rather than a scan decoding every row's
-        JSON; SQLite maintains it with every write, a re-embedding's included.
+        is an expression index over the binding an episode's own step parked; no
+        read uses it since ADR-0309 §5 retired ``episode_parking``, and it leaves
+        with ``links.parks`` (ADR-0318). SQLite maintains it with every write, a
+        re-embedding's included.
         """
         conn.execute(
             "CREATE INDEX IF NOT EXISTS records_by_channel "
@@ -2822,44 +2822,6 @@ class SqliteMemoryStore:
         if after is None:
             rows.reverse()
         return rows, int(total)
-
-    async def episode_parking(self, binding: ParkedBinding) -> EpisodicMemory | None:
-        """Return the lowest-numbered live episode whose step parked ``binding`` (§3:3).
-
-        Served from the ``records_by_parking`` expression index rather than a scan.
-
-        Raises:
-            MemoryStoreError: If the store cannot be read, or a stored record is
-                corrupt.
-        """
-        async with self._lock:
-            row = await _run_to_completion(
-                self._episode_parking_sync,
-                binding.execution_id,
-                binding.step_id,
-                self._now_micros(),
-            )
-        if row is None:
-            return None
-        record = self._decoded_at(*row)
-        if not isinstance(record, EpisodicMemory):
-            msg = "a parking index row holds a non-episodic record"
-            raise MemoryStoreError(msg)
-        return record
-
-    def _episode_parking_sync(
-        self, execution_id: str, step_id: str, now: int
-    ) -> tuple[str, int] | None:
-        sql = (
-            f"SELECT data, revision FROM records WHERE {_PARKS_EXECUTION} = ? "  # noqa: S608 — module literals; every value is bound
-            f"AND {_PARKS_STEP} = ? AND kind = 'episodic' AND {_LIVE} ORDER BY rowid LIMIT 1"
-        )
-        try:
-            row = self._conn.execute(sql, (execution_id, step_id, now, now, now)).fetchone()
-        except sqlite3.Error as exc:
-            msg = "failed to find the episode that parked a binding"
-            raise MemoryStoreError(msg) from exc
-        return None if row is None else (str(row[0]), int(row[1]))
 
     async def channel_episode_ids(
         self,

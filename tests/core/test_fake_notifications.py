@@ -152,7 +152,7 @@ def test_the_fake_refuses_a_retention_the_store_cannot_work_under(retention: obj
 async def test_the_fake_refuses_an_id_source_that_repeats_itself() -> None:
     """An admission never overwrites a record, and never half-commits one.
 
-    `DeferralStore.defer` already argues this for the queue — a present id is "a
+    ADR-0078 already argues this for the queue — a present id is "a
     hard error, not an overwrite", because otherwise "a dict-backed store
     silently overwrites someone else's pending question while a SQL one raises".
     A store injected with a constant id source is how that reaches this fake.

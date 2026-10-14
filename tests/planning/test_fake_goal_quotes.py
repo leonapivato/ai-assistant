@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from ai_assistant.core.protocols import GoalQuotes, PlanStore
+    from ai_assistant.core.protocols import GoalQuotes
     from ai_assistant.core.types import ActionQuote
 
 
@@ -73,7 +73,9 @@ def _goal() -> Goal:
     )
 
 
-async def _seeded[S: PlanStore](store: S, quotes: Sequence[ActionQuote]) -> S:
+async def _seeded[S: (InMemoryPlanStore, SqlitePlanStore)](
+    store: S, quotes: Sequence[ActionQuote]
+) -> S:
     """Open the goal, mint the suite's two acts, and append ``quotes`` in order.
 
     **Generic in the store rather than typed at the Protocol**, so the concrete type

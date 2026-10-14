@@ -21,7 +21,6 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
-    ParkedBinding,
     Provenance,
     SemanticMemory,
 )
@@ -267,10 +266,6 @@ def _broken_store() -> FakeMemoryStore:
         pytest.param(lambda store: store.walk_records("nightly", limit=1), id="walk_records"),
         pytest.param(
             lambda store: store.channel_episodes(_CHANNEL, limit=1), id="channel_episodes"
-        ),
-        pytest.param(
-            lambda store: store.episode_parking(ParkedBinding(execution_id="e", step_id="s")),
-            id="episode_parking",
         ),
         pytest.param(
             lambda store: store.channel_episode_ids(_CHANNEL, limit=1), id="channel_episode_ids"

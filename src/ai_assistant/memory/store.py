@@ -51,7 +51,7 @@ from ai_assistant.core.types import (
     band_of,
     caseless_key,
 )
-from ai_assistant.memory._channel_reads import channel_of, check_channel_page, parks_of
+from ai_assistant.memory._channel_reads import channel_of, check_channel_page
 from ai_assistant.memory._episode_guard import is_open, refuse_episode_change
 from ai_assistant.memory._walk import (
     check_walk_limit,
@@ -70,7 +70,6 @@ if TYPE_CHECKING:
         MemoryKind,
         MemoryRecord,
         MemoryWrite,
-        ParkedBinding,
         TimeWindow,
         WalkPosition,
     )
@@ -914,19 +913,6 @@ class InMemoryMemoryStore:
             ),
             total=len(matching),
         )
-
-    async def episode_parking(self, binding: ParkedBinding) -> EpisodicMemory | None:
-        """Return the lowest-numbered live episode whose step parked ``binding`` (§3:3)."""
-        now = self._now_utc()
-        for rid in self._keys:
-            record = self._records[rid]
-            if (
-                isinstance(record, EpisodicMemory)
-                and parks_of(record) == binding
-                and self._is_readable(record, now)
-            ):
-                return record.model_copy(deep=True)
-        return None
 
     async def channel_episode_ids(
         self,

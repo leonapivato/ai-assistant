@@ -460,8 +460,7 @@ async def test_a_write_known_not_to_have_committed_reaches_nothing_else() -> Non
 
 
 async def test_the_parked_binding_is_recorded_as_the_episode_s_own_park() -> None:
-    """§3:4: ``links.parks`` is the binding this activation's own step parked, and a
-    resume finds the episode by it (§5)."""
+    """§3:4: ``links.parks`` is the binding this activation's own step parked."""
     binding = ParkedBinding(execution_id="execution-1", step_id="step-1")
     wiring = Wiring()
     state = await wiring.state(parked=binding)
@@ -471,9 +470,6 @@ async def test_the_parked_binding_is_recorded_as_the_episode_s_own_park() -> Non
     assert episode.processing_record is not None
     assert episode.processing_record.links.parks == binding
     assert episode.processing_record.links.parked is None
-    parking = await wiring.memory.episode_parking(binding)
-    assert parking is not None
-    assert parking.id == _ADDRESS
 
 
 async def test_a_spoken_capture_writes_its_unknown_delivery_row() -> None:

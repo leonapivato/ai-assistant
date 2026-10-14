@@ -28,7 +28,6 @@ from ai_assistant.testing.connections import (
 )
 from ai_assistant.testing.conversations import FakeConversationStore
 from ai_assistant.testing.coverage_answers import FakeCoverageAnswers
-from ai_assistant.testing.deferrals import FakeDeferralStore
 from ai_assistant.testing.destination_trust import FakeDestinationTrustStore
 from ai_assistant.testing.diagnostics import (
     FakeDiagnosticRetention,
@@ -104,7 +103,6 @@ from ai_assistant.testing.notifications import (
     FakeNotificationStore,
     FakeNotificationWriter,
 )
-from ai_assistant.testing.parked_reads import FakeParkedReads
 from ai_assistant.testing.permissions import (
     FakeActionPolicy,
     FakeAuditTrail,
@@ -263,7 +261,6 @@ __all__ = [
     "FakeConnectionPurger",
     "FakeConversationStore",
     "FakeCoverageAnswers",
-    "FakeDeferralStore",
     "FakeDestinationTrustStore",
     "FakeDiagnosticRetention",
     "FakeDiagnosticSink",
@@ -288,7 +285,6 @@ __all__ = [
     "FakeNotificationStore",
     "FakeNotificationWriter",
     "FakeOutboundTransport",
-    "FakeParkedReads",
     "FakePlanStore",
     "FakeReader",
     "FakeRecipientGrantResolution",

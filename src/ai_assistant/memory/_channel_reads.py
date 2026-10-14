@@ -1,11 +1,10 @@
 """What the memory stores' channel reads share (ADR-0283 §1, §3).
 
-The argument bounds of ``channel_episodes`` and ``channel_episode_ids``, and the two
-facts those reads and ``episode_parking`` take off a record: which channel it is on
-and which binding its own step parked. Both stores in this package import them, so
-the two cannot disagree about either; the canonical fake in ``ai_assistant.testing``
-repeats them, since it may not import a subsystem (golden rule 1), and the shared
-conformance suite runs the same cases against all three.
+The argument bounds of ``channel_episodes`` and ``channel_episode_ids``, and the
+fact those reads take off a record: which channel it is on. Both stores in this
+package import them, so the two cannot disagree about either; the canonical fake in
+``ai_assistant.testing`` repeats them, since it may not import a subsystem (golden
+rule 1), and the shared conformance suite runs the same cases against all three.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ from typing import TYPE_CHECKING, Final
 from ai_assistant.core.types import EpisodicMemory
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import ChannelIdentity, MemoryRecord, ParkedBinding
+    from ai_assistant.core.types import ChannelIdentity, MemoryRecord
 
 #: The largest page either channel read serves (ADR-0283 §3:2).
 MAX_CHANNEL_PAGE: Final = 1000
@@ -53,10 +52,3 @@ def channel_of(record: MemoryRecord) -> ChannelIdentity | None:
     if not isinstance(record, EpisodicMemory) or record.processing_record is None:
         return None
     return record.processing_record.trigger.channel
-
-
-def parks_of(record: MemoryRecord) -> ParkedBinding | None:
-    """The binding ``record``'s own step parked (``links.parks``), or ``None``."""
-    if not isinstance(record, EpisodicMemory) or record.processing_record is None:
-        return None
-    return record.processing_record.links.parks

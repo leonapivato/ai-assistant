@@ -63,8 +63,8 @@ if TYPE_CHECKING:
 
 #: One past the largest value a paging argument accepts — the signed 64-bit
 #: ceiling a SQLite bind parameter tops out at (ADR-0073 §2). Duplicated rather
-#: than shared for ``FakeDeferralStore``'s reason: ``ai_assistant.testing`` may
-#: not import a subsystem (golden rule 1).
+#: than shared, because ``ai_assistant.testing`` may not import a subsystem
+#: (golden rule 1).
 _PAGE_BOUND = 2**63
 
 #: The most actionable records the store holds (ADR-0130 §7). Strictly positive
@@ -814,8 +814,8 @@ class FakeNotificationStore:
         """Draw a record id, refusing one this store already holds.
 
         **A store that overwrote a record here would lose one silently**, and the
-        two dispositions would name the same id — which is `DeferralStore.defer`'s
-        argument for making a present id "a hard error, not an overwrite" rather
+        two dispositions would name the same id — which is ADR-0078's argument
+        for making a present id "a hard error, not an overwrite" rather
         than letting "a dict-backed store silently overwrite someone else's
         pending question while a SQL one raises".
 
