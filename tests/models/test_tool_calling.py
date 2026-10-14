@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import httpx
 import pytest
@@ -715,3 +715,107 @@ async def test_with_no_activation_bound_the_completer_writes_nothing() -> None:
     await completer.respond(_request(), [_tool()])
 
     assert sink.recorded == ()
+
+
+# --- #2910: the tools are recorded as the model's request preparation sent them -------------
+
+
+def _recorded_tools(sink: FakeDiagnosticSink) -> list[dict[str, Any]]:
+    (entry,) = sink.recorded
+    body = entry.model_dump(mode="json")["body"]
+    assert "offered_tools_unprepared" not in body
+    tools: list[dict[str, Any]] = body["offered_tools"]
+    return tools
+
+
+async def test_an_openai_models_rewritten_schemas_are_recorded_as_sent() -> None:
+    """The transformer's added restriction reaches the record, read against the wire body."""
+    sink = FakeDiagnosticSink()
+    recorder = RequestRecorder(openai_success)
+    offered = [_tool("web_search"), _tool("book_stay")]
+    with network_denied(), diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(recorder)) as http_client:
+            client = AsyncOpenAI(api_key=_DUMMY_KEY, http_client=http_client, max_retries=0)
+            model = OpenAIChatModel("gpt-4o", provider=OpenAIProvider(openai_client=client))
+            await PydanticAIToolCallingCompleter(model, diagnostics=sink).respond(
+                _request(), offered
+            )
+
+    recorded = _recorded_tools(sink)
+    wire = [tool["function"] for tool in cast("list[dict[str, Any]]", recorder.only["tools"])]
+    assert [
+        {key: tool[key] for key in ("name", "description", "parameters")} for tool in wire
+    ] == recorded
+    assert [tool["name"] for tool in recorded] == ["web_search", "book_stay", ROUND_TOOL]
+    assert [tool["description"] for tool in recorded[:2]] == [t.description for t in offered]
+    # A restriction the round did not write is recorded, as the provider was sent it.
+    assert "additionalProperties" not in _tool().parameters
+    assert recorded[0]["parameters"]["additionalProperties"] is False
+
+
+async def test_an_anthropic_models_tools_are_recorded_as_sent() -> None:
+    """Planning's own model: the record and the wire carry the same definitions."""
+    sink = FakeDiagnosticSink()
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now):
+        _, body = await _anthropic_round("claude-opus-4-8", anthropic_success, diagnostics=sink)
+
+    recorded = _recorded_tools(sink)
+    wire = cast("list[dict[str, Any]]", body["tools"])
+    assert [
+        {
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["input_schema"],
+        }
+        for tool in wire
+    ] == recorded
+    assert [tool["name"] for tool in recorded] == ["web_search", ROUND_TOOL]
+    assert recorded[0] == _tool().model_dump(mode="json")
+
+
+class _Unpreparable(WrapperModel):
+    """A model that answers as the one it wraps but cannot be prepared from outside.
+
+    pydantic-ai's wrapper sends the request through the wrapped model, which prepares
+    it itself, so the round runs and only the record's own preparation fails.
+    """
+
+    def prepare_request(self, model_settings: Any, model_request_parameters: Any) -> Any:
+        del model_settings, model_request_parameters
+        msg = "cannot prepare"
+        raise RuntimeError(msg)
+
+
+def _answering() -> FunctionModel:
+    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del messages, info
+        return ModelResponse(parts=[TextPart("ok")])
+
+    return FunctionModel(answer)
+
+
+@pytest.mark.parametrize(
+    ("model", "why"),
+    [
+        pytest.param(lambda: _Unpreparable(_answering()), "cannot prepare", id="raises"),
+        pytest.param(
+            lambda: FallbackModel(_answering()), "a fallback model prepares", id="fallback"
+        ),
+    ],
+)
+async def test_tools_whose_preparation_cannot_be_computed_are_recorded_as_built_and_marked(
+    model: Callable[[], Model], why: str
+) -> None:
+    """The round is not failed and the entry is not dropped: the tools are kept, marked."""
+    sink = FakeDiagnosticSink()
+    completer = PydanticAIToolCallingCompleter(model(), diagnostics=sink)
+
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now):
+        response = await completer.respond(_request(), [_tool()])
+
+    assert response == RoundResponse(text="ok")
+    body = sink.recorded[0].model_dump(mode="json")["body"]
+    assert body["read_as_round"] is True
+    assert body["offered_tools"][0] == _tool().model_dump(mode="json")
+    assert [tool["name"] for tool in body["offered_tools"]] == ["web_search", ROUND_TOOL]
+    assert why in body["offered_tools_unprepared"]["message"]

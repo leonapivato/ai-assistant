@@ -44,7 +44,10 @@ it reads as a round, before it returns or raises. Beside the response it writes 
 tool the request offered, :data:`ROUND_TOOL` and its description included (#2894):
 planning's module writes the given entry with the capabilities it offers, and the
 reserved tool is added here, so this is the one place the record can show the whole
-list the provider received. The entry is written for the
+list the provider received. Each tool's parameters are recorded as the chosen model's
+request preparation sent them (#2910), since a provider's schema transformer may rewrite
+them (OpenAI's adds ``additionalProperties: false``); where that cannot be computed they
+are recorded as the round built them, and the entry says so. The entry is written for the
 activation :mod:`ai_assistant.core.diagnostics` carries, and nothing is written where
 none is bound. The thinking still reaches nothing else: :class:`RoundResponse`, the
 episode and the next round never carry it (§5:3). Where the record is off, the request
@@ -59,6 +62,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from pydantic import ValidationError
@@ -106,6 +110,11 @@ DEFAULT_THINKING: Final[ThinkingLevel] = True
 #: keeps it (ADR-0314 §5:1): adaptive thinking omits the text unless the request asks for
 #: the summarised display.
 _SUMMARISED_ADAPTIVE: Final[Mapping[str, str]] = {"type": "adaptive", "display": "summarized"}
+
+#: The returned entry's key saying its ``offered_tools`` are as the round built them, not
+#: as the model's request preparation sent them, and why (#2910). It is present only
+#: where the tools as prepared could not be computed.
+_UNPREPARED: Final = "offered_tools_unprepared"
 
 #: The output a round's message and calls had before it could think: pydantic-ai's
 #: Anthropic default ceiling. Thinking is given its room on top of this, never out of it.
@@ -214,29 +223,26 @@ class PydanticAIToolCallingCompleter:
         parameters = ModelRequestParameters(function_tools=sent, allow_text_output=True)
         try:
             chosen = infer_model(self._default_model if model is None else model)
+            settings = _settings(self._thinking, chosen, summarised=self._diagnostics is not None)
             response = await model_request(
-                chosen,
-                history,
-                model_settings=_settings(
-                    self._thinking, chosen, summarised=self._diagnostics is not None
-                ),
-                model_request_parameters=parameters,
+                chosen, history, model_settings=settings, model_request_parameters=parameters
             )
         except Exception as exc:
             # Broad on purpose: `_classify` is the taxonomy, and its default for an
             # unrecognised failure is the conservative bare `ModelError` (ADR-0063).
             raise _classify(exc) from exc
+        request = _Request(model=chosen, settings=settings, parameters=parameters)
         try:
             read = _round(response)
         except ModelResponseError as exc:
-            await self._returned(sent, response, exc)
+            await self._returned(request, response, exc)
             raise
-        await self._returned(sent, response, None)
+        await self._returned(request, response, None)
         return read
 
     async def _returned(
         self,
-        sent: Sequence[NativeTool],
+        request: _Request,
         response: ModelResponse,
         failure: ModelResponseError | None,
     ) -> None:
@@ -244,15 +250,21 @@ class PydanticAIToolCallingCompleter:
 
         Every part in order, thinking included, as pydantic-ai serialises the response;
         every tool the request offered, in the order it offered them, the reserved one
-        included (#2894); and where the response did not read as a round, why not.
+        included (#2894), each as the chosen model's request preparation gave it to the
+        provider (#2910); and where the response did not read as a round, why not.
+        Where the tools as prepared cannot be computed they are kept as the round built
+        them, and :data:`_UNPREPARED` says why.
         """
 
         def body() -> dict[str, object]:
+            tools, unprepared = _offered(request)
             returned: dict[str, object] = {
-                "offered_tools": [_recorded(tool) for tool in sent],
+                "offered_tools": tools,
                 "response": ModelMessagesTypeAdapter.dump_python([response], mode="json")[0],
                 "read_as_round": failure is None,
             }
+            if unprepared is not None:
+                returned[_UNPREPARED] = unprepared
             if failure is not None:
                 returned["failure"] = failure_body(failure)
             return returned
@@ -342,12 +354,72 @@ def _native(tool: OfferedTool) -> NativeTool:
     return NativeTool(name=tool.name, description=tool.description, parameters_json_schema=schema)
 
 
-def _recorded(tool: NativeTool) -> dict[str, object]:
-    """One offered tool as the record keeps it, in the shape planning's given entry has."""
+@dataclass(frozen=True, slots=True)
+class _Request:
+    """What a round sent the model: the model, the settings and the request parameters."""
+
+    model: models.Model
+    settings: ModelSettings | None
+    parameters: ModelRequestParameters
+
+
+def _offered(request: _Request) -> tuple[list[dict[str, object]], dict[str, object] | None]:
+    """Every tool ``request`` offered as the record keeps it, and why not as prepared.
+
+    Each tool's parameters are as the model's own request preparation gives them to its
+    provider (#2910): pydantic-ai prepares every request it sends from the same model,
+    settings and parameters, and preparation is a function of those alone, so preparing
+    them again here gives what the request carried without touching what it sent. The
+    name, the description and the order are the round's own.
+
+    Where that cannot be computed — the preparation raises, gives back other tools than
+    were sent, or the model is a
+    :class:`~pydantic_ai.models.fallback.FallbackModel`, which prepares each request
+    for whichever model it holds answers — each tool is kept as the round built it, and
+    the second value says why. Nothing here fails the round or drops the entry.
+    """
+    sent = request.parameters.function_tools
+    try:
+        prepared = _prepared(request)
+    except Exception as exc:
+        # Broad on purpose: the record must not fail the round (ADR-0314 §2:4), and
+        # whatever stops the preparation the tools are still kept, marked.
+        return [_recorded(tool, tool) for tool in sent], failure_body(exc)
+    return [_recorded(tool, as_sent) for tool, as_sent in zip(sent, prepared, strict=True)], None
+
+
+def _prepared(request: _Request) -> list[NativeTool]:
+    """The function tools as ``request.model``'s own request preparation gives them.
+
+    Raises:
+        ModelError: If the model is a fallback one, or preparation gives back tools
+            other than the ones sent, by name and order.
+    """
+    inner = request.model
+    while isinstance(inner, WrapperModel):
+        inner = inner.wrapped
+    if isinstance(inner, FallbackModel):
+        msg = "a fallback model prepares the request for whichever model it holds answers"
+        raise ModelError(msg)
+    _, parameters = request.model.prepare_request(request.settings, request.parameters)
+    prepared = list(parameters.function_tools)
+    if [tool.name for tool in prepared] != [
+        tool.name for tool in request.parameters.function_tools
+    ]:
+        msg = "the model's request preparation gave back other tools than were sent"
+        raise ModelError(msg)
+    return prepared
+
+
+def _recorded(tool: NativeTool, prepared: NativeTool) -> dict[str, object]:
+    """One offered tool as the record keeps it, in the shape planning's given entry has.
+
+    Its name and description are as the round offered it, its parameters as ``prepared``.
+    """
     return {
         "name": tool.name,
         "description": tool.description,
-        "parameters": copy.deepcopy(tool.parameters_json_schema),
+        "parameters": copy.deepcopy(prepared.parameters_json_schema),
     }
 
 
