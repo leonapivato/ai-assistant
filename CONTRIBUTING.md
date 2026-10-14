@@ -530,7 +530,7 @@ rebase:
 `uv run lint-imports` fails the build if any of these are violated:
 
 1. `core` imports nothing else in `ai_assistant`.
-2. Subsystems (`models`, `memory`, `context`, `planning`, `tools`,
+2. Subsystems (`models`, `memory`, `planning`, `tools`,
    `permissions`, `learning`) never import one another.
 3. Subsystems never import `orchestration` or `interfaces` (dependencies point
    inward).
@@ -592,7 +592,7 @@ Because the check wants evidence that the contract *ran*, a contract test that
 skips itself does not count. Where an obligation genuinely does not apply to every
 implementation, the **suite** says so by marking that test
 `@pytest.mark.optional_obligation`; only then may an implementation's run skip
-it. See `ContextProviderContract.test_each_assembly_recomputes_from_the_clock`.
+it. See `FeedbackProcessorContract.test_a_minted_record_is_stamped_from_the_processors_own_clock`.
 
 What the check enforces is that the three artifacts exist and run — **not that
 a suite covers every method of its Protocol.** Keeping the suite abreast of the

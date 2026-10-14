@@ -41,9 +41,8 @@ These boundaries (rules 1, 2, 4) are enforced mechanically by
 core/           contracts (Protocols), shared types, config, errors
 models/         model-agnostic LLM layer (wraps pydantic-ai)   → ModelProvider
 memory/         persistent user model + long-term memory        → MemoryStore
-context/        situational context assembly (time, calendar, tasks)
 readers/        read-only ingestion; no subsystem imports it   → Reader
-planning/       request → executable plan, progress tracking
+planning/       the plan store: an activation's stop record and effect records
 tools/          tool registry + external integrations
 permissions/    policy/permission checks + audit trail
 learning/       feedback capture → memory updates
