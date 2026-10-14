@@ -319,19 +319,17 @@ the one that starts cleanly.
 
 **The grant is a separate act, and configuration is not consent** (§9, ADR-0097
 §5). Until the user grants the source through a client the store is not
-resolved, not opened and not parsed, and the request-path facet contributes
-nothing::
+resolved, not opened and not parsed::
 
     assistant sources                                 # what is offered, and from where
-    assistant grant email --scope facet
-    assistant amend email --scope facet --scope notify  # narrow or widen; two acts, both recorded
+    assistant grant email --scope notify
     assistant revoke email                            # prospective (ADR-0097 §6)
 
 The source is **positional**; there is no ``--source`` option. A source holds one
-grant at a time, so changing what one covers is ``assistant amend``, which is a
-withdrawal followed by a fresh grant and says how each half went — or the same
-two acts run by hand. ``--scope notify`` is accepted and buys nothing yet: §9
-mints no producer for this source, so nothing reads that member until one exists.
+grant at a time; ``assistant amend`` changes what one covers, as a withdrawal
+followed by a fresh grant that says how each half went. ``notify`` is the one use
+a new grant may name (ADR-0318 §6:2), and it buys nothing yet: §9 mints no
+producer for this source, so nothing reads that member until one exists.
 §13 makes the composition-root registration its own deliverable — with
 ``email_source_path`` set the source is offered under the declared identity
 ``email`` and its consumers are wired on **separate** ``EmailReader`` instances;
