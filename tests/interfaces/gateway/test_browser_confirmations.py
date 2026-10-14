@@ -1516,6 +1516,88 @@ async def test_the_acts_answer_is_taken_down_by_the_owners_own_press_and_by_noth
 # settles nothing, disables nothing, and is not the end of the act.
 
 
+@pytest.mark.parametrize(
+    ("body", "shape"),
+    [
+        ('{"cancellation": null}', "a null member"),
+        ("{}", "no member at all"),
+        ('{"cancellation": ["withdrawn"]}', "an array whose string form spells a member"),
+        ('{"cancellation": [["interrupted"]]}', "a nested array of the same shape"),
+        ('{"cancellation": {"withdrawn": true}}', "an object"),
+        ('{"cancellation": "settled"}', "a string that is not one of the three"),
+        ('{"cancellation": "toString"}', "a string naming an inherited property"),
+    ],
+    ids=["null-member", "no-member", "array", "nested-array", "object", "unknown", "inherited"],
+)
+async def test_a_success_this_page_cannot_read_as_an_outcome_settles_nothing(
+    gateway_browser: Browser, tmp_path: Path, body: str, shape: str
+) -> None:
+    """Adversarial review's round 6, second finding, in both of its shapes.
+
+    A `200` carrying ``{"cancellation": null}`` or no member at all is a response this
+    browser read and cannot read *as* an outcome. Recording it as settled went wrong in
+    two opposite directions at once: the stored ``null`` left **Cancel this lookup**
+    enabled over a token ``cancelRead`` returns early on — a control that submits
+    nothing — and the stored ``undefined`` disabled every control on the row over a
+    state nothing established.
+
+    So neither is settled. The act is recorded as unresolved, the page says the outcome
+    is not known, every control stays exactly as it was, and pressing the act again
+    really sends a second request — which is the whole of what "not the end of the act"
+    means here.
+
+    **The array shapes are round 7's finding**: a property key is a coerced one, so
+    ``Object.hasOwn(words, ["withdrawn"])`` asks for the key ``"withdrawn"``. Requiring a
+    string first is what closes the class.
+
+    **Driven on the recovery listing's row** since the Ask form that rendered a parking
+    turn's own row retired (ADR-0309 §5:4). The act starts a listing re-read, so the
+    engine here answers the act and keeps the question parked — what a hub whose reply
+    was then lost looks like to the listing — and the row the second press is made on
+    is the re-read's own.
+
+    Args:
+        gateway_browser: The one browser this run launched.
+        tmp_path: The case's data directory.
+        body: The response body the gateway's own is replaced with.
+        shape: What that body is, for the case's name.
+    """
+    sent: list[str] = []
+
+    async def _answer_and_keep(token: ContinuationToken, /) -> ReadCancellation:
+        sent.append(token.handle)
+        return ReadCancellation.WITHDRAWN
+
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.read_parked["r-1"] = _read()
+        drive.engine._read_handles.add("r-1")
+        drive.engine.cancel_read = _answer_and_keep  # type: ignore[method-assign]
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+        row = drive.page.locator("#confirmation-list .confirmation-row").first
+        await _substitute(drive, path="/confirmation/cancel-read", body=body)
+        await row.locator("button", has_text="Cancel this lookup").click()
+
+        await expect(drive.page.locator("#cancellation-said")).to_contain_text("is not known")
+        # Nothing is settled, so nothing is disabled — and the act is still available.
+        await expect(row.locator("button", has_text="Cancel this lookup")).to_be_enabled()
+        await expect(row.locator("button", has_text="Yes, do it")).to_be_enabled()
+        await expect(row.locator("button", has_text="No")).to_be_enabled()
+        # The settled statement, and not the word — `READ_CANCEL_LOST` says the page
+        # cannot tell whether the question was withdrawn, which is the opposite claim.
+        said = await drive.page.inner_text("#cancellation-said")
+        assert "That question is withdrawn" not in said, shape
+
+        await _stop_substituting(drive)
+        await row.locator("button", has_text="Cancel this lookup").click()
+
+        # The second press really sends: a lost reply is not the end of the act.
+        await expect(drive.page.locator("#cancellation-said")).to_contain_text(
+            "That question is withdrawn"
+        )
+        assert sent == ["r-1", "r-1"]
+
+
 @pytest.mark.parametrize("cancel_first", [True, False], ids=["cancel-first", "answer-first"])
 async def test_an_unresolved_cancellation_is_never_reported_as_nothing_cancelled(
     gateway_browser: Browser, tmp_path: Path, cancel_first: bool
