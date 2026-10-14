@@ -31,16 +31,13 @@ without standing anything up.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 import structlog
 
-from ai_assistant.core.errors import AuthorizationError, RecipientGrantError
+from ai_assistant.core.errors import RecipientGrantError
 from ai_assistant.core.types import (
-    AuthorizationOrigin,
-    BoundKind,
     CostBasis,
     CoverageUnrecordedBinding,
     OriginUnrecordedBinding,
@@ -50,28 +47,15 @@ from ai_assistant.core.types import (
     RiskLevel,
     SpanCoverage,
 )
-from ai_assistant.permissions._coverage import (
-    account_of,
-    coverage_answer,
-    coverage_members,
-    coverage_subject,
-    covers,
-    covers_on_argument_route,
-    governing_quote,
-    uncovered,
-)
+from ai_assistant.permissions._coverage import coverage_subject
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ai_assistant.core.protocols import GoalAuthorizations, GoalQuotes, RecipientGrants
+    from ai_assistant.core.protocols import RecipientGrants
     from ai_assistant.core.types import (
-        ActionQuote,
         ActionRequest,
-        Authorization,
         CanonicalDestination,
-        CoverageAnswer,
-        CoverageMember,
         EgressBinding,
         PermissionDecision,
         RecipientGrant,
@@ -217,40 +201,6 @@ _CONFIGURED_FORECAST_PROVIDER = (
     "the destination they chose and the recipient they granted"
 )
 
-#: The ground a route-(d) ``ALLOW`` is rendered with (ADR-0254 §6). It names the
-#: **basis** — that a recorded act of the user about this goal fixed or bounded
-#: every user-facing argument of this call — and quotes **no argument key, no
-#: value, no bound, no record id and no digest**. ADR-0254 §4 is explicit that a
-#: reason never reproduces an argument's value, the bound, the record's id or its
-#: digest: the reason is carried on a durable ``PermissionDecision`` that holds
-#: ``parameters_digest`` and not ``parameters``, and quoting a value would put into
-#: the trail exactly what that omission keeps out.
-_GOAL_AUTHORIZATION = (
-    "the user's own recorded act for this goal fixed or bounded every argument of "
-    "this call, and this call is inside it"
-)
-
-#: Reported to an operator when the authorization seam could not answer. **A fault
-#: takes ADR-0254 §6's bar and is never read as an absence**: this seam discovers
-#: restrictions as well as permissions, so a fault answered ``None`` would turn a
-#: ``CONFIRM`` the user's own act earned into a route-(b) or route-(c) ``ALLOW`` —
-#: a transient store fault making a call *more* authorised, which is the one
-#: direction nothing in this corpus may fail in.
-_AUTHORIZATION_SEAM_UNREADABLE = (
-    "a policy that cannot check a standing authorization takes no standing route at all"
-)
-
-#: Reported to an operator when the quote seam could not answer (ADR-0267 §5).
-#: **A fault is never an absence**: no implementation converts one into an empty tuple,
-#: so ADR-0254 §6's bar is taken, no standing route is taken at all, and the ruling is
-#: the ``CONFIRM`` the request would have drawn had the user authorised nothing. An
-#: empty tuple would have let a declaration declaring a money argument fall through to
-#: the argument route and prove a **charge** against a **filter**, which ADR-0266 §7
-#: refuses in terms — *"a filter is not a charge"*.
-_QUOTE_SEAM_UNREADABLE = (
-    "a policy that cannot read the price an act was quoted at takes no standing route at all"
-)
-
 #: ADR-0181 §5's ground, worded at the strength the recorded predicate carries
 #: (§2's second clause, §6's second and sixth): a statement about the **selection
 #: this system made**, naming no source and no kind of source, and never a
@@ -288,62 +238,6 @@ def _planned_with_external_content(request: ActionRequest) -> bool:
     """
     binding = request.egress_binding
     return binding is not None and binding.planned_with_external_content
-
-
-def _pending_cancellations() -> int:
-    """How many cancellation requests the running task is currently carrying.
-
-    Read as a **baseline and a delta, never as a boolean** — ``tools/consume.py``'s
-    ``pending_cancellations`` and ``models/streaming.py``'s ``_cancellations`` state
-    the same reading, and this is that reading stated locally rather than imported
-    across a subsystem boundary (golden rule 1). ``Task.cancelling()`` is a lifetime
-    count only ``uncancel()`` lowers, so a caller that absorbed an earlier
-    cancellation to finish some work and then asked this policy a question still
-    reports a positive count with nothing about *this* call cancelled. **An unmoved
-    count means no cancellation request reached this task during the call; an
-    increased one means one did**, from a party the count cannot name.
-
-    Outside a task there is nothing to have been cancelled, and the answer is zero.
-    """
-    task = asyncio.current_task()
-    return 0 if task is None else task.cancelling()
-
-
-class _Authority(NamedTuple):
-    """What the one ``live_for`` read settled about ADR-0254 §6's bar.
-
-    Three values because §6 asks three questions of one read and a ``bool`` answers
-    only the first: whether a standing route may be taken at all, which row route
-    (d) would then be decided from, and — where the bar fired on **coverage** rather
-    than on a fault — §4's account of which of its three failures it was. **And a
-    fourth carries the quotes the same step read** (ADR-0267 §5), so route (d)'s own
-    comparison below is decided over the answer the bar was decided over rather than
-    over a second read of a seam.
-    """
-
-    barred: bool
-    """Whether ADR-0254 §6's bar fires, so no standing route is taken at all."""
-
-    record: Authorization | None
-    """The live row the seam returned, or ``None``.
-
-    ``None`` covers three different facts and route (d) treats them alike: the seam
-    was not read (no goal, or no seam), it answered ``None``, or it faulted."""
-
-    account: str | None
-    """§4's account of the coverage failure, where the bar fired on one.
-
-    ``None`` on a **fault**, because there is no coverage failure to describe and
-    *"a store fault is an operator's fact and not something to put in front of
-    someone deciding about a call"*."""
-
-    quotes: tuple[ActionQuote, ...] = ()
-    """The goal's quotes naming the request's intended action, oldest first.
-
-    Empty where the seam was not read at all — no goal, no act, no ``GoalQuotes``, or
-    a row carrying no ``MONEY`` member — and where the goal holds none. **Never a
-    fault's answer**: a fault takes the bar, and a barred ruling reaches no comparison
-    this would be read by (ADR-0267 §5)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,14 +444,10 @@ def _at_configured_provider(
 class ThresholdActionPolicy:
     """An ``ActionPolicy`` combining user thresholds with the contract's floors.
 
-    Structurally implements :class:`~ai_assistant.core.protocols.ActionPolicy` **and
-    :class:`~ai_assistant.core.protocols.CoverageAnswers`** (ADR-0270 §1) — *"three
-    faces, one object"* (ADR-0193 §1), one more time. ``coverage_met`` is the face
-    ``orchestration`` obtains ADR-0266 §7's condition 6 through for a row it would
-    propose, and it is this class's own comparison rather than a second
-    implementation of it: the composition root passes this one object to the
-    proposal writer under the narrow annotation, which is golden rule 1 rather than
-    an exception to it.
+    Structurally implements :class:`~ai_assistant.core.protocols.ActionPolicy`. It
+    holds no goal authorizations and no goal quotes: ADR-0309 §5 retires them with
+    the old path, and with them ADR-0254 §6's route (d), ADR-0267 §5's quote read and
+    ADR-0270 §1's ``coverage_met`` face. The authority milestone redoes them.
 
     The rule table, combined by taking the **most restrictive** result:
 
@@ -640,8 +530,6 @@ class ThresholdActionPolicy:
         grants: RecipientGrants | None = None,
         configured_search: ConfiguredSearchDestination | None = None,
         configured_forecast: ConfiguredForecastDestination | None = None,
-        authorizations: GoalAuthorizations | None = None,
-        quotes: GoalQuotes | None = None,
     ) -> None:
         """Create the policy.
 
@@ -688,33 +576,6 @@ class ThresholdActionPolicy:
                 configured provider* fact false for every forecast read, and a
                 deployment configured for one kind and not the other reaches route
                 (c) on the kind it configured and on no other.
-            authorizations: The goal authorizations this policy may consult
-                (ADR-0254 §6, §16). **The query face and never the store**: a
-                policy handed the whole store is one ``record`` call away from
-                authorising the call it is ruling on, and the annotation is what
-                removes the capability rather than a rule this class is trusted to
-                keep. ``None`` — the default — takes **route (d) as unreachable for
-                every request** and leaves ``authorised_by``, ``authorised_subject``
-                and ``authorised_goal`` unset on every ruling it would have set
-                them on, which is ADR-0021 §3's rule unamended in this limb;
-                ADR-0247 §2's supersession of that rule is **not inherited**, being
-                stated *"in the limb that reaches a request carrying
-                ``closed_loop``, and in no other"*. Such a policy also **never
-                fires ADR-0254 §6's bar** and reads this seam **zero** times, on
-                every request.
-            quotes: The goal quotes this policy may consult (ADR-0267 §5).
-                **The keyed face and never the store**: a policy handed
-                ``PlanStore`` is one ``record_quote`` call away from minting the
-                price it is about to prove a ceiling against, and the annotation is
-                what removes the capability rather than a rule this class is trusted
-                to keep. ``None`` — the default — leaves **every ``MONEY`` member
-                unmet**, so every act carrying a stated ceiling asks and this seam is
-                read **zero** times on every request, which is ADR-0266 §7's
-                fail-closed direction and the arithmetic the tree had before
-                ADR-0267's Q1. It is **not** what route (d) rests on in general: a
-                policy given none still reaches route (d) for a row carrying no
-                ``MONEY`` member.
-
         A ``deny`` threshold below its matching ``confirm`` threshold is
         accepted rather than rejected: the combination is still a maximum, so
         the result is a policy that denies where it would otherwise have asked —
@@ -724,8 +585,6 @@ class ThresholdActionPolicy:
         self._grants = grants
         self._configured_search = configured_search
         self._configured_forecast = configured_forecast
-        self._authorizations = authorizations
-        self._quotes = quotes
         rules = list(_FLOORS)
         if confirm_at_risk is not None:
             rules.append(_risk_rule(confirm_at_risk, PermissionOutcome.CONFIRM))
@@ -803,10 +662,11 @@ class ThresholdActionPolicy:
         **The request handed on is checked against this ruling's own observation of
         it first, and a drifted one buys no grant** (ADR-0065, ADR-0193 §1's
         fail-closed clause). ``RecipientGrants.covering`` takes its subject at *its*
-        first executed line, which since ADR-0254 §6 is after the authorization
-        seam has suspended — so without this the grant returned could be one
-        covering the request as rewritten mid-flight, cited in an ``ALLOW`` whose
-        every other ground was reached about the request as presented. The check is
+        first executed line, which is later than this ruling's observation — so a
+        seam read ever placed between the two would otherwise let the grant
+        returned be one covering the request as rewritten mid-flight, cited in an
+        ``ALLOW`` whose every other ground was reached about the request as
+        presented. The check is
         sound where it stands because **nothing suspends between it and that line**:
         awaiting a coroutine runs it to its own first await. Rebuilding the subject
         is three validations rather than a whole
@@ -962,9 +822,9 @@ class ThresholdActionPolicy:
             # not off the binding afterwards (ADR-0065). Every line above this one is
             # part of a single observation of the request — nothing else runs on the
             # loop between two statements that do not await — and this is the last of
-            # them: past ``_authority`` the caller has had a turn, and a rewritten
-            # ``egress_binding.account`` would otherwise put a reference this ruling
-            # never checked into the ``ALLOW`` the trail then compares.
+            # them: past the grant seam's read the caller has had a turn, and a
+            # rewritten ``egress_binding.account`` would otherwise put a reference
+            # this ruling never checked into the ``ALLOW`` the trail then compares.
             configured = (
                 None
                 if at_configured is None
@@ -973,104 +833,36 @@ class ThresholdActionPolicy:
                     ground=at_configured.ground,
                 )
             )
-            barred, record, account, quotes = await self._authority(subject)
-            if not barred:
-                standing = await self._standing_allow(
-                    request,
-                    record,
-                    subject=subject,
-                    configured=configured,
-                    external=external,
-                    quotes=quotes,
-                )
-                if standing is not None:
-                    return standing
-            elif account is not None:
-                # **ADR-0254 §4's account of why coverage failed**, added to the
-                # grounds the table already reached rather than replacing them: the
-                # disclosure floor is still what stands in the way, and the bar is
-                # why no standing route relieved it. The outcome is already
-                # ``CONFIRM`` — ``_only_the_disclosure_floor`` is what admitted this
-                # branch — so appending a ``CONFIRM`` ground moves nothing but the
-                # sentence the user reads. **It quotes no value, no bound, no record
-                # id and no digest**, and names a key only where the declaration's
-                # own schema names it (:func:`~ai_assistant.permissions._coverage.
-                # account_of`).
-                grounds.append((PermissionOutcome.CONFIRM, account))
+            standing = await self._standing_allow(request, subject=subject, configured=configured)
+            if standing is not None:
+                return standing
         reasons = [reason for ruled, reason in grounds if ruled is outcome]
         return PermissionRuling(outcome=outcome, reason="; ".join(reasons))
 
-    async def _standing_allow(  # noqa: PLR0913 — one keyword per value the one pre-suspension observation carries forward; each is a fact ADR-0254 §6 decides a different step on
+    async def _standing_allow(
         self,
         request: ActionRequest,
-        record: Authorization | None,
         *,
         subject: CoverageSubject,
         configured: _ConfiguredAuthority | None,
-        external: bool,
-        quotes: tuple[ActionQuote, ...],
     ) -> PermissionRuling | None:
         """The standing ``ALLOW`` this request earns, or ``None`` for none.
 
-        **ADR-0254 §6's total order, and each step answers before the next seam is
-        consulted**: the **bar** first, on the one ``live_for`` read; then **route
-        (c)** (ADR-0247 §2's ordering before the grant seam, kept); then **route
-        (d)**, decided from the row that same read returned; then **route (b)**.
-
-        **Where the bar fires, no route answers** and ``RecipientGrants.covering``
-        is called **zero** times. Where route (c) answers, it is called **zero**
-        times. Where route (d) answers, it is called **zero** times — **except on
-        an opening-act row**, where it is consulted **once, before route (d) may
-        answer**, because such a row carries no recipient authority of its own and
-        the one it rested on must still stand. **At most one durable read per seam
-        per ruling and never a cached answer** (ADR-0193 §7's rule read onto the
-        second seam, and it holds on both).
-
-        **A route-(d) ``ALLOW`` is the one ruling that carries a pin** (ADR-0271 §1).
-        Where its coverage carries a ``MONEY`` member — the member ADR-0266 §7's
-        evidence route alone can meet, and which condition 6 therefore proved against
-        a quote — the ruling records **that** quote as ``proved_quote``, by value. The
-        absence is total everywhere else: route (a), route (b), route (c), a
-        ``CONFIRM``, a ``DENY``, and a route-(d) ``ALLOW`` whose coverage names no
-        price all leave it unset, and no path here invents one, back-fills one, or
-        reads one back. It is **stated over the route and not over the quotes**: a
-        goal holding a quote for an act whose row bounds no money pins nothing,
-        because nothing was proved against it.
-
-        **Why (d) precedes (b), stated so it is a decision and not an accident**
-        (ADR-0254 §6). A record covering a request under both routes is one the user
-        made about *this goal*, with a basis naming the turn and the span, an expiry
-        measured in hours and a coverage that names the arguments; the grant that
-        would also cover it is a standing preference about a destination set, made
-        about something else, with no basis and a longer life. Citing the narrower
-        and better-evidenced authority records more and asserts less. **Neither
-        route is made reachable or unreachable by the order.**
-
-        **It is reached only where the bar did not fire.** *"Where the bar fires, no
-        route answers"* and the recipient-grant seam is consulted **zero** times,
-        which :meth:`decide` keeps by not calling this at all — the ruling there is
-        the one the table reached with no standing route, which is what §13 and §14
-        require of a changed argument outside coverage, what §5 promises of a
-        widening the store refused, and what §9's third clause promises of *"an
-        argument no member names"*.
+        **Route (c) first, then route (b)** (ADR-0247 §2's ordering before the grant
+        seam). Where route (c) answers, ``RecipientGrants.covering`` is called
+        **zero** times; otherwise it is called **once**, and never cached (ADR-0193
+        §7).
 
         Args:
             request: The action being ruled on, already past
                 :meth:`_only_the_disclosure_floor`. **Handed to the grant seam and
-                read for nothing else**: every comparison this method takes is over
-                ``subject``.
-            record: The row the one ``live_for`` read returned, or ``None``.
-            subject: The one pre-suspension observation of the request, which §§3
-                and 4's comparisons are decided over.
+                read for nothing else.**
+            subject: The one pre-suspension observation of the request, which the
+                grant seam's drift check compares against.
             configured: Route (c)'s authority where ADR-0247 §2's derived fact
                 holds of the request, as ADR-0260 §6 widens it — the binding's
                 ``account.reference`` and the matched kind's own ground, both read
-                before the suspension, like every other value here — and ``None``
-                otherwise.
-            external: Whether the binding records that the call was planned over
-                external content.
-            quotes: The goal's quotes naming this request's act, as the **same** step
-                that decided the bar read them (ADR-0267 §5).
+                before the suspension — and ``None`` otherwise.
 
         Returns:
             The ``ALLOW`` a standing route earned, or ``None`` where none did.
@@ -1101,65 +893,7 @@ class ThresholdActionPolicy:
                 reason=configured.ground,
                 authorised_by=configured.reference,
             )
-        recipient: RecipientGrant | None = None
-        consulted = False
-        if self._covers_in_full(subject, record, external=external, quotes=quotes):
-            assert record is not None  # noqa: S101 — narrowing; the test is stated over it
-            if record.origin is AuthorizationOrigin.OPENING_ACT:
-                # **The one exception to "route (d) answers with the grant seam
-                # consulted zero times"** (ADR-0254 §6): an opening-act row carries
-                # no recipient authority of its own, so the one it rested on is
-                # re-taken here, **once, before route (d) may answer**. Where it no
-                # longer stands, route (b) does not cover either — it needs the same
-                # grant — so the answer is carried rather than the seam re-read,
-                # which is what keeps "at most one durable read per seam per ruling"
-                # true on this path as on every other.
-                recipient = await self._covering(request, subject)
-                consulted = True
-            if consulted is False or recipient is not None:
-                # **The pin, and the only place anything writes one** (ADR-0271 §1).
-                # This branch *is* the route-(d) ``ALLOW``, so condition 6 is already
-                # established over ``record.coverage`` and these quotes —
-                # ``_covers_in_full`` above answered it — and what is added here is
-                # **which** quote the evidence route was taken over, never a second
-                # reading of whether it was met. ``governing_quote`` is that one
-                # statement, shared with ADR-0270 §1's seam so the two cannot drift.
-                #
-                # **No second read** (ADR-0267 §5): ``quotes`` is the tuple the one
-                # ``for_action`` of this ruling returned, the same tuple the bar and
-                # the comparison were decided over, so the pinned value is the value
-                # condition 6 was proved against and not one a later read supplies.
-                #
-                # **The operand and never a verdict** (ADR-0271 §1, ADR-0254 §13):
-                # nothing reads it back, and every later dispatch re-reads the
-                # *current* governing quote as if the field were not there. It is
-                # carried **by value** — the field's own validator detaches it, so
-                # what is recorded cannot be moved by a seam that still holds the
-                # object.
-                return PermissionRuling(
-                    outcome=PermissionOutcome.ALLOW,
-                    reason=_GOAL_AUTHORIZATION,
-                    authorised_by=record.id,
-                    authorised_subject=record.subject_digest,
-                    authorised_goal=record.goal,
-                    proved_quote=governing_quote(record.coverage, quotes),
-                )
-        if external:
-            # **The third disjunct is what admitted this request** (ADR-0254 §6):
-            # ``_only_the_disclosure_floor``'s lineage limb now reads "…, **or** the
-            # request carries a ``goal`` and the policy holds a
-            # ``GoalAuthorizations``", and that disjunct **admits a request rather
-            # than deciding it**. Route (c) does not answer on it, because ADR-0247
-            # §3's retirement, as ADR-0260 §6 widens it, is for a request at its
-            # kind's configured provider and for nothing else — and this branch is
-            # reached only where it was not at one; route (b) does not, because
-            # ADR-0193 §4 is unmoved
-            # and **no** ``RecipientGrant`` covers a tainted call. So a request the
-            # goal's record does not cover in full reaches **no** route at all and
-            # ``_covering`` is called **zero** times.
-            return None
-        if not consulted:
-            recipient = await self._covering(request, subject)
+        recipient = await self._covering(request, subject)
         if recipient is not None:
             return PermissionRuling(
                 outcome=PermissionOutcome.ALLOW,
@@ -1168,210 +902,6 @@ class ThresholdActionPolicy:
                 authorised_subject=recipient.subject_digest,
             )
         return None
-
-    async def _authority(self, subject: CoverageSubject) -> _Authority:
-        """The one ``live_for`` read, and whether ADR-0254 §6's bar fires on it.
-
-        **Where the bar reads, and it is the same read route (d) takes** (§6). The
-        policy calls ``live_for`` **at most once per ruling**, and both the bar and
-        route (d) are decided from the row it returns: there is no second seam read,
-        no second clock reading and no cached answer. It is called **only** where
-        ``request.goal`` is set, so a request carrying none reads the seam **zero**
-        times and the bar never fires on one; and **only** where the policy holds a
-        ``GoalAuthorizations``, a policy constructed without one taking the bar as
-        never firing exactly as it takes route (d) as unreachable. Those two
-        exclusions are what bound the fault clause below.
-
-        **A standing route is taken only on one of exactly two answers** (§6): *no
-        record* — the seam read the store and holds no live row for that goal and
-        that declaration id — or *a record every user-facing argument of the request
-        is covered by*, which is §3's **condition 6 and that condition alone**. On
-        every other answer no standing route is taken at all: a record some argument
-        of the request is not covered by, whether it names that argument in a member
-        the value fails **or names it in no member at all**; and an answer the seam
-        could not give.
-
-        **The bar is stated over the arguments and over nothing else, and the line
-        is ADR-0193 §5's.** It does not fire on the declaration, on an account the
-        record does not carry, or on a destination outside the record's set: those
-        are facts a grant is stated *about*, so a request whose only mismatch is one
-        of them fails route (d) on §3's conditions 3, 4 and 5 and still reaches
-        route (c) or route (b), exactly as it does today. **A record's arguments are
-        the one thing nothing else in this corpus speaks for**, and that is the
-        whole of what the bar refuses on.
-
-        **The bar reads no field of the declaration, and that is what makes it
-        monotone** (ADR-0021 §5). It is keyed on the declaration's ``id``, which no
-        severity edit moves, and its test is condition 6 over the arguments, which
-        no severity edit moves either — so raising ``risk_level``,
-        ``reversibility`` or ``discloses`` cannot change its answer in **either**
-        direction.
-
-        **A seam the policy could not read takes the bar, and that is the one place
-        this seam departs from** :meth:`_covering`'s **discipline.** That method
-        answers ``None`` on a fault because the grant seam discovers *permissions*
-        only, and losing a permission can only make a ruling more restrictive. This
-        seam discovers **restrictions** as well, so a fault that read as absence
-        would turn a ``CONFIRM`` the bar owes into a route-(b) or route-(c)
-        ``ALLOW``. So the fault is logged and **takes the bar**.
-
-        **The log line names the class and no value, and every value here was read
-        before the await** — :meth:`_covering`'s existing discipline, adopted rather
-        than reinvented and now carried by the subject
-        (:func:`~ai_assistant.permissions._coverage.coverage_subject`). ADR-0065: a
-        frozen model is rewritable through ``__dict__``, so a handler composing its
-        line from ``request.tool.id`` after the seam suspended leaves as whatever
-        that read raised — **and the coverage comparison below has the same
-        problem**, which is why it is taken over the subject and not over the
-        request. A policy that selected the row for the goal it read on the way in
-        and compared the arguments it read on the way out would ``ALLOW`` a request
-        that is neither the one presented nor the one substituted.
-
-        Args:
-            subject: The one pre-suspension observation of the request, which the
-                seam is asked about and which the comparison is decided over.
-
-        **A fault carries no account** (§4, §16). *"A store fault is an operator's
-        fact and not something to put in front of someone deciding about a call"*,
-        so the reason the user sees is the one the table reached and nothing is
-        added to it — there is no coverage failure to describe, and describing the
-        fault would put an operator's fact in the prompt.
-
-        **The quotes are read on this same step, at most once, and only where a
-        ceiling could be proved by one** (ADR-0267 §5). ``for_action`` is consulted
-        **zero** times on a request carrying no ``goal`` or no ``intended_action``, on
-        a policy holding no ``GoalQuotes``, where ``live_for`` answered ``None`` or
-        faulted, and on a row carrying **no ``MONEY`` member** — the last because the
-        evidence route meets a member of no other kind in any case, so a read there
-        could change no answer. ``_DISCLOSURE_FLOOR``'s *"at most one durable read per
-        seam per ruling and never a cached answer"* is kept: the tuple the bar was
-        decided over is the tuple route (d) is decided over.
-
-        **A ``for_action`` this policy could not read takes the bar, exactly as
-        ``live_for``'s fault does** (ADR-0267 §5, ADR-0266 §7). *"A fault is never an
-        absence"*: no implementation converts one into an empty tuple, so the request
-        is **not covered**, no standing route is taken at all, and the ruling is the
-        ``CONFIRM`` the request would have drawn had the user authorised nothing. It
-        **never falls through to the argument route**, which is what an empty tuple
-        would have let it do for a declaration declaring an amount. The log line names
-        the class and no value, and the id it names was read before the await.
-
-        Returns:
-            Whether the bar fires; the live row the seam returned — ``None`` where
-            the seam was not read at all, where it answered ``None``, or where it
-            faulted; ADR-0254 §4's account of the coverage failure where the bar
-            fired on one; and the quotes naming this request's act, empty where the
-            quote seam was not read.
-        """
-        goal = subject.goal
-        if goal is None or self._authorizations is None:
-            return _Authority(barred=False, record=None, account=None)
-        tool_id = subject.tool.id
-        try:
-            record = await self._authorizations.live_for(goal, tool_id)
-        except AuthorizationError as exc:
-            _log.warning(
-                "authorization_seam_unreadable",
-                tool_id=tool_id,
-                outcome="confirm",
-                refused_by=type(exc).__name__,
-                reason=_AUTHORIZATION_SEAM_UNREADABLE,
-            )
-            return _Authority(barred=True, record=None, account=None)
-        if record is None:
-            return _Authority(barred=False, record=None, account=None)
-        act = subject.intended_action
-        quotes: tuple[ActionQuote, ...] = ()
-        if (
-            self._quotes is not None
-            and act is not None
-            and any(member.kind is BoundKind.MONEY for member in record.coverage)
-        ):
-            try:
-                quotes = await self._quotes.for_action(goal, act)
-            except AuthorizationError as exc:
-                _log.warning(
-                    "quote_seam_unreadable",
-                    tool_id=tool_id,
-                    outcome="confirm",
-                    refused_by=type(exc).__name__,
-                    reason=_QUOTE_SEAM_UNREADABLE,
-                )
-                return _Authority(barred=True, record=None, account=None)
-        defects = uncovered(record.coverage, subject, quotes)
-        if defects:
-            return _Authority(
-                barred=True,
-                record=record,
-                account=account_of(defects, subject.tool),
-                quotes=quotes,
-            )
-        return _Authority(barred=False, record=record, account=None, quotes=quotes)
-
-    @staticmethod
-    def _covers_in_full(
-        subject: CoverageSubject,
-        record: Authorization | None,
-        *,
-        external: bool,
-        quotes: tuple[ActionQuote, ...],
-    ) -> bool:
-        """Whether route (d) covers this request but for the opening-act recheck.
-
-        **Route (d) is reachable on** :meth:`_only_the_disclosure_floor`'s **five
-        conditions and relaxes none of them** (ADR-0254 §6). Two of them are
-        re-taken **over the binding** here rather than read off that predicate's
-        answer, because that predicate carries ADR-0247 §3's disjunct and a lane
-        reusing its answer would relax on route (d) something §6 relaxes only on its
-        own terms:
-
-        * **condition 4** — the binding's ``coverage`` is
-          ``SpanCoverage.NOT_COVERED``, **in its strict form**. ADR-0233 §9's second
-          clause is absolute about its class — *"**no** standing authorisation,
-          standing policy, standing recipient grant, configuration, connected
-          account, tool declaration or approved payload description covers such a
-          call, **ever**"* — and route (d) inherits none of ADR-0247 §3's
-          retirement, because **route (d) is not route (c)**. A request at the
-          configured provider carrying covered content therefore reaches route (d)
-          in no case.
-        * **condition 3** — the binding does not carry
-          ``planned_with_external_content``, **or** the row covers the request under
-          §3 **in full** *and* covers every argument of it **on the argument route**.
-          That second limb is ADR-0181 §5's floor **discharged**, and ADR-0266 §7
-          narrows it: §6's stated ground is that the user's own fixed values and
-          permitted ranges leave nothing outside content could have steered, and
-          condition 6's **third conjunct** does not supply that ground — a quote's
-          digest proves the call is the one **quoted**, not one the user bounded. So
-          a tainted request whose coverage the evidence route supplied reaches no
-          route at all and **the floor binds unrelaxed**. **Partial coverage still
-          asks.**
-
-        The remaining condition — the recipient authority an **opening-act** row
-        rested on, re-taken at every dispatch — is :meth:`_standing_allow`'s,
-        because it is the one that spends a seam read and the read has to be shared
-        with route (b).
-
-        Args:
-            subject: The one pre-suspension observation of the request, which this
-                comparison is decided over (ADR-0065).
-            record: The row the one ``live_for`` read returned, or ``None``.
-            external: Whether the binding carries ``planned_with_external_content``,
-                read before this ruling suspended, on which ADR-0266 §7's narrowing
-                of the lineage discharge turns.
-            quotes: The goal's quotes naming this request's act, as the **same** step
-                that decided the bar read them (ADR-0267 §5) — never a second read,
-                so condition 6 cannot answer one way for the bar and another here.
-
-        Returns:
-            Whether §3's six conditions hold over that pair, condition 4 holds over
-            the binding, and — for a tainted request — every argument is covered on
-            the argument route.
-        """
-        if record is None or subject.coverage is not SpanCoverage.NOT_COVERED:
-            return False
-        if not covers(record, subject, quotes):
-            return False
-        return not external or covers_on_argument_route(record.coverage, subject)
 
     def _only_the_disclosure_floor(
         self,
@@ -1477,43 +1007,13 @@ class ThresholdActionPolicy:
         binding = request.egress_binding
         configured = at_configured is not None
         return (
-            (self._grants is not None or configured or self._authorizations is not None)
+            (self._grants is not None or configured)
             and binding is not None
-            and (not external or configured or self._sourced(request))
+            and (not external or configured)
             and (binding.coverage is SpanCoverage.NOT_COVERED or configured)
             and outcome is PermissionOutcome.CONFIRM
             and fired == [_DISCLOSURE_FLOOR]
         )
-
-    def _sourced(self, request: ActionRequest) -> bool:
-        """ADR-0254 §6's third disjunct on the lineage limb, and it **admits** only.
-
-        *"``_only_the_disclosure_floor``'s lineage limb gains a third disjunct, and
-        that disjunct admits a request rather than deciding it."* It becomes *"the
-        binding does not carry ``planned_with_external_content``, **or** the request
-        is at its kind's configured provider, **or** the request carries a ``goal``
-        and the policy holds a ``GoalAuthorizations``"* — the second disjunct in the
-        text ADR-0260 §6 restates it in, which widens what satisfies it and leaves
-        this third one exactly where ADR-0254 §6 put it.
-
-        **Where this disjunct is what admitted the request, route (d) is the only
-        route that may answer**: route (c) does not, because ADR-0247 §3's
-        retirement as ADR-0260 §6 widens it is for a request **at its kind's
-        configured provider** and for nothing else — and a request admitted by this
-        disjunct is by construction at neither; route (b) does not, because ADR-0193
-        §4 is unmoved and **no** ``RecipientGrant`` covers a tainted call.
-        :meth:`_standing_allow` is where that is kept.
-
-        **The coverage limb gains no disjunct**, and the predicate is not made to
-        depend on a seam read: this admits, and ADR-0254 §3's six conditions decide.
-
-        Args:
-            request: The action being ruled on.
-
-        Returns:
-            Whether the request carries a goal and this policy holds the seam.
-        """
-        return request.goal is not None and self._authorizations is not None
 
     async def resolve(self, confirmed: PermissionDecision, *, approved: bool) -> PermissionRuling:
         """Turn the user's answer to ``confirmed`` into the ruling that resolves it.
@@ -1599,108 +1099,6 @@ class ThresholdActionPolicy:
             reason="the user approved the confirmation",
             authorised_by=confirmed.id,
         )
-
-    async def coverage_met(
-        self, request: ActionRequest, coverage: tuple[CoverageMember, ...]
-    ) -> CoverageAnswer:
-        """Whether ``coverage`` satisfies condition 6 for ``request`` (ADR-0270 §1).
-
-        **The one implementation's face, and not a second implementation.** The
-        comparison is ``_coverage.py``'s — the same ``covers_arguments`` ADR-0254
-        §6's bar and route (d) are decided by — over the same two routes and the
-        same selection of the governing quote. What this member adds is the seam
-        read and the answer's shape, so ADR-0266 §7's *"One implementation, in
-        ``permissions``"* stays one.
-
-        **Condition 6 and no other condition** (§1). There is no live row here — a
-        proposal is written ``PROPOSED`` — so ADR-0254 §3's conditions 1 to 5 have
-        nothing to be taken over; §6's floors are read by nothing, §1's *"the
-        proposal reads none of §6's floors, and that is deliberate"* binding entire,
-        so a request whose binding carries ``planned_with_external_content`` is
-        answered exactly as one that does not; and §12's ladder and §1's other three
-        proposal conditions are the writer's.
-
-        **The seam is read at most once, and only where a ceiling could be proved by
-        one** (ADR-0267 §5) — the same arithmetic ``_authority`` takes: zero reads on
-        a request carrying no ``goal`` or no ``intended_action``, on a policy holding
-        no ``GoalQuotes``, and on a ``coverage`` carrying **no ``MONEY`` member**, the
-        last because the evidence route meets a member of no other kind in any case.
-        **Nothing is memoised**: two calls with equal arguments each read, and no
-        answer is carried to a later :meth:`decide`, which is ADR-0254 §13's *"no
-        cached coverage verdict anywhere"*.
-
-        **A fault propagates** (ADR-0270 §4). ``decide``'s own fault clause converts
-        an unreadable seam into ADR-0254 §6's bar because it is producing a *ruling*;
-        here there is no ruling to take, so an
-        :class:`~ai_assistant.core.errors.AuthorizationError` leaves as itself and is
-        **never** turned into a met answer, an unmet one, or an empty tuple of
-        quotes. A component that asked writes no row, and the one call is confirmed
-        under ADR-0148 §3's route (a).
-
-        **And a cancellation the seam absorbed is delivered onward** (ADR-0060).
-        ``core/protocols.py``'s cancellation clause is explicit that a method *"never
-        converts such a cancellation into a return value, and never lets a
-        collaborator's suppressed cancellation stand in for its own"*. Nothing forces
-        a ``GoalQuotes`` to let a ``CancelledError`` through: one that caught it and
-        answered ``()`` would leave this member holding an empty tuple, and an empty
-        tuple is this seam's word for *the goal holds no quote for this act* — so an
-        unmet answer would be returned to a caller that had already asked for the
-        work to stop, and a proposal would be declined for a reason that never
-        happened. The cancellation count is read before the await and compared on
-        **both** exits from it — the normal one and the exceptional one — and an
-        increase re-raises. A seam that absorbed the cancellation and then raised an
-        ``AuthorizationError`` would otherwise leave that error standing in for it,
-        which is the same substitution one step over: the request would be reported
-        unreadable when what happened is that the caller asked for it to stop. **The
-        cancellation takes precedence over the fault**, the fault riding out as its
-        ``__cause__``; a ``CancelledError`` already leaving is passed through
-        unchanged, there being nothing to convert. Adversarial review, rounds 5 and
-        6, two ``blocker``s.
-
-        **A policy holding no ``GoalQuotes`` answers unmet** for any ``coverage``
-        carrying a ``MONEY`` member (§4), the empty tuple leaving the evidence route
-        met by nothing — the fail-closed direction, and the same arithmetic that
-        makes this tree's ``ALLOW``s unmoved.
-
-        Args:
-            request: The concrete action a row would be proposed for.
-            coverage: The coverage that row would carry — condition 6's fourth
-                operand, and **never the row** (§1).
-
-        Returns:
-            Whether condition 6 holds, and the governing quote where the evidence
-            route decided it (ADR-0270 §2).
-
-        Raises:
-            AuthorizationError: If ``GoalQuotes.for_action`` raises one.
-        """
-        subject = coverage_subject(request)
-        members = coverage_members(coverage)
-        quotes: tuple[ActionQuote, ...] = ()
-        if (
-            self._quotes is not None
-            and subject.goal is not None
-            and subject.intended_action is not None
-            and any(member.kind is BoundKind.MONEY for member in members)
-        ):
-            entered = _pending_cancellations()
-            try:
-                quotes = await self._quotes.for_action(subject.goal, subject.intended_action)
-            except asyncio.CancelledError:
-                # Already being delivered onward, and its own instance is the one to
-                # deliver — there is nothing here to convert.
-                raise
-            except BaseException as exc:
-                # **A fault the seam raised after swallowing the cancellation does not
-                # stand in for it.** ``BaseException`` and not ``Exception``, because a
-                # seam is free to raise anything and the rule is about what reaches the
-                # caller rather than about the class that displaced it.
-                if _pending_cancellations() > entered:
-                    raise asyncio.CancelledError from exc
-                raise
-            if _pending_cancellations() > entered:
-                raise asyncio.CancelledError
-        return coverage_answer(members, subject, quotes)
 
 
 __all__ = ["ThresholdActionPolicy"]

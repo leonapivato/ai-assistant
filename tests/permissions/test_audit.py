@@ -25,6 +25,9 @@ import pytest
 import structlog.testing
 from audit_trail_contract import AuditTrailContract
 from permission_builders import AT, action, decision, ruling, tool
+from recipient_builders import ALICE
+from recipient_builders import binding as egress_binding
+from recipient_builders import request as egress_request
 
 from ai_assistant.core.errors import (
     AuditError,
@@ -408,6 +411,73 @@ async def test_a_resolving_deny_citing_an_authorisation_is_refused(
         await ephemeral.record(answer)
 
     assert await ephemeral.get("d-answer") is None
+
+
+_GOAL = "goal-1"
+
+
+@pytest.mark.parametrize("subject", ["0" * 64, None], ids=["with a digest", "without one"])
+async def test_a_standing_egress_row_scoped_to_a_goal_is_refused(
+    ephemeral: SqliteAuditTrail, subject: str | None
+) -> None:
+    """Route (d) is retired, so no standing row may carry a goal scope (ADR-0309 §5).
+
+    The goal authorizations a route-(d) pointer resolved to are gone, so the row is
+    refused from its shape alone — the answer a trail holding no authorization store
+    always gave such a row — and nothing is written.
+    """
+    scoped = decision(
+        "d-route-d",
+        request=egress_request(egress_binding(ALICE)),
+        ruled=ruling(
+            PermissionOutcome.ALLOW,
+            authorised_by="a1",
+            authorised_subject=subject,
+            authorised_goal=_GOAL,
+        ),
+    )
+
+    with pytest.raises(InvalidAuthorisationError, match="route \\(d\\) is retired"):
+        await ephemeral.record(scoped)
+
+    assert await ephemeral.export() == []
+
+
+async def test_a_resolving_allow_scoped_to_a_goal_is_refused(ephemeral: SqliteAuditTrail) -> None:
+    """Route (a) rests on the user's answer about this call and carries no goal scope."""
+    with pytest.raises(InvalidAuthorisationError, match="scopes its authorisation to a goal"):
+        await ephemeral.record(
+            decision(
+                "d-route-a",
+                request=egress_request(egress_binding(ALICE)),
+                ruled=ruling(PermissionOutcome.ALLOW, authorised_by="d-0", authorised_goal=_GOAL),
+                resolves="d-0",
+            )
+        )
+
+    assert await ephemeral.export() == []
+
+
+@pytest.mark.parametrize("subject", ["0" * 64, None], ids=["with a digest", "without one"])
+async def test_a_goal_scope_on_a_decision_recording_no_egress_call_is_refused(
+    ephemeral: SqliteAuditTrail, subject: str | None
+) -> None:
+    """A row naming no egress call is on no standing route, so its goal scope is refused."""
+    with pytest.raises(InvalidAuthorisationError, match="scopes its authorisation to a goal"):
+        await ephemeral.record(
+            decision(
+                "d-no-egress",
+                request=action(),
+                ruled=ruling(
+                    PermissionOutcome.ALLOW,
+                    authorised_by="g-1",
+                    authorised_subject=subject,
+                    authorised_goal=_GOAL,
+                ),
+            )
+        )
+
+    assert await ephemeral.export() == []
 
 
 async def test_clearing_an_empty_trail_removes_nothing(ephemeral: SqliteAuditTrail) -> None:

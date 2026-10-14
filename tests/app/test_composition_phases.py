@@ -74,9 +74,6 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(
         assert authorizing._trail is engine._trail
         assert authorizing._memory is engine._memory
         assert authorizing._stories is engine._stories
-        # ADR-0306 §4:11: the phases' policy reads no goal authorization and no quote.
-        assert authorizing._policy._authorizations is None  # type: ignore[attr-defined]
-        assert authorizing._policy._quotes is None  # type: ignore[attr-defined]
         assert phases._round_limit == PHASES_ROUND_LIMIT
         assert phases._round_wait == PHASES_CALL_DEADLINE
         # ADR-0308 §2:5, §3: the second run's provisional cap, and the one memory store
