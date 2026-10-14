@@ -66,6 +66,20 @@ def _follows(drive: Drive) -> list[int]:
     ]
 
 
+async def _followed(drive: Drive, count: int) -> None:
+    """Wait, bounded, until the hub has recorded ``count`` change streams.
+
+    Nothing on the page says that yet: it holds its stream from the moment it asks, and
+    the gateway writes the stream's head before it asks the hub, so neither
+    ``chat.stream`` nor its ``headed`` means the follow has been recorded. The case
+    asserts what it counted afterwards, so a follow that never comes still fails it.
+    """
+    for _ in range(100):
+        if len(_follows(drive)) >= count:
+            return
+        await asyncio.sleep(0.1)
+
+
 async def _open(drive: Drive, *, devices: tuple[str, ...] = ("hub",)) -> str:
     """Put ``devices`` in "my devices", start a conversation, and open it in the chat."""
     await drive.engine.set_my_devices(
@@ -224,6 +238,7 @@ async def test_a_hidden_page_pauses_and_follows_again_when_it_comes_back(
         )
         await expect(follow).to_contain_text("You came back")
         await drive.page.wait_for_function("() => chat.stream !== null")
+        await _followed(drive, 2)
         assert len(_follows(drive)) == 2
 
 
@@ -1152,4 +1167,5 @@ async def test_a_hub_shutting_down_stops_the_following_and_it_carries_on_after(
         await expect(drive.page.locator("#chat .fault")).to_be_hidden()
         await drive.page.click("#chat-follow-again")
         await expect(follow).to_contain_text("because you asked")
+        await _followed(drive, 2)
         assert _follows(drive)[-1] == cursor + 5
