@@ -39,7 +39,9 @@ from typing import (
     Any,
     ForwardRef,
     Literal,
+    NewType,
     TypeAliasType,
+    TypeVar,
     get_args,
     get_origin,
     get_type_hints,
@@ -168,7 +170,9 @@ def _annotation_types(annotation: object, seen: set[int] | None = None) -> list[
     parameterized generic's **origin** is named too, so ``Envelope[str]`` reaches
     ``Envelope`` and its own fields rather than only ``str``. A ``Literal``'s arguments
     are values and an ``Annotated``'s metadata is not a type, so neither is descended: a
-    string found is then a forward reference and nothing else.
+    string found is then a forward reference and nothing else. A ``NewType`` is followed
+    to its supertype, and a type variable to its bound, its constraints and its default,
+    since each admits what those admit.
     """
     seen = set() if seen is None else seen
     while isinstance(annotation, TypeAliasType):
@@ -179,18 +183,26 @@ def _annotation_types(annotation: object, seen: set[int] | None = None) -> list[
     if isinstance(annotation, list):
         return [found for one in annotation for found in _annotation_types(one, seen)]
     found: list[object] = [annotation]
+    for one in _beneath(annotation):
+        found.extend(_annotation_types(one, seen))
+    return found
+
+
+def _beneath(annotation: object) -> list[object]:
+    """What one annotation admits beneath itself, which the walk descends into."""
+    if isinstance(annotation, NewType):
+        return [annotation.__supertype__]
+    if isinstance(annotation, TypeVar):
+        default = [annotation.__default__] if annotation.has_default() else []
+        return [*annotation.__constraints__, *default] + (
+            [] if annotation.__bound__ is None else [annotation.__bound__]
+        )
     origin = get_origin(annotation)
     if origin is Literal:
-        return found
+        return []
     if origin is Annotated:
-        arguments = get_args(annotation)[:1]
-    else:
-        arguments = get_args(annotation)
-        if origin is not None:
-            found.extend(_annotation_types(origin, seen))
-    for argument in arguments:
-        found.extend(_annotation_types(argument, seen))
-    return found
+        return list(get_args(annotation)[:1])
+    return [*([] if origin is None else [origin]), *get_args(annotation)]
 
 
 def _crossed(found: object) -> bool:
@@ -248,23 +260,41 @@ def _seams_reach() -> dict[str, type]:
     return _reachable([one for seam in _SEAMS for one in _hints(seam).values()])
 
 
+def _hole(found: object) -> str | None:  # noqa: PLR0911 — one answer per kind of annotation
+    """Why the walk cannot see through ``found``, or ``None`` where it can.
+
+    Closed rather than open: anything that is not a kind of annotation the walk was
+    taught is a hole, so a wrapper nobody anticipated fails here instead of passing.
+    """
+    if isinstance(found, ForwardRef | str):
+        return f"carries the unresolved forward reference {found!r}"
+    if isinstance(found, type):
+        if (
+            found in _CARRIERS
+            or found in _SHAPES
+            or found in _LEAVES
+            or _crossed(found)
+            or issubclass(found, Enum)
+        ):
+            return None
+        return f"names {found!r}, which the walk cannot see into"
+    if isinstance(found, TypeVar):
+        if found.__bound__ is None and not found.__constraints__:
+            return f"names the type parameter {found!r}, which admits anything"
+        return None
+    if isinstance(found, NewType) or found is Ellipsis or get_origin(found) is not None:
+        return None
+    return f"carries {found!r}, an annotation the walk cannot read"
+
+
 def _holes(annotations: Mapping[str, object]) -> list[str]:
     """Each annotation among ``annotations`` the walk cannot see through, and why."""
-    holes: list[str] = []
-    for where, annotation in annotations.items():
-        for found in _annotation_types(annotation):
-            if isinstance(found, ForwardRef | str):
-                holes.append(f"{where} carries the unresolved forward reference {found!r}")
-            elif (
-                isinstance(found, type)
-                and found not in _CARRIERS
-                and found not in _SHAPES
-                and not _crossed(found)
-                and not issubclass(found, Enum)
-                and found not in _LEAVES
-            ):
-                holes.append(f"{where} names {found!r}, which the walk cannot see into")
-    return holes
+    return [
+        f"{where} {why}"
+        for where, annotation in annotations.items()
+        for found in _annotation_types(annotation)
+        if (why := _hole(found)) is not None
+    ]
 
 
 def _admitting(annotations: Mapping[str, object]) -> list[str]:
@@ -547,4 +577,42 @@ def test_a_carrier_written_on_a_seam_itself_is_found() -> None:
         f"_handed_a_secret.credential admits {[SecretStr]}",
         f"_handed_a_secret.keys admits {[SecretStr]}",
         f"_handed_a_secret.return admits {[SecretBytes]}",
+    ]
+
+
+_Credential = NewType("_Credential", SecretStr)
+_Anything = TypeVar("_Anything")
+
+
+def _wrapped[B: SecretStr, C: (str, SecretBytes)](
+    new_type: _Credential, bound: Sequence[B], constrained: C | None
+) -> None:
+    raise NotImplementedError
+
+
+def test_a_carrier_behind_a_new_type_or_a_type_variable_is_found() -> None:
+    """A ``NewType`` admits its supertype, and a type variable its bound and constraints."""
+    assert _admitting(_seam_annotations([_wrapped])) == [
+        f"_wrapped.bound admits {[SecretStr]}",
+        f"_wrapped.constrained admits {[SecretBytes]}",
+        f"_wrapped.new_type admits {[SecretStr]}",
+    ]
+
+
+def test_an_annotation_the_walk_cannot_read_is_a_hole_rather_than_a_pass() -> None:
+    """What could admit a carrier unseen is refused: the hole check is closed, not open."""
+    assert _holes(
+        {
+            "unbounded": _Anything,
+            "any": Any,
+            "foreign": collections.deque[str],
+            "unresolved": ForwardRef("Elsewhere"),
+            "unread": typing.ParamSpec("_Params"),
+        }
+    ) == [
+        f"unbounded names the type parameter {_Anything!r}, which admits anything",
+        f"any names {Any!r}, which the walk cannot see into",
+        f"foreign names {collections.deque!r}, which the walk cannot see into",
+        f"unresolved carries the unresolved forward reference {ForwardRef('Elsewhere')!r}",
+        "unread carries ~_Params, an annotation the walk cannot read",
     ]
