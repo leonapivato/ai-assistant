@@ -1,6 +1,6 @@
 # 284. An episode is the experience of processing its activation
 
-- Status: Partially superseded by ADR-0285 (the observer's member of §6:2, §8:3 and §8:7) and ADR-0286 (§5:5's validator, for an open record; §6:2's last sentence, for an open episode; §7:1's timing of the content; §7:4's pass, for an open episode; §9:1's values) and ADR-0287 (§5:3's second sentence) and ADR-0307 (§8:1's projection, in the addition alone) and ADR-0308 (§8:1's projection, in the addition alone) and ADR-0309 (§5:1–§5:2's verdict fields; §5:4–§5:5's resume record)
+- Status: Partially superseded by ADR-0285 (the observer's member of §6:2, §8:3 and §8:7) and ADR-0286 (§5:5's validator, for an open record; §6:2's last sentence, for an open episode; §7:1's timing of the content; §7:4's pass, for an open episode; §9:1's values) and ADR-0287 (§5:3's second sentence) and ADR-0307 (§8:1's projection, in the addition alone) and ADR-0308 (§8:1's projection, in the addition alone) and ADR-0309 (§5:1–§5:2's verdict fields; §5:4–§5:5's resume record) and ADR-0318 (§4:2's `response_degraded`; §8:1's stage verdicts; §8:6's verdict phrases)
 - Date: 2026-10-02
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); the second of three steps, the episode's end entry.
 - Dependency: ADR-0283, implemented at `f5993b40`.
@@ -57,6 +57,17 @@
   replacement takes effect on ratification of ADR-0309. This reciprocal header record
   accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the
   ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0318 — three scopes. §4:2's
+  `response_degraded`: the field leaves, since only the compose stage reported it
+  (ADR-0318 §5:3); `output_degraded` stands. §8:1's stage verdicts: the projection
+  carries none, as no stage records one once ADR-0309 §3:7 removes them. §8:6's verdict
+  phrases: the table leaves, and a rendering states the episode's status and reason
+  (ADR-0318 §3:1). Every other clause stands, §8:1's other parts and §8:2–§8:5 and §8:7
+  included. The old path keeps the replaced clauses until the lane that removes or
+  changes that code merges (ADR-0318 §1:3). These replacements take effect on
+  ratification of ADR-0318. This reciprocal header record accompanies the numbered
+  draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 

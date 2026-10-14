@@ -1,6 +1,6 @@
 # 133. A producer's read is a third use of a source, and the user grants it separately
 
-- Status: Partially superseded by ADR-0294 (§2:3's subset of the three, for a new grant; §6:6's help text naming all three)
+- Status: Partially superseded by ADR-0294 (§2:3's subset of the three, for a new grant; §6:6's help text naming all three) and ADR-0318 (§2:3's subset, in `FACET`)
 - Date: 2026-08-11
 - **Note (2026-08-11, UTC): ratified, on the second flip.** `Proposed` →
   `Accepted` on the content this ADR merges with, after both required reviews
@@ -84,6 +84,13 @@
   ratification of ADR-0294. This reciprocal header record accompanies the numbered
   draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below
   are preserved.
+- Partially superseded: 2026-10-14 by ADR-0318 — one scope. §2:3's subset, in `FACET`:
+  `GrantScope` loses `FACET`, since no read is gated on it once the request-path facets
+  have left, so a scope names a non-empty subset of `INGEST` and `NOTIFY`, and a new
+  grant names `NOTIFY` alone (ADR-0318 §6:2–§6:3). Every other clause stands, §2:3's
+  independence of the members included. This replacement takes effect on ratification
+  of ADR-0318. This reciprocal header record accompanies the numbered draft under
+  ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

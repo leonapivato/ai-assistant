@@ -1,6 +1,6 @@
 # 21. Permission decisions and the audit trail
 
-- Status: Partially superseded by ADR-0192 (§4's paragraph "It bounds resolutions, not executions", and with it the scope of the trail, of `clear` and of `export`'s whole-store portability discharge) and ADR-0193 (§3's per-ruling purity clauses, for a policy constructed with an authorisation source) and ADR-0247 (§3's clause that `decide` returns `authorised_by is None` from a policy constructed with no authorisation source, in the limb reaching an egress request whose binding carries `closed_loop`: such a ruling sets `authorised_by` to the binding's own `BoundAccount.reference` and leaves `authorised_subject` unset, and the pointer is not one the policy could invent because the audit trail refuses it unless it equals that same value. That scope, and nothing else in this ADR beyond what the two records above already recorded here: §3's other clauses, §4's resolution invariant, §5's disclosure floor — which that ruling satisfies rather than relaxes, by setting the field — §5's monotonicity obligation and §6's deferral of standing grants for other actions bind as those records left them)
+- Status: Partially superseded by ADR-0192 (§4's paragraph "It bounds resolutions, not executions", and with it the scope of the trail, of `clear` and of `export`'s whole-store portability discharge) and ADR-0193 (§3's per-ruling purity clauses, for a policy constructed with an authorisation source) and ADR-0247 (§3's clause that `decide` returns `authorised_by is None` from a policy constructed with no authorisation source, in the limb reaching an egress request whose binding carries `closed_loop`: such a ruling sets `authorised_by` to the binding's own `BoundAccount.reference` and leaves `authorised_subject` unset, and the pointer is not one the policy could invent because the audit trail refuses it unless it equals that same value. That scope, and nothing else in this ADR beyond what the two records above already recorded here: §3's other clauses, §4's resolution invariant, §5's disclosure floor — which that ruling satisfies rather than relaxes, by setting the field — §5's monotonicity obligation and §6's deferral of standing grants for other actions bind as those records left them) and ADR-0318 (`step_id` on `PermissionDecision` and `ActionRequest`, and the match on it, wherever §1, §3 and §4 name them)
 - Date: 2026-07-20
 - Partially superseded: 2026-08-25 by
   [ADR-0193](0193-a-standing-recipient-grant-is-a-user-act-on-a-canonical-destination-set-and-never-covers-a-call-planned-over-external-content.md)
@@ -168,6 +168,15 @@
   reading its own §4 does not support is corrected rather than grandfathered. Appended
   dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
   other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
+- Partially superseded: 2026-10-14 by ADR-0318 — one scope. `step_id` on
+  `PermissionDecision` and on `ActionRequest`, and the match on it, wherever §1, §3 and
+  §4 name them: both fields leave, and `authorises` and the resolution invariant stop
+  comparing them, since nothing the phases run sets them (ADR-0318 §6:1). Every other
+  field, and the match on it, stands. The old path keeps the replaced scope until the
+  lane that changes it merges (ADR-0318 §1:3). This replacement takes effect on
+  ratification of ADR-0318. This reciprocal header record accompanies the numbered
+  draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 ## Context
 
 `permissions/` is an empty package with a docstring. ADR-0004 §7 ratified what
