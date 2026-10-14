@@ -162,7 +162,6 @@ from ai_assistant.permissions import (
 )
 from ai_assistant.planning import (
     InMemoryPlanStore,
-    ModelBackedPlanner,
     PlanExecution,
     SqlitePlanStore,
 )
@@ -238,16 +237,6 @@ def _goal_ids(prefix: str) -> Callable[[], str]:
 #: A naive reading: the one every seam used to accept and now must refuse.
 _NAIVE = datetime(2026, 7, 21, 12)  # noqa: DTZ001 — the naive reading is the subject
 _AWARE = datetime(2026, 7, 21, 12, tzinfo=UTC)
-
-
-#: A model reply the plan extractor can parse, so ``ModelBackedPlanner``'s seam is
-#: the clock and not the output: a bare ``FakeModelProvider()`` raises
-#: ``PlanningError('no JSON object found in the model reply')`` before the clock is
-#: reached, which would pass this table's assertion for the wrong reason.
-_PLAN_REPLY: Final = (
-    '{"rationale": "one step", "steps": [{"intent": "find a place", '
-    '"capability": "search_housing", "parameters": {}}]}'
-)
 
 
 def _naive_clock() -> datetime:
@@ -883,13 +872,6 @@ async def _fake_goal_authorization_store(now: Clock) -> None:
     await FakeGoalAuthorizationStore(now=now).live_for("goal-1", "tool-1")
 
 
-async def _planner(now: Clock) -> None:
-    """The plan the model's reply becomes is stamped ``created_at`` from the clock."""
-    await ModelBackedPlanner(FakeModelProvider(_PLAN_REPLY), now=now).plan(
-        _goal(), utterance="a request", context=_context(), capabilities=("search_housing",)
-    )
-
-
 async def _rule_based_processor(now: Clock) -> None:
     """Every proposal the rules produce carries a provenance stamped from the clock."""
     await RuleBasedFeedbackProcessor(now=now).process(_feedback())
@@ -1148,7 +1130,6 @@ SEAMS = [
     Seam("FakeGoalAuthorizations", _fake_goal_authorizations, ClockReadingError),
     Seam("FakeRecipientGrantStore", _fake_recipient_grant_store, ClockReadingError),
     Seam("FakeRecipientGrants", _fake_recipient_grants, ClockReadingError),
-    Seam("ModelBackedPlanner", _planner, PlanningError),
     Seam("RuleBasedFeedbackProcessor", _rule_based_processor, ClockReadingError),
     Seam("SqliteAuditTrail", _sqlite_audit_trail, AuditError),
     Seam("SqliteConversationStore", _sqlite_conversation_store, ConversationStoreError),

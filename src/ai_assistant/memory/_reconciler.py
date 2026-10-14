@@ -445,15 +445,14 @@ def _quoted_span(value: str) -> str:
     every non-ASCII character closes that by construction rather than by enumerating
     the two code points known today.
 
-    **A fourth copy of this transform rather than an import, because golden rule 1
-    forbids the import.** ``orchestration.composing`` and ``planning.planner`` each
-    hold a ``_quoted_span`` and ``orchestration.consolidation`` calls
-    :func:`json.dumps` directly — the inventory ADR-0183 §13 records — and ``memory``
-    may import none of those subsystems. The escaping is deliberately *identical* to
-    theirs and is pinned against ``consolidation``'s by a test, so the four cannot
+    **A copy of this transform rather than an import, because golden rule 1 forbids
+    the import.** ``orchestration.consolidation`` calls :func:`json.dumps` directly,
+    one of the copies the inventory ADR-0183 §13 records, and ``memory`` may not
+    import that subsystem. The escaping is deliberately *identical* to
+    ``consolidation``'s and is pinned against it by a test, so the copies cannot
     drift apart on the property that matters; whether the transform earns a shared
-    home is a decision reaching four subsystems and is filed as an issue rather than
-    taken inside this fence.
+    home is a decision reaching more than one subsystem and is filed as an issue
+    rather than taken inside this fence.
 
     Args:
         value: The held string, verbatim as this system carries it.
@@ -560,13 +559,12 @@ def _read(content: str, consulted: set[str]) -> dict[str, ConflictRelation] | No
 def _extract_object(content: str) -> dict[str, object] | None:
     """Decode the JSON envelope embedded in ``content``, or ``None``.
 
-    ADR-0071's scan, **duplicated** from ``learning.observer`` and
-    ``planning.planner`` rather than shared: ``memory`` may import neither
-    (golden rule 1). ADR-0077 §9.5 rules that the helper stays in the producing
-    subsystem and names the *third* model-backed producer as the trigger to
-    promote it; this is that third, and the promotion is a decision of its own
-    reaching three subsystems, filed as an issue rather than taken inside
-    ADR-0159's fence.
+    ADR-0071's scan, **duplicated** rather than shared: ``memory`` may import no
+    other subsystem's copy (golden rule 1). ADR-0077 §9.5 rules that the helper
+    stays in the producing subsystem and names the *third* model-backed producer
+    as the trigger to promote it; this was that third, and the promotion is a
+    decision of its own reaching more than one subsystem, filed as an issue rather
+    than taken inside ADR-0159's fence.
 
     Each ``{`` is tried left to right with :meth:`json.JSONDecoder.raw_decode`,
     which stops at the end of the object and ignores trailing text, so a model
