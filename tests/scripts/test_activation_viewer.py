@@ -315,6 +315,77 @@ def test_the_badges_cover_a_refusal_and_a_stage_that_failed() -> None:
     assert set(tally.badges()) == {"refused", "could_not_finish"}
 
 
+def _fed(lines: list[Any]) -> Any:
+    tally = viewer.Tally("a")
+    for line in lines:
+        tally.feed(line)
+    return tally
+
+
+def _controller(line: int, stage: str, due: str, start: int, outcome: str = "done") -> Any:
+    body = step(stage, due, start, start + 1, outcome)
+    return viewer.Entry(line, "controller", "step", at(start + 1).timestamp(), "", body)
+
+
+@pytest.mark.parametrize("outcome", ["failed", "timed_out"])
+def test_a_tolerated_stage_failure_badges_nothing_and_its_step_still_shows(outcome: str) -> None:
+    # Recall tolerates its failure and its budget, and the pass goes on (ADR-0281 §5):
+    # the activation finished, so nothing says it could not (ADR-0317 §3:3, §4:4).
+    lines = [
+        _controller(0, "recall", "not_recalled", 10, outcome),
+        _controller(1, "understanding", "not_understood", 20),
+        _controller(2, "planning", "first_round_due", 30),
+        _controller(3, "end", "nothing_due", 40),
+    ]
+    tally = _fed(lines)
+    assert tally.badges() == []
+    assert tally.summary()["ended"] == "nothing_due"
+    shown = viewer.timeline("a", lines)
+    recall = [one for one in shown["items"] if one["lane"] == "recall"]
+    assert [(one["kind"], one["tone"]) for one in recall] == [("step", outcome)]
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "round_limit_reached",
+        "stage_failed",
+        "stage_timed_out",
+        "stage_repeated",
+        "interrupted",
+        "hub_stopped",
+    ],
+)
+def test_an_activation_its_end_cut_short_is_badged_could_not_finish(rule: str) -> None:
+    tally = _fed([_controller(0, "planning", "round_due", 10), _controller(1, "end", rule, 20)])
+    assert tally.badges() == ["could_not_finish"]
+
+
+@pytest.mark.parametrize("rule", ["nothing_due", "route_taken", "no_text_input", "stopped"])
+def test_an_activation_that_ended_without_being_cut_short_has_no_such_badge(rule: str) -> None:
+    tally = _fed([_controller(0, "planning", "round_due", 10), _controller(1, "end", rule, 20)])
+    assert tally.badges() == []
+
+
+def test_a_failure_authorizing_returned_badges_only_through_the_end_it_caused() -> None:
+    failure = {"failure": {"class": "AuditError", "message": "refused"}}
+    returned = viewer.Entry(0, "authorizing", "returned", 1.0, "", failure)
+    failed = _controller(1, "authorizing", "round_unauthorized", 10, "failed")
+    assert _fed([returned, failed]).badges() == []
+    ended = _fed([returned, failed, _controller(2, "end", "stage_failed", 20)])
+    assert ended.badges() == ["could_not_finish"]
+    assert _fed([returned, failed, _controller(2, "end", "stopped", 20)]).badges() == []
+
+
+def test_a_refused_message_keeps_its_own_badge() -> None:
+    refused = {"calls": [], "message": {"allowed": False}}
+    lines = [
+        viewer.Entry(0, "authorizing", "returned", 1.0, "", refused),
+        _controller(1, "end", "nothing_due", 20),
+    ]
+    assert _fed(lines).badges() == ["refused"]
+
+
 def test_the_timeline_draws_one_lane_per_source_and_planning_by_round(server: Any) -> None:
     shown = _get_json(server.port, "/api/activation?id=act-1")
     lanes = [lane["key"] for lane in shown["lanes"]]
