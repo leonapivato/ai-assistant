@@ -86,7 +86,6 @@ from ai_assistant.core.errors import (
     InvalidGrantError,
     OversizedValueError,
     ReadTrailError,
-    UngrantableActError,
     UngrantableSourceError,
     UnknownConnectionError,
     UnresolvedEvidenceError,
@@ -100,8 +99,6 @@ from ai_assistant.core.types import (
     SECRET_VALUE_MAX_BYTES,
     ActionPlan,
     ActionRequest,
-    AnswerKind,
-    AuthorizationSettlement,
     BeliefBand,
     BeliefSummary,
     CapabilityEffect,
@@ -149,7 +146,6 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.disclosure import speakable_notification_triple
 from ai_assistant.orchestration.payloads import GRANTABLE_SCOPES, _encode, project
 from ai_assistant.testing import (
-    AUTHORIZATION_GOAL,
     Disclosure,
     FakeAuditTrail,
     FakeSourceReadTrail,
@@ -174,15 +170,6 @@ _OVERSIZED_CREDENTIAL_BYTES = 712
 
 #: A generous per-turn budget: nothing in this suite is about a deadline.
 _PATIENT = timedelta(seconds=30)
-
-#: An expiry far enough ahead that no implementation's clock reaches it, so a case
-#: about an *availability* refusal never trips ADR-0235 §1's expiry check instead.
-_FAR_FUTURE = datetime(2099, 1, 1, tzinfo=UTC)
-
-#: The same instant with its offset dropped — a wall-clock time or a UTC timestamp
-#: read back through a format that lost it, and ADR-0023 §3's point is that this
-#: layer cannot tell which.
-_NAIVE = datetime(2099, 1, 1)  # noqa: DTZ001 — the value under test is the naive one
 
 #: A limit large enough that an ordinary ``learn`` call — argument *and* result —
 #: fits inside it, and small enough that a handful of stored beliefs does not.
@@ -931,12 +918,6 @@ class SpendSubject:
 #: the limit rather than the ten thousand rows a genuinely large total needs.
 _SPEND_LIMIT: Final = 64
 
-#: A payload limit one ``AuthorizationView`` cannot fit inside, for ADR-0254 §11's
-#: unpaged listing. Small rather than realistic, for :data:`_SPEND_LIMIT`'s reason: the
-#: listing takes no ``limit`` and nothing bounds a goal's rows, so what a suite can
-#: arrange cheaply is the frame rather than the thousands of rows a real one needs.
-_AUTHORIZATION_LIMIT: Final = 64
-
 #: The reporting currency every spend fixture here is configured in.
 SPEND_CURRENCY: Final = "USD"
 
@@ -1236,6 +1217,23 @@ def near_ceiling_limit(candidate: NotificationCandidate) -> int:
 #: The members ADR-0309 §5:1 retires with the old path's turn: "Retire ``converse``;
 #: ``resume``, ``pending_confirmations``, ``cancel_read``".
 RETIRED_TURN_MEMBERS: Final = ("converse", "resume", "cancel_read", "pending_confirmations")
+
+#: The old path's listing, question and authorization members (ADR-0309 §5:1) and the
+#: recipient grant's establishing act with its listing (ADR-0313 §5:1), which leave
+#: the surface after its turn members.
+RETIRED_MEMBERS: Final = (
+    "goals",
+    "withdraw_clarification",
+    "abandon_goal",
+    "standing_authorizations",
+    "revoke_authorization",
+    "answer",
+    "questions",
+    "interrupted_questions",
+    "forget_question",
+    "grantable_decisions",
+    "establish_recipient_grant",
+)
 
 #: The one triple ADR-0206 §3 places as speakable on a channel of unbounded
 #: audience, and a candidate carrying it. Built from the placement predicate's own
@@ -1656,6 +1654,20 @@ class AssistantEngineContract(
         assert not hasattr(AssistantEngine, member)
         assert not hasattr(engine, member)
 
+    @pytest.mark.parametrize("member", RETIRED_MEMBERS)
+    def test_the_old_paths_listing_and_grant_members_are_gone(
+        self, engine: AssistantEngine, member: str
+    ) -> None:
+        """ADR-0309 §5:1 and ADR-0313 §5:1: these leave every implementation too.
+
+        :meth:`test_the_old_paths_turn_members_are_gone`'s clause over the old path's
+        goal, question and authorization members and the recipient grant's
+        establishing act, on its reason: a member an implementation kept would be a
+        door no contract describes.
+        """
+        assert not hasattr(AssistantEngine, member)
+        assert not hasattr(engine, member)
+
     async def test_every_enumeration_returns_a_tuple(self, engine: AssistantEngine) -> None:
         """ADR-0085 §3b: a caller that mutated a returned page changed nothing.
 
@@ -1664,8 +1676,6 @@ class AssistantEngineContract(
         a mutable page is a wart a spoke author has to remember.
         """
         assert isinstance(await engine.beliefs(), tuple)
-        assert isinstance(await engine.questions(), tuple)
-        assert isinstance(await engine.interrupted_questions(), tuple)
         assert isinstance(await engine.recent_conversations(), tuple)
 
     # --- ADR-0206: what a poll that asks for a rendering gets --------------
@@ -1833,8 +1843,6 @@ class AssistantEngineContract(
         "method",
         [
             "beliefs",
-            "questions",
-            "interrupted_questions",
             "recent_conversations",
             "transcript",
             "chat_changes",
@@ -1858,10 +1866,6 @@ class AssistantEngineContract(
     ) -> None:
         """The clause itself, not merely the signature that advertises it."""
         assert await engine.beliefs() == await engine.beliefs(limit=DEFAULT_PAGE_SIZE)
-        assert await engine.questions() == await engine.questions(limit=DEFAULT_PAGE_SIZE)
-        assert await engine.interrupted_questions() == await engine.interrupted_questions(
-            limit=DEFAULT_PAGE_SIZE
-        )
         assert await engine.recent_conversations() == await engine.recent_conversations(
             limit=DEFAULT_PAGE_SIZE
         )
@@ -1874,7 +1878,6 @@ class AssistantEngineContract(
         [
             "belief",
             "forget",
-            "forget_question",
             "conversation",
             "forget_conversation",
             "delete_conversation",
@@ -1893,17 +1896,6 @@ class AssistantEngineContract(
         with pytest.raises(ValueError, match=r"\w"):
             await getattr(engine, call)(blank)
 
-    async def test_a_blank_identifier_is_refused_on_the_keyword_selectors(
-        self, engine: AssistantEngine
-    ) -> None:
-        """``answer``'s identifier.
-
-        ``observe`` was the second keyword-only selector until ADR-0285 §2 removed it,
-        and ``converse``'s the first until the switch retired it (ADR-0309 §5:1).
-        """
-        with pytest.raises(ValueError, match=r"\w"):
-            await engine.answer("  ", accept=True)
-
     async def test_an_identifier_is_stripped_before_it_is_used(
         self, beliefs: BeliefSubject
     ) -> None:
@@ -1921,9 +1913,7 @@ class AssistantEngineContract(
 
     @pytest.mark.parametrize("bad", [-1, 2**63])
     @pytest.mark.parametrize("argument", ["limit", "offset"])
-    @pytest.mark.parametrize(
-        "method", ["beliefs", "questions", "interrupted_questions", "recent_conversations"]
-    )
+    @pytest.mark.parametrize("method", ["beliefs", "recent_conversations"])
     async def test_a_malformed_page_argument_is_refused_locally(
         self, engine: AssistantEngine, method: str, argument: str, bad: int
     ) -> None:
@@ -1933,9 +1923,7 @@ class AssistantEngineContract(
 
     @pytest.mark.parametrize("bad", [1.5, True, "1", None])
     @pytest.mark.parametrize("argument", ["limit", "offset"])
-    @pytest.mark.parametrize(
-        "method", ["beliefs", "questions", "interrupted_questions", "recent_conversations"]
-    )
+    @pytest.mark.parametrize("method", ["beliefs", "recent_conversations"])
     async def test_a_page_argument_that_is_not_an_integer_is_refused_locally(
         self, engine: AssistantEngine, method: str, argument: str, bad: object
     ) -> None:
@@ -2106,21 +2094,6 @@ class AssistantEngineContract(
         assert summary.lost_evidence == detail.lost_evidence
         assert summary.unsupported == detail.unsupported
 
-    # --- ADR-0078 §8: only an open question is answerable --------------------
-
-    async def test_a_question_that_is_not_open_answers_not_open(
-        self, engine: AssistantEngine
-    ) -> None:
-        """Rendering a non-open answer as anything else would claim a write.
-
-        "That question is not open — absent, lapsed, already being answered, or
-        already answered. Nothing was written." An id naming nothing is the case
-        every implementation can be held to without seeding a queue.
-        """
-        outcome = await engine.answer("no-such-question", accept=True)
-        assert outcome.kind is AnswerKind.NOT_OPEN
-        assert outcome.record_id is None
-
     # --- forgetting something absent is not an error ------------------------
 
     async def test_forgetting_what_is_not_held_reports_false_rather_than_raising(
@@ -2128,7 +2101,6 @@ class AssistantEngineContract(
     ) -> None:
         """The user's intent — "let this not be held" — is already satisfied."""
         assert await engine.forget("no-such-record") is False
-        assert await engine.forget_question("no-such-question") is False
         assert await engine.forget_conversation("no-such-conversation") is False
 
     async def test_reading_what_is_not_held_answers_none(self, engine: AssistantEngine) -> None:
@@ -4494,14 +4466,13 @@ class AssistantEngineContract(
     def overfull_spending(self) -> AssistantEngine:
         """A subject whose contract limit the two totals exceed."""
 
-    # --- ADR-0235 §3, §7: the recipient-grant surface's five ----------------
+    # --- ADR-0235 §7: the recipient-grant surface's three --------------------
     #
     # The clauses that bind **every** implementation over a subject holding nothing,
     # which is the state every deployment starts in and the one a client meets first.
-    # What a *populated* store does to each — the act, the carrier, the ceiling, the
-    # race — is the concrete engine's, in `test_recipient_grant_operations.py` and
-    # `test_engine_recipient_grants.py`, because those clauses are about orderings a
-    # fake engine's resume does not have.
+    # The establishing act and its listing left the surface (ADR-0313 §5:1). What a
+    # *populated* store does to each — the ceiling, the race — is the concrete
+    # engine's, in `test_recipient_grant_operations.py`.
 
     async def test_the_recipient_grant_reads_answer_empty_rather_than_refusing(
         self, engine: AssistantEngine
@@ -4512,7 +4483,6 @@ class AssistantEngineContract(
         mutated a returned page has changed nothing about the engine's state and may
         believe otherwise.
         """
-        assert await engine.grantable_decisions() == ()
         assert await engine.standing_recipient_grants() == ()
         assert await engine.recent_recipient_grants() == ()
 
@@ -4528,145 +4498,22 @@ class AssistantEngineContract(
         """
         assert await engine.revoke_recipient_grant("g-nothing-holds") is None
 
-    # --- ADR-0254 §11's two operations, over every implementation ------------
-    #
-    # A listing and a revocation, and §16 calls that roster complete. They are here
-    # rather than only in `orchestration`'s own module because ADR-0085 §3 makes the
-    # promoted surface *substitutable*: what `Engine`, `FakeAssistantEngine` and
-    # `HubClient` answer has to be the same, and the two that cannot be reached in a
-    # bare fixture — a row this store holds — are asserted at their **empty** state,
-    # which is exactly where the three most easily disagree.
-
-    async def test_the_authorization_listing_answers_empty_rather_than_refusing(
-        self, engine: AssistantEngine
-    ) -> None:
-        """A goal holding no authority is the ordinary state and never an error.
-
-        ADR-0254 §11 makes a goal the plan store does not hold an **empty answer
-        rather than a raise**, and a goal that holds no ``ESTABLISHED`` row the same;
-        neither is distinguishable here and neither should be. And it is a **tuple**,
-        on ADR-0085 §3b's rule: a caller that mutated a returned listing has changed
-        nothing about the engine's state and may believe otherwise.
-        """
-        assert await engine.standing_authorizations("goal-nothing-holds") == ()
-
-    async def test_revoking_an_authorization_no_store_holds_is_a_result(
-        self, engine: AssistantEngine
-    ) -> None:
-        """§16: *"an unknown id is a result and never a raise"*.
-
-        ``NO_SUCH_AUTHORIZATION`` is the store's own word for it, returned **unmapped**
-        — a second three-valued vocabulary for one fact would be the second carrier
-        ADR-0150 is named after — and this is
-        ``test_a_refusal_is_a_result_and_not_an_exception``'s rule on the one operation
-        ADR-0254 adds that can refuse.
-        """
-        settled = await engine.revoke_authorization("auth-nothing-holds")
-
-        assert settled is AuthorizationSettlement.NO_SUCH_AUTHORIZATION
-
-    @pytest.mark.parametrize("call", ["standing_authorizations", "revoke_authorization"])
-    async def test_a_blank_authorization_identifier_is_refused_locally(
-        self, engine: AssistantEngine, call: str
-    ) -> None:
-        """Both identifier arguments undergo ``Identifier`` validation (ADR-0085 §3c).
-
-        "Before any I/O", so a wire client refuses the same values without a round trip
-        — the obligation is inherited from ``AssistantEngine``'s own second clause
-        rather than restated by ADR-0254, and this is where it is checked on the two
-        arguments that decision adds.
-        """
-        with pytest.raises(ValueError, match=r"\w"):
-            await getattr(engine, call)("  ")
-
-    async def test_an_authorization_listing_too_large_for_the_frame_is_refused_whole(
-        self, overfull_authorizations: AssistantEngine
-    ) -> None:
-        """The unpaged listing's declared ``OversizedValueError``, exercised.
-
-        ``standing_authorizations`` takes no ``limit`` because *"a truncated answer to
-        'what do I authorise' is a false answer rather than a partial one"* — so the
-        listing that will not fit the frame has to be refused **whole**, and the
-        surface declares ``OversizedValueError`` for it. Without this the declaration
-        is a formality: dropping the result measurement, paging the answer or
-        truncating it would each leave every other case in this file green, because
-        they all read a listing of zero rows or of very few.
-
-        ``overfull_spending``'s shape one operation over, and asserted over every
-        implementation for ADR-0085 §3's reason: a wire client has to refuse what the
-        engine refuses, and the refusal has to survive the crossing as the same class.
-        """
-        with pytest.raises(OversizedValueError):
-            await overfull_authorizations.standing_authorizations(AUTHORIZATION_GOAL)
-
-    @pytest.fixture
-    @abstractmethod
-    def overfull_authorizations(self) -> AssistantEngine:
-        """A subject holding a listing for :data:`AUTHORIZATION_GOAL` its limit refuses.
-
-        One ``ESTABLISHED`` row is enough at :data:`_AUTHORIZATION_LIMIT`: what the
-        suite arranges cheaply is the limit, not the thousands of rows a genuinely
-        oversized listing would need.
-        """
-
-    async def test_the_authorization_listing_takes_no_limit(self, engine: AssistantEngine) -> None:
-        """ADR-0254 §11: *"It takes no ``limit``"*, for ``standing_recipient_grants``'
-        stated reason — *"a truncated answer to 'what do I authorise' is a false answer
-        rather than a partial one"*.
-
-        Asserted over the **Protocol's** signature rather than over an implementation,
-        because what §11 forbids is the parameter existing at all: an implementation
-        that accepted one and ignored it would pass every behavioural case here.
-        """
-        taken = set(inspect.signature(AssistantEngine.standing_authorizations).parameters)
-
-        assert taken == {"self", "goal_id"}
-
-    async def test_the_revocation_takes_only_the_record_it_withdraws(
-        self, engine: AssistantEngine
-    ) -> None:
-        """§11: revocation is **whole**.
-
-        *"No operation narrows a record, re-scopes one, extends one or edits one in
-        place"*, so there is no second argument through which a caller could express a
-        narrowing — and none through which a remote caller could substitute a subject.
-        """
-        taken = set(inspect.signature(AssistantEngine.revoke_authorization).parameters)
-
-        assert taken == {"self", "authorization_id"}
-
-    async def test_an_act_on_a_decision_the_trail_does_not_hold_is_refused(
-        self, engine: AssistantEngine
-    ) -> None:
-        """§3's first availability condition, and the type §3 names for every refusal.
-
-        ``UngrantableActError`` and not a bare ``ValueError``: a ``ValueError`` is not
-        an ``AssistantError``, so it would escape a command's ``except
-        (AssistantError, TransportError)`` boundary as an uncaught traceback with no
-        controlled exit code, which ADR-0042 §7 forbids.
-        """
-        with pytest.raises(UngrantableActError, match=r"\w"):
-            await engine.establish_recipient_grant("d-nothing-holds", expires_at=_FAR_FUTURE)
-
-    @pytest.mark.parametrize("call", ["establish_recipient_grant", "revoke_recipient_grant"])
     async def test_a_blank_recipient_grant_identifier_is_refused_locally(
-        self, engine: AssistantEngine, call: str
+        self, engine: AssistantEngine
     ) -> None:
-        """ADR-0235 §4: both identifier arguments undergo ``Identifier`` validation.
+        """ADR-0235 §4: the identifier argument undergoes ``Identifier`` validation.
 
         "Before any I/O", so a wire client refuses the same values without a round
         trip — the obligation is inherited from ``AssistantEngine``'s own second
         clause rather than restated by ADR-0235, and this is where it is checked on
-        the two arguments that decision adds.
+        the argument that decision adds and the surface still carries.
         """
-        arguments = {"expires_at": _FAR_FUTURE} if call.startswith("establish") else {}
         with pytest.raises(ValueError, match=r"\w"):
-            await getattr(engine, call)("  ", **arguments)
+            await engine.revoke_recipient_grant("  ")
 
     @pytest.mark.parametrize("bad", [0, -1, 2**63])
-    @pytest.mark.parametrize("method", ["grantable_decisions", "recent_recipient_grants"])
     async def test_a_non_positive_recipient_grant_limit_is_refused_locally(
-        self, engine: AssistantEngine, method: str, bad: int
+        self, engine: AssistantEngine, bad: int
     ) -> None:
         """Strictly positive, on ``recent_grants``' reason and in every implementation.
 
@@ -4676,43 +4523,15 @@ class AssistantEngineContract(
         implementation from being silently more permissive than the other.
         """
         with pytest.raises(ValueError, match=r"\w"):
-            await getattr(engine, method)(limit=bad)
+            await engine.recent_recipient_grants(limit=bad)
 
     @pytest.mark.parametrize("bad", [1.5, True, "1", None])
-    @pytest.mark.parametrize("method", ["grantable_decisions", "recent_recipient_grants"])
     async def test_a_recipient_grant_limit_that_is_not_an_integer_is_refused_locally(
-        self, engine: AssistantEngine, method: str, bad: object
+        self, engine: AssistantEngine, bad: object
     ) -> None:
         """The type, checked before the range and before any I/O."""
         with pytest.raises(TypeError, match=r"\w"):
-            await getattr(engine, method)(limit=bad)
-
-    @pytest.mark.parametrize("bad", [_NAIVE, "2099-01-01T00:00:00Z", 0, None])
-    async def test_an_instant_with_no_determinate_offset_is_refused_locally(
-        self, engine: AssistantEngine, bad: object
-    ) -> None:
-        """ADR-0085 §9 on the surface's first :data:`UtcInstant` **arguments**.
-
-        ``UtcInstant`` is a pydantic ``Annotated`` alias: a wire request is validated
-        against it by ``wire/surface.py`` before dispatch and an in-process call is
-        not, so without a local refusal the two implementations accept different
-        values — which is exactly what §9 forbids.
-
-        **Two failures, and the second is the quiet one.** A naive ``datetime``
-        reaches ADR-0235 §1's ordering comparison and raises a bare ``TypeError``,
-        which is not an ``AssistantError`` and so escapes a command's error boundary
-        (ADR-0042 §7). And ADR-0087 §2d's encoder spells every instant with a ``Z``
-        unconditionally, so a naive one that reached the wire would cross
-        **relabelled as UTC** — an expiry hours from the one the user chose, recorded
-        as though they had chosen it. ADR-0023 §3 is why this is a refusal rather
-        than an attribution.
-
-        A ``str`` is refused too, and by ``TypeError`` rather than by parsing: the
-        annotation declares a ``datetime``, and an implementation that parsed one
-        would accept what no other implementation does.
-        """
-        with pytest.raises((TypeError, ValueError), match=r"\w"):
-            await engine.establish_recipient_grant("d-1", expires_at=bad)  # type: ignore[arg-type]
+            await engine.recent_recipient_grants(limit=bad)  # type: ignore[arg-type]
 
     async def test_the_standing_listing_takes_no_page_argument(self) -> None:
         """ADR-0235 §7: no ``limit``, for ``connected_accounts``' stated reason.

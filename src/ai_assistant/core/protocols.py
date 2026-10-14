@@ -118,12 +118,10 @@ if TYPE_CHECKING:
         ActivationEffect,
         ActivationEffectClaim,
         ActivationStop,
-        AnswerOutcome,
         AttemptTransition,
         Authorization,
         AuthorizationDisposition,
         AuthorizationSettlement,
-        AuthorizationView,
         BatchHandle,
         BatchItemOutcome,
         BatchRequest,
@@ -144,7 +142,6 @@ if TYPE_CHECKING:
         ChatDevice,
         ChatStreamChunk,
         ChatStreamEnd,
-        ClarificationWithdrawal,
         ConflictRelation,
         ConnectedAccount,
         ConnectionAct,
@@ -182,7 +179,6 @@ if TYPE_CHECKING:
         ForecastOutcome,
         FrozenJsonMapping,
         Goal,
-        GoalAbandonment,
         GoalAssociation,
         GoalAttempt,
         GoalBrief,
@@ -194,7 +190,6 @@ if TYPE_CHECKING:
         GoalQuestionDisposition,
         GoalRevision,
         GoalStatus,
-        GoalSummary,
         GrantableSource,
         GrantScope,
         HeldNotification,
@@ -227,7 +222,6 @@ if TYPE_CHECKING:
         PlannerOutput,
         ProcessingStatus,
         QueryOutcome,
-        Question,
         ReadAskOutcome,
         RecipientGrant,
         RecordChunk,
@@ -14628,105 +14622,6 @@ class AssistantEngine(Protocol):
         """
         ...
 
-    # --- goals, and the two acts on one (ADR-0250 §§12, 15) ---------------
-    #
-    # **The names are new and overload none** (§15). `questions`, `answer` and
-    # `forget_question` below, with the type `Question` and its `QuestionState`, are
-    # ADR-0078 §8's **deferred memory questions** — a contradiction about a belief,
-    # answered `--accept`/`--reject`. A goal's clarification is a different thing
-    # about a different subject with a different vocabulary: it asks *which of two
-    # things did you mean*, is answered in words, and its answer revises an
-    # interpretation. Sharing a command would make the binary answer reachable for a
-    # question that has no binary answer, so these three take names of their own and
-    # no surface presents the two kinds in one list.
-
-    async def goals(
-        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
-    ) -> tuple[GoalSummary, ...]:
-        """List the user's goals, most recently engaged first (ADR-0250 §15).
-
-        The listing from which a user learns what is outstanding and obtains the
-        references :meth:`converse`'s ``reference`` keyword takes — a question's id to
-        answer it, or a goal's id to resume it, including **from another
-        conversation**, which is the one route to a cross-conversation resumption
-        (§13).
-
-        Paged on ADR-0085 §3's own convention and **answers no total count**, on
-        ADR-0074 §2's ground.
-
-        :attr:`~ai_assistant.core.types.GoalSummary.paused` **is computed here and by
-        no adapter**, so that two surfaces cannot render it differently — which is why
-        ADR-0249 §5 states the derivation once.
-
-        Args:
-            limit: How many summaries to return. The default is normative.
-            offset: How many to skip.
-
-        Returns:
-            The page, as a tuple.
-
-        Raises:
-            ValueError: If ``limit`` is not positive or ``offset`` is negative.
-        """
-        ...
-
-    async def withdraw_clarification(self, question_id: Identifier, /) -> ClarificationWithdrawal:
-        """Take back a clarification without answering it (ADR-0250 §12).
-
-        Settles an ``OPEN`` question ``WITHDRAWN``, clearing its content in the same
-        step and freeing the goal's one question slot. **It takes no reason, no free
-        text and no deadline.**
-
-        **Withdrawing removes the question and not the pause**: the attempt stays
-        ``AWAITING_CLARIFICATION`` and the goal stays open. What the act buys is the
-        freedom to ask again, which is exactly what the one-open rule's genuine
-        constraint (§8) is about. A withdrawal **records no answer**, revises no
-        interpretation and engages no goal, on ADR-0244 §11's distinction between a
-        denial and a cancellation.
-
-        Args:
-            question_id: The clarification to withdraw.
-
-        Returns:
-            Which of the two states this call reached. **An unknown id is
-            ``NOTHING_TO_WITHDRAW`` and never a raise**, which is
-            ``AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception``
-            binding at this seam.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-        """
-        ...
-
-    async def abandon_goal(self, goal_id: Identifier, /) -> GoalAbandonment:
-        """Give up on a goal, and say what that did (ADR-0250 §12).
-
-        **The only thing in this system that writes**
-        :attr:`~ai_assistant.core.types.GoalStatus.ABANDONED`: no expiry, no silence,
-        no timeout, no sweep, no reclaim, no model output and no inference writes it.
-        ADR-0249 §4 defines the member as a decision nobody but the user can take, and
-        a system that wrote it from an expiry would be recording that the user gave up
-        because they did not reply within a window.
-
-        It writes the status through ``PlanStore.set_goal_status`` and settles the
-        goal's open question ``WITHDRAWN``, **and does nothing else**: it does not move
-        the attempt's state, does not write an ``AttemptOutcome``, does not end an
-        execution and does not cancel anything in flight — what becomes of an attempt
-        on an abandoned goal is A9's. An abandoned goal leaves the open set, so nothing
-        associates to it and nothing plans for it.
-
-        Args:
-            goal_id: The goal to abandon.
-
-        Returns:
-            Which of the three states this call reached. An unknown id is
-            ``NO_SUCH_GOAL`` and never a raise.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-        """
-        ...
-
     # --- the inspection surface (ADR-0073 §7, ADR-0077 §6) ----------------
 
     async def episodes(
@@ -15184,92 +15079,6 @@ class AssistantEngine(Protocol):
             ValueError: If ``record_id`` is blank.
             MemoryStoreError: If reading or writing memory failed, including where
                 the bounded retry above was exhausted.
-        """
-        ...
-
-    # --- the deferred-question surface (ADR-0078 §8) ----------------------
-
-    async def questions(
-        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
-    ) -> tuple[Question, ...]:
-        """List the questions waiting for an answer.
-
-        Args:
-            limit: How many to return; defaults to
-                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
-            offset: How many to skip.
-
-        Returns:
-            The answerable questions, each with what accepting would retire.
-
-        Raises:
-            ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
-            DeferralStoreError: If reading the queue failed.
-            MemoryStoreError: If resolving what a question would retire failed.
-        """
-        ...
-
-    async def interrupted_questions(
-        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
-    ) -> tuple[Question, ...]:
-        """List the questions whose answer was begun and whose outcome is unrecorded.
-
-        Not "failed" and not "retryable": the system does **not** know whether the
-        memory write landed, which is the actual epistemic situation (ADR-0078 §9),
-        and this enumeration is what lets a user dispose of one deliberately.
-
-        Args:
-            limit: How many to return; defaults to
-                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
-            offset: How many to skip.
-
-        Returns:
-            The interrupted questions.
-
-        Raises:
-            ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
-            DeferralStoreError: If reading the queue failed.
-            MemoryStoreError: If resolving what a question would retire failed.
-        """
-        ...
-
-    async def answer(self, question_id: Identifier, *, accept: bool) -> AnswerOutcome:
-        """Answer one deferred question, and say what the answer did.
-
-        An accepted answer is **re-submitted through the ratified write path**, so
-        conflict detection, the policy, the atomic applier and the full-set
-        retirement rule all run unchanged — which is what lets an answer raise a
-        further question (``REDEFERRED``) rather than silently widening its own
-        scope (ADR-0078 §5).
-
-        Args:
-            question_id: The question to answer.
-            accept: Whether to have the assistant believe it.
-
-        Returns:
-            Which of the five outcomes happened, and what it left behind.
-
-        Raises:
-            ValueError: If ``question_id`` is blank.
-            MemoryStoreError: If reading or writing memory failed.
-            UnresolvedEvidenceError: If the re-submitted proposal cites a record
-                the store no longer holds.
-            DeferralStoreError: If reading or updating the queue failed.
-        """
-        ...
-
-    async def forget_question(self, question_id: Identifier) -> bool:
-        """Destroy one deferred question, so its subject can be asked again.
-
-        Args:
-            question_id: The question to destroy.
-
-        Returns:
-            Whether a question was destroyed. ``False`` where the id named nothing.
-
-        Raises:
-            ValueError: If ``question_id`` is blank.
-            DeferralStoreError: If reading or updating the queue failed.
         """
         ...
 
@@ -16273,15 +16082,14 @@ class AssistantEngine(Protocol):
 
     # --- the recipient-grant surface (ADR-0235 §3, §7) -----------------------
     #
-    # Five operations, and each is here because a surface cannot obtain it
-    # otherwise (ADR-0235 §4). Without :meth:`grantable_decisions` an adapter would
-    # read ``recent_decisions`` and join rows to find which confirmations are
-    # unanswered, which is business logic in `interfaces`. Without
-    # :meth:`standing_recipient_grants` there is no surface showing the user what
-    # they currently authorise, and ADR-0193 §9's revocation right has nowhere to
-    # sit. Without :meth:`recent_recipient_grants` an expired grant occupies a slot
-    # against the ceiling and appears in no listing, so ADR-0193 §1's stated
-    # recourse names an act the user cannot perform. Without
+    # Three operations, and each is here because a surface cannot obtain it
+    # otherwise (ADR-0235 §4); the establishing act and its listing left the surface
+    # (ADR-0313 §5:1). Without :meth:`standing_recipient_grants` there is no
+    # surface showing the user what they currently authorise, and ADR-0193 §9's
+    # revocation right has nowhere to sit. Without :meth:`recent_recipient_grants`
+    # an expired grant occupies a slot against the ceiling and appears in no
+    # listing, so ADR-0193 §1's stated recourse names an act the user cannot
+    # perform. Without
     # :meth:`revoke_recipient_grant` the only exit from a grant is ``clear`` on a
     # store no surface holds.
     #
@@ -16314,229 +16122,6 @@ class AssistantEngine(Protocol):
     # (ADR-0060), observes no caller-owned container (ADR-0065), and returns a
     # detached snapshot** — the tuple, the records in it, and everything mutable
     # those reach (ADR-0018 §3), as every neighbouring promoted read does.
-
-    async def grantable_decisions(
-        self, *, limit: int = DEFAULT_PAGE_SIZE
-    ) -> tuple[PermissionDecision, ...]:
-        """List the recorded ``CONFIRM``s an establishing act may ride (ADR-0235 §3).
-
-        The read that makes the act reachable without a surface joining trail rows
-        for itself. It returns, most recent first under ADR-0186 §2's order, those
-        of the trail's most recent ``limit`` decisions meeting **every** condition
-        :meth:`establish_recipient_grant` requires.
-
-        **It offers history and never outstanding work** (ADR-0235 §3). A decision
-        this returns is not a park, holds no turn, blocks nothing, expires under no
-        sweep and is reclaimed by nothing; no surface presents one as a task, a
-        queue, a to-do, a badge, an unread count, an alert, or anything a reader
-        could take as owed. It is deliberately **not** named "confirmations":
-        :meth:`pending_confirmations` returns
-        :class:`~ai_assistant.core.types.Confirmation` records and names outstanding
-        work, and the collision is precisely where this distinction has to be
-        sharpest. A decision a park holds is never returned here, and one returned
-        here is never returned by :meth:`pending_confirmations`.
-
-        **``limit`` bounds the rows read and therefore also the rows returned**, so
-        a grantable decision older than the window is not offered and this makes no
-        unbounded read of a Tier 1 store. The recourse is a larger ``limit``. This
-        mints no filtered, indexed or per-kind read of the trail and adds no member
-        to :class:`AuditTrail`.
-
-        **A decision is offered only where the window read is *complete for it***,
-        which holds when the read returned fewer rows than ``limit``, and otherwise
-        when that decision's ``decided_at`` is **strictly after** the ``decided_at``
-        of the oldest row the read returned. A decision at that boundary instant is
-        **not** offered, whatever else it satisfies, and the recourse is a larger
-        ``limit``.
-
-        That rule is what makes "the trail holds no decision resolving it"
-        decidable from the window, and it rests on two clauses of the
-        :class:`AuditTrail` contract and on nothing else: :meth:`AuditTrail.record`
-        refuses a resolution whose confirmation was decided *after* it, so a
-        resolution's ``decided_at`` is at or after its confirmation's, **equal
-        timestamps included**; and :meth:`AuditTrail.recent` returns the newest rows
-        by ``decided_at`` descending, ties broken by ``id`` ascending. So a
-        candidate strictly newer than the boundary has any resolution of it inside
-        the window too, while a candidate *sharing* the boundary instant may have
-        one tie-broken just outside it — and offering that one would be offering a
-        confirmation the user has already answered.
-
-        Args:
-            limit: How many trail rows to read, and thereby the most this can
-                return. Defaults to
-                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, and an
-                implementation called without it behaves as though it had been
-                passed.
-
-        Returns:
-            A detached snapshot of the offerable decisions, most recent first.
-            Empty means none is offerable, never that the trail could not be read.
-
-        Raises:
-            ValueError: If ``limit`` is not strictly positive, or is outside
-                ``[0, 2**63)`` — refused rather than clamped or passed through, for
-                the reason ADR-0021 §4 gives and ADR-0186 §3 restates. Refused
-                **locally and before any I/O**, in every implementation.
-            TypeError: If ``limit`` is not an integer, or is a ``bool``.
-            AuditError: If the trail could not be read.
-        """
-        ...
-
-    async def establish_recipient_grant(
-        self, decision_id: DurableIdentifier, *, expires_at: UtcInstant
-    ) -> RecipientGrant:
-        """Perform the establishing act on a recorded ``CONFIRM`` no park holds.
-
-        The second door, and it exists because the population it serves is
-        **history rather than work** (ADR-0235 §3). Such a decision is not a
-        :class:`~ai_assistant.core.types.PlanStep`, reaches neither an executor nor
-        an execution state, carries neither a ``step_id`` nor an ``execution_id``,
-        and the turn it belonged to composed and finished. Answering it is an act
-        on a record; answering a park is an act on work, and that is what makes one
-        door insufficient.
-
-        It reads the named decision from the :class:`AuditTrail`, obtains the
-        resolving ruling from ``ActionPolicy.resolve`` with ``approved=True``, and —
-        where that ruling is an ``ALLOW`` and the expiry check below passes —
-        records that answer, builds the grant with
-        :meth:`~ai_assistant.core.types.RecipientGrant.established_from`, records
-        the grant, and returns it.
-
-        **It resumes nothing and services nothing.** The ``ALLOW`` it records
-        authorises a call that has already been abandoned: no lane executes it,
-        re-composes the turn it belonged to, re-plans, re-services a read, or treats
-        the recorded answer as making anything runnable (ADR-0231 §9's first limb,
-        binding entire).
-
-        **It is available on a decision meeting all seven of the following, and is
-        refused on any other**, in this order:
-
-        1. the trail holds it;
-        2. its ruling is a ``CONFIRM``;
-        3. its ``step_id`` **and** its ``execution_id`` are both unset;
-        4. the trail holds no decision resolving it;
-        5. its ``expires_at`` is unset or is strictly after the instant of the call
-           (ADR-0059 §1);
-        6. its ``egress_binding`` is an
-           :class:`~ai_assistant.core.types.EgressBinding` — never ``None``, never
-           an :class:`~ai_assistant.core.types.OriginUnrecordedBinding`, never a
-           :class:`~ai_assistant.core.types.CoverageUnrecordedBinding`;
-        7. and that binding's ``planned_with_external_content`` is ``False``.
-
-        The third is what keeps the two populations apart and is **structural
-        rather than a rule to remember**: a confirmation carrying either binding
-        field belongs to a step of an execution, whose answer is the resuming one,
-        and :meth:`resume` is the only door to it. No lane relaxes it and no lane
-        reaches this operation from a park by clearing either field.
-
-        The sixth is stated over the binding's **type** and refused here rather than
-        inherited: ``ActionPolicy.resolve`` returns no ``ALLOW`` on either
-        unrecorded epoch, so the act could not complete in any case, and refusing
-        before the trail is asked keeps the act from being offered on a row it can
-        never ride.
-
-        The seventh is ADR-0193 §2's third clause read at this surface, and it is
-        **refused here rather than left to the constructor** because the constructor
-        runs too late: ``resolve`` returns an ``ALLOW`` on an approved confirmation
-        carrying ``planned_with_external_content``, so an operation that checked
-        nothing would record the answer and *then* meet ``established_from``'s
-        refusal — leaving an ``ALLOW`` in the trail, no grant, and a user told
-        nothing they could act on.
-
-        **Where the answer is going to be an ``ALLOW``, an ``expires_at`` that is
-        not strictly after the instant that will stamp that answer is refused**,
-        after the policy has ruled and **before** that answer is recorded, naming
-        the instant it was compared against (ADR-0235 §1). The instant is chosen
-        once and used for both, because two clock reads admit an expiry that passes
-        the check and fails the constructor.
-
-        **That check is scoped to the establishing path and reaches no other
-        outcome.** Where the policy answers other than an ``ALLOW`` — which its
-        second obligation expressly permits for a confirmation answered long after
-        it was asked — **that answer is recorded**, the supplied instant is not
-        consulted, and this raises
-        :class:`~ai_assistant.core.errors.PermissionDeniedError`. Suppressing the
-        record would be the failure ADR-0042 §4's guarantee exists to prevent, one
-        operation over. Because a confirmation has one answer (ADR-0044 §2b) the
-        decision is thereby settled, and condition 4 then keeps the act from being
-        offered on it again.
-
-        Raising ``PermissionDeniedError`` here does **not** breach the shared
-        conformance suite's "a refusal is a result and not an exception": that
-        clause is stated over :meth:`resume`, whose ``TurnOutcome`` carries a
-        disposition a refusal can be reported *in*. This method's return **is** the
-        grant, there is no disposition to carry, and the ruling is recorded in the
-        trail — so nothing about the refusal is hidden, and what the raise reports
-        is that no grant exists, which is true.
-
-        **Condition 4 can also fail late, and the outcome is decided rather than
-        left to an implementation** (ADR-0235 §3). This reads the trail, finds no
-        resolution, and only then awaits ``resolve``; a second caller may resolve
-        the same ``CONFIRM`` inside that interval, and :meth:`AuditTrail.record`
-        then refuses **this** answer. Where ``record`` refuses with
-        :class:`~ai_assistant.core.errors.InvalidResolutionError`, this reads the
-        trail **once more** for a resolution of the named confirmation and raises
-        :class:`~ai_assistant.core.errors.UngrantableActError` where one is now
-        recorded — condition 4 failing late, reported as the same type it is
-        reported as when it fails at the check. Where no resolution is recorded the
-        ``InvalidResolutionError`` **propagates unchanged**, and so does every other
-        :class:`~ai_assistant.core.errors.AuditError` in every case: a fault is not
-        a settled decision, and converting one into the other would hide it.
-
-        The race is **settled and never retried**. No lane re-reads and re-attempts
-        the act, composes a second answer, waits and tries again, or reports the
-        loss as a fault. The confirmation now has its one answer, condition 4 keeps
-        it out of :meth:`grantable_decisions` for good, and the user's recourse is
-        to make the **next** such call standing.
-
-        **The engine composes no answer of its own.** ``ActionPolicy.resolve``
-        authors every ruling, the trail records it, ``core`` transcribes the grant
-        through
-        :meth:`~ai_assistant.core.types.PermissionDecision.from_confirmation` and
-        :meth:`~ai_assistant.core.types.RecipientGrant.established_from`, and the
-        store admits it; this operation sequences those four and supplies the ids
-        and instants a caller that records supplies. It reaches no
-        :class:`RecipientGrants` query face, evaluates no coverage, and reads no
-        ``authorised_by``.
-
-        Args:
-            decision_id: The recorded ``CONFIRM`` to answer, from **this surface's
-                own** :meth:`grantable_decisions` listing. Undergoes
-                :data:`~ai_assistant.core.types.Identifier` validation before any
-                I/O, as every identifier argument on this surface does.
-            expires_at: The instant past which the grant ceases to be live, **stated
-                by the user and by nobody else** (ADR-0235 §1): no surface, adapter,
-                gateway or engine defaults it, derives it, extends it, rounds it,
-                offers it pre-filled, or supplies one where the user supplied none.
-
-        Returns:
-            A detached snapshot of the grant the store accepted.
-
-        Raises:
-            ValueError: If ``decision_id`` is blank or has no UTF-8 encoding.
-                Refused locally, before any I/O.
-            UngrantableActError: If any of the seven conditions above fails, at the
-                check or late against the trail's own invariant, or if the expiry
-                check refuses. **No answer is recorded** in any of these cases,
-                nothing is sent, and the call may still be answered elsewhere
-                without the standing request.
-            PermissionDeniedError: If the policy answered other than an ``ALLOW``.
-                That answer **is** recorded and the decision is thereby settled.
-            AuditError: If the trail could not be read, or refused the answer on any
-                ground other than a resolution recorded in the interval.
-            InvalidRecipientGrantError: If the store refused the grant — the ceiling
-                (:class:`~ai_assistant.core.errors.RecipientGrantCeilingError`), a
-                duplicate subject
-                (:class:`~ai_assistant.core.errors.DuplicateRecipientGrantError`),
-                or any other ground. The answer **stays recorded**: the trail is
-                append-only and nothing retracts it, nothing already in the grant
-                store is removed, narrowed, expired, evicted or truncated to make
-                room, and no looser grant is minted in its place.
-            RecipientGrantError: If the grant store could not be written. It
-                propagates unchanged here, where nothing has been sent and there is
-                no outcome to destroy.
-        """
-        ...
 
     async def standing_recipient_grants(self) -> tuple[RecipientGrant, ...]:
         """List every **live** standing recipient grant (ADR-0235 §7).
@@ -16894,148 +16479,6 @@ class AssistantEngine(Protocol):
             InvalidDestinationTrustError: If the trust store could not be read or
                 written, on any ground other than the record having been revoked in the
                 interval.
-        """
-        ...
-
-    # --- the goal-authorization surface (ADR-0254 §11) -----------------------
-    #
-    # **Exactly two operations, and the roster is closed** (ADR-0254 §16): a
-    # listing and a revocation, and no lane invents a third. Proposing a row,
-    # settling one, correcting one and opening one are `orchestration`'s writer
-    # clauses (§15) and reach no client; reading a row whole reaches none either,
-    # because §16 promotes no member of `GoalAuthorizations`,
-    # `AuthorizationResolution` or `GoalAuthorizationStore` and lets no
-    # `Authorization` cross a frame.
-    #
-    # **The listing is per goal, and that is a decision rather than an omission**
-    # (§11). §16's `standing(goal)` is keyed on a goal and ADR-0254 adds no
-    # goal-free read: §1's uniqueness bounds the `ESTABLISHED` set per goal and
-    # declaration and bounds it not at all across goals, and this store carries no
-    # outstanding-count ceiling of the kind ADR-0193 §1 gives the grant store — so
-    # a cross-goal read would have to choose between a truncated answer and an
-    # unbounded one, and :meth:`standing_recipient_grants`' own reason forbids the
-    # first. ADR-0254 §19 books the cross-goal listing with what fires it.
-
-    async def standing_authorizations(self, goal_id: Identifier) -> tuple[AuthorizationView, ...]:
-        """What one goal's recorded acts still authorise (ADR-0254 §11).
-
-        The ``ESTABLISHED`` rows of that goal, **live and lapsed**, read from
-        :meth:`GoalAuthorizationStore.standing` and projected into
-        :class:`~ai_assistant.core.types.AuthorizationView`. A lapsed row is returned
-        because a user can then see and revoke what they once authorised, which is
-        ADR-0193 §9's own reason for keeping an expired grant visible one store over,
-        and it is why the withdrawal path needs no history query. A ``PROPOSED`` row is
-        **never** here — that is a question the user has not answered and not an
-        authority they hold — and ``standing`` is what makes that a fact about the read
-        rather than a filter a renderer applies.
-
-        **It takes no ``limit``**, for :meth:`standing_recipient_grants`' stated
-        reason: *"a truncated answer to 'what do I authorise' is a false answer rather
-        than a partial one"*.
-
-        **It composes, filters, enriches and summarises nothing beyond the
-        projection.** The goal's statement is read through :meth:`PlanStore.get_goal`,
-        and **a goal that store does not hold is an empty answer rather than a raise**.
-        No other store is read: no recipient grant annotates a row, no audit row is
-        consulted, and no ``Settings`` value reaches the answer.
-
-        **The liveness is the engine's one clock reading** (ADR-0254 §16), taken once
-        for the whole listing, because ``standing`` evaluates none and reports none — a
-        listing that read an advancing clock per row could answer over a set true at no
-        real instant (ADR-0193 §9).
-
-        **:attr:`~ai_assistant.core.types.AuthorizationView.live` reports the row's own
-        liveness and never the standing of another act.** A row whose ``origin`` is
-        ``OPENING_ACT`` rests on a recipient grant ADR-0254 §6 re-takes at every
-        dispatch, and that grant may have lapsed or been revoked since. Such a row
-        **still appears and still reads live** where §1's predicate holds, because
-        hiding an ``ESTABLISHED`` row the user may revoke would hide an authority they
-        hold. **The listing is a record of what the user authorised and is not a
-        promise that the next call will be allowed** — ``decide`` is the only thing
-        that answers that (§13), and this operation reads no grant seam at all.
-
-        **The rendering bar** (ADR-0254 §11, ADR-0193 §11). The view carries the row's
-        ``id``, because that is the handle :meth:`revoke_authorization` takes and a
-        listing that named no id would state an act and withhold the means to perform
-        it. It carries **no** subject digest, **no** ``BoundAccount`` and no account
-        reference, **no** connection reference, **no** ``confirmation``, **no**
-        ``supersedes``, **no** resolution, **no** ``destinations`` and no basis beyond
-        each member's span; the goal is rendered by **statement** and never by id.
-
-        Args:
-            goal_id: The goal whose standing authorities to list.
-
-        Returns:
-            One view per ``ESTABLISHED`` row of that goal, in the store's own order,
-            and an empty tuple where the goal holds none or the plan store does not
-            hold the goal.
-
-        Raises:
-            ValueError: If ``goal_id`` is blank or has no UTF-8 encoding. Refused
-                locally, before any I/O.
-            AuthorizationError: If the authorization store could not be read.
-            PlanningError: If the plan store could not be read.
-            OversizedValueError: If the listing does not fit the contract limit.
-        """
-        ...
-
-    async def revoke_authorization(
-        self, authorization_id: DurableIdentifier
-    ) -> AuthorizationSettlement:
-        """Withdraw one standing authorization (ADR-0254 §11).
-
-        :meth:`GoalAuthorizationStore.settle` to ``REVOKED`` on ADR-0254 §1's one edge
-        out of ``ESTABLISHED``, its answer returned **unmapped**: a second three-valued
-        vocabulary for one fact is exactly the second carrier ADR-0150 is named after,
-        so the surface renders prose from the member and never the member's own
-        spelling.
-
-        **An unknown id is a result and never a raise**, which is
-        ``AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception``'s
-        rule and :meth:`revoke_recipient_grant`'s own shape one store over. A ``bool``
-        was considered and refused — it cannot tell an unknown id from a row that was
-        not at the source, which this surface must tell apart (§16).
-
-        **Which members can reach a caller here.**
-        :attr:`~ai_assistant.core.types.AuthorizationSettlement.SETTLED` where the row
-        stood ``ESTABLISHED`` and now stands ``REVOKED``;
-        :attr:`~ai_assistant.core.types.AuthorizationSettlement.NOT_AT_SOURCE` where
-        the store holds the row and §1's one edge into ``REVOKED`` does not leave where
-        it stands — a ``PROPOSED`` row, a retired one, and the loser of two racing
-        settlements alike; and
-        :attr:`~ai_assistant.core.types.AuthorizationSettlement.NO_SUCH_AUTHORIZATION`
-        where the store holds no row with that id.
-        **:attr:`~ai_assistant.core.types.AuthorizationSettlement.WOULD_DUPLICATE` is
-        unreachable here** and is not a reason to mint a narrower type: it is reachable
-        only on a settlement **to ``ESTABLISHED``**, and a revocation settles to
-        ``REVOKED``, so the member is excluded by the edge rather than by the
-        vocabulary.
-
-        **A ``PROPOSED`` row is therefore not revocable**, and that is §1's graph
-        rather than an omission: a question the user has not answered is withdrawn by
-        declining it or by letting it lapse, and ``standing`` never offers one to a
-        listing in the first place. **A lapsed ``ESTABLISHED`` row is revocable**,
-        which is why ``standing`` returns it.
-
-        **Never refused for a ceiling** — there is none — and **revocation is whole**:
-        no operation narrows a record, re-scopes one, extends one or edits one in place
-        (§1). It is prospective: a recorded ``ALLOW`` stays recorded and stays true
-        about the moment it was made, and a call already dispatched is not recalled.
-
-        Args:
-            authorization_id: The row to withdraw, as
-                :attr:`~ai_assistant.core.types.AuthorizationView.id` renders it.
-
-        Returns:
-            The store's own settlement outcome, unmapped and unrenamed.
-
-        Raises:
-            ValueError: If ``authorization_id`` is blank or has no UTF-8 encoding.
-                Refused locally, before any I/O.
-            AuthorizationError: If the authorization store could not be read or
-                written.
-            PlanningError: If the injected clock's reading is not conforming.
-            OversizedValueError: If the argument exceeds the contract limit.
         """
         ...
 

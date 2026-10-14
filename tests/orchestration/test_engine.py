@@ -41,7 +41,6 @@ from ai_assistant.core.protocols import (
 )
 from ai_assistant.core.types import (
     ActionPlan,
-    AnswerKind,
     AssociationVerdict,
     Attestation,
     BeliefBand,
@@ -58,7 +57,6 @@ from ai_assistant.core.types import (
     GoalAssociation,
     GoalBrief,
     Idempotency,
-    MemoryDecisionKind,
     MemoryKind,
     MemorySource,
     PlannerOutput,
@@ -66,7 +64,6 @@ from ai_assistant.core.types import (
     ProposedAction,
     Provenance,
     ProvisioningState,
-    QuestionState,
     ReadAskOutcome,
     Reversibility,
     RiskLevel,
@@ -2759,66 +2756,6 @@ async def test_beliefs_propagates_rather_than_returning_a_page_it_could_not_reso
         await harness.engine.beliefs()
 
     assert store.batches > 1, "the refusal landed after a belief had already resolved"
-
-
-# --- the deferred-question surface, through the façade (ADR-0078 §8, §9) ----
-
-
-async def test_a_parked_deferred_question_is_listed_and_answered_through_the_facade() -> None:
-    """The façade's question reach, in one pass (ADR-0078 §8 reach 2).
-
-    The loop parks the question, as any producer that rules ``ASK_USER`` does;
-    ``questions`` lists it and ``answer`` commits it. The façade is the only surface
-    `interfaces` has (ADR-0042 §1), and ``learn`` no longer reaches it (ADR-0293 §11).
-    """
-    harness = Harness()
-    harness.policy_for_writer.kind = MemoryDecisionKind.ASK_USER
-
-    [written] = await harness.loop.learn(feedback())
-    assert written.admission is not None
-    assert written.admission.deferral is not None
-
-    [question] = await harness.engine.questions()
-    assert question.id == written.admission.deferral.id
-    assert question.state is QuestionState.OPEN
-    assert await harness.engine.interrupted_questions() == (), "the two reads are disjoint"
-
-    harness.policy_for_writer.kind = MemoryDecisionKind.ACCEPT
-    answered = await harness.engine.answer(question.id, accept=True)
-
-    assert answered.kind is AnswerKind.APPLIED
-    assert answered.record_id is not None
-    assert await harness.engine.belief(answered.record_id) is not None
-    assert await harness.engine.questions() == (), "and it is no longer waiting"
-
-
-async def test_forget_question_relays_the_disposal_and_reports_an_unknown_id() -> None:
-    """§9's first recovery step, relayed unconditionally (ADR-0007)."""
-    harness = Harness()
-    harness.policy_for_writer.kind = MemoryDecisionKind.ASK_USER
-    [written] = await harness.loop.learn(feedback())
-    assert written.admission is not None
-    assert written.admission.deferral is not None
-    question_id = written.admission.deferral.id
-
-    assert await harness.engine.forget_question(question_id) is True
-    assert await harness.engine.forget_question(question_id) is False
-    assert await harness.engine.questions() == ()
-
-
-async def test_the_question_surface_is_refused_while_the_engine_is_shutting_down() -> None:
-    """Every façade method rejects new work once ``aclose`` has been entered (§2)."""
-    harness = Harness()
-    await harness.engine.aclose()
-
-    for call in (
-        harness.engine.questions(),
-        harness.engine.interrupted_questions(),
-        harness.engine.answer("q-1", accept=True),
-        harness.engine.forget_question("q-1"),
-    ):
-        with pytest.raises(RuntimeError, match="shutting down"):
-            await call
 
 
 # --- ADR-0119 §8: one OPERATION trace per call, at one wiring point -----

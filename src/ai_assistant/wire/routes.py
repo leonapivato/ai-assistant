@@ -1,7 +1,10 @@
 """ADR-0298 §5's route table, and the half of it the wire server checks.
 
-**Every method on the promoted surface is in exactly one row**, except ``receive``,
-which the kind of the input's target places in one of two (ADR-0298 §5:1).
+**Every method on the promoted surface is in exactly one row** (ADR-0298 §5:1).
+``receive`` was the exception, placed by its input's target in the legacy-turn row
+or the spoke-traffic row; the legacy-turn row left with its last member (ADR-0309
+§5:1), and a conversational input is refused at decode before any row is read
+(ADR-0313 §4:1), so ``receive`` is spoke traffic alone.
 :data:`ROWS` is the table as the ADR states it, and ``tests/wire/test_routes.py``
 fails while any member of :data:`~ai_assistant.wire.surface.METHODS` is in no row,
 or in more rows than the table allows it (§5:4), and while a row names a method the
@@ -31,7 +34,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final, NoReturn
 
 from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
-from ai_assistant.core.types import ChannelIdentity, ChannelInput, DeviceRole, NewConversation
+from ai_assistant.core.types import DeviceRole
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -52,8 +55,6 @@ class Route(StrEnum):
         READING_ONE: Be the named conversation's end for reading.
         READING_MANY: Hold a role; the answer holds only conversations the device
             reads.
-        LEGACY_TURN: Be the named conversation's end for writing and for reading, or
-            where none is named, be in "my devices" for both.
         SPOKE_TRAFFIC: Hold the role of host of spokes.
         NOTIFICATION_POLL: Be in "my devices" for reading, as the connecting device.
     """
@@ -65,23 +66,21 @@ class Route(StrEnum):
     WRITING = "writing"
     READING_ONE = "reading_one"
     READING_MANY = "reading_many"
-    LEGACY_TURN = "legacy_turn"
     SPOKE_TRAFFIC = "spoke_traffic"
     NOTIFICATION_POLL = "notification_poll"
 
 
-#: The method whose row the input's target decides (ADR-0298 §5:1, §5:2).
-#: ``receive_streaming`` was the other until ADR-0293 §11 took it off the surface.
-TARGETED: Final[frozenset[str]] = frozenset({"receive"})
-
-#: ADR-0298 §5's table, row by row, with ``receive`` in both rows its target may place
-#: it in. ``converse_streaming``, ``learn`` and ``receive_streaming`` left the surface
-#: under ADR-0293 §11, and their names left this table with them, which the closure
-#: test asks of a removal; ``converse_spoken`` left with spoken conversation (ADR-0313
-#: §3:1), and ``converse``, ``resume``, ``cancel_read`` and ``pending_confirmations``
-#: with the old path's turn (ADR-0309 §5:1). ``receive``'s legacy-turn row is one no
-#: request reaches: a conversational input is refused at decode, before any row is
-#: read (§4:1).
+#: ADR-0298 §5's table, row by row. ``converse_streaming``, ``learn`` and
+#: ``receive_streaming`` left the surface under ADR-0293 §11, and their names left this
+#: table with them, which the closure test asks of a removal; ``converse_spoken`` left
+#: with spoken conversation (ADR-0313 §3:1); ``converse``, ``resume``, ``cancel_read``,
+#: ``pending_confirmations``, ``goals``, ``withdraw_clarification``, ``abandon_goal``,
+#: ``standing_authorizations``, ``revoke_authorization``, ``answer``, ``questions``,
+#: ``interrupted_questions`` and ``forget_question`` with the old path (ADR-0309 §5:1);
+#: and ``grantable_decisions`` and ``establish_recipient_grant`` with the establishing
+#: act (ADR-0313 §5:1). The legacy-turn row left with ``answer``, its last member, and
+#: ``receive`` is spoke traffic alone: a conversational input is refused at decode,
+#: before any row is read (ADR-0313 §4:1).
 #:
 #: ADR-0300 §8's four story commands, ``story_summary``, ``story_standing``,
 #: ``add_story_note`` and ``move_story_members``, postdate the table and are placed
@@ -91,7 +90,6 @@ TARGETED: Final[frozenset[str]] = frozenset({"receive"})
 ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.COMMAND: frozenset(
         {
-            "abandon_goal",
             "activation_stories",
             "add_story_note",
             "belief",
@@ -104,26 +102,20 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "episode_chunk",
             "episodes",
             "establish_destination_trust",
-            "establish_recipient_grant",
             "export_decisions",
             "export_invocations",
             "export_reads",
             "forget",
             "forget_notification",
-            "forget_question",
-            "goals",
             "grant",
-            "grantable_decisions",
             "grantable_sources",
             "guard",
-            "interrupted_questions",
             "link_story",
             "merge_stories",
             "move_story_members",
             "my_devices",
             "notification_preferences",
             "notifications",
-            "questions",
             "recent_connection_acts",
             "recent_decisions",
             "recent_grants",
@@ -132,13 +124,11 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "recent_recipient_grants",
             "reprovision_account",
             "revoke",
-            "revoke_authorization",
             "revoke_destination_trust",
             "revoke_recipient_grant",
             "set_notification_preferences",
             "spend_totals",
             "split_story",
-            "standing_authorizations",
             "standing_destination_trust",
             "standing_grants",
             "standing_recipient_grants",
@@ -150,7 +140,6 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "story_standing",
             "unguard",
             "unlink_story",
-            "withdraw_clarification",
         }
     ),
     Route.SETTING_DEVICES: frozenset({"set_my_devices", "set_conversation_devices"}),
@@ -160,14 +149,9 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.READING_ONE: frozenset({"transcript", "conversation"}),
     # ADR-0298 §5 names "the change stream" in this row; `follow_chat` is its name.
     Route.READING_MANY: frozenset({"recent_conversations", "chat_changes", "follow_chat"}),
-    Route.LEGACY_TURN: frozenset({"answer", *TARGETED}),
-    Route.SPOKE_TRAFFIC: TARGETED,
+    Route.SPOKE_TRAFFIC: frozenset({"receive"}),
     Route.NOTIFICATION_POLL: frozenset({"next_notification"}),
 }
-
-#: The ``channel_type`` of a channel whose input is a conversation's, which places a
-#: targeted method in the legacy-turn row (ADR-0298 §5:1's table).
-CONVERSATION_CHANNEL: Final = "conversation"
 
 #: The role each roster-checked row needs (ADR-0298 §5:6). A row absent here needs no
 #: role of the wire server: its check, where it has one, is the engine's.
@@ -179,37 +163,24 @@ _ROLE_NEEDED: Final[Mapping[Route, DeviceRole]] = {
 }
 
 
-def route_of(method: str, arguments: Mapping[str, Any]) -> Route | None:
-    """The row a request is in, by its method and, for ``receive``, its target.
+def route_of(method: str) -> Route | None:
+    """The row a request is in, by its method (ADR-0298 §5:2).
 
-    ADR-0298 §5:2: a request's kind is its envelope ``method``, and for ``receive``
-    also the input's target — its ``kind``, and a channel's
-    ``channel_type`` — as validated; no row is chosen by any other part of a request.
+    A request's kind is its envelope ``method``, and no row is chosen by any other
+    part of a request. ``receive``'s target once chose between two rows; with the
+    legacy-turn row gone (ADR-0309 §5:1) and a conversational input refused at
+    decode (ADR-0313 §4:1), every ``receive`` that reaches a row is spoke traffic.
 
     Args:
         method: The envelope's ``method``.
-        arguments: The request's arguments, decoded and validated.
 
     Returns:
         The row, or ``None`` for a method in no row.
     """
-    if method in TARGETED:
-        target = _target(arguments)
-        if isinstance(target, NewConversation):
-            return Route.LEGACY_TURN
-        if isinstance(target, ChannelIdentity) and target.channel_type == CONVERSATION_CHANNEL:
-            return Route.LEGACY_TURN
-        return Route.SPOKE_TRAFFIC
     for route, methods in ROWS.items():
         if method in methods:
             return route
     return None
-
-
-def _target(arguments: Mapping[str, Any]) -> object:
-    """The validated input's target, or ``None`` where the request carried no input."""
-    held = arguments.get("input")
-    return held.target if isinstance(held, ChannelInput) else None
 
 
 def check_request(
@@ -243,7 +214,7 @@ def check_request(
             hold, names a device the hub does not know, is a poll relayed for
             another device (§5:5), or is in no row and not the hub's (§5:3).
     """
-    route = route_of(method, arguments)
+    route = route_of(method)
     if route is None:
         if not device.is_hub:
             _refuse(f"{method} is in no row of the route table", DeviceRefusal.NOT_ALLOWED)
@@ -279,9 +250,7 @@ def _refuse(message: str, reason: DeviceRefusal) -> NoReturn:
 
 
 __all__ = [
-    "CONVERSATION_CHANNEL",
     "ROWS",
-    "TARGETED",
     "Route",
     "check_request",
     "route_of",

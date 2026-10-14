@@ -288,6 +288,18 @@ _NAMESPACE: Final = {
 #: ``DriveWithheld``, ``TextChannelResult``, or the two text reply declarations, which
 #: only ``TextChannelResult``'s ``TurnOutcome`` reached. They stay in ``core`` until the
 #: types lanes retire them; they are no longer contract surface.
+#:
+#: **ADR-0309 §5:1 and ADR-0313 §5:1 take eleven more off it.** ``goals``,
+#: ``withdraw_clarification`` and ``abandon_goal`` were the only members carrying
+#: ``GoalSummary``, its ``Clarification``, ``ClarificationWithdrawal`` and
+#: ``GoalAbandonment``; ``questions``, ``interrupted_questions``, ``answer`` and
+#: ``forget_question`` the only ones carrying ``Question``, ``QuestionState``,
+#: ``Retirement``, ``Warrant``, ``AnswerKind``, ``AnswerOutcome`` and
+#: ``SuccessorLink``. ``standing_authorizations`` and ``revoke_authorization``
+#: carried ``AuthorizationView`` and ``AuthorizationSettlement``, which this roster
+#: never named, and ``grantable_decisions`` and ``establish_recipient_grant`` carried
+#: nothing a member that stays does not. The eleven types stay in ``core`` until the
+#: types lanes retire them.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
         "EpisodeCaptureReport",
@@ -306,10 +318,6 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "SpokenReply",
         "InformationalEventResult",
         "ChannelResult",
-        "Clarification",
-        "ClarificationWithdrawal",
-        "GoalAbandonment",
-        "GoalSummary",
         "SpokenRendering",
         "SpokenAudio",
         "SpokenAudioFormat",
@@ -321,12 +329,6 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "BeliefSummary",
         "Belief",
         "ConversationSummary",
-        "QuestionState",
-        "Retirement",
-        "SuccessorLink",
-        "Question",
-        "AnswerKind",
-        "AnswerOutcome",
         "ConversationDigest",
         "GrantableSource",
         "HeldNotification",
@@ -341,7 +343,6 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "ProvisioningState",
         "ConnectedAccount",
         "ConnectionAct",
-        "Warrant",
         # ADR-0289 §4's nine story methods, and the types they carry. A store-side
         # type no method returns — ``StoryEntry``, ``StoryViewPage`` — is not here,
         # because the walk does not reach it.
@@ -831,10 +832,33 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     ``pending_confirmations``, with the old path's turn — so the count falls to
     seventy-five. Their gateway routes left with the Ask panel and the confirmation
     panels (§5:4).
+
+    **ADR-0309 §5:1 removes nine more and ADR-0313 §5:1 two**: ``goals``,
+    ``withdraw_clarification``, ``abandon_goal``, ``standing_authorizations``,
+    ``revoke_authorization``, ``answer``, ``questions``, ``interrupted_questions``
+    and ``forget_question`` with the old path, and ``grantable_decisions`` and
+    ``establish_recipient_grant`` with the establishing act — so the count falls to
+    sixty-four. Their gateway panels and command-line commands left first.
     """
-    assert len(_method_names()) == 75
+    assert len(_method_names()) == 64
     assert "converse_spoken" not in _method_names()
-    for retired in ("converse", "resume", "cancel_read", "pending_confirmations"):
+    for retired in (
+        "converse",
+        "resume",
+        "cancel_read",
+        "pending_confirmations",
+        "goals",
+        "withdraw_clarification",
+        "abandon_goal",
+        "standing_authorizations",
+        "revoke_authorization",
+        "answer",
+        "questions",
+        "interrupted_questions",
+        "forget_question",
+        "grantable_decisions",
+        "establish_recipient_grant",
+    ):
         assert retired not in _method_names()
 
 
@@ -1656,6 +1680,11 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     at 101 no longer answers; and ``ChannelOutcome`` loses ``TextChannelResult``, a
     wire-carried core type (§6:4, ADR-0124 §9:2).
 
+    **102 is ADR-0309 §5:1 and ADR-0313 §5:1, on the method set.**
+    ``AssistantEngine`` loses eleven members, so the method set falls to **64** and
+    a client at 101 may call eleven operations a hub at 102 no longer answers
+    (ADR-0313 §6:4, ADR-0124 §9:2).
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1664,7 +1693,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (75, 101), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (64, 102), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

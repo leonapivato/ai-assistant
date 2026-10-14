@@ -30,9 +30,10 @@ _RETIRED_OBSERVATION_SEAMS = frozenset({"observe", "observe_due"})
 #: ``learn``, which ADR-0293 §11 retires from the engine and which stays on both of
 #: ADR-0120 §3's sets: no decision has reclassified the traces a store already holds
 #: under it, as ADR-0285 §7 reclassified the observation seams', so they keep counting
-#: where they always did. No operation emits it again. ``converse`` and ``resume``
-#: joined it when ADR-0309 §5:1 retired them from the engine, on the same terms.
-_RETIRED_BUT_CLASSIFIED = frozenset({"learn", "converse", "resume"})
+#: where they always did. No operation emits it again. ``converse``, ``resume`` and
+#: ``answer`` joined it when ADR-0309 §5:1 retired them from the engine, on the same
+#: terms.
+_RETIRED_BUT_CLASSIFIED = frozenset({"learn", "converse", "resume", "answer"})
 
 
 class TestMetricKeys:

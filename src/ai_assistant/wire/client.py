@@ -94,7 +94,6 @@ from ai_assistant.wire.codec import (
     positive_page_argument,
     project,
     usable_identity,
-    utc_instant,
 )
 from ai_assistant.wire.errors import (
     ConnectionClosedError,
@@ -116,9 +115,6 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import (
         ActivationStop,
-        AnswerOutcome,
-        AuthorizationSettlement,
-        AuthorizationView,
         Belief,
         BeliefBand,
         BeliefSummary,
@@ -128,7 +124,6 @@ if TYPE_CHECKING:
         ChatChanges,
         ChatDevice,
         ChatStreamEnd,
-        ClarificationWithdrawal,
         ConnectedAccount,
         ConnectionAct,
         ConversationDigest,
@@ -136,8 +131,6 @@ if TYPE_CHECKING:
         DestinationTrustRecord,
         DurableIdentifier,
         EncodableText,
-        GoalAbandonment,
-        GoalSummary,
         GrantableSource,
         GrantScope,
         HeldNotification,
@@ -149,7 +142,6 @@ if TYPE_CHECKING:
         NotificationPreferences,
         PermissionDecision,
         Placement,
-        Question,
         RecipientGrant,
         RecordedInvocation,
         SecretValue,
@@ -170,7 +162,6 @@ if TYPE_CHECKING:
         StoryView,
         TranscriptPage,
         UserMessage,
-        UtcInstant,
     )
 
 #: The free-form name the connect frame carries, for the hub's logs (ADR-0084 §2).
@@ -408,49 +399,6 @@ class HubClient:
         return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
             "stop_activation", activation_id=named
         )
-
-    async def goals(
-        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
-    ) -> tuple[GoalSummary, ...]:
-        """Relay a listing of the user's goals (ADR-0250 §15).
-
-        Args:
-            limit: How many summaries to return.
-            offset: How many to skip.
-
-        Returns:
-            The page the hub answered.
-        """
-        return await self._call("goals", limit=limit, offset=offset)  # type: ignore[no-any-return]
-
-    async def withdraw_clarification(self, question_id: Identifier, /) -> ClarificationWithdrawal:
-        """Relay a withdrawal of a goal's clarification (ADR-0250 §12).
-
-        **The client relays and decides nothing**: which of the two states the call
-        reached is a fact about a row only the hub holds.
-
-        Args:
-            question_id: The clarification to withdraw.
-
-        Returns:
-            Which of the two states the hub reached.
-        """
-        named = identifier(question_id, name="question_id")
-        return await self._call(  # type: ignore[no-any-return]
-            "withdraw_clarification", question_id=named
-        )
-
-    async def abandon_goal(self, goal_id: Identifier, /) -> GoalAbandonment:
-        """Relay an abandonment of a goal (ADR-0250 §12).
-
-        Args:
-            goal_id: The goal to abandon.
-
-        Returns:
-            Which of the three states the hub reached.
-        """
-        named = identifier(goal_id, name="goal_id")
-        return await self._call("abandon_goal", goal_id=named)  # type: ignore[no-any-return]
 
     async def episodes(
         self,
@@ -735,61 +683,6 @@ class HubClient:
         """
         named = identifier(record_id, name="record_id")
         return await self._call("unguard", record_id=named)  # type: ignore[no-any-return]
-
-    async def questions(
-        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
-    ) -> tuple[Question, ...]:
-        """One page of the deferred questions awaiting an answer.
-
-        Args:
-            limit: How many questions this page holds.
-            offset: How many to skip.
-
-        Returns:
-            The page.
-        """
-        return await self._page("questions", limit=limit, offset=offset)  # type: ignore[no-any-return]
-
-    async def interrupted_questions(
-        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
-    ) -> tuple[Question, ...]:
-        """One page of the questions whose answering was interrupted.
-
-        Args:
-            limit: How many questions this page holds.
-            offset: How many to skip.
-
-        Returns:
-            The page.
-        """
-        return await self._page("interrupted_questions", limit=limit, offset=offset)  # type: ignore[no-any-return]
-
-    async def answer(self, question_id: Identifier, *, accept: bool) -> AnswerOutcome:
-        """Answer one deferred question.
-
-        Args:
-            question_id: Which question.
-            accept: What the user said.
-
-        Returns:
-            What became of the question.
-        """
-        named = identifier(question_id, name="question_id")
-        return await self._call(  # type: ignore[no-any-return]
-            "answer", question_id=named, accept=accept
-        )
-
-    async def forget_question(self, question_id: Identifier) -> bool:
-        """Destroy one deferred question.
-
-        Args:
-            question_id: Which question.
-
-        Returns:
-            Whether anything was held to destroy.
-        """
-        named = identifier(question_id, name="question_id")
-        return await self._call("forget_question", question_id=named)  # type: ignore[no-any-return]
 
     async def notifications(
         self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
@@ -1169,56 +1062,6 @@ class HubClient:
 
     # --- the recipient-grant surface (ADR-0235 §3, §7) ---------------------
 
-    async def grantable_decisions(
-        self, *, limit: int = DEFAULT_PAGE_SIZE
-    ) -> tuple[PermissionDecision, ...]:
-        """One page of the recorded ``CONFIRM``s an establishing act may ride.
-
-        ``limit`` is refused unless it is **strictly positive**, on
-        :meth:`recent_grants`' reason: it bounds the trail rows the hub reads as
-        well as the rows it returns, so a non-positive one would reach
-        ``AuditTrail.recent`` as an unbounded read.
-
-        **What comes back is history and never a queue** (ADR-0235 §3). No row here
-        is a park, holds a turn or blocks anything, and no surface renders one as
-        outstanding work — which is what keeps this apart from
-        :meth:`pending_confirmations`.
-
-        Args:
-            limit: How many trail rows the hub reads, and thereby the most this can
-                return.
-
-        Returns:
-            The offerable decisions, most recent first.
-        """
-        positive_page_argument(limit, name="limit")
-        return await self._call("grantable_decisions", limit=limit)  # type: ignore[no-any-return]
-
-    async def establish_recipient_grant(
-        self, decision_id: DurableIdentifier, *, expires_at: UtcInstant
-    ) -> RecipientGrant:
-        """Answer a recorded ``CONFIRM`` no park holds, and get the grant it made.
-
-        ``decision_id`` undergoes :data:`~ai_assistant.core.types.Identifier`
-        validation locally and before any I/O (ADR-0085 §3c), so this client refuses
-        exactly what the in-process engine refuses and strips the value the hub is
-        then asked about.
-
-        Args:
-            decision_id: The decision, from **this surface's own**
-                :meth:`grantable_decisions` listing.
-            expires_at: The instant the user chose, past which the grant ceases to
-                be live. Relayed and never defaulted or derived here (ADR-0235 §1).
-
-        Returns:
-            The grant the hub's store accepted.
-        """
-        named = identifier(decision_id, name="decision_id")
-        until = utc_instant(expires_at, name="expires_at")
-        return await self._call(  # type: ignore[no-any-return]
-            "establish_recipient_grant", decision_id=named, expires_at=until
-        )
-
     async def standing_recipient_grants(self) -> tuple[RecipientGrant, ...]:
         """Every standing recipient grant that is live now, read hub-side.
 
@@ -1266,58 +1109,6 @@ class HubClient:
         """
         named = identifier(grant_id, name="grant_id")
         return await self._call("revoke_recipient_grant", grant_id=named)  # type: ignore[no-any-return]
-
-    # --- the goal-authorization surface (ADR-0254 §11) -----------------------
-
-    async def standing_authorizations(self, goal_id: Identifier) -> tuple[AuthorizationView, ...]:
-        """What one goal's recorded acts still authorise, read hub-side.
-
-        ``goal_id`` undergoes :data:`~ai_assistant.core.types.Identifier` validation
-        locally and before any I/O (ADR-0085 §3c), so this client refuses exactly what
-        the in-process engine refuses.
-
-        **No ``limit`` to refuse**, because the method takes none: a truncated answer to
-        *"what do I authorise"* is a false answer rather than a partial one, so a
-        listing too large for the frame comes back as ``OversizedValueError`` and not as
-        a short listing (ADR-0254 §11).
-
-        **The liveness on each view is the hub's one clock reading and is not
-        re-derived here** (ADR-0254 §16). This client holds no clock, compares no
-        instant and annotates no row: an adapter reads no store and holds no clock
-        (ADR-0042 §6), and a second comparison over the wire could disagree with the
-        one the hub took.
-
-        Args:
-            goal_id: The goal whose standing authorities to list.
-
-        Returns:
-            One view per ``ESTABLISHED`` row of that goal, live and lapsed.
-        """
-        named = identifier(goal_id, name="goal_id")
-        return await self._call("standing_authorizations", goal_id=named)  # type: ignore[no-any-return]
-
-    async def revoke_authorization(
-        self, authorization_id: DurableIdentifier
-    ) -> AuthorizationSettlement:
-        """Withdraw one standing authorization, hub-side.
-
-        The hub's own :class:`~ai_assistant.core.types.AuthorizationSettlement` crosses
-        **unmapped** (ADR-0254 §16): this client does not translate it into a ``bool``,
-        a ``None`` or a second vocabulary, because a second three-valued spelling for
-        one fact is the second carrier ADR-0150 is named after.
-
-        Args:
-            authorization_id: The id :meth:`standing_authorizations` renders.
-
-        Returns:
-            The hub's settlement outcome — ``SETTLED``, ``NOT_AT_SOURCE`` or
-            ``NO_SUCH_AUTHORIZATION``. ``WOULD_DUPLICATE`` is unreachable on this
-            surface, being reachable only on a settlement to ``ESTABLISHED``.
-        """
-        named = identifier(authorization_id, name="authorization_id")
-        return await self._call(  # type: ignore[no-any-return]
-            "revoke_authorization", authorization_id=named
-        )
 
     # --- the destination-trust surface (ADR-0242 §2, §4) --------------------
 

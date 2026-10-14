@@ -116,8 +116,9 @@ def test_each_ground_is_true_of_the_types_and_the_surface_themselves() -> None:
         assert member in dumped, "emitted on every outcome, not only a populated one"
 
     # ``converse`` and ``converse_streaming`` carried ``reference``; ADR-0293 §11 and
-    # ADR-0309 §5:1 retired both, so no promoted method carries it now.
-    assert set(_OPERATIONS) <= surface.METHODS
+    # ADR-0309 §5:1 retired both, so no promoted method carries it now. The three
+    # operations left the surface with the old path too (ADR-0309 §5:1).
+    assert not set(_OPERATIONS) & surface.METHODS
 
 
 def test_a_peer_at_the_previous_version_and_one_at_this_refuse_each_other() -> None:
@@ -197,21 +198,17 @@ def test_the_records_the_seams_hold_reach_no_promoted_surface() -> None:
     assert carrying == [], "the record is the store's; a surface is handed a Clarification"
 
 
-def test_the_three_operations_are_on_the_protocol_and_reach_the_wire() -> None:
-    """§§12, 15: three operations, promoted by being ``AssistantEngine`` members.
+def test_the_three_operations_left_the_protocol_and_the_wire() -> None:
+    """§§12, 15 promoted three operations; ADR-0309 §5:1 retired them.
 
-    ADR-0130 §9's own reading — "These are contract surface, because
-    ``AssistantEngine`` is a Protocol in ``core/protocols.py``" — so the walk that
-    reaches them is ``wire/surface.py``'s derivation rather than a table anyone kept in
-    step. Each returns a value ``core`` declares, which is ADR-0085 §5's closed graph.
+    They were promoted by being ``AssistantEngine`` members (ADR-0130 §9), so the walk
+    that reached them was ``wire/surface.py``'s derivation, and leaving the Protocol is
+    what takes them off the wire. The vocabularies they answered stay in ``core`` until
+    the types lanes retire them.
     """
     for operation in _OPERATIONS:
-        assert hasattr(AssistantEngine, operation)
-        assert operation in surface.METHODS
-        assert operation not in surface.STREAMING_METHODS
-    assert surface.positional_only("withdraw_clarification") == ("question_id",)
-    assert surface.positional_only("abandon_goal") == ("goal_id",)
-    assert surface.parameters("goals") == ("limit", "offset")
+        assert not hasattr(AssistantEngine, operation)
+        assert operation not in surface.METHODS
     assert {
         ClarificationWithdrawal.WITHDRAWN,
         ClarificationWithdrawal.NOTHING_TO_WITHDRAW,

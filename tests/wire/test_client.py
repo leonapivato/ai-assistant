@@ -603,7 +603,7 @@ async def test_an_error_frame_reconstructs_the_hub_s_own_declared_failure(
 
     async with _listening(tmp_path / "hub.sock", _failing_hub) as client:
         with pytest.raises(UnresolvedEvidenceError) as caught:
-            await client.answer("q-1", accept=True)
+            await client.forget("rec-1")
     assert caught.value.unresolved_ids == ("a", "b")
     assert caught.value.details_elided is False
 

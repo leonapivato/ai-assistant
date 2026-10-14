@@ -124,8 +124,9 @@ def test_the_decision_is_what_carries_both_members_across_a_frame() -> None:
     Asserted where it could stop being true. If a later lane stopped promoting every
     method that returns a decision, the two grounds would need restating rather than
     inheriting — and the check is over the promoted set rather than over one name.
+    ``grantable_decisions`` was the third until it left the surface (ADR-0313 §5:1).
     """
-    returning = {"recent_decisions", "grantable_decisions", "export_decisions"}
+    returning = {"recent_decisions", "export_decisions"}
 
     assert returning <= surface.METHODS
     assert PermissionDecision.model_fields["ruling"].annotation is PermissionRuling

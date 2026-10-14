@@ -116,7 +116,6 @@ from ai_assistant.core.types import (
     AttemptReport,
     AttemptState,
     AttemptTransition,
-    AuthorizationSettlement,
     AuthorizationView,
     Belief,
     BeliefSummary,
@@ -125,7 +124,6 @@ from ai_assistant.core.types import (
     ChannelInput,
     ChannelResult,
     Clarification,
-    ClarificationWithdrawal,
     Confirmation,
     ConfirmationEgress,
     ContinuationToken,
@@ -142,7 +140,6 @@ from ai_assistant.core.types import (
     Evidence,
     ForecastNotRead,
     Goal,
-    GoalAbandonment,
     GoalAttempt,
     GoalDisambiguation,
     GoalEngagement,
@@ -151,7 +148,6 @@ from ai_assistant.core.types import (
     GoalQuestionDisposition,
     GoalRevision,
     GoalStatus,
-    GoalSummary,
     InformationalEventResult,
     IntendedActionMinting,
     MemoryKind,
@@ -308,7 +304,6 @@ from ai_assistant.orchestration.payloads import (
     non_blank_text,
     page_argument,
     positive_page_argument,
-    utc_instant,
 )
 from ai_assistant.orchestration.phase_path import failing_stage, is_defect, log_defect
 from ai_assistant.orchestration.reads import StructuredFacts, outbound_statement
@@ -377,7 +372,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ActionPlan,
         ActivationUnderstanding,
-        AnswerOutcome,
         BeliefBand,
         ChatChanges,
         ChatDevice,
@@ -1478,79 +1472,6 @@ class _Association:
     open_question: str | None = None
     supersede: str | None = None
     resumes: bool = False
-
-
-#: The sort sentinel for a goal no turn has engaged (ADR-0250 §1).
-#:
-#: It is never actually compared against anything: the listing partitions the goals on
-#: ``last_engaged_at is None`` **first** and sorts only the ones carrying an instant, so
-#: this exists to give that sort a total type rather than to order anything. §1's own
-#: rule is the partition — *"a goal whose ``last_engaged_at`` is absent sorts **after**
-#: every goal carrying one"* — and reading it as "sorts as though engaged at the
-#: beginning of time" would be the same answer for the wrong reason.
-_NEVER_ENGAGED: Final = datetime.min.replace(tzinfo=UTC)
-
-
-def _summary_of(
-    goal: Goal,
-    attempt: GoalAttempt | None,
-    question: GoalQuestion | None,
-    *,
-    effect_in_flight: bool,
-) -> GoalSummary:
-    """Project one goal onto what a surface is shown (ADR-0250 §15).
-
-    **It carries no attempt id, no revision number, no element, no ground, no evidence
-    reference and no plan** — which is a property of the type rather than of this
-    function, and is why the attempt reaches it as a *fact* (``paused``) rather than as
-    a record.
-
-    **``paused`` is ADR-0249 §5's own derivation, computed here and by no adapter**:
-    the goal's status is ``ACTIVE`` **and** its current attempt's state is
-    ``AWAITING_CLARIFICATION``, ``AWAITING_AUTHORIZATION`` or ``BLOCKED``. A goal with
-    no attempt is not paused, and neither is a ``BLOCKED`` **goal** — §5's derivation is
-    over the attempt's state and ADR-0249 §4 keeps the two vocabularies apart.
-
-    **``effect_in_flight`` is ADR-0261 §6's predicate and reaches here as a *fact***,
-    for ``paused``'s own reason one fact over: *"the engine computes it, so that two
-    surfaces cannot render it differently"*, and **no adapter derives it**. It arrives
-    already answered by ``PlanStore.has_outstanding_effect`` rather than being computed
-    from the attempt this function is handed — the predicate is **goal-wide**, so an
-    ``INDETERMINATE`` step on an *older* attempt makes it true while the current
-    attempt says nothing about it, and it is **never** derived from an
-    :class:`~ai_assistant.core.types.AttemptOutcome`, which is what lets it clear.
-
-    Args:
-        goal: The goal to project.
-        attempt: Its current attempt — the latest by ``opened_at`` — or ``None``.
-        question: Its open question, where one stands.
-        effect_in_flight: Whether an action of this goal is outstanding, as the store
-            answered it for **this** goal (ADR-0261 §6).
-
-    Returns:
-        The summary.
-    """
-    return GoalSummary(
-        id=goal.id,
-        outcome=goal.statement,
-        status=goal.status,
-        paused=(
-            goal.status is GoalStatus.ACTIVE
-            and attempt is not None
-            and attempt.state in _PAUSED_ATTEMPT_STATES
-        ),
-        last_engaged_at=goal.last_engaged_at,
-        clarification=(
-            None
-            if question is None or question.text is None
-            else Clarification(
-                question_id=question.id,
-                text=question.text,
-                expires_at=question.expires_at,
-            )
-        ),
-        effect_in_flight=effect_in_flight,
-    )
 
 
 #: The three :class:`~ai_assistant.core.types.AttemptState` members ADR-0249 §5 calls a
@@ -3070,7 +2991,10 @@ class _RoutedSurface:
     The exception is :meth:`beliefs`, which is not a routable operation at all: ADR-0197
     §5's ``forget`` lookup needs :class:`~ai_assistant.core.types.Belief` records, which is
     the arm §8 gives that operation, and the promoted ``beliefs`` answers
-    :class:`~ai_assistant.core.types.BeliefSummary` rows.
+    :class:`~ai_assistant.core.types.BeliefSummary` rows. :meth:`questions` and
+    :meth:`forget_question` are the others since their promoted members left the
+    surface (ADR-0309 §5:1): with no façade method to relay, they reach the question
+    stage those members delegated to.
 
     A separate object rather than the engine itself, so the engine's own public surface
     gains nothing: ADR-0197 §9 and §11 are explicit that ``AssistantEngine`` gains no
@@ -3086,8 +3010,8 @@ class _RoutedSurface:
         return await self.engine._routed_beliefs(limit=limit, offset=offset)
 
     async def questions(self, *, limit: int, offset: int) -> tuple[Question, ...]:
-        """Relay the promoted ``questions``."""
-        return await self.engine.questions(limit=limit, offset=offset)
+        """List the deferred questions from the question stage."""
+        return await self.engine._questions.questions(limit=limit, offset=offset)
 
     async def recent_reads(self, *, limit: int) -> tuple[SourceReadRecord, ...]:
         """Relay the promoted ``recent_reads``."""
@@ -3118,8 +3042,8 @@ class _RoutedSurface:
         return await self.engine.revoke(source)
 
     async def forget_question(self, question_id: str) -> bool:
-        """Relay the promoted ``forget_question``."""
-        return await self.engine.forget_question(question_id)
+        """Destroy one deferred question through the question stage."""
+        return await self.engine._questions.forget_question(question_id)
 
     async def guard(self, record_id: str) -> Placement | None:
         """Relay the promoted ``guard``."""
@@ -4993,398 +4917,6 @@ class Engine:
             ActivationStop.NO_SUCH_ACTIVATION if episode is None else ActivationStop.ALREADY_ENDED
         )
 
-    # --- goals, and the two acts on one (ADR-0250 §§12, 15) ---------------
-    #
-    # **Three promoted operations, implemented here by §19's M3.** Each returns the
-    # non-acting member of its closed vocabulary where there is nothing to act on —
-    # `AssistantEngineContract` requires a refusal to be a result and never an
-    # exception, so an unknown id is `NOTHING_TO_WITHDRAW` or `NO_SUCH_GOAL` and never
-    # a raise (§12).
-    #
-    # **`goals` is built over `PlanStore.export()`, and that is a cost taken openly**
-    # (#2296). ADR-0250 §9's eight new members carry **no goal listing** —
-    # `candidates_for` is per conversation and capped at eight, and every other read is
-    # by id — so the three shapes M1 named were a ninth `PlanStore` member, a second
-    # mode on `candidates_for`, or this. The first is a contract change and needs its
-    # own ADR under golden rule 5; the second would give one member two meanings and
-    # two orders; this one is honest and is a full materialisation per page. The cost
-    # is filed rather than hidden.
-
-    async def goals(
-        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
-    ) -> tuple[GoalSummary, ...]:
-        """List the user's goals, most recently engaged first (ADR-0250 §15).
-
-        **Empty until ADR-0250 §19's M3**, which is the lane that reads the store: M1
-        changes no behaviour, and `PlanStore` carries no goal listing for this
-        operation to read (see the note above this method). The paging arguments are
-        refused and measured here exactly as every other page on this surface is, so
-        the two implementations refuse the same values from the day the operation is
-        reachable.
-
-        Args:
-            limit: How many summaries to return; the default is normative.
-            offset: How many to skip.
-
-        Returns:
-            The page, as a tuple.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: If ``limit`` is not positive or ``offset`` is negative.
-        """
-        self._reject_if_closing()
-        self._check_page("goals", limit=limit, offset=offset)
-        return await self._tracked(self._goals(limit=limit, offset=offset), "goals", checked=True)
-
-    async def _goals(self, *, limit: int, offset: int) -> tuple[GoalSummary, ...]:
-        """Read the page, in ADR-0250 §1's order, and compute what §15 says is computed.
-
-        Split from :meth:`goals` because ADR-0119 §8's envelope sits at
-        :meth:`_tracked` and "already wraps every public method" — a public operation
-        that did not cross it would falsify the claim that makes the placement sound.
-
-        **``paused`` is computed and never stored** (§15), by ADR-0249 §5's own
-        definition — the goal's status is ``ACTIVE`` and its current attempt's state is
-        ``AWAITING_CLARIFICATION``, ``AWAITING_AUTHORIZATION`` or ``BLOCKED`` — and
-        **the engine computes it**, *"so that two surfaces cannot render it
-        differently"*.
-
-        **The order is §1's, and it is stated rather than left to a store's rows**: the
-        greatest ``last_engaged_at`` first, the ``goal_id`` ascending as the tie-break,
-        and a goal carrying no instant **after** every goal that does. It is computed by
-        sorting on the instants themselves and never on a number derived from them, so
-        two instants a float would round together stay apart.
-
-        Args:
-            limit: How many summaries to return.
-            offset: How many to skip.
-
-        Returns:
-            The page.
-
-        Raises:
-            ValueError: If ``limit`` is not positive.
-        """
-        # **This page is refused here rather than by a store**, and that is a
-        # consequence of #2296 rather than a second convention: every other paged read
-        # on this surface passes its `limit` to a `PlanStore`, `MemoryStore` or
-        # `AuditTrail` member that refuses a non-positive one, and ADR-0250 §9 gives
-        # this operation no such member to pass it to. The refusal is stated here so
-        # the operation behaves as its own contract documents rather than answering an
-        # empty page to an argument every neighbouring read rejects.
-        if limit < 1:
-            msg = f"limit must be positive, got {limit}"
-            raise ValueError(msg)
-        export = await self._plans.export()
-        current: dict[str, GoalAttempt] = {}
-        for attempt in export.attempts:
-            held = current.get(attempt.goal_id)
-            if held is None or attempt.opened_at >= held.opened_at:
-                current[attempt.goal_id] = attempt
-        standing = await self._outstanding()
-        by_id = sorted(export.goals, key=lambda goal: goal.id)
-        engaged = [goal for goal in by_id if goal.last_engaged_at is not None]
-        engaged.sort(key=lambda goal: goal.last_engaged_at or _NEVER_ENGAGED, reverse=True)
-        ordered = engaged + [goal for goal in by_id if goal.last_engaged_at is None]
-        # ADR-0261 §6: **one `has_outstanding_effect` call per listed goal** — per goal
-        # of the page this call returns, and not per goal the export held, because
-        # "listed" is what a surface is shown. The engine takes the member rather than
-        # walking `attempts_of` and `get_execution`, over a history ADR-0249 §5 and §12
-        # leave append-only and unbounded: what the member buys is a bound on *this*
-        # engine's reads "and an answer that is correct at all", which the walk could
-        # not be. The answer is read per call and **never cached across calls**.
-        page = ordered[offset : offset + limit]
-        return tuple(
-            [
-                _summary_of(
-                    goal,
-                    current.get(goal.id),
-                    standing.get(goal.id),
-                    effect_in_flight=await self._plans.has_outstanding_effect(goal.id),
-                )
-                for goal in page
-            ]
-        )
-
-    async def withdraw_clarification(self, question_id: Identifier, /) -> ClarificationWithdrawal:
-        """Take back a clarification without answering it (ADR-0250 §12).
-
-        **``NOTHING_TO_WITHDRAW`` until ADR-0250 §19's M3**, which is the lane that
-        raises a question in the first place: M1 raises none, so there is none to
-        withdraw and the answer is true of what this tree holds. It is also the
-        vocabulary's non-acting member, which is what an unknown id answers — "an
-        unknown id is ``NOTHING_TO_WITHDRAW`` and never a raise".
-
-        Args:
-            question_id: The clarification to withdraw.
-
-        Returns:
-            Which of the two states this call reached.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: If ``question_id`` is blank.
-        """
-        self._reject_if_closing()
-        named = identifier(question_id, name="question_id")
-        check_arguments(
-            "withdraw_clarification", max_bytes=self._max_payload_bytes, question_id=named
-        )
-        return await self._tracked(
-            self._withdraw_clarification(named), "withdraw_clarification", checked=True
-        )
-
-    async def _withdraw_clarification(self, question_id: str) -> ClarificationWithdrawal:
-        """Settle an open question ``WITHDRAWN``, and say what that did (ADR-0250 §12).
-
-        *"It settles an ``OPEN`` question ``WITHDRAWN``, clearing its content in the
-        same step and freeing the goal's one question slot. **It takes no reason, no
-        free text and no deadline.**"*
-
-        **Withdrawing removes the question and not the pause** (§12): the attempt stays
-        ``AWAITING_CLARIFICATION`` and the goal stays open, and *"What the act buys is
-        the freedom to ask again"*. It records no answer, revises no interpretation and
-        engages no goal — ADR-0244 §11's own distinction, *"a cancellation is the user
-        withdrawing the question and is not"* a ruling.
-
-        **A question past its deadline is expired and not withdrawn**, because §12 makes
-        an expiry *"settled and … never inferred"* by the operation that reads it, and
-        reporting ``WITHDRAWN`` for a question the deadline had already taken would
-        record an act the user did not perform. There is then nothing left to withdraw.
-
-        Args:
-            question_id: The clarification to withdraw.
-
-        Returns:
-            Which of the two states this call reached.
-        """
-        question = await self._plans.get_question(question_id)
-        if question is None or question.disposition is not GoalQuestionDisposition.OPEN:
-            return ClarificationWithdrawal.NOTHING_TO_WITHDRAW
-        now = self._clock()
-        if question.expires_at <= now:
-            await self._plans.settle_question(
-                question.id, disposition=GoalQuestionDisposition.EXPIRED, at=now
-            )
-            return ClarificationWithdrawal.NOTHING_TO_WITHDRAW
-        if await self._plans.settle_question(
-            question.id, disposition=GoalQuestionDisposition.WITHDRAWN, at=now
-        ):
-            return ClarificationWithdrawal.WITHDRAWN
-        return ClarificationWithdrawal.NOTHING_TO_WITHDRAW
-
-    async def abandon_goal(self, goal_id: Identifier, /) -> GoalAbandonment:
-        """Give up on a goal, and say what that did (ADR-0250 §12).
-
-        **``NO_SUCH_GOAL`` until ADR-0250 §19's M3**, which is the lane that writes
-        the status: M1 writes no ``GoalStatus`` at all — §20 arm 23 asserts over the
-        shipped tree that this decision's two status writes have exactly one caller
-        each, and in this lane they have none — so this returns the vocabulary's
-        non-acting member rather than claiming an abandonment nothing performed.
-
-        Args:
-            goal_id: The goal to abandon.
-
-        Returns:
-            Which of the three states this call reached.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: If ``goal_id`` is blank.
-        """
-        self._reject_if_closing()
-        named = identifier(goal_id, name="goal_id")
-        check_arguments("abandon_goal", max_bytes=self._max_payload_bytes, goal_id=named)
-        return await self._tracked(self._abandon_goal(named), "abandon_goal", checked=True)
-
-    async def _abandon_goal(self, goal_id: str) -> GoalAbandonment:
-        """Write ``ABANDONED``, and settle the goal's open question (ADR-0250 §12).
-
-        *"``AssistantEngine`` gains ``abandon_goal`` … and **it is the only thing in
-        this system that writes ``ABANDONED``**. No expiry, no silence, no timeout, no
-        sweep, no reclaim, no model output and no inference writes it."*
-
-        *"Abandoning … settles its open question ``WITHDRAWN``"* — and since ADR-0261
-        §2 it writes the status through **``PlanStore.close_goal_abandoned``** rather
-        than through ``set_goal_status``. That decision partially supersedes ADR-0250
-        §12's *"does **not** move the attempt's state, does not write an
-        ``AttemptOutcome``"*: the one call ends **every** attempt of the goal standing
-        in a non-terminal ``AttemptState`` — each carrying the outcome ADR-0261 §3's
-        four limbs yield over that attempt's own executions — writes ``ABANDONED`` and
-        answers what was outstanding, all in one indivisible step. A9 is discharged
-        there rather than still owed. What ADR-0250 §12 says about **executions** binds
-        verbatim and is untouched: the act *"does not end an execution and does not
-        cancel anything in flight"*.
-
-        **Why the member and not ``set_goal_status``.** ADR-0261 §2 puts a conjunct on
-        that member refusing an ``→ ABANDONED`` write over a goal holding a live
-        attempt, on **every** caller, so this path could not take it and be correct;
-        and the three writes are one step because "every two-step arrangement loses the
-        answer" — a predicate read before the status write is falsified between them,
-        and one computed after separate attempt commits misses a step that resolved in
-        between.
-
-        **The answer is ADR-0261 §6's fourth member where the call reports one**, and
-        ``ABANDONED`` in every other abandoning case: *"It is returned **exactly where**
-        ``close_goal_abandoned`` **answers true**"*, that answer being the predicate
-        evaluated in the same indivisible step that ends the goal's attempts and closes
-        it, *"so it is the state of the whole goal at the one instant the act had"*.
-        **No second read is taken for it, it is assembled from no second call, and it is
-        derived from no** :class:`~ai_assistant.core.types.AttemptOutcome`. It is a
-        **snapshot** and is not made durable: a listing that later reads
-        ``effect_in_flight`` false *"is the accurate answer to a different question"*,
-        and nothing here re-reads to keep the answer current.
-
-        **The single ``StaleExecutionError`` retry, and what it re-takes** (§2). A lost
-        ``Goal.version`` is the only way the member takes that class, and the class
-        directs a caller to re-read and retry. **What is re-taken is this act's own
-        first-read decision and not the call**: a re-read finding the goal **closed**
-        answers ``ALREADY_CLOSED``, one finding **none** answers ``NO_SUCH_GOAL``, and
-        only where the goal is still open is the call made again, under the version just
-        read. **A second refusal propagates** and the act ends there, having written
-        nothing either time — *"the bound being deliberate, because a writer that raced
-        the act once can race it again and an unbounded act would spin against it"*. The
-        retry is a second **attempt**, so it carries its own ending: ADR-0268 §1 takes
-        ``end_for_goal`` *"once per closing-write attempt"*, and the pair is structured
-        in :meth:`_ending_then_close` so that an attempt is never made without one
-        (#2452).
-
-        **This path still commits no attempt, computes no ``AttemptOutcome`` and takes
-        no outstanding-effect read of its own** (§13): §2 and §3 put all three inside the
-        one call, *"and a lane that split them out would rebuild the window the member
-        exists to remove"*. The listing's ``has_outstanding_effect`` call is a different
-        path and is untouched by that prohibition.
-
-        **The question is settled first**, so a call that dies between the two writes
-        leaves an open goal whose question is gone rather than a closed goal still
-        holding one — the direction in which the next act is the ordinary one.
-
-        **And the open question is read again after the status write**, because
-        ``record_question`` does not advance the goal's ``version`` (§9) and so a
-        clarification a concurrent turn admitted between the first read and
-        ``set_goal_status`` is invisible to the abandonment's compare-and-swap. Closing
-        the goal without settling that one would leave §12's *"settles its open question
-        ``WITHDRAWN``"* untrue of the resulting state. The second pass **narrows the
-        window and does not close it**: a question admitted after the second read is
-        admitted onto a goal the store already holds as ``ABANDONED``, and refusing that
-        at the store boundary is a ``PlanStore`` contract change with its own ADR
-        (filed as an issue against §12, and FLAGged in this PR).
-
-        Args:
-            goal_id: The goal to abandon.
-
-        Returns:
-            Which of ADR-0261 §6's four states this call reached.
-
-        Raises:
-            StaleExecutionError: As ``close_goal_abandoned`` raises it (ADR-0014 §5,
-                ADR-0261 §2), on a lost ``Goal.version`` and on nothing else — **on the
-                retry's own call**, the first refusal of that class being the one this
-                act re-reads for.
-        """
-        goal = await self._plans.get_goal(goal_id)
-        if goal is None:
-            return GoalAbandonment.NO_SUCH_GOAL
-        if not is_open(goal):
-            return GoalAbandonment.ALREADY_CLOSED
-        await self._withdraw_open_question(goal.id)
-        try:
-            outstanding = await self._ending_then_close(goal.id, goal_version=goal.version)
-        except StaleExecutionError:
-            # §2's one retry, re-taking the act's **first-read decision**: the goal has
-            # advanced under this act, so what is asked again is whether there is still
-            # an abandonment to perform — not merely whether the write lands. A goal
-            # closed meanwhile is `ALREADY_CLOSED` and one deleted meanwhile is
-            # `NO_SUCH_GOAL`, and **neither makes a second call at all**; a second
-            # refusal of the call below propagates and the act ends there.
-            reread = await self._plans.get_goal(goal_id)
-            if reread is None:
-                return GoalAbandonment.NO_SUCH_GOAL
-            if not is_open(reread):
-                return GoalAbandonment.ALREADY_CLOSED
-            outstanding = await self._ending_then_close(reread.id, goal_version=reread.version)
-        # §12 again, over the window the goal's compare-and-swap does not cover: a
-        # question admitted while the status write was in flight is still this goal's
-        # open question, and the goal is now closed.
-        await self._withdraw_open_question(goal.id)
-        # §6's mapping, over the one call's own answer and nothing else.
-        return (
-            GoalAbandonment.ABANDONED_EFFECT_IN_FLIGHT if outstanding else GoalAbandonment.ABANDONED
-        )
-
-    async def _ending_then_close(self, goal_id: str, /, *, goal_version: int) -> bool:
-        """One abandonment attempt: the ending, then the closing write (ADR-0268 §1).
-
-        **The two writes of one attempt, in the one order ADR-0268 §1 admits**, and
-        they are **two writes in two stores** — the corpus offers no transaction
-        across them (ADR-0255 §6), so nothing here states, implements or tests them
-        as one.
-
-        **The ending is taken strictly before the closing write**, after the read
-        this attempt's ``expected_version`` came from has found the goal open. That
-        is what makes the ending *total* rather than best-effort: from the instant
-        ``end_for_goal`` returns, and for as long as the fence it raised stands, no
-        row of the goal stands ``PROPOSED`` or ``ESTABLISHED`` and none can be
-        recorded, so the closing write cannot be raced by an establishment. **Taken
-        after the status write it would be exactly that race.**
-
-        **One clock reading serves both**, which §1 requires: a ``GOAL_CLOSED``
-        row's ``settled_at`` is the instant of the **act** that ended it and never a
-        second reading taken between the two writes.
-
-        **The version is this attempt's own ``expected_version`` and never one a
-        write returned.** An overtaken attempt — the store's record already standing
-        above it — ends no row and fences nothing, and that is the universal holding
-        rather than an exception to it: a record standing higher means some act read
-        the goal above this version, so this attempt's own closing write is refused
-        stale anyway.
-
-        **Why this is a method and not two lines at the call site.** ADR-0268 §1
-        takes the ending *"once per closing-write attempt"*, ADR-0261 §2's
-        re-read-and-retry included, *"each carrying that attempt's own instant"*.
-        :meth:`_abandon_goal`'s retry therefore calls this method a **second** time
-        rather than re-issuing the closing write alone, which is how ADR-0268 §9 arm 4's
-        *"once per attempt it makes"* is satisfied by construction instead of by memory:
-        an attempt cannot be made here without its own ending, its own instant and its
-        own version. A fresh row a reopen admitted between the two attempts is ended by
-        the second call with the rest (#2452).
-
-        **What each failure leaves** (§1). Where ``end_for_goal`` faults the act ends
-        here having written nothing on this attempt — its step is all-or-nothing —
-        and on a first attempt that is nothing at all. Where it succeeds and the
-        closing write does not, the act propagates and **compensates nothing**: the
-        rows stand ``GOAL_CLOSED``, truthfully under §2's meaning; the goal is left
-        open and fenced, so every call of it asks; and the repair is the user's own
-        abandon and reopen. A ``clear_closure`` here could not tell its own orphaned
-        fence from one a concurrent act is relying on — two acts whose reads both
-        found the goal open at version *v* fence at *v* alike — so the compensation
-        goes, not the fence.
-
-        Args:
-            goal_id: The goal being abandoned.
-            goal_version: The version this attempt's own closing write names as its
-                ``expected_version``.
-
-        Returns:
-            Whether any step of any execution of any attempt of this goal stood
-            ``INDETERMINATE`` or ``RUNNING`` at the instant the closing write took —
-            ADR-0261 §6's predicate, answered by the write itself and never by a read
-            this engine takes.
-
-        Raises:
-            StaleExecutionError: As ``close_goal_abandoned`` raises it, on a lost
-                ``Goal.version`` and on nothing else.
-            AuthorizationError: As ``end_for_goal`` raises it.
-        """
-        at = self._clock()
-        await self._end_authorizations(goal_id, at=at, goal_version=goal_version)
-        return await self._plans.close_goal_abandoned(
-            goal_id,
-            at=at,
-            expected_version=goal_version,
-        )
-
     async def _end_authorizations(self, goal_id: str, /, *, at: datetime, goal_version: int) -> int:
         """Take ADR-0268 §1's ending over ``goal_id`` where a store is wired.
 
@@ -5411,26 +4943,6 @@ class Engine:
         if operations is None:
             return 0
         return await operations.end_for_goal(goal_id, at=at, goal_version=goal_version)
-
-    async def _withdraw_open_question(self, goal_id: str) -> None:
-        """Settle this goal's open question ``WITHDRAWN``, if it holds one (§12).
-
-        A no-op where the goal holds none, and where the one it held had already passed
-        its deadline — :meth:`_open_question` settles that ``EXPIRED`` instead, because
-        §12 makes an expiry *"settled and … never inferred"* by the operation that reads
-        it, and recording a withdrawal there would record an act nobody performed.
-
-        Args:
-            goal_id: The goal whose question to settle.
-        """
-        question = await self._open_question(goal_id)
-        if question is None:
-            return
-        await self._plans.settle_question(
-            question.id,
-            disposition=GoalQuestionDisposition.WITHDRAWN,
-            at=self._clock(),
-        )
 
     async def episodes(
         self,
@@ -6134,174 +5646,6 @@ class Engine:
             return self._clock()
         except ClockReadingError as exc:
             raise MemoryStoreError(str(exc)) from exc
-
-    async def questions(
-        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
-    ) -> tuple[Question, ...]:
-        """List the deferred questions awaiting an answer (ADR-0078 §8 reach 2).
-
-        The reach for a question no ``learn`` call was in flight to render, which is
-        every question a background producer raises. Relayed to the question stage
-        and returned as :class:`~ai_assistant.orchestration.questions.Question`
-        DTOs, which is where ``band_of`` is applied — once, here — so no adapter
-        classifies anything (ADR-0073 §7).
-
-        **Answerable questions only.** One whose answer was begun and never recorded
-        is a different question and comes back from
-        :meth:`interrupted_questions`; the two never merge into one list, because
-        offering an interrupted question beside the answerable ones would present a
-        claim that cannot be taken.
-
-        **No total count is offered**, for ADR-0073 §7's reason: "is there more" is
-        answered by asking for the next page.
-
-        Args:
-            limit: Page size, bounded by default (ADR-0073 §2, §8).
-            offset: How many ordered rows to skip.
-
-        Returns:
-            The page, oldest first — the head of the queue being the question whose
-            admission is blocking a newer one.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: If ``limit`` or ``offset`` falls outside ``[0, 2**63)``, as
-                the store refuses rather than clamps. Not an ``AssistantError``, so
-                an adapter that lets a user supply either must refuse an
-                out-of-range value at its own parse boundary.
-            DeferralStoreError: If the queue cannot be read.
-            MemoryStoreError: If a conflict's content cannot be read.
-        """
-        self._reject_if_closing()
-        self._check_page("questions", limit=limit, offset=offset)
-        return await self._tracked(
-            self._questions.questions(limit=limit, offset=offset), "questions", checked=True
-        )
-
-    async def interrupted_questions(
-        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
-    ) -> tuple[Question, ...]:
-        """List the questions whose answer was begun and never recorded (§8, §9).
-
-        A **second enumeration**, separate all the way to the surface. It exists
-        because a process that died inside a claim leaves the question ``APPLYING``
-        forever — unclaimable, never swept, and, after a restart, holding no id
-        anything could look it up by. Without this read the stranded question is
-        unreachable, which is the vanishing ADR-0078 is about, one state along.
-
-        What the surface must say about one of these is that **an answer was begun
-        and its outcome is not recorded** — not that it failed and not that it can be
-        retried, because the system does not know whether the memory write landed.
-        The recovery is two steps in order: :meth:`forget_question`, then read the
-        belief (:meth:`beliefs`) and ``learn`` it again if it is missing.
-
-        Args:
-            limit: Page size, bounded by default as :meth:`questions` is.
-            offset: How many ordered rows to skip.
-
-        Returns:
-            The page, in :meth:`questions`' order and disjoint from it.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: As :meth:`questions` refuses a malformed page argument.
-            DeferralStoreError: If the queue cannot be read.
-            MemoryStoreError: If a conflict's content cannot be read.
-        """
-        self._reject_if_closing()
-        self._check_page("interrupted_questions", limit=limit, offset=offset)
-        return await self._tracked(
-            self._questions.interrupted_questions(limit=limit, offset=offset),
-            "interrupted_questions",
-            checked=True,
-        )
-
-    async def answer(self, question_id: Identifier, *, accept: bool) -> AnswerOutcome:
-        """Answer one deferred question (ADR-0078 §5, §9).
-
-        The write half of the deferred-question surface. An accept **claims** the
-        question, re-submits its proposal through the same write path ``learn`` uses
-        — carrying the authority the claim mints, which is what lets it retire an
-        assertion the ordinary path may not — and records the outcome. A rejection
-        needs no claim, because it writes nothing.
-
-        **Answering is binary, and there is no third "neither — here's the real
-        answer".** An amendment is a new proposal and ``learn`` already is one
-        (ADR-0073 §6), so a free-text answer would be a second correction path
-        wearing a confirmation's clothes. There is likewise **no retry verb**
-        anywhere on this surface (ADR-0078 §2, §8).
-
-        Args:
-            question_id: The question the user named, taken as opaque.
-            accept: The user's answer. ``True`` re-submits the proposal under the
-                claim's authority; ``False`` declines it and retains the record so
-                the same question is not asked again.
-
-        Returns:
-            An :class:`~ai_assistant.orchestration.questions.AnswerOutcome` saying
-            which of the five outcomes happened — including a re-deferral, which
-            carries the successor question so the user is handed the next question
-            rather than being told their answer went nowhere.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            MemoryStoreError: If the write path failed. The claim is left
-                ``APPLYING`` and reachable through :meth:`interrupted_questions`;
-                nothing is "repaired", because the engine cannot tell whether the
-                write landed and stamping a terminal state would be a lie.
-            UnresolvedEvidenceError: If the proposal's cited evidence was deleted
-                between the question and the answer. Likewise stranding.
-            DeferralStoreError: If the queue cannot be read or written.
-        """
-        self._reject_if_closing()
-        named = identifier(question_id, name="question_id")
-        check_arguments(
-            "answer", max_bytes=self._max_payload_bytes, question_id=named, accept=accept
-        )
-        device = current_requesting_device()
-        return await self._tracked(
-            self._answered(device, named, accept=accept), "answer", checked=True
-        )
-
-    async def _answered(
-        self, device: RequestingDevice, question_id: str, *, accept: bool
-    ) -> AnswerOutcome:
-        """ADR-0298 §5 "A legacy turn", naming no conversation, then the answer."""
-        await self._device_checks.turn(device, None, "answer")
-        return await self._questions.answer(question_id, accept=accept)
-
-    async def forget_question(self, question_id: Identifier) -> bool:
-        """Destroy one deferred question (ADR-0078 §8, §9; ADR-0007).
-
-        Relays ``DeferralStore.delete``. **Unconditional**, like every other
-        deletion on this façade — including on a question whose answer is in flight,
-        because a data right conditional on an internal state the system assigned is
-        the mistake ADR-0073 §9 declines with a different label, and a refusal would
-        be *permanent* for a stranded claim.
-
-        It is also step 1 of the recovery a stranded answer has, and the ordering is
-        the whole point: while the row lives it holds its question key, so a
-        re-``learn`` of the same correction would collide with it and be handed back
-        an id nothing can claim. Deleting destroys the key with the content.
-
-        Args:
-            question_id: The question the user named, taken as opaque.
-
-        Returns:
-            ``True`` if a question was destroyed, ``False`` if the id named nothing
-            — which the adapter renders and maps to an exit code, exactly as
-            :meth:`forget` does for a belief.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            DeferralStoreError: If the queue cannot be written.
-        """
-        self._reject_if_closing()
-        named = identifier(question_id, name="question_id")
-        check_arguments("forget_question", max_bytes=self._max_payload_bytes, question_id=named)
-        return await self._tracked(
-            self._questions.forget_question(named), "forget_question", checked=True
-        )
 
     # --- the notification surface (ADR-0130 §7, §9) ------------------------
 
@@ -7854,87 +7198,6 @@ class Engine:
 
     # --- the recipient-grant surface (ADR-0235 §3, §7) ----------------------
 
-    async def grantable_decisions(
-        self, *, limit: int = DEFAULT_PAGE_SIZE
-    ) -> tuple[PermissionDecision, ...]:
-        """List the recorded ``CONFIRM``s an establishing act may ride (ADR-0235 §3).
-
-        ``limit`` is refused when it is **not strictly positive**, on
-        ``recent_decisions``' reason and in every implementation (ADR-0186 §3): it
-        bounds the trail rows read as well as the rows returned, so a non-positive
-        one reaches ``AuditTrail.recent`` as an unbounded read of a Tier 1 store.
-
-        **This is history and never a queue.** Nothing it returns is a park, holds a
-        turn, blocks anything or expires under a sweep, and no surface presents one
-        as outstanding work (ADR-0231 §9's third limb, ADR-0235 §3).
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            TypeError: If ``limit`` is not an integer, or is a ``bool``.
-            ValueError: If ``limit`` is not in ``[1, 2**63)``.
-            AuditError: If the trail cannot be read.
-            PlanningError: If the injected clock's reading is not conforming.
-            OversizedValueError: If the page exceeds the contract limit.
-        """
-        self._reject_if_closing()
-        positive_page_argument(limit, name="limit")
-        check_arguments("grantable_decisions", max_bytes=self._max_payload_bytes, limit=limit)
-        return await self._tracked(
-            self._recipient_grants.grantable_decisions(limit=limit),
-            "grantable_decisions",
-            checked=True,
-        )
-
-    async def establish_recipient_grant(
-        self, decision_id: DurableIdentifier, *, expires_at: UtcInstant
-    ) -> RecipientGrant:
-        """Answer a recorded ``CONFIRM`` no park holds and record the grant (ADR-0235 §3).
-
-        ``decision_id`` undergoes :data:`~ai_assistant.core.types.Identifier`
-        validation before any I/O, as every identifier argument on this surface does
-        (ADR-0085 §3c) — it both refuses a blank value and strips the one the
-        implementation then uses, so a client cannot make ``" id "`` and ``"id"``
-        disagree at the seam.
-
-        **This resumes nothing and services nothing.** The ``ALLOW`` it records
-        authorises a call that has already been abandoned; no lane executes it,
-        re-composes the turn it belonged to, or treats the recorded answer as making
-        anything runnable (ADR-0231 §9's first limb).
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: If ``decision_id`` is blank or unwritable.
-            UngrantableActError: If the act may not ride this decision — any of
-                ADR-0235 §3's seven conditions, at the check or late against the
-                trail's own resolution invariant, or an expiry that is not strictly
-                after the instant the answer would carry. **No answer is recorded.**
-            PermissionDeniedError: If the policy answered other than an ``ALLOW``.
-                That answer **is** recorded and the confirmation is thereby settled.
-            AuditError: If the trail cannot be read or refused the answer.
-            InvalidRecipientGrantError: If the store refused the grant. The answer
-                stays recorded and nothing is evicted to make room.
-            RecipientGrantError: If the grant store cannot be written.
-            OversizedValueError: If the arguments or the record exceed the limit.
-        """
-        self._reject_if_closing()
-        named = identifier(decision_id, name="decision_id")
-        # The instant is refused here for ``decision_id``'s reason and one sharper:
-        # a naive one reaches ADR-0235 §1's comparison **after** the policy has been
-        # consulted, so a caller would meet a bare ``TypeError`` where the contract
-        # declares a controlled refusal before any I/O (ADR-0085 §9, ADR-0023 §3).
-        until = utc_instant(expires_at, name="expires_at")
-        check_arguments(
-            "establish_recipient_grant",
-            max_bytes=self._max_payload_bytes,
-            decision_id=named,
-            expires_at=until,
-        )
-        return await self._tracked(
-            self._recipient_grants.establish_recipient_grant(named, expires_at=until),
-            "establish_recipient_grant",
-            checked=True,
-        )
-
     async def standing_recipient_grants(self) -> tuple[RecipientGrant, ...]:
         """List every standing recipient grant that is live now (ADR-0235 §7).
 
@@ -8009,73 +7272,6 @@ class Engine:
         )
 
     # --- the goal-authorization surface (ADR-0254 §11) -----------------------
-
-    async def standing_authorizations(self, goal_id: Identifier) -> tuple[AuthorizationView, ...]:
-        """What one goal's recorded acts still authorise (ADR-0254 §11).
-
-        Delegated whole to :class:`~ai_assistant.orchestration.authorization_surface.
-        AuthorizationOperations`; what this layer adds is the identifier validation,
-        the payload check, the drain tracking and the result measurement. **It takes
-        no ``limit``**, for :meth:`standing_recipient_grants`' stated reason: a
-        truncated answer to *"what do I authorise"* is a false answer rather than a
-        partial one, so a listing that does not fit the frame is an
-        ``OversizedValueError`` and no listing at all.
-
-        **An unwired surface answers empty rather than raising.** A deployment with no
-        authorization store proposes no row at all, so *"this goal authorises nothing"*
-        is the true answer there and not a degraded one.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: If ``goal_id`` is blank or unwritable.
-            AuthorizationError: If the authorization store could not be read.
-            PlanningError: If the plan store could not be read.
-            OversizedValueError: If the listing exceeds the contract limit.
-        """
-        self._reject_if_closing()
-        named = identifier(goal_id, name="goal_id")
-        check_arguments("standing_authorizations", max_bytes=self._max_payload_bytes, goal_id=named)
-        operations = self._authorization_operations
-        if operations is None:
-            return ()
-        return await self._tracked(
-            operations.standing_authorizations(named), "standing_authorizations", checked=True
-        )
-
-    async def revoke_authorization(
-        self, authorization_id: DurableIdentifier
-    ) -> AuthorizationSettlement:
-        """Withdraw one standing authorization (ADR-0254 §11).
-
-        The store's own :class:`~ai_assistant.core.types.AuthorizationSettlement`,
-        **unmapped**: a second three-valued vocabulary for one fact would be the second
-        carrier ADR-0150 is named after, and the surface renders prose from the member.
-
-        **Never refused for a ceiling** — there is none — and **an unknown id is a
-        result and never a raise**, which is
-        ``AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception``'s
-        rule. An unwired surface answers ``NO_SUCH_AUTHORIZATION``, which is what is
-        true of a store holding no row with that id.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: If ``authorization_id`` is blank or unwritable.
-            AuthorizationError: If the authorization store could not be read or
-                written.
-            PlanningError: If the injected clock's reading is not conforming.
-            OversizedValueError: If the argument exceeds the contract limit.
-        """
-        self._reject_if_closing()
-        named = identifier(authorization_id, name="authorization_id")
-        check_arguments(
-            "revoke_authorization", max_bytes=self._max_payload_bytes, authorization_id=named
-        )
-        operations = self._authorization_operations
-        if operations is None:
-            return AuthorizationSettlement.NO_SUCH_AUTHORIZATION
-        return await self._tracked(
-            operations.revoke_authorization(named), "revoke_authorization", checked=True
-        )
 
     def _announced_authorizations(
         self, disposition: StepDisposition, recorded: RecordedGoal | None
@@ -10259,30 +9455,6 @@ class Engine:
         if origin is None:
             return
         await self._engage(plan.goal_id, conversation_id=origin.conversation_id)
-
-    async def _outstanding(self) -> dict[str, GoalQuestion]:
-        """Every goal's open question, expiring what is due (ADR-0250 §12, §15).
-
-        ``outstanding_questions`` is one of the four operations §12 names as *"the first
-        operation that reads it"*, so a question past its deadline is settled ``EXPIRED``
-        here rather than rendered as though it still stood. The settlement *"clears the
-        content (§8) and moves **nothing else**: not the goal's status, not the attempt's
-        state, not ``last_engaged_at``"*.
-
-        Returns:
-            The open questions, keyed by the goal each is about. A goal holds at most
-            one (§8), so the mapping loses nothing.
-        """
-        now = self._clock()
-        standing: dict[str, GoalQuestion] = {}
-        for question in await self._plans.outstanding_questions():
-            if question.expires_at > now:
-                standing[question.goal_id] = question
-                continue
-            await self._plans.settle_question(
-                question.id, disposition=GoalQuestionDisposition.EXPIRED, at=now
-            )
-        return standing
 
     async def _associate(
         self,
