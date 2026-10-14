@@ -1,6 +1,6 @@
 # 59. A durable, robust confirmation record: a lifetime deadline, resolution recovery, and the legacy park narrowed
 
-- Status: Partially superseded by ADR-0319 (§1's computing of `expires_at` and its freshness check in the step runner, and §3)
+- Status: Partially superseded by ADR-0319 (§1's computing of `expires_at` and its freshness check in the step runner, §2 and §3)
 - Date: 2026-07-24
 - **This is a contract change.** It adds a field to `PermissionDecision` in
   `core/types.py` (with a matching parameter on `PermissionDecision.from_request`
@@ -68,7 +68,7 @@
   ADR-0099 §6 stated this finding against this ADR and ADR-0058 together, filed it
   as **#685**, and declined to fix either text from that lane; this note is that
   fix, and ADR-0058 carries its own. Refs #685, #308, ADR-0099 §1 and §6.
-- Partially superseded: 2026-10-14 by ADR-0319 — §1's computing of `expires_at` and its freshness check in the step runner, and §3. They governed `StepRunner` in `orchestration/runner.py`; the field and `AuditTrail.resolution_of` stand, and the authority milestone redoes asking the user. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §1's computing of `expires_at` and its freshness check in the step runner, §2 and §3. They governed `StepRunner` in `orchestration/runner.py` and `AuditTrail.resolution_of`; the `expires_at` field stands, and the authority milestone redoes asking the user. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 8. Situational context: `CurrentContext` and a source seam
 
-- Status: Partially superseded by ADR-0319 (§2's `ContextSource` seam, §3, §4's bullets on a failing optional source and a key collision, and §5's working-hours window and source clock, with ADR-0026's amendments to them); §§2, 4–5 amended by ADR-0026
+- Status: Partially superseded by ADR-0319 (§2, §3, §4's bullets on a failing optional source and a key collision, and §5's working-hours window and source clock, with ADR-0026's amendments to them); §§2, 4–5 amended by ADR-0026
 - Date: 2026-07-17
 - Amended: 2026-07-21 by ADR-0026 — §4's "a valid CurrentContext can always be
   built" now holds for a *conforming* clock: a reading that is naive,
@@ -12,7 +12,7 @@
   contract of ADR-0026 §1. The startup-time treatment of a malformed timezone,
   the ContextSource/CurrentContext shapes, and everything else in §§2, 4–5
   stand.
-- Partially superseded: 2026-10-14 by ADR-0319 — §2's `ContextSource` seam, §3, §4's bullets on a failing optional source and a key collision, and §5's working-hours window and source clock, with ADR-0026's amendments to them. They governed the assembler and its sources in `context/`, and the two `Settings` fields that went with them. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0319 — §2, §3, §4's bullets on a failing optional source and a key collision, and §5's working-hours window and source clock, with ADR-0026's amendments to them. They governed the `ContextProvider` seam, the assembler and its sources in `context/`, and the two `Settings` fields that went with them; `CurrentContext`, `TimeOfDay`, `ContextError` and the timezone stand. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

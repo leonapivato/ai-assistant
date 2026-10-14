@@ -1,6 +1,6 @@
 # 184. A decision recorded before the origin field is legible history, and the absence is its own value
 
-- Status: Partially superseded by ADR-0233 (§1's exception roster, §2's first, third and fifth clauses, §3's two-shape discrimination sentence, §10's discrimination-test clause, and §9's one-sibling clause; §2's shared-base rule, §3's structural property, §4's write rule, §5's readers, §7's floor and §10's other tests all stand)
+- Status: Partially superseded by ADR-0233 (§1's exception roster, §2's first, third and fifth clauses, §3's two-shape discrimination sentence, §10's discrimination-test clause, and §9's one-sibling clause; §2's shared-base rule, §3's structural property, §4's write rule, §5's readers, §7's floor and §10's other tests all stand) and ADR-0319 (§5:2, §5:3, §5:5 and §10:8)
 - Date: 2026-08-23
 - **Partially superseded: 2026-09-04 by ADR-0233 — §1's exception roster, §2's first,
   third and fifth clauses, §3's two-shape discrimination sentence, §10's
@@ -101,6 +101,7 @@
   (which this supersedes as the route to the fix and which closes against the
   implementation lane), #1443 (the lane that discovered it). **Filed by this lane:**
   none.
+- Partially superseded: 2026-10-14 by ADR-0319 — §5:2, §5:3, §5:5 and §10:8. They governed `AuditTrail.pending_confirmation` and `resolution_of`, which left the trail; the authority milestone redoes asking the user. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

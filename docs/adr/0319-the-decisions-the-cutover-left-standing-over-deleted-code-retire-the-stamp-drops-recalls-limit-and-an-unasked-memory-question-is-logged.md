@@ -7,7 +7,7 @@
 - Authorization: the dispatcher assigned 0319 and authorized ratifying this decision once its reviews are green. §4 is the dispatcher's ruling on [#2989](https://github.com/leonapivato/ai-assistant/issues/2989), and §5 the dispatcher's ruling for the deferred-question store's deletion, the simple option the owner takes on deferred areas.
 - Changes no `core` type or Protocol and nothing the wire carries. The seams whose implementations the cutover deleted leave `core` under ADR-0309 §5:1, in their own lanes; this decision records which earlier decisions stop binding when they go.
 - **Supersedes**, each whole (§8): ADR-0022, ADR-0033, ADR-0034, ADR-0047, ADR-0051, ADR-0053, ADR-0055, ADR-0057, ADR-0058, ADR-0071, ADR-0158, ADR-0160, ADR-0170, ADR-0176, ADR-0201, ADR-0211 and ADR-0244.
-- **Partially supersedes**, in the clauses §8's second table names: ADR-0008, ADR-0014, ADR-0028, ADR-0029, ADR-0037, ADR-0039, ADR-0042, ADR-0049, ADR-0052, ADR-0059, ADR-0060, ADR-0074, ADR-0083, ADR-0084, ADR-0085, ADR-0093, ADR-0096, ADR-0097, ADR-0106, ADR-0115, ADR-0119, ADR-0122, ADR-0144, ADR-0148, ADR-0150, ADR-0162, ADR-0173, ADR-0175, ADR-0177, ADR-0178, ADR-0181, ADR-0185, ADR-0187, ADR-0189, ADR-0192, ADR-0193, ADR-0199, ADR-0203, ADR-0204, ADR-0208, ADR-0210, ADR-0221, ADR-0222, ADR-0223, ADR-0226, ADR-0227, ADR-0228, ADR-0230, ADR-0231, ADR-0232, ADR-0233, ADR-0235, ADR-0236, ADR-0238, ADR-0240, ADR-0241, ADR-0242, ADR-0245, ADR-0246, ADR-0247, ADR-0260, ADR-0274, ADR-0286, ADR-0293, ADR-0295, ADR-0297 and ADR-0300.
+- **Partially supersedes**, in the clauses §8's second table names: ADR-0008, ADR-0014, ADR-0028, ADR-0029, ADR-0037, ADR-0039, ADR-0042, ADR-0049, ADR-0052, ADR-0059, ADR-0060, ADR-0074, ADR-0083, ADR-0084, ADR-0085, ADR-0093, ADR-0096, ADR-0097, ADR-0106, ADR-0115, ADR-0119, ADR-0122, ADR-0144, ADR-0148, ADR-0150, ADR-0162, ADR-0173, ADR-0175, ADR-0177, ADR-0178, ADR-0181, ADR-0184, ADR-0185, ADR-0187, ADR-0189, ADR-0192, ADR-0193, ADR-0199, ADR-0203, ADR-0204, ADR-0208, ADR-0210, ADR-0221, ADR-0222, ADR-0223, ADR-0226, ADR-0227, ADR-0228, ADR-0230, ADR-0231, ADR-0232, ADR-0233, ADR-0235, ADR-0236, ADR-0238, ADR-0240, ADR-0241, ADR-0242, ADR-0245, ADR-0246, ADR-0247, ADR-0260, ADR-0274, ADR-0286, ADR-0293, ADR-0295, ADR-0297 and ADR-0300.
 
 ## Context
 
@@ -38,11 +38,14 @@ the parked-reads store (`permissions/parked_reads.py`), the deferred-question st
 (`memory/deferral_store.py`) and the goal authorizations
 (`permissions/goal_authorizations.py`); `planning/goals.py` retires under ADR-0309 §5:1. The
 owner ruled on 2026-10-14 (#2816) that the old planner, the query composer and the streaming
-completer retire with their seams, and that `context/` is deleted and `learning/` kept.
+completer retire with their seams, and that `context/` is deleted and `learning/` kept. At
+`2090976a` the `StreamingCompleter`, `QueryComposer`, `Planner`, `GoalAssociator`,
+`ContextProvider`, `RoutingRecorder` and `RoutingTrail` Protocols left `core` with their
+suites and fakes, and `AuditTrail` lost `pending_confirmation` and `resolution_of`.
 
 **The sweep.** Every ADR numbered below 0306 whose status is not already wholly superseded
 was read against `5bffba96`, clause by clause where it is marked, section by section where
-it is not. A clause retires here when the code it obligates, constrains or describes is in
+it is not, and checked again against `2090976a`. A clause retires here when the code it obligates, constrains or describes is in
 the lists above. A clause about a type, store member or seam that survives in `core` or in
 its subsystem stands, even where nothing in production calls it now; those are listed under
 "What stays open". The decisions ADR-0309, ADR-0313 and the old path's wire vocabulary
@@ -192,7 +195,7 @@ Superseded in part (§3); every clause the middle column does not name stands:
 
 | Earlier decision | What retires | What it governed |
 | --- | --- | --- |
-| ADR-0008 | §2's `ContextSource` seam, §3, §4's bullets on a failing optional source and a key collision, and §5's working-hours window and source clock, with ADR-0026's amendments to them | The assembler and its sources in `context/`, and the two `Settings` fields that went with them |
+| ADR-0008 | §2, §3, §4's bullets on a failing optional source and a key collision, and §5's working-hours window and source clock, with ADR-0026's amendments to them | The `ContextProvider` seam, the assembler and its sources in `context/`, and the two `Settings` fields that went with them; `CurrentContext`, `TimeOfDay`, `ContextError` and the timezone stand |
 | ADR-0014 | §1's `Goal`, §5's goal members and goal deletion, §4's startup recovery scan, §6's `Planner` Protocol and §7's model-backed planner | `planning/goals.py`, `PlanStore`'s goal members, `orchestration/recovery.py` and `planning/planner.py` with the `Planner` seam |
 | ADR-0028 | §4's ruling on `LearningLoop`, with its `LearningLoop` limbs in §4a and §4b | `LearningLoop` in `orchestration/loop.py`; the writer itself, its tuning check and its expiry clock stand |
 | ADR-0029 | §8 but its two wiring bullets, and §4's paragraphs obliging the executor on a cancelled call | `StepExecutor` in `orchestration/executor.py`; the seam's own rules stand |
@@ -201,7 +204,7 @@ Superseded in part (§3); every clause the middle column does not name stands:
 | ADR-0042 | §3's `converse` and `resume` call shapes, and §4 | `converse`, `resume` and the confirmation token, which left the engine surface; the authority milestone redoes asking the user |
 | ADR-0049 | §1's `goals` table and its goal-side rules, and §4 | `PlanStore`'s goal members and the parked `CONFIRM` path in `orchestration/runner.py` |
 | ADR-0052 | §1–§3, and §4's command-line `resume` bullet | `pending_confirmations`, `resume` and `assistant resume`, which are gone; the authority milestone redoes asking the user |
-| ADR-0059 | §1's computing of `expires_at` and its freshness check in the step runner, and §3 | `StepRunner` in `orchestration/runner.py`; the field and `AuditTrail.resolution_of` stand, and the authority milestone redoes asking the user |
+| ADR-0059 | §1's computing of `expires_at` and its freshness check in the step runner, §2 and §3 | `StepRunner` in `orchestration/runner.py` and `AuditTrail.resolution_of`; the `expires_at` field stands, and the authority milestone redoes asking the user |
 | ADR-0060 | §3's `ContextProvider` leg | `AssemblingContextProvider` in `context/provider.py` |
 | ADR-0074 | §5, and §6's first paragraph | The conversation's tail and retrieved beliefs as `Planner.plan`'s supply, in `planning/planner.py` and `orchestration/retrieval.py` |
 | ADR-0083 | §1's startup recovery scan, §2's `max_outstanding_confirmations`, §7's `DeferralStore.purge` limb and its bullet on confirmation deadlines, §13's #333 bullet and §14's item 7 | `orchestration/recovery.py`, the parked confirmation, `memory/deferral_store.py` and the continuation token |
@@ -224,6 +227,7 @@ Superseded in part (§3); every clause the middle column does not name stands:
 | ADR-0178 | §5:1–§5:4 and §9:4–§9:5 | The engine's two confirmation assembly sites and the parked step |
 | ADR-0181 | §3:3, §5:5 and §5:6 | The confirmation assembly sites and the resuming path |
 | ADR-0185 | §11:3, in its "all three uses and both readers" | The `FACET` driver in `context/sources.py`; the arms run over the surviving driver (ADR-0319 §7) |
+| ADR-0184 | §5:2, §5:3, §5:5 and §10:8 | `AuditTrail.pending_confirmation` and `resolution_of`, which left the trail; the authority milestone redoes asking the user |
 | ADR-0187 | §3:1, §4, §4d, §5, §6:1 and §7:1 | The retrieval assembler's band floor in `orchestration/retrieval.py` |
 | ADR-0189 | §2:2–§2:4, §3:1–§3:2, §4:4–§4:6, §9:5, §9:7 and §9:9 | The `Question`, `Retirement` and `Warrant` projections and their renderers |
 | ADR-0192 | §3:36–§3:52 | The startup recovery scan in `orchestration/recovery.py` |
@@ -242,7 +246,7 @@ Superseded in part (§3); every clause the middle column does not name stands:
 | ADR-0230 | §2:1–§2:6, §3, §7, §8:1, §8:2, §8:6, §9, §10:2–§10:4, §12:1 and §13:6–§13:8 | The planner's file ask and its servicing; the `Fetcher` seam stands |
 | ADR-0231 | §2:1, §3, §4:1, §9:2–§9:3, §11, §12:1, §13:1–§13:6, §15:3, §16:2–§16:4, §17:1–§17:3 and §17:11–§17:12 | The planner's search ask, the `QueryComposer` with `planning/composer.py`, and the servicing in `orchestration/reads.py`; the `WebSearcher` seam stands |
 | ADR-0232 | §7 | The turn's read audit in `orchestration/reads.py` |
-| ADR-0233 | §11:2 and §14:8 | The confirmation surfaces and assembly sites, which are gone; the authority milestone redoes asking the user |
+| ADR-0233 | §11:2, §14:7 and §14:8 | The confirmation surfaces, the assembly sites and `AuditTrail.pending_confirmation`, which are gone; the authority milestone redoes asking the user |
 | ADR-0235 | §1, §2, §5, §6:7–§6:18, §8:2–§8:3, §9:2–§9:10 and §9:13 | The establishing act's operations, `resume`'s flag and the surfaces offering them; the authority milestone redoes the act |
 | ADR-0236 | §5 | The read audit's cost ground in `orchestration/reads.py` |
 | ADR-0238 | §2, §3:4, §5:2–§5:8, §5:10, §7:1–§7:2, §11, §12:1–§12:2, §12:4 and §13:5–§13:6 | The `SearchSupply` the `QueryComposer` was handed, and its servicing |
@@ -267,7 +271,7 @@ Superseded in part (§3); every clause the middle column does not name stands:
 | ADR-0200, ADR-0205, ADR-0206, ADR-0207 | Nothing: ADR-0313 decided what of spoken conversation retires |
 | ADR-0280, ADR-0281, ADR-0282, ADR-0292 | Nothing: ADR-0309 recorded what the cutover changes in them |
 | ADR-0050, ADR-0079, ADR-0098, ADR-0159, ADR-0171, ADR-0214 | Nothing: the policy's `ASK_USER` ruling and its honouring of a confirmation are surviving code; §5 and §6 say what follows the store's deletion |
-| ADR-0016, ADR-0041, ADR-0064, ADR-0145, ADR-0152, ADR-0184, ADR-0186, ADR-0194 | Nothing whole: what they bind survives in `core`, the stores or the tool seam; a limb naming the executor or `resume` binds nothing (§3:2) |
+| ADR-0016, ADR-0041, ADR-0064, ADR-0145, ADR-0152, ADR-0186, ADR-0194 | Nothing whole: what they bind survives in `core`, the stores or the tool seam; a limb naming the executor or `resume` binds nothing (§3:2) |
 | ADR-0119 §9:5, ADR-0185 §1–§10 | Nothing: §4:3 and §7 rely on them |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
@@ -294,13 +298,13 @@ Superseded in part (§3); every clause the middle column does not name stands:
 - Members and types that survive with no production caller since the cutover, so that the
   clauses binding them stand: `PlanStore`'s plan and execution members (`save_plan`,
   `get_plan`, `start_execution`, `commit_transition`, `active_executions`, `claim_effect`),
-  with `ActionPlan`, `ExecutionState` and `PlanExecution`; `AuditTrail.pending_confirmation`,
-  `resolution_of` and `open_invocations`; `ActionPolicy.resolve`; `EgressBinder.rebind`;
+  with `ActionPlan`, `ExecutionState` and `PlanExecution`; `AuditTrail.open_invocations`;
+  `ActionPolicy.resolve`; `EgressBinder.rebind`;
   `Confirmation` and its egress types; `RecipientGrant.established_from` and
   `PermissionDecision.from_confirmation`; the `ReadKind`, `ReadAsk` and `ReadRequest` family;
-  `SearchDisposition`, `SearchNotServiced` and `ForecastNotRead`; `ReplyChunk`; and the
-  `ContextProvider` seam with `CurrentContext`. Retiring them, and the clauses that bind them,
-  is a later lane's and a later record's.
+  `SearchDisposition`, `SearchNotServiced` and `ForecastNotRead`; and `CurrentContext` with
+  its facets. Retiring them, and the clauses that bind them, is a later lane's and a later
+  record's ([#3018](https://github.com/leonapivato/ai-assistant/issues/3018)).
 - What an `ASK_USER` ruling becomes (the learning milestone), and who may produce a
   `UserConfirmation` (the authority milestone).
 
