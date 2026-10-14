@@ -12,6 +12,7 @@ network denied.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, cast
@@ -52,7 +53,7 @@ from ai_assistant.core.types import (
     Role,
     RoundResponse,
 )
-from ai_assistant.models import PydanticAIToolCallingCompleter
+from ai_assistant.models import PydanticAIToolCallingCompleter, tool_calling
 from ai_assistant.models.tool_calling import DEFAULT_THINKING, ROUND_TOOL
 from ai_assistant.testing import FakeDiagnosticSink
 
@@ -61,7 +62,8 @@ if TYPE_CHECKING:
 
     from pydantic_ai.messages import ModelMessage, ModelResponsePart
     from pydantic_ai.models import Model
-    from pydantic_ai.settings import ThinkingLevel
+    from pydantic_ai.models import ModelRequestParameters as Parameters
+    from pydantic_ai.settings import ModelSettings, ThinkingLevel
     from pydantic_ai.tools import ToolDefinition as NativeTool
     from vendor_stacks import Handler
 
@@ -773,17 +775,49 @@ async def test_an_anthropic_models_tools_are_recorded_as_sent() -> None:
     assert recorded[0] == _tool().model_dump(mode="json")
 
 
-class _Unpreparable(WrapperModel):
-    """A model that answers as the one it wraps but cannot be prepared from outside.
+class _Counting(FunctionModel):
+    """A model whose own preparation keeps state: each request is numbered into its schema.
 
-    pydantic-ai's wrapper sends the request through the wrapped model, which prepares
-    it itself, so the round runs and only the record's own preparation fails.
+    Replaying such a preparation would record a number never sent and move the next
+    request's on (the round-1 review's probe), so the record must not replay it.
     """
 
-    def prepare_request(self, model_settings: Any, model_request_parameters: Any) -> Any:
-        del model_settings, model_request_parameters
-        msg = "cannot prepare"
-        raise RuntimeError(msg)
+    def __init__(self, seen: list[object]) -> None:
+        def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            del messages
+            seen.append(info.function_tools[0].parameters_json_schema["properties"]["query"])
+            return ModelResponse(parts=[TextPart("ok")])
+
+        super().__init__(answer)
+        self.prepared = 0
+
+    def prepare_request(
+        self, model_settings: ModelSettings | None, model_request_parameters: Parameters
+    ) -> tuple[ModelSettings | None, Parameters]:
+        self.prepared += 1
+        settings, parameters = super().prepare_request(model_settings, model_request_parameters)
+        first, *rest = parameters.function_tools
+        schema = {**first.parameters_json_schema}
+        schema["properties"] = {"query": {"const": self.prepared}}
+        numbered = dataclasses.replace(first, parameters_json_schema=schema)
+        return settings, dataclasses.replace(parameters, function_tools=[numbered, *rest])
+
+
+async def test_a_preparation_that_is_not_pydantic_ais_own_is_not_replayed() -> None:
+    """The requests are as they are with the record off, and the record says why not."""
+    seen: list[object] = []
+    sink = FakeDiagnosticSink()
+    completer = PydanticAIToolCallingCompleter(_Counting(seen), diagnostics=sink)
+
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now):
+        await completer.respond(_request(), [_tool()])
+        await completer.respond(_request(), [_tool()])
+
+    assert seen == [{"const": 1}, {"const": 2}]
+    for entry in sink.recorded:
+        body = entry.model_dump(mode="json")["body"]
+        assert body["offered_tools"][0] == _tool().model_dump(mode="json")
+        assert "_Counting" in body["offered_tools_unprepared"]["message"]
 
 
 def _answering() -> FunctionModel:
@@ -794,12 +828,29 @@ def _answering() -> FunctionModel:
     return FunctionModel(answer)
 
 
+class _Wrapping(WrapperModel):
+    """A wrapper whose own code sends the request, which a replay could not see into."""
+
+    async def request(
+        self,
+        messages: list[ModelMessage],
+        model_settings: ModelSettings | None,
+        model_request_parameters: Parameters,
+    ) -> ModelResponse:
+        return await super().request(messages, model_settings, model_request_parameters)
+
+
 @pytest.mark.parametrize(
     ("model", "why"),
     [
-        pytest.param(lambda: _Unpreparable(_answering()), "cannot prepare", id="raises"),
+        pytest.param(lambda: _Wrapping(_answering()), "_Wrapping prepares", id="own-wrapper"),
         pytest.param(
             lambda: FallbackModel(_answering()), "a fallback model prepares", id="fallback"
+        ),
+        pytest.param(
+            lambda: WrapperModel(FallbackModel(_answering())),
+            "a fallback model prepares",
+            id="wrapped-fallback",
         ),
     ],
 )
@@ -819,3 +870,29 @@ async def test_tools_whose_preparation_cannot_be_computed_are_recorded_as_built_
     assert body["offered_tools"][0] == _tool().model_dump(mode="json")
     assert [tool["name"] for tool in body["offered_tools"]] == ["web_search", ROUND_TOOL]
     assert why in body["offered_tools_unprepared"]["message"]
+
+
+async def test_a_preparation_that_raises_for_the_record_still_writes_the_entry_marked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure computing the tools as prepared never fails the round or drops the entry."""
+
+    def refuse(request: object) -> list[NativeTool]:
+        del request
+        msg = "cannot prepare"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(tool_calling, "_prepared", refuse)
+    completer, sink = _diagnosing(ThinkingPart("Weighing it…"), finish="length")
+
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now), pytest.raises(ModelResponseError):
+        await completer.respond(_request(), [_tool()])
+
+    body = sink.recorded[0].model_dump(mode="json")["body"]
+    assert body["read_as_round"] is False
+    assert body["offered_tools"][0] == _tool().model_dump(mode="json")
+    assert [tool["name"] for tool in body["offered_tools"]] == ["web_search", ROUND_TOOL]
+    assert body["offered_tools_unprepared"] == {
+        "class": "RuntimeError",
+        "message": "cannot prepare",
+    }
