@@ -17,9 +17,7 @@ are built and tested but refuse nothing and cost nothing.
 **A conversation's ends are its devices as the conversation store holds them**
 (§5:7). A conversation the store does not hold — never started, or stamped deleted —
 has no ends, so a row that needs the device to be one of them refuses it, rather than
-letting the operation say whether such a conversation exists. The legacy turn alone
-reads otherwise, because its row says so: a call naming no existing conversation
-needs "my devices" instead.
+letting the operation say whether such a conversation exists.
 
 **Which of §6:2's reasons a membership refusal carries** is decided here, because the
 wire server cannot (it sees roster roles and no membership): ``NO_ROLE`` where the
@@ -49,11 +47,9 @@ from typing import TYPE_CHECKING, Final, NoReturn
 
 from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import (
-    ChannelIdentity,
     ChatChanges,
     ConversationStartedChange,
     DevicesChangedChange,
-    NewConversation,
 )
 
 if TYPE_CHECKING:
@@ -67,10 +63,6 @@ if TYPE_CHECKING:
         UserMessage,
     )
     from ai_assistant.orchestration.conversations import ConversationLifecycle
-
-#: The ``channel_type`` of a channel whose input is a conversation's, which makes a
-#: ``receive`` a legacy turn rather than spoke traffic (ADR-0298 §5's table).
-CONVERSATION_CHANNEL: Final = "conversation"
 
 #: How many changes one page of the replay in :meth:`DeviceChecks._an_end` reads.
 _REPLAY_PAGE: Final = 100
@@ -172,52 +164,6 @@ class DeviceChecks:
                 device, "write_message names a device other than the one it comes from"
             )
         await self.writing(device, conversation_id, "write_message")
-
-    async def turn(
-        self, device: RequestingDevice, conversation_id: str | None, method: str
-    ) -> None:
-        """§5 "A legacy turn": both ends of the named conversation, or of "my devices".
-
-        Where the call names an existing conversation, be its end for writing and for
-        reading; otherwise — no conversation named, or one the store does not hold —
-        be in "my devices" for writing and for reading. A legacy turn is input to the
-        assistant answered with its reply, so it needs both.
-
-        Raises:
-            DeviceRefusedError: If the device is not such an end.
-        """
-        if device.is_hub:
-            return
-        devices = (
-            None
-            if conversation_id is None
-            else await self._conversations.conversation_devices(conversation_id)
-        )
-        if devices is None:
-            devices = await self._conversations.my_devices()
-        held = _access(devices, device.device_id)
-        if held is None or not (held.reads and held.writes):
-            await self._refuse(
-                device, f"{method} needs a device that writes and reads the conversation"
-            )
-
-    async def receiving(self, device: RequestingDevice, target: object, method: str) -> None:
-        """§5's row for a channel input, chosen by its target alone (§5:2).
-
-        A ``NewConversation``, or a channel whose ``channel_type`` is
-        ``conversation``, is a legacy turn (:meth:`turn`); any other target is spoke
-        traffic, which needs only the role of host of spokes and is the wire
-        server's to check (§5:6), so nothing is checked here.
-
-        Raises:
-            DeviceRefusedError: If the input is a legacy turn the device may not make.
-        """
-        if device.is_hub:
-            return
-        if isinstance(target, NewConversation):
-            await self.turn(device, None, method)
-        elif isinstance(target, ChannelIdentity) and target.channel_type == CONVERSATION_CHANNEL:
-            await self.turn(device, target.instance_id, method)
 
     async def polling(self, device: RequestingDevice) -> None:
         """§5 "Notification poll": be in "my devices" for reading.
@@ -394,4 +340,4 @@ def _raise(message: str, reason: DeviceRefusal) -> NoReturn:
     raise DeviceRefusedError(message, reason=reason)
 
 
-__all__ = ["CONVERSATION_CHANNEL", "DeviceChecks", "device_changes"]
+__all__ = ["DeviceChecks", "device_changes"]

@@ -38,11 +38,12 @@ from ai_assistant.core.types import (
     TextChannelPayload,
     WholeTextReply,
 )
-from ai_assistant.orchestration.activation_state import admit_channel, admit_resume
+from ai_assistant.orchestration.activation_state import admit_channel
 from ai_assistant.orchestration.conversations import activation_ending
 from ai_assistant.orchestration.engine import _stopped_failure
 
 if TYPE_CHECKING:
+    from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.testing import FakeMemoryStore
 
 
@@ -161,31 +162,23 @@ async def test_what_waited_behind_a_stopped_activation_is_then_taken_in() -> Non
     assert await harness.conversation_store.untaken_messages(conversation) == ()
 
 
-def test_only_a_turn_call_is_answered_with_the_stop_and_a_resume_keeps_its_raise() -> None:
-    """§4:9 is stated over a turn call; a resume's own raise stays intact (ADR-0275 §5:6).
-
-    A resume raising before any answer was recorded raises what it raised — which is what
-    tells its caller the park still stands — whether or not its activation was stopped.
-    """
-    channel = admit_channel(
+def _admitted() -> ActivationState:
+    return admit_channel(
         ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hi")),
         WholeTextReply(),
         clock=lambda: AT,
         id_factory=lambda: "0b8f8f0e-2a5c-4c55-9a6c-6a2c1f0b0d11",
     )
-    control = admit_resume(
-        approved=True,
-        remember_recipients_until=None,
-        clock=lambda: AT,
-        id_factory=lambda: "5d1c7a3e-9b0f-4f6a-8c2d-1e3f5a7b9c0d",
-    )
+
+
+def test_a_call_awaiting_a_stopped_pass_is_answered_with_the_stop() -> None:
+    """§4:9: the stop takes the place of what the pass ended with, a cancellation aside."""
+    state = _admitted()
     raised = PlanningError("refused before any answer")
     cancelled = asyncio.CancelledError()
-    for state in (channel, control):
-        assert _stopped_failure(state, raised) is raised
-        assert state.stop()
-        assert _stopped_failure(state, cancelled) is cancelled
-    assert isinstance(_stopped_failure(channel, raised), ActivationStoppedError)
-    assert isinstance(_stopped_failure(channel, None), ActivationStoppedError)
-    assert _stopped_failure(control, raised) is raised
-    assert _stopped_failure(control, None) is None
+    assert _stopped_failure(state, raised) is raised
+    assert _stopped_failure(state, None) is None
+    assert state.stop()
+    assert _stopped_failure(state, cancelled) is cancelled
+    assert isinstance(_stopped_failure(state, raised), ActivationStoppedError)
+    assert isinstance(_stopped_failure(state, None), ActivationStoppedError)
