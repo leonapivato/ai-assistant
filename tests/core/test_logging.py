@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import logging.handlers
 import subprocess
 import sys
 from collections import ChainMap, UserDict, deque
@@ -1034,6 +1035,32 @@ def test_a_host_handlers_failure_inside_an_except_block_reports_none_of_the_hand
     assert "KeyError" in err, "the failure is shown by its class"
     assert "in _raise_with_content" in err, "and the handled exception by its frames"
     assert "Arguments: ()" in err
+
+
+def test_a_forwarding_handlers_targets_failure_reports_none_of_the_handled_words(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Adversarial review, round 2 under the third holder: a ``MemoryHandler`` on the
+    # root forwards the replaced record to a target the net never attached to, which
+    # fails on the same format inside the same ``except`` block.
+    root = logging.getLogger()
+    for one in list(root.handlers):
+        root.removeHandler(one)
+    stream = io.StringIO()
+    target = logging.StreamHandler(stream)
+    target.setFormatter(logging.Formatter("%(request_id)s %(message)s"))
+    root.addHandler(logging.handlers.MemoryHandler(capacity=1, target=target))
+    configure_logging(Settings())
+
+    try:
+        _raise_with_content()
+    except _ReadFailedError:
+        logging.getLogger("thirdparty").exception("request failed", extra={"request_id": "safe-id"})
+
+    err = capsys.readouterr().err
+    _assert_no_content(stream.getvalue() + err)
+    assert "--- Logging error ---" in err
+    assert "in _raise_with_content" in err
 
 
 def test_a_processor_formatter_hosts_failure_on_a_wrapped_event_reports_no_words(
