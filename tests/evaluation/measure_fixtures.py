@@ -106,7 +106,7 @@ def write(  # noqa: PLR0913 — one keyword per field the emitter fills
     superseded_total: int | None = None,
     elapsed: timedelta | None = QUICK,
     outcome: TraceOutcome = TraceOutcome.OK,
-    seam: str = "memory_ingest_reading",
+    seam: str = "memory_ingest",
 ) -> EvaluationTrace:
     """One ``MEMORY_WRITE`` trace, with whichever id sets the crossing observed."""
     records = {}

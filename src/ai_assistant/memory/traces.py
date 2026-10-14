@@ -90,18 +90,6 @@ SEAM_SEARCH: Final = "memory_search"
 #: ``MemoryWriter.ingest`` — one proposal, one ``MEMORY_WRITE`` trace (§8).
 SEAM_INGEST: Final = "memory_ingest"
 
-#: ``MemoryWriter.ingest_reading`` — **one crossing and one trace**, "not one per
-#: resulting ``MemoryIngestResult``, following §5's one-crossing rule; the
-#: per-reading counts ride as metrics" (§8).
-#:
-#: **This label is where "the write's mode" §8 requires lands.** The envelope has
-#: no enum-valued field to put a mode in — ``metrics`` values are
-#: ``int | float | bool`` and ``refs`` values are identifiers — and the seam label
-#: is the axis §3 already gives a measure to filter on ("distinguished by the seam
-#: label and the outcome"). Two labels for the two ``MemoryWriter`` members is
-#: therefore the mode, carried where a measure can group by it.
-SEAM_INGEST_READING: Final = "memory_ingest_reading"
-
 # --- the retrieval metric keys ------------------------------------------------
 
 #: The ``limit`` the caller asked for. Observed before any work, so it is on the
@@ -182,19 +170,10 @@ BANDS: Final = "bands"
 
 # --- the write metric keys ----------------------------------------------------
 
-#: How many proposals the crossing was handed. Observed before any work — one for
-#: :data:`SEAM_INGEST`, the reading's own count for :data:`SEAM_INGEST_READING` —
-#: so it is on the fault-path trace too, as :data:`LIMIT` is on retrieval's.
+#: How many proposals the crossing was handed — one for :data:`SEAM_INGEST`.
+#: Observed before any work, so it is on the fault-path trace too, as :data:`LIMIT`
+#: is on retrieval's.
 PROPOSALS: Final = "proposals"
-
-#: Whether the reading declared a coverage, and so whether ADR-0110's
-#: reconciliation was in scope at all. Observed at entry, like :data:`PROPOSALS`.
-COVERAGE_DECLARED: Final = "coverage_declared"
-
-#: How many windows the reading's coverage closed (ADR-0110 §3). Observed only
-#: where a reconciliation ran, so absent on :data:`SEAM_INGEST` and on an
-#: uncovered reading.
-CLOSED: Final = "closed"
 
 #: One literal key per ``MemoryDecisionKind``, because §2's second clause makes a
 #: metric key "a literal constant written in the emitting module" — an
@@ -436,7 +415,6 @@ class MemoryTraces:
         observe: Callable[[T], Reading],
         *,
         entry: Mapping[str, int | float | bool] | None = None,
-        partial: Callable[[], Reading] | None = None,
     ) -> T:
         """Await ``work`` and record exactly one trace for it.
 
@@ -460,19 +438,8 @@ class MemoryTraces:
             observe: How to read what ``work`` returned into the trace.
             entry: Quantities observed *before* the work, so they are carried on
                 the fault path too — §8 requires exactly that of a retrieval's
-                ``limit``.
-            partial: What the crossing had reached when it failed, for a crossing
-                that can leave work **applied** behind a raise. ``None`` for one
-                that cannot, where the entry quantities are the whole of the fault
-                path.
-
-                Not an optimisation: an ``ingest_reading`` whose second proposal
-                refuses has already committed its first, and a trace carrying no
-                ``WRITTEN`` id would say a record that is live was never written.
-                §3's absent key means *not observed*, so omitting an id the
-                crossing did observe is the instrument denying the work — the
-                fabrication §8's fault-path paragraph refuses in the other
-                direction, arriving through a partial commit instead of a zero.
+                ``limit``. They are the whole of the fault path: no crossing
+                observed here leaves work applied behind a raise.
 
         Returns:
             Whatever ``work`` returned, untouched.
@@ -487,7 +454,7 @@ class MemoryTraces:
                 occurred_at=occurred_at,
                 started=started,
                 outcome=TraceOutcome.REFUSED if isinstance(error, REFUSALS) else TraceOutcome.FAULT,
-                reading=self._merged(seam, entry, partial),
+                reading=self._merged(seam, entry, None),
                 fault_class=fault_class_of(error),
             )
             raise
@@ -529,8 +496,8 @@ class MemoryTraces:
     ) -> Reading:
         """The entry quantities, with whatever the crossing itself observed on top.
 
-        One helper for both paths, so the success reading and the partial one
-        cannot drift in how they merge or in how they fail.
+        One helper for both paths, so the success reading and the fault path's
+        cannot drift in how they merge.
 
         A mapper is first-party code in this package, so a raise here is a bug
         rather than an environmental failure — but §5 admits no exception for
@@ -542,8 +509,8 @@ class MemoryTraces:
         Args:
             seam: Which crossing this is, for the log record.
             entry: Quantities observed before the work.
-            produce: The crossing's own reading, or ``None`` where it has none —
-                a fault path with nothing applied behind it.
+            produce: The crossing's own reading, or ``None`` on the fault path,
+                which has none.
 
         Returns:
             The merged reading, or the entry quantities alone.
@@ -623,16 +590,13 @@ def _capped(ids: Sequence[str]) -> RecordIdSet:
     **The de-duplication is the load-bearing half, and it is not defensive.** §3
     rules that "a ``RecordIdSet`` carries each id **at most once**" and the type
     enforces it — so a repeat is not a trace with a redundant entry, it is a trace
-    that fails construction and is lost under §5. One ``ingest_reading`` reaches
-    that honestly: two proposals of one reading may both ``REINFORCE`` the same
-    standing belief, and both results then name the same id. Losing the whole
-    crossing's trace because a writer did its job twice is exactly the instrument
-    lying that §5 exists to prevent.
+    that fails construction and is lost under §5. Losing a whole crossing's trace
+    because one id was reported twice is exactly the instrument lying that §5
+    exists to prevent.
 
-    **What is de-duplicated is the id set and never the counts.** The two
-    reinforcements are two rulings and stay two in ``decisions_reinforce``; what
-    collapses is only the answer to "which records ended up in this state", which
-    is a set by §3's own definition.
+    **What is de-duplicated is the id set and never the counts**: what collapses
+    is only the answer to "which records ended up in this state", which is a set
+    by §3's own definition.
 
     **Ordered**, via ``dict.fromkeys``, because §3 wants the ids "in the order the
     observed operation produced them" and a repeat should not move the first
@@ -690,8 +654,6 @@ def dropped(kind: TraceKind, seam: str, error: Exception) -> None:
 __all__ = [
     "BANDS",
     "CANDIDATES",
-    "CLOSED",
-    "COVERAGE_DECLARED",
     "DECISION_METRICS",
     "EXCLUDED_BAND",
     "EXCLUDED_KIND",
@@ -703,7 +665,6 @@ __all__ = [
     "REFUSALS",
     "RETURNED",
     "SEAM_INGEST",
-    "SEAM_INGEST_READING",
     "SEAM_SEARCH",
     "TRACE_NOT_RECORDED",
     "UNREADABLE_TRACE_FIELD",

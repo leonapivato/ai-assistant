@@ -260,10 +260,6 @@ async def test_a_call_that_is_not_a_claimed_remember_call_is_not_done() -> None:
 class _FailingWriter:
     """A ``MemoryWriter`` whose store is gone."""
 
-    async def ingest_reading(self, reading: object) -> list[MemoryIngestResult]:
-        del reading
-        raise AssertionError
-
     async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
         del proposal
         msg = "the store is gone"

@@ -11,7 +11,8 @@ with their denominators.
 **What is real here and what is a double, stated once so nobody has to infer it.**
 Everything on the path either arm measures is the shipping class: the real
 ``CalendarReader`` over a planted ``.ics`` whose reading reaches the real
-``MemoryIngestor`` through ``MemoryWriter.ingest_reading`` (:class:`PriorIngestion`),
+``MemoryIngestor`` one proposal at a time through ``MemoryWriter.ingest``
+(:class:`PriorIngestion`),
 the real ``MemoryWriteStage`` over that writer and the real
 ``DefaultMemoryPolicy``, the real ``LearningLoop`` retrieving from the real
 ``InMemoryMemoryStore``, the real ``ModelBackedPlanner``, the real ``Engine``, the
@@ -513,8 +514,13 @@ class PriorIngestion:
     validity window, deletes no record and alters no stored record." So a store
     still holds ``ATTESTED`` beliefs carrying a third party's text, and consolidation
     still walks them — which is the population both arms measure. This replays how
-    they got there: the real reader's reading, put whole through the real writer's
-    reading-level path, which ADR-0294 §2 keeps standing.
+    they got there: the real reader's reading, each of its proposals put through the
+    real writer's ``ingest``.
+
+    **No absence closes a window here.** The reading-level write path, and with it
+    ADR-0110's absence reconciliation, retired (ADR-0320 §2), so a later cycle's
+    reading leaves an earlier cycle's beliefs live. Neither arm reads a closed
+    window, and every cycle plants distinct entries, so each still adds records.
 
     It is a stand-in for history rather than a live mechanism, so it holds no grant
     gate and parks no deferral: nothing either arm asserts reads one.
@@ -524,8 +530,10 @@ class PriorIngestion:
     writer: MemoryIngestor
 
     async def ingest(self) -> None:
-        """Read the planted source once and write the whole reading."""
-        await self.writer.ingest_reading(await self.reader.read())
+        """Read the planted source once and write each of the reading's proposals."""
+        reading = await self.reader.read()
+        for proposal in reading.proposals:
+            await self.writer.ingest(proposal)
 
 
 class _Consolidations(Protocol):

@@ -7,7 +7,6 @@ as a stand-in for a real write path: it is held to the same contract as
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -24,9 +23,6 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     PreferenceMemory,
     Provenance,
-    ReadCoverage,
-    ReportedExtent,
-    SourceReading,
     Validity,
 )
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore, FakeMemoryWriter
@@ -35,7 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, MemoryWriter
-    from ai_assistant.core.types import BeliefBand, ConflictRelation, MemoryKind, MemoryRecord
+    from ai_assistant.core.types import ConflictRelation, MemoryRecord
 
 
 def _fixed_now() -> datetime:
@@ -563,188 +559,6 @@ async def test_supersede_hiding_is_read_time_relative() -> None:
     # export keeps the retired target regardless of its validity window (both
     # records here are non-expired, so both appear).
     assert {r.id for r in await store.export()} == {"existing", new_id}
-
-
-class _GatedStore(FakeMemoryStore):
-    """A store that holds the absence selection open, so a test can interleave."""
-
-    def __init__(self) -> None:
-        super().__init__(now=_gated_now)
-        self.selecting = asyncio.Event()
-        self.may_select = asyncio.Event()
-        self.may_select.set()
-
-    async def list_beliefs(
-        self,
-        *,
-        bands: Sequence[BeliefBand] | None = None,
-        kinds: Sequence[MemoryKind] | None = None,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> list[MemoryRecord]:
-        self.selecting.set()
-        await self.may_select.wait()
-        return await super().list_beliefs(bands=bands, kinds=kinds, limit=limit, offset=offset)
-
-
-def _gated_now() -> datetime:
-    return datetime(2026, 6, 1, tzinfo=UTC)
-
-
-def _intruder() -> MemoryUpdateProposal:
-    """An ordinary write that must not slip inside the reading's hold."""
-    return MemoryUpdateProposal(
-        proposed=PreferenceMemory(
-            id="intruder",
-            content="an unrelated preference",
-            preference="an unrelated preference",
-            provenance=Provenance(
-                source=MemorySource.OBSERVED, confidence=0.6, last_updated=_gated_now()
-            ),
-        ),
-        rationale="because",
-        sensitivity=DataTier.PERSONAL,
-    )
-
-
-async def test_the_fake_serialises_a_covered_reading_against_other_writes() -> None:
-    """ADR-0115 §3, proved against **this** implementation's own mechanism (§7).
-
-    §7 keeps the serialisation off the shared suite because it is not observable
-    through the Protocol — which is exactly why each implementation owes its own
-    proof, the fake included. Without one, deleting this fake's lock would leave the
-    shared contract and the production test green while every consumer that reaches
-    for the canonical double got a subject whose isolation is imaginary: a
-    concurrent ``ingest`` could land between a covered reading's selection and its
-    closes, and the stale reconciliation would retire a record just updated.
-    """
-    store = _GatedStore()
-    writer = FakeMemoryWriter(store=store, policy=FakeMemoryPolicy(), now=_gated_now)
-    reading = SourceReading(
-        source="calendar:work",
-        read_at=_gated_now(),
-        coverage=ReadCoverage(covers_until=_gated_now() + timedelta(days=30)),
-    )
-
-    store.may_select.clear()
-    covered = asyncio.create_task(writer.ingest_reading(reading))
-    await store.selecting.wait()
-
-    competing = asyncio.create_task(writer.ingest(_intruder()))
-    for _ in range(10):
-        await asyncio.sleep(0)
-    assert not competing.done(), "an ingest interleaved with the reading's read-modify-write"
-
-    store.may_select.set()
-    assert list(await covered) == []
-    await competing
-
-
-# --- ADR-0110 §3 condition 3, over this implementation's own selection --------
-
-#: The reader identity the condition-3 cases below attest their records to.
-_READER = "calendar:work"
-
-#: What the covered reading in those cases declares it exhausted. Open at the
-#: start for the reason a forward-looking read is: it has nothing to say about
-#: where an entry *began*, and closing that end would exclude everything already
-#: in progress.
-_COVERAGE = ReadCoverage(covers_until=_fixed_now() + timedelta(days=30))
-
-
-def _reported(record_id: str, *, extent: ReportedExtent | None = None) -> MemoryRecord:
-    """A live attested belief with a **fully open** envelope window.
-
-    Which is the shape ADR-0117 §4 wants a conforming producer's proposals in:
-    the belief is on the read path, visible to conflict detection and enumerable,
-    and where its entry lies is stated by the extent or by nothing at all.
-    """
-    text = f"the entry {record_id} names"
-    return PreferenceMemory(
-        id=record_id,
-        content=text,
-        preference=text,
-        validity=Validity(),
-        provenance=Provenance(
-            source=MemorySource.EXTERNAL,
-            confidence=0.6,
-            last_updated=_fixed_now(),
-            attestation=Attestation(reported_by=_READER, reported_at=_fixed_now(), extent=extent),
-        ),
-    )
-
-
-async def _read_over(store: FakeMemoryStore) -> None:
-    """One covered reading that reports nothing, through the public member."""
-    writer = FakeMemoryWriter(store=store, policy=FakeMemoryPolicy(), now=_fixed_now)
-    await writer.ingest_reading(
-        SourceReading(source=_READER, read_at=_fixed_now(), coverage=_COVERAGE)
-    )
-
-
-@pytest.mark.parametrize(
-    ("extent", "closes", "why"),
-    [
-        (
-            ReportedExtent(extends_until=_fixed_now() + timedelta(days=1)),
-            True,
-            "the source said where it lies and the read exhausted that region",
-        ),
-        (
-            ReportedExtent(extends_until=_fixed_now() + timedelta(days=90)),
-            False,
-            "an entry reaching past the horizon was not wholly looked at",
-        ),
-        (
-            ReportedExtent(),
-            False,
-            "an unbounded extent end needs an unbounded coverage end",
-        ),
-        (None, False, "no extent states no position, so no reading exhausted it"),
-    ],
-    ids=["inside", "overhangs", "unbounded", "none"],
-)
-async def test_condition_three_is_decided_by_the_extent(
-    extent: ReportedExtent | None, closes: bool, why: str
-) -> None:
-    """ADR-0117 §9's second clause, for **this** implementation (ADR-0115 §7).
-
-    §7 leaves "each of ADR-0110 §3's other conditions independently prevents a
-    close" to each writer's own tests, and ADR-0117 §9 corrects the carrier without
-    moving the allocation. The fake duplicates the rule rather than importing it
-    (golden rule 1), so a divergence here would be silent: the fake would keep
-    demoting on one carrier while ``MemoryIngestor`` demoted on another, and the
-    shared suite would drive two different rules while reporting one.
-
-    The ``None`` row is §3's own second sentence, which §9 obliges each
-    implementation to state: a record whose attestation declares no extent is
-    demotable by no reading, whatever its envelope validity window.
-    """
-    store = FakeMemoryStore(now=_fixed_now)
-    await store.add(_reported("subject", extent=extent))
-
-    await _read_over(store)
-
-    assert (await store.get("subject") is None) is closes, why
-
-
-async def test_a_bounded_envelope_window_does_not_substitute_for_an_extent() -> None:
-    """The carrier moved rather than widened (ADR-0117 §3).
-
-    A record bounded exactly as ADR-0110 §3 originally asked — ``valid_until``
-    inside the coverage — is demotable by nothing, because the window is no longer
-    consulted. Pinned separately from the ``None`` row above because a fake that
-    accepted *either* carrier would pass that row and this is what catches it.
-    """
-    store = FakeMemoryStore(now=_fixed_now)
-    bounded = _reported("bounded-but-silent").model_copy(
-        update={"validity": Validity(valid_until=_fixed_now() + timedelta(days=1))}
-    )
-    await store.add(bounded)
-
-    await _read_over(store)
-
-    assert await store.get(bounded.id) is not None
 
 
 @pytest.mark.parametrize("answer", [None, "not a mapping", 42], ids=["none", "a-string", "an-int"])

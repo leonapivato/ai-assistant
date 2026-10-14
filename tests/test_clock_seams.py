@@ -409,9 +409,6 @@ async def _remember_calls(now: Clock) -> None:
         async def ingest(self, proposal: object) -> object:
             raise AssertionError
 
-        async def ingest_reading(self, reading: object) -> object:
-            raise AssertionError
-
     request = ActionRequest(
         tool=REMEMBER,
         parameters={
