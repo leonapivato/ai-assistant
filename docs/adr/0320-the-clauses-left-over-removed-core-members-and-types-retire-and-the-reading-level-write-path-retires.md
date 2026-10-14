@@ -150,9 +150,13 @@ design; and retire the label index and `TimeWindow`.
 > unchanged (ADR-0119 §8:1, §8:3).
 
 > **Normative.** The coverage half stays as it is, with no consumer, until the decision on
-> the readers' channels keeps or retires it (#2685): `SourceReading.coverage`,
-> `ReadCoverage` with its containment test, `Attestation.extent` with `ReportedExtent`, and
-> what the calendar reader declares of them (ADR-0110 §2, ADR-0117 §2, §5 and §6).
+> the readers' channels keeps or retires it (#2685): `SourceReading.coverage`, `ReadCoverage`
+> with its containment test, and the coverage the calendar reader declares (ADR-0110 §2,
+> ADR-0117 §5).
+
+> **Normative.** `Attestation.extent` with `ReportedExtent`, and the extent the calendar
+> reader declares (ADR-0117 §2 and §6), stay as they are. The upcoming-event producer keeps
+> reading it as ADR-0132 §3:2 and §5:1 decide.
 
 > **Normative.** The retirement reaches nothing `MemoryWriter.ingest` does. `memory/ingest.py`
 > keeps honouring a `UserConfirmation` as ADR-0319 §6:2 decides, and its policy, conflict
@@ -258,7 +262,7 @@ Superseded in part (§7); every clause the middle column does not name stands:
 | ADR-0110 (§2) | §3, §4, §5 and §5a | The absence reconciliation `MemoryWriter.ingest_reading` performs over a covered reading: when an absence closes a window, what absence is, the close's obligations and its serialisation; §1, §2's coverage, §7 and §8 stand |
 | ADR-0117 (§2) | §3:1–§3:3, §9:2 and §9:3 | ADR-0110 §3's containment judged against the extent in both `MemoryWriter` implementations, and the writer suite's and implementations' tests of it; the extent (§2, §6), the calendar's coverage (§5), §4, §8:1, §9:1 and §9:4 stand |
 | ADR-0125 | §10:1 | `DeferredProposal`'s refusal of a `DataTier.SECRET` proposal and the deferral queue, which left `core` |
-| ADR-0140 (§3) | §1–§5, §7 and §9–§11, and §12 and §13:2 in what ADR-0294 left of them | The email source: `EmailReader` and its store, its proposals, its grant as a grantable source, its settings and its lanes' obligations; §6's `EmailFacet` and facet union and §13:1 stand |
+| ADR-0140 (§3) | §1–§5, §7, §9–§11 and §12, and §13:2 but its test that the facet union discriminates at validation, each in what ADR-0294 left of it | The email source: `EmailReader` and its store, its proposals, its grant as a grantable source, its settings and its lanes' obligations; §6's `EmailFacet` and facet union, §13:1 and §13:2's test of that union stand |
 | ADR-0147 | §6:7 | `StepExecution.output` as a projection carrying content with no origin; §6:1–§6:6 stand |
 | ADR-0152 | §9:6 and §13:22 | `Disposition.EGRESS_UNBINDABLE` and its cases; `EgressBinder`, its refusals and the store-outage case stand |
 | ADR-0173 | §2:2, in what ADR-0296 left of it, and §4:3 | `ReplyChunk` on a reply stream, and the mapping of `converse_streaming`'s yielded union onto the frames; the `CHUNK` frame kind, §4:5's reflection rule and what ADR-0319 left of §§10–12 stand |
@@ -333,7 +337,7 @@ Superseded in part (§7); every clause the middle column does not name stands:
   model designs email; what it already wrote stays (ADR-0294 §3:1).
 
 **What stays open.**
-- The coverage half: whether `SourceReading.coverage`, `ReadCoverage` and the extent stay,
+- The coverage half: whether `SourceReading.coverage` and `ReadCoverage` stay,
   for a channel that has to notice a deleted entry, is the readers' channel decision's
   (#2685).
 - What the authority milestone reuses or redoes, with the clauses that bind it, ADR-0154
@@ -364,4 +368,4 @@ Superseded in part (§7); every clause the middle column does not name stands:
 - **Keep ADR-0110 §3's conditions as a standing rule for a later absence mechanism.**
   Rejected: §3 and §4 define absence by what ingesting the reading's proposals returned,
   which no surviving path produces, and a later mechanism decides its own conditions
-  (§2:6).
+  (§2:7).
