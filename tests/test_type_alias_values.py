@@ -432,7 +432,7 @@ def test_the_scan_actually_finds_the_aliases() -> None:
         ("ai_assistant.core.clock", "Clock"),
         ("ai_assistant.core.types", "UtcInstant"),
         ("ai_assistant.core.types", "FrozenJson"),
-        ("ai_assistant.orchestration.loop", "SupplyFilter"),
+        ("ai_assistant.orchestration.disclosure", "TurnSupply"),
         ("ai_assistant.service.enrolment", "ExpelCallback"),
     } <= set(_ALIASES)
 
