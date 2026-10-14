@@ -1,6 +1,6 @@
 # 283. A channel's history is its episodes, and the turn index is retired
 
-- Status: Partially superseded by ADR-0284 (§3:1's and §3:2's eligibility axis; §4:1's eligibility; §7:5's flag; §11:1's skip) and ADR-0285 (§6:1's and §6:8's `record_observed` member; §6:6; §11:1–§11:3) and ADR-0286 (§1:3's never-changed channel; §7:1's sequence; §7:3's and §7:4's treatment of the episode after a capture failure) and ADR-0287 (§7:2's and §8:1's archive discards; §9:1–§9:2) and ADR-0291 (§1:2 as a general rule about a channel) and ADR-0292 (§1's index and §1:2's order, read as channel and place) and ADR-0293 (§4:1's history read, for every read but the quarantined spoken path's; §8:1's deletion, in what deleting a conversation removes; §8:2's reclaim condition; §7:2's and §7:4's deletion of the episode on a deleted conversation) and ADR-0313 (§6's delivery members, argument and rows: §6:1's `record_delivery` and `deliveries`, §6:2's `delivery`, §6:3–§6:5, §6:7's delivery rows and §6:8's `record_delivery`)
+- Status: Partially superseded by ADR-0284 (§3:1's and §3:2's eligibility axis; §4:1's eligibility; §7:5's flag; §11:1's skip) and ADR-0285 (§6:1's and §6:8's `record_observed` member; §6:6; §11:1–§11:3) and ADR-0286 (§1:3's never-changed channel; §7:1's sequence; §7:3's and §7:4's treatment of the episode after a capture failure) and ADR-0287 (§7:2's and §8:1's archive discards; §9:1–§9:2) and ADR-0291 (§1:2 as a general rule about a channel) and ADR-0292 (§1's index and §1:2's order, read as channel and place) and ADR-0293 (§4:1's history read, for every read but the quarantined spoken path's; §8:1's deletion, in what deleting a conversation removes; §8:2's reclaim condition; §7:2's and §7:4's deletion of the episode on a deleted conversation) and ADR-0313 (§6's delivery members, argument and rows: §6:1's `record_delivery` and `deliveries`, §6:2's `delivery`, §6:3–§6:5, §6:7's delivery rows and §6:8's `record_delivery`) and ADR-0318 (§3:4)
 - Date: 2026-10-01
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); the first of three steps, the channel.
 - Dependency: ADR-0275, ADR-0276, ADR-0280, ADR-0281 and ADR-0282, all implemented at `5d872812`.
@@ -91,6 +91,13 @@
   This replacement takes effect on ratification of ADR-0313. This reciprocal header
   record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0318 — one scope. §3:4 whole:
+  `ActivationLinks` leaves with every field it has, `parks` among them, since the phases
+  park nothing and nothing sets a link (ADR-0318 §4:2). Every other clause stands. The
+  old path keeps the replaced clause until the lane that removes or changes that code
+  merges (ADR-0318 §1:3). This replacement takes effect on ratification of ADR-0318.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

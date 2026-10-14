@@ -1,6 +1,6 @@
 # 294. Readers no longer ingest into memory, and what they wrote stays
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0318 (§2:2's request-path facets; §4:3's and §4:6's `FACET`)
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the retirement of readers' scheduled ingestion into memory that ADR-0292 §13 names, taken ahead of the readers' channels.
 - Authorization: the owner ruled on 2026-10-04, in the review ADR-0292 records, that readers' scheduled ingestion into memory retires (ADR-0292 §13's table), and directed that it go now rather than wait for the readers' channel design. The dispatcher assigned 0294.
@@ -11,6 +11,16 @@
 - **Partially supersedes** [ADR-0139](0139-a-standing-grant-is-read-from-the-store-not-from-the-sources-the-hub-can-offer.md) — **one scope.** §3:2, in which members a surface offering uses for a new grant carries. Every other clause stands.
 - **Partially supersedes** [ADR-0120](0120-a-measure-is-a-rate-over-the-trace-stream-read-offline-while-the-hub-is-stopped.md) — **one scope.** §3:2's `ingest` member of the machine set, which the code spells `ingest_calendar` and `ingest_email` under ADR-0142 §4. Every other clause stands.
 - **Partially supersedes** [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md) — **one scope.** §Decision:2's and §13:1's hold on readers' scheduled ingestion until its replacement is built. §13:2, §13:3 and the rest of the table stand.
+- Partially superseded: 2026-10-14 by ADR-0318 — two scopes. §2:2's request-path
+  facets: no request path reads a facet under a grant use, and `GrantScope` loses `FACET`
+  (ADR-0318 §6:2); the upcoming-event producer stands on its own reader instance and
+  grant use. §4:3's and §4:6's `FACET`: a new grant's scope is `NOTIFY` alone, and a
+  surface offering the uses for a new grant offers `NOTIFY` alone (ADR-0318 §6:2); the
+  refusal of `INGEST` stands. Every other clause stands, §4:4 included. The old path
+  keeps the replaced clauses until the lane that removes or changes that code merges
+  (ADR-0318 §1:3). These replacements take effect on ratification of ADR-0318. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  the ratified body below is preserved.
 
 ## Context
 

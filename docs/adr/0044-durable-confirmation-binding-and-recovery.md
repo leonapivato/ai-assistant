@@ -1,6 +1,6 @@
 # 44. Durable confirmation: binding a parked CONFIRM to its execution, recoverable after restart
 
-- Status: Accepted
+- Status: Superseded by ADR-0318
 - Date: 2026-07-22
 - **This is a contract change, and a cross-subsystem one.** It adds a field to
   `ActionRequest` and `PermissionDecision` in `core/types.py` (read by
@@ -15,6 +15,14 @@
   It touches the two highest-collision files in the repository and reaches into
   `planning`, so the dispatcher sequences it against in-flight `core/types.py`
   work and the `planning` change rather than racing either.
+- Superseded: 2026-10-14 by ADR-0318 — the whole decision. Every section binds a parked
+  `CONFIRM` to the plan execution it belongs to, and plan executions retire with the old
+  path (ADR-0309 §5); `execution_id` leaves `ActionRequest` and `PermissionDecision`,
+  and the resolution invariant stops comparing it (ADR-0318 §6:1). The old path keeps
+  the replaced decision until the lane that removes or changes that code merges
+  (ADR-0318 §1:3). This replacement takes effect on ratification of ADR-0318. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  the ratified body below is preserved.
 
 ## Context
 
