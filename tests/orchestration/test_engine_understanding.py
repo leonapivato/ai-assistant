@@ -15,13 +15,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from test_engine import AT, Harness, NoStepPlanner
+from test_engine import AT, Harness
 from understanding_support import STATED_PROPOSAL, understanding_stage
 
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import EpisodicMemory
-from ai_assistant.orchestration.composing import ComposingStage
-from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, FakeStreamingCompleter
+from ai_assistant.testing import FakeMemoryStore, FakeModelProvider
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import EpisodeProcessingRecord
@@ -31,11 +30,6 @@ _UTTERANCE: Final = "Is our camping trip still on?"
 
 def _harness(understanding_model: FakeModelProvider, **knobs: Any) -> Harness:
     memory = knobs.pop("memory", None) or FakeMemoryStore(now=lambda: AT)
-    knobs.setdefault("planner", NoStepPlanner())
-    knobs.setdefault(
-        "composing",
-        ComposingStage(model=FakeModelProvider("Yes."), streaming=FakeStreamingCompleter()),
-    )
     return Harness(
         memory=memory,
         understanding=understanding_stage(model=understanding_model),

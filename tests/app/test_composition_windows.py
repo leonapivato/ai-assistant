@@ -20,7 +20,7 @@ async def test_the_engine_is_built_with_the_windows_stage_over_its_store(tmp_pat
         assert isinstance(windows, WindowsStage)
         selector = windows._episodes
         assert isinstance(selector, RecentEpisodes)
-        assert selector._memory is engine._loop._memory
+        assert selector._memory is engine._memory
         assert selector._limit == UNDERSTANDING_EPISODE_LIMIT
         # ADR-0282 §5: the understanding stage itself holds no selector and reads no store.
         assert not hasattr(engine._understanding, "_episodes")

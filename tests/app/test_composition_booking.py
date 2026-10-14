@@ -25,6 +25,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Final, cast
 
 import pytest
+from phases_composition_support import wired_binder, wired_registry
 
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
@@ -50,19 +51,19 @@ if TYPE_CHECKING:
 def _wired_registry(engine: Engine) -> InMemoryToolRegistry:
     """The registry this root wired, as the concrete object it built.
 
-    The runner holds it behind ``ToolRegistry``, which is the narrowing ADR-0029 §8
-    wants in production; a case about **what was wired** has to look at the object.
+    The phases' tools hold it behind ``ToolRegistry``, which is the narrowing ADR-0029
+    §8 wants in production; a case about **what was wired** has to look at the object.
     """
-    return cast("InMemoryToolRegistry", engine._runner._registry)
+    return cast("InMemoryToolRegistry", wired_registry(engine))
 
 
 def _wired_table(engine: Engine) -> RegistrationTable:
     """The registration table this root wired, likewise.
 
-    The runner holds the seam behind the ``EgressBinder`` Protocol, which carries
+    Authorizing holds the seam behind the ``EgressBinder`` Protocol, which carries
     ``bind`` and ``rebind`` and nothing else; the table is the concrete seam's.
     """
-    binder = engine._runner._binder
+    binder = wired_binder(engine)
     assert binder is not None, "the composition root wires a binding seam"
     seam = cast("EgressBindingSeam", binder)
     return cast("RegistrationTable", seam._registrations)

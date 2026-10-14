@@ -71,7 +71,6 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     ActionPlan,
     ActionRequest,
-    AssociationVerdict,
     CanonicalDestination,
     CapabilityEffect,
     CapabilityResult,
@@ -86,7 +85,6 @@ from ai_assistant.core.types import (
     FeedbackEvent,
     FeedbackKind,
     Goal,
-    GoalAssociation,
     GoalAttempt,
     GoalBrief,
     GoalInterpretation,
@@ -134,24 +132,14 @@ from ai_assistant.memory import traces as memory_traces
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.memory.health import StoreHealthReader
 from ai_assistant.orchestration import (
-    AuthorizationOperations,
-    ComposingStage,
     ConnectionOperations,
     ConsolidationStage,
     ConversationLifecycle,
     DestinationTrustOperations,
     Engine,
-    ForecastServicer,
     GrantOperations,
-    LearningLoop,
     MemoryWriteStage,
-    ParkedReadOperations,
-    QuestionStage,
     RecipientGrantOperations,
-    SearchFooting,
-    SearchServicer,
-    StepExecutor,
-    StepRunner,
     UpcomingEventStage,
 )
 from ai_assistant.orchestration import traces as operation_traces
@@ -159,6 +147,7 @@ from ai_assistant.orchestration.acting import ActingStage, AuthorizedCall, Autho
 from ai_assistant.orchestration.activation_coordinator import ActivationCoordinator
 from ai_assistant.orchestration.activation_state import admit_channel
 from ai_assistant.orchestration.activation_writer import ActivationWriter
+from ai_assistant.orchestration.authorization_surface import AuthorizationOperations
 from ai_assistant.orchestration.authorizer import (
     AuthorizingStage,
     CallToAuthorize,
@@ -168,8 +157,11 @@ from ai_assistant.orchestration.authorizer import (
 )
 from ai_assistant.orchestration.digesting import ActivationLabels, DigestingStage
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
+from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
+from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
+from ai_assistant.orchestration.parked_reads import ParkedReadOperations
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, PhaseWorking
 from ai_assistant.orchestration.planning import (
     PlaceWindow,
@@ -177,8 +169,15 @@ from ai_assistant.orchestration.planning import (
     PlanningInputs,
     PlanningStage,
 )
-from ai_assistant.orchestration.reads import _SearchCounts
+from ai_assistant.orchestration.questions import QuestionStage
+from ai_assistant.orchestration.reads import (
+    ForecastServicer,
+    SearchFooting,
+    SearchServicer,
+    _SearchCounts,
+)
 from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls
+from ai_assistant.orchestration.runner import StepRunner
 from ai_assistant.orchestration.traces import OperationTraces
 from ai_assistant.permissions import (
     SqliteAuditTrail,
@@ -209,7 +208,6 @@ from ai_assistant.testing import (
     FakeFeedbackProcessor,
     FakeFetcher,
     FakeForecaster,
-    FakeGoalAssociator,
     FakeGoalAuthorizations,
     FakeGoalAuthorizationStore,
     FakeMemoryPolicy,
@@ -232,9 +230,7 @@ from ai_assistant.testing import (
     FakeSourceReadRecorder,
     FakeSourceReadTrail,
     FakeStoryStore,
-    FakeStreamingCompleter,
     FakeToolCallingCompleter,
-    FakeToolInvoker,
     FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
@@ -276,17 +272,6 @@ def _goal_ids(prefix: str) -> Callable[[], str]:
 #: A naive reading: the one every seam used to accept and now must refuse.
 _NAIVE = datetime(2026, 7, 21, 12)  # noqa: DTZ001 — the naive reading is the subject
 _AWARE = datetime(2026, 7, 21, 12, tzinfo=UTC)
-
-
-def _composing() -> ComposingStage:
-    """The terminal composing stage every engine now takes (ADR-0170 §2).
-
-    Wired to a cooperating fake provider, which is all these tests need: what the
-    composed answer *says*, and what the engine does when composing it fails, are
-    pinned in ``tests/orchestration/test_composing.py`` and
-    ``tests/orchestration/test_engine_composing.py``.
-    """
-    return ComposingStage(model=FakeModelProvider(), streaming=FakeStreamingCompleter())
 
 
 #: A model reply the plan extractor can parse, so ``ModelBackedPlanner``'s seam is
@@ -852,38 +837,9 @@ async def _engine(now: Clock) -> None:
     memory = FakeMemoryStore(now=lambda: _AWARE)
     conversations = FakeConversationStore(now=lambda: _AWARE)
     deferrals = FakeDeferralStore(now=lambda: _AWARE)
-    writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: _AWARE)
-    writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
     plans = FakePlanStore(now=lambda: _AWARE)
-    # No call in this arm reaches the seam; the ledger is the collaborator
-    # ADR-0192 §1 makes unconditional, and nothing here reads it.
-    invoker = FakeToolInvoker([], ledger=FakeAuditTrail(), gate=FakeAuditTrail())
     await Engine(
         chat_reader=False,
-        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
-        composing=_composing(),
-        loop=LearningLoop(
-            context=FakeContextProvider(),
-            memory=memory,
-            writes=writes,
-            planner=FakePlanner(now=lambda: _AWARE),
-            feedback=FakeFeedbackProcessor(),
-            now=lambda: _AWARE,
-            # The same object the runner below resolves against (ADR-0211 §3):
-            # a loop told one vocabulary while selection resolved against another
-            # could plan a step the selecting registry never advertised.
-            registry=invoker,
-        ),
-        runner=StepRunner(
-            plans=plans,
-            registry=invoker,
-            policy=FakeActionPolicy(),
-            trail=FakeAuditTrail(),
-            executor=StepExecutor(
-                plans=plans, registry=invoker, invoker=invoker, now=lambda: _AWARE
-            ),
-            now=lambda: _AWARE,
-        ),
         plans=plans,
         trail=FakeAuditTrail(),
         spend=FakeAuditTrail(),
@@ -899,22 +855,17 @@ async def _engine(now: Clock) -> None:
             retention=timedelta(days=30),
             now=lambda: _AWARE,
         ),
-        questions=QuestionStage(
-            writer=writer, deferrals=deferrals, memory=memory, now=lambda: _AWARE
-        ),
         grant_operations=GrantOperations(
             store=FakeSourceGrantStore(),
             sources=(),
             id_factory=lambda: "grant-1",
             clock=lambda: _AWARE,
         ),
-        # The recipient-grant operations read a clock of their own — the instant an
-        # establishing answer carries (ADR-0235 §1) — so this module wires it from
-        # the same seam every other one here comes from.
+        # The recipient-grant operations read a clock of their own — the instant a
+        # revoking record carries (ADR-0235 §7) — so this module wires it from the
+        # same seam every other one here comes from.
         recipient_grant_operations=RecipientGrantOperations(
             store=FakeRecipientGrantStore(),
-            trail=FakeAuditTrail(),
-            policy=FakeActionPolicy(),
             id_factory=lambda: "recipient-grant-1",
             clock=lambda: _AWARE,
         ),
@@ -1323,8 +1274,6 @@ async def _recipient_grant_operations(now: Clock) -> None:
     """
     await RecipientGrantOperations(
         store=FakeRecipientGrantStore([recipient_grant(grant_id="g-1")]),
-        trail=FakeAuditTrail(),
-        policy=FakeActionPolicy(),
         id_factory=_goal_ids("g"),
         clock=now,
     ).revoke_recipient_grant("g-1")

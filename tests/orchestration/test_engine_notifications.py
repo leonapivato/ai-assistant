@@ -21,7 +21,6 @@ import pytest
 from test_engine import (
     AT,
     Harness,
-    _composing,
     _connection_operations,
     _destination_trust_operations,
     _grant_operations,
@@ -31,10 +30,8 @@ from test_engine import (
 from ai_assistant.core.correlation import current_correlation
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import (
-    AssociationVerdict,
     ClassReach,
     DataTier,
-    GoalAssociation,
     NotificationCandidate,
     NotificationCondition,
     NotificationDisposition,
@@ -46,7 +43,6 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.engine import Engine
 from ai_assistant.testing import (
-    FakeGoalAssociator,
     FakeNotificationPolicy,
     FakeNotificationStore,
 )
@@ -71,14 +67,10 @@ def _wired(
     """
     return Engine(
         chat_reader=False,
-        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
-        composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
         destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
-        loop=harness.engine._loop,
-        runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
         spend=harness.trail,
@@ -89,7 +81,6 @@ def _wired(
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
-        questions=harness.questions,
         notifications=store,
         notification_policy=policy,
         now=lambda: AT,

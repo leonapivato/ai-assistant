@@ -1,30 +1,11 @@
 """Orchestration: the engine that ties everything together.
 
-The heart of the product. For each request it runs the pipeline:
-**operation routing** → intent understanding → context assembly → memory retrieval →
-planning → tool selection → permission checking → execution → **reply composition** →
-learning/memory updates.
-
-The routing stage is ADR-0197 §1's addition and it is the **first** stage, ahead of
-intent understanding; the list is amended rather than annotated for ADR-0170 §1's own
-reason, restated by §1 for this stage. Given the user's utterance and nothing else it
-either names one of the hub's own operations — ``forget``, ``revoke``,
-``forget_question`` and six listings — together with the one query that operation's
-argument is resolved from, or it **declines**, and a declined route is not a failure
-and is not reported as one. A route that is **taken ends the pipeline there**: no goal
-is minted, no context is assembled, no memories are retrieved, no plan is made and no
-step is driven, and the composing stage runs on two closed-vocabulary values alone.
-Running first is what makes a routed ask cheap — it skips the two most expensive
-stages and the planner's model call — and what makes it safe: a router that has not yet
-read the store cannot be steered by what is in it.
-
-The composing stage is ADR-0170 §1's addition, and the list is amended rather than
-annotated because a recitable pipeline that omits the stage producing the product
-is the sentence every later reader plans against. Every stage after planning used
-to be about *acting*, so a request whose whole point was an answer had nowhere to
-land: the planner is obliged to name a capability, nothing advertises it, the step
-is skipped, and one dim line saying no tool is available was the whole of what the
-user received.
+The heart of the product. **The phases plan every activation** (ADR-0309 §2:6): a
+message written into a conversation is taken in by the chat's reader, and an
+informational event is admitted by ``Engine.receive``; each runs as one activation
+whose stages the controller runs by ADR-0309 §3's table — understanding, recall,
+planning, authorizing, acting and the digests — and whose messages the phases
+write (ADR-0293 §6, ADR-0307, ADR-0308, ADR-0313 §4).
 
 It depends *only* on the Protocols in ``core.protocols`` — never on concrete
 subsystem implementations, which are injected. That inversion is what keeps the
@@ -32,29 +13,14 @@ engine testable and the subsystems independently replaceable.
 
 Contract: this package *consumes* contracts; it wires implementations together.
 
-``LearningLoop`` is the first working slice of that pipeline: the closed
-learning loop of ADR-0022 (intent → context → retrieval → planning, then
-feedback → proposal → policy → memory).
-
-``StepExecutor`` is the ``execute`` stage (ADR-0029 §8): it claims a plan step,
-runs one authorised call through an injected ``ToolInvoker``, and commits what
-came back.
-
-``StepRunner`` is the join between them (ADR-0037): the tool-selection and
-permission stages. It takes a ``PlanStep``, finds the tool advertising its
-capability, has an ``ActionPolicy`` rule on it, records the
-``PermissionDecision``, and hands the executor a ``ToolCall`` built from the
-audit trail's own copy of that decision — or disposes of the step without
-running it, saying durably why.
-
 ``Engine`` is the concrete class that **satisfies** ``core.protocols``'s
 ``AssistantEngine`` (ADR-0084 §5, ADR-0085 §1). ADR-0042 §1 declined a Protocol
 because there was one engine and one class of consumer, and named its own revisit
 trigger — a second implementation; a client satisfying the same surface over a
 local transport is that implementation, so the surface is now a contract and the
-twenty-four result types it names live in ``core.types``. Import them from there:
-this package exports the engine, the stages, and its own internal DTOs, and no
-longer re-exports a promoted type under a second name.
+result types it names live in ``core.types``. Import them from there: this package
+exports the engine, the stages, and its own internal DTOs, and no longer
+re-exports a promoted type under a second name.
 
 ``Engine`` keeps ``start()`` and ``aclose()``, which are deliberately **not** on
 the Protocol (ADR-0083 §8): lifecycle belongs to the concrete object the
@@ -77,76 +43,40 @@ the contract limit ADR-0084 §4 makes every implementation enforce.
 ``GrantOperations`` is the **grant surface** (ADR-0102 §1, §7): what may be
 granted, granting, revoking, and the record of both. It is the only object in the
 system holding a ``SourceGrantStore`` (ADR-0097 §3, §9) — every driver holds the
-narrow ``SourceGrants`` instead — and ``Engine`` delegates its four
+narrow ``SourceGrants`` instead — and ``Engine`` delegates its
 ``AssistantEngine`` grant methods to it. It lives here because those must be
 ``AssistantEngine`` methods to be addressable over the socket, and that Protocol is
-provided by this package.
+provided by this package. ``RecipientGrantOperations`` and
+``DestinationTrustOperations`` are its siblings over the recipient-grant and
+destination-trust stores (ADR-0235 §7, ADR-0242 §4).
 
 ``ConnectionOperations`` is the **connection surface** (ADR-0151 §1, §10):
 connecting an account, replacing its credential, disconnecting it, and the two
 listings that say what is connected now and what was done. It is the only object in
-this package holding a ``ConnectionProvisioner``, and ``Engine`` delegates its five
+this package holding a ``ConnectionProvisioner``, and ``Engine`` delegates its
 ``AssistantEngine`` connection methods to it. **Holding that seam is not holding a
 keyring face** (ADR-0149 §8, ADR-0125 §8): it names five members over `core` types
-and cannot name ``set``, ``delete`` or ``get``. It lives here for
-``GrantOperations``' reason exactly — those must be ``AssistantEngine`` methods to
-be addressable over the socket.
+and cannot name ``set``, ``delete`` or ``get``.
 
 ``ConversationLifecycle`` is the **capture/lifecycle stage** (ADR-0074 §9): the
 one layer holding both durable stores, and therefore the owner of every sequence
-that spans them — capturing a turn as an ``EpisodicMemory``, carrying out a
+that spans them — capturing an activation as an ``EpisodicMemory``, carrying out a
 conversation-scoped deletion, reclaiming what retention has emptied, and
 composing the export a user receives. ADR-0074 §9's coordinator ruling puts those
 here precisely because neither store may hold the other (golden rule 1).
 
-``MemoryWriteStage`` is the **write stage** (ADR-0078 §3): the one place a proposal
-reaches memory. It holds the ratified ``MemoryWriter`` *and* the ``DeferralStore``,
-so an ``ASK_USER`` ruling's question is parked durably instead of vanishing when the
-proposal goes out of scope — the drop issue #423 reports, closed by a wiring choice
-rather than by a new writer. Every producer's stage (``LearningLoop``,
-``ConsolidationStage``) writes through it rather than through a
-``MemoryWriter`` handle of its own, which is the one obligation ADR-0078 §3 places
-on this lane.
-
-``QuestionStage`` is the **answer path** (ADR-0078 §8, §9): it enumerates the
-questions waiting, and the separate list of those whose answer was begun and never
-recorded, then runs ``claim`` → ``ingest`` → ``resolve`` to commit an answer. It is
-the *only* producer of a ``UserConfirmation``, and only from a deferral it has
-claimed — the one authority in this system that has never been delegable.
+``MemoryWriteStage`` is the **write stage** (ADR-0078 §3): the one place a
+producer's proposal reaches memory. It holds the ratified ``MemoryWriter`` *and*
+the ``DeferralStore``, so an ``ASK_USER`` ruling's question is parked durably
+instead of vanishing when the proposal goes out of scope.
 
 ``ConsolidationStage`` is the **consolidation stage** (ADR-0106, ADR-0111,
 ADR-0114), a producer's stage, and the only one that is also its own
 producer. It walks the memory store a bounded chunk at a time from a durable
 cursor, asks an injected ``ModelProvider`` what each chunk justifies believing,
-and puts every proposal through the same write path — computing the derived-taint
+and puts every proposal through the write stage — computing the derived-taint
 marker itself, from the input set it selected, and discarding whatever the model
-emitted for that field (ADR-0106 §3). The producer is module-private rather than a
-`core` Protocol because it has one implementation and ADR-0028 §7 refuses a
-generic seam until a second exists; ADR-0114 decides two store operations and two
-types and no third contract.
-
-``RoutingStage`` is the **operation-routing stage** (ADR-0197 §1, §2): given one
-sentence it names one member of §3's closed vocabulary and the query its argument is
-resolved from, or declines. It reaches the model through the injected
-``ModelProvider`` and adds no member to it, holds the write-only ``RoutingRecorder``
-half of §9's trail and never the readable ``RoutingTrail``, and performs the operation
-it named by calling the engine's own implementation of it — never by reaching into a
-store the engine holds. Its result is rendered **beside** the reply and never fed back
-into a prompt: §6 makes "a typed operation is never re-read" an invariant of the turn,
-so the composing stage is given the ``RoutableOperation`` and the ``RouteOutcome`` and
-nothing else at all.
-
-``ComposingStage`` is the **terminal composing stage** (ADR-0170 §1, §2): given the
-turn's goal, its assembled context, the memories retrieved for it, its plan and what
-became of the step the turn drove, it composes the one natural-language answer
-``TurnOutcome.reply`` carries. It holds an injected ``ModelProvider`` and consumes
-nothing else — no ``ContextProvider`` and no ``MemoryStore``, because its context and
-its memories are the ones the turn already assembled — and it adds no Protocol
-(ADR-0170 §2 declines one for having a single implementation and a single consumer).
-A reply is **not** a tool: no registry lookup, no ``ToolDefinition``, no
-``ToolInvoker.invoke``, no destination and no credential (§1). A composition failure
-degrades the turn rather than failing it, and the set of failures that degrade is
-closed (§8).
+emitted for that field (ADR-0106 §3).
 
 ``NotificationWriteStage`` is ADR-0130 §3's **producer seam**, concrete: it holds
 the deterministic policy and hands it to the store, so the duplicate lookup, the
@@ -157,12 +87,9 @@ clause that keeps a ruled interruption from waiting for a restart.
 first holder: one bounded calendar read per tick, gated on a live ``NOTIFY`` grant
 (ADR-0133 §5), one candidate per occurrence starting inside the lead window, and
 an expiry at the start instant — which is the only route ADR-0130 §5 offers to an
-interruption. It concludes nothing else: no model call, no importance judgement,
-no absence, no disposition, and no cursor (ADR-0111 §11).
+interruption.
 """
 
-from ai_assistant.orchestration.authorization_surface import AuthorizationOperations
-from ai_assistant.orchestration.composing import ComposedReply, ComposingStage
 from ai_assistant.orchestration.connections import ConnectionOperations
 from ai_assistant.orchestration.consolidation import (
     ConsolidationReport,
@@ -180,23 +107,15 @@ from ai_assistant.orchestration.engine import (
     conversation_summary,
     presented_confidence,
 )
-from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.grants import GrantOperations, HeldSource
-from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.notifications import NotificationWriteStage, hand_off
-from ai_assistant.orchestration.parked_reads import ParkedReadOperations
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     ENVELOPE_RESERVE_BYTES,
     MIN_FRAME_BYTES,
     canonical_payload,
 )
-from ai_assistant.orchestration.questions import QuestionStage, question_state
-from ai_assistant.orchestration.reads import ForecastServicer, SearchFooting, SearchServicer
 from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
-from ai_assistant.orchestration.recovery import RecoveryScan
-from ai_assistant.orchestration.routing import RoutedRoute, RoutingStage
-from ai_assistant.orchestration.runner import StepDisposition, StepRunner
 from ai_assistant.orchestration.upcoming import UpcomingEventStage
 from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
 
@@ -205,32 +124,17 @@ __all__ = [
     "ENVELOPE_RESERVE_BYTES",
     "MIN_FRAME_BYTES",
     "AssembledHistory",
-    "AuthorizationOperations",
-    "ComposedReply",
-    "ComposingStage",
     "ConnectionOperations",
     "ConsolidationReport",
     "ConsolidationStage",
     "ConversationLifecycle",
     "DestinationTrustOperations",
     "Engine",
-    "ForecastServicer",
     "GrantOperations",
     "HeldSource",
-    "LearningLoop",
     "MemoryWriteStage",
     "NotificationWriteStage",
-    "ParkedReadOperations",
-    "QuestionStage",
     "RecipientGrantOperations",
-    "RecoveryScan",
-    "RoutedRoute",
-    "RoutingStage",
-    "SearchFooting",
-    "SearchServicer",
-    "StepDisposition",
-    "StepExecutor",
-    "StepRunner",
     "UpcomingEventStage",
     "WriteOutcome",
     "belief_from_record",
@@ -239,5 +143,4 @@ __all__ = [
     "conversation_summary",
     "hand_off",
     "presented_confidence",
-    "question_state",
 ]

@@ -41,12 +41,10 @@ from ai_assistant.core.types import (
     StepStatus,
     ToolDefinition,
 )
-from ai_assistant.orchestration import (
-    StepExecutor,
-    StepRunner,
-)
 from ai_assistant.orchestration.capability_alias import resolve_capability
+from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
+from ai_assistant.orchestration.runner import StepRunner
 from ai_assistant.testing import FakeActionPolicy, FakeAuditTrail, FakePlanStore
 from ai_assistant.tools import (
     CURRENT_TIME,

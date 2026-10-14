@@ -20,7 +20,6 @@ the composition root would.
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import count
@@ -85,33 +84,21 @@ from ai_assistant.core.protocols import (
     StoryStore,
 )
 from ai_assistant.core.types import (
-    ActionPlan,
-    AssociationVerdict,
     CapabilityEffect,
     CapabilityResult,
     CostBasis,
     DataTier,
-    EvidenceDigest,
-    GoalAssociation,
-    GoalBrief,
     GrantScope,
     Idempotency,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
-    Message,
     Placement,
     PlacementReach,
     PlacementSetter,
-    PlannerOutput,
-    PlanStep,
-    ProposedAction,
     Provenance,
-    ReadAskOutcome,
     Reversibility,
     RiskLevel,
-    Role,
-    RoutableOperation,
     SemanticMemory,
     StoryMember,
     StoryMemberKind,
@@ -121,52 +108,34 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration import (
     DEFAULT_MAX_PAYLOAD_BYTES,
-    ComposingStage,
     ConnectionOperations,
     ConversationLifecycle,
     DestinationTrustOperations,
     Engine,
     GrantOperations,
     HeldSource,
-    LearningLoop,
-    MemoryWriteStage,
-    QuestionStage,
     RecipientGrantOperations,
-    RoutingStage,
-    StepExecutor,
-    StepRunner,
 )
-from ai_assistant.orchestration.engine import _DEFAULT_MAX_OUTSTANDING
 
 # The engine's own default confirmation ceiling, read from where it is declared so
 # this helper cannot drift from it. Every fixture below wires at the default; the
 # one that does not says which value it wants and why (ADR-0198 §4).
-from ai_assistant.orchestration.informational_events import InformationalEventStage
 from ai_assistant.testing import (
-    FakeActionPolicy,
     FakeAuditTrail,
     FakeConnectionProvisioner,
-    FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
     FakeDestinationTrustStore,
     FakeEgressBinder,
-    FakeFeedbackProcessor,
-    FakeGoalAssociator,
-    FakeMemoryPolicy,
     FakeMemoryStore,
-    FakeMemoryWriter,
-    FakeModelProvider,
     FakeNotificationOutbox,
     FakePlanStore,
     FakeRecipientGrantStore,
-    FakeRoutingRecorder,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeSpeechSynthesizer,
     FakeSpeechTranscriber,
     FakeStoryStore,
-    FakeStreamingCompleter,
     FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
@@ -179,18 +148,14 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import AssistantEngine, SourceReadTrail
     from ai_assistant.core.types import (
-        CurrentContext,
         EgressBinding,
         FrozenJson,
-        MemoryRecord,
-        ShownFile,
         SourceGrant,
     )
     from ai_assistant.tools.invocation import BoundImplementation
 
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
 RETENTION = timedelta(days=30)
-OBSERVER_ROUTE = "anthropic:claude-opus-4-8"
 
 #: The one grantable identity the ``granting_engine`` fixture holds. It must equal
 #: the suite's own ``_SOURCE``: the suite names the source it grants, and a fixture
@@ -214,8 +179,8 @@ class ConsumingTrail(AuditTrail, InvocationLedger, SpendGate, SpendLedger, Proto
 
     The composition root wires a single store as ``AuditTrail``,
     ``InvocationLedger`` and ``InvocationCompleter``, handing each consumer the
-    face its job needs. A harness that wires the runner and the seam has to name
-    both at once — the runner records rulings through the trail, the seam claims
+    face its job needs. A harness that wires authorizing and the seam has to name
+    both at once — authorizing records rulings through the trail, the seam claims
     through the ledger, the seam is **admitted** through the gate, and they must
     be the same object or every claim is refused and the ceiling is decided over
     rows a second holder cannot see (ADR-0194 §5).
@@ -223,17 +188,6 @@ class ConsumingTrail(AuditTrail, InvocationLedger, SpendGate, SpendLedger, Proto
     invoker suite: a variable annotated with one Protocol does not statically
     satisfy the other, and a cast would hide the very identity being asserted.
     """
-
-
-def _composing() -> ComposingStage:
-    """The terminal composing stage every engine now takes (ADR-0170 §2).
-
-    Wired to a cooperating fake provider, which is all these tests need: what the
-    composed answer *says*, and what the engine does when composing it fails, are
-    pinned in ``tests/orchestration/test_composing.py`` and
-    ``tests/orchestration/test_engine_composing.py``.
-    """
-    return ComposingStage(model=FakeModelProvider(), streaming=FakeStreamingCompleter())
 
 
 #: A schema declaring ``to`` a destination-bearing argument, in ADR-0152 §3's two
@@ -283,72 +237,6 @@ def _confirmable() -> ToolDefinition:
     )
 
 
-class _OneStepPlanner:
-    """A ``Planner`` that plans exactly one step **for the goal it is given**.
-
-    Building the plan from the passed goal is what keeps ``plan.goal_id`` equal to
-    the id the loop minted, so the façade's ``save_plan`` finds its goal.
-    """
-
-    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
-        self,
-        goal: GoalBrief,
-        *,
-        utterance: str,
-        context: CurrentContext,
-        memories: Sequence[MemoryRecord] = (),
-        capabilities: Sequence[str],
-        files: Sequence[ShownFile] = (),
-        read_outcomes: Sequence[ReadAskOutcome] = (),
-        evidence: Sequence[EvidenceDigest] = (),
-    ) -> PlannerOutput:
-        """Return a one-step plan for the goal."""
-        # ADR-0265 §4's label, and ADR-0259 §2 is why it is here: a side-effecting step
-        # whose plan names no act is refused `EFFECT_UNSCOPED` before any ruling is
-        # sought. One act proposed per call, so each turn is an act of its own.
-        step = PlanStep(
-            id="step-1",
-            intent="send the note",
-            capability=CAPABILITY,
-            parameters=PARAMETERS,
-            intended_action=f"A{len(goal.actions) + 1}",
-        )
-        return PlannerOutput(
-            actions=(ProposedAction(intent="send the note"),),
-            plan=ActionPlan(
-                id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(step,), created_at=AT
-            ),
-        )
-
-
-class _NoStepPlanner:
-    """A ``Planner`` that ends a turn at an empty plan.
-
-    The conformance suite is about the *surface*, not about driving a tool: a turn
-    with no step is a ratified shape (``TurnOutcome(step=None)``) and it keeps the
-    binding free of a permission fixture it would otherwise have to carry.
-    """
-
-    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
-        self,
-        goal: GoalBrief,
-        *,
-        utterance: str,
-        context: CurrentContext,
-        memories: Sequence[MemoryRecord] = (),
-        capabilities: Sequence[str],
-        files: Sequence[ShownFile] = (),
-        read_outcomes: Sequence[ReadAskOutcome] = (),
-        evidence: Sequence[EvidenceDigest] = (),
-    ) -> PlannerOutput:
-        """Return an empty plan for the goal."""
-        return PlannerOutput(
-            plan=ActionPlan(
-                id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(), created_at=AT
-            )
-        )
-
-
 def _counter(prefix: str) -> Callable[[], str]:
     """Ids that differ per call.
 
@@ -384,34 +272,6 @@ class _SucceedsBound:
         egress_binding: EgressBinding,
     ) -> None:
         """Accept the binding the ruling fixed, and succeed with no output."""
-
-
-class _RoutingProvider:
-    """A ``ModelProvider`` that always answers the routing stage the same way.
-
-    ADR-0197 §4 gives the router's envelope two legal shapes; this yields the route one
-    for a scripted query and the decline one otherwise, which is what lets one ``_wire``
-    knob produce either a deployment that routes a ``forget`` or the ordinary deployment
-    that routes nothing at all.
-
-    It is the routing stage's **only** collaborator (§2), so a double this small is the
-    whole of what a subject holding a routed park needs — no planner, no tool and no
-    policy is reached on a routed pass.
-    """
-
-    def __init__(self, query: str | None) -> None:
-        """Answer with a ``forget`` on ``query``, or decline where it is ``None``."""
-        self._query = query
-
-    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
-        """Return one envelope, ignoring what was asked."""
-        del messages, model
-        envelope = (
-            {"no_operation": True}
-            if self._query is None
-            else {"operation": RoutableOperation.FORGET.value, "query": self._query}
-        )
-        return Message(role=Role.ASSISTANT, content=json.dumps(envelope))
 
 
 def _store_belief_holder(memory: FakeMemoryStore) -> BeliefHolder:
@@ -459,10 +319,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     reads: SourceReadTrail | None = None,
     real_invoker: bool = False,
     closers: Sequence[Callable[[], Awaitable[None]]] = (),
-    routes: str | None = None,
     memory: FakeMemoryStore | None = None,
-    plans: FakePlanStore | None = None,
-    max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
     notification_outbox: FakeNotificationOutbox | None = None,
     stories: StoryStore | None = None,
     chat_reader: bool = True,
@@ -471,9 +328,8 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
-    ``parks`` swaps in a one-step plan over a tool the policy confirms, which is
-    the only way to reach the resume path: parking is the permission stage's
-    ruling and no call on the surface asks for it.
+    ``parks`` binds an egress tool the policy confirms, with its egress registration,
+    so a case driving a call through the phases' acting has a tool to invoke.
 
     ``sources`` is what the composition root would have read off the readers it
     built (ADR-0102 §7). Empty by default, which is the ordinary deployment: a
@@ -489,22 +345,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     the same reason one turn over: a read is authored on the seam that gated it
     (ADR-0185 §5), so nothing on this surface appends one either.
 
-    ``routes`` scripts the operation-routing stage to route every utterance to a
-    ``forget`` on that query (ADR-0197 §1), which is the only way to reach the routed
-    resume path: a routed park is minted inside a turn and, unlike a tool park, is not
-    enumerable afterwards (§7). ``None`` — the default — wires the stage and its recorder
-    as a deployment that never routes anything, so every other case in the shared suite
-    is driven over a pipeline that behaves exactly as it did before ADR-0197.
-
-    ``memory`` is the record store, a knob so a routed ``forget``'s subject can be seeded:
-    §5 resolves the argument by reading the store the operation itself reads, so a
-    resolvable park needs a belief in it before the turn runs.
-
-    ``plans`` is the plan store, a knob for one clause only: ADR-0198 §2 rules that a
-    restatement re-reads ``StepOutcome.state`` from the store rather than answering from
-    a snapshot, and the case that separates the two needs the store emptied *behind* an
-    engine that has already settled a park. Nothing on the promoted surface reaches plan
-    state, so a fixture that could not hold the store could not arrange it.
+    ``memory`` is the record store, a knob so a case can seed what the engine reads.
 
     ``notification_outbox`` is ADR-0131 §3's delivery seam, a knob because nothing on
     this surface enqueues a notification — ADR-0130 §3 puts the offer on the
@@ -527,12 +368,6 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     phases' acting over this subject's invoker. Given, the path also holds this
     subject's egress binder, as the composition root's does; ``None`` builds the path
     every shared case runs on, unchanged.
-
-    ``max_outstanding_confirmations`` is the ceiling ADR-0198 §4 reuses as the bound on
-    the retained settled records. A knob for :attr:`AssistantEngineContract.tiny_engine`'s
-    reason — it is a construction-time property of a deployment — and at
-    :data:`SETTLED_SINGLE_SLOT` it is what makes §4's discard reachable in two
-    settlements.
     """
     # **The conversation store's clock advances**, because ADR-0074 §2's sort key
     # is activity and a frozen clock cannot express "more recently active" at all —
@@ -541,11 +376,11 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     # is about ordering in time.
     ticks = count(1)
     conversation_clock = lambda: AT + timedelta(seconds=next(ticks))  # noqa: E731
-    store = FakePlanStore(now=lambda: AT) if plans is None else plans
+    store = FakePlanStore(now=lambda: AT)
     audit: ConsumingTrail = FakeAuditTrail() if trail is None else trail
     read_trail: SourceReadTrail = FakeSourceReadTrail() if reads is None else reads
     confirmable = _confirmable()
-    # The seam claims through the **same** trail the runner records rulings into
+    # The seam claims through the **same** trail authorizing records rulings into
     # (ADR-0192 §9's wiring clause); a second one would refuse every claim.
     bound = [(confirmable, _succeeds)] if parks else []
     egress_bound: list[tuple[ToolDefinition, BoundImplementation]] = (
@@ -561,9 +396,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         if real_invoker
         else FakeToolInvoker(bound, ledger=audit, gate=audit)
     )
-    # The egress binding seam, wired only where the suite needs a park: ADR-0178
-    # §3's clause binds every producer of a ``ConfirmationEgress``, and a subject
-    # parking a non-egress call would leave it vacuous here.
+    # The egress binding seam, wired only beside the egress tool ``parks`` binds.
     binder = FakeEgressBinder() if parks else None
     if binder is not None:
         binder.register_egress(
@@ -581,40 +414,9 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         retention=RETENTION,
         now=conversation_clock,
     )
-    writer = FakeMemoryWriter(store=records, policy=FakeMemoryPolicy(), now=lambda: AT)
     deferrals = FakeDeferralStore(now=lambda: AT)
-    writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
-    questions = QuestionStage(writer=writer, deferrals=deferrals, memory=records, now=lambda: AT)
-    loop = LearningLoop(
-        context=FakeContextProvider(),
-        memory=records,
-        writes=writes,
-        planner=_OneStepPlanner() if parks else _NoStepPlanner(),
-        feedback=FakeFeedbackProcessor(),
-        now=lambda: AT,
-        id_factory=_counter("g"),
-        # The same object the runner below resolves against (ADR-0211 §3): a
-        # loop told one vocabulary while selection resolved against another
-        # could plan a step the selecting registry never advertised.
-        registry=invoker,
-    )
-    runner = StepRunner(
-        plans=store,
-        registry=invoker,
-        policy=FakeActionPolicy(),
-        trail=audit,
-        executor=StepExecutor(plans=store, registry=invoker, invoker=invoker, now=lambda: AT),
-        now=lambda: AT,
-        id_factory=_counter("d"),
-        binder=binder,
-    )
     return Engine(
-        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
-        composing=_composing(),
-        informational_events=InformationalEventStage(FakeModelProvider()),
         closers=closers,
-        loop=loop,
-        runner=runner,
         plans=store,
         trail=audit,
         spend=audit,
@@ -629,13 +431,6 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         trace_sink=FakeTraceSink(),
         trace_retention=timedelta(days=365),
         conversations=conversations,
-        questions=questions,
-        # ADR-0197's routing stage, holding the write-only half of §9's trail (§9 puts
-        # the capability on the stage, so the façade holds no trail seam of any width). A
-        # provider that always names one operation is what makes a routed park reachable
-        # at all: §7 rules that `pending_confirmations` does not list one and that no
-        # durable store recovers it.
-        routing=RoutingStage(model=_RoutingProvider(routes), recorder=FakeRoutingRecorder()),
         # ADR-0276's understanding stage, as the composition root wires it: the shared
         # channel contract asserts the version-1 record every pass it captures carries.
         understanding=understanding_stage(),
@@ -654,14 +449,9 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
             id_factory=_counter("grant"),
             clock=grant_clock if grant_clock is not None else (lambda: AT),
         ),
-        # The five recipient-grant operations, over the **same** trail and policy the
-        # runner has (ADR-0235 §3): the act records its answer where every other
-        # ruling is recorded and is ruled on by the same gate, so the suite drives
-        # one system rather than two that agree by luck.
+        # The three recipient-grant operations, over a store of their own (ADR-0235 §7).
         recipient_grant_operations=RecipientGrantOperations(
             store=FakeRecipientGrantStore(),
-            trail=audit,
-            policy=FakeActionPolicy(),
             id_factory=_counter("recipient-grant"),
             clock=lambda: AT,
         ),
@@ -687,9 +477,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         transcriber=FakeSpeechTranscriber(),
         synthesizer=FakeSpeechSynthesizer(),
         notification_outbox=notification_outbox,
-        id_factory=_counter("tok"),
         max_payload_bytes=max_payload_bytes,
-        max_outstanding_confirmations=max_outstanding_confirmations,
         stories=stories,
         chat_reader=chat_reader,
         # ADR-0309 §2:6: the phases plan what the chat's reader takes in and every event,

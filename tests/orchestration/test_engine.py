@@ -1,10 +1,9 @@
 """The engine façade an adapter drives (ADR-0042 §1, §3, §4).
 
-What is exercised here is only what the façade *composes*: that one call runs a
-turn and drives its step, that a parked confirmation comes back as
-engine-assembled content plus an opaque token, that relaying the token resumes the
-exact step, and that shutdown drains in-flight work before closing owned
-resources. Every collaborator is a canonical fake from ``ai_assistant.testing`` or
+What is exercised here is only what the façade *composes*: the maintenance
+surface, the belief inspection surface, the trace emitter at its one wiring point,
+and that shutdown drains in-flight work before closing owned resources. Every
+collaborator is a canonical fake from ``ai_assistant.testing`` or
 one of this package's own stage objects, so nothing here imports a subsystem
 concrete (CLAUDE.md golden rule 1).
 """
@@ -30,8 +29,6 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.protocols import (
     ActionPolicy,
     AuditTrail,
-    AuthorizationResolution,
-    CoverageAnswers,
     InvocationLedger,
     RecipientGrantStore,
     SpeechSynthesizer,
@@ -40,31 +37,18 @@ from ai_assistant.core.protocols import (
     SpendLedger,
 )
 from ai_assistant.core.types import (
-    ActionPlan,
-    AssociationVerdict,
     Attestation,
     BeliefBand,
     BeliefSummary,
-    CanonicalDestination,
     CostBasis,
     DataTier,
-    DestinationProtocol,
     EpisodicMemory,
     Evidence,
-    EvidenceDigest,
-    FeedbackEvent,
-    FeedbackKind,
-    GoalAssociation,
-    GoalBrief,
     Idempotency,
     MemoryKind,
     MemorySource,
-    PlannerOutput,
-    PlanStep,
-    ProposedAction,
     Provenance,
     ProvisioningState,
-    ReadAskOutcome,
     Reversibility,
     RiskLevel,
     SemanticMemory,
@@ -77,23 +61,13 @@ from ai_assistant.core.types import (
     secret_value,
 )
 from ai_assistant.orchestration import (
-    AuthorizationOperations,
-    ComposingStage,
     ConnectionOperations,
     ConversationLifecycle,
     DestinationTrustOperations,
     Engine,
-    ForecastServicer,
     GrantOperations,
     HeldSource,
-    MemoryWriteStage,
-    QuestionStage,
     RecipientGrantOperations,
-    RoutingStage,
-    SearchFooting,
-    SearchServicer,
-    StepExecutor,
-    StepRunner,
     belief_from_record,
     belief_summary_from_record,
     presented_confidence,
@@ -101,38 +75,23 @@ from ai_assistant.orchestration import (
 from ai_assistant.orchestration import engine as engine_module
 from ai_assistant.orchestration.consolidation import ConsolidationReport
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, DrainPhase
-from ai_assistant.orchestration.loop import LearningLoop
-from ai_assistant.orchestration.parked_reads import ParkedReadOperations
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
 from ai_assistant.orchestration.stories import DEFAULT_STORY_SUMMARY_VIEW_NOTES
 from ai_assistant.orchestration.understanding import RecentEpisodes, WindowsStage
-from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
-    DEFAULT_SEARCH_ORIGIN,
-    FakeActionPolicy,
     FakeAuditTrail,
     FakeConnectionProvisioner,
-    FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
     FakeDestinationTrustStore,
-    FakeEgressBinder,
-    FakeFeedbackProcessor,
-    FakeGoalAssociator,
-    FakeGoalAuthorizationStore,
-    FakeMemoryPolicy,
     FakeMemoryStore,
-    FakeMemoryWriter,
-    FakeModelProvider,
-    FakeParkedReads,
     FakePlanStore,
     FakeRecipientGrantStore,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeSpeechSynthesizer,
     FakeSpeechTranscriber,
-    FakeStreamingCompleter,
     FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
@@ -146,44 +105,20 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
         DiagnosticSink,
-        EgressBinder,
         SourceReadTrail,
         StoryStore,
     )
     from ai_assistant.core.types import (
-        CurrentContext,
         EvaluationTrace,
-        FrozenJson,
         MemoryRecord,
-        ShownFile,
     )
     from ai_assistant.orchestration.delivery import DeliveryOutbox
-    from ai_assistant.orchestration.informational_events import InformationalEventStage
     from ai_assistant.orchestration.matters_pass import MattersPass
     from ai_assistant.orchestration.phase_path import PhasePath
     from ai_assistant.orchestration.recall import RecallStage
-    from ai_assistant.orchestration.reconciling import ReconciliationStage
     from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
     from ai_assistant.orchestration.understanding import UnderstandingStage
     from ai_assistant.testing.invoker import FakeToolImplementation
-
-
-def _goal_ids(prefix: str) -> Callable[[], str]:
-    """Distinct identifiers, ``<prefix>-1`` first (ADR-0249 §12).
-
-    ``save_goal`` is the opening write alone since ADR-0249 §12, so a loop wired with a
-    *constant* factory would refuse its second turn: a goal per turn needs an id per
-    turn, which is what production's ``uuid4`` already gives it. The first value is
-    unchanged, so a single-turn case reads exactly what it read before.
-    """
-    count = 0
-
-    def factory() -> str:
-        nonlocal count
-        count += 1
-        return f"{prefix}-{count}"
-
-    return factory
 
 
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
@@ -194,8 +129,8 @@ class ConsumingTrail(AuditTrail, InvocationLedger, SpendGate, SpendLedger, Proto
 
     The composition root wires a single store as ``AuditTrail``,
     ``InvocationLedger`` and ``InvocationCompleter``, handing each consumer the
-    face its job needs. A harness that wires the runner and the seam has to name
-    both at once — the runner records rulings through the trail, the seam claims
+    face its job needs. A harness that wires authorizing and the seam has to name
+    both at once — authorizing records rulings through the trail, the seam claims
     through the ledger, the seam is **admitted** through the gate, and they must
     be the same object or every claim is refused and the ceiling is decided over
     rows a second holder cannot see (ADR-0194 §5).
@@ -203,17 +138,6 @@ class ConsumingTrail(AuditTrail, InvocationLedger, SpendGate, SpendLedger, Proto
     invoker suite: a variable annotated with one Protocol does not statically
     satisfy the other, and a cast would hide the very identity being asserted.
     """
-
-
-def _composing() -> ComposingStage:
-    """The terminal composing stage every engine now takes (ADR-0170 §2).
-
-    Wired to a cooperating fake provider, which is all these tests need: what the
-    composed answer *says*, and what the engine does when composing it fails, are
-    pinned in ``tests/orchestration/test_composing.py`` and
-    ``tests/orchestration/test_engine_composing.py``.
-    """
-    return ComposingStage(model=FakeModelProvider(), streaming=FakeStreamingCompleter())
 
 
 def _grant_ids() -> Callable[[], str]:
@@ -282,8 +206,6 @@ def _recipient_grant_operations(
     """
     return RecipientGrantOperations(
         store=FakeRecipientGrantStore() if store is None else store,
-        trail=FakeAuditTrail() if trail is None else trail,
-        policy=FakeActionPolicy() if policy is None else policy,
         id_factory=_grant_ids(),
         clock=lambda: AT,
     )
@@ -302,9 +224,6 @@ def _connection_operations() -> ConnectionOperations:
     return ConnectionOperations(provisioner=FakeConnectionProvisioner())
 
 
-#: Long enough that the fakes' instant tools finish inside it anywhere.
-PATIENT = timedelta(seconds=30)
-
 #: The episodic horizon the harness's capture stage stamps with (ADR-0074 §7).
 RETENTION = timedelta(days=30)
 
@@ -314,41 +233,8 @@ RETENTION = timedelta(days=30)
 #: the wrong one pass.
 TRACE_RETENTION = timedelta(days=365)
 
-#: ADR-0197 §7's routed-park lifetime, as ``Settings`` defaults it. Named here so a
-#: case that advances the injected clock past it names one figure rather than two.
-ROUTED_TTL = timedelta(minutes=15)
-
-#: ADR-0250 §8's default, restated here so a case that pins a deadline reads the same
-#: figure the composition root passes.
-GOAL_QUESTION_TTL = timedelta(hours=72)
-
-#: The engine's own default outstanding-confirmation ceiling, restated so a case that
-#: wants backpressure can lower it without every other case naming a number.
-DEFAULT_MAX_OUTSTANDING = 1024
 
 CAPABILITY = "send_email"
-PARAMETERS = {"to": "someone@example.com"}
-
-#: The connected account an egress park in this module is bound to.
-EGRESS_REFERENCE = "conn-0001"
-EGRESS_IDENTITY = "work@example.com"
-EGRESS_ENDPOINT = "test://endpoint/one"
-
-#: A schema declaring ``to`` a destination-bearing argument, in ADR-0152 §3's two
-#: keywords. It is what makes ``FakeEgressBinder`` derive a real binding for
-#: :data:`PARAMETERS` rather than answer ``None``, so an egress park here is the
-#: seam's own output and not a fixture's idea of one.
-EGRESS_SCHEMA: Mapping[str, FrozenJson] = {
-    "type": "object",
-    "properties": {
-        "to": {
-            "type": "string",
-            "x-egress-destination": "smtp",
-            "x-egress-tier": "personal",
-        }
-    },
-    "additionalProperties": False,
-}
 
 
 def tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
@@ -373,145 +259,6 @@ def tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
 def confirmable(tool_id: str = "smtp") -> ToolDefinition:
     """A declaration the fake policy confirms: it discloses off-device."""
     return tool(tool_id, discloses=(DataTier.PERSONAL,))
-
-
-def egress_confirmable(tool_id: str = "smtp") -> ToolDefinition:
-    """A confirmable declaration whose ``to`` argument names a recipient.
-
-    The same tool the fake policy confirms, plus ADR-0152 §3's schema keywords, so
-    a runner holding a :class:`FakeEgressBinder` binds the call and the recorded
-    ``CONFIRM`` carries an ``egress_binding``.
-    """
-    return tool(tool_id, discloses=(DataTier.PERSONAL,), parameters_schema=EGRESS_SCHEMA)
-
-
-def bound_binder(tool_definition: ToolDefinition) -> FakeEgressBinder:
-    """A binder holding ``tool_definition`` against one active connected account."""
-    binder = FakeEgressBinder()
-    binder.register_egress(
-        tool_definition,
-        reference=EGRESS_REFERENCE,
-        identity=EGRESS_IDENTITY,
-        transport_endpoint=EGRESS_ENDPOINT,
-    )
-    return binder
-
-
-def plan_id(goal_id: str, ordinal: int) -> str:
-    """The id a test planner mints for the ``ordinal``-th call of one turn.
-
-    **Distinct per call, because ADR-0014 §2's "re-planning produces a *new*
-    ``ActionPlan`` with a new ``id``" now binds within a turn** (ADR-0228 §3): a turn
-    may call ``Planner.plan`` twice, both plans are persisted, and
-    ``PlanStore.save_plan`` refuses a ``supersedes`` naming the saving plan's own id
-    (ADR-0228 §5). A planner minting one id twice is non-conforming, and would fail
-    its consumer for the planner's own defect.
-
-    **The first call keeps the id these planners have always minted**, so nothing that
-    named it moves.
-
-    Args:
-        goal_id: The goal the plan is for.
-        ordinal: Which call of this turn, 1-based.
-
-    Returns:
-        The plan id.
-    """
-    return f"{goal_id}-plan" if ordinal == 1 else f"{goal_id}-plan-{ordinal}"
-
-
-class OneStepPlanner:
-    """A ``Planner`` that plans exactly one step **for the goal it is given**.
-
-    Building the plan from the passed goal is what keeps ``plan.goal_id`` equal to
-    the id the loop minted, so the façade's ``save_plan`` finds its goal. Structurally
-    implements :class:`~ai_assistant.core.protocols.Planner`.
-
-    **Its plan id is per call** (:func:`plan_id`). ``_calls`` is a class-level default
-    that the first call shadows with an instance attribute, so every subclass keeps
-    working whether or not it calls ``super().__init__()``.
-    """
-
-    _calls: int = 0
-
-    def __init__(
-        self,
-        *,
-        capability: str = CAPABILITY,
-        parameters: Mapping[str, object] | None = None,
-    ) -> None:
-        self._capability = capability
-        # Overridable so a case can drive a *shape* of arguments — a long
-        # destination-bearing key naming a many-element array, for ADR-0178 §9's
-        # expansion — without a second planner class.
-        self._parameters = PARAMETERS if parameters is None else parameters
-
-    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
-        self,
-        goal: GoalBrief,
-        *,
-        utterance: str,
-        context: CurrentContext,
-        memories: Sequence[MemoryRecord] = (),
-        capabilities: Sequence[str],
-        files: Sequence[ShownFile] = (),
-        read_outcomes: Sequence[ReadAskOutcome] = (),
-        evidence: Sequence[EvidenceDigest] = (),
-    ) -> PlannerOutput:
-        # **One act proposed per call, and the step names it** (ADR-0265 §4). Every
-        # declaration these cases drive is `side_effecting`, and ADR-0259 §2 refuses to
-        # dispatch such a step whose plan cannot say which act it is an attempt at. A
-        # *fresh* act each turn rather than the goal's existing one, because that is what
-        # keeps a second turn over one goal a second dispatch: two acts the user asked
-        # for, which is §2's own reading of "book another one just like it". A case about
-        # the **reuse** — one act, two turns — says so, and
-        # `test_engine_effect_claim.py` is where it says it.
-        label = f"A{len(goal.actions) + 1}"
-        step = PlanStep(
-            id="step-1",
-            intent="send the note",
-            capability=self._capability,
-            parameters=self._parameters,  # type: ignore[arg-type]  # heterogeneous test arguments
-            intended_action=label,
-        )
-        self._calls += 1
-        return PlannerOutput(
-            actions=(ProposedAction(intent="send the note"),),
-            plan=ActionPlan(
-                id=plan_id(goal.goal_id, self._calls),
-                goal_id=goal.goal_id,
-                steps=(step,),
-                created_at=AT,
-            ),
-        )
-
-
-class NoStepPlanner:
-    """A ``Planner`` that ends a turn at an empty plan.
-
-    Its plan id is per call, for :class:`OneStepPlanner`'s reason (:func:`plan_id`).
-    """
-
-    _calls: int = 0
-
-    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
-        self,
-        goal: GoalBrief,
-        *,
-        utterance: str,
-        context: CurrentContext,
-        memories: Sequence[MemoryRecord] = (),
-        capabilities: Sequence[str],
-        files: Sequence[ShownFile] = (),
-        read_outcomes: Sequence[ReadAskOutcome] = (),
-        evidence: Sequence[EvidenceDigest] = (),
-    ) -> PlannerOutput:
-        self._calls += 1
-        return PlannerOutput(
-            plan=ActionPlan(
-                id=plan_id(goal.goal_id, self._calls), goal_id=goal.goal_id, steps=(), created_at=AT
-            )
-        )
 
 
 class RecordingBeliefStore(FakeMemoryStore):
@@ -553,130 +300,40 @@ class _Default:
 _DEFAULT: Final = _Default()
 
 
-#: The canonical destination set a search of this harness's deployment binds to
-#: (ADR-0238 §2, §5). ``tools/web_search.py`` declares the ``origin`` argument
-#: ``x-egress-destination: "https"``, so a search binding's spans carry exactly this one
-#: destination and ``EgressBinding.canonical_destination_set`` answers exactly this
-#: tuple — which ``tests/app/test_search_destinations.py`` asserts against a binding the
-#: real seam derived rather than leaving as a claim here.
-SEARCH_DESTINATIONS: Final = (
-    CanonicalDestination(
-        protocol=DestinationProtocol.HTTPS, canonical=f"{DEFAULT_SEARCH_ORIGIN}:443"
-    ),
-)
-
-
 class Harness:
     """A wired :class:`Engine` and the fakes behind it, for assertions."""
 
     def __init__(  # noqa: PLR0913 — one knob per fake; that is what a harness is
         self,
         *,
-        planner: object | None = None,
-        # ADR-0250 §4's seam, so a case can script what the association decided. The
-        # default is `FRESH` — "the turn opens a new goal" — which is exactly what
-        # every turn did before ADR-0250 §19's M3, so a case that says nothing about
-        # association is unchanged by it. The **fake's** own default is `UNDECIDED`
-        # (§4's decline), which is right for a double and wrong for a harness whose
-        # cases are about something else.
-        associator: FakeGoalAssociator | None = None,
-        context: FakeContextProvider | None = None,
-        composing: ComposingStage | None = None,
-        informational_events: InformationalEventStage | None = None,
         tools: tuple[ToolDefinition, ...] = (),
-        policy: FakeActionPolicy | None = None,
         recipient_grants: RecipientGrantStore | None = None,
         memory: FakeMemoryStore | None = None,
         conversation_store: FakeConversationStore | None = None,
-        # ADR-0238's remaining knob. `destination_trust` empty is `origin/main`'s
-        # state and ADR-0238's own exit note. It no longer decides a search's standing
-        # — ADR-0247 §1 takes that from the registration — and the per-conversation
-        # call bound it used to sit beside is removed entire (ADR-0247 §5).
         destination_trust: FakeDestinationTrustStore | None = None,
         closers: Sequence[object] = (),
-        loop_id_factory: Callable[[], str] | None = None,
-        feedback: object | None = None,
-        # ADR-0230 §3's seam, so an engine-level case can drive a turn that **fetches**
-        # — which is what §14 item 10 needs and what no loop-level case can reach: the
-        # stamp it asserts is on a *captured episode*, and the consequence it asserts
-        # is a *later* turn's egress ruling. `None` is the default and is every other
-        # case's deployment: no root configured, so no file is nameable.
-        fetcher: object | None = None,
-        # ADR-0231 §17's Lane 5 seam, so an engine-level case can drive a turn that
-        # **searches** — which is what §18 item 2 needs and what no loop-level case can
-        # reach: the stamp it asserts is on a *captured episode*, and the consequence
-        # it asserts is a *later* turn's egress ruling. `None` is the default and is
-        # every other case's deployment: no search account connected, so §13's
-        # disposition for any `WEB_SEARCH` ask is `NOT_CONFIGURED`.
-        search: SearchServicer | None = None,
-        # ADR-0260 §12's L3 seam, so an engine-level case can drive a turn that reads a
-        # **forecast** — which is what §13's arm (h) needs and what no loop-level case
-        # can reach: the field it asserts is on the `TurnOutcome`, and the statement
-        # beside it is assembled at the capture point. `None` is the default and is
-        # every other case's deployment: no forecast provider configured, so §8's
-        # disposition for any `FORECAST_READ` ask is `NOT_CONFIGURED`.
-        forecast: ForecastServicer | None = None,
-        # ADR-0254 §20's Lane 1 and Lane 3 seams, wired **together or not at all**: the
-        # writer that proposes a row (`StepRunner`) and the reader that renders it
-        # (`AuthorizationOperations`) are given the **same** store, which is what makes
-        # "the confirmation shows what the answer would establish" a property of the
-        # wiring rather than of two tables that happen to agree.
-        #
-        # `None` is the default and is every other case's deployment: no store wired, so
-        # `_propose` writes nothing, every `Confirmation` carries `authorization` `None`,
-        # the listing answers empty and the revocation answers `NO_SUCH_AUTHORIZATION` —
-        # which is exactly what is true of a deployment holding no rows. A case that
-        # wires one therefore changes no other case's behaviour.
-        authorizations: FakeGoalAuthorizationStore | None = None,
-        # ADR-0262 §3's one new collaborator, which the composition root gives the engine
-        # as the **third face** of the store above (ADR-0254 §16) — so the default here
-        # is that same object, and an engine wired with no store resolves no row and
-        # leaves every criterion `unestablished`, which is that deployment's own truth.
-        #
-        # **The override exists because the comparison's operands and the path that
-        # writes them are two different lanes' subjects.** ADR-0254 §20 drives the
-        # establishment end to end; a case about §4's limbs needs the row the comparison
-        # reads to be a fact it chose, not one it had to establish first.
-        resolution: AuthorizationResolution | None = None,
-        coverage_answers: CoverageAnswers | None = None,
-        # ADR-0256 §1's third rung, which `StepRunner` reads when an act names no
-        # instant and the goal carries no deadline. Only a case wiring `authorizations`
-        # can reach it.
-        episode_retention: timedelta | None = None,
-        # ADR-0244 §18's Lane 1 seam, so an engine-level case can drive a **parked**
-        # read end to end — which is the only level it can be driven at: the question is
-        # assembled at the capture point, the answer runs through `resume`, and the
-        # continuation is a turn. `None` is the default and is the deployment this lane
-        # ships: no store wired, so no servicing writes a park and §1's third clause is
-        # the whole of what every `CONFIRM` then is. A case wiring one passes the **same
-        # object** to the `SearchServicer` it builds, which is ADR-0244 §18's
-        # one-instance obligation held by the case rather than by this harness.
-        parked_reads: FakeParkedReads | None = None,
         queue_limit: int = 50,
         drain_timeout: timedelta | None = None,
         traces: FakeTraceRetention | None = None,
         trace_sink: FakeTraceSink | None = None,
         trace_retention: timedelta | None = TRACE_RETENTION,
-        binder: EgressBinder | None = None,
         plans: FakePlanStore | None = None,
         tool_handler: FakeToolImplementation | None = None,
         trail: ConsumingTrail | None = None,
         reads: SourceReadTrail | None = None,
-        routing: RoutingStage | None = None,
         # ADR-0276's understanding stage, wired as the composition root wires it with
         # §7's version bound beside it. `None` is every other case's deployment: no
-        # stage, so every capture records `not_reached` exactly as before step 3.
+        # stage, so every capture records `not_reached`.
         understanding: UnderstandingStage | None = None,
         understanding_version_limit: int | None = 8,
         # ADR-0282's windows stage. `None` wires one over this harness's store wherever
         # understanding is wired, as the composition root does.
         windows: WindowsStage | None = None,
-        # ADR-0281's recall stage. `None` is every other case's deployment: no recall,
-        # so every pass runs exactly as it did before recall was wired.
+        # ADR-0281's recall stage. `None` is every other case's deployment: no recall.
         recall: RecallStage | None = None,
         # ADR-0300 §6's story store, candidates and story-links stage. `None` is every
         # other case's deployment: no story is read or written, and no stories section
-        # is rendered, so every pass runs exactly as it did before §6 was built.
+        # is rendered.
         stories: StoryStore | None = None,
         story_candidates: StoryCandidates | None = None,
         story_links: StoryLinksStage | None = None,
@@ -685,26 +342,13 @@ class Harness:
         # ADR-0300 §9:3's matters pass. `None` is every other case's deployment:
         # `decide_story_flags` refuses, and nothing else reads it.
         matters_pass: MattersPass | None = None,
-        # ADR-0259 §4's turn-start pass and §3's check, wired **together or not at
-        # all** — one object holds both. `None` is the default and is every other
-        # case's deployment: no stage wired, so no goal's residual is repaired and the
-        # pipeline is exactly what it was before that decision, which is why a case
-        # that wires one changes no other case's behaviour.
-        reconciliation: ReconciliationStage | None = None,
         transcriber: SpeechTranscriber | None | _Default = _DEFAULT,
         synthesizer: SpeechSynthesizer | None | _Default = _DEFAULT,
         speakable_attested_sources: frozenset[str] = frozenset(),
         max_spoken_audio_bytes: int = DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
-        routed_confirmation_ttl: timedelta = ROUTED_TTL,
-        # ADR-0250 §8's one `Settings` field, so a case can pin the deadline it
-        # computes and the figure the engine refuses at construction.
-        goal_question_ttl: timedelta = GOAL_QUESTION_TTL,
-        max_outstanding_confirmations: int = DEFAULT_MAX_OUTSTANDING,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
         notification_outbox: DeliveryOutbox | None = None,
         now: Clock | None = None,
-        id_factory: Callable[[], str] | None = None,
-        epoch_factory: Callable[[], str] | None = None,
         # ADR-0293 §6's reader, which runs every activation through the phases (ADR-0309
         # §2:6), so it is wired only beside them. `None`, the default, is on wherever
         # `phases` is given and off otherwise: a case holding the medium alone, or a
@@ -717,32 +361,22 @@ class Harness:
         # `None` is every other case's deployment: the diagnostic record off.
         diagnostics: DiagnosticSink | None = None,
     ) -> None:
-        # ADR-0197's knobs. The recorder lives on the *stage* (§9), so a case that wants
-        # to read the rows builds its own ``RoutingStage(model=…, recorder=…)`` and keeps
-        # the recorder; there is nothing for this harness to hold. Every other case in
-        # this module gets no stage at all, which is the deployment the pipeline had
-        # before ADR-0197 and is why they are unaffected by it.
-        self.routing = routing
-        self.reconciliation = reconciliation
         # ADR-0200's two seams, wired **together** or not at all — the engine refuses
-        # half a pipeline. Defaulted to the canonical fakes so every spoken case in
-        # this suite has a subject, and kept on the harness so a case can read what
-        # reached each seam, arm a failure, or narrow a `formats` set.
+        # half a pipeline. Defaulted to the canonical fakes, and kept on the harness so
+        # a case can read what reached each seam, arm a failure, or narrow a `formats`
+        # set.
         self.transcriber: SpeechTranscriber | None = (
             FakeSpeechTranscriber() if isinstance(transcriber, _Default) else transcriber
         )
         self.synthesizer: SpeechSynthesizer | None = (
             FakeSpeechSynthesizer() if isinstance(synthesizer, _Default) else synthesizer
         )
-        # The **injected** clock (ADR-0009), settable so ADR-0197 §7's lifetime is
-        # pinned by advancing it rather than by waiting: "a test advances it rather
-        # than waits", and a case that reclaimed a slot before resuming would pass
-        # against an implementation whose expiry is only ever noticed by housekeeping.
+        # The **injected** clock (ADR-0009), settable so a case moves it rather than
+        # waits.
         self.clock: Clock = (lambda: AT) if now is None else now
-        # A knob for the same reason ``trail`` is one below: ADR-0249 §6 makes the six
-        # phases "six observable transitions", and three of a turn's six are commits a
-        # case can only see by holding the store that took them. The default stays the
-        # canonical fake, which is what every other case here wants.
+        # A knob because a case about the phases' effect records needs to hold the
+        # store that took them. The default stays the canonical fake, which is what
+        # every other case here wants.
         self.plans = FakePlanStore(now=lambda: AT) if plans is None else plans
         # ``trail`` is a knob because the audit surface's own reader cases need a
         # store that holds **bytes**: ADR-0184 §10 puts the origin-unrecorded row's
@@ -751,12 +385,11 @@ class Harness:
         # holding objects has no bytes for a shared case to seed". The default stays
         # the canonical fake, which is what every other case here wants.
         self.trail: ConsumingTrail = FakeAuditTrail() if trail is None else trail
-        # One object as both registry and invoker, as ADR-0029 §8 requires.
-        # The seam claims through the **same** trail the runner records rulings
-        # into (ADR-0192 §9's wiring clause); a second one would refuse every claim.
-        # A knob for the same reason ``plans`` is one: ADR-0249 §5 makes ``ANSWERED``
-        # assert that **no step failed**, and a case about that needs a tool that fails
-        # rather than the one that succeeds. The default is unchanged.
+        # One object as both registry and invoker, as ADR-0029 §8 requires, which the
+        # phases a case wires reach. The seam claims through the **same** trail
+        # authorizing records rulings into (ADR-0192 §9's wiring clause); a second one
+        # would refuse every claim. ``tool_handler`` is a knob so a case can have a
+        # tool fail rather than succeed.
         self.invoker = FakeToolInvoker(
             [
                 (definition, _succeeds if tool_handler is None else tool_handler)
@@ -765,12 +398,10 @@ class Harness:
             ledger=self.trail,
             gate=self.trail,
         )
-        self.policy = policy if policy is not None else FakeActionPolicy()
         self.memory = memory if memory is not None else FakeMemoryStore(now=lambda: AT)
         # The capture/lifecycle stage over the *same* memory store, as the
         # composition root wires it (ADR-0074 §9). Kept on the harness so a test can
-        # read what capture actually recorded, and so a second façade over the same
-        # durable state shares one stage.
+        # read what capture actually recorded.
         # A knob for the same reason ``memory`` is one: ADR-0074 §9's store faults and
         # ADR-0205 §3's refusals are properties of what the *store* does, and a case
         # about one needs a store it can arm or count. The default is the canonical
@@ -781,10 +412,7 @@ class Harness:
             else conversation_store
         )
         #: ADR-0238 §14's store, and ADR-0242 §4's: **the caller's where one was given**,
-        #: so the engine's three trust operations and the search footing below hold the
-        #: *same* object. A second assignment here would leave a case's seeded records
-        #: and armed faults reaching the servicing site and never the engine — the two
-        #: halves of one journey looking at two stores.
+        #: so the engine's three trust operations hold the *same* object a case seeded.
         self.destination_trust = (
             FakeDestinationTrustStore() if destination_trust is None else destination_trust
         )
@@ -795,103 +423,15 @@ class Harness:
             now=lambda: AT,
         )
         self.ids = iter(f"d-{n}" for n in range(1, 100))
-        self.handles = iter(f"tok-{n}" for n in range(1, 100))
-        # Kept on the harness so a test can read what reached the loop.
-        self.feedback = feedback if feedback is not None else FakeFeedbackProcessor()
-        self.policy_for_writer = FakeMemoryPolicy()
-
-        writer = FakeMemoryWriter(store=self.memory, policy=self.policy_for_writer, now=lambda: AT)
-        # **One** write stage over that writer and one deferral queue, shared by every
-        # producer's stage, as the composition root wires it (ADR-0078 §3). Both are
-        # kept on the harness: a test reads back what was parked, and the question
-        # surface answers it.
+        # The deferral queue the engine's retention sweep purges (ADR-0078 §10 item
+        # 8), kept on the harness so a case can count what the sweep reached.
         self.deferrals = FakeDeferralStore(now=lambda: AT, queue_limit=queue_limit)
-        self.writes = MemoryWriteStage(writer=writer, deferrals=self.deferrals)
-        self.questions = QuestionStage(
-            writer=writer, deferrals=self.deferrals, memory=self.memory, now=lambda: AT
-        )
-        # ADR-0185 §5's trail. **A whole trail rather than the bare recorder, since
-        # ADR-0186 §10.** The
-        # engine now holds the wide seam as well, and the composition root passes
-        # *one* object into all four positions — narrowed to `SourceReadRecorder` at
-        # each driver, whole at the façade. `FakeSourceReadTrail` satisfies both
-        # Protocols structurally, which is ADR-0185 §4's arrangement modelled in the
-        # double; a harness holding two objects here would let `recent_reads` answer
-        # about a store the drivers never wrote to, which is precisely the wiring
-        # mistake no type can catch.
-        #
-        # A knob for ``trail``'s reason, one store over: the read surface's own cases
-        # need a **durable** trail, because the order ``export_reads`` reverses comes
-        # from the store's ``ORDER BY`` rather than from a Python list, and a fake
-        # cannot exhibit a wrong one.
+        # ADR-0185 §5's trail, whole, as the composition root hands it to the façade
+        # (ADR-0186 §10). A knob for ``trail``'s reason, one store over: the read
+        # surface's own cases need a **durable** trail, because the order
+        # ``export_reads`` reverses comes from the store's ``ORDER BY`` rather than
+        # from a Python list, and a fake cannot exhibit a wrong one.
         self.reads: SourceReadTrail = FakeSourceReadTrail() if reads is None else reads
-        self.loop = loop = LearningLoop(
-            # A knob because ADR-0204 §8's sixth case needs a *placed* facet in the
-            # turn's supply — the calendar — to show that a facet ADR-0199 §3 places
-            # leaves the stamp `False`, and the default context carries none at all.
-            context=FakeContextProvider() if context is None else context,
-            memory=self.memory,
-            writes=self.writes,
-            planner=planner if planner is not None else OneStepPlanner(),  # type: ignore[arg-type]
-            feedback=self.feedback,  # type: ignore[arg-type]
-            now=lambda: AT,
-            id_factory=loop_id_factory if loop_id_factory is not None else _goal_ids("g"),
-            # The same object the runner below resolves against (ADR-0211 §3):
-            # a loop told one vocabulary while selection resolved against another
-            # could plan a step the selecting registry never advertised.
-            registry=self.invoker,
-            fetcher=fetcher,  # type: ignore[arg-type]  # the harness's own heterogeneous knobs
-            search=search,
-            # ADR-0260 §7: the one servicing site, handed the one forecast servicer.
-            # The composition root wires it into that site and into nothing else, and
-            # this harness holds it nowhere else either.
-            forecast=forecast,
-            # ADR-0247 §1: the registration fact wired into the one servicing path,
-            # in place of the trust store ADR-0238 §14 put there — over the **same**
-            # `ConversationStore` the capture stage holds, because §8 rests the
-            # increment's atomicity on that one object's per-conversation exclusion.
-            #
-            # **Derived from the searcher and not offered as a knob**, which is the
-            # composition root's own arithmetic: `app/composition.py` builds the
-            # servicer and reads `registered` from the same two `Settings` fields, so a
-            # harness wiring a servicer *is* a deployment holding a registration and
-            # one wiring none is not. A knob would let a case arrange a deployment that
-            # cannot exist.
-            footing=lambda conversation_id: SearchFooting(
-                conversation_id=conversation_id,
-                registered=search is not None,
-            ),
-        )
-        runner = StepRunner(
-            plans=self.plans,
-            registry=self.invoker,
-            policy=self.policy,
-            trail=self.trail,
-            executor=StepExecutor(
-                plans=self.plans, registry=self.invoker, invoker=self.invoker, now=lambda: AT
-            ),
-            now=lambda: AT,
-            id_factory=lambda: next(self.ids),
-            # The egress binding seam (ADR-0152 §1), wired only where a case needs
-            # a *bound* call: without one ``bind`` answers ``None`` and every
-            # request carries ``egress_binding=None``, which is the ordinary
-            # non-egress shape almost every case here is about.
-            binder=binder,
-            # ADR-0254 §15's single writer of an `Authorization`, over the store this
-            # harness also hands the reader below.
-            authorizations=authorizations,
-            # Condition 6's **one** implementation (ADR-0270 §1), so what a proposal
-            # here is refused or allowed by is the real comparison and not a
-            # configuration. `ThresholdActionPolicy` holding no `GoalQuotes` answers
-            # unmet for every `MONEY` member, which is the fail-closed direction and
-            # the shape of this harness — no goal here states a bound ADR-0266 §4
-            # reads, so every coverage the writer puts to it is empty. A case that needs the answer
-            # controlled, counted or faulted passes `FakeCoverageAnswers` instead.
-            coverage_answers=(
-                ThresholdActionPolicy() if coverage_answers is None else coverage_answers
-            ),
-            episode_retention=episode_retention,
-        )
         # The trace store's *deletion* seam, and only that: ADR-0119 §7 gives the
         # engine the purge and withholds the walk, so the harness hands it a
         # ``FakeTraceRetention`` rather than the whole store — a fake that could
@@ -905,58 +445,21 @@ class Harness:
         # case assert a reach the engine does not have.
         self.trace_sink = trace_sink if trace_sink is not None else FakeTraceSink()
         self.trace_retention = trace_retention
-        # The terminal composing stage (ADR-0170 §2), overridable so a case can
-        # script what the composer does — refuse, come back blank, or contradict
-        # the step account — without a second harness.
-        self.composing = composing if composing is not None else _composing()
-        #: The recipient-grant store the five ADR-0235 §7 operations read and write,
-        #: held here so a case can seed it, put it at its ceiling, or make its writes
-        #: fail — the states the establishing act's carrier is about.
+        #: The recipient-grant store the three ADR-0235 §7 operations read and write,
+        #: held here so a case can seed it or make its writes fail.
         self.recipient_grants: RecipientGrantStore = (
             FakeRecipientGrantStore() if recipient_grants is None else recipient_grants
         )
-        #: ADR-0244 §3's store, kept so a case can read the park a servicing wrote, seed
-        #: one, or arm its writes to fail — the three states ADR-0244 §1's third clause
-        #: and §19's arms are about.
-        self.parked_reads = parked_reads
-        #: The operations the engine reaches it through (ADR-0244 §5, §6, §11), over the
-        #: **same** conversation index the capture stage holds: §6's clause 2 reads the
-        #: conversation from it (ADR-0247 §6), and a second store over the same rows
-        #: could answer about a conversation this one never began.
-        self.parked_read_operations = ParkedReadOperations(
-            store=parked_reads,
-            conversations=self.conversation_store,
-            search=search,
-            clock=self.clock,
-        )
-        self.associator = (
-            FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH))
-            if associator is None
-            else associator
-        )
         self.engine = Engine(
-            informational_events=informational_events,
-            associator=self.associator,
-            composing=self.composing,
             grant_operations=_grant_operations(),
-            # The harness's **own** trail and policy, so the act this surface performs
-            # is recorded where every other ruling is and ruled on by the same gate
-            # (ADR-0235 §3). A second trail here would let a case establish a grant
-            # from a confirmation `recent_decisions` cannot see.
             recipient_grant_operations=RecipientGrantOperations(
                 store=self.recipient_grants,
-                trail=self.trail,
-                policy=self.policy,
                 id_factory=lambda: next(self.ids),
                 clock=self.clock,
-                # ADR-0244 §5's eighth condition, decided through the **same**
-                # operations the engine answers a park through — so a case that parks a
-                # read and then asks `grantable_decisions` sees one store and not two.
-                parked_reads=self.parked_read_operations,
             ),
-            # The harness's own trail again (ADR-0242 §1): the trust act reads the
-            # decision it rides from the trail every other operation here records to,
-            # so a case cannot trust a decision `recent_decisions` cannot see.
+            # The harness's own trail (ADR-0242 §1): the trust act reads the decision it
+            # rides from the trail every other operation here records to, so a case
+            # cannot trust a decision `recent_decisions` cannot see.
             destination_trust_operations=DestinationTrustOperations(
                 store=self.destination_trust,
                 trail=self.trail,
@@ -964,22 +467,6 @@ class Harness:
                 clock=lambda: AT,
             ),
             connection_operations=_connection_operations(),
-            # ADR-0254 §11's read side, over the **same** store the runner writes
-            # through and the **same** plan store the goal's statement is read from.
-            authorization_operations=(
-                None
-                if authorizations is None
-                else AuthorizationOperations(
-                    authorizations=authorizations, plans=self.plans, now=self.clock
-                )
-            ),
-            # ADR-0262 §3's read seam, narrowed at the engine's own annotation to
-            # `resolve(id)` and nothing else — the same object the runner writes
-            # through unless a case named another.
-            authorizations=authorizations if resolution is None else resolution,
-            loop=loop,
-            runner=runner,
-            reconciliation=reconciliation,
             plans=self.plans,
             trail=self.trail,
             spend=self.trail,
@@ -990,14 +477,7 @@ class Harness:
             trace_sink=self.trace_sink,
             trace_retention=trace_retention,
             conversations=self.conversations,
-            questions=self.questions,
             closers=tuple(closers),  # type: ignore[arg-type]
-            id_factory=(lambda: next(self.handles)) if id_factory is None else id_factory,
-            # The handle epoch (#1644), a knob so a restart case can hand two engines
-            # two epochs it chose rather than two real UUIDs and the hope they differ.
-            # Defaulted per harness instance, so two harnesses are two engines.
-            epoch_factory=(lambda: "epoch") if epoch_factory is None else epoch_factory,
-            routing=self.routing,
             understanding=understanding,
             understanding_version_limit=understanding_version_limit,
             windows=(
@@ -1011,33 +491,20 @@ class Harness:
             story_candidates=story_candidates,
             story_links=story_links,
             matters_pass=matters_pass,
-            # ADR-0244 §5, §6, §11: the enumeration, the answer and the cancellation,
-            # over the store above. Wired unconditionally, exactly as the composition
-            # root wires the operations object — what varies by deployment is the
-            # *store* behind it, which is `None` here unless a case wired one.
-            parked_reads=self.parked_read_operations,
             transcriber=self.transcriber,
             synthesizer=self.synthesizer,
             speakable_attested_sources=speakable_attested_sources,
             max_spoken_audio_bytes=max_spoken_audio_bytes,
-            routed_confirmation_ttl=routed_confirmation_ttl,
-            goal_question_ttl=goal_question_ttl,
-            max_outstanding_confirmations=max_outstanding_confirmations,
             # ADR-0085 §8c's contract limit, a knob so a case can put a *result* over
-            # it cheaply — which is the only way ADR-0200 §4's fourth degradation and
-            # its one-step re-measure are reachable at all.
+            # it cheaply.
             max_payload_bytes=max_payload_bytes,
             # The whole harness runs at one instant unless a case moves it, so the
             # horizon the sweep measures back from is a figure a case can name
-            # (ADR-0119 §10) — and ADR-0197 §7's routed-park lifetime is a figure a
-            # case can *advance* past.
+            # (ADR-0119 §10).
             now=self.clock,
             drain_timeout=drain_timeout,
             # ADR-0131 §3's durable delivery queue. ``None`` by default, which is the
-            # in-process deployment that serves no poll — and a knob because an
-            # *absence* is only assertable against an outbox that would have recorded
-            # the call: ADR-0207's park cases pin that the spoken path acquired no
-            # edge to it, which a subject holding no outbox at all cannot show.
+            # in-process deployment that serves no poll.
             notification_outbox=notification_outbox,
             chat_reader=phases is not None if chat_reader is None else chat_reader,
             phases=None if phases is None else phases(self),
@@ -1047,46 +514,6 @@ class Harness:
 
 async def _succeeds(parameters: object, *, idempotency_key: str | None) -> None:
     """A tool that does nothing and succeeds."""
-
-
-# --- durable recovery of a parked confirmation (ADR-0052) ---------------
-
-
-def _fresh_facade(harness: Harness) -> Engine:
-    """A new ``Engine`` over ``harness``'s durable state, with an empty in-process table.
-
-    The fakes are the same instances, so plan/execution state and the audit trail
-    persist — this stands in for a restarted process whose ``_parked`` table starts
-    empty (ADR-0052 §1). It reuses the harness's stage objects, which already hold
-    the same ``plans`` and ``trail``.
-    """
-    return Engine(
-        chat_reader=False,
-        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
-        composing=_composing(),
-        grant_operations=_grant_operations(),
-        recipient_grant_operations=_recipient_grant_operations(),
-        destination_trust_operations=_destination_trust_operations(),
-        connection_operations=_connection_operations(),
-        # ADR-0254 §11's recovery clause needs this across the restart: "A restart
-        # between the question and the answer recovers the row and renders the same
-        # projection", which a facade holding no read side could not do.
-        authorization_operations=harness.engine._authorization_operations,
-        loop=harness.engine._loop,
-        runner=harness.engine._runner,
-        plans=harness.plans,
-        trail=harness.trail,
-        spend=harness.trail,
-        reads=harness.reads,
-        memory=harness.memory,
-        deferrals=harness.deferrals,
-        traces=harness.traces,
-        trace_sink=harness.trace_sink,
-        trace_retention=harness.trace_retention,
-        conversations=harness.conversations,
-        questions=harness.questions,
-        id_factory=lambda: next(harness.handles),
-    )
 
 
 async def test_aclose_is_idempotent() -> None:
@@ -1202,19 +629,16 @@ async def test_the_purge_sweeps_both_tier_one_stores_and_reports_each_count() ->
     assert calls == {"records": 1, "questions": 1}
 
 
-async def test_the_purge_reaches_the_same_deferral_queue_the_question_surface_answers() -> None:
+async def test_the_purge_reaches_the_deferral_queue_it_was_wired_with() -> None:
     """One queue, or the sweep reclaims rows nobody can see (ADR-0078 §1, §3).
 
     A composition-root single-instance obligation no type can state, of the same
     shape as ``plans`` and ``trail``. Wired to a second queue, ``purge_expired``
-    would report a cap kept while the rows the user's own questions live in kept
-    growing.
+    would report a cap kept while the rows the write stage parked kept growing.
     """
     harness = Harness()
 
     assert harness.engine._deferrals is harness.deferrals
-    assert harness.engine._deferrals is harness.questions._deferrals
-    assert harness.engine._deferrals is harness.writes._deferrals
 
 
 async def test_the_purge_is_drained_before_shutdown_closes_resources() -> None:
@@ -1403,14 +827,10 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
     harness = Harness(traces=traces)
     facade = Engine(
         chat_reader=False,
-        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
-        composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
         destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
-        loop=harness.engine._loop,
-        runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
         spend=harness.trail,
@@ -1421,7 +841,6 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
-        questions=harness.questions,
         now=lambda: datetime.min.replace(tzinfo=UTC) + timedelta(days=1),
     )
 
@@ -1501,65 +920,6 @@ def test_the_engine_never_reads_a_trace_back() -> None:
     ]
 
     assert walks == [], "the engine reads a trace back, which ADR-0119 §7 forbids"
-
-
-async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
-    """The ceiling must be positive — zero would refuse to drive any step at all."""
-    harness = Harness()
-    with pytest.raises(ValueError, match="must be positive"):
-        Engine(
-            chat_reader=False,
-            associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
-            composing=_composing(),
-            grant_operations=_grant_operations(),
-            recipient_grant_operations=_recipient_grant_operations(),
-            destination_trust_operations=_destination_trust_operations(),
-            connection_operations=_connection_operations(),
-            loop=harness.engine._loop,
-            runner=harness.engine._runner,
-            plans=harness.plans,
-            trail=harness.trail,
-            spend=harness.trail,
-            reads=harness.reads,
-            memory=harness.memory,
-            deferrals=harness.deferrals,
-            traces=harness.traces,
-            trace_sink=harness.trace_sink,
-            trace_retention=harness.trace_retention,
-            conversations=harness.conversations,
-            questions=harness.questions,
-            max_outstanding_confirmations=0,
-        )
-
-
-@pytest.mark.parametrize("bad", [True, 1.5, "2"])
-async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> None:
-    """A bool, float or string ceiling is a TypeError, not a surprising limit."""
-    harness = Harness()
-    with pytest.raises(TypeError, match="must be an integer"):
-        Engine(
-            chat_reader=False,
-            associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
-            composing=_composing(),
-            grant_operations=_grant_operations(),
-            recipient_grant_operations=_recipient_grant_operations(),
-            destination_trust_operations=_destination_trust_operations(),
-            connection_operations=_connection_operations(),
-            loop=harness.engine._loop,
-            runner=harness.engine._runner,
-            plans=harness.plans,
-            trail=harness.trail,
-            spend=harness.trail,
-            reads=harness.reads,
-            memory=harness.memory,
-            deferrals=harness.deferrals,
-            traces=harness.traces,
-            trace_sink=harness.trace_sink,
-            trace_retention=harness.trace_retention,
-            conversations=harness.conversations,
-            questions=harness.questions,
-            max_outstanding_confirmations=bad,  # type: ignore[arg-type]  # the point of the test
-        )
 
 
 @pytest.mark.parametrize("unusable", [float("nan"), float("inf"), 1.5, True, 0, -1])
@@ -1642,26 +1002,6 @@ async def test_aclose_sweeps_remaining_closers_when_one_is_cancelled() -> None:
     with pytest.raises(asyncio.CancelledError):
         await harness.engine.aclose()
     assert closed == ["a", "b"]  # b released despite a's cancellation
-
-
-# --- feedback, as the loop folds it (ADR-0022) ------------------------------
-
-
-def feedback(
-    *,
-    kind: FeedbackKind = FeedbackKind.CORRECTION,
-    memory_kind: MemoryKind = MemoryKind.SEMANTIC,
-    content: str = "the office is in Boston",
-    subject: str | None = None,
-) -> FeedbackEvent:
-    """A ``FeedbackEvent`` the fakes fold into memory."""
-    return FeedbackEvent(
-        kind=kind,
-        memory_kind=memory_kind,
-        content=content,
-        subject=subject,
-        created_at=AT,
-    )
 
 
 # --- the belief inspection surface (ADR-0073 §4, §5, §7) ----------------
@@ -2253,7 +1593,7 @@ async def test_engine_start_consumes_the_stamped_enumeration(
     enumeration ADR-0076 added, which is the only way a deletion a previous run left
     unfinished is ever rediscovered.
     """
-    harness = Harness(planner=NoStepPlanner())
+    harness = Harness()
     calls: list[str | None] = []
     original = harness.conversation_store.stamped_conversation_ids
 
@@ -3070,28 +2410,6 @@ async def test_the_connection_surface_is_still_drained_though_it_is_not_traced()
 # --- ADR-0181 §4, §10: the origin the engine computes from its own selection ---
 # Kept in one block so a rebase across another lane's edits to this module moves
 # it whole rather than through it.
-
-
-def _external_belief(record_id: str = "rec-external") -> SemanticMemory:
-    """A belief in the ``ATTESTED`` band, which is where externality is recorded.
-
-    ``rests_on_recorded_external_content`` is true of it by ``band_of`` alone
-    (ADR-0106 §1): the band is reached only through ``MemorySource.EXTERNAL``,
-    whose whole meaning is that a connected source reported the belief. Its content
-    carries the utterance's terms so the store's lexical search selects it.
-    """
-    return SemanticMemory(
-        id=record_id,
-        content="send it to the address in the invite",
-        fact="send it to the address in the invite",
-        validity=Validity(),
-        provenance=Provenance(
-            source=MemorySource.EXTERNAL,
-            confidence=0.9,
-            last_updated=AT,
-            attestation=Attestation(reported_by="calendar:work", reported_at=AT),
-        ),
-    )
 
 
 @pytest.mark.parametrize("method", ["episodes", "episode_chunk"])

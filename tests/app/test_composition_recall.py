@@ -37,7 +37,7 @@ async def test_the_engine_is_built_with_recall_over_its_store_at_its_embedders_t
     try:
         recall = engine._recall
         assert isinstance(recall, RecallStage)
-        assert recall._memory is engine._loop._memory
+        assert recall._memory is engine._memory
         # ADR-0300 §7:1: the one story store, the engine surface's and the candidates'.
         assert recall._stories is engine._stories
         assert recall._threshold == RECALL_THRESHOLDS[kind]

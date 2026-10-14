@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
-from test_engine import Harness, NoStepPlanner
+from test_engine import Harness
 
 from ai_assistant.core.device_context import serving_device
 from ai_assistant.core.errors import (
@@ -544,7 +544,7 @@ async def test_a_state_no_act_changed_is_sent_by_the_sweep() -> None:
 
 async def test_a_device_with_no_role_is_refused_the_stream_before_any_chunk() -> None:
     """ADR-0298 §5 "Reading many", §7:17: refused as holding no role, at the first step."""
-    engine = Harness(planner=NoStepPlanner(), chat_reader=False).engine
+    engine = Harness(chat_reader=False).engine
     try:
         await engine.set_my_devices([_PHONE])
         with serving_device(RequestingDevice(device_id="stranger")):
@@ -565,7 +565,7 @@ async def test_a_device_with_no_role_is_refused_the_stream_before_any_chunk() ->
 
 async def test_the_engines_stream_ends_when_it_shuts_down() -> None:
     """The engine closing ends every open stream with the cursor to reopen from."""
-    engine = Harness(planner=NoStepPlanner(), chat_reader=False).engine
+    engine = Harness(chat_reader=False).engine
     await engine.set_my_devices([_PHONE])
     head = (await engine.chat_changes(after=0)).next_after
     async with closing_stream(engine.follow_chat(after=0)) as chunks:
@@ -589,7 +589,7 @@ async def test_the_hub_writes_each_streams_end_before_its_listener_closes(
     alone would let the hub cancel its connection before it wrote its end. The engine
     wakes its streams and waits for each to be closed, so the end is on the wire first.
     """
-    engine = Harness(planner=NoStepPlanner(), chat_reader=False).engine
+    engine = Harness(chat_reader=False).engine
     await engine.set_my_devices([_PHONE])
     served: set[asyncio.Task[None]] = set()
     limits = ConnectionLimits(
@@ -660,7 +660,7 @@ async def test_a_record_that_cannot_be_read_is_still_forgotten() -> None:
             ),
         )
     )
-    engine = Harness(planner=NoStepPlanner(), chat_reader=False, memory=memory).engine
+    engine = Harness(chat_reader=False, memory=memory).engine
     try:
         assert await engine.forget("note-1") is True
         assert await memory.delete("note-1") is False, "already destroyed"

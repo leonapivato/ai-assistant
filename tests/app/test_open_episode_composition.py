@@ -6,8 +6,7 @@ its end entry; a restart closes what a dead process left open (ADR-0286).
 Every case builds the engine with :func:`ai_assistant.app.build_engine` over a fresh
 data directory, so the stores are the shipped ``sqlite`` ones and the lifecycle, the
 coordinator and the activation writer are the ones the root wires. The substitutes
-are the model-facing seams — the provider's ``complete``, the planner, the
-associator, the streaming completer and the speech fakes — and, where a case needs a
+are the model-facing seam — the provider's ``complete`` — and, where a case needs a
 pass to stop at a known point, a wrapper around one of the engine's own stages that
 waits there. A process that dies mid-pass is a writer whose freeze never runs.
 """
@@ -15,9 +14,8 @@ waits there. A process that dies mid-pass is a writer whose freeze never runs.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
-from itertools import count
+from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -25,83 +23,37 @@ import pytest
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import (
-    ActionPlan,
-    AssociationVerdict,
-    CapabilityEffect,
-    CapabilityResult,
     ChannelIdentity,
     ChannelInput,
     ChannelResult,
-    CostBasis,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    GoalAssociation,
-    Idempotency,
     PlacementReach,
     PlacementSetter,
-    PlannerOutput,
-    PlanStep,
-    ProposedAction,
-    Reversibility,
-    RiskLevel,
     TextChannelPayload,
-    ToolCost,
-    ToolDefinition,
 )
 from ai_assistant.models import PydanticAIProvider
 from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.testing import (
-    FakeGoalAssociator,
     FakeModelProvider,
-    FakeSpeechSynthesizer,
-    FakeSpeechTranscriber,
-    FakeStreamingCompleter,
-    StreamAttempt,
 )
-from ai_assistant.tools.registry import InMemoryToolRegistry
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
     from pathlib import Path
 
     from ai_assistant.core.protocols import MemoryStore
-    from ai_assistant.core.types import FrozenJson, GoalBrief, Message
+    from ai_assistant.core.types import Message
     from ai_assistant.orchestration import Engine
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.activation_writer import ActivationWriter
 
 pytestmark = pytest.mark.integration
 _BUDGET = timedelta(seconds=10)
-_AT = datetime(2026, 10, 3, tzinfo=UTC)
 _UNDERSTANDING_PROMPT = "You read one incoming input and state what it means."
 _UNDERSTOOD = json.dumps({"meaning": "The input means what it says.", "meaning_ground": "stated"})
-#: The text a case's planner fails on, so the pass ends in its turn loop.
-_FAILS = "this pass fails"
-#: The text a case's planner answers with one step the root's own policy confirms.
-_PARKS = "book it"
-#: A side-effecting declaration the root's ``confirm_at_risk`` default confirms.
-_BOOKING = ToolDefinition(
-    id="book_table",
-    capability="book_table",
-    description="Book a table.",
-    risk_level=RiskLevel.HIGH,
-    reversibility=Reversibility.REVERSIBLE,
-    side_effecting=True,
-    effect=CapabilityEffect.WORLD,
-    leaves_hub=True,
-    result=CapabilityResult.NO_OUTSIDE_TEXT,
-    outcome_can_be_unknown=True,
-    safe_to_repeat=False,
-    reads=(),
-    writes=(),
-    discloses=(),
-    cost=ToolCost(basis=CostBasis.FREE),
-    idempotency=Idempotency.NATURAL,
-)
 _SENSOR = ChannelIdentity(channel_type="informational_event", instance_id="sensor")
-#: Numbers each engine a case builds, so their plan ids never collide in one store.
-_ENGINES = count()
 
 
 def _reply(messages: Sequence[Message]) -> str:
@@ -111,11 +63,9 @@ def _reply(messages: Sequence[Message]) -> str:
 
 @dataclass
 class Composed:
-    """The engine the root built, and what its booking tool saw stored when it ran."""
+    """The engine the root built."""
 
     engine: Engine
-    #: What the store held at the running resume's address when the booking ran.
-    booked: list[EpisodicMemory | None] = field(default_factory=list)
 
     @property
     def memory(self) -> MemoryStore:
@@ -165,58 +115,7 @@ async def _build(
     controlled = model
     monkeypatch.setattr(PydanticAIProvider, "complete", complete)
     engine = build_engine(settings, data_dir=tmp_path)
-    engine._associator = FakeGoalAssociator(
-        answer=GoalAssociation(verdict=AssociationVerdict.FRESH)
-    )
-    engine._routing = None
-    engine._transcriber = FakeSpeechTranscriber(transcripts=["  spoken words  "] * 8)
-    engine._synthesizer = FakeSpeechSynthesizer()
-    engine._composing._streaming = FakeStreamingCompleter(
-        script=tuple(StreamAttempt(deltas=("Channel reply.",)) for _ in range(64))
-    )
-    # A second engine over the same data directory must not reuse a plan id.
-    plan_ids = count(1 + 1000 * next(_ENGINES))
-
-    async def plan(goal: GoalBrief, *, utterance: str, **_kwargs: object) -> PlannerOutput:
-        if utterance == _FAILS:
-            msg = "the planner is down"
-            raise RuntimeError(msg)
-        steps: tuple[PlanStep, ...] = ()
-        actions: tuple[ProposedAction, ...] = ()
-        if utterance == _PARKS:
-            steps = (
-                PlanStep(
-                    id="step-1",
-                    intent="book the table",
-                    capability=_BOOKING.capability,
-                    parameters={},
-                    intended_action=f"A{len(goal.actions) + 1}",
-                ),
-            )
-            actions = (ProposedAction(intent="book the table"),)
-        return PlannerOutput(
-            actions=actions,
-            plan=ActionPlan(
-                id=f"open-plan-{next(plan_ids)}", goal_id=goal.goal_id, steps=steps, created_at=_AT
-            ),
-        )
-
-    monkeypatch.setattr(engine._loop._planner, "plan", plan)
     composed = Composed(engine)
-
-    async def book(
-        parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
-    ) -> FrozenJson:
-        del parameters, idempotency_key
-        state = active_state()
-        assert state is not None
-        assert state.episode_address is not None
-        composed.booked.append(await composed.stored(state.episode_address))
-        return {"booked": True}
-
-    registry = engine._runner._registry
-    assert isinstance(registry, InMemoryToolRegistry)
-    registry.register(_BOOKING, book)
     if start:
         await engine.start()
     return composed

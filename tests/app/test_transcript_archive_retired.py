@@ -8,15 +8,13 @@ members that read and destroyed it are gone, and with them their wire operations
 
 Every case builds the engine with :func:`ai_assistant.app.build_engine` over a fresh
 data directory, so the stores, the lifecycle and the activation writer are the ones
-the root wires. Only the model-facing seams are substituted: the provider's
-``complete``, the planner, the associator and the streaming completer.
+the root wires. Only the model-facing seam is substituted: the provider's
+``complete``.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
-from itertools import count
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -24,13 +22,9 @@ import pytest
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.protocols import AssistantEngine
-from ai_assistant.core.types import ActionPlan, AssociationVerdict, GoalAssociation, PlannerOutput
 from ai_assistant.models import PydanticAIProvider
 from ai_assistant.testing import (
-    FakeGoalAssociator,
     FakeModelProvider,
-    FakeStreamingCompleter,
-    StreamAttempt,
 )
 from ai_assistant.wire import surface
 
@@ -38,12 +32,11 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.types import GoalBrief, Message
+    from ai_assistant.core.types import Message
     from ai_assistant.orchestration import Engine
 
 pytestmark = pytest.mark.integration
 
-_AT: Final = datetime(2026, 10, 4, tzinfo=UTC)
 _UNDERSTANDING_PROMPT: Final = "You read one incoming input and state what it means."
 _UNDERSTOOD: Final = json.dumps(
     {"meaning": "The input means what it says.", "meaning_ground": "stated"}
@@ -83,22 +76,6 @@ async def engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterat
     built = build_engine(
         Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING), data_dir=tmp_path
     )
-    built._associator = FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH))
-    built._routing = None
-    built._composing._streaming = FakeStreamingCompleter(
-        script=tuple(StreamAttempt(deltas=("Channel reply.",)) for _ in range(8))
-    )
-
-    plan_ids = count(1)
-
-    async def plan(goal: GoalBrief, **_kwargs: object) -> PlannerOutput:
-        return PlannerOutput(
-            plan=ActionPlan(
-                id=f"retired-plan-{next(plan_ids)}", goal_id=goal.goal_id, steps=(), created_at=_AT
-            )
-        )
-
-    monkeypatch.setattr(built._loop._planner, "plan", plan)
     await built.start()
     try:
         yield built

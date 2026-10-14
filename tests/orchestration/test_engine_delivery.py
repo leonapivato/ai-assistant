@@ -22,7 +22,6 @@ import pytest
 from test_engine import (
     AT,
     Harness,
-    _composing,
     _connection_operations,
     _destination_trust_operations,
     _grant_operations,
@@ -35,10 +34,8 @@ from ai_assistant.core.errors import (
     NotificationOutboxError,
 )
 from ai_assistant.core.types import (
-    AssociationVerdict,
     ClassReach,
     DataTier,
-    GoalAssociation,
     NotificationCandidate,
     NotificationEnqueue,
     NotificationPreferences,
@@ -49,7 +46,6 @@ from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
 from ai_assistant.testing import (
     FakeAssistantEngine,
-    FakeGoalAssociator,
     FakeNotificationOutbox,
     FakeNotificationPolicy,
     FakeNotificationStore,
@@ -130,7 +126,6 @@ def _wired(  # noqa: PLR0913 — one parameter per knob a case here varies, whic
     """
     return Engine(
         chat_reader=False,
-        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         notifications=notifications,
         notification_policy=notification_policy,
         transcriber=transcriber,
@@ -138,13 +133,10 @@ def _wired(  # noqa: PLR0913 — one parameter per knob a case here varies, whic
         max_notification_budget=max_notification_budget,
         max_payload_bytes=max_payload_bytes,
         max_spoken_audio_bytes=max_spoken_audio_bytes,
-        composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
         destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
-        loop=harness.engine._loop,
-        runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
         spend=harness.trail,
@@ -155,7 +147,6 @@ def _wired(  # noqa: PLR0913 — one parameter per knob a case here varies, whic
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
-        questions=harness.questions,
         notification_outbox=outbox,
         now=(lambda: AT) if now is None else now,
     )

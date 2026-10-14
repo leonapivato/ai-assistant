@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import pytest
+from phases_composition_support import wired_binder, wired_phases, wired_registry
 from pydantic import ValidationError
 
 import ai_assistant
@@ -36,11 +37,6 @@ from ai_assistant.app import (
     ensure_model_credentials,
 )
 from ai_assistant.app import composition as composition_module
-from ai_assistant.context import (
-    AssemblingContextProvider,
-    CalendarContextSource,
-    EmailContextSource,
-)
 from ai_assistant.core.config import EmbedderKind, Settings, load_settings
 from ai_assistant.core.errors import (
     AssistantError,
@@ -50,7 +46,6 @@ from ai_assistant.core.errors import (
     ModelError,
     ReaderError,
     RecipientGrantError,
-    RoutingTrailError,
     SourceNotGrantedError,
     TraceStoreError,
 )
@@ -58,10 +53,6 @@ from ai_assistant.core.protocols import (
     AssistantEngine,
     AuthorizationResolution,
     ConnectionPurger,
-    CoverageAnswers,
-    GoalAuthorizations,
-    GoalAuthorizationStore,
-    GoalQuotes,
     InvocationLedger,
     RecipientGrantResolution,
     RecipientGrants,
@@ -98,8 +89,7 @@ from ai_assistant.memory import (
     SqliteMemoryStore,
 )
 from ai_assistant.memory import deferral_store as deferral_store_module
-from ai_assistant.models import BoundedEmbedder, HashingEmbedder, RoutingProvider
-from ai_assistant.models.streaming import PydanticAIStreamingCompleter
+from ai_assistant.models import BoundedEmbedder, HashingEmbedder
 from ai_assistant.orchestration import Engine
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.loop import (
@@ -117,7 +107,6 @@ from ai_assistant.permissions import (
     SqliteAuditTrail,
     SqliteGoalAuthorizationStore,
     SqliteRecipientGrantStore,
-    SqliteRoutingTrail,
     SqliteSourceReadTrail,
     ThresholdActionPolicy,
 )
@@ -167,18 +156,19 @@ async def test_build_engine_wires_the_durable_plan_store_as_one_shared_instance(
     """The default is a durable ``SqlitePlanStore``, one instance shared everywhere (#318).
 
     The single-instance obligation ADR-0042 §2 documents: the *same* plan store
-    object is injected into the runner, the executor behind it, and the façade, so
-    the façade drives and resumes the execution the runner started. The audit trail
-    is likewise the one instance the façade and the runner share (ADR-0052 §1).
+    object is injected into the phases, acting among them, and the façade, so the
+    façade records a stop against the store acting claims effects in. The audit trail
+    is likewise the one instance the façade and authorizing share (ADR-0052 §1).
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         plans = engine._plans
         assert isinstance(plans, SqlitePlanStore)
-        assert engine._runner._plans is plans
-        assert engine._runner._executor._plans is plans
-        # The façade and the runner read the very same audit trail.
-        assert engine._trail is engine._runner._trail
+        phases = wired_phases(engine)
+        assert phases._plans is plans
+        assert phases._acting._plans is plans
+        # The façade and authorizing read the very same audit trail.
+        assert phases._authorizing._trail is engine._trail
     finally:
         await engine.aclose()
 
@@ -204,10 +194,9 @@ async def test_build_engine_wires_one_read_trail_into_every_driver_and_the_facad
     #1485 records for the audit trail one store over — a correct value with no
     reader — arriving as a wiring slip rather than as a missing surface.
 
-    The calendar source is configured so that both of its drivers exist: with it
-    unset the upcoming stage is ``None`` and no context source is registered, and the
-    case would assert only the façade's half, which is the half that cannot be wrong
-    on its own.
+    The calendar source is configured so that its driver exists: with it unset the
+    upcoming stage is ``None``, and the case would assert only the façade's half, which
+    is the half that cannot be wrong on its own.
     """
     settings = Settings(
         embedder=EmbedderKind.HASHING,
@@ -223,33 +212,29 @@ async def test_build_engine_wires_one_read_trail_into_every_driver_and_the_facad
         # rather than rebuilt — so this asserts the object the façade actually holds.
         assert engine._upcoming is not None
         assert engine._upcoming._reads is trail
-        # The context source's own recorder, the second driver (ADR-0185 §5).
-        provider = engine._loop._context
-        assert isinstance(provider, AssemblingContextProvider)  # narrows the Protocol seam
-        sources = [
-            source for source in provider._sources if isinstance(source, CalendarContextSource)
-        ]
-        assert [source._reads for source in sources] == [trail]
     finally:
         await engine.aclose()
 
 
-async def test_build_engine_wires_one_memory_store_into_both_the_loop_and_the_writer(
+async def test_build_engine_wires_one_memory_store_into_both_the_engine_and_the_writer(
     tmp_path: Path,
 ) -> None:
-    """The store the loop retrieves from is the store the writer persists to (ADR-0028 §4).
+    """The store the engine reads is the store the writer persists to (ADR-0028 §4).
 
     ``MemoryWriter``'s Protocol states this obligation in prose and says outright
     that it is "unenforceable here precisely because no store is on this seam" —
     so the composition root is the only place it can be checked, and identity is
-    the only way to check it. Split the two and the learning loop is silently
-    open: what the assistant learns is written somewhere nothing ever reads.
+    the only way to check it. Split the two and what the assistant learns is written
+    somewhere nothing ever reads. The writer is reached through the one write stage
+    every producer shares (ADR-0078 §3), consolidation's.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        memory = engine._loop._memory
+        memory = engine._memory
         assert isinstance(memory, SqliteMemoryStore)
-        writer = engine._loop._writes._writer
+        consolidation = engine._consolidation
+        assert consolidation is not None
+        writer = consolidation._writes._writer
         assert isinstance(writer, MemoryIngestor)  # narrows the Protocol-typed seam
         assert writer._store is memory
     finally:
@@ -262,7 +247,7 @@ async def test_build_engine_wires_the_on_device_embedder_by_default(tmp_path: Pa
     ADR-0006 §2's firm decision is that on-device embedding is the *default* — so an
     unconfigured deployment must get semantic recall, not the non-semantic
     ``HashingEmbedder`` the composition root wired unconditionally before this. The
-    store the loop retrieves from must therefore carry a :class:`FastEmbedEmbedder`
+    store the engine reads must therefore carry a :class:`FastEmbedEmbedder`
     at its 384-dim embedding space (ADR-0024).
 
     Constructing that embedder is offline and cheap — it resolves its dimensions and
@@ -283,7 +268,7 @@ async def test_build_engine_wires_the_on_device_embedder_by_default(tmp_path: Pa
 
     engine = build_engine(Settings(), data_dir=tmp_path)
     try:
-        memory = engine._loop._memory
+        memory = engine._memory
         assert isinstance(memory, SqliteMemoryStore)  # narrows the Protocol-typed seam
         assert isinstance(memory._embedder, BoundedEmbedder)
         assert isinstance(memory._embedder._inner, FastEmbedEmbedder)
@@ -303,7 +288,7 @@ async def test_build_engine_wires_the_hashing_embedder_when_selected(tmp_path: P
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        memory = engine._loop._memory
+        memory = engine._memory
         assert isinstance(memory, SqliteMemoryStore)  # narrows the Protocol-typed seam
         assert isinstance(memory._embedder, BoundedEmbedder)
         assert isinstance(memory._embedder._inner, HashingEmbedder)
@@ -325,7 +310,7 @@ async def test_no_unbounded_embedder_reaches_the_memory_store(
     """
     engine = build_engine(Settings(embedder=kind), data_dir=tmp_path)
     try:
-        memory = engine._loop._memory
+        memory = engine._memory
         assert isinstance(memory, SqliteMemoryStore)  # narrows the Protocol-typed seam
         assert isinstance(memory._embedder, BoundedEmbedder)
     finally:
@@ -344,10 +329,9 @@ def test_build_engine_reports_a_missing_on_device_artifact_as_config_error(
     reads only offline metadata and defers the artifact to its backend's first
     ``embed`` — so without it a missing model would surface far below disk as a
     ``MemoryStoreError`` after the stores were opened. ``build_engine`` runs the
-    check in the same above-disk block as the model seam and the context provider,
-    so it must fail as a ``ConfigurationError`` and leave the filesystem untouched:
-    no data directory, no SQLite files. Mirrors the no-disk assertions #372/#403
-    added for the other two pure-config steps.
+    check in the same above-disk block as the model seam, so it must fail as a
+    ``ConfigurationError`` and leave the filesystem untouched: no data directory, no
+    SQLite files. Mirrors the no-disk assertion #372 added for the model seam.
 
     Redirecting to an absent directory means the check short-circuits before
     ``fastembed`` is even imported, so this stays offline and never loads ONNX.
@@ -487,38 +471,35 @@ async def test_build_engine_wires_one_registry_object_as_both_registry_and_invok
     """Selection and execution act on one tool object, everywhere (ADR-0029 §8).
 
     The second prose-only wiring obligation: ``ToolRegistry`` and ``ToolInvoker``
-    are separate seams that "no Protocol can close" onto one instance. If the
-    runner selected from one registry while the executor invoked against another,
-    a gated step could execute a tool the permission check never saw.
+    are separate seams that "no Protocol can close" onto one instance. If
+    authorizing selected from one registry while acting invoked against another, a
+    ruled call could execute a tool the permission check never saw.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        tools = engine._runner._registry
+        tools = wired_registry(engine)
         assert isinstance(tools, InMemoryToolRegistry)
-        assert engine._runner._executor._registry is tools
-        assert engine._runner._executor._invoker is tools
+        assert wired_phases(engine)._tools._invoker is tools
     finally:
         await engine.aclose()
 
 
-async def test_build_engine_plans_against_the_registry_selection_resolves_against(
+async def test_build_engine_plans_against_the_tools_selection_resolves_against(
     tmp_path: Path,
 ) -> None:
-    """ADR-0211 §3: the planner is told the vocabulary of the *same* registry object.
+    """Planning is offered the capabilities of the *same* tools authorizing selects from.
 
-    The same-object clause is what makes ADR-0211 worth anything. Told one
-    vocabulary while selection resolved against another, a step could be planned
-    against a capability the selecting registry never advertised — the
-    ``NO_CAPABLE_TOOL`` narration #1772 records, reintroduced by wiring rather than
-    by prompting, and invisible to every test that stubs one side. It is a third
-    prose-only wiring obligation of exactly the shape the two above are: no Protocol
-    can close it, so the root discharges it and a test asserts it.
+    Offered one vocabulary while selection resolved against another, a call could be
+    proposed for a capability the selecting registry never advertised — the
+    narration #1772 records, reintroduced by wiring rather than by prompting, and
+    invisible to every test that stubs one side. It is a prose-only wiring obligation
+    of exactly the shape the one above is: no Protocol can close it, so the root
+    discharges it and a test asserts it.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        tools = engine._runner._registry
-        assert isinstance(tools, InMemoryToolRegistry)
-        assert engine._loop._registry is tools
+        phases = wired_phases(engine)
+        assert phases._authorizing._registry is phases._tools
     finally:
         await engine.aclose()
 
@@ -534,22 +515,24 @@ async def test_build_engine_hands_the_invoker_the_ledger_face_of_the_one_trail(
     *second* store over the same file, would be a defect no Protocol can close:
     the ledger requires the decision it is passed to equal the decision the store
     holds under that id, so a second handle would refuse every claim under a
-    ruling the runner had just recorded.
+    ruling authorizing had just recorded.
 
-    Asserted as identity against the trail the runner records into, because that
+    Asserted as identity against the trail authorizing records into, because that
     is the whole content of the clause — the narrowing itself is the parameter's
     annotation and is what ``mypy`` checks.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        tools = engine._runner._registry
+        tools = wired_registry(engine)
         assert isinstance(tools, InMemoryToolRegistry)
+        trail: object = wired_phases(engine)._authorizing._trail
+        assert trail is engine._trail
         # Compared as objects: the two names are annotated with the two *faces*,
         # which is the whole point of the clause, so a typed identity check is the
         # one thing a static checker calls non-overlapping.
         ledger: object = tools.ledger
-        assert ledger is engine._runner._trail, (
-            "the invoker claims through the same object the runner records decisions into"
+        assert ledger is trail, (
+            "the invoker claims through the same object authorizing records decisions into"
         )
         assert isinstance(ledger, InvocationLedger)
     finally:
@@ -564,7 +547,7 @@ async def test_build_engine_hands_the_invoker_the_gate_face_of_the_one_trail(
     One object satisfies ``SpendGate``, ``SpendLedger`` and ADR-0192's ledger seam
     because all three read the same rows: two holders keyed by them could disagree
     about a total, which is the failure ADR-0016 §7 named for two registries one
-    seam over. So the gate the invoker admits through is the trail the runner
+    seam over. So the gate the invoker admits through is the trail authorizing
     records into, by identity and not merely by type.
 
     The **engine** is handed the ledger face and never the gate, and the invoker the
@@ -574,17 +557,16 @@ async def test_build_engine_hands_the_invoker_the_gate_face_of_the_one_trail(
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        tools = engine._runner._registry
+        tools = wired_registry(engine)
         assert isinstance(tools, InMemoryToolRegistry)
+        trail: object = wired_phases(engine)._authorizing._trail
         gate: object = tools.gate
-        assert gate is engine._runner._trail, (
-            "the invoker admits through the same object the runner records decisions into"
+        assert gate is trail, (
+            "the invoker admits through the same object authorizing records decisions into"
         )
         assert isinstance(gate, SpendGate)
         ledger: object = engine._spend
-        assert ledger is engine._runner._trail, (
-            "the spend read states totals over the rows the seam wrote"
-        )
+        assert ledger is trail, "the spend read states totals over the rows the seam wrote"
         assert isinstance(ledger, SpendLedger)
     finally:
         await engine.aclose()
@@ -630,31 +612,6 @@ async def test_build_engine_reads_the_four_spend_settings_and_the_zone(
         await engine.aclose()
 
 
-async def test_build_engine_passes_the_configured_confirmation_ttl_to_the_runner(
-    tmp_path: Path,
-) -> None:
-    """A configured lifetime reaches the runner that enforces it end to end (#310)."""
-    ttl = timedelta(hours=1)
-    engine = build_engine(
-        Settings(confirmation_ttl=ttl, embedder=EmbedderKind.HASHING), data_dir=tmp_path
-    )
-    try:
-        assert engine._runner._confirmation_ttl == ttl
-    finally:
-        await engine.aclose()
-
-
-async def test_build_engine_defaults_the_runner_to_no_confirmation_lifetime(
-    tmp_path: Path,
-) -> None:
-    """With no ``confirmation_ttl`` set, the runner keeps the pre-#243 default of None (#310)."""
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    try:
-        assert engine._runner._confirmation_ttl is None
-    finally:
-        await engine.aclose()
-
-
 def _spy_on_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[dict[str, object]]:
@@ -665,16 +622,14 @@ def _spy_on_policy(
     to which constructor parameter — without depending on the policy's private,
     deliberately opaque rule table.
 
-    **The root's policy alone**, the one built with the goal authorizations and quotes.
-    The phases build a second from the same settings and grants, holding neither
-    (ADR-0306 §4:11), which ``test_composition_phases`` asserts on; it is told apart
-    here by holding no ``authorizations``.
+    **The phases' policy, the root's only one** since the old path's was deleted
+    (ADR-0309 §5): built from the settings and the grants, holding no goal
+    authorizations and no quotes (ADR-0306 §4:11).
     """
     calls: list[dict[str, object]] = []
 
     def factory(**kwargs: object) -> ThresholdActionPolicy:
-        if "authorizations" in kwargs:
-            calls.append(kwargs)
+        calls.append(kwargs)
         return ThresholdActionPolicy(**kwargs)  # type: ignore[arg-type]  # forwarded kwargs
 
     monkeypatch.setattr(composition_module, "ThresholdActionPolicy", factory)
@@ -688,17 +643,14 @@ def _thresholds(calls: list[dict[str, object]]) -> list[dict[str, object]]:
     constructor parameter** (#239), and a seam in the dict would make each of
     them fail whenever an unrelated dependency was added — the brittleness that
     turns a mapping test into a roster test nobody meant to write.
-    :func:`_policy_grant_seam` is where the seam itself is asserted, once,
-    :func:`_policy_configured_search` is where ADR-0247 §2's configured search
-    destination is — the second dependency this list exists to keep out of a
-    mapping test — :func:`_policy_authorization_seam` is ADR-0254 §6's, the
-    third, and :func:`_policy_quote_seam` is ADR-0267 §5's, the fourth.
-    ``configured_forecast`` is the fifth (ADR-0260 §6, §12's L2), lifted for the
-    same reason and asserted in ``tests/app/test_composition_forecast.py``, where
-    the value can be compared against the registration the seam actually holds
-    rather than against a spy's record of what was passed.
+    :func:`_policy_grant_seam` is where the seam itself is asserted, once.
+    ``configured_search`` and ``configured_forecast`` are lifted for the same reason
+    and asserted in ``tests/app/test_composition_web_search.py`` and
+    ``tests/app/test_composition_forecast.py``, where the value can be compared
+    against the registration the seam actually holds rather than against a spy's
+    record of what was passed.
     """
-    lifted = {"grants", "configured_search", "configured_forecast", "authorizations", "quotes"}
+    lifted = {"grants", "configured_search", "configured_forecast"}
     return [{name: value for name, value in call.items() if name not in lifted} for call in calls]
 
 
@@ -706,12 +658,6 @@ def _policy_grant_seam(calls: list[dict[str, object]]) -> object:
     """The one ``grants`` argument the builder constructed the policy with."""
     assert len(calls) == 1, calls
     return calls[0]["grants"]
-
-
-def _policy_configured_search(calls: list[dict[str, object]]) -> object:
-    """The one ``configured_search`` argument the builder constructed the policy with."""
-    assert len(calls) == 1, calls
-    return calls[0]["configured_search"]
 
 
 def _spy_on_trail(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
@@ -735,18 +681,6 @@ def _trail_grant_seam(calls: list[dict[str, object]]) -> object:
     """The one ``recipient_grants`` argument the builder constructed the trail with."""
     assert len(calls) == 1, calls
     return calls[0]["recipient_grants"]
-
-
-def _policy_authorization_seam(calls: list[dict[str, object]]) -> object:
-    """The one ``authorizations`` argument the builder constructed the policy with."""
-    assert len(calls) == 1, calls
-    return calls[0]["authorizations"]
-
-
-def _policy_quote_seam(calls: list[dict[str, object]]) -> object:
-    """The one ``quotes`` argument the builder constructed the policy with."""
-    assert len(calls) == 1, calls
-    return calls[0]["quotes"]
 
 
 def _trail_authorization_seam(calls: list[dict[str, object]]) -> object:
@@ -836,108 +770,25 @@ async def test_build_engine_gives_the_policy_the_recipient_grant_query_face(
         await engine.aclose()
 
 
-async def test_build_engine_gives_the_policy_and_the_trail_one_authorization_store(
+async def test_build_engine_gives_the_trail_the_goal_authorization_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-0254 §16's three faces are one object, and route (d) needs both of them.
+    """ADR-0254 §16's resolution face reaches the trail, and the policy holds none.
 
-    **Route (d) is unreachable without the policy's half.** ``ThresholdActionPolicy``
-    takes ``authorizations`` with a default, and a policy constructed without one
-    *"takes no standing route at all"* from an authorization (§6) — so the whole
-    route ships dead unless this argument is passed. The same is true one component
-    over and in the worse direction: ``SqliteAuditTrail`` substitutes a resolution
-    holding nothing, and §7's route-(d) invariant then **refuses** every ``ALLOW``
-    the policy authored, which is a system that prompts, forgets and prompts again
-    with nothing failing.
-
-    Asserted as the **same object**, not merely as two of the right shape, for
-    ``_policy_grant_seam``'s own reason one store over: two stores over two files
-    would each hold half the state, and a row this stage proposed through one would
-    be invisible to the other's ``resolve``. What closes that is identity, here.
+    ``SqliteAuditTrail`` substitutes a resolution holding nothing where none is
+    passed, and §7's route-(d) invariant then refuses a route-(d) row an older process
+    wrote. The phases' policy holds no goal authorizations (ADR-0306 §4:11), so the
+    trail is the store's one holder.
     """
     calls = _spy_on_policy(monkeypatch)
     trail_calls = _spy_on_trail(monkeypatch)
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        seam = _policy_authorization_seam(calls)
+        seam = _trail_authorization_seam(trail_calls)
         assert isinstance(seam, SqliteGoalAuthorizationStore)
-        assert isinstance(seam, GoalAuthorizations)
         assert isinstance(seam, AuthorizationResolution)
-        assert isinstance(seam, GoalAuthorizationStore)
-        assert _trail_authorization_seam(trail_calls) is seam
-    finally:
-        await engine.aclose()
-
-
-async def test_build_engine_passes_the_one_plan_store_as_the_policys_quote_seam(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """ADR-0267 §5 and §11: the quote seam is the **same** plan store, by identity.
-
-    §11 is explicit that the provider *"cannot be deferred to a later lane"*: ``app/``
-    passes the plan store where a ``GoalQuotes`` is wanted, *"and a store without
-    ``for_action`` does not satisfy the Protocol"*. Left unwired, ADR-0266 §7's
-    evidence route has no operand, **every ``MONEY`` member is unmet**, and every act
-    carrying a stated ceiling asks — a whole route shipped dead with nothing failing,
-    which is the hazard ADR-0193 §1 names one seam over and the one ``authorizations``
-    hit before it was passed.
-
-    **Identity and not merely type**, which is ADR-0042 §2's single-instance
-    obligation reaching a fourth seam. A *second* ``SqlitePlanStore`` over the same
-    file satisfies ``GoalQuotes`` structurally and type-checks, and the two would even
-    agree — until a mint written through one is read back through the other's own
-    connection mid-transaction. What distinguishes the right wiring is that the policy
-    reads the quotes the runner's own store appended, and nothing but this assertion
-    catches it.
-
-    **And the narrow face is what the policy holds**: the constructor annotates
-    ``quotes`` as ``GoalQuotes``, so a policy is one ``record_quote`` call away from
-    minting the price it is about to prove a ceiling against only if that annotation
-    moves — ``mypy --strict`` is the enforcement and this is the wiring half of it.
-    """
-    calls = _spy_on_policy(monkeypatch)
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    try:
-        seam = _policy_quote_seam(calls)
-        assert isinstance(seam, SqlitePlanStore)
-        assert isinstance(seam, GoalQuotes)
-        assert seam is engine._plans, "the policy reads the store the runner appends to"
-    finally:
-        await engine.aclose()
-
-
-async def test_build_engine_gives_the_proposal_writer_the_policys_condition_6_face(
-    tmp_path: Path,
-) -> None:
-    """ADR-0270 §6: *"app/ passes that one object to the proposal writer under the new
-    annotation in the lane that moves the call site"*.
-
-    **The row-proposing path is dead without this line.** ADR-0270 §1 and §3 make
-    ``coverage_met`` the only means by which a component that is not ``permissions``
-    obtains condition 6's answer, and ``StepRunner`` proposes nothing holding no
-    answerer — so a root that wired the store and not this face would leave every
-    ``CONFIRM`` resolving under ADR-0148 §3's route (a) with nothing failing, which is
-    the fail-closed direction but also a whole decision shipped inert. That is the
-    hazard ADR-0193 §1 names one seam over and the one ``authorizations`` and
-    ``quotes`` each hit before they were passed.
-
-    **Identity and not merely type, and it is the identity that carries the meaning
-    here.** ADR-0193 §1's *"three faces, one object"*: ``permissions`` satisfies
-    ``ActionPolicy`` and ``CoverageAnswers`` from the policy it already builds, and a
-    *second* ``ThresholdActionPolicy`` over the same seams would type-check, answer
-    condition 6 identically, and still be the second implementation ADR-0266 §7's
-    *"One implementation, in ``permissions``"* exists to forbid — two objects that
-    could be constructed with different thresholds, a different quote seam or a
-    different authorization store, and nothing downstream would look wrong. What
-    distinguishes the right wiring is that the object which **rules** on the dispatch
-    is the object which **answered** the proposal, and only this assertion catches it.
-    """
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    try:
-        answers = engine._runner._coverage_answers
-        assert isinstance(answers, ThresholdActionPolicy)
-        assert isinstance(answers, CoverageAnswers)
-        assert answers is engine._runner._policy, "one object, under two annotations"
+        assert len(calls) == 1, calls
+        assert "authorizations" not in calls[0]
     finally:
         await engine.aclose()
 
@@ -1209,13 +1060,13 @@ async def test_build_engine_closes_opened_stores_when_a_later_step_fails(
     monkeypatch.setattr(composition_module, "SqliteAuditTrail", _SpyStore)
 
     def _boom(*_args: object, **_kwargs: object) -> object:
-        msg = "planner construction failed"
+        msg = "writer construction failed"
         raise RuntimeError(msg)
 
-    # ModelBackedPlanner is built *after* both stores are opened.
-    monkeypatch.setattr(composition_module, "ModelBackedPlanner", _boom)
+    # MemoryIngestor is built *after* both stores are opened.
+    monkeypatch.setattr(composition_module, "MemoryIngestor", _boom)
 
-    with pytest.raises(RuntimeError, match="planner construction failed"):
+    with pytest.raises(RuntimeError, match="writer construction failed"):
         build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
 
     assert _SpyStore.instances, "both stores should have been opened before the failure"
@@ -1262,55 +1113,6 @@ def test_build_engine_touches_no_disk_when_config_validation_fails(tmp_path: Pat
     assert not absent.exists()
 
 
-@pytest.mark.parametrize(
-    ("bad_settings", "match"),
-    [
-        pytest.param(
-            Settings.model_construct(timezone="Definitely/Not_A_Zone"),
-            "unknown timezone",
-            id="unknown-timezone",
-        ),
-        pytest.param(
-            Settings.model_construct(working_hours_start=20, working_hours_end=8),
-            "invalid working-hours window",
-            id="invalid-working-hours",
-        ),
-    ],
-)
-def test_a_context_config_failure_touches_no_disk_either(
-    tmp_path: Path, bad_settings: Settings, match: str
-) -> None:
-    """The *other* resource-free step — the context provider — also fails before disk (#403).
-
-    #372 hoisted two pure-config steps above the data directory: the model seam's
-    vendor check and the context provider's construction. The sibling test above
-    covers the model-seam half; this covers the context half. Building the
-    ``AssemblingContextProvider`` constructs a ``ClockContextSource``, which
-    validates its locale at construction and raises ``ConfigurationError`` on an
-    unknown timezone or an empty working-hours window
-    (``ai_assistant.context.sources``). Because that step runs above the
-    ``mkdir``/store-opening block, such a failure must leave the filesystem
-    untouched — no data directory and none of the SQLite files.
-
-    ``Settings`` validates both fields at load, so a well-formed instance can never
-    carry a bad one into ``build_engine`` — unlike the vendor check, there is no
-    natural "load-valid but build-invalid" spec to exploit. ``model_construct``
-    (pydantic's validation-bypassing constructor) hands ``build_engine`` the exact
-    out-of-contract configuration that only its hoisted context step would catch,
-    with every other field left at its default so the model seam ahead of it
-    passes and the context step is genuinely the one that fails.
-    """
-    absent = tmp_path / "state"
-    assert not absent.exists()
-
-    with pytest.raises(ConfigurationError, match=match):
-        build_engine(bad_settings, data_dir=absent)
-
-    # The build failed at the context step, before touching disk: no data
-    # directory, and therefore none of the connection-owning stores' files.
-    assert not absent.exists()
-
-
 async def test_closing_the_engine_closes_the_recipient_grant_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1343,32 +1145,6 @@ async def test_closing_the_engine_closes_the_recipient_grant_store(
 
     with pytest.raises(RecipientGrantError):
         await grants.standing()
-
-
-async def test_closing_the_engine_closes_the_routing_trail(tmp_path: Path) -> None:
-    """ADR-0197 §9's trail is Tier 1 too, and had the same gap for the same reason.
-
-    A row names the conversation an ask ran under and the subject of a
-    **model-selected** operation against the owner's own memory, which is why §9
-    states the residency clause explicitly. A connection surviving shutdown leaves
-    those pages in a ``-wal`` nobody classified (#1903).
-
-    Reached through the stage that holds it rather than through a spy, because the
-    engine is handed only the write-only ``RoutingRecorder`` face and this asserts
-    on the object that face actually is — a trail closed at shutdown while the stage
-    kept a live second one would pass a file-level check and fail this.
-    """
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    stage = engine._routing
-    assert stage is not None
-    trail = stage._recorder
-    assert isinstance(trail, SqliteRoutingTrail)
-    assert await trail.recent(limit=1) == (), "open before, so the refusal below means something"
-
-    await engine.aclose()
-
-    with pytest.raises(RoutingTrailError):
-        await trail.recent(limit=1)
 
 
 async def test_build_engine_opens_the_deferral_queue_under_the_data_dir(
@@ -1472,53 +1248,24 @@ async def test_the_deferral_queue_joins_the_ordered_shutdown(
         await built[0].export()
 
 
-async def test_build_engine_gives_the_write_stage_and_the_answer_path_one_queue(
+async def test_build_engine_gives_the_write_stage_and_the_sweep_one_queue(
     tmp_path: Path,
 ) -> None:
     """ADR-0078 §3's **first** composition-root obligation, enforced rather than asked.
 
-    "The ``DeferralStore`` the write stage enqueues into is the **same instance** the
-    façade enumerates from. A second instance queues questions nobody can answer."
-    No type expresses it — a ``DeferralStore`` exposes no identity and the two stages
-    are wired independently — so identity here is the only way to check it, exactly as
-    ADR-0028 §4's writer/store rule is checked.
-
-    The consolidation stage is included because it is another producer and reaches
-    memory through the same stage: a second write stage over a second queue would park
-    a consolidated question the question surface cannot show, which is the drop
-    ADR-0078 ends restored by a wiring mistake.
+    The ``DeferralStore`` the write stage enqueues into is the **same instance** the
+    engine's retention sweep purges (ADR-0078 §10 item 8). No type expresses it — a
+    ``DeferralStore`` exposes no identity and the two are wired independently — so
+    identity here is the only way to check it, exactly as ADR-0028 §4's writer/store
+    rule is checked. The write stage is reached through consolidation, the producer
+    that writes through it.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        writes = engine._loop._writes
         assert engine._consolidation is not None
-        assert engine._consolidation._writes is writes, "one write stage, both producers"
-        assert engine._questions._deferrals is writes._deferrals
+        writes = engine._consolidation._writes
+        assert writes._deferrals is engine._deferrals
         assert isinstance(writes._deferrals, SqliteDeferralStore)
-    finally:
-        await engine.aclose()
-
-
-async def test_build_engine_gives_the_answer_path_the_writer_and_store_learn_uses(
-    tmp_path: Path,
-) -> None:
-    """ADR-0078 §3's **second** obligation: ADR-0028 §4's rule at a second place.
-
-    "The ``MemoryWriter`` an answer applies through writes to the **same**
-    ``MemoryStore`` whose records the question's frozen conflict set names… applying a
-    confirmed retirement against a different store would retire nothing while
-    reporting success." The answer path also *reads* that store directly, to resolve
-    what accepting would retire — so a second store would show the user conflicts the
-    apply cannot reach.
-    """
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    try:
-        memory = engine._loop._memory
-        assert engine._questions._writer is engine._loop._writes._writer
-        assert engine._questions._memory is memory
-        writer = engine._questions._writer
-        assert isinstance(writer, MemoryIngestor)  # narrows the Protocol-typed seam
-        assert writer._store is memory
     finally:
         await engine.aclose()
 
@@ -1546,19 +1293,6 @@ def _one_event_calendar(directory: Path) -> Path:
         ).encode()
     )
     return path
-
-
-def _calendar_sources(engine: Engine) -> list[CalendarContextSource]:
-    """The calendar context sources the built provider actually composes.
-
-    Reached through the loop's provider because that is where the assembled
-    ``CurrentContext`` comes from: a source registered anywhere else would not
-    contribute to a turn, so asserting on the list this layer built would be
-    asserting on the wrong object.
-    """
-    provider = engine._loop._context
-    assert isinstance(provider, AssemblingContextProvider)
-    return [source for source in provider._sources if isinstance(source, CalendarContextSource)]
 
 
 def _one_message_mailbox(directory: Path) -> Path:
@@ -1596,29 +1330,6 @@ def _one_message_mailbox(directory: Path) -> Path:
     return path
 
 
-def _email_sources(engine: Engine) -> list[EmailContextSource]:
-    """The email context sources the built provider actually composes.
-
-    :func:`_calendar_sources`'s reason unchanged: reached through the loop's
-    provider, because a source registered anywhere else would not contribute to a
-    turn.
-    """
-    provider = engine._loop._context
-    assert isinstance(provider, AssemblingContextProvider)
-    return [source for source in provider._sources if isinstance(source, EmailContextSource)]
-
-
-async def _grant_the_mail(engine: Engine) -> None:
-    """Grant the email source through the surface a user uses.
-
-    ``EMAIL_READER_NAME`` rather than a literal, for :func:`_grant_the_calendar`'s
-    reason: ADR-0097 §1 keys a grant to the reader's **declared** identity, and a
-    grant naming anything else covers nothing — which is also what makes ADR-0142
-    §7's "no grant on one source authorises a read of another" testable at all.
-    """
-    await engine.grant(EMAIL_READER_NAME, scope=[GrantScope.FACET])
-
-
 async def _grant_the_calendar(engine: Engine) -> None:
     """Grant the one source this tree has, through the surface a user uses.
 
@@ -1638,20 +1349,17 @@ async def _grant_the_calendar(engine: Engine) -> None:
     await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.FACET])
 
 
-async def test_build_engine_wires_both_drivers_on_a_configured_path(
+async def test_build_engine_wires_the_upcoming_driver_on_a_configured_path(
     tmp_path: Path,
 ) -> None:
     """A configured source is now enough to *wire*, and never enough to *read*.
 
     Until ADR-0102 §7 this needed two conditions: a path, and a ``SourceGrants``
     the composition root was handed — which nothing in production ever handed it,
-    so ``build_engine`` wired neither driver and no deployment read a calendar
-    (#684). The store is opened here now, so the seam is always present and only
-    the *grant* decides whether anything is read.
-
-    Both halves are covered because the property that matters is that neither
-    reads the file before the user says so: the upcoming-event stage exists and
-    refuses, and the context source is registered and contributes nothing.
+    so ``build_engine`` wired no driver and no deployment read a calendar (#684).
+    The store is opened here now, so the seam is always present and only the
+    *grant* decides whether anything is read: the upcoming-event stage exists and
+    refuses.
     """
     settings = Settings(
         embedder=EmbedderKind.HASHING,
@@ -1660,12 +1368,10 @@ async def test_build_engine_wires_both_drivers_on_a_configured_path(
     engine = build_engine(settings, data_dir=tmp_path)
     try:
         assert engine._upcoming is not None
-        assert len(_calendar_sources(engine)) == 1
         # ADR-0097 §8: an installation that has been reading a source stops
         # reading it until the user grants. Nothing is minted from configuration.
         with pytest.raises(SourceNotGrantedError):
             await engine.notice_upcoming_events()
-        assert (await engine._loop._context.assemble()).calendar is None
     finally:
         await engine.aclose()
 
@@ -1707,10 +1413,9 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
     reason: inside the directory the instance lock already covers, opened by the
     same process, closed in the same ordered shutdown. ADR-0185 §4's read trail is
     the eleventh, on the same terms; ADR-0193 §1's recipient-grant store is
-    the twelfth on the same terms again; and ADR-0197 §9's routing trail is the
-    thirteenth, whose §9 states the residency clause explicitly for the reason
-    ADR-0185 §9 gave — "a new store which omitted to would be a store nobody had
-    classified". ADR-0238 §1's destination-trust store is the
+    the twelfth on the same terms again; and ADR-0197 §9's routing trail was the
+    thirteenth until the old path that wrote it was deleted (ADR-0309 §5), so the root
+    opens it no more. ADR-0238 §1's destination-trust store is the
     **fifteenth**, and §1 states the residency clause explicitly for ADR-0185
     §9's reason — "local and durable and … never written to a remote service".
     ADR-0244 §3's parked-read store joins them on the same terms, and its §2 is where
@@ -1790,13 +1495,6 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # in, the other sending out — and separately erasable because each
             # store's own wholesale erase is the user's to perform (§9).
             "recipient_grants.db",
-            # ADR-0197 §9's routing trail, the thirteenth and the twelfth that is
-            # Tier 1: a row carries the conversation an ask ran under and the
-            # subject of a **model-selected** operation against the owner's own
-            # memory. It carries no content — no query, no utterance, no belief
-            # text — which is what makes the row safe to keep after the belief it
-            # names is destroyed (ADR-0185 §2's ground).
-            "routing.db",
             # ADR-0289 §1's story store: which activations belong to the same matter,
             # held as identities and instants with no free text (§2), on a file of its
             # own because it reads no other store and no store reads it.
@@ -1812,12 +1510,6 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
         # And the tenth (ADR-0149 §3, ADR-0004 §4): an account identity is the
         # user's own text, so the file mode is the one every Tier 1 store gets.
         assert stat.S_IMODE((tmp_path / "connections.db").stat().st_mode) == 0o600
-        # And the thirteenth (ADR-0197 §9, ADR-0004 §4): a row names what a model
-        # chose to do to the user's own memory, so it gets the mode every Tier 1
-        # store gets. ADR-0197 §9 makes this a test rather than prose because it
-        # "is the one clause of §9 that a working store can violate while every
-        # other test passes".
-        assert stat.S_IMODE((tmp_path / "routing.db").stat().st_mode) == 0o600
         # And the story store (ADR-0289 §1, ADR-0004 §4).
         assert stat.S_IMODE((tmp_path / "stories.db").stat().st_mode) == 0o600
     finally:
@@ -1885,7 +1577,7 @@ async def test_the_egress_binder_is_wired_over_the_store_the_provisioner_writes(
     """ADR-0152 §10, #1138: "The composition root wires the one implementation."
 
     **Two claims, and the second is the one a `is not None` check would miss.**
-    The seam must exist on the runner, and its ``records`` must be the *same*
+    The seam must exist on authorizing, and its ``records`` must be the *same*
     ``SqliteConnectionStore`` object the provisioner writes through — not a second
     handle over the same file. ADR-0152 §10 has the seam read one connection record
     per egress call for its connectability and identity, so a second handle would
@@ -1898,7 +1590,7 @@ async def test_the_egress_binder_is_wired_over_the_store_the_provisioner_writes(
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        binder = engine._runner._binder  # the seam the composition root wired
+        binder = wired_binder(engine)  # the seam the composition root wired
         assert binder is not None, "ADR-0152 §10 requires the root to wire it (#1138)"
         # Narrowed to the concrete classes, which is itself part of the claim: §10
         # says the root wires "the one implementation", and the seam and the
@@ -1938,7 +1630,7 @@ async def test_the_root_constructs_the_transport_capability_and_hands_it_in(
         data_dir=tmp_path,
     )
     try:
-        registry = engine._runner._registry
+        registry = wired_registry(engine)
         assert isinstance(registry, InMemoryToolRegistry)
         tool = registry._live[SEND_EMAIL.id].implementation
         assert isinstance(tool, SendEmail)
@@ -1996,7 +1688,7 @@ async def test_the_transport_is_constructed_only_where_an_integration_is(
 
     try:
         assert built == expected
-        assert (await engine._runner._registry.get(SEND_EMAIL.id) is None) is not configured
+        assert (await wired_registry(engine).get(SEND_EMAIL.id) is None) is not configured
     finally:
         await engine.aclose()
 
@@ -2006,7 +1698,7 @@ async def test_the_wired_binder_refuses_a_mis_registered_egress_tool(
 ) -> None:
     """ADR-0152 §8's refusal, reachable in production for the first time (#1138).
 
-    This is what the wiring actually buys today. With ``binder=None`` the runner
+    This is what the wiring actually buys today. With ``binder=None`` the binding stage
     answered ``None`` for every call and §8's refusal — a tool declaring either §3
     keyword while bound to no connected account — was unreachable in a built
     engine, whatever the seam's own tests proved. The registration table is empty,
@@ -2024,10 +1716,10 @@ async def test_the_wired_binder_refuses_a_mis_registered_egress_tool(
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        binder = engine._runner._binder
+        binder = wired_binder(engine)
         assert isinstance(binder, EgressBindingSeam)
         assert binder._registrations.registration("send_email") is None
-        assert await engine._runner._registry.get("send_email") is None
+        assert await wired_registry(engine).get("send_email") is None
     finally:
         await engine.aclose()
 
@@ -2056,9 +1748,9 @@ async def test_a_configured_deployment_wires_the_registry_and_the_table_together
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        assert await engine._runner._registry.get("send_email") is not None
+        assert await wired_registry(engine).get("send_email") is not None
 
-        binder = engine._runner._binder
+        binder = wired_binder(engine)
         assert isinstance(binder, EgressBindingSeam)
         registration = binder._registrations.registration("send_email")
         assert registration is not None
@@ -2342,8 +2034,8 @@ async def test_only_the_maintenance_operation_is_handed_the_trace_store(
     try:
         holders = _holders_of(engine, built[0])
         assert sorted(holders) == [
-            "engine._loop._memory._traces._sink",
-            "engine._loop._writes._writer._traces._sink",
+            "engine._consolidation._writes._writer._traces._sink",
+            "engine._memory._traces._sink",
             "engine._notifications._traces._sink",
             "engine._operation_traces._sink",
             "engine._traces",
@@ -2435,7 +2127,7 @@ def _holders_of(root: object, target: object, *, depth: int = 6) -> list[str]:
     Bounded in depth and cycle-guarded, because an engine's object graph is deep
     and partly cyclic. **Six levels rather than four** since ADR-0119 §8's memory
     emitters landed: the writer's sink sits at
-    ``engine._loop._writes._writer._traces._sink``, one hop past where four
+    ``engine._consolidation._writes._writer._traces._sink``, one hop past where four
     stopped, so the walk would have reported one memory emitter and silently
     missed its twin. Eight finds nothing six does not, so six is a bound rather
     than a lucky number.
@@ -2476,35 +2168,7 @@ async def test_the_drivers_and_the_grant_operations_share_one_store(
     try:
         stage = engine._upcoming
         assert stage is not None
-        (facet_source,) = _calendar_sources(engine)
         assert stage._grants is engine._grants._store
-        assert facet_source._grants is engine._grants._store
-    finally:
-        await engine.aclose()
-
-
-async def test_a_granted_source_becomes_readable_and_a_revocation_stops_it(
-    tmp_path: Path,
-) -> None:
-    """Leg 6's exit test, reachable by a user rather than by a fake (#684).
-
-    The whole loop through the real surface: nothing is read, the user grants, the
-    request-path facet reads, the user revokes, and the facet stops. What ADR-0102
-    §7 buys is that every step here is one a person can take at a terminal.
-    """
-    settings = Settings(
-        embedder=EmbedderKind.HASHING,
-        calendar_reader_path=_in_progress_calendar(tmp_path),
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        assert (await engine._loop._context.assemble()).calendar is None
-
-        await _grant_the_calendar(engine)
-        assert (await engine._loop._context.assemble()).calendar is not None
-
-        assert await engine.revoke(CALENDAR_READER_NAME) is not None
-        assert (await engine._loop._context.assemble()).calendar is None
     finally:
         await engine.aclose()
 
@@ -2521,10 +2185,9 @@ async def test_build_engine_registers_the_configured_mail_source_on_its_own_read
     test in ADR-0140's list constructs its subject directly, so every one of them
     passes on an engine that wires none of them.
 
-    **Both registrations.** The source is offered by ``grantable_sources()`` under
-    the declared identity ``email``, and the facet adapter is composed into the
-    provider a turn assembles from. §13's third registration, the ingestion stage, is
-    retired (ADR-0294 §1).
+    The source is offered by ``grantable_sources()`` under the declared identity
+    ``email``. The facet adapter went with the old path's context provider (ADR-0309
+    §5), and §13's third registration, the ingestion stage, is retired (ADR-0294 §1).
     """
     store = _one_message_mailbox(tmp_path)
     settings = Settings(embedder=EmbedderKind.HASHING, email_source_path=store)
@@ -2533,8 +2196,6 @@ async def test_build_engine_registers_the_configured_mail_source_on_its_own_read
         offered = await engine.grantable_sources()
         assert [one.source for one in offered] == [EMAIL_READER_NAME]
         assert offered[0].location == str(store)
-
-        assert len(_email_sources(engine)) == 1
     finally:
         await engine.aclose()
 
@@ -2546,92 +2207,13 @@ async def test_build_engine_registers_nothing_for_email_without_a_path(
 
     ADR-0140 §13: "with it unset, none of the three is registered at all, because a
     source with nothing to read is 'I/O on personal data in exchange for nothing'".
-    Both remaining absences are asserted, because a lane that keyed one of them off a
-    different field would pass a test of the other.
 
     ``email_source_path`` defaults to ``None`` (ADR-0140 §12), so this is the
     shipping default rather than a configuration a test had to construct.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        assert not _email_sources(engine)
         assert await engine.grantable_sources() == ()
-    finally:
-        await engine.aclose()
-
-
-async def test_every_consumer_of_every_source_holds_its_own_reader(
-    tmp_path: Path,
-) -> None:
-    """ADR-0142 §9 test 4's clause: one instance per consumer, no two of them one object.
-
-    The clause is ADR-0096 §5's — each consumer of a source holds its **own** reader
-    instance — and ADR-0142 §3 carries it across the second source rather than
-    restating it for one. What this catches is a lane reusing one construction,
-    "which no behavioural test in this list would notice": on a single-threaded test
-    the shared instance answers every read correctly, and the breach only surfaces
-    on a running hub as one consumer's read suppressing another's.
-
-    **Asserted across sources as well as within them**, so identity is checked
-    pairwise over the whole set — the calendar's facet and its upcoming-event
-    producer, and the email facet — rather than within each source. No consumer
-    ingests (ADR-0294 §1), so the set has three members.
-    """
-    settings = Settings(
-        embedder=EmbedderKind.HASHING,
-        calendar_reader_path=_one_event_calendar(tmp_path),
-        email_source_path=_one_message_mailbox(tmp_path),
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        upcoming = engine._upcoming
-        assert upcoming is not None
-        (calendar_facet,) = _calendar_sources(engine)
-        (email_facet,) = _email_sources(engine)
-
-        readers = [
-            calendar_facet._reader,
-            upcoming._reader,
-            email_facet._reader,
-        ]
-
-        assert len({id(reader) for reader in readers}) == len(readers)
-    finally:
-        await engine.aclose()
-
-
-async def test_no_grant_on_one_source_authorises_a_read_of_another(
-    tmp_path: Path,
-) -> None:
-    """ADR-0142 §9 test 7's clause, on the facets: a granted calendar buys no mail.
-
-    ADR-0097 §5 and ADR-0133 §2 rule that no grant on one source authorises a read
-    of another, whatever its scope. It is asserted here because the composition
-    root is where the wrong grant lookup would be injected, and the facets are the
-    drivers left on both sources once ingestion is retired (ADR-0294 §1).
-
-    **Both directions, because one grant proves only one of them.** A driver
-    constructed over the wrong source's grant lookup refuses the source that *is*
-    granted and admits the one that is not, so asserting an absence alone is passed
-    by an engine that reads nothing.
-    """
-    settings = Settings(
-        embedder=EmbedderKind.HASHING,
-        calendar_reader_path=_in_progress_calendar(tmp_path),
-        email_source_path=_one_message_mailbox(tmp_path),
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        await _grant_the_calendar(engine)
-        context = await engine._loop._context.assemble()
-        assert context.calendar is not None
-        assert context.email is None
-
-        assert await engine.revoke(CALENDAR_READER_NAME) is not None
-        await _grant_the_mail(engine)
-        context = await engine._loop._context.assemble()
-        assert context.email is not None
-        assert context.calendar is None
     finally:
         await engine.aclose()
 
@@ -2666,127 +2248,6 @@ async def test_each_source_is_offered_under_its_own_identity_and_its_own_locatio
         assert set(offered) == {CALENDAR_READER_NAME, EMAIL_READER_NAME}
         assert offered[CALENDAR_READER_NAME].location == str(calendar)
         assert offered[EMAIL_READER_NAME].location == str(store)
-    finally:
-        await engine.aclose()
-
-
-async def test_build_engine_registers_no_calendar_source_without_a_path(
-    tmp_path: Path,
-) -> None:
-    """A source with nothing to read is I/O on personal data in exchange for nothing.
-
-    ADR-0093 §7a's words about the state it reserved, and the reason the adapter is
-    registered on the path rather than unconditionally.
-    """
-    settings = Settings(embedder=EmbedderKind.HASHING)
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        assert not _calendar_sources(engine)
-    finally:
-        await engine.aclose()
-
-
-def _in_progress_calendar(directory: Path) -> Path:
-    """A source holding one entry that is happening **right now**.
-
-    Anchored on the wall clock for :func:`_one_event_calendar`'s reason — this
-    layer wires the reader's own default clock, and inventing a second one here
-    would be the second timezone/clock source ADR-0093 §7b refuses. Half an hour
-    either side of now, so the entry is unambiguously in progress at whatever
-    instant the read lands on (#658 tracks the live-clock dependency this shares).
-    """
-    began = datetime.now(UTC) - timedelta(minutes=30)
-    ends = began + timedelta(hours=1)
-    stamp = "%Y%m%dT%H%M%SZ"
-    path = directory / "in-progress.ics"
-    path.write_bytes(
-        (
-            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//ai-assistant tests//EN\r\n"
-            "BEGIN:VEVENT\r\nUID:e1\r\nDTSTAMP:20260101T000000Z\r\n"
-            f"DTSTART:{began.strftime(stamp)}\r\nDTEND:{ends.strftime(stamp)}\r\n"
-            "SUMMARY:Dentist\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
-        ).encode()
-    )
-    return path
-
-
-async def test_a_granted_calendar_reaches_the_assembled_context_as_a_facet(
-    tmp_path: Path,
-) -> None:
-    """The facet half, end to end over the concrete reader (ADR-0096 §8).
-
-    The claim nothing below this layer can make: ``lint-imports`` forbids every
-    subsystem to import ``ai_assistant.readers``, so this is the only place a real
-    ``CalendarReader`` and a real provider meet — a file on disk becomes a *facet* —
-    and it is what would fail if the reader stopped populating
-    ``SourceReading.facet`` and the adapter went back to contributing ``{}`` for
-    every deployment.
-
-    **It asserts the stamp and the count and nothing about the entry**, because the
-    facet carries no entry text at all (ADR-0096 §6:4).
-    """
-    settings = Settings(
-        embedder=EmbedderKind.HASHING,
-        calendar_reader_path=_in_progress_calendar(tmp_path),
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        await _grant_the_calendar(engine)
-        context = await engine._loop._context.assemble()
-
-        assert context.calendar is not None
-        assert context.calendar.source == CALENDAR_READER_NAME
-        assert context.calendar.read_at <= context.calendar.covers_until
-        assert context.calendar.entries_in_progress == 1
-    finally:
-        await engine.aclose()
-
-
-async def test_an_ungranted_calendar_reaches_the_context_as_nothing_at_all(
-    tmp_path: Path,
-) -> None:
-    """And the ungranted deployment is observationally identical to an unread one.
-
-    ADR-0097 §5's last clause over the concrete reader: the file below holds an
-    entry that is happening right now, and the assembled context says nothing
-    about it and nothing about why. ``CurrentContext`` never reports a source's
-    grant state, because a field that did would be a model being handed a script
-    to ask for access.
-    """
-    settings = Settings(
-        embedder=EmbedderKind.HASHING,
-        calendar_reader_path=_in_progress_calendar(tmp_path),
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        context = await engine._loop._context.assemble()
-
-        assert context.calendar is None
-    finally:
-        await engine.aclose()
-
-
-async def test_the_two_consumers_hold_separate_reader_instances(
-    tmp_path: Path,
-) -> None:
-    """ADR-0096 §5, decided there rather than left for this layer to pick by accident.
-
-    ADR-0093 §7 bounds a reader at **one outstanding worker**, and that reservation
-    is per instance. Share one and the upcoming-event producer's scheduled read
-    suppresses the request-path facet for as long as it runs — coupling a request
-    cadence to a periodic job, in the direction that makes an advisory facet wait on
-    it.
-    """
-    settings = Settings(
-        embedder=EmbedderKind.HASHING,
-        calendar_reader_path=_one_event_calendar(tmp_path),
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        stage = engine._upcoming
-        assert stage is not None
-        (facet_source,) = _calendar_sources(engine)
-        assert stage._reader is not facet_source._reader
     finally:
         await engine.aclose()
 
@@ -3293,12 +2754,17 @@ async def test_build_composition_tunes_the_collaborators_to_the_figures_it_repor
     either collaborator on a default it does not control, a later change to that
     default would silently make the operator's record wrong — which is the failure
     this lane exists to avoid rather than one it may reintroduce.
+
+    **The conflict figure alone**: the retrieval figure tuned the old path's loop, and
+    no production retrieval is built with it since that path was deleted (ADR-0309
+    §5), so there is no collaborator left to hold it against.
     """
     composed = build_composition(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        writer = composed.engine._loop._writes._writer
+        consolidation = composed.engine._consolidation
+        assert consolidation is not None
+        writer = consolidation._writes._writer
         assert isinstance(writer, MemoryIngestor)  # narrows the Protocol-typed seam
-        assert composed.engine._loop._retrieval_limit == composed.retrieval_search_limit
         assert writer._conflict_limit + 2 == composed.conflict_search_limit
     finally:
         await composed.engine.aclose()
@@ -3418,21 +2884,6 @@ def test_the_roots_two_budgets_are_held_equal_to_orchestrations_own_defaults() -
     """
     assert composition_module.RETRIEVAL_LIMIT == _DEFAULT_RETRIEVAL_LIMIT
     assert composition_module.EPISODIC_SUPPLEMENT_LIMIT == _DEFAULT_EPISODIC_LIMIT
-
-
-async def test_the_composed_loop_is_built_with_the_roots_episodic_bound(tmp_path: Path) -> None:
-    """The constant is wired, not decorative (ADR-0158 §3, §5).
-
-    ``orchestration`` carries a default of its own and may not import this module, so
-    the two are held equal for the reader's sake and neither depends on the other.
-    What that leaves unproved — and what this checks — is that the deployment the
-    root builds asks for *this* figure, so moving it here moves what a turn does.
-    """
-    composed = build_composition(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    try:
-        assert composed.engine._loop._episodic_limit == composition_module.EPISODIC_SUPPLEMENT_LIMIT
-    finally:
-        await composed.engine.aclose()
 
 
 class TestBuildMeasureReader:
@@ -3730,48 +3181,6 @@ class TestBuildConnectionPurger:
 
         with pytest.raises(ConnectionStoreError):
             asyncio.run(opened.purger.connected())
-
-
-# --- ADR-0173 §5: the streaming seam the composition root injects ------------
-
-
-async def test_build_engine_gives_the_composer_an_unwrapped_streaming_seam(
-    tmp_path: Path,
-) -> None:
-    """§5: injected explicitly, and deliberately behind **neither** wrapper.
-
-    "A stream is not atomic. Once a delta has been handed upward, a retry produces
-    a *second* answer to a question already half-answered, and a fallback route
-    produces a different one" — which is why streaming is a sibling Protocol that
-    ``RetryingProvider`` and ``RoutingProvider`` do not implement, and why wrapping
-    one here would reintroduce the failure the sibling exists to avoid, one layer
-    down.
-
-    The composing stage's completing seam is asserted beside it, because the two
-    are different objects on purpose: the whole-answer path keeps every bit of the
-    resilience the streaming path gives up (§4 keeps ``converse`` for exactly that).
-    """
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    try:
-        streaming = engine._composing._streaming
-        assert isinstance(streaming, PydanticAIStreamingCompleter)
-        assert isinstance(engine._composing._model, RoutingProvider)
-    finally:
-        await engine.aclose()
-
-
-def test_the_streamed_answer_comes_from_the_route_configured_for_conversation() -> None:
-    """§5's route, and ADR-0173 §9's silence about "which model answers".
-
-    ``default_model`` is the primary the router prefers, so a streamed answer and a
-    whole one come from the same place — and a route that cannot stream is a
-    ``ModelError`` from the call rather than a startup refusal or a capability flag,
-    which is what keeps the promoted surface's method set a fixed property of a
-    build (``wire.surface.METHODS`` is reflective, and ADR-0084 §3's handshake makes
-    that set a promise).
-    """
-    settings = Settings(embedder=EmbedderKind.HASHING)
-    assert composition_module._model_specs(settings)[0] == settings.default_model
 
 
 async def test_the_composed_engine_and_its_contract_declare_no_observe(tmp_path: Path) -> None:

@@ -27,6 +27,12 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from phases_composition_support import (
+    wired_binder,
+    wired_policy,
+    wired_registry,
+    wired_searcher,
+)
 
 from ai_assistant.app import build_engine
 from ai_assistant.app import composition as composition_module
@@ -98,7 +104,7 @@ async def test_the_search_declaration_is_absent_from_the_wired_registry(
     """
     engine = build_engine(_settings(configured=configured), data_dir=tmp_path)
     try:
-        registry = engine._runner._registry
+        registry = wired_registry(engine)
 
         assert WEB_SEARCH.capability not in await registry.capabilities()
         assert WEB_SEARCH_ID not in {tool.id for tool in await registry.all_tools()}
@@ -120,7 +126,7 @@ async def test_the_registration_reaches_the_binding_seam_only_where_configured(
     """
     engine = build_engine(_settings(configured=configured), data_dir=tmp_path)
     try:
-        binder = engine._runner._binder
+        binder = wired_binder(engine)
         assert isinstance(binder, EgressBindingSeam)
         registration = binder._registrations.registration(WEB_SEARCH_ID)
 
@@ -229,29 +235,20 @@ async def test_the_searcher_and_the_seam_share_one_registration_object(
 
     try:
         (integration,) = built
-        binder = engine._runner._binder
+        binder = wired_binder(engine)
         assert isinstance(binder, EgressBindingSeam)
         assert binder._registrations.registration(WEB_SEARCH_ID) is integration.registration
     finally:
         await engine.aclose()
 
 
-async def test_the_searcher_reaches_the_loop_and_nothing_else(tmp_path: Path) -> None:
-    """ADR-0231 §11's one-call-site clause, asserted where it can be broken.
+async def test_the_searcher_reaches_the_phases_tools(tmp_path: Path) -> None:
+    """The one searcher the root built is the one the phases' tools hold (ADR-0309 §4).
 
-    "``app/composition.py`` wires the searcher into that one site and into nothing
-    else, no other subsystem holds the reference, and no lane adds a second caller."
     There is no type that says so — a ``WebSearcher`` is a Protocol any holder could
     satisfy the caller of — so the property is a fact about **this wiring**, asserted
-    here: the object ``build_web_search_integration`` returned is the object the loop's
-    servicer holds, and the loop is the only thing on the engine that holds one.
-
-    The **policy, the binder and the trail the servicer holds are the runner's own
-    objects**, which is the other half of the wiring and is asserted beside it: one
-    ``ThresholdActionPolicy`` so a step's send and a turn's search are ruled under one
-    set of thresholds and one ``RecipientGrants`` face (ADR-0193 §7), one binding seam
-    (ADR-0152 §10), and one trail because ADR-0192 §1 requires the decision the
-    searcher's ledger claim is keyed on to equal the one the store holds under that id.
+    here: the object ``build_web_search_integration`` returned is the object planning's
+    search runs through.
     """
     built: list[WebSearchIntegration] = []
 
@@ -266,12 +263,7 @@ async def test_the_searcher_reaches_the_loop_and_nothing_else(tmp_path: Path) ->
 
     try:
         (integration,) = built
-        servicer = engine._loop._search
-        assert servicer is not None, "a configured deployment services searches"
-        assert servicer._searcher is integration.searcher, "the one the seam registered"
-        assert servicer._binder is engine._runner._binder
-        assert servicer._policy is engine._runner._policy
-        assert servicer._trail is engine._runner._trail
+        assert wired_searcher(engine) is integration.searcher, "the one the seam registered"
     finally:
         await engine.aclose()
 
@@ -283,13 +275,12 @@ async def test_a_deployment_that_connected_no_account_services_no_search(
 
     "A deployment with no search account connected … reads a 0% yield for this kind,
     and that is a true statement about that configuration rather than a reading of a
-    trigger." The loop holds no servicer at all, so a ``WEB_SEARCH`` ask composes
-    nothing, seeks no ruling and opens no channel — and ``None`` is the ordinary case
-    rather than an error.
+    trigger." The phases hold no searcher at all, so no search is offered and no
+    channel opens — and ``None`` is the ordinary case rather than an error.
     """
     engine = build_engine(_settings(configured=False), data_dir=tmp_path)
     try:
-        assert engine._loop._search is None
+        assert wired_searcher(engine) is None
     finally:
         await engine.aclose()
 
@@ -310,14 +301,12 @@ async def test_the_composition_root_forwards_the_configured_per_call_figure(
     would leave **every configured deployment at ``UNKNOWN``** with a green gate,
     which is precisely the failure the whole decision exists to remove.
 
-    Read off the searcher the loop actually holds, rather than off the builder's
+    Read off the searcher the phases actually hold, rather than off the builder's
     return value, so a root that built one declaration and wired another would fail.
     """
     engine = build_engine(_settings(configured=True, priced=True), data_dir=tmp_path)
     try:
-        servicer = engine._loop._search
-        assert servicer is not None, "a configured deployment services searches"
-        searcher = servicer._searcher
+        searcher = wired_searcher(engine)
         assert isinstance(searcher, WebSearchEgress), "the production searcher, not a fake"
         declared = searcher._declaration
 
@@ -339,9 +328,7 @@ async def test_a_deployment_that_declared_no_figure_is_wired_at_unknown(tmp_path
     """
     engine = build_engine(_settings(configured=True), data_dir=tmp_path)
     try:
-        servicer = engine._loop._search
-        assert servicer is not None
-        searcher = servicer._searcher
+        searcher = wired_searcher(engine)
         assert isinstance(searcher, WebSearchEgress), "the production searcher, not a fake"
         declared = searcher._declaration
 
@@ -395,7 +382,7 @@ async def test_the_root_derives_the_destination_set_the_seam_would_bind_to(
     """
     engine = build_engine(_settings(configured=True), data_dir=tmp_path)
     try:
-        seam = engine._runner._binder
+        seam = wired_binder(engine)
         assert isinstance(seam, EgressBindingSeam)
         occurrence = seam._occurrence(
             seam._declaration(WEB_SEARCH),
@@ -417,7 +404,7 @@ async def test_a_deployment_that_connected_no_account_has_an_empty_destination_s
 
     "``UNCHOSEN`` for an empty sequence" — so a deployment with no search account needs
     no branch anywhere downstream: its footing reads ``UNCHOSEN``, its supply carries the
-    utterance alone, and it holds no ``SearchServicer`` to service anything with.
+    utterance alone, and it holds no searcher to search with.
     """
     assert _search_destinations(None) == ()
 
@@ -452,11 +439,11 @@ async def test_the_policy_is_handed_the_configured_search_destination(tmp_path: 
     """
     engine = build_engine(_settings(configured=True), data_dir=tmp_path)
     try:
-        binder = engine._runner._binder
+        binder = wired_binder(engine)
         assert isinstance(binder, EgressBindingSeam)
         registration = binder._registrations.registration(WEB_SEARCH_ID)
         assert registration is not None, "a configured deployment registers the search"
-        policy = engine._runner._policy
+        policy = wired_policy(engine)
         assert isinstance(policy, ThresholdActionPolicy), "the production policy"
         configured = policy._configured_search
 
@@ -480,7 +467,7 @@ async def test_a_deployment_that_connected_no_account_hands_the_policy_nothing(
     """
     engine = build_engine(_settings(configured=False), data_dir=tmp_path)
     try:
-        policy = engine._runner._policy
+        policy = wired_policy(engine)
         assert isinstance(policy, ThresholdActionPolicy), "the production policy"
         assert policy._configured_search is None
     finally:

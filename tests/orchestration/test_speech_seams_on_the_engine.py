@@ -11,32 +11,21 @@ either is the unwired deployment.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 import pytest
 from test_engine import Harness
 
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import SpokenAudioFormat
-from ai_assistant.orchestration.composing import ComposingStage
-from ai_assistant.testing import FakeModelProvider, FakeStreamingCompleter
-
-if TYPE_CHECKING:
-    from ai_assistant.core.protocols import ModelProvider
 
 _WEBM: Final = SpokenAudioFormat.WEBM_OPUS
 _MP4: Final = SpokenAudioFormat.MP4
 
-_ANSWER: Final = "You went hiking on Tuesday."
 
-
-def _wired(model: ModelProvider | None = None, /, **knobs: object) -> Harness:
-    """A harness whose composing stage runs over ``model`` (or over a fixed answer)."""
-    stage = ComposingStage(
-        model=FakeModelProvider(_ANSWER) if model is None else model,
-        streaming=FakeStreamingCompleter(),
-    )
-    return Harness(composing=stage, **knobs)  # type: ignore[arg-type]  # heterogeneous harness knobs
+def _wired(**knobs: object) -> Harness:
+    """A harness over ``knobs``."""
+    return Harness(**knobs)  # type: ignore[arg-type]  # heterogeneous harness knobs
 
 
 # --- §2, §5: where this may and may not be wired -----------------------------
