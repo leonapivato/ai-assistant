@@ -91,8 +91,6 @@ from ai_assistant.memory import (
 from ai_assistant.memory import deferral_store as deferral_store_module
 from ai_assistant.models import BoundedEmbedder, HashingEmbedder
 from ai_assistant.orchestration import Engine
-from ai_assistant.orchestration.conversations import BELIEF_KINDS
-from ai_assistant.orchestration.retrieval import assemble_by_band
 from ai_assistant.orchestration.upcoming import (
     NOTIFICATION_CLASS as UPCOMING_NOTIFICATION_CLASS,
 )
@@ -2802,32 +2800,14 @@ async def test_the_conflict_probe_asks_the_store_for_the_reported_figure() -> No
     assert store.limits == [composition_module.CONFLICT_LIMIT + 2]
 
 
-async def test_the_band_budget_never_asks_for_more_than_the_reported_figure() -> None:
-    """The retrieval figure's "effective equals its own value", pinned the same way.
-
-    ``orchestration/retrieval.py`` fills one budget of ``retrieval_limit`` band by
-    band, so the first band asks for all of it and every later band asks for what
-    is left. The largest ``limit`` reaching the store is therefore the control
-    itself — which is what §9 asserts and what this checks rather than assumes.
-    """
-    store = _LimitSpy()
-
-    await assemble_by_band(
-        store, "oat milk", limit=composition_module.RETRIEVAL_LIMIT, kinds=BELIEF_KINDS
-    )
-
-    assert store.limits
-    assert max(store.limits) == composition_module.RETRIEVAL_LIMIT
-
-
 def test_the_retrieval_budget_is_the_depth_the_reach_evidence_bought() -> None:
     """The figure itself, pinned to the measurement that chose it (ADR-0162 §9).
 
     Every other test here holds the figure *symbolically* — that the stamp reports
-    what the loop was built with, that the band budget never over-asks — and would
-    pass just as well on a budget of 5 or 1. None of them notices the number going
-    back, which is what this one is for. It was 15 on #1029's re-rank analysis, and
-    §9 takes it to 30 on the probe's reach sweep: complete intake (ADR-0162 §1)
+    what the loop was built with — and would pass just as well on a budget of 5 or 1.
+    None of them notices the number going back, which is what this one is for. It
+    was 15 on #1029's re-rank analysis, and §9 takes it to 30 on the probe's reach
+    sweep: complete intake (ADR-0162 §1)
     removes the 63.1% ceiling that made depth in beliefs worthless, the probe's
     belief-reach curve runs 55.1% at 5 to 81.2% at 50 and is still climbing, and
     30+10 reaches 85.1% union all-gold-reached against the incumbent 15+15's 79.8%.

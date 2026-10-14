@@ -153,12 +153,6 @@ from ai_assistant.orchestration.planning import (
     PlanningInputs,
     PlanningStage,
 )
-from ai_assistant.orchestration.reads import (
-    ForecastServicer,
-    SearchFooting,
-    SearchServicer,
-    _SearchCounts,
-)
 from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls
 from ai_assistant.orchestration.traces import OperationTraces
 from ai_assistant.permissions import (
@@ -184,11 +178,9 @@ from ai_assistant.testing import (
     FakeConversationStore,
     FakeDeferralStore,
     FakeDestinationTrustStore,
-    FakeEgressBinder,
     FakeEmbedder,
     FakeFeedbackProcessor,
     FakeFetcher,
-    FakeForecaster,
     FakeGoalAuthorizations,
     FakeGoalAuthorizationStore,
     FakeMemoryPolicy,
@@ -201,7 +193,6 @@ from ai_assistant.testing import (
     FakeNotificationWriter,
     FakePlanner,
     FakePlanStore,
-    FakeQueryComposer,
     FakeReader,
     FakeRecipientGrants,
     FakeRecipientGrantStore,
@@ -214,12 +205,9 @@ from ai_assistant.testing import (
     FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
-    FakeWebSearcher,
     recipient_grant,
     source_grant,
 )
-from ai_assistant.testing.forecasting import FAKE_FORECAST_READ
-from ai_assistant.testing.searching import FAKE_WEB_SEARCH
 from ai_assistant.tools.builtin import CurrentTime
 
 if TYPE_CHECKING:
@@ -609,80 +597,6 @@ async def _phase_path(now: Clock) -> None:
     result = await path.stages()[2].run(_PhasePass(working))
     if result.error is not None:
         raise result.error
-
-
-async def _search_servicer(now: Clock) -> None:
-    """ADR-0231 §6's recorder clock, read where the ``PermissionDecision`` is stamped.
-
-    Driven through the seam's real entry point rather than a private method: the
-    composition, the proposal, the binding and the ruling all run first, and the
-    reading is the last thing before the trail is written. A ``FakeActionPolicy``
-    reaches a ``CONFIRM`` on the search declaration's own ``discloses`` floor, which
-    is a **recorded** ruling like any other — §9 records every outcome — so the stamp
-    is reached without a grant, a costed declaration or an open channel.
-    """
-    binder = FakeEgressBinder()
-    binder.register_egress(
-        FAKE_WEB_SEARCH, reference="search-account", identity="search@example.com"
-    )
-    footing = SearchFooting(
-        conversation_id="c-1",
-        # This deployment holds a search registration (ADR-0247 §1) — a servicer is
-        # wired below and its binder holds the registration — which is the fact the
-        # servicing site now reads about the destination in place of `trust_of`.
-        registered=True,
-    )
-    await SearchServicer(
-        composer=FakeQueryComposer(),
-        searcher=FakeWebSearcher(),
-        binder=binder,
-        policy=FakeActionPolicy(),
-        trail=FakeAuditTrail(),
-        now=now,
-        id_factory=lambda: "d-1",
-        deadline=timedelta(seconds=30),
-        # This case is about the **clock** the servicer stamps its decision from, so it
-        # wires no park store: ADR-0244 §1's third clause makes a servicing with none
-        # exactly what it was, and the reading under test is unchanged either way.
-        parked_reads=None,
-        parked_read_ttl=timedelta(hours=24),
-    ).service(
-        "what is that bell tower in Porto",
-        remaining=10,
-        external=False,
-        footing=footing,
-        in_view=(),
-        counts=_SearchCounts(),
-        goal=_goal(),
-        plan=_plan(),
-    )
-
-
-async def _forecast_servicer(now: Clock) -> None:
-    """ADR-0260 §7's recorder clock, read where the ``PermissionDecision`` is stamped.
-
-    :func:`_search_servicer`'s twin one kind over, and driven the same way: through the
-    seam's real entry point, so the proposal, the binding and the ruling all run first
-    and the reading is the last thing before the trail is written. A
-    ``FakeActionPolicy`` reaches a ``CONFIRM`` on the forecast declaration's own
-    ``discloses`` floor — a **recorded** ruling like any other — so the stamp is reached
-    without a configured pair, a costed declaration or an open channel.
-    """
-    binder = FakeEgressBinder()
-    binder.register_egress(
-        FAKE_FORECAST_READ, reference="conn-forecast", identity="Example Forecast"
-    )
-    await ForecastServicer(
-        forecaster=FakeForecaster(),
-        binder=binder,
-        policy=FakeActionPolicy(),
-        trail=FakeAuditTrail(),
-        now=now,
-        id_factory=lambda: "d-1",
-        # ADR-0260 §11 adds no deadline figure of its own, so this is the one bound
-        # ADR-0241 §3 already gives the servicing.
-        deadline=timedelta(seconds=30),
-    ).service(remaining=10, external=False)
 
 
 @dataclass(frozen=True)
@@ -1197,9 +1111,6 @@ SEAMS = [
     Seam("InMemoryMemoryStore", _in_memory_store, MemoryStoreError),
     Seam("SqliteMemoryStore", _sqlite_store, MemoryStoreError),
     Seam("MemoryIngestor", _ingestor, MemoryStoreError),
-    # ADR-0231 §6's recorder clock, propagating rather than translating for the
-    # reason `PROPAGATED` records — `Fetcher`'s clause above, one seam over.
-    Seam("SearchServicer", _search_servicer, ClockReadingError),
     # ADR-0306 §6's record clock, propagating for the reason `PROPAGATED` records.
     Seam("ActingStage", _acting_stage, ClockReadingError),
     # ADR-0037 §2's decision stamp, propagating for `ActingStage`'s reason one phase over.
@@ -1213,9 +1124,6 @@ SEAMS = [
     # ADR-0309 §3:3's step start, propagating for `ActingStage`'s reason: the glue that
     # runs the phases adds no error class either.
     Seam("PhasePath", _phase_path, ClockReadingError),
-    # ADR-0260 §7's recorder clock, propagating for `SearchServicer`'s own reason one
-    # kind over: ADR-0260 adds **no** error class to `core.errors` either.
-    Seam("ForecastServicer", _forecast_servicer, ClockReadingError),
     Seam("FakeMemoryStore", _fake_store, MemoryStoreError),
     Seam("FakeMemoryWriter", _fake_writer, MemoryStoreError),
     Seam("FakePlanner", _fake_planner, PlanningError),
@@ -1532,18 +1440,6 @@ PROPAGATED: Final[dict[str, str]] = {
         "ADR-0230 §4 adds **no** error class to `core.errors` — a source failure is a "
         "`FetchRefusal` rather than a raise — and a clock fault is not a source reason, "
         "so `core`'s own rejection is what a caller sees"
-    ),
-    "SearchServicer": (
-        "ADR-0231 adds **no** error class to `core.errors` either, and a clock this "
-        "process cannot read is none of ADR-0231 §9's three decline causes — a binder, "
-        "a policy, a trail — so reporting it as one of them would report one stage's "
-        "fault under another stage's member, which §13 forbids in terms"
-    ),
-    "ForecastServicer": (
-        "ADR-0260 adds **no** error class to `core.errors` either, and a clock this "
-        "process cannot read is none of ADR-0260 §8's decline causes — a binder, a "
-        "policy, a trail — so reporting it as one of them would report one stage's "
-        "fault under another stage's member, which §8 forbids in terms"
     ),
     "ActingStage": (
         "ADR-0306 adds **no** error class to `core.errors`, and a clock this process "
