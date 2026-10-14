@@ -37,6 +37,7 @@ import copy
 import logging
 import sys
 import traceback
+from collections import ChainMap
 from collections.abc import Mapping, Sequence, Set
 from dataclasses import fields, is_dataclass
 from datetime import date, datetime, time, timedelta
@@ -486,6 +487,17 @@ _DONE: Final = object()
 _STRUCTLOG_PLUMBING: Final = frozenset({"_logger", "_name"})
 
 
+#: The types of an extra a record that carries an exception keeps, matched exactly:
+#: a number, a UUID or ``None`` holds no text, and a host's format may print it as a
+#: number (``%(elapsed).3f``). Every other extra is masked.
+_KEPT_EXTRA_TYPES: Final = frozenset({bool, int, float, complex, Decimal, UUID, type(None)})
+
+
+def _masked(value: object) -> object:
+    """An extra of a record that carries an exception: kept if it holds no text."""
+    return value if type(value) in _KEPT_EXTRA_TYPES else REDACTED
+
+
 class _UnscrubbableError(Exception):
     """A record this module could not make content-free, so it is dropped."""
 
@@ -507,8 +519,13 @@ def _walked(value: object) -> Iterator[object] | None:
 
     The containers the redactor walks (:func:`_redact_value`): a mapping's keys and
     values, a dataclass's or a pydantic model's fields (:func:`_as_mapping`), and a
-    sequence's or a set's items. Text, bytes and a ``range`` hold no exception.
+    sequence's or a set's items; a ``ChainMap``'s every mapping. Text, bytes and a
+    ``range`` hold no exception.
     """
+    if isinstance(value, ChainMap):
+        # Its repr prints every mapping it chains, a shadowed entry included, where
+        # its items give only the entry in front.
+        return iter(value.maps)
     mapping = _as_mapping(value)
     if mapping is not None:
         return (part for pair in mapping.items() for part in pair)
@@ -600,7 +617,7 @@ def _scrubbed_event(record: logging.LogRecord) -> logging.LogRecord:
     safe.msg = scrubbed
     if carried or in_event or not checked:
         for key in extras:
-            setattr(safe, key, REDACTED)
+            setattr(safe, key, _masked(getattr(record, key)))
     safe.exc_text = _exception_text([raised] if raised is not None else [], record.exc_text)
     safe.exc_info = None
     return safe
@@ -636,12 +653,13 @@ def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
     redactor walks (:func:`_carried`) — or a traceback rendered before this net,
     keeps what is code-owned: its logger's name, its level, where it was logged.
     Its message is :data:`_WITHHELD` followed by each exception's class and frames
-    (:func:`_exception_text`); it has no arguments; each extra is masked. The
-    description is the message, not ``exc_text``, so a formatter that discards
-    ``exc_text`` — ``ProcessorFormatter`` does, by default — still prints it; and no
-    ``exc_info`` is left for a formatter to render its own way. ``stack_info`` is
-    kept: the logging module builds it from the caller's frames alone, which hold no
-    message and print no local.
+    (:func:`_exception_text`); it has no arguments; each extra is masked unless it
+    is a number, a UUID or ``None`` (:func:`_masked`). The description is the
+    message, not ``exc_text``, so a formatter that discards ``exc_text`` —
+    ``ProcessorFormatter`` does, by default — still prints it; and no ``exc_info`` is
+    left for a formatter to render its own way. ``stack_info`` is kept: the logging
+    module builds it from the caller's frames alone, which hold no message and print
+    no local.
 
     A record holding more than :data:`_WALK_LIMIT` values is not checked through and
     is withheld the same way, its message :data:`_UNCHECKED` (fail closed).
@@ -670,7 +688,7 @@ def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
         return record
     safe = copy.copy(record)
     for key in extras:
-        setattr(safe, key, REDACTED)
+        setattr(safe, key, _masked(getattr(record, key)))
     shown = _exception_text(carried, record.exc_text)
     message = _WITHHELD if checked else _UNCHECKED
     if shown:

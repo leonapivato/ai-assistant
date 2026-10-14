@@ -992,6 +992,24 @@ def test_a_hosts_format_keeps_the_logger_and_level_and_masks_each_extra() -> Non
     assert out.endswith(f"_ReadFailedError|{REDACTED}\n")
 
 
+def test_a_numeric_extra_is_kept_so_a_hosts_numeric_format_still_prints() -> None:
+    # Adversarial review, round 3 under this holder: a number masked as a string
+    # failed ``%(elapsed).3f`` and the record was lost.
+    stream = _configured_under_a_hosts_handler("%(elapsed).3f %(count)d %(message)s|%(detail)s")
+    failure = _caught(_raise_with_content)
+
+    logging.getLogger("thirdparty").error(
+        "read failed",
+        exc_info=failure,
+        extra={"elapsed": 1.25, "count": 3, "detail": str(failure)},
+    )
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert out.startswith(f"1.250 3 {_WITHHELD}\n")
+    assert out.endswith(f"|{REDACTED}\n")
+
+
 @pytest.mark.parametrize(
     "logged",
     [
@@ -1007,6 +1025,10 @@ def test_a_hosts_format_keeps_the_logger_and_level_and_masks_each_extra() -> Non
         pytest.param(lambda log, failure: log.error("%s", {failure}), id="set"),
         pytest.param(lambda log, failure: log.error("%s", deque([failure])), id="deque"),
         pytest.param(lambda log, failure: log.error("%s", UserList([failure])), id="UserList"),
+        pytest.param(
+            lambda log, failure: log.error("%s", ChainMap({"read": "ok"}, {"read": failure})),
+            id="ChainMap shadowed",
+        ),
         pytest.param(
             lambda log, failure: log.error("%s", MappingProxyType({"read": failure})),
             id="mapping proxy",
