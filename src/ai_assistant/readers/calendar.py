@@ -118,11 +118,9 @@ Point the hub at its output::
     ASSISTANT_CALENDAR_READER_PATH=/home/you/.calendars/calendar.ics
 
 **Configuration is not consent** — the hub reads nothing until the user grants the
-source through a client, and until then the request-path facet contributes
-nothing (ADR-0097 §5)::
+source through a client (ADR-0097 §5)::
 
     assistant sources                                    # shows the location
-    assistant grant calendar --scope facet
     assistant revoke calendar                            # prospective (ADR-0097 §6)
 
 The reader's identity is ``calendar`` and a grant keys on **that**, never on the
@@ -130,11 +128,11 @@ path (ADR-0097 §1) — so repointing the path leaves the grant standing over th
 location, which ADR-0097 §9a states and does not close.
 
 **Arming unprompted contact is three further acts, and none implies another**
-(ADR-0132 §4, ADR-0133 §3). Everything above arms the *facet* — this file looked
-at while answering. Nothing reads it into beliefs: scheduled ingestion is retired
-(ADR-0294 §1). The upcoming-event producer is a second, independent consumer of
-the same source (ADR-0093 §3), so arming the facet arms neither the producer nor
-any interruption. In the order they can be performed:
+(ADR-0132 §4, ADR-0133 §3). Everything above only configures the source. Nothing
+reads it into beliefs, since scheduled ingestion is retired (ADR-0294 §1), and
+nothing looks at it while answering, since that use left with the request path's
+facets (ADR-0318 §6:2). The upcoming-event producer is the one consumer of the
+source a new grant may name (ADR-0093 §3). In the order they can be performed:
 
 1. **The operator arms the producer**, in the hub's environment. It needs the
    path above and nothing else (ADR-0132 §4)::
@@ -167,16 +165,14 @@ any interruption. In the order they can be performed:
    read never returns. Both are refused at load rather than discovered as a job
    that runs, logs nothing and reports health.
 
-2. **The user grants the read**, a use of the source that ``facet`` does not
-   back-fill (ADR-0133 §3)::
+2. **The user grants the read**, the one use a new grant may name (ADR-0318
+   §6:2), which no other grant back-fills (ADR-0133 §3)::
 
        assistant grant calendar --scope notify
 
    The source is **positional**; there is no ``--source`` option. A source holds
-   one grant at a time, so adding ``notify`` to a calendar already granted for
-   the facet is ``assistant revoke calendar`` and then one ``grant`` naming every
-   scope wanted — ``--scope facet --scope notify`` — and both acts stay on the
-   record.
+   one grant at a time; ``assistant revoke calendar`` withdraws it, and both acts
+   stay on the record.
 
 3. **The user raises the class's reach.** Every class ships at ``hold``, so a
    producer cannot interrupt on the day it ships (ADR-0130 §6)::
