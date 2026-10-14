@@ -1074,6 +1074,96 @@ def test_bytes_are_masked_and_an_unhashable_rebuilt_key_does_not_drop_the_line()
     assert out == f"header {REDACTED!r}, seen {{{REDACTED!r}: 1}}\n"
 
 
+def test_escaped_notes_and_group_messages_carry_no_words() -> None:
+    # Adversarial review, round 3: a text argument or note was matched only as it
+    # stands, and ``!r`` escapes a tab.
+    stream = _configured_on_a_bare_root()
+    member = ValueError("failed")
+    member.add_note(f"{_LOCAL}\t{_CHAINED}")
+    group = ExceptionGroup(f"{_MESSAGE}\tmore", [member])
+
+    logging.getLogger("thirdparty").error(
+        f"notes: {member.__notes__!r} {group.message!r} {group.message!a}", exc_info=group
+    )
+
+    _assert_no_content(stream.getvalue())
+
+
+def test_a_path_printing_an_exceptions_text_is_cleared() -> None:
+    # Adversarial review, round 3: a path is text, and was kept as a plain value.
+    root = logging.getLogger()
+    for one in list(root.handlers):
+        root.removeHandler(one)
+    stream = io.StringIO()
+    hosts = logging.StreamHandler(stream)
+    hosts.setFormatter(logging.Formatter("%(message)s|%(where)s"))
+    root.addHandler(hosts)
+    configure_logging(Settings())
+    path = PurePath(f"/{_MESSAGE}/{_LOCAL}")
+
+    logging.getLogger("thirdparty").error(
+        "failed path: %s", path, exc_info=ValueError(str(path)), extra={"where": path}
+    )
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert out.startswith("failed path: ValueError|ValueError")
+
+
+def test_an_exception_whose_arguments_share_values_is_not_rendered_to_be_matched() -> None:
+    # Adversarial review, round 3: ``str(failure)`` over ``[shared, shared]`` nested
+    # sixteen times calls the leaf's repr 65,536 times. Neither its text nor its repr
+    # is built.
+    calls = 0
+
+    class Leaf:
+        def __repr__(self) -> str:
+            nonlocal calls
+            calls += 1
+            return _MESSAGE
+
+    stream = _configured_on_a_bare_root()
+    shared: object = Leaf()
+    for _ in range(16):
+        shared = [shared, shared]
+
+    logging.getLogger("thirdparty").error("operation failed", exc_info=ValueError(shared))
+
+    assert calls == 0
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert out.startswith("operation failed\n")
+    assert out.rstrip().endswith("ValueError")
+
+
+def test_a_field_a_hosts_record_factory_adds_is_cleared_like_an_extra() -> None:
+    # Adversarial review, round 3: the standard fields were read off
+    # ``makeLogRecord``, which calls the factory a host installed before importing
+    # this package, so its fields counted as standard and were never looked at.
+    script = (
+        "import io, logging\n"
+        "made = logging.getLogRecordFactory()\n"
+        "def factory(*args, **kwargs):\n"
+        "    record = made(*args, **kwargs)\n"
+        f"    record.failure = ValueError({_MESSAGE!r})\n"
+        "    return record\n"
+        "logging.setLogRecordFactory(factory)\n"
+        "stream = io.StringIO()\n"
+        "hosts = logging.StreamHandler(stream)\n"
+        "hosts.setFormatter(logging.Formatter('%(message)s|%(failure)s'))\n"
+        "logging.getLogger().addHandler(hosts)\n"
+        "import ai_assistant.core.logging\n"
+        "logging.getLogger('thirdparty').error('read failed')\n"
+        "print(stream.getvalue())\n"
+    )
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", script], capture_output=True, text=True, check=True
+    )
+
+    assert _MESSAGE not in result.stdout
+    assert result.stdout.startswith("read failed|ValueError")
+
+
 def test_an_argument_holding_itself_is_masked_not_walked_forever() -> None:
     stream = _configured_on_a_bare_root()
     held: list[object] = [ValueError(_MESSAGE)]
