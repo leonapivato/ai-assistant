@@ -51,7 +51,6 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.protocols import (
     AssistantEngine,
-    AuthorizationResolution,
     ConnectionPurger,
     InvocationLedger,
     RecipientGrantResolution,
@@ -99,7 +98,6 @@ from ai_assistant.orchestration.upcoming import (
 )
 from ai_assistant.permissions import (
     SqliteAuditTrail,
-    SqliteGoalAuthorizationStore,
     SqliteRecipientGrantStore,
     SqliteSourceReadTrail,
     ThresholdActionPolicy,
@@ -677,12 +675,6 @@ def _trail_grant_seam(calls: list[dict[str, object]]) -> object:
     return calls[0]["recipient_grants"]
 
 
-def _trail_authorization_seam(calls: list[dict[str, object]]) -> object:
-    """The one ``authorizations`` argument the builder constructed the trail with."""
-    assert len(calls) == 1, calls
-    return calls[0]["authorizations"]
-
-
 async def test_build_engine_passes_the_configured_thresholds_to_the_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -760,29 +752,6 @@ async def test_build_engine_gives_the_policy_the_recipient_grant_query_face(
         assert isinstance(seam, RecipientGrants)
         assert isinstance(seam, RecipientGrantResolution)
         assert _trail_grant_seam(trail_calls) is seam
-    finally:
-        await engine.aclose()
-
-
-async def test_build_engine_gives_the_trail_the_goal_authorization_store(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ADR-0254 §16's resolution face reaches the trail, and the policy holds none.
-
-    ``SqliteAuditTrail`` substitutes a resolution holding nothing where none is
-    passed, and §7's route-(d) invariant then refuses a route-(d) row an older process
-    wrote. The phases' policy holds no goal authorizations (ADR-0306 §4:11), so the
-    trail is the store's one holder.
-    """
-    calls = _spy_on_policy(monkeypatch)
-    trail_calls = _spy_on_trail(monkeypatch)
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    try:
-        seam = _trail_authorization_seam(trail_calls)
-        assert isinstance(seam, SqliteGoalAuthorizationStore)
-        assert isinstance(seam, AuthorizationResolution)
-        assert len(calls) == 1, calls
-        assert "authorizations" not in calls[0]
     finally:
         await engine.aclose()
 
@@ -1450,15 +1419,6 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # of trust". Joining them in one file would be the first step toward
             # joining them in one answer.
             "destination_trust.db",
-            # ADR-0254 §16's goal authorizations, the sixteenth and the fifteenth
-            # that is Tier 1: a row carries the user's own words — every coverage
-            # member's basis names a recorded turn and the span inside it — beside
-            # the declaration, the connected account and the destination set the
-            # authority is about. **A separate file from ``recipient_grants.db``**
-            # for ADR-0193 §6's own reason: one store holding two kinds of record
-            # with two covering rules would have one ``covering`` member choosing
-            # between them, and §6 forecloses the cheap answer in terms.
-            "goal_authorizations.db",
             "grants.db",
             "memory.db",
             "notifications.db",

@@ -58,7 +58,6 @@ from ai_assistant.permissions import (
 )
 from ai_assistant.testing import (
     FakeAuditTrail,
-    FakeGoalAuthorizations,
     FakeRecipientGrantResolution,
     FakeRecipientGrants,
     recipient_grant,
@@ -1226,10 +1225,9 @@ async def test_the_forecast_read_asks_nothing_and_the_turns_other_send_is_unaffe
     **no** grant seam read and ``authorised_subject`` unset — and the same turn's
     search at an unconfigured destination is unaffected."
 
-    The goal is carried on the request, and the policy holds a ``GoalAuthorizations``
-    seam, so route (d) is reachable in principle: the ``ALLOW`` still names the
-    connection reference rather than a record id, which is route (c) answering first.
-    The second ruling is the same policy in the same turn on a search bound elsewhere —
+    The goal is carried on the request, and the ``ALLOW`` still names the connection
+    reference and carries no goal scope: route (c) answers it. The second ruling is
+    the same policy in the same turn on a search bound elsewhere —
     ADR-0260 §6's last normative clause, "nothing rides this that is not a forecast
     read at the configured forecast provider".
     """
@@ -1239,7 +1237,7 @@ async def test_the_forecast_read_asks_nothing_and_the_turns_other_send_is_unaffe
         tool=SEARCH_TOOL,
         account=SEARCH_ACCOUNT,
     )
-    policy, grants = _at_both(covering, authorizations=FakeGoalAuthorizations([]))
+    policy, grants = _at_both(covering)
 
     forecast = await policy.decide(
         request(
