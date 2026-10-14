@@ -1,6 +1,6 @@
 # 140. The email source is a file the fetcher replaces whole, and the reader proposes envelopes, never bodies
 
-- Status: Partially superseded by ADR-0294 (§12:1's `email_reader_interval` row; §12:2; §12:5's interval half; §13:2's ingestion parts)
+- Status: Partially superseded by ADR-0294 (§12:1's `email_reader_interval` row; §12:2; §12:5's interval half; §13:2's ingestion parts) and ADR-0320 (§1–§5, §7 and §9–§11, and §12 and §13:2 in what ADR-0294 left of them)
 - Date: 2026-08-12
 - **Note (2026-08-25): §10's second clause is ambiguous about which seam it names,
   it does not fire on another ADR's title, and the resolution belongs to the lane
@@ -76,6 +76,7 @@
   clause stand. This replacement takes effect on ratification of ADR-0294. This
   reciprocal header record accompanies the numbered draft under ADR-0070 and
   ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0320 — §1–§5, §7 and §9–§11, and §12 and §13:2 in what ADR-0294 left of them. They governed the email source: `EmailReader` and its store, its proposals, its grant as a grantable source, its settings and its lanes' obligations; §6's `EmailFacet` and facet union and §13:1 stand. Every other clause stands. They bind the code they govern until the final cleanup lane ADR-0320 §3:2 names removes it (ADR-0320 §1:4). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
