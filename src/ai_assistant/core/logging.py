@@ -19,10 +19,19 @@ raising frame's locals, which hold the conversation's text. So the chain renders
 an exception itself, before redaction, as its class and the frames it passed
 through (:func:`scrub_exceptions`), and the renderer's exception formatter does
 the same should anything reach it. No content reaches a log (ADR-0314 §3:2).
+
+**A standard-library record is held to the same rule.** Records from the
+``logging`` module — a third-party library's, asyncio's "Task exception was never
+retrieved" — never pass through structlog's chain, and the stdlib's formatter
+appends a traceback with the exception's message. So each root handler is handed a
+scrubbed copy of every record (:class:`_ScrubRecords`): its exception rendered as
+class and frames, and every exception it carries named by its class wherever its
+message would have printed it, including the repr asyncio's message embeds.
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 import sys
 import traceback
@@ -32,7 +41,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import PosixPath, PurePosixPath, PureWindowsPath, WindowsPath
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, TextIO
 from uuid import UUID
 
 import structlog
@@ -40,7 +49,6 @@ from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from collections.abc import MutableMapping
-    from typing import TextIO
 
     from structlog.typing import ExcInfo
 
@@ -443,9 +451,245 @@ def _write_exception(sio: TextIO, exc_info: ExcInfo) -> None:
         raise structlog.DropEvent from exc
 
 
+class _ClassName:
+    """An exception standing in a log record's arguments as its class alone.
+
+    ``%s`` and ``%r`` both print the class, so ``log.error("failed: %s", exc)``
+    renders ``failed: ValueError`` and never the exception's words.
+    """
+
+    __slots__ = ("_name",)
+
+    def __init__(self, failure: BaseException) -> None:
+        self._name = _class_name(failure)
+
+    def __str__(self) -> str:
+        return self._name
+
+    def __repr__(self) -> str:
+        return self._name
+
+    def __format__(self, spec: str) -> str:
+        return format(self._name, spec)
+
+
+def _named(value: object) -> object:
+    """``value``, or its class alone if it is an exception."""
+    return _ClassName(value) if isinstance(value, BaseException) else value
+
+
+def _exc_info_raised(exc_info: object) -> BaseException | None:
+    """The exception a stdlib ``exc_info`` names: an ``exc_info`` tuple's, or itself.
+
+    Unlike :func:`_raised`, a true value is never read as "the exception being
+    handled": the logging module resolved that when the record was made, and a
+    record may be emitted long after, on another thread.
+    """
+    if isinstance(exc_info, tuple) and len(exc_info) == len(("type", "value", "traceback")):
+        exc_info = exc_info[1]
+    return exc_info if isinstance(exc_info, BaseException) else None
+
+
+def _record_raised(record: logging.LogRecord) -> BaseException | None:
+    """The exception ``record``'s ``exc_info`` names, if any."""
+    return _exc_info_raised(record.exc_info)
+
+
+def _record_failures(record: logging.LogRecord) -> list[BaseException]:
+    """Every exception a record carries, with each one's chain and a group's members.
+
+    The record's ``exc_info``, a message that is itself an exception, and an
+    exception among its arguments, then everything each of those holds: its cause,
+    its context and, for a group, its members. Each is listed once, so a cycle or a
+    member groups share ends the walk rather than repeating it.
+    """
+    carried: list[object] = [_record_raised(record), record.msg]
+    args = record.args
+    if isinstance(args, Mapping):
+        carried.extend(args.values())
+    elif isinstance(args, tuple):
+        carried.extend(args)
+    pending = [one for one in carried if isinstance(one, BaseException)]
+    found: list[BaseException] = []
+    seen: set[int] = set()
+    while pending:
+        one = pending.pop()
+        if id(one) in seen:
+            continue
+        seen.add(id(one))
+        found.append(one)
+        held: list[BaseException | None] = [one.__cause__, one.__context__]
+        if isinstance(one, BaseExceptionGroup):
+            held.extend(one.exceptions)
+        pending.extend(member for member in held if member is not None)
+    return found
+
+
+def _record_message(record: logging.LogRecord, failures: Sequence[BaseException]) -> str:
+    """The record's message with every exception it carries named by its class alone.
+
+    An exception passed as the message or among the arguments is formatted as its
+    class. What remains is a message that *embeds* an exception's words itself —
+    asyncio's "Task exception was never retrieved" carries the task's repr, and
+    that holds ``exception=ValueError('…')`` — so each carried exception's repr and
+    its text are then replaced wherever they appear, longest first, so a group's
+    repr goes whole before a member's could split it.
+    """
+    named = copy.copy(record)
+    named.msg = _named(record.msg)
+    args = record.args
+    if isinstance(args, Mapping):
+        named.args = {key: _named(value) for key, value in args.items()}
+    elif isinstance(args, tuple):
+        named.args = tuple(_named(value) for value in args)
+    text = named.getMessage()
+    words: dict[str, str] = {}
+    for failure in failures:
+        name = _class_name(failure)
+        for said in (repr(failure), str(failure)):
+            if said:
+                words.setdefault(said, name)
+    for said in sorted(words, key=len, reverse=True):
+        text = text.replace(said, words[said])
+    return text
+
+
+def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
+    """A copy of ``record`` that carries no exception's words.
+
+    The copy's message is rendered and scrubbed (:func:`_record_message`) and has
+    no arguments left to format. Its exception is rendered here as its class and
+    frames, as :func:`scrub_exceptions` renders one, and set as the text a
+    formatter appends, with no ``exc_info`` left for a formatter to render its own
+    way. Text a formatter rendered before this net — a record sent over a socket
+    carries its traceback as text alone — cannot have its words told from its
+    frames, so it is masked. ``stack_info`` is kept: the logging module builds it
+    from the caller's frames alone, which hold no message and print no local.
+
+    The record itself is untouched, so every other handler it reaches is handed the
+    record as it was logged.
+    """
+    failures = _record_failures(record)
+    text = _record_message(record, failures)
+    safe = copy.copy(record)
+    safe.msg = text
+    safe.args = ()
+    safe.message = text
+    raised = _record_raised(record)
+    if raised is not None:
+        safe.exc_text = _described(raised)
+    elif isinstance(record.exc_text, _Described) or not record.exc_text:
+        safe.exc_text = record.exc_text
+    else:
+        safe.exc_text = REDACTED
+    safe.exc_info = None
+    return safe
+
+
+class _ScrubRecords(logging.Filter):
+    """A handler's filter that hands it each record with no exception's words in it.
+
+    Fails closed: a record that cannot be scrubbed is dropped, never emitted as it
+    was logged.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool | logging.LogRecord:
+        """Return a scrubbed copy of ``record``, or ``False`` to drop it.
+
+        Args:
+            record: The record a handler is about to emit.
+
+        Returns:
+            The copy to emit in its place, or ``False`` if it could not be made.
+        """
+        try:
+            return _scrubbed_record(record)
+        except Exception:  # losing a log line beats leaking one
+            return False
+
+
+class _ContentFreeFormatter(logging.Formatter):
+    """The formatter of this module's own handler: the second net for stdlib records.
+
+    The handler's :class:`_ScrubRecords` hands it records already scrubbed; were one
+    to reach it otherwise — ``emit`` called directly, the filter removed — it is
+    scrubbed here, and an ``exc_info`` is still rendered as its class and frames
+    alone, where the stdlib's default appends the exception's message.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Format ``record`` with no exception's words in it.
+
+        Args:
+            record: The record to format.
+
+        Returns:
+            The formatted line.
+        """
+        return super().format(_scrubbed_record(record))
+
+    def formatException(self, ei: Any) -> str:  # noqa: N802 — the stdlib's name
+        """Render an exception as its class and frames, never its message.
+
+        Args:
+            ei: An ``exc_info`` tuple.
+
+        Returns:
+            The rendering, or nothing if no exception is named.
+        """
+        raised = _exc_info_raised(ei)
+        if raised is None:
+            return ""
+        return str(_described(raised))
+
+
+class _ContentFreeHandler(logging.StreamHandler[TextIO]):
+    """This module's own standard-error handler on the root logger.
+
+    Installed only where the root logger has none, as ``logging.basicConfig`` would
+    have installed one. It fails closed: a record that cannot be formatted is
+    dropped. The stdlib's default reports such a failure with the record's message
+    and arguments, which is the leak the formatter exists to prevent.
+    """
+
+    def handleError(self, record: logging.LogRecord) -> None:  # noqa: N802 — the stdlib's name
+        """Drop a record that could not be emitted, saying nothing of it.
+
+        Args:
+            record: The record that could not be emitted (unused).
+        """
+        del record
+
+
+def _install_stdlib_net(level: int | None) -> None:
+    """Make every standard-library record the root logger emits content-free.
+
+    Each handler on the root logger, and ``logging.lastResort``, gains
+    :class:`_ScrubRecords` once — a host's handler included, which keeps its own
+    format and level and loses only the exception's words, as
+    :func:`install_redaction` composes with a host's structlog chain rather than
+    replacing it. Given a ``level`` and a root logger with no handler, this
+    module's own standard-error handler is installed and the root set to that
+    level, as ``logging.basicConfig`` did. ``basicConfig`` does nothing at all
+    where the root already has a handler — under pytest, or in a host that
+    configured logging first — so the net is attached here rather than left to it.
+    """
+    root = logging.getLogger()
+    if level is not None and not root.handlers:
+        ours = _ContentFreeHandler()
+        ours.setFormatter(_ContentFreeFormatter("%(message)s"))
+        root.addHandler(ours)
+        root.setLevel(level)
+    for handler in [*root.handlers, logging.lastResort]:
+        if handler is not None and not any(
+            isinstance(one, _ScrubRecords) for one in handler.filters
+        ):
+            handler.addFilter(_ScrubRecords())
+
+
 def _configure(level: int) -> None:
-    """Install the processor chain at ``level``."""
-    logging.basicConfig(format="%(message)s", level=level)
+    """Install the processor chain, and the standard library's net, at ``level``."""
+    _install_stdlib_net(level)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
@@ -512,11 +756,18 @@ def install_redaction() -> None:
     configured, leave every processor the host chose in place and *insert* ours —
     :func:`scrub_exceptions`, then :func:`redact_sensitive` — ahead of the
     renderer. Both configurations end up strictly more redacted than either was
-    alone, and the host keeps its formatting, level, and factory.
+    alone, and the host keeps its formatting, level, and factory. The standard
+    library's handlers are composed with the same way: each root handler gains a
+    filter that hands it records with no exception's words in them, and keeps its
+    own format (see :func:`_install_stdlib_net`).
     """
     if not structlog.is_configured():
         _configure(logging.INFO)
         return
+
+    # A host that configured structlog owns its standard-library logging too: its
+    # root handlers gain the scrubbing filter, and none is added to them.
+    _install_stdlib_net(None)
 
     # Mutated **in place**, not replaced. A host using
     # `cache_logger_on_first_use=True` (structlog's own recommendation for
