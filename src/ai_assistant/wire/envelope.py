@@ -2566,7 +2566,13 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     promoted ``AssistantEngine`` method set, and ADR-0313 §5:1 removes
 #:     ``grantable_decisions`` and ``establish_recipient_grant``. A peer at 101 calls
 #:     eleven methods a hub at 102 does not route (ADR-0313 §6:4, ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 102
+#: 103: ADR-0313 §4:5 and §7 remove ``ChannelProcessingError`` and
+#:     ``ChannelProcessingTimeoutError`` with the event-summary stage, and ADR-0309 §5
+#:     removes ``UnknownContinuationError`` with ``resume``, which alone raised it. The
+#:     wire rebuilds an error by its name in ``core.errors``, so a hub at 102 may send
+#:     an error frame naming a class a client at 103 no longer has and refuses as a
+#:     protocol fault (ADR-0313 §6:4, ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 103
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

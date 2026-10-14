@@ -20,7 +20,7 @@ from ai_assistant.core.errors import (
     MemoryStoreError,
     ModelRateLimitError,
     OversizedValueError,
-    UnknownContinuationError,
+    PermissionDeniedError,
     UnresolvedEvidenceError,
 )
 from ai_assistant.wire.codec import canonical_payload
@@ -83,7 +83,7 @@ def test_the_code_names_the_concrete_type_and_never_a_declared_base() -> None:
         UnresolvedEvidenceError("two are gone", ["a", "b"]),
         OversizedValueError("too big", limit=10, size=99, field="utterance"),
         OversizedValueError("too big", limit=10, size=99, field=None),
-        UnknownContinuationError("that handle is from a previous process life"),
+        PermissionDeniedError("the policy refused that action"),
         DeviceRefusedError("this phone has no role for that", reason=DeviceRefusal.NOT_ALLOWED),
     ],
 )
@@ -174,6 +174,21 @@ def test_an_unknown_code_is_a_protocol_violation_and_not_a_nearest_ancestor() ->
         raise_from_payload(
             {"code": "SomethingFromTheFuture", "message": "?", "details": None, "reduced": False}
         )
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["ChannelProcessingError", "ChannelProcessingTimeoutError", "UnknownContinuationError"],
+)
+def test_a_code_naming_a_retired_error_is_a_protocol_violation(code: str) -> None:
+    """``PROTOCOL_VERSION`` 103: a hub at 102 may name these, and a client at 103 refuses.
+
+    ADR-0313 §4:5 retires the two event failures with the event-summary stage, and
+    ADR-0309 §5 retires the continuation refusal with ``resume``; the code is looked
+    up in ``core.errors``, so removing a class is what moves the version (§6:4).
+    """
+    with pytest.raises(ProtocolError, match="does not know"):
+        raise_from_payload({"code": code, "message": "?", "details": None, "reduced": False})
 
 
 def test_a_code_naming_something_that_is_not_an_error_is_refused() -> None:

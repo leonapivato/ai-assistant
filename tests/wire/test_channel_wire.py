@@ -1,14 +1,12 @@
-"""Nested channel validation and reflected streaming/error carriage (ADR-0274)."""
+"""Nested channel validation and reflected streaming carriage (ADR-0274)."""
 
 from __future__ import annotations
 
 import json
-from typing import Any
 
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from ai_assistant.core.errors import ChannelProcessingError, ChannelProcessingTimeoutError
 from ai_assistant.core.types import (
     ActivationEnding,
     ChannelIdentity,
@@ -18,7 +16,7 @@ from ai_assistant.core.types import (
     SpokenAudio,
 )
 from ai_assistant.wire.codec import encode_projection, project
-from ai_assistant.wire.errors import UndecodableFrameError, error_payload, raise_from_payload
+from ai_assistant.wire.errors import UndecodableFrameError
 from ai_assistant.wire.server import _decode_arguments
 from ai_assistant.wire.surface import _reaches_audio, audio_bearing, return_adapter
 
@@ -103,13 +101,6 @@ def test_a_text_conversational_frame_is_refused_before_dispatch(
                 "timeout": "PT10S",
             },
         )
-
-
-@pytest.mark.parametrize("kind", [ChannelProcessingError, ChannelProcessingTimeoutError])
-def test_event_failure_types_round_trip_through_existing_error_reflection(kind: Any) -> None:
-    payload = error_payload(kind("informational event processing failed"), max_bytes=1024)
-    with pytest.raises(kind, match="informational event processing failed"):
-        raise_from_payload(payload)
 
 
 @pytest.mark.parametrize("ended", list(ActivationEnding))

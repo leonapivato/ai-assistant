@@ -1933,41 +1933,6 @@ class ActiveExecutionError(PlanningError):
     """
 
 
-class UnknownContinuationError(PlanningError):
-    """The continuation token names no parked step this engine can resume (ADR-0084 §7).
-
-    ADR-0084 §7 ratified that presenting a token the server cannot resolve "yields
-    one specific, typed refusal — an unknown-continuation error — and never a
-    generic failure, and never a denial". Before this the engine raised a bare
-    :class:`PlanningError`, indistinguishable from four other planning faults.
-
-    **Which tokens the server cannot resolve is stated where the method is, and this
-    docstring is re-pointed rather than refreshed** (ADR-0198 §5, #1641). It used to
-    name "eviction under ``max_outstanding_confirmations``" as one of two ways a
-    handle goes missing, and the engine performs no such eviction: at the ceiling it
-    refuses to drive another step rather than parking one and having to strand it,
-    raising before a park exists. A ratified sentence is not corrected in place
-    (ADR-0001) and a living document that restates one does not get a fresh list
-    either — a second catalogue is a second thing to go stale. The cases are
-    enumerated once, in ADR-0198 §5, and carried on
-    :meth:`~ai_assistant.core.protocols.AssistantEngine.resume`, which is what a
-    caller deciding what to do about this error is already reading.
-
-    **Never a denial**, and that is the distinction the type exists to keep: an
-    unresolvable token means nobody ruled on the action, whereas
-    :class:`PermissionDeniedError` means somebody did and said no. Reporting one as
-    the other would tell a user their action was refused when it was merely
-    forgotten.
-
-    **A subclass of :class:`PlanningError` rather than of
-    :class:`AssistantError` directly**, deliberately: every existing
-    ``Raises: PlanningError`` contract on the engine surface stays true and a
-    caller that already handles it keeps working, while a caller that wants
-    ADR-0084 §7's specific remedy — enumerate ``pending_confirmations()`` and
-    re-mint — can catch the thing that has that remedy.
-    """
-
-
 class OversizedValueError(AssistantError):
     """A call's payload is larger than the contract admits (ADR-0085 §8).
 
@@ -2193,7 +2158,7 @@ class UnknownConnectionError(ConnectionStoreError):
     """``reprovision_account`` named a reference the store does not hold (ADR-0151 §2a).
 
     What the corpus does for "you named something this store does not hold",
-    after :class:`UnknownConversationError` and :class:`UnknownContinuationError`.
+    after :class:`UnknownConversationError`.
     Refused before the first write, so nothing is written.
 
     **It reaches ``reprovision_account`` only.** ``disconnect_account`` on an
@@ -2451,11 +2416,3 @@ class TransportError(AssistantError):
     refusal may name is the condition — a host, a port, a bound that was
     exceeded, an error type — and never an octet that was written or read.
     """
-
-
-class ChannelProcessingError(AssistantError):
-    """An informational event could not produce a usable summary (ADR-0274 §8)."""
-
-
-class ChannelProcessingTimeoutError(ChannelProcessingError):
-    """The informational event exhausted its admitted wall-clock budget."""

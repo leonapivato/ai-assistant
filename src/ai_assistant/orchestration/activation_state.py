@@ -17,7 +17,6 @@ import structlog
 from ai_assistant.core.channel_validation import input_origin
 from ai_assistant.core.errors import (
     AssistantError,
-    ChannelProcessingTimeoutError,
     ModelTimeoutError,
     OversizedValueError,
     SpeechTimeoutError,
@@ -647,9 +646,7 @@ def terminal_status(  # noqa: C901, PLR0911, PLR0912 — ADR-0275's ordered term
         return ProcessingStatus.INTERRUPTED, ProcessingReason.STOPPED
     if isinstance(failure, asyncio.CancelledError):
         return ProcessingStatus.INTERRUPTED, ProcessingReason.CANCELLED
-    if state.composition_timed_out or isinstance(
-        failure, ModelTimeoutError | SpeechTimeoutError | ChannelProcessingTimeoutError
-    ):
+    if state.composition_timed_out or isinstance(failure, ModelTimeoutError | SpeechTimeoutError):
         return ProcessingStatus.FAILED, ProcessingReason.TIMEOUT
     # No failure classifies as a transcription failure since ADR-0313 §3:1 retired
     # `converse_spoken`, whose `TranscriptionFailedError` was the one that did.

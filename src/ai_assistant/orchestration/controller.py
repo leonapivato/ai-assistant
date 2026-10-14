@@ -20,11 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, Protocol
 
 from ai_assistant.core.diagnostics import diagnosed_activation, failure_body, write_diagnostic
-from ai_assistant.core.errors import (
-    ChannelProcessingTimeoutError,
-    ModelTimeoutError,
-    SpeechTimeoutError,
-)
+from ai_assistant.core.errors import ModelTimeoutError, SpeechTimeoutError
 from ai_assistant.core.types import (
     ControllerRule,
     ControllerStage,
@@ -46,7 +42,7 @@ if TYPE_CHECKING:
 #: The classified timeouts a stage can end in (§5). Each is already the row
 #: ``terminal_status`` files under ``TIMEOUT``, and the bare ``TimeoutError`` is what
 #: an ``asyncio.timeout`` around a stage raises.
-_TIMEOUTS = (ModelTimeoutError, ChannelProcessingTimeoutError, SpeechTimeoutError, TimeoutError)
+_TIMEOUTS = (ModelTimeoutError, SpeechTimeoutError, TimeoutError)
 
 
 def stage_timed_out(error: BaseException) -> bool:
