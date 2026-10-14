@@ -56,7 +56,7 @@ import structlog
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, MutableMapping
+    from collections.abc import Callable, Iterable, MutableMapping
 
     from structlog.typing import ExcInfo
 
@@ -495,6 +495,14 @@ class _UnscrubbableError(Exception):
     """A record this module could not make content-free, so it is dropped."""
 
 
+class _Replaced(logging.LogRecord):
+    """A record this net built in place of one that carried an exception.
+
+    Its own type, so a handler's failure to emit it is reported without the failure's
+    chain (:class:`_ReportsContentFree`).
+    """
+
+
 def _exc_info_raised(exc_info: object) -> BaseException | None:
     """The exception a stdlib ``exc_info`` names: an ``exc_info`` tuple's, or itself.
 
@@ -544,7 +552,7 @@ def _fresh(record: logging.LogRecord, msg: object, kept: Iterable[str] = ()) -> 
     named in ``kept``. Built by the ``LogRecord`` class directly, never through the
     process's record factory, which a host may have made to add fields of its own.
     """
-    fresh = logging.LogRecord(
+    fresh = _Replaced(
         record.name,
         record.levelno,
         record.pathname,
@@ -648,7 +656,8 @@ def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
     message is :data:`_WITHHELD` followed by each exception's class and frames
     (:func:`_exception_text`). It has no arguments and **no extra**: none is masked
     and none is kept, so a host's format that names one fails in that host's handler,
-    whose report of the failure prints the fixed message and ``()`` alone. The
+    whose report of the failure prints the failure's classes and frames, the fixed
+    message and ``()`` alone (:class:`_ReportsContentFree`). The
     description is the message, not ``exc_text``, so a formatter that discards
     ``exc_text`` — ``ProcessorFormatter`` does, by default — still prints it; and no
     ``exc_info`` is left for a formatter to render its own way.
@@ -748,6 +757,44 @@ class _ContentFreeHandler(logging.StreamHandler[TextIO]):
         del record
 
 
+class _ReportsContentFree:
+    """A handler's ``handleError``, reporting its failure on a replaced record content-free.
+
+    A host's format that names an extra fails on a record this net built (it has
+    none), in the host's own handler. The stdlib's report of that failure prints the
+    failure's chain, and a record logged inside an ``except`` block —
+    ``logger.exception``, the commonest of all — chains the exception being handled,
+    words and all. So for a record this net built, the report prints the failure's
+    chain by its classes and frames alone (:func:`_describe`), then the record's
+    fixed message and ``()``; and it says nothing where ``logging.raiseExceptions`` is
+    off, as the stdlib's does. Every other record is reported by the handler's own
+    ``handleError``.
+    """
+
+    def __init__(self, hosts: Callable[[logging.LogRecord], None]) -> None:
+        self._hosts = hosts
+
+    def __call__(self, record: logging.LogRecord) -> None:
+        """Report a failure to emit ``record``.
+
+        Args:
+            record: The record that could not be emitted.
+        """
+        if type(record) is not _Replaced:
+            self._hosts(record)
+            return
+        try:
+            if not logging.raiseExceptions or sys.stderr is None:
+                return
+            failure = sys.exc_info()[1]
+            shown = "".join(_describe(failure)) if failure is not None else ""
+            sys.stderr.write(
+                f"--- Logging error ---\n{shown}Message: {record.msg!r}\nArguments: ()\n"
+            )
+        except Exception:  # noqa: S110 — a report that fails says nothing, as the stdlib's
+            pass
+
+
 def _install_stdlib_net(level: int | None) -> None:
     """Make every standard-library record the root logger emits content-free.
 
@@ -760,6 +807,9 @@ def _install_stdlib_net(level: int | None) -> None:
     level, as ``logging.basicConfig`` did. ``basicConfig`` does nothing at all
     where the root already has a handler — under pytest, or in a host that
     configured logging first — so the net is attached here rather than left to it.
+    Each such handler's ``handleError`` is also wrapped once
+    (:class:`_ReportsContentFree`), so its failure to emit a record this net built
+    reports none of the exception being handled.
     """
     root = logging.getLogger()
     if level is not None and not root.handlers:
@@ -768,10 +818,16 @@ def _install_stdlib_net(level: int | None) -> None:
         root.addHandler(ours)
         root.setLevel(level)
     for handler in [*root.handlers, logging.lastResort]:
-        if handler is not None and not any(
-            isinstance(one, _ScrubRecords) for one in handler.filters
-        ):
+        if handler is None:
+            continue
+        if not any(isinstance(one, _ScrubRecords) for one in handler.filters):
             handler.addFilter(_ScrubRecords())
+        if not isinstance(handler, _ContentFreeHandler) and not isinstance(
+            handler.handleError, _ReportsContentFree
+        ):
+            # An instance attribute, so the handler's ``self.handleError(record)`` finds
+            # it ahead of its class's method.
+            handler.handleError = _ReportsContentFree(handler.handleError)  # type: ignore[method-assign]
 
 
 def _configure(level: int) -> None:
