@@ -224,14 +224,11 @@ class PydanticAIToolCallingCompleter:
         try:
             chosen = infer_model(self._default_model if model is None else model)
             settings = _settings(self._thinking, chosen, summarised=self._diagnostics is not None)
-            # Where the record is on, the tools as prepared are taken here, with no await
-            # between this and the request preparing itself, so nothing else can change
-            # what either sees (#2910). `_offered` never raises.
-            offered_record = (
-                _offered(_Request(model=chosen, settings=settings, parameters=parameters))
-                if self._diagnostics is not None
-                else None
-            )
+            # Where the record is on, the tools as prepared are taken on either side of
+            # the request, and kept only where the two agree (#2910). `_offered` never
+            # raises.
+            request = _Request(model=chosen, settings=settings, parameters=parameters)
+            before = _offered(request) if self._diagnostics is not None else None
             response = await model_request(
                 chosen, history, model_settings=settings, model_request_parameters=parameters
             )
@@ -239,6 +236,7 @@ class PydanticAIToolCallingCompleter:
             # Broad on purpose: `_classify` is the taxonomy, and its default for an
             # unrecognised failure is the conservative bare `ModelError` (ADR-0063).
             raise _classify(exc) from exc
+        offered_record = None if before is None else _settled(request, before, _offered(request))
         try:
             read = _round(response)
         except ModelResponseError as exc:
@@ -389,13 +387,12 @@ def _offered(request: _Request) -> _Offered:
     Each tool's parameters are as the model's own request preparation gives them to its
     provider (#2910). The request prepares itself inside pydantic-ai, where nothing can
     observe it, so the record prepares the same model, settings and parameters again,
-    immediately before the request does: a model prepares at the top of its ``request``,
-    before anything it awaits, so with no await between the two nothing else on the event
-    loop can change what either sees. pydantic-ai's own preparation is a function of
-    those alone, built by replacement over a deep copy, and pydantic-ai replays it itself
-    (its fallback model prepares a request apart from sending it), so that gives what the
-    request carried without touching what it sent. The name, the description and the
-    order are the round's own.
+    once just before the request is sent and once just after it returns (see
+    :func:`_settled`). pydantic-ai's own preparation is a function of those alone, built
+    by replacement over a deep copy, and pydantic-ai replays it itself (its fallback
+    model prepares a request apart from sending it), so that gives what the request
+    carried without touching what it sent. The name, the description and the order are
+    the round's own.
 
     So the replay is made only where every piece of code the preparation runs is
     pydantic-ai's own: each model the request passes through is an instance of one of
@@ -405,7 +402,9 @@ def _offered(request: _Request) -> _Offered:
     moving the next request on, or carry the request somewhere a replay cannot see.
 
     Where that cannot be computed, each tool is kept as the round built it and the
-    second value says why: where the replay is not made, as above; where the model is a
+    second value says why: where the replay is not made, as above; where the two
+    replays disagree, since what the preparation reads then changed while the request
+    was out; where the model is a
     :class:`~pydantic_ai.models.fallback.FallbackModel`, which prepares each request for
     whichever model it holds answers; and where the preparation raises, or gives back
     other tools than were sent. Nothing here fails the round or drops the entry.
@@ -418,6 +417,20 @@ def _offered(request: _Request) -> _Offered:
         # whatever stops the preparation the tools are still kept, marked.
         return [_recorded(tool, tool) for tool in sent], failure_body(exc)
     return [_recorded(tool, as_sent) for tool, as_sent in zip(sent, prepared, strict=True)], None
+
+
+def _settled(request: _Request, before: _Offered, after: _Offered) -> _Offered:
+    """The tools as prepared where the replays either side of the request agree.
+
+    Where they differ, something the preparation reads changed while the request was
+    out, and which of the two the request was prepared under cannot be told, so the
+    tools are kept as the round built them, marked.
+    """
+    if before == after:
+        return before
+    msg = "what the model's preparation reads changed while the request was out"
+    sent = request.parameters.function_tools
+    return [_recorded(tool, tool) for tool in sent], failure_body(ModelError(msg))
 
 
 def _prepared(request: _Request) -> list[NativeTool]:

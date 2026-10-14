@@ -12,6 +12,7 @@ network denied.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from network_guard import network_denied
 from openai import AsyncOpenAI
+from pydantic_ai.concurrency import ConcurrencyLimiter
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import (
     ModelRequest,
@@ -33,6 +35,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
+from pydantic_ai.models.concurrency import ConcurrencyLimitedModel
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -755,14 +758,16 @@ async def test_an_openai_models_rewritten_schemas_are_recorded_as_sent() -> None
     assert recorded[0]["parameters"]["additionalProperties"] is False
 
 
-async def test_preparation_state_changed_while_the_request_is_out_does_not_reach_the_record() -> (
-    None
-):
-    """The round-3 review's probe: the profile changes while the request is pending.
+def _as_built_and_marked(body: dict[str, Any]) -> None:
+    """The record claims no definition it cannot vouch for: the tools as built, marked."""
+    assert body["offered_tools"][0] == _tool().model_dump(mode="json")
+    assert [tool["name"] for tool in body["offered_tools"]] == ["web_search", ROUND_TOOL]
+    message = body["offered_tools_unprepared"]["message"]
+    assert "changed while the request was out" in message
 
-    The tools as prepared are taken before the request is sent, so the record is still
-    what the wire carried.
-    """
+
+async def test_preparation_state_changed_after_the_request_prepared_is_marked() -> None:
+    """The round-3 review's probe: the profile changes while the request is on the wire."""
     sink = FakeDiagnosticSink()
     shared: list[Model] = []
 
@@ -779,11 +784,42 @@ async def test_preparation_state_changed_while_the_request_is_out_does_not_reach
                 _request(), [_tool()]
             )
 
-    assert shared[0].profile.get("json_schema_transformer") is None
-    recorded = _recorded_tools(sink)
+    body = sink.recorded[0].model_dump(mode="json")["body"]
     wire = [tool["function"] for tool in cast("list[dict[str, Any]]", recorder.only["tools"])]
-    assert [tool["parameters"] for tool in wire] == [tool["parameters"] for tool in recorded]
-    assert recorded[0]["parameters"]["additionalProperties"] is False
+    assert wire[0]["parameters"]["additionalProperties"] is False
+    _as_built_and_marked(body)
+
+
+async def test_preparation_state_changed_before_the_request_prepared_is_marked() -> None:
+    """The round-4 review's probe: a wrapper awaits before the model prepares.
+
+    The request waits for a concurrency slot, the profile changes while it waits, and
+    the request is then prepared under the change: the replay taken before it was sent
+    no longer matches, so the record is marked rather than claiming the old schema.
+    """
+    sink = FakeDiagnosticSink()
+    recorder = RequestRecorder(openai_success)
+    limiter = ConcurrencyLimiter(max_running=1)
+    with network_denied(), diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(recorder)) as http_client:
+            client = AsyncOpenAI(api_key=_DUMMY_KEY, http_client=http_client, max_retries=0)
+            inner = OpenAIChatModel("gpt-4o", provider=OpenAIProvider(openai_client=client))
+            completer = PydanticAIToolCallingCompleter(
+                ConcurrencyLimitedModel(inner, limiter=limiter), diagnostics=sink
+            )
+            await limiter.acquire("held by the test")
+            pending = asyncio.ensure_future(completer.respond(_request(), [_tool()]))
+            for _ in range(10):  # the round reaches the held slot within a few steps
+                await asyncio.sleep(0)
+            assert limiter.waiting_count == 1
+            inner.profile["json_schema_transformer"] = None
+            limiter.release()
+            await pending
+
+    body = sink.recorded[0].model_dump(mode="json")["body"]
+    wire = [tool["function"] for tool in cast("list[dict[str, Any]]", recorder.only["tools"])]
+    assert "additionalProperties" not in wire[0]["parameters"]
+    _as_built_and_marked(body)
 
 
 async def test_an_anthropic_models_tools_are_recorded_as_sent() -> None:
