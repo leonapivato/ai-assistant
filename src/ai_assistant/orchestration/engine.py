@@ -120,7 +120,6 @@ from ai_assistant.core.types import (
     StoryOutcome,
     TextChannelPayload,
     TraceOutcome,
-    TurnOutcome,
     WholeTextReply,
     band_of,
     chat_conversation_ids,
@@ -5868,7 +5867,7 @@ class Engine:
         )
         marked: list[int] = []
 
-        async def turn() -> TurnOutcome | None:
+        async def turn() -> None:
             try:
                 await reader.take_in(taken, into=marked)
                 if not marked:
@@ -5879,7 +5878,7 @@ class Engine:
                 # admitted with: an open episode is only ever extended (ADR-0286 §3:4,
                 # §12:2), and what an episode records is never kept in step with the
                 # transcript (ADR-0293 §5:5).
-                return await self._chat_input_turn(taken.narrowed(marked))
+                await self._chat_input_turn(taken.narrowed(marked))
             except Exception:
                 # §9:1, §10:2: what was marked is consumed, so its failure is written.
                 # Once the phases' run has begun, the controller holding the pass's
@@ -5921,10 +5920,9 @@ class Engine:
         # finish* message included (ADR-0307 §3), so nothing is written here.
         return True
 
-    async def _chat_input_turn(self, taken: ChatInput) -> TurnOutcome | None:
+    async def _chat_input_turn(self, taken: ChatInput) -> None:
         """The reader's input, planned by the phases (ADR-0309 §2:6)."""
         await self._phases_turn(taken)
-        return None
 
     async def _phases_turn(self, taken: ChatInput) -> None:
         """The reader's input planned by the phases (ADR-0309 §2:6, §3).
