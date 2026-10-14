@@ -24,11 +24,17 @@ the same should anything reach it. No content reaches a log (ADR-0314 §3:2).
 ``logging`` module — a third-party library's, asyncio's "Task exception was never
 retrieved" — never pass through structlog's chain, and the stdlib's formatter
 appends a traceback with the exception's message. So each root handler is handed,
-for every record that carries an exception, a copy that prints no message and no
-argument (:class:`_ScrubRecords`): its logger's name, its level, a fixed marker
-saying its message was withheld, and each exception's class and frames. Nothing is
-taken out of a string: any string can be rebuilt from an exception's words, so the
+in place of a record that carries an exception, a fresh record built from its
+standard fields alone (:class:`_ScrubRecords`): its logger's name, its level, where
+it was logged, and as its message a fixed marker followed by each exception's class
+and frames. No argument and no extra is carried over. Nothing is taken out of a
+string: any string can be rebuilt from an exception's words, so the record's
 strings are not printed at all. A record that carries no exception prints as it is.
+
+"Carries an exception" is shallow by design: ``exc_info``, or an exception passed
+directly as the message, an argument or an extra — what a realistic emitter does.
+An object built to hide one deeper, and content a call site puts into a record with
+no exception, are the call site's to keep out of a log (ADR-0004 §5).
 """
 
 from __future__ import annotations
@@ -37,7 +43,6 @@ import copy
 import logging
 import sys
 import traceback
-from collections import ChainMap
 from collections.abc import Mapping, Sequence, Set
 from dataclasses import fields, is_dataclass
 from datetime import date, datetime, time, timedelta
@@ -51,7 +56,7 @@ import structlog
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, MutableMapping
+    from collections.abc import Iterable, MutableMapping
 
     from structlog.typing import ExcInfo
 
@@ -459,14 +464,6 @@ def _write_exception(sio: TextIO, exc_info: ExcInfo) -> None:
 #: record's words.
 _WITHHELD: Final = "[message withheld: the record carries an exception]"
 
-#: What a record prints in place of its message when it holds more values than
-#: :data:`_WALK_LIMIT`, so whether it carries an exception was not checked.
-_UNCHECKED: Final = "[message withheld: the record holds more than this net checks]"
-
-#: How many values :func:`_carried` looks at in one record before it stops, and the
-#: record is withheld as if it carried an exception (fail closed).
-_WALK_LIMIT: Final = 10_000
-
 #: The attributes every ``LogRecord`` has, and those a formatter adds. Any other
 #: attribute was set by a call site's ``extra``, which a host's format may print.
 #: Read off a record built directly, never through ``makeLogRecord``: that calls the
@@ -475,27 +472,23 @@ _RECORD_FIELDS: Final = frozenset(
     vars(logging.LogRecord("", logging.NOTSET, "", 0, "", (), None))
 ) | {"message", "asctime"}
 
-#: Sequences with no exception in them, by their type: text and bytes, which are
-#: sequences of themselves, and a ``range``, which can be unbounded to walk.
-_LEAF_SEQUENCES: Final = (str, bytes, bytearray, memoryview, range)
-
-#: What an exhausted iterator gives :func:`_carried` in place of a value.
-_DONE: Final = object()
+#: The standard fields a fresh record takes from the record it stands for, past those
+#: its constructor takes: when and where it was logged, never what.
+_COPIED_FIELDS: Final = (
+    "levelname",
+    "created",
+    "msecs",
+    "relativeCreated",
+    "thread",
+    "threadName",
+    "process",
+    "processName",
+    "taskName",
+)
 
 #: The extras ``structlog.stdlib.ProcessorFormatter.wrap_for_formatter`` attaches,
 #: by which ``ProcessorFormatter`` tells a structlog event from a foreign record.
 _STRUCTLOG_PLUMBING: Final = frozenset({"_logger", "_name"})
-
-
-#: The types of an extra a record that carries an exception keeps, matched exactly:
-#: a number, a UUID or ``None`` holds no text, and a host's format may print it as a
-#: number (``%(elapsed).3f``). Every other extra is masked.
-_KEPT_EXTRA_TYPES: Final = frozenset({bool, int, float, complex, Decimal, UUID, type(None)})
-
-
-def _masked(value: object) -> object:
-    """An extra of a record that carries an exception: kept if it holds no text."""
-    return value if type(value) in _KEPT_EXTRA_TYPES else REDACTED
 
 
 class _UnscrubbableError(Exception):
@@ -514,64 +507,59 @@ def _exc_info_raised(exc_info: object) -> BaseException | None:
     return exc_info if isinstance(exc_info, BaseException) else None
 
 
-def _walked(value: object) -> Iterator[object] | None:
-    """What :func:`_carried` looks inside ``value`` at, or ``None``.
-
-    The containers the redactor walks (:func:`_redact_value`): a mapping's keys and
-    values, a dataclass's or a pydantic model's fields (:func:`_as_mapping`), and a
-    sequence's or a set's items; a ``ChainMap``'s every mapping. Text, bytes and a
-    ``range`` hold no exception.
-    """
-    if isinstance(value, ChainMap):
-        # Its repr prints every mapping it chains, a shadowed entry included, where
-        # its items give only the entry in front.
-        return iter(value.maps)
-    mapping = _as_mapping(value)
-    if mapping is not None:
-        return (part for pair in mapping.items() for part in pair)
-    if isinstance(value, (Sequence, Set)) and not isinstance(value, _LEAF_SEQUENCES):
-        return iter(value)
-    return None
-
-
-def _carried(values: Iterable[object]) -> tuple[list[BaseException], bool]:
-    """Every exception in ``values``, at any depth of a container :func:`_walked` opens.
-
-    Each container is looked inside once, so shared structure and a cycle end the
-    walk rather than repeating it. Containers are read one value at a time, depth
-    first, from one budget of :data:`_WALK_LIMIT` values — a value met again counted
-    too — so no input reads or holds more than that, however it branches. The
-    second item says whether the walk finished within it.
-    """
-    found: list[BaseException] = []
-    # Each value held by its id, so a value a lazy container made and dropped cannot
-    # free its id for another to be mistaken for it.
-    seen: dict[int, object] = {}
-    budget = _WALK_LIMIT
-    open_: list[Iterator[object]] = [iter(values)]
-    while open_:
-        one = next(open_[-1], _DONE)
-        if one is _DONE:
-            open_.pop()
-            continue
-        budget -= 1
-        if budget < 0:
-            return found, False
-        if id(one) in seen:
-            continue
-        seen[id(one)] = one
-        if isinstance(one, BaseException):
-            found.append(one)
-            continue
-        inside = _walked(one)
-        if inside is not None:
-            open_.append(inside)
-    return found, True
-
-
 def _extras(record: logging.LogRecord) -> list[str]:
     """The attributes of ``record`` a call site's ``extra`` or a record factory set."""
     return [key for key in vars(record) if key not in _RECORD_FIELDS]
+
+
+def _carried(record: logging.LogRecord) -> list[BaseException]:
+    """The exceptions ``record`` carries, its ``exc_info``'s first.
+
+    Shallow, and only this: the exception its ``exc_info`` names; its message, when
+    that is an exception; an exception that is directly one of its arguments (a
+    tuple's element, or a value of the mapping a sole mapping argument becomes); and
+    an exception that is directly the value of an extra. Nothing inside a container
+    or an object is looked at. These are what a realistic emitter passes —
+    ``logger.exception``, asyncio's handler, ``log.warning("failed: %s", err)``,
+    ``extra={"error": err}`` — and an exception held deeper is the call site's to
+    keep out of a log (ADR-0004 §5).
+    """
+    candidates: list[object] = [_exc_info_raised(record.exc_info), record.msg]
+    args = record.args
+    if isinstance(args, Mapping):
+        candidates.extend(args.values())
+    elif isinstance(args, tuple):
+        candidates.extend(args)
+    candidates.extend(getattr(record, key) for key in _extras(record))
+    return [one for one in candidates if isinstance(one, BaseException)]
+
+
+def _fresh(record: logging.LogRecord, msg: object, kept: Iterable[str] = ()) -> logging.LogRecord:
+    """A new record standing for ``record``, built from its standard fields alone.
+
+    It has ``record``'s logger name, level, place (path, line, function), time,
+    thread, process and ``stack_info`` — which the logging module builds from the
+    caller's frames alone, and which prints no local — and ``msg`` as its message.
+    It has no arguments, no ``exc_info`` or ``exc_text``, and no extra but those
+    named in ``kept``. Built by the ``LogRecord`` class directly, never through the
+    process's record factory, which a host may have made to add fields of its own.
+    """
+    fresh = logging.LogRecord(
+        record.name,
+        record.levelno,
+        record.pathname,
+        record.lineno,
+        msg,
+        (),
+        None,
+        record.funcName,
+        record.stack_info,
+    )
+    for field in _COPIED_FIELDS:
+        setattr(fresh, field, getattr(record, field, getattr(fresh, field, None)))
+    for key in kept:
+        setattr(fresh, key, getattr(record, key))
+    return fresh
 
 
 def _from_structlog(record: logging.LogRecord) -> bool:
@@ -591,14 +579,16 @@ def _scrubbed_event(record: logging.LogRecord) -> logging.LogRecord:
     The event dict goes through :func:`scrub_exceptions` then
     :func:`redact_sensitive`, the rule every structlog event is held to: an
     exception is its class and frames, and any value the redactor cannot vouch for —
-    an exception under another key included — is masked. Where the record carries
-    an exception — in its event dict (an ``exception`` or a true ``exc_info``, as
-    the structlog chain left it), its ``exc_info``, or an extra a record factory set
-    — each extra is masked, as a foreign record's is: a factory can put an
-    exception's text there. Its ``exc_info`` is rendered as class and frames. The
-    plumbing extras are left as they are, for ``ProcessorFormatter`` to read.
+    an exception under another key included — is masked. Where the event carries an
+    exception — an ``exception`` or a true ``exc_info`` in its dict, as the structlog
+    chain left it; an exception directly as one of its values; its record's
+    ``exc_info``; or an exception directly as an extra — it is handed on as a fresh
+    record (:func:`_fresh`) with no extra but the plumbing ``ProcessorFormatter``
+    reads, as a foreign record is: a factory can put an exception's text in one. Its
+    ``exc_info`` is rendered as class and frames.
     """
-    held: dict[str, Any] = dict(cast("dict[str, Any]", record.msg))
+    given = cast("dict[str, Any]", record.msg)
+    held: dict[str, Any] = dict(given)
     try:
         event = scrub_exceptions(None, record.levelname.lower(), held)
         scrubbed = dict(redact_sensitive(None, record.levelname.lower(), event))
@@ -606,18 +596,22 @@ def _scrubbed_event(record: logging.LogRecord) -> logging.LogRecord:
         # Not an ``Exception``: raised as is, it would pass every handler's own
         # ``except Exception`` and reach the line that logged the record.
         raise _UnscrubbableError from exc
-    extras = [key for key in _extras(record) if key not in _STRUCTLOG_PLUMBING]
     raised = _exc_info_raised(record.exc_info)
-    given = cast("dict[str, Any]", record.msg)
-    carried, checked = _carried([raised, given, *(getattr(record, key) for key in extras)])
-    # An exception the structlog chain already rendered is an ``exception`` key, and
-    # one not yet rendered may be a bare ``exc_info=True``.
-    in_event = "exception" in given or bool(given.get("exc_info"))
-    safe = copy.copy(record)
-    safe.msg = scrubbed
-    if carried or in_event or not checked:
-        for key in extras:
-            setattr(safe, key, _masked(getattr(record, key)))
+    extras = [key for key in _extras(record) if key not in _STRUCTLOG_PLUMBING]
+    carries = (
+        raised is not None
+        # An exception the structlog chain already rendered is an ``exception`` key,
+        # and one not yet rendered may be a bare ``exc_info=True``.
+        or "exception" in given
+        or bool(given.get("exc_info"))
+        or any(isinstance(value, BaseException) for value in given.values())
+        or any(isinstance(getattr(record, key), BaseException) for key in extras)
+    )
+    if carries:
+        safe = _fresh(record, scrubbed, kept=_STRUCTLOG_PLUMBING)
+    else:
+        safe = copy.copy(record)
+        safe.msg = scrubbed
     safe.exc_text = _exception_text([raised] if raised is not None else [], record.exc_text)
     safe.exc_info = None
     return safe
@@ -643,26 +637,21 @@ def _exception_text(carried: Sequence[BaseException], exc_text: str | None) -> s
 
 
 def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
-    """``record``, or a copy of it that prints no message and no argument.
+    """``record``, or a fresh record in its place that prints none of its words.
 
     The rule F7 holds a structlog event to, applied to a standard-library record: an
     exception is shown by its class and frames, and never by anything that could
     hold its words. No string is edited to take words out of it. A record that
-    carries an exception — its ``exc_info``, or an exception instance in its
-    message, its arguments or its extras, at any depth of the containers the
-    redactor walks (:func:`_carried`) — or a traceback rendered before this net,
-    keeps what is code-owned: its logger's name, its level, where it was logged.
-    Its message is :data:`_WITHHELD` followed by each exception's class and frames
-    (:func:`_exception_text`); it has no arguments; each extra is masked unless it
-    is a number, a UUID or ``None`` (:func:`_masked`). The description is the
-    message, not ``exc_text``, so a formatter that discards ``exc_text`` —
-    ``ProcessorFormatter`` does, by default — still prints it; and no ``exc_info`` is
-    left for a formatter to render its own way. ``stack_info`` is kept: the logging
-    module builds it from the caller's frames alone, which hold no message and print
-    no local.
-
-    A record holding more than :data:`_WALK_LIMIT` values is not checked through and
-    is withheld the same way, its message :data:`_UNCHECKED` (fail closed).
+    carries an exception (:func:`_carried`), or a traceback rendered before this net,
+    is replaced by a fresh record (:func:`_fresh`) that keeps only what is
+    code-owned: its logger's name, its level, where and when it was logged. Its
+    message is :data:`_WITHHELD` followed by each exception's class and frames
+    (:func:`_exception_text`). It has no arguments and **no extra**: none is masked
+    and none is kept, so a host's format that names one fails in that host's handler,
+    whose report of the failure prints the fixed message and ``()`` alone. The
+    description is the message, not ``exc_text``, so a formatter that discards
+    ``exc_text`` — ``ProcessorFormatter`` does, by default — still prints it; and no
+    ``exc_info`` is left for a formatter to render its own way.
 
     A record that carries no exception is returned as it is, and prints as it
     printed before this net: what a call site puts in an ordinary message is the
@@ -676,31 +665,12 @@ def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
     """
     if _from_structlog(record):
         return _scrubbed_event(record)
-    extras = _extras(record)
-    args = record.args
-    arguments = [args] if isinstance(args, Mapping) else list(args or ())
-    raised = _exc_info_raised(record.exc_info)
-    carried, checked = _carried(
-        [raised, record.msg, *arguments, *(getattr(record, key) for key in extras)]
-    )
+    carried = _carried(record)
     pre_rendered = bool(record.exc_text) and not isinstance(record.exc_text, _Described)
-    if checked and not carried and not pre_rendered:
+    if not carried and not pre_rendered:
         return record
-    safe = copy.copy(record)
-    for key in extras:
-        setattr(safe, key, _masked(getattr(record, key)))
     shown = _exception_text(carried, record.exc_text)
-    message = _WITHHELD if checked else _UNCHECKED
-    if shown:
-        message = f"{message}\n{shown}"
-    safe.msg = message
-    safe.args = ()
-    # What a formatter cached on the record — another handler may have formatted it
-    # first — is its rendering of the record as logged.
-    safe.message = message
-    safe.exc_text = None
-    safe.exc_info = None
-    return safe
+    return _fresh(record, f"{_WITHHELD}\n{shown}" if shown else _WITHHELD)
 
 
 class _ScrubRecords(logging.Filter):
