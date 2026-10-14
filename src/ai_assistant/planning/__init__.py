@@ -1,23 +1,20 @@
-"""Planning: the durable goals and plans, and the execution state over them.
+"""Planning: the plan store, holding an activation's stop record and effect records.
 
-Owns the plan/step data model and its lifecycle: the stores that hold goals,
-plans and their progress, and the execution that tracks a plan step by step.
+Owns the durable state the phases keep about an activation: the stop record that
+refuses its further effects (ADR-0297 §1) and acting's record of each effect it
+claims and finishes (ADR-0306 §6), with the ADR-0004 data rights over both.
 
-Contract: :class:`~ai_assistant.core.protocols.PlanStore` holds the durable
-goals, plans and execution state (ADR-0014). No implementation of
-:class:`~ai_assistant.core.protocols.Planner` lives here: the model-backed one
-retired with the old path (ADR-0309 §5).
+Contract: :class:`~ai_assistant.core.protocols.PlanStore` (ADR-0014). The goals,
+plans and step execution the old path kept here retired with it, and so did its
+model-backed planner (ADR-0309 §5).
 """
 
 from __future__ import annotations
 
-from ai_assistant.planning.execution import DEFAULT_MAX_ATTEMPTS, PlanExecution
 from ai_assistant.planning.sqlite_store import SqlitePlanStore
 from ai_assistant.planning.store import InMemoryPlanStore
 
 __all__ = [
-    "DEFAULT_MAX_ATTEMPTS",
     "InMemoryPlanStore",
-    "PlanExecution",
     "SqlitePlanStore",
 ]

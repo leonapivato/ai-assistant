@@ -62,7 +62,6 @@ from ai_assistant.core.errors import (
     TraceStoreError,
 )
 from ai_assistant.core.types import (
-    ActionPlan,
     ActionRequest,
     CanonicalDestination,
     CapabilityEffect,
@@ -153,7 +152,6 @@ from ai_assistant.permissions import (
 )
 from ai_assistant.planning import (
     InMemoryPlanStore,
-    PlanExecution,
     SqlitePlanStore,
 )
 from ai_assistant.readers._locality import DeviceBacking, MountClaim
@@ -248,12 +246,6 @@ def _record(*, expires_at: datetime | None = None) -> SemanticMemory:
             source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AWARE
         ),
         expires_at=expires_at,
-    )
-
-
-def _plan() -> ActionPlan:
-    return ActionPlan(
-        id="p1", goal_id="g1", steps=(), created_at=_AWARE, rationale="because", targets_revision=1
     )
 
 
@@ -605,10 +597,6 @@ async def _fake_plan_store(now: Clock) -> None:
 
 async def _in_memory_plan_store(now: Clock) -> None:
     await InMemoryPlanStore(now=now).export()
-
-
-async def _plan_execution(now: Clock) -> None:
-    PlanExecution(now=now).start(_plan(), execution_id="e1")
 
 
 async def _engine(now: Clock) -> None:
@@ -1009,7 +997,6 @@ SEAMS = [
     # the refusals either.
     Seam("LocalFileFetcher", _local_file_fetcher, ClockReadingError),
     Seam("FakeFetcher", _fake_fetcher, ClockReadingError),
-    Seam("PlanExecution", _plan_execution, PlanningError),
     Seam("InMemoryPlanStore", _in_memory_plan_store, PlanningError),
     Seam("InMemoryMemoryStore", _in_memory_store, MemoryStoreError),
     Seam("SqliteMemoryStore", _sqlite_store, MemoryStoreError),
