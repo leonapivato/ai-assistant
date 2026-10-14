@@ -1216,8 +1216,9 @@ class Settings(BaseSettings):
         default=timedelta(hours=1),
         gt=timedelta(0),
         description=(
-            "How often the hub sweeps expired memory records and purgeable deferred "
-            "questions (ADR-0083 §7). Set it to 'none' to disable the job; never 0."
+            "How often the hub sweeps expired memory records, traces past their "
+            "retention, purgeable held notifications and expired diagnostic-record "
+            "files (ADR-0083 §7). Set it to 'none' to disable the job; never 0."
         ),
     )
     conversation_sweep_interval: _OptionalDuration = Field(
