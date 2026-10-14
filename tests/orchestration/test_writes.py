@@ -2,8 +2,8 @@
 
 The deferred-question queue retired with the old path, so the stage parks nothing
 and reports what the writer ruled. What it adds is one structured event per
-deferral, carrying the proposal's id and the ruling and never the proposal's
-content (ADR-0004 §5).
+deferral, carrying the ruling's kind and the proposal's memory kind alone, and no
+identifier and no content of the proposal (ADR-0319 §5, ADR-0004 §5).
 """
 
 from __future__ import annotations
@@ -52,8 +52,8 @@ def _stage(store: FakeMemoryStore, kind: MemoryDecisionKind) -> MemoryWriteStage
     )
 
 
-async def test_an_ask_user_ruling_writes_nothing_and_logs_one_event_by_id() -> None:
-    """Nothing is written and nothing is parked; one event names the id and the ruling."""
+async def test_an_ask_user_ruling_writes_nothing_and_logs_one_event_by_kind() -> None:
+    """Nothing is written and nothing is parked; one event names the two kinds alone."""
     store = FakeMemoryStore(now=_now)
     stage = _stage(store, MemoryDecisionKind.ASK_USER)
 
@@ -67,25 +67,30 @@ async def test_an_ask_user_ruling_writes_nothing_and_logs_one_event_by_id() -> N
         {
             "event": DEFERRED_EVENT,
             "log_level": "info",
-            "proposal_id": "deferred-1",
             "ruling": MemoryDecisionKind.ASK_USER.value,
+            "memory_kind": "semantic",
         }
     ]
 
 
-async def test_the_deferral_event_carries_no_proposal_content() -> None:
-    """ADR-0004 §5: identifiers and classes reach a log, never the user's words.
+async def test_the_deferral_event_carries_no_proposal_id_and_no_content() -> None:
+    """ADR-0319 §5: no identifier and no content of the proposal reach the log.
 
-    The ruling's ``reason`` is excluded with the rest, because a policy may quote
-    the proposal in it.
+    A memory id is not guaranteed free of personal data, so it is excluded with
+    the user's words (ADR-0004 §5). The ruling's ``reason`` is excluded with the
+    rest, because a policy may quote the proposal in it.
     """
+    record_id = "imogen-sister-deferred-2"
     store = FakeMemoryStore(now=_now)
     stage = _stage(store, MemoryDecisionKind.ASK_USER)
 
     with structlog.testing.capture_logs() as logs:
-        outcome = await stage.write(_proposal("deferred-2"))
+        outcome = await stage.write(_proposal(record_id))
 
+    (event,) = [entry for entry in logs if entry["event"] == DEFERRED_EVENT]
+    assert set(event) == {"event", "log_level", "ruling", "memory_kind"}
     rendered = repr(logs)
+    assert record_id not in rendered
     assert _CONTENT not in rendered
     assert _RATIONALE not in rendered
     assert outcome.result.decision.reason not in rendered

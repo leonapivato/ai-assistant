@@ -789,28 +789,22 @@ async def _written_preferences(
 def _consolidated(report: ConsolidationReport) -> Observation:
     """Read one consolidation run onto its own ``OPERATION`` trace (ADR-0119 §8).
 
-    **A halted run is ``INCOMPLETE``, which is the only place the fourth outcome
-    is produced.** ADR-0111 §9's third clause rules that "a run that halts under §5
-    without processing its remaining work is recorded as a completed run that did
-    not exhaust its work, not as a failure", and ADR-0119 §3 calls ``INCOMPLETE``
-    that clause "given a value": recording a halt as ``OK`` makes a job that has
-    stopped making progress invisible, and recording it as ``FAULT`` makes a queue
-    at its cap indistinguishable from a broken store.
-
-    ``halted`` is therefore **not** also a metric. The outcome carries it, and a
-    second copy is a second thing to disagree with the first —
-    :attr:`~ai_assistant.orchestration.consolidation.ConsolidationReport.exhausted`
-    is a different fact and is carried, because a run that spent its budget and one
-    that halted are distinguishable only through the pair.
+    **A run that returns is ``OK``.** A run stopped at a question the
+    deferred-question queue refused at its cap was the one halt ADR-0111 §9 gave
+    ``INCOMPLETE``, and that queue has retired: an ``ASK_USER`` ruling is counted
+    as deferred and its chunk recorded as done (ADR-0319 §5), so a run that
+    returns has either exhausted the store or spent its budget, and both are
+    completed runs. ``exhausted`` tells those two apart, so it is carried as a
+    metric.
 
     Args:
         report: What the run examined, proposed and recorded.
 
     Returns:
-        The run's counters, and ``INCOMPLETE`` if it halted.
+        The run's counters, under an ``OK`` outcome.
     """
     return Observation(
-        outcome=TraceOutcome.INCOMPLETE if report.halted else TraceOutcome.OK,
+        outcome=TraceOutcome.OK,
         metrics={
             "chunks": report.chunks,
             "examined": report.examined,

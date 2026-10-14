@@ -8,8 +8,10 @@ it puts a proposal through, and reports what the writer ruled.
 deferred-question queue ADR-0078 built for that ruling retired with the old path,
 and the question surface that answered from it left the engine before it. So a
 deferred proposal is parked nowhere: the writer has already written nothing on
-that ruling, and this stage records one structured event naming the proposal's id
-and the ruling, and none of its content (ADR-0004 §5). Whether a deferred proposal
+that ruling, and this stage records one structured event carrying the ruling's
+kind and the proposal's memory kind alone (ADR-0319 §5): no identifier and no
+content of the proposal, since a memory id is not guaranteed free of personal
+data (ADR-0004 §5). Whether a deferred proposal
 should become something the user is asked is for the learning work to decide,
 not this stage.
 
@@ -34,8 +36,9 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
-#: The event an ``ASK_USER`` ruling is logged under, carrying the proposal's id and
-#: the ruling and never its content (ADR-0004 §5).
+#: The event an ``ASK_USER`` ruling is logged under, carrying the ruling's kind and
+#: the proposal's memory kind and nothing else of the proposal: no identifier and
+#: no content (ADR-0319 §5, ADR-0004 §5).
 DEFERRED_EVENT: Final = "memory_write_deferred"
 
 
@@ -82,9 +85,10 @@ class MemoryWriteStage:
 
         An ``ASK_USER`` ruling writes nothing: the writer persists nothing on it,
         and this stage parks nothing. One :data:`DEFERRED_EVENT` is logged with the
-        proposal's id and the ruling, and **no proposal content**: not its text,
-        its rationale, or the ruling's reason, any of which may carry the user's
-        words (ADR-0004 §5).
+        ruling's kind and the proposal's memory kind alone (ADR-0319 §5). It
+        carries **no identifier and no content** of the proposal: not its id, which
+        is not guaranteed free of personal data, nor its text, its rationale or the
+        ruling's reason, any of which may carry the user's words (ADR-0004 §5).
 
         Args:
             proposal: The proposed memory update.
@@ -100,15 +104,15 @@ class MemoryWriteStage:
         """
         # One observation of the caller's proposal, on this coroutine's first
         # executed line, before the ingest that is this method's first await
-        # (ADR-0065). The id logged below is read from this copy, so a model
-        # tampered past `frozen=True` while the ingest is in flight cannot change
-        # what the log names (ADR-0018 §3, ADR-0021 §4).
+        # (ADR-0065). The memory kind logged below is read from this copy, so a
+        # model tampered past `frozen=True` while the ingest is in flight cannot
+        # change what the log names (ADR-0018 §3, ADR-0021 §4).
         observed = proposal.model_copy(deep=True)
         result = await self._writer.ingest(observed)
         if result.decision.kind is MemoryDecisionKind.ASK_USER:
             _log.info(
                 DEFERRED_EVENT,
-                proposal_id=observed.proposed.id,
                 ruling=result.decision.kind.value,
+                memory_kind=observed.proposed.kind,
             )
         return WriteOutcome(result=result)
