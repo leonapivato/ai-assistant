@@ -128,10 +128,12 @@ class ActivationState:
     started_at: datetime | None
     conversation_id: str | None
     facts: CaptureFacts | None = None
+    #: What the old path's compose stage reported. Nothing sets either since it left
+    #: (ADR-0309 §5); the rows of :func:`terminal_status` reading them leave with the
+    #: record's members they classify into.
     outcome: TurnOutcome | None = None
     response: str | None = None
     links: ActivationLinks = field(default_factory=ActivationLinks)
-    composition_timed_out: bool = False
     reply_degraded: bool = False
     spoken_degraded: bool = False
     no_words: bool = False
@@ -246,21 +248,6 @@ class ActivationState:
         """Record ADR-0223's value as the pass now holds it (ADR-0286 §4:3)."""
         self.derived_from_external = value
 
-    def transcription(self, transcript: str | None) -> None:
-        """Keep exact text, including an empty transcript, without audio bytes."""
-        trigger = self.trigger
-        if isinstance(trigger, RecordedChannelTrigger) and isinstance(
-            trigger.payload, RecordedSpeechInput
-        ):
-            self.trigger = trigger.model_copy(
-                update={"payload": trigger.payload.model_copy(update={"transcript": transcript})}
-            )
-            self.no_words = transcript is not None and not transcript.strip()
-            if transcript is None or not transcript.strip():
-                # ADR-0276 §5: speech that yielded no words, or whose transcription
-                # failed, is a branch the pass took — the stage is never entered.
-                self.omit(UnderstandingOmission.NO_TEXT)
-
     def omit(self, omission: UnderstandingOmission) -> None:
         """Record the branch that ended the pass without an understanding (ADR-0276 §5).
 
@@ -318,17 +305,6 @@ class ActivationState:
                 "channel": ChannelIdentity(channel_type="conversation", instance_id=conversation_id)
             }
         )
-
-    def observe_result(self, outcome: TurnOutcome) -> None:
-        """Carry production degradation and response facts after composition."""
-        self.outcome = outcome
-        self.response = outcome.reply
-
-    def composition(self, text: str | None, *, degraded: bool, timed_out: bool) -> None:
-        """Retain the completed composition before later bookkeeping can fail."""
-        self.response = text
-        self.reply_degraded = degraded
-        self.composition_timed_out = timed_out
 
     def processing(
         self, ended_at: datetime, failure: BaseException | None
@@ -504,14 +480,6 @@ class ActivationState:
         """The episode's id, ``activation:<activation_id>`` (ADR-0283 §2), once admitted."""
         return None if self.activation_id is None else f"activation:{self.activation_id}"
 
-    def summary(self, text: str) -> None:
-        """Observe a produced summary before the stage's final deadline check."""
-        self.response = text
-
-    def published(self, text: str) -> None:
-        """Retain exactly the stream chunks actually published by this worker."""
-        self.response = (self.response or "") + text
-
     def degraded_report(self) -> EpisodeCaptureReport:
         """Name the episode only where its conversation recorded it, never claiming more."""
         return EpisodeCaptureReport(
@@ -581,25 +549,6 @@ def admit_channel(
     )
 
 
-def admit_resume(
-    *,
-    approved: bool,
-    remember_recipients_until: datetime | None,
-    clock: Clock,
-    id_factory: Callable[[], str],
-) -> ActivationState:
-    """Begin a control activation only after the worker resolves an unsettled park."""
-    activation_id, started_at = _metadata(clock, id_factory)
-    return ActivationState(
-        trigger=RecordedResumeTrigger(
-            channel=None, approved=approved, remember_recipients_until=remember_recipients_until
-        ),
-        activation_id=activation_id,
-        started_at=started_at,
-        conversation_id=None,
-    )
-
-
 def canonical_activation_id(minted: object) -> bool:
     """Whether ``minted`` is canonical UUID4 text, which an activation id is (ADR-0275 §6:1)."""
     if not isinstance(minted, str):
@@ -646,7 +595,7 @@ def terminal_status(  # noqa: C901, PLR0911, PLR0912 — ADR-0275's ordered term
         return ProcessingStatus.INTERRUPTED, ProcessingReason.STOPPED
     if isinstance(failure, asyncio.CancelledError):
         return ProcessingStatus.INTERRUPTED, ProcessingReason.CANCELLED
-    if state.composition_timed_out or isinstance(failure, ModelTimeoutError | SpeechTimeoutError):
+    if isinstance(failure, ModelTimeoutError | SpeechTimeoutError):
         return ProcessingStatus.FAILED, ProcessingReason.TIMEOUT
     # No failure classifies as a transcription failure since ADR-0313 §3:1 retired
     # `converse_spoken`, whose `TranscriptionFailedError` was the one that did.
