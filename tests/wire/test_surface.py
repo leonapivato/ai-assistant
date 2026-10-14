@@ -20,13 +20,12 @@ from pydantic import TypeAdapter
 
 from ai_assistant.core.types import (
     ActivationStop,
-    Confirmation,
-    ConfirmationEgress,
-    ContinuationToken,
+    BoundAccount,
     CostBasis,
     DataTier,
     DestinationProtocol,
     DiscloserProvenance,
+    EgressBinding,
     EgressDestination,
     EgressSpan,
     RecordedInvocation,
@@ -92,98 +91,83 @@ def test_an_unknown_method_is_refused_by_every_adapter() -> None:
             accessor("no_such_method")
 
 
-# --- ADR-0178 §6: an egress confirmation crosses with every member intact ----
+# --- ADR-0178 §6: an egress binding crosses with every member intact --------
 
 
-def test_an_egress_confirmation_survives_the_round_trip_a_client_actually_makes() -> None:
+def test_an_egress_binding_survives_the_round_trip_a_client_actually_makes() -> None:
     """ADR-0178 §6: ``project`` -> canonical JSON -> validation against the type.
 
-    The route a confirmation took to a client: the hub rendered the result through
-    :func:`~ai_assistant.wire.codec.project` and the canonical encoding, and the
-    client validated the decoded payload against the method's declared return
-    annotation (ADR-0085 §10). No promoted method returns a ``TurnOutcome`` since
-    ``converse`` and ``resume`` retired (ADR-0309 §5:1), and the type itself has left
-    (ADR-0318), so the confirmation is projected and validated as itself, which keeps
-    the codec's half of the claim.
+    The route a recorded binding takes to a client: the hub renders the result through
+    :func:`~ai_assistant.wire.codec.project` and the canonical encoding, and the client
+    validates the decoded payload against the method's declared return annotation
+    (ADR-0085 §10). A binding reaches a frame on the decision the trail returns.
+
+    **Ported from the old path's confirmation** (ADR-0309 §5): the confirmation that
+    carried these spans retired, and the binding holds the same spans, the same
+    coverage and the same derived destination set, so the codec's half of the claim is
+    pinned on the kept type.
 
     ``tier`` of ``None`` and ``index`` of ``None`` are in the vector deliberately:
     both are optional on :class:`~ai_assistant.core.types.EgressSpan`, and an
     encoder that dropped an absent member rather than emitting ``null`` would
     round-trip them by accident here and lose the discrimination elsewhere.
 
-    The derived canonical destination set is **not** in the frame, and this is
-    where that is visible: ``ConfirmationDestination`` is the member type of a
-    property, so no peer receives one and ``PROTOCOL_VERSION`` 10 does not
-    describe it. The far side derives its own set from the occurrences it decoded,
-    and the two cannot disagree because there is only one rule.
+    The derived canonical destination set is **not** in the frame: it is a property,
+    so no peer receives one. The far side derives its own set from the occurrences it
+    decoded, and the two cannot disagree because there is only one rule.
     """
-    confirmation = Confirmation(
-        tool_id="smtp",
-        tool_description="Send an email.",
-        parameters={"to": "Alice@Example.ORG", "body": "hello"},
-        reason="this discloses data off-device",
-        token=ContinuationToken(handle="tok"),
-        egress=ConfirmationEgress(
-            planned_with_external_content=False,
-            account_identity="work@example.com",
-            spans=(
-                EgressSpan(
-                    argument="body",
-                    provenance=DiscloserProvenance.USER_AUTHORED,
-                    extent=5,
-                    tier=None,
-                    destination=None,
-                ),
-                EgressSpan(
-                    argument="to",
-                    index=None,
-                    provenance=DiscloserProvenance.SYSTEM_SELECTED,
-                    extent=17,
-                    tier=DataTier.PERSONAL,
-                    destination=EgressDestination(
-                        protocol=DestinationProtocol.SMTP,
-                        supplied="Alice@Example.ORG",
-                        canonical="alice@example.org",
-                    ),
+    binding = EgressBinding(
+        account=BoundAccount(identity="work@example.com", reference="conn-0001"),
+        transport_endpoint="smtp://mail.example.com:587",
+        planned_with_external_content=False,
+        spans=(
+            EgressSpan(
+                argument="body",
+                provenance=DiscloserProvenance.USER_AUTHORED,
+                extent=5,
+                tier=None,
+                destination=None,
+            ),
+            EgressSpan(
+                argument="to",
+                index=None,
+                provenance=DiscloserProvenance.SYSTEM_SELECTED,
+                extent=17,
+                tier=DataTier.PERSONAL,
+                destination=EgressDestination(
+                    protocol=DestinationProtocol.SMTP,
+                    supplied="Alice@Example.ORG",
+                    canonical="alice@example.org",
                 ),
             ),
-            coverage=SpanCoverage.NOT_COVERED,
         ),
-        read=None,
-        authorization=None,
+        coverage=SpanCoverage.NOT_COVERED,
     )
-    payload = json.loads(canonical_payload(project(confirmation)))
-    decoded = TypeAdapter(Confirmation).validate_python(payload)
+    payload = json.loads(canonical_payload(project(binding)))
+    decoded = TypeAdapter(EgressBinding).validate_python(payload)
 
-    assert decoded == confirmation
-    # Present as ``null`` rather than omitted, which is what makes the bump bite:
-    # a version 9 client fails ``extra_forbidden`` on this member.
-    assert "egress" in payload
-    assert "canonical_destination_set" not in payload["egress"]
+    assert decoded == binding
+    assert "canonical_destination_set" not in payload
 
 
-def test_a_non_egress_confirmation_crosses_as_an_explicit_null() -> None:
+def test_an_absent_member_crosses_as_an_explicit_null() -> None:
     """ADR-0178 §6: ``project`` renders a model by ``model_dump()``, which keeps ``None``.
 
-    So a version 10 hub emits ``"egress": null`` on **every** confirmation, egress
-    or not — which is why ADR-0124 §9's second limb bites here rather than merely
-    applying, and why no compatibility shim is offered for it.
+    So a hub emits ``"destination": null`` on a span that names none, rather than
+    omitting the member — the shape ADR-0124 §9's second limb bites on. **Ported from
+    the old path's confirmation** (ADR-0309 §5), whose ``egress`` member was the case.
     """
-    confirmation = Confirmation(
-        tool_id="notes",
-        tool_description="Write a note.",
-        parameters={},
-        reason="an unknown cost",
-        token=ContinuationToken(handle="tok"),
-        egress=None,
-        read=None,
-        authorization=None,
+    span = EgressSpan(
+        argument="body",
+        provenance=DiscloserProvenance.USER_AUTHORED,
+        extent=5,
+        tier=None,
+        destination=None,
     )
-    payload = json.loads(canonical_payload(project(confirmation)))
-    assert payload["egress"] is None
-    # ``pending_confirmations`` returned these until it retired (ADR-0309 §5:1).
-    listed = TypeAdapter(tuple[Confirmation, ...]).validate_python([payload])
-    assert listed == (confirmation,)
+    payload = json.loads(canonical_payload(project(span)))
+    assert payload["destination"] is None
+    listed = TypeAdapter(tuple[EgressSpan, ...]).validate_python([payload])
+    assert listed == (span,)
 
 
 def test_the_invocation_pair_is_reflected_and_round_trips_through_the_codec() -> None:

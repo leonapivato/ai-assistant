@@ -697,15 +697,8 @@ def _tool() -> ToolDefinition:
 
 
 def _request() -> ActionRequest:
-    """The one request the permission seams are driven over.
-
-    It names the act its step is an attempt at (ADR-0265 §4).
-    """
-    return ActionRequest(
-        tool=_tool(),
-        parameters={},
-        intended_action="ia1",
-    )
+    """The one request the permission seams are driven over."""
+    return ActionRequest(tool=_tool(), parameters={})
 
 
 def _decision(request: ActionRequest) -> PermissionDecision:

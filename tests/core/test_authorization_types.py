@@ -3,20 +3,17 @@
 ADR-0309 §5 deletes the old path, and with it the goal-authorization Protocols, their
 contract suites and their canonical fakes. The row family those Protocols stored —
 ``Authorization``, ``CoverageMember``, ``AuthorizationBasis``, ``ValueResolution`` and
-their vocabularies — has no consumer left, so its tests left with the Protocols and the
-types follow in their own lane.
+their vocabularies — left ``core`` with them, and so did the bound a user could state
+(``BoundKind``, ``ValueBound``) and the request's ``goal``, which nothing held once the
+family went.
 
 What stays is pinned here, each value built locally rather than from a fake that no
-longer exists: the bound a user can state (``BoundKind``, ``ValueBound``), the tool
-declaration's own refusal (``system_supplied``), the fields
-``ActionRequest`` and ``PermissionRuling`` still carry, the one canonical encoding, and
-``Settings``' absence of any authorization field.
+longer exists: the tool declaration's own refusal (``system_supplied``), the one
+canonical encoding, and ``Settings``' absence of any authorization field.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from typing import Final
 
 import pytest
@@ -24,8 +21,6 @@ from pydantic import ValidationError
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.types import (
-    ActionRequest,
-    BoundKind,
     CapabilityEffect,
     CapabilityResult,
     CostBasis,
@@ -35,13 +30,8 @@ from ai_assistant.core.types import (
     RiskLevel,
     ToolCost,
     ToolDefinition,
-    ValueBound,
     canonical_json_bytes,
 )
-
-#: The instant every bound below is stated from.
-STARTS_AT: Final = datetime(2026, 9, 13, 9, 0, tzinfo=UTC)
-LATER: Final = STARTS_AT + timedelta(hours=1)
 
 #: A declaration that classifies nothing system-supplied and declares no bounded
 #: argument, so a case about either field raises it on a copy of this.
@@ -65,263 +55,7 @@ TOOL: Final = ToolDefinition(
 )
 
 
-def money_bound(
-    maximum: str | Decimal = "60",
-    *,
-    currency: str = "GBP",
-    minimum: str | Decimal | None = None,
-    maximum_exclusive: bool = False,
-) -> ValueBound:
-    """A ``MONEY`` bound: at most ``maximum`` of ``currency``, by default inclusive."""
-    return ValueBound(
-        kind=BoundKind.MONEY,
-        currency=currency,
-        maximum=Decimal(maximum),
-        minimum=None if minimum is None else Decimal(minimum),
-        maximum_exclusive=maximum_exclusive,
-    )
-
-
-def period_bound(
-    *,
-    starts_at: datetime = STARTS_AT,
-    ends_at: datetime = STARTS_AT + timedelta(hours=12),
-    timezone: str = "Europe/London",
-) -> ValueBound:
-    """A ``PERIOD`` bound over the half-open interval ``[starts_at, ends_at)``."""
-    return ValueBound(
-        kind=BoundKind.PERIOD, starts_at=starts_at, ends_at=ends_at, timezone=timezone
-    )
-
-
-def terms_bound(*terms: str) -> ValueBound:
-    """A ``TERMS`` bound over the set the user named, in their order."""
-    return ValueBound(kind=BoundKind.TERMS, terms=terms)
-
-
-# --- §2: the vocabulary is closed --------------------------------------------
-
-
-def test_the_bound_kinds_are_closed_at_the_membership_the_adr_fixes() -> None:
-    """§2 closes ``BoundKind`` at three members, pinned by **value** because the
-    values are what cross a wire and what a stored row decodes from."""
-    assert [member.value for member in BoundKind] == ["money", "period", "terms"]
-
-
-# --- §2: the three bound kinds, and every other shape refused ----------------
-
-
-#: The arguments each :class:`BoundKind` takes, keyed by kind — ADR-0254 §2's own
-#: enumeration, written once so the two directions of the validator's rule are
-#: tested against one statement of it rather than two.
-_ARGUMENTS_OF: Final[dict[BoundKind, dict[str, object]]] = {
-    BoundKind.MONEY: {"currency": "GBP", "maximum": Decimal("60")},
-    BoundKind.PERIOD: {
-        "starts_at": STARTS_AT,
-        "ends_at": LATER,
-        "timezone": "Europe/London",
-    },
-    BoundKind.TERMS: {"terms": ("flexible",)},
-}
-
-
-@pytest.mark.parametrize(
-    ("kind", "kwargs"),
-    [
-        (BoundKind.MONEY, {"terms": ("flexible",)}),
-        (BoundKind.MONEY, {"starts_at": STARTS_AT}),
-        (BoundKind.PERIOD, {"maximum": Decimal("60")}),
-        (BoundKind.TERMS, {"currency": "GBP"}),
-    ],
-)
-def test_a_bound_carrying_an_argument_its_kind_does_not_take_is_refused(
-    kind: BoundKind, kwargs: dict[str, object]
-) -> None:
-    """§2: the validator is stated in both directions, per kind."""
-    with pytest.raises(ValidationError, match="bound"):
-        ValueBound.model_validate({"kind": kind, **_ARGUMENTS_OF[kind], **kwargs})
-
-
-@pytest.mark.parametrize(
-    ("kind", "missing"),
-    [
-        (BoundKind.MONEY, "currency"),
-        (BoundKind.MONEY, "maximum"),
-        (BoundKind.PERIOD, "starts_at"),
-        (BoundKind.PERIOD, "ends_at"),
-        (BoundKind.PERIOD, "timezone"),
-        (BoundKind.TERMS, "terms"),
-    ],
-)
-def test_a_bound_missing_an_argument_its_kind_takes_is_refused(
-    kind: BoundKind, missing: str
-) -> None:
-    """§2: every argument that kind takes is present, ``minimum`` alone excepted."""
-    stated = dict(_ARGUMENTS_OF[kind])
-    del stated[missing]
-    with pytest.raises(ValidationError, match="states its"):
-        ValueBound.model_validate({"kind": kind, **stated})
-
-
-@pytest.mark.parametrize("kind", [BoundKind.PERIOD, BoundKind.TERMS])
-def test_a_bound_of_another_kind_carrying_maximum_exclusive_is_refused(kind: BoundKind) -> None:
-    """ADR-0266 §3: the flag is ``MONEY``-only, and a ``bool`` is not ``None``.
-
-    Stated as its own refusal because the stray-argument sweep cannot see it: every
-    other field of a kind it does not belong to is absent as ``None``, and a flag
-    withdrawing a ``maximum`` the bound does not state records nothing (arm 6(b)).
-    """
-    with pytest.raises(ValidationError, match="no maximum_exclusive"):
-        ValueBound.model_validate({"kind": kind, **_ARGUMENTS_OF[kind], "maximum_exclusive": True})
-
-
-def test_a_money_bound_defaults_to_an_inclusive_ceiling_and_states_a_strict_one() -> None:
-    """ADR-0266 §3: *"a ceiling the user stated strictly is representable as one"*.
-
-    **Arm 5 stands verbatim under the new field**, which is the sweep's own finding:
-    ``maximum_exclusive`` defaults to ``False``, so every bound written before this
-    decision reads exactly as it did.
-    """
-    assert money_bound("100").maximum_exclusive is False
-    assert money_bound("100", maximum_exclusive=True).maximum_exclusive is True
-
-
-@pytest.mark.parametrize("coercible", ["true", "false", "yes", "no", "on", "off", 0, 1])
-def test_a_ceiling_is_not_made_strict_or_inclusive_by_a_value_pydantic_would_coerce(
-    coercible: object,
-) -> None:
-    """ADR-0266 §3 states the flag as *"a ``bool`` defaulting to ``False``"*, and
-    lax coercion would make each of these a **different authority** rather than a
-    malformed one: ``"false"`` an inclusive ceiling, ``1`` an exclusive one.
-
-    **The one field in this model where that is not harmless**, because ADR-0254 §5
-    *orders* it: a correction clearing the flag at an equal ``maximum`` is a
-    widening §5 refuses, so a value nobody recorded decides whether the user is
-    asked. The browser's ``readBound`` already rejected exactly these shapes on the
-    ground that they are states ``ValueBound`` refuses — and it did not, so the
-    adapter was holding an invariant the type did not. Adversarial review, round 10,
-    ``blocker``.
-    """
-    with pytest.raises(ValidationError, match="must be a boolean"):
-        ValueBound.model_validate(
-            {"kind": BoundKind.MONEY, "maximum": "100", "currency": "GBP"}
-            | {"maximum_exclusive": coercible}
-        )
-
-
-@pytest.mark.parametrize("stated", [True, False])
-def test_a_ceiling_states_either_boolean_and_both_survive_a_round_trip(stated: bool) -> None:
-    """The control beside the refusals above: strictness rejects **only** what is
-    not a ``bool``, and a bound of either flag decodes from its own JSON unchanged.
-
-    Both directions matter because the flag crosses the wire on every ``MONEY``
-    bound, so a refusal reaching a conforming payload would take the whole record
-    with it.
-    """
-    bound = money_bound("100", maximum_exclusive=stated)
-    assert ValueBound.model_validate(bound.model_dump(mode="json")).maximum_exclusive is stated
-
-
-def test_a_money_bound_takes_an_optional_minimum_and_refuses_one_above_its_maximum() -> None:
-    """§2: ``minimum`` is *"less than or equal to ``maximum``"*."""
-    assert money_bound("60", minimum="10").minimum == Decimal("10")
-    with pytest.raises(ValidationError, match="minimum is at most its maximum"):
-        money_bound("10", minimum="60")
-
-
-@pytest.mark.parametrize(
-    ("amount", "reason"), [("Infinity", "finite"), ("NaN", "finite"), ("-1", "negative")]
-)
-def test_a_money_bounds_amounts_take_tool_costs_two_refusals(amount: str, reason: str) -> None:
-    """§2: ``ToolCost``'s refusals, *"reused rather than restated"*.
-
-    *"``Decimal`` admits ``Infinity`` and ``NaN``, neither of which has a JSON
-    representation or survives arithmetic in a running total, and comparing ``NaN``
-    with ``<`` raises rather than answering."*
-
-    **The non-finite half is refused by pydantic's own ``Decimal`` handling before
-    the model validator runs**, which is ``ToolCost``'s situation unchanged: the
-    explicit check is the belt-and-braces that type already carries, and what this
-    asserts is the **refusal**, not which layer produced it.
-    """
-    with pytest.raises(ValidationError, match=reason):
-        money_bound(amount)
-    with pytest.raises(ValidationError, match=reason):
-        money_bound("60", minimum=amount)
-
-
-@pytest.mark.parametrize("code", ["gbp", "GB", "GBPP", "G8P", ""])
-def test_a_money_bounds_currency_is_iso_4217_shaped_and_is_not_normalised(code: str) -> None:
-    """§2: three uppercase ASCII letters, validated for **shape** and not a register."""
-    with pytest.raises(ValidationError, match="three uppercase ASCII letters"):
-        money_bound(currency=code)
-
-
-def test_a_period_bound_is_half_open_and_refuses_an_empty_interval() -> None:
-    """§2: ``ends_at`` **strictly after** ``starts_at``; ADR-0194 §1's convention."""
-    assert period_bound(starts_at=STARTS_AT, ends_at=LATER).ends_at == LATER
-    with pytest.raises(ValidationError, match="ends strictly after it starts"):
-        period_bound(starts_at=LATER, ends_at=LATER)
-
-
-@pytest.mark.parametrize("zone", ["Mars/Olympus", "UTC+1", "+01:00", "Europe/Nowhere"])
-def test_a_period_bounds_timezone_is_a_name_the_tz_database_knows(zone: str) -> None:
-    """§4 reads a calendar date as the start of that day *in the bound's own zone*.
-
-    A name nothing resolves would make that reading unavailable at the one
-    comparison that decides whether a call is authorised, and §4's answer to an
-    unproven comparison is to refuse rather than to guess.
-    """
-    with pytest.raises(ValidationError, match="IANA zone name"):
-        period_bound(timezone=zone)
-
-
-@pytest.mark.parametrize("zone", ["localtime", "posixrules", "Localtime", "POSIXRULES"])
-def test_a_period_bounds_timezone_is_never_the_hosts_own_configuration(zone: str) -> None:
-    """§§2 and 4: the zone is **recorded** so that the comparison reads none.
-
-    ``localtime`` and ``posixrules`` resolve through ``ZoneInfo`` on a stock Linux
-    install and name the machine rather than a zone — ``localtime`` is a copy of
-    whatever the operator configured. A bound recording one would mean a different
-    interval on a different host, and a different one on the same host after
-    ``timedatectl set-timezone``, while the stored string and the row's
-    ``subject_digest`` stayed identical: a calendar date outside the bound could
-    start drawing an ``ALLOW`` with no further act of the user's.
-
-    The folded spellings are here because the tz lookup is a **file** lookup: on a
-    case-insensitive filesystem they reach the same host-local file, and no IANA
-    zone is spelled either way.
-    """
-    with pytest.raises(ValidationError, match="host's own configuration rather than a zone"):
-        period_bound(timezone=zone)
-
-
-def test_a_period_bounds_timezone_is_still_an_ordinary_iana_name() -> None:
-    """The control: the refusal above narrows nothing a user could have meant."""
-    for zone in ("UTC", "Europe/London", "Australia/Sydney", "Factory"):
-        assert period_bound(timezone=zone).timezone == zone
-
-
-def test_a_terms_bound_is_non_empty_duplicate_free_and_keeps_the_users_order() -> None:
-    """§2: the set the user named, and membership is equality of stored characters."""
-    assert terms_bound("free cancellation", "flexible").terms == (
-        "free cancellation",
-        "flexible",
-    )
-    with pytest.raises(ValidationError, match="at least one term"):
-        terms_bound()
-    with pytest.raises(ValidationError, match="each term once"):
-        terms_bound("flexible", "flexible")
-
-
-# --- §3, §6, §7: what the ruling, the request and the declaration carry -------
-
-
-def test_an_action_request_carries_no_goal_unless_orchestration_sets_one() -> None:
-    """§6: ``goal`` defaults to ``None``, and such a request reaches route (d) in no
-    case — the fail-closed direction."""
-    assert ActionRequest(tool=TOOL).goal is None
-    assert ActionRequest(tool=TOOL, goal="goal-0001").goal == "goal-0001"
+# --- §3, §7: what the declaration carries -------------------------------------
 
 
 def test_a_declaration_classifies_nothing_system_supplied_by_default() -> None:
