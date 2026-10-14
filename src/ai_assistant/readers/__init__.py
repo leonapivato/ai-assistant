@@ -11,15 +11,15 @@ here, and this package is a leaf:
 Both halves are enforced by ``lint-imports`` rather than asserted — the two
 contracts in ``pyproject.toml`` carry the argument. **The split is the point**,
 and ADR-0095 §3 refuses to collapse it: the contract sits in `core` where every
-subsystem may name it, because two of them hold the type — `orchestration` by
-injection, and later `context/` through its facet adapter — while the
-implementations sit in a package nothing imports. Making ``Reader`` an internal
+subsystem may name it, because a subsystem holds the type — `orchestration`, by
+injection, as `context/`'s facet adapter did until it retired (ADR-0309 §5) — while
+the implementations sit in a package nothing imports. Making ``Reader`` an internal
 seam here would require exactly the ``orchestration -> ai_assistant.readers`` edge
 the second contract forbids in as many words.
 
 **Why a top-level package rather than a subsystem's**, re-tested rather than
 inherited when the dedicated-always-on-box premise arrived (ADR-0095 §2):
-`context/` is advisory and non-durable, so a reader living there would need a
+`context/` was advisory and non-durable, so a reader living there would need a
 ``MemoryWriter`` to reach memory; `memory/` owns the store and the gate, and a
 producer beside the policy ruling on it is what ADR-0028's propose/dispose split
 exists to prevent; `learning/` is model-backed distillation and a reader infers
@@ -43,9 +43,9 @@ The reader here is :class:`~ai_assistant.readers.calendar.CalendarReader`. Email
 is not a source this package reads: it left the grantable sources with its reader
 (ADR-0320 §3), and returns only through the channel model's design of an email
 capability. Each source may have **more than one consumer, each reading at its own
-cadence** (ADR-0093 §3): the ``context/`` facet reads at assembly time, the
-calendar's upcoming-event producer reads on its schedule (ADR-0132), and neither
-derives its answer from the other's reading. Nothing reads a source into memory on
+cadence** (ADR-0093 §3): the calendar's upcoming-event producer reads on its
+schedule (ADR-0132), and the ``context/`` facet that read at assembly time retired
+with the request path's facets (ADR-0309 §5). Nothing reads a source into memory on
 a schedule: that consumer is retired (ADR-0294 §1).
 
 **Each consumer holds its own reader instance rather than sharing one**

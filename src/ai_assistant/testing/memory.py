@@ -348,8 +348,7 @@ class FakeMemoryStore:
                 it is how a test reads the fake's state back: what a degradation path
                 owes is that the consumer carried on *and wrote nothing*, and a
                 failure that closed the inspection window would make the second half
-                unprovable — ``tests/orchestration/test_loop.py`` asserts exactly
-                that. It is ADR-0007's data-rights snapshot rather than a retrieval,
+                unprovable. It is ADR-0007's data-rights snapshot rather than a retrieval,
                 which is the same distinction from the other side.
         """
         self._records: dict[str, MemoryRecord] = {}

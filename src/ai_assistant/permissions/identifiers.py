@@ -3,8 +3,8 @@
 ADR-0192 §2 has the ledger mint each row's ``id`` from an **injected factory**
 rather than take one from a caller. That answers three questions at once. A
 ``PermissionDecision.id`` has to exist before the write, because it is the name
-the rest of the system already knows a ruling by — a step's ``approval_ref``, a
-``ToolCall``'s decision, an invocation row's ``decision_id``. An invocation row's
+the rest of the system already knows a ruling by — a ``ToolCall``'s decision, an
+invocation row's ``decision_id``. An invocation row's
 id names nothing outside the store: it is minted at the append, learned from the
 returned row, and used once, to point a completion at its claim. Neither
 ``ToolCall`` nor the seam has an id source; deriving one from ``decision_id``

@@ -47,8 +47,8 @@ def field_state(kind: type[BaseModel], given: object) -> Any:
     a valid-but-false mapping. Everything downstream then rebuilds *that* — so the
     equality check ``claim_invocation`` runs would compare the store's row against a
     decision the caller never held, and a completion would record a cost nobody
-    submitted. ``orchestration/executor.py`` states the same reasoning for
-    ``ToolResult`` and is the precedent this follows: the class serializer is
+    submitted. The retired ``orchestration/executor.py`` stated the same reasoning
+    for ``ToolResult`` and is the precedent this follows: the class serializer is
     resolved on the class, reads the instance's field values, and consults no
     instance attribute.
 

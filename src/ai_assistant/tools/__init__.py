@@ -11,8 +11,9 @@ Contracts: :class:`~ai_assistant.core.protocols.ToolRegistry` (ADR-0016) and
 by :class:`~ai_assistant.tools.registry.InMemoryToolRegistry` — one object over
 one binding, which is how ADR-0029 §1's "invocable if and only if registered"
 stays true. Registration itself is on neither contract: what an integration
-author writes is this subsystem's own business, in the way `context` keeps its
-``ContextSource`` seam behind ``ContextProvider`` (ADR-0008).
+author writes is this subsystem's own business, in the way `context` kept its
+``ContextSource`` seam behind ``ContextProvider`` until both retired (ADR-0008,
+ADR-0309 §5).
 
 **This subsystem transmits, from one module and under one designation.**
 ADR-0154 §1 designates :mod:`ai_assistant.tools.egress` and §4 attests every one

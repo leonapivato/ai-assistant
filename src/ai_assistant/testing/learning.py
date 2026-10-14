@@ -97,8 +97,7 @@ def _derived_id(event: FeedbackEvent) -> str:
     reached that way nominates the id of the record it establishes — and an id is
     what ``MemoryStore.add`` upserts on, so a nominated one is the very collision
     the paragraph above rules out by construction. It is the same rule
-    ``ai_assistant.testing._detachment`` states for a detached snapshot,
-    ``ai_assistant.orchestration.executor`` for a ``ToolResult``, and
+    ``ai_assistant.testing._detachment`` states for a detached snapshot and
     :meth:`~ai_assistant.core.types.MemoryUpdateProposal._fingerprint_projection`
     for a proposal's fingerprint; it is stated here because this is an identity
     position too, and not because ``ai_assistant.testing`` has a boundary to

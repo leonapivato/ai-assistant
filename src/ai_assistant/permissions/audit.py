@@ -1904,9 +1904,9 @@ class SqliteAuditTrail:
         The argument is read as the **type the signature names**, before the lock:
         :data:`~ai_assistant.core.types.Identifier` strips, so ``"  d-1  "`` and
         ``"d-1"`` are one identifier to every row that holds one, and looking the
-        raw text up would answer "no open claims" for a decision holding one — with
-        the recovery scan then reserving nothing and leaving the claim open for
-        good. The same guard ``complete_invocation`` puts on ``claim_id``.
+        raw text up would answer "no open claims" for a decision holding one, and
+        leave the claim open for good. The same guard ``complete_invocation`` puts on
+        ``claim_id``.
 
         Raises:
             AuditError: If ``decision_id`` is not a usable identifier, or the trail

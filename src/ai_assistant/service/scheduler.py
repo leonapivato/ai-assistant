@@ -19,8 +19,8 @@ this is a client of the same façade the CLI is a client of.
 **That is also what closes the shutdown race**, and the reasoning is worth having
 here rather than only in the ADR. ``Engine._tracked`` wraps every public method, so
 a job whose body is ``engine.<operation>()`` has its underlying store work in
-``_inflight`` already and the engine's drain waits for it exactly as it waits for a
-``converse``. What is *untracked* is only this loop, and that is closed by ordering
+``_inflight`` already and the engine's drain waits for it exactly as it waits for
+any other call. What is *untracked* is only this loop, and that is closed by ordering
 rather than by ownership: service shutdown stops and joins the scheduler **before**
 calling ``Engine.aclose()`` (see :mod:`ai_assistant.service.hub`). Belt and braces
 for the race window, :class:`Scheduler` treats the ``RuntimeError`` that
@@ -266,14 +266,9 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
     source's scheduled ingestion rows are retired and nothing replaces them here: a
     source's content reaches memory only as what an activation concludes.
 
-    **Confirmation deadlines are deliberately not here.** The roadmap names them as
-    this scheduler's, and §7 is the one place that sentence does not survive contact
-    with what is ratified below it: there is no operation to reclaim an expired
-    confirmation (ADR-0059 §3, #333) and the deadline it would enforce is not yet
-    written (#525), so a job over a column of nulls would sweep nothing and look
-    healthy doing it. Nothing goes unenforced meanwhile — the lifetime is enforced
-    at *answer* time by ``_check_fresh``, so an expired confirmation is unanswerable
-    whether or not anything sweeps.
+    **Confirmation deadlines are deliberately not here.** The roadmap named them as
+    this scheduler's, and the confirmations they would sweep retired with the old
+    path (ADR-0309 §5), so a job here would sweep nothing and look healthy doing it.
 
     Args:
         engine: The façade every job calls. Each job holds a **bound method** of

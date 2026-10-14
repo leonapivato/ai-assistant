@@ -617,7 +617,7 @@ def _refuse_secret_write(decision: MemoryDecision, proposal: MemoryUpdateProposa
     """Refuse any *write* of a ``DataTier.SECRET`` proposal (ADR-0078 §5b check 0).
 
     **A refusal at the writer boundary, independent of the model validator**
-    ``DeferredProposal`` and ``MemoryUpdateProposal`` carry, because a validator is
+    ``MemoryUpdateProposal`` carries, because a validator is
     not a boundary: ``model_construct`` and ``model_copy(update=...)`` both skip
     validation, and this repository already treats a definition "tampered past
     ``frozen=True`` with ``object.__setattr__``" as inside its threat model

@@ -9,9 +9,8 @@ that a fact rather than an intention.
 
 **It is stateless, by decision rather than by description** (ADR-0084 §7). Under a
 resident hub a continuation token *could* outlive a command — the engine lives on —
-and the client nonetheless does not persist one; it re-enumerates through
-``pending_confirmations()``. "A client that cached tokens would behave differently
-depending on whether the hub happened to restart between two commands, and 'it
+and the client nonetheless does not persist one. "A client that cached tokens would
+behave differently depending on whether the hub happened to restart between two commands, and 'it
 works unless something invisible happened' is the opposite of legible."
 
 **One connection per call**, which falls out of that statelessness rather than
@@ -1131,7 +1130,7 @@ class HubClient:
 
         Args:
             decision_id: The recorded decision, from **this surface's own**
-                :meth:`grantable_decisions` or :meth:`recent_decisions` listing.
+                :meth:`recent_decisions` listing.
 
         Returns:
             The record the hub's store accepted.
@@ -1607,7 +1606,8 @@ class HubClient:
         in ``wire/server.py``'s ``CONNECTION_METHODS`` (ADR-0186 §5). The five that
         are withheld are withheld because they carry a Tier 0 credential, and a
         ``PermissionDecision`` carries none: every class of fact one holds already
-        crosses ADR-0124's hop inside a ``Confirmation``'s ``ConfirmationEgress``.
+        crossed ADR-0124's hop inside a ``Confirmation``'s ``ConfirmationEgress``,
+        before the old path retired both (ADR-0309 §5).
 
         ``limit`` is refused when it is **not strictly positive**, locally and
         before a frame is sent, on :meth:`recent_grants`' reason (ADR-0186 §3) — the

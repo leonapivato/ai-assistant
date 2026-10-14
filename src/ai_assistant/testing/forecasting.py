@@ -881,8 +881,7 @@ class FakeForecaster:
                 refused value reached nothing has the absence of a row to assert over.
             ToolBindingError: If the call does not survive ADR-0260 §6's three
                 pre-execution checks (:meth:`_authorised`). Carrying **no**
-                ``ForecastRefusal``, because it is no outcome of the read: the servicing
-                records ``BINDING_FAILED``, which establishes no contact.
+                ``ForecastRefusal``, because it is no outcome of the read.
             CancelledError: Re-raised unchanged when a call armed by
                 :meth:`suspend_next` is cancelled from outside while suspended, and
                 converted into neither an outcome nor a refusal (ADR-0060, ADR-0260 §4).

@@ -2,10 +2,9 @@
 
 The shared fakes for :class:`~ai_assistant.core.protocols.SourceGrants` and
 :class:`~ai_assistant.core.protocols.SourceGrantStore`, so a subsystem that
-drives a reader — `orchestration`'s upcoming-event producer, `context`'s facet
-adapter — can exercise every branch of its own gate without a store on disk and
-without importing the permissions subsystem's internals (``CLAUDE.md`` golden
-rule 1).
+drives a reader — `orchestration`'s upcoming-event producer — can exercise
+every branch of its own gate without a store on disk and without importing the
+permissions subsystem's internals (``CLAUDE.md`` golden rule 1).
 
 **Two fakes because the seam is two Protocols**, split by capability rather than
 by taxonomy (ADR-0097 §3). :class:`FakeSourceGrants` is the narrow one and can
@@ -198,8 +197,8 @@ class _GrantLog:
         ``model_dump()``**, which is where this parts company with
         ``FakeAuditTrail.record``'s otherwise identical shape. ``model_dump`` is an
         ordinary overridable method, so a ``SourceGrant`` subclass can return a
-        mapping that does not describe itself — a ``FACET``-only instance whose
-        dump says ``(FACET, INGEST)`` — and the store would then append a *wider
+        mapping that does not describe itself — a ``NOTIFY``-only instance whose
+        dump says ``(NOTIFY, INGEST)`` — and the store would then append a *wider
         grant than the one it was handed*. That is not the
         caller-falsifies-its-own-record case ADR-0018 §3 puts outside a store's
         reach: the object presented is a valid narrow grant and the record kept is

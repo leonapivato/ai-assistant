@@ -7,9 +7,9 @@ pair is in hand.
 
 The callable's own signature is deliberately **not** a ``core`` contract.
 ADR-0029 §1 leaves "how the callable is reached" internal to `tools/`, on
-ADR-0008's precedent — a ``ContextProvider`` crosses the boundary while the
-``ContextSource`` seam that populates it stays inside `context/`. Registration
-is this subsystem's ``ContextSource``.
+ADR-0008's precedent — a ``ContextProvider`` crossed the boundary while the
+``ContextSource`` seam that populated it stayed inside `context/`, until both
+retired (ADR-0309 §5). Registration is this subsystem's ``ContextSource``.
 
 **There are two callable shapes, not one**, and the second is what that licence
 was being kept for. :class:`ToolImplementation` takes the call's arguments;

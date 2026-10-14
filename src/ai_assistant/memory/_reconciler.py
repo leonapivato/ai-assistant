@@ -491,8 +491,8 @@ def _render(record: MemoryRecord, consulted: Sequence[MemoryRecord]) -> str:
     :data:`~ai_assistant.core.types.MemoryRecord` fixes it as a ``Literal``, so it is
     the assembler's own vocabulary rather than a span. The **id** is escaped even
     though ADR-0092 §6 obliges an ``EXTERNAL`` producer to mint one opaque to its
-    source, for the reason ``orchestration.composing`` gives for quoting this
-    system's own output: "a span this system authored can still carry a newline, and
+    source, for the reason the retired ``orchestration.composing`` gave for quoting
+    this system's own output: "a span this system authored can still carry a newline, and
     §2's non-forgeability is a property of the assembler rather than a judgement
     about the span's author". ``MemoryRecord.id`` is ``EncodableText``, and a
     container whose non-forgeability rested on a producer elsewhere behaving would

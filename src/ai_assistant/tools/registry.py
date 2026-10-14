@@ -135,8 +135,7 @@ def revalidated_call(call: ToolCall) -> ToolCall:
     would never have accepted, and ``authorises`` compares a digest that
     canonicalises that mapping to JSON — so checking authorisation first would
     raise a raw serialisation error out of a method whose contract is that it
-    answers a question, after the executor has already committed its
-    ``→ RUNNING`` claim. Revalidating first turns that input into a rejection.
+    answers a question. Revalidating first turns that input into a rejection.
 
     Raises:
         ToolBindingError: If the mutated call is one the type would refuse to
@@ -315,9 +314,9 @@ class InMemoryToolRegistry:
         - **any** registration under a *deregistered* id is refused too, even an
           identical one. Deregistration is revocation, not renaming. Were an id
           reusable, it could be rebound between a permission decision and the
-          step that executes it: the user approves a ``REVERSIBLE`` send, an
-          ``IRREVERSIBLE`` definition takes the name, and both the
-          ``approval_ref`` and the ``bound_tool`` id still read as consistent.
+          call that executes it: the user approves a ``REVERSIBLE`` send, an
+          ``IRREVERSIBLE`` definition takes the name, and the decision's tool id
+          still reads as consistent.
 
         Raises:
             ToolRegistrationError: If the id is already bound to a different

@@ -587,8 +587,9 @@ def non_blank_text(value: str, *, name: str) -> str:
 #: ``GrantScope`` keeps ``INGEST`` — a recorded grant naming it stays readable,
 #: exportable and revocable, and a revocation still transcribes it — but "a new
 #: grant names a non-empty subset of ``FACET`` and ``NOTIFY``", because nothing
-#: reads a source under ``INGEST`` any more. Written as an exclusion from the enum
-#: rather than as a list of the two, so the refusal is of the one retired member.
+#: reads a source under ``INGEST`` any more, and ``FACET`` has since left the enum
+#: (ADR-0318 §6:2). Written as an exclusion from the enum rather than as a list, so
+#: the refusal is of the one retired member.
 GRANTABLE_SCOPES: Final[tuple[GrantScope, ...]] = tuple(
     use for use in GrantScope if use is not GrantScope.INGEST
 )

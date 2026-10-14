@@ -731,7 +731,9 @@ class FakeAssistantEngine:
         thrown away by the next assignment and the guard would be there or not
         depending on whether a case used the lever.
 
-        The translation is :meth:`StepRunner._now`'s, so the fake refuses what the
+        The translation is
+        :meth:`~ai_assistant.orchestration.recipient_grants.RecipientGrantOperations._now`'s,
+        so the fake refuses what the
         concrete engine refuses with the type it refuses it with: a consumer's test
         against a non-conforming clock must not pass here and fail against a hub.
 

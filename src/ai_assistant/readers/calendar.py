@@ -453,10 +453,10 @@ class CalendarReader:
         except Exception as exc:
             # **Broad on purpose, and the cause is what keeps it honest.** §8
             # forbids letting a source-level exception — an ``OSError``, a
-            # parser's own class — cross the seam unwrapped, because both
-            # consumers would then have to catch by *implementation*: the
-            # `context/` adapter and the scheduler job would each need to know
-            # which exceptions this reader's parser can throw. A programming
+            # parser's own class — cross the seam unwrapped, because every
+            # consumer would then have to catch by *implementation*: the
+            # scheduler job would need to know which exceptions this reader's
+            # parser can throw. A programming
             # error is not hidden by this, it is relabelled: it arrives as a
             # ``ReaderError`` whose ``__cause__`` is a ``TypeError``, which reads
             # unambiguously in the one place ADR-0083 §7 puts it.
@@ -540,9 +540,9 @@ class CalendarReader:
                 window_end,
                 accounted=resolved.accounted and proposed_all,
             ),
-            # The other consumer's half of the same read, from the same
+            # The situational half of the same read, from the same
             # occurrences and the same acquisition instant (ADR-0096 §5). It is
-            # built here rather than by the `context/` adapter because an adapter
+            # built here rather than by a consumer because a consumer
             # that built its own would be stamping a value with instants it did
             # not observe, and `SourceReading`'s validator refuses exactly that.
             facet=self._facet(occurrences, read_at, window_end),
