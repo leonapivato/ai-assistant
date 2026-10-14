@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     StageOutcome,
 )
 from ai_assistant.orchestration.chat import COULDNT_FINISH
+from ai_assistant.orchestration.defects import ToleratedStageError
 from ai_assistant.orchestration.phase_path import is_defect, log_defect
 from ai_assistant.testing import (
     FakeConversationStore,
@@ -119,6 +120,7 @@ def _activation(episode: EpisodicMemory) -> str:
         (ModelError("down"), False),
         (ConversationStoreError("busy"), False),
         (TimeoutError(), False),
+        (ToleratedStageError("recall's digest failed"), False),
         (ExceptionGroup("both", [ModelError("down"), TimeoutError()]), False),
         (ExceptionGroup("both", [ModelError("down"), ValueError("bug")]), True),
     ],

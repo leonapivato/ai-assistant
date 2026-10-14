@@ -11,9 +11,10 @@ import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from typing import Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from structlog.testing import capture_logs
 
 from ai_assistant.core.diagnostics import diagnosed_activation_id, write_diagnostic
 from ai_assistant.core.errors import MemoryStoreError, ModelTimeoutError, PlanningError
@@ -37,6 +38,9 @@ from ai_assistant.orchestration.controller import (
     run_recorded,
 )
 from ai_assistant.testing import FakeDiagnosticSink
+
+if TYPE_CHECKING:
+    from collections.abc import MutableMapping, Sequence
 
 _AT: Final = datetime(2026, 9, 27, tzinfo=UTC)
 
@@ -945,6 +949,116 @@ async def test_a_recorded_stage_that_raises_after_the_mark_ends_stopped_and_rera
         (ControllerStage.DRIVE, ControllerRule.PARK_ANSWERED, StageOutcome.FAILED),
         (ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE),
     ]
+
+
+# --- #2927: the error a stop keeps from being re-raised -----------------------------
+
+
+#: Words a stage's error carries, which no log line may (ADR-0314 §3:2).
+_PRIVATE: Final = "the user's private words"
+
+
+def _raising_after_the_mark(mark: _Mark, error: Exception | None) -> ActivationController[_Facts]:
+    """A pass whose one stage sets the stop mark, then raises ``error`` or decides."""
+
+    async def body(state: _Facts) -> None:
+        mark.stopped = True
+        if error is not None:
+            raise error
+        state.event_summarized = True
+
+    _, now = _clock()
+    return ActivationController(
+        stages=(Stage(ControllerStage.EVENT_SUMMARY, body),),
+        clock=now,  # type: ignore[arg-type]  # a plain callable
+        rules=_MECHANISM_RULES,
+        stopped=mark,
+        activation_id="a-1",
+    )
+
+
+def _errors(logs: Sequence[MutableMapping[str, Any]]) -> list[MutableMapping[str, Any]]:
+    return [one for one in logs if one["log_level"] == "error"]
+
+
+async def test_a_defect_a_stop_keeps_from_being_reraised_is_logged_by_class_and_frames() -> None:
+    """ADR-0297 §4 still ends the pass ``stopped``; the defect is logged once, wordless."""
+    mark = _Mark()
+    record = StageRecord()
+
+    with capture_logs() as logs:
+        await _raising_after_the_mark(mark, ValueError(_PRIVATE)).run(
+            _Facts(informational_event=True), record
+        )
+
+    assert _shape(record) == [
+        (ControllerStage.EVENT_SUMMARY, ControllerRule.EVENT_UNSUMMARIZED, StageOutcome.FAILED),
+        (ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE),
+    ]
+    (line,) = _errors(logs)
+    assert line["event"] == "stopped_stage_failed"
+    assert line["stage"] == ControllerStage.EVENT_SUMMARY.value
+    assert line["activation_id"] == "a-1"
+    assert line["error"] == "ValueError"
+    assert "in body" in line["traceback"]
+    assert "exc_info" not in line
+    assert _PRIVATE not in repr(logs)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [PlanningError(_PRIVATE), ModelTimeoutError(_PRIVATE), TimeoutError(_PRIVATE)],
+    ids=["operational", "deadline", "timeout"],
+)
+async def test_an_expected_error_a_stop_keeps_from_being_reraised_logs_nothing(
+    error: Exception,
+) -> None:
+    mark = _Mark()
+    record = StageRecord()
+
+    with capture_logs() as logs:
+        await _raising_after_the_mark(mark, error).run(_Facts(informational_event=True), record)
+
+    assert record.entries[-1].due is ControllerRule.STOPPED
+    assert _errors(logs) == []
+    assert _PRIVATE not in repr(logs)
+
+
+async def test_a_stage_that_ends_done_once_the_mark_is_set_logs_nothing() -> None:
+    mark = _Mark()
+    record = StageRecord()
+
+    with capture_logs() as logs:
+        await _raising_after_the_mark(mark, None).run(_Facts(informational_event=True), record)
+
+    assert _shape(record) == [
+        (ControllerStage.EVENT_SUMMARY, ControllerRule.EVENT_UNSUMMARIZED, StageOutcome.DONE),
+        (ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE),
+    ]
+    assert logs == []
+
+
+async def test_a_defect_on_an_unmarked_pass_is_reraised_and_left_to_its_caller_to_log() -> None:
+    """Only a stop keeps an error from its caller; one re-raised is logged there (#2904)."""
+    error = ValueError(_PRIVATE)
+
+    async def body(_: _Facts) -> None:
+        raise error
+
+    _, now = _clock()
+    controller = ActivationController(
+        stages=(Stage(ControllerStage.EVENT_SUMMARY, body),),
+        clock=now,  # type: ignore[arg-type]  # a plain callable
+        rules=_MECHANISM_RULES,
+        stopped=_Mark(),
+        activation_id="a-1",
+    )
+
+    with capture_logs() as logs, pytest.raises(ValueError, match=_PRIVATE) as caught:
+        await controller.run(_Facts(informational_event=True), StageRecord())
+
+    assert caught.value is error
+    assert logs == []
 
 
 # --- ADR-0309 §3: the phases' table, the round's step and the per-round guard ----------

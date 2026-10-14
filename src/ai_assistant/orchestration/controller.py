@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     StageEntry,
     StageOutcome,
 )
+from ai_assistant.orchestration.defects import is_defect, log_defect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
@@ -882,8 +883,11 @@ class ActivationController[P: PassFacts]:
         appends ``stopped`` where it would append ``interrupted``. A stage that failed
         or timed out once the mark was set ends the pass with the stop's end entry, and
         its error is **not** re-raised: the stop was taken in first, so it is what
-        ended the pass. No task is cancelled, and a cancellation that reaches a marked
-        pass still propagates, its end entry still the stop's.
+        ended the pass. Where that error is a programming defect it is logged, by its
+        class and frames and never its message, since nothing it would have reached
+        logs it now (#2927, ADR-0314 §3:2); an expected ending logs nothing. No task is
+        cancelled, and a cancellation that reaches a marked pass still propagates, its
+        end entry still the stop's.
 
         **The run binds the activation its diagnostic entries are written for**
         (ADR-0314 §5:4), around every stage, and writes one step entry for each entry it
@@ -923,6 +927,24 @@ class ActivationController[P: PassFacts]:
     async def _ended(self, record: StageRecord) -> None:
         """Write the end entry the record just took."""
         await self._stepped(record.entries[-1])
+
+    def _swallowed(self, ending: tuple[ControllerStage, StageResult] | None) -> None:
+        """Log the error a stop kept from being re-raised, where it is a defect (#2927).
+
+        A stopped pass does not re-raise (ADR-0297 §4), so the error reaches nothing
+        that logs it. A defect is logged as the engine logs one, by its class and frames
+        and never its message (ADR-0314 §3:2); an expected ending logs nothing new.
+        """
+        if ending is None:
+            return
+        stage, result = ending
+        if result.error is not None and is_defect(result.error):
+            log_defect(
+                "stopped_stage_failed",
+                result.error,
+                stage=stage.value,
+                activation_id=self._activation_id,
+            )
 
     async def _run(self, state: P, record: StageRecord) -> None:  # noqa: C901, PLR0912 — §3's one step, with ADR-0297 §4's two readings of the stop mark and ADR-0309 §3:3's step of two stages in it
         ran: set[tuple[ControllerStage, object]] = set()
@@ -968,28 +990,22 @@ class ActivationController[P: PassFacts]:
                     await self._stepped(entry, result.error)
                 if self._appended is not None:
                     await self._appended()
+                ending = _ending(state, steps)
                 if self._marked():
+                    self._swallowed(ending)
                     return
-                ending = next(
-                    (
-                        result
-                        for _, (result, _) in steps
-                        if result.outcome is not StageOutcome.DONE
-                        and not (result.tolerated and not state.deadline_passed)
-                    ),
-                    None,
-                )
                 if ending is None:
                     continue
+                _, failed = ending
                 record.end(
                     ControllerRule.STAGE_TIMED_OUT
-                    if ending.outcome is StageOutcome.TIMED_OUT
+                    if failed.outcome is StageOutcome.TIMED_OUT
                     else ControllerRule.STAGE_FAILED,
                     self._clock(),
                 )
                 await self._ended(record)
-                assert ending.error is not None  # noqa: S101 — a stage that did not end done carries its error
-                raise ending.error
+                assert failed.error is not None  # noqa: S101 — a stage that did not end done carries its error
+                raise failed.error
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -1001,6 +1017,25 @@ class ActivationController[P: PassFacts]:
                 )
                 if not cancelled:
                     await self._ended(record)
+
+
+def _ending(
+    state: PassFacts, steps: Sequence[tuple[ControllerStage, tuple[StageResult, datetime]]]
+) -> tuple[ControllerStage, StageResult] | None:
+    """The step's first result that ends the pass under the fixed default, and its stage.
+
+    One that did not end ``done``, save a tolerated one while the pass's deadline has
+    not passed (ADR-0281 §5); ``None`` where the pass goes on.
+    """
+    return next(
+        (
+            (name, result)
+            for name, (result, _) in steps
+            if result.outcome is not StageOutcome.DONE
+            and not (result.tolerated and not state.deadline_passed)
+        ),
+        None,
+    )
 
 
 class _CancelledBeside(Exception):  # noqa: N818 — names what happened to the stage, and is never raised
