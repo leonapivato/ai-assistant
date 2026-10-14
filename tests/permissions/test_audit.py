@@ -465,13 +465,14 @@ async def test_a_fresh_trail_keeps_no_step_no_execution_and_no_binding_index(
     assert indexes.isdisjoint({"decisions_binding_resolution", "decisions_binding"})
 
 
-def _write_premarker_trail(path: Path) -> None:
+def _write_premarker_trail(path: Path, table: str = "decisions") -> None:
     """Seed ``path`` with a ``decisions`` table and no marker, as code before it wrote."""
     legacy = sqlite3.connect(str(path))
     try:
         legacy.execute(
-            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
-            "resolves TEXT, data TEXT NOT NULL)"
+            f"CREATE TABLE {table}(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
+            "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
+            "expires_at_us INTEGER, data TEXT NOT NULL)"
         )
         legacy.execute(
             "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
@@ -483,21 +484,25 @@ def _write_premarker_trail(path: Path) -> None:
 
 
 @pytest.mark.integration
-async def test_a_pre_marker_database_is_refused_rather_than_migrated(tmp_path: Path) -> None:
+@pytest.mark.parametrize("table", ["decisions", "Decisions"])
+async def test_a_pre_marker_database_is_refused_rather_than_migrated(
+    tmp_path: Path, table: str
+) -> None:
     """A trail holding decisions and no marker predates it, and nothing reads it.
 
     No reader is written for a store from before the cutover (ADR-0309 §6:4), so it is
     refused at open — inside the setup transaction, before any create — and the file
-    is left exactly as it arrived: no ``meta`` table, no marker, no new table.
+    is left exactly as it arrived: no ``meta`` table, no marker, no new table. A table
+    declared ``Decisions`` is the same table to SQLite, so it is refused the same way.
     """
     path = tmp_path / "audit.db"
-    _write_premarker_trail(path)
+    _write_premarker_trail(path, table)
 
     with pytest.raises(AuditError, match="predates the marker"):
         SqliteAuditTrail(path=path)
 
     assert _stored_schema_version(path) is None
-    assert _tables(path) == {"decisions"}
+    assert _tables(path) == {table}
 
 
 def _tables(path: Path) -> set[str]:
