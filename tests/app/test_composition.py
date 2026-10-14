@@ -15,7 +15,6 @@ import stat
 import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from email.utils import format_datetime
 from enum import StrEnum
 from pathlib import Path
 from types import ModuleType
@@ -100,7 +99,7 @@ from ai_assistant.permissions import (
     ThresholdActionPolicy,
 )
 from ai_assistant.planning import SqlitePlanStore
-from ai_assistant.readers import CALENDAR_READER_NAME, EMAIL_READER_NAME
+from ai_assistant.readers import CALENDAR_READER_NAME
 from ai_assistant.secret_store import backend as secret_store_module
 from ai_assistant.testing import FakeMemoryStore, FakeTraceSink, evaluation_trace
 from ai_assistant.tools import InMemoryToolRegistry
@@ -1132,41 +1131,6 @@ def _one_event_calendar(directory: Path) -> Path:
     return path
 
 
-def _one_message_mailbox(directory: Path) -> Path:
-    """A minimal mbox holding one message delivered an hour ago, and its path.
-
-    :func:`_one_event_calendar`'s shape for the second source, and anchored on the
-    real clock for its reason exactly: the composition root leaves the reader's
-    clock at its default, because nothing at this layer has a second clock to hand
-    it. An hour ago sits comfortably inside ADR-0140 §12's seven-day default window,
-    so the case does not depend on the wall clock beyond it being a clock (#658
-    tracks the live-clock dependency this shares with the calendar's fixtures).
-
-    **The ``From `` separator's own timestamp is deliberately wrong**, as every
-    fixture in ``tests/readers`` writes it: ADR-0140 §5 forbids deriving a delivery
-    instant from it, and a fixture that made it agree with the headers would let a
-    reader that read the wrong line pass.
-
-    ``Date`` and ``X-Assistant-Delivered-At`` are written from the same instant here
-    because this case is about *wiring* rather than about §5's two clocks — the
-    tests that pull them apart are the reader's, in
-    ``tests/readers/test_email_headers.py``.
-    """
-    delivered = datetime.now(UTC) - timedelta(hours=1)
-    path = directory / "mail.mbox"
-    path.write_bytes(
-        (
-            "From nobody@invalid Thu Jan  1 00:00:00 1970\n"
-            "From: Alice <alice@example.com>\n"
-            "Subject: Standup moved to ten\n"
-            f"Date: {format_datetime(delivered)}\n"
-            f"X-Assistant-Delivered-At: {delivered:%Y-%m-%dT%H:%M:%SZ}\n"
-            "\n"
-        ).encode()
-    )
-    return path
-
-
 async def _grant_the_calendar(engine: Engine) -> None:
     """Grant the one source this tree has, through the surface a user uses.
 
@@ -1989,81 +1953,30 @@ async def test_the_drivers_and_the_grant_operations_share_one_store(
         await engine.aclose()
 
 
-async def test_build_engine_registers_the_configured_mail_source_on_its_own_readers(
-    tmp_path: Path,
+async def test_email_is_not_offered_even_where_its_old_store_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-0140 §13's registration item: the deliverable that makes the reader called.
+    """ADR-0320 §3: email is not a grantable source, and no setting makes it one.
 
-    §13 names this as its own deliverable rather than leaving it implicit in the
-    reader and the adapter, "because they are *objects* and this is the wiring that
-    puts them in the engine — a different thing to omit, and the one omission that
-    leaves a fully conforming ``EmailReader`` a module nothing calls". Every other
-    test in ADR-0140's list constructs its subject directly, so every one of them
-    passes on an engine that wires none of them.
-
-    The source is offered by ``grantable_sources()`` under the declared identity
-    ``email``. The facet adapter went with the old path's context provider (ADR-0309
-    §5), and §13's third registration, the ingestion stage, is retired (ADR-0294 §1).
-    """
-    store = _one_message_mailbox(tmp_path)
-    settings = Settings(embedder=EmbedderKind.HASHING, email_source_path=store)
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        offered = await engine.grantable_sources()
-        assert [one.source for one in offered] == [EMAIL_READER_NAME]
-        assert offered[0].location == str(store)
-    finally:
-        await engine.aclose()
-
-
-async def test_build_engine_registers_nothing_for_email_without_a_path(
-    tmp_path: Path,
-) -> None:
-    """The half a lane omits, because a hub with no mail configured looks like nothing.
-
-    ADR-0140 §13: "with it unset, none of the three is registered at all, because a
-    source with nothing to read is 'I/O on personal data in exchange for nothing'".
-
-    ``email_source_path`` defaults to ``None`` (ADR-0140 §12), so this is the
-    shipping default rather than a configuration a test had to construct.
-    """
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    try:
-        assert await engine.grantable_sources() == ()
-    finally:
-        await engine.aclose()
-
-
-async def test_each_source_is_offered_under_its_own_identity_and_its_own_location(
-    tmp_path: Path,
-) -> None:
-    """ADR-0102 §6 with a second source, which is what made the location per source.
-
-    Until email arrived, ``grantable_sources`` read one ``Settings`` field for every
-    reader in the list — correct only while every reader was a calendar's. With two
-    sources that shape discloses the calendar's path as email's, and §6's third
-    clause forbids a client that cannot show the location from sending ``grant``: a
-    grant given against a *wrong* disclosed location is the uninformed grant
-    ADR-0097 §9a exists to prevent, arriving through a wiring shortcut.
-
-    **Each source's instances still deduplicate to one row**, which is ADR-0102 §7's
-    other half and is what makes the count assertion below meaningful: two calendar
-    consumers and one email consumer, three readers, two offers.
+    Through the hub's own ``load_settings`` over an environment that still names a
+    mail store at the variable the retired reader was configured by, beside a
+    configured calendar: ``Settings`` ignores the variable, the composition root
+    builds no email reader, and ``grantable_sources`` offers the calendar alone, at
+    its own location. The calendar is there so the case cannot pass on an engine
+    that offers nothing at all.
     """
     calendar = _one_event_calendar(tmp_path)
-    store = _one_message_mailbox(tmp_path)
-    settings = Settings(
-        embedder=EmbedderKind.HASHING,
-        calendar_reader_path=calendar,
-        email_source_path=store,
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
+    store = tmp_path / "mail.mbox"
+    store.write_bytes(b"From nobody@invalid Thu Jan  1 00:00:00 1970\n\n")
+    monkeypatch.setenv("ASSISTANT_EMBEDDER", "hashing")
+    monkeypatch.setenv("ASSISTANT_CALENDAR_READER_PATH", str(calendar))
+    monkeypatch.setenv("ASSISTANT_EMAIL_SOURCE_PATH", str(store))
+    engine = build_engine(load_settings(), data_dir=tmp_path)
     try:
-        offered = {one.source: one for one in await engine.grantable_sources()}
+        offered = await engine.grantable_sources()
 
-        assert set(offered) == {CALENDAR_READER_NAME, EMAIL_READER_NAME}
-        assert offered[CALENDAR_READER_NAME].location == str(calendar)
-        assert offered[EMAIL_READER_NAME].location == str(store)
+        assert [one.source for one in offered] == [CALENDAR_READER_NAME]
+        assert offered[0].location == str(calendar)
     finally:
         await engine.aclose()
 

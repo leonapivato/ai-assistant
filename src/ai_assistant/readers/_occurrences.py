@@ -1148,11 +1148,10 @@ def _text(value: object) -> str:
     decodes a ``\n`` escape in a TEXT property into a real newline, so before
     this an adversary-chosen ``SUMMARY`` put a line break inside the sentence
     :func:`~ai_assistant.readers.calendar._render` composes, while the email
-    reader removed one from a header value. Both readers now apply the one rule,
-    and it is applied **here rather than at the rendering** so that
+    reader (retired since, ADR-0320 §3) removed one from a header value. The rule
+    is applied **here rather than at the rendering** so that
     :attr:`_Entry.text_bytes` — what ``calendar_max_content_bytes`` is measured
-    against — counts the characters that actually reach a proposal, which is what
-    the email reader's own ``text_bytes`` has always counted.
+    against — counts the characters that actually reach a proposal.
 
     It neutralises nothing a consumer may rely on. ADR-0183 §8 binds unchanged
     over the composed string, the quotation mark is untouched, and ``_compose``'s

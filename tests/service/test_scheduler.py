@@ -30,7 +30,6 @@ from __future__ import annotations
 import asyncio
 import math
 from datetime import UTC, datetime, timedelta
-from email.utils import format_datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -249,12 +248,12 @@ async def test_no_ingestion_job_is_scheduled_even_where_the_old_variables_are_se
     an environment that still carries the two variables a pre-change deployment set
     to arm ingestion. ``Settings`` ignores a variable that names no field, so the
     hub starts without an error and arms nothing from them — which is the cutover
-    ADR-0294 §5 names. Both sources are configured and every other interval is
+    ADR-0294 §5 names. The calendar is configured and every other interval is
     armed, so the table read here is the widest a deployment can build; the check
-    is over every row's name *and* every row's bound method.
+    is over every row's name *and* every row's bound method. The email variables
+    name no field either, since email left the grantable sources (ADR-0320 §3).
     """
     _write_one_event_calendar(tmp_path / "calendar.ics")
-    _write_one_mail_message(tmp_path / "mail.mbox")
     monkeypatch.setenv("ASSISTANT_CALENDAR_READER_INTERVAL", "PT6H")
     monkeypatch.setenv("ASSISTANT_EMAIL_READER_INTERVAL", "PT6H")
     monkeypatch.setenv("ASSISTANT_EMBEDDER", "hashing")
@@ -1161,31 +1160,3 @@ async def test_the_producer_job_can_be_disabled_but_never_by_zero(tmp_path: Path
             _producer_settings(tmp_path, interval=timedelta(0))
     finally:
         await engine.aclose()
-
-
-def _write_one_mail_message(path: Path) -> None:
-    """Put one message delivered an hour ago at ``path`` — a store a granted job reads.
-
-    Duplicated from ``tests/app/test_composition.py`` rather than shared, and
-    deliberately, for :func:`_write_one_event_calendar`'s reason exactly: a test of
-    the *scheduler* should not reach into the composition root's test module for its
-    fixture, and the two subjects happen to need the same few lines of mbox rather
-    than sharing a concern.
-
-    Anchored on the real clock, which is a known dependency rather than an oversight
-    (#658): ``EmailReader``'s window is clock-relative by definition (ADR-0140 §3)
-    and the composition root deliberately injects no clock into it. An hour back
-    inside the seven-day default window (ADR-0140 §12) is a margin and not a
-    guarantee.
-    """
-    delivered = datetime.now(UTC) - timedelta(hours=1)
-    path.write_bytes(
-        (
-            "From nobody@invalid Thu Jan  1 00:00:00 1970\n"
-            "From: Alice <alice@example.com>\n"
-            "Subject: Standup moved to ten\n"
-            f"Date: {format_datetime(delivered)}\n"
-            f"X-Assistant-Delivered-At: {delivered:%Y-%m-%dT%H:%M:%SZ}\n"
-            "\n"
-        ).encode()
-    )
