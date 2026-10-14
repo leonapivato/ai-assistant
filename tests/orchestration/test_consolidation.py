@@ -290,7 +290,8 @@ async def test_the_gate_never_commits_a_tainted_unconfirmed_consolidation() -> N
     auto-accepted into durable memory.
 
     An ``ASK_USER`` ruling writes nothing and parks nothing (ADR-0309 §5): it is
-    logged once, by the proposal's id.
+    logged once, by the ruling's kind and the proposal's memory kind alone, with
+    no identifier of the proposal (ADR-0319 §5).
     """
     store = await _seeded(
         [
@@ -307,7 +308,10 @@ async def test_the_gate_never_commits_a_tainted_unconfirmed_consolidation() -> N
     assert report.deferred == 1
     assert await store.get(writes.proposals[0].proposed.id) is None, "nothing is written"
     deferred = [entry for entry in logs if entry["event"] == DEFERRED_EVENT]
-    assert [entry["proposal_id"] for entry in deferred] == [writes.proposals[0].proposed.id]
+    assert [(entry["ruling"], entry["memory_kind"]) for entry in deferred] == [
+        (MemoryDecisionKind.ASK_USER.value, writes.proposals[0].proposed.kind)
+    ]
+    assert all("proposal_id" not in entry for entry in deferred)
 
 
 # --- ADR-0106 §10, case 3: taint inherits through a DERIVED input ------------

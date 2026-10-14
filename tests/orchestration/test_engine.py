@@ -2205,26 +2205,21 @@ async def test_a_sweep_that_did_not_run_omits_its_key_rather_than_reporting_zero
     assert dict(trace.metrics) == {"records": 0}
 
 
-def test_a_halted_consolidation_reads_as_incomplete() -> None:
-    """ADR-0111 §9's third clause, given ADR-0119 §3's value.
+def test_a_consolidation_run_reads_as_ok_with_exhausted_carried() -> None:
+    """A run that returns is ``OK``, whether it exhausted the store or spent its budget.
 
-    "A run that halts under §5 without processing its remaining work is recorded as
-    a completed run that did not exhaust its work, not as a failure." Recording it
-    as ``OK`` makes a job that has stopped making progress invisible; recording it
-    as ``FAULT`` makes a queue at its cap indistinguishable from a broken store.
-
-    ``halted`` is carried by the outcome and **not** duplicated as a metric, so the
-    two cannot disagree; ``exhausted`` is a different fact and is carried, because a
-    run that spent its budget and one that halted are told apart only by the pair.
+    The deferred-question queue's cap was the one halt, and it retired with the
+    queue (ADR-0319 §5). ``exhausted`` is the fact that tells the two completed
+    runs apart, so it is carried as a metric.
     """
-    halted = engine_module._consolidated(ConsolidationReport(chunks=2, halted=True))
     spent = engine_module._consolidated(ConsolidationReport(chunks=2, exhausted=False))
+    walked = engine_module._consolidated(ConsolidationReport(chunks=3, exhausted=True))
 
-    assert halted.outcome is TraceOutcome.INCOMPLETE
     assert spent.outcome is TraceOutcome.OK
-    assert "halted" not in halted.metrics
-    assert halted.metrics["exhausted"] is False
-    assert halted.metrics["chunks"] == 2
+    assert walked.outcome is TraceOutcome.OK
+    assert spent.metrics["exhausted"] is False
+    assert walked.metrics["exhausted"] is True
+    assert spent.metrics["chunks"] == 2
 
 
 async def test_a_result_too_large_to_return_records_the_refusal_not_a_success() -> None:

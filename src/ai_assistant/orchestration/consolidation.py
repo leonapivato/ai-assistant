@@ -479,10 +479,6 @@ class ConsolidationReport:
             this counting exists to remove (ADR-0077 §2, §4).
         exhausted: Whether the walk reached the end of the store. ``False`` on a
             run that spent its budget.
-        halted: Always ``False``. It named a run stopped at a question the
-            deferred-question queue refused at its cap, and that queue has retired
-            (ADR-0309 §5). It stays only until the engine's trace, which reads it,
-            drops that read in its own lane.
     """
 
     chunks: int = 0
@@ -495,7 +491,6 @@ class ConsolidationReport:
     discarded_over_limit: int = 0
     refused_self_citing: int = 0
     exhausted: bool = False
-    halted: bool = False
 
 
 class ConsolidationStage:
