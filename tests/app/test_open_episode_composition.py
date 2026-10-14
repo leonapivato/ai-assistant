@@ -37,7 +37,6 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     GoalAssociation,
     Idempotency,
-    NewConversation,
     PlacementReach,
     PlacementSetter,
     PlannerOutput,
@@ -48,11 +47,9 @@ from ai_assistant.core.types import (
     TextChannelPayload,
     ToolCost,
     ToolDefinition,
-    WholeTextReply,
 )
 from ai_assistant.models import PydanticAIProvider
 from ai_assistant.orchestration.activation_state import active_state
-from ai_assistant.orchestration.channels import ChannelProjection
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.testing import (
     FakeGoalAssociator,
@@ -129,25 +126,6 @@ class Composed:
     def writer(self) -> ActivationWriter:
         """The activation writer the lifecycle built."""
         return self.engine._conversations.activation_writer
-
-    async def say(self, text: str, conversation_id: str | None = None) -> ChannelResult:
-        """One text activation on a new conversation, or on the one named."""
-        target = (
-            NewConversation()
-            if conversation_id is None
-            else ChannelIdentity(channel_type="conversation", instance_id=conversation_id)
-        )
-        # ADR-0293 §11 takes the text conversational combination off ``receive``, and
-        # ``converse`` — which still runs it, for the turn carrying a reference — returns
-        # the bare outcome. These cases are about how that turn's episode is captured,
-        # so they drive the same admission ``converse`` does and read its receipt.
-        return await self.engine._receive(
-            ChannelInput(target=target, payload=TextChannelPayload(text=text)),
-            reply=WholeTextReply(),
-            timeout=_BUDGET,
-            projection=ChannelProjection("converse"),
-            typed_turn=True,
-        )
 
     async def stored(self, address: str) -> EpisodicMemory | None:
         """The episode the store holds at ``address``, open or frozen."""

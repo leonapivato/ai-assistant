@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core import types as types_module
-from ai_assistant.core.channel_validation import snapshot
+from ai_assistant.core.channel_validation import snapshot, validate_combination
 from ai_assistant.core.types import (
     ActivationEnding,
     ChannelContext,
@@ -86,32 +88,33 @@ def test_invalid_reply_cannot_become_an_event_with_no_reply() -> None:
 @pytest.mark.parametrize(
     "target", [NewConversation(), ChannelIdentity(channel_type="conversation", instance_id="one")]
 )
-def test_the_text_conversational_combination_is_refused_off_converses_own_input(
+def test_the_text_conversational_combination_is_admitted_by_no_entry(
     target: NewConversation | ChannelIdentity,
 ) -> None:
-    """ADR-0293 §11: ``receive`` refuses a typed turn; ``converse`` alone admits one."""
+    """ADR-0293 §11, ADR-0309 §5:1: ``converse``'s own typed input left with ``converse``."""
     supplied = ChannelInput(target=target, payload=TextChannelPayload(text="hello"))
     with pytest.raises(ValueError, match="unsupported channel"):
         snapshot(supplied, WholeTextReply())
-    accepted, reply = snapshot(supplied, WholeTextReply(), typed_turn=True)
-    assert accepted == supplied
-    assert reply == WholeTextReply()
 
 
-@pytest.mark.parametrize("typed_turn", [False, True])
-def test_a_streaming_reply_is_admitted_by_no_entry(typed_turn: bool) -> None:
+def test_snapshot_takes_no_typed_turn() -> None:
+    """ADR-0309 §5:1: no caller is left to admit a typed turn, so no entry offers one."""
+    assert "typed_turn" not in inspect.signature(snapshot).parameters
+    assert "typed_turn" not in inspect.signature(validate_combination).parameters
+
+
+def test_a_streaming_reply_is_admitted_by_no_entry() -> None:
     """ADR-0293 §11 retired both entries that offered it; a recorded trigger may still hold one."""
     supplied = ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hello"))
     with pytest.raises(ValueError, match="unsupported channel"):
-        snapshot(supplied, StreamingTextReply(), typed_turn=typed_turn)
+        snapshot(supplied, StreamingTextReply())
 
 
-@pytest.mark.parametrize("typed_turn", [False, True])
 @pytest.mark.parametrize(
     "target", [NewConversation(), ChannelIdentity(channel_type="conversation", instance_id="one")]
 )
 def test_the_spoken_conversational_combination_is_admitted_by_no_entry(
-    target: NewConversation | ChannelIdentity, typed_turn: bool
+    target: NewConversation | ChannelIdentity,
 ) -> None:
     """ADR-0313 §3:2, §4:1: spoken conversation retired, so no entry admits it."""
     supplied = ChannelInput(
@@ -121,7 +124,7 @@ def test_the_spoken_conversational_combination_is_admitted_by_no_entry(
         ),
     )
     with pytest.raises(ValueError, match="unsupported channel"):
-        snapshot(supplied, SpokenReply(plays=(SpokenAudioFormat.MP4,)), typed_turn=typed_turn)
+        snapshot(supplied, SpokenReply(plays=(SpokenAudioFormat.MP4,)))
 
 
 def test_an_input_carries_no_conversation_options() -> None:
@@ -134,7 +137,10 @@ def test_an_input_carries_no_conversation_options() -> None:
         ChannelInput.model_validate({**dumped, "conversation": {}})
 
 
-@pytest.mark.parametrize("name", ["SpokenTurn", "SpokenChannelResult", "ConversationInputOptions"])
+@pytest.mark.parametrize(
+    "name",
+    ["SpokenTurn", "SpokenChannelResult", "ConversationInputOptions", "TextChannelResult"],
+)
 def test_the_retired_channel_types_are_gone_from_core(name: str) -> None:
-    """ADR-0313 §3:1, §4:2, §4:6: these leave ``core`` with spoken conversation."""
+    """ADR-0313 §3:1, §4:2, §4:6: these leave ``core`` with conversation on ``receive``."""
     assert not hasattr(types_module, name)

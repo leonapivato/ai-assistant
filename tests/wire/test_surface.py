@@ -16,8 +16,10 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import TypeAdapter
 
 from ai_assistant.core.types import (
+    ActivationStop,
     Confirmation,
     ConfirmationEgress,
     ContinuationToken,
@@ -72,7 +74,7 @@ def test_no_method_is_adapted_by_both_rules() -> None:
     validate, so returning one would be worse than refusing: the failure would
     surface as a decode error inside a call rather than as a build-time mistake.
     """
-    for name in ("converse", "resume"):
+    for name in ("receive", "stop_activation"):
         with pytest.raises(KeyError):
             chunk_adapter(name)
         with pytest.raises(KeyError):
@@ -83,8 +85,8 @@ def test_no_method_is_adapted_by_both_rules() -> None:
 
 def test_a_non_streaming_method_keeps_its_single_result_adapter() -> None:
     """§4: "a non-streaming method keeps its single result adapter"."""
-    outcome = return_adapter("converse").validate_python({"turn": None})
-    assert isinstance(outcome, TurnOutcome)
+    stop = return_adapter("stop_activation").validate_python("stopped")
+    assert stop is ActivationStop.STOPPED
 
 
 def test_an_unknown_method_is_refused_by_every_adapter() -> None:
@@ -98,14 +100,15 @@ def test_an_unknown_method_is_refused_by_every_adapter() -> None:
 
 
 def test_an_egress_confirmation_survives_the_round_trip_a_client_actually_makes() -> None:
-    """ADR-0178 §6: ``project`` -> canonical JSON -> ``return_adapter`` validation.
+    """ADR-0178 §6: ``project`` -> canonical JSON -> validation against the type.
 
-    The route a confirmation really takes to a client: the hub renders the result
-    through :func:`~ai_assistant.wire.codec.project` and the canonical encoding,
-    and the client validates the decoded payload against the method's **own
-    declared return annotation** (ADR-0085 §10) — which is why the new member
-    crosses without a second declaration and nothing under ``wire/`` transcribes
-    it into a schema.
+    The route a confirmation took to a client: the hub rendered the result through
+    :func:`~ai_assistant.wire.codec.project` and the canonical encoding, and the
+    client validated the decoded payload against the method's declared return
+    annotation (ADR-0085 §10). No promoted method returns a ``TurnOutcome`` since
+    ``converse`` and ``resume`` retired (ADR-0309 §5:1), so the payload is validated
+    against the type itself, which keeps the codec's half of the claim until the type
+    retires.
 
     ``tier`` of ``None`` and ``index`` of ``None`` are in the vector deliberately:
     both are optional on :class:`~ai_assistant.core.types.EgressSpan`, and an
@@ -165,7 +168,7 @@ def test_an_egress_confirmation_survives_the_round_trip_a_client_actually_makes(
     )
 
     payload = json.loads(canonical_payload(project(outcome)))
-    decoded = return_adapter("converse").validate_python(payload)
+    decoded = TypeAdapter(TurnOutcome).validate_python(payload)
 
     assert decoded == outcome
     assert decoded.step is not None
@@ -195,7 +198,9 @@ def test_a_non_egress_confirmation_crosses_as_an_explicit_null() -> None:
     )
     payload = json.loads(canonical_payload(project(confirmation)))
     assert payload["egress"] is None
-    assert return_adapter("pending_confirmations").validate_python([payload]) == (confirmation,)
+    # ``pending_confirmations`` returned these until it retired (ADR-0309 §5:1).
+    listed = TypeAdapter(tuple[Confirmation, ...]).validate_python([payload])
+    assert listed == (confirmation,)
 
 
 def test_the_invocation_pair_is_reflected_and_round_trips_through_the_codec() -> None:

@@ -1110,7 +1110,7 @@ async def test_calls_are_refused_once_shutdown_has_begun() -> None:
     harness = Harness(tools=(tool(),))
     await harness.engine.aclose()
     with pytest.raises(RuntimeError, match="shutting down"):
-        await harness.engine.converse("send it", timeout=PATIENT)
+        await harness.engine.beliefs()
 
 
 # --- the two-phase drain (ADR-0083 §4) ---------------------------------
@@ -2831,10 +2831,7 @@ async def test_the_question_surface_is_refused_while_the_engine_is_shutting_down
 #: public method that deliberately does *not* run through ``_tracked``: tracing it
 #: would put a trace's append inside the drain that exists to wait for appends,
 #: and the ``TraceSink`` may already be closed by the time it returned.
-#: ``aclose``, and the members the switch retired (ADR-0309 §2:6, §5:1): each refuses
-#: before any work and reaches no wiring point, until the engine-surface deletion lane
-#: removes it.
-_UNTRACED = frozenset({"aclose", "converse", "resume"})
+_UNTRACED = frozenset({"aclose"})
 
 
 class _TrackedScan(ast.NodeVisitor):
@@ -3020,19 +3017,20 @@ async def test_a_result_too_large_to_return_records_the_refusal_not_a_success() 
     The refusal is ``REFUSED`` rather than ``FAULT``: a contract limit answered is
     the system working, and ADR-0084 §4 puts the same limit on the way in.
 
-    Driven through ``pending_confirmations``, which takes no arguments at all, so
-    a one-byte ceiling cannot be tripped by the *argument* check that runs before
+    Driven through ``standing_grants``, which takes no arguments at all, so a
+    one-byte ceiling cannot be tripped by the *argument* check that runs before
     ``_tracked`` — an operation refused there emits nothing at all, which is the
     separate gap #855 carries and not the one this case is about.
+    ``pending_confirmations`` drove it until it retired (ADR-0309 §5:1).
     """
     harness = Harness()
     harness.engine._max_payload_bytes = 1
 
     with pytest.raises(OversizedValueError):
-        await harness.engine.pending_confirmations()
+        await harness.engine.standing_grants()
 
     (trace,) = harness.trace_sink.recorded
-    assert trace.seam == "pending_confirmations"
+    assert trace.seam == "standing_grants"
     assert trace.outcome is TraceOutcome.REFUSED
     assert trace.fault_class == "OversizedValueError"
 

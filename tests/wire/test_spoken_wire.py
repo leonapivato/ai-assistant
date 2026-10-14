@@ -60,7 +60,7 @@ def _spoken_input(content: str) -> dict[str, object]:
 def test_the_surface_knows_which_arguments_can_hold_a_recording() -> None:
     """Derived from the Protocol, so a second such method needs no edit here."""
     assert audio_bearing("receive") == {"input"}
-    assert audio_bearing("converse") == frozenset()
+    assert audio_bearing("stop_activation") == frozenset()
 
 
 def test_a_malformed_recording_is_refused_without_being_echoed() -> None:
@@ -101,7 +101,7 @@ def test_a_non_audio_argument_still_quotes_what_its_type_refused() -> None:
     quiet narrowing of what an operator can see.
     """
     with pytest.raises(UndecodableFrameError) as caught:
-        _decode_arguments("converse", {"utterance": 17, "timeout": "PT30S"})
+        _decode_arguments("belief", {"record_id": 17})
 
     assert caught.value.__cause__ is not None
 

@@ -34,7 +34,6 @@ from assistant_engine_contract import (
     _UNHELD_SOURCE,
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
-    SETTLED_SINGLE_SLOT,
     SPEAKABLE_NOTIFICATION,
     SPEND_ZERO_CEILING,
     UNSPEAKABLE_NOTIFICATION,
@@ -45,9 +44,6 @@ from assistant_engine_contract import (
     DerivedPlacementSubject,
     InvocationSubject,
     ReadSubject,
-    RoutedParkSubject,
-    SettledParkSubject,
-    SingleSlotParkSubject,
     SpendSubject,
     backwards_clock,
     fake_belief_holder,
@@ -75,15 +71,12 @@ from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSu
 
 from ai_assistant.core.errors import (
     ConversationStoreError,
-    DuplicateDecisionError,
     OversizedValueError,
-    UngrantableActError,
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     ActionRequest,
-    ActivationStop,
     AnswerKind,
     Attestation,
     BeliefBand,
@@ -92,7 +85,6 @@ from ai_assistant.core.types import (
     CapabilityEffect,
     CapabilityResult,
     ChatDevice,
-    ContinuationToken,
     Conversation,
     ConversationState,
     ConversationSummary,
@@ -101,7 +93,6 @@ from ai_assistant.core.types import (
     DestinationProtocol,
     DeviceAccess,
     DiscloserProvenance,
-    Disposition,
     EgressBinding,
     EgressDestination,
     EgressSpan,
@@ -121,17 +112,13 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     QuestionState,
-    RecipientGrantNotEstablished,
     Reversibility,
     RiskLevel,
-    RoutableOperation,
     SpanCoverage,
     ToolCost,
     ToolDefinition,
     TranscriptMessage,
-    TurnOutcome,
     UserMessage,
-    UtcInstant,
 )
 from ai_assistant.orchestration.chat import COULDNT_FINISH
 from ai_assistant.testing import (
@@ -386,22 +373,6 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         return engine
 
     @pytest.fixture
-    def routed_park(self) -> RoutedParkSubject:
-        """One fake engine holding a single answerable routed park, on a ``forget``.
-
-        The card is assembled by ``park_routed`` from the operation and the belief the
-        engine already holds, so what the shared suite holds this fake to is the type's
-        own invariants rather than a pre-built member — ``park``'s arrangement one
-        operation over.
-        """
-        engine = FakeAssistantEngine()
-        held = engine.hold("rec-routed", content="the user likes jazz")
-        engine.park_routed("routed-1", operation=RoutableOperation.FORGET, subject=(held,))
-        return RoutedParkSubject(
-            engine=engine, token=ContinuationToken(handle="routed-1"), belief_id=held.id
-        )
-
-    @pytest.fixture
     def derived_placement(self) -> DerivedPlacementSubject:
         """One fake engine holding a belief the derivation placed (ADR-0217 §3).
 
@@ -420,70 +391,6 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
             ),
         )
         return DerivedPlacementSubject(engine=engine, record_id=held.id)
-
-    @pytest.fixture
-    def parked_engine(self) -> AssistantEngine:
-        """One fake engine holding a single answerable park, on an egress call.
-
-        The binding is handed to ``park`` whole and reduced there by the rule the
-        real engine uses (ADR-0178 §5), so what the suite's correspondence clause
-        holds this fake to is the *reduction* rather than a pre-built member.
-        """
-        engine = FakeAssistantEngine()
-        engine.park("h-1", egress=_binding())
-        return engine
-
-    @pytest.fixture
-    async def settled_park(self) -> SettledParkSubject:
-        """One fake engine that has answered its park, and the token that named it.
-
-        Settled by calling ``resume`` rather than by seeding ``settled`` directly, so
-        the record under test is the one this fake's own resolution installs — a fake
-        whose lever wrote the record would pass the suite over a path no ``resume``
-        takes.
-        """
-        engine = FakeAssistantEngine()
-        engine.park("h-1", egress=_binding())
-        token = ContinuationToken(handle="h-1")
-        await engine.resume(token, approved=True, timeout=timedelta(seconds=30))
-        return SettledParkSubject(engine=engine, token=token)
-
-    @pytest.fixture
-    async def settled_park_without_its_execution(self) -> SettledParkSubject:
-        """:attr:`settled_park`'s subject whose ``executions`` have been emptied.
-
-        ``executions`` is this fake's stand-in for the plan store a restatement
-        re-reads (ADR-0198 §2), and emptying it is the fake's spelling of a store that
-        has stopped holding the settled binding's execution. It is done from the test
-        process because no call on the promoted surface removes one — which is the same
-        reason the concrete binding reaches for the store's own data-rights operation.
-        """
-        engine = FakeAssistantEngine()
-        engine.park("h-1", egress=_binding())
-        token = ContinuationToken(handle="h-1")
-        await engine.resume(token, approved=True, timeout=timedelta(seconds=30))
-        engine.executions.clear()
-        return SettledParkSubject(engine=engine, token=token)
-
-    @pytest.fixture
-    async def single_slot_parks(self) -> SingleSlotParkSubject:
-        """A fake at a ceiling of one, holding one settled record and one live park.
-
-        The parks are levered in and the settlement is real, which is the division
-        this fake keeps everywhere: a park is reached inside a turn no fake runs, and
-        what the suite is holding this one to is what ``resume`` does with them. The
-        ceiling binds only the retained set here — this fake admits no turn, so the
-        backpressure half has nothing to reach — and the retention is the half ADR-0198
-        §4's discard is about.
-        """
-        engine = FakeAssistantEngine(max_outstanding_confirmations=SETTLED_SINGLE_SLOT)
-        engine.park("h-1", egress=_binding())
-        settled = ContinuationToken(handle="h-1")
-        await engine.resume(settled, approved=True, timeout=timedelta(seconds=30))
-        engine.park("h-2", egress=_binding())
-        return SingleSlotParkSubject(
-            engine=engine, settled=settled, parked=ContinuationToken(handle="h-2")
-        )
 
     @pytest.fixture
     async def decisions(self) -> DecisionSubject:
@@ -691,16 +598,6 @@ async def test_declining_a_question_writes_nothing() -> None:
     assert await engine.beliefs() == ()
 
 
-async def test_a_parked_confirmation_is_recovered_and_then_resolvable() -> None:
-    """ADR-0052 §1's enumerate-and-re-mint, in miniature."""
-    engine = FakeAssistantEngine()
-    engine.park("h-1")
-    pending = await engine.pending_confirmations()
-    assert len(pending) == 1
-    await engine.resume(pending[0].token, approved=True, timeout=timedelta(seconds=30))
-    assert await engine.pending_confirmations() == ()
-
-
 async def test_the_filters_compose_by_conjunction() -> None:
     """A belief is listed when its band is selected *and* its kind is (ADR-0073 §2)."""
     engine = FakeAssistantEngine()
@@ -838,33 +735,12 @@ async def test_the_ordering_clause_catches_insertion_order() -> None:
     """
 
     async def _listed(engine: FakeAssistantEngine) -> list[str]:
-        await engine.converse("one", timeout=timedelta(seconds=30))
-        await engine.converse("two", timeout=timedelta(seconds=30))
+        await engine.start_conversation()
+        await engine.start_conversation()
         return [one.id for one in await engine.recent_conversations()]
 
     assert await _listed(FakeAssistantEngine()) == ["c-2", "c-1"]
     assert await _listed(_InsertionOrderEngine()) == ["c-1", "c-2"]  # nothing ordered it
-
-
-class _SteplessEngine(FakeAssistantEngine):
-    """An engine whose resume carries no resolved step — the ADR-0085 §4 gap."""
-
-    async def resume(
-        self,
-        token: ContinuationToken,
-        *,
-        approved: bool,
-        timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
-        remember_recipients_until: UtcInstant | None = None,
-    ) -> TurnOutcome:
-        """Resolve the park and hand back nothing to render."""
-        await super().resume(
-            token,
-            approved=approved,
-            timeout=timeout,
-            remember_recipients_until=remember_recipients_until,
-        )
-        return TurnOutcome(turn=None)
 
 
 def test_the_retention_ceiling_is_guarded_exactly_as_the_concrete_engine_guards_it() -> None:
@@ -957,27 +833,6 @@ def test_a_knob_that_cannot_describe_itself_still_gets_the_documented_refusal() 
 
     with pytest.raises(TypeError, match="max_payload_bytes must be an integer"):
         FakeAssistantEngine(max_payload_bytes=_Unspeakable())  # type: ignore[arg-type]
-
-
-async def test_the_resume_clause_catches_an_outcome_with_no_step() -> None:
-    """A resume that carries neither a turn nor a step leaves a client nothing.
-
-    ``turn`` is legitimately ``None`` on a recovered park, which is exactly why the
-    step cannot be: between them they are the whole of what a resumption produced.
-    """
-    conforming = FakeAssistantEngine()
-    conforming.park("h-1")
-    resolved = await conforming.resume(
-        ContinuationToken(handle="h-1"), approved=True, timeout=timedelta(seconds=30)
-    )
-    assert resolved.step is not None
-
-    stepless = _SteplessEngine()
-    stepless.park("h-1")
-    empty = await stepless.resume(
-        ContinuationToken(handle="h-1"), approved=True, timeout=timedelta(seconds=30)
-    )
-    assert empty.step is None  # nothing to render, and nothing refused it
 
 
 # --- ADR-0189 §2 on the far side of an answer (#1523's knobs, round-1 finding 1) ---
@@ -1293,340 +1148,6 @@ async def test_seeding_over_a_held_id_replaces_its_placement_rather_than_inherit
     assert lifted.set_by is PlacementSetter.OWNER_ACT
 
 
-# --- ADR-0235 §2, ADR-0193 §2: the fake records before it settles ------------
-
-
-async def test_a_trail_that_refuses_the_answer_leaves_the_park_answerable() -> None:
-    """The order ADR-0193 §2 fixes, held on the canonical fake (ADR-0235 §2).
-
-    The answer is recorded **before** the park is evicted, which is what the
-    concrete engine does — its runner records the resolving decision inside the
-    critical section that then replaces the park with its settled record. A fake
-    that settled first would, on a trail refusing the write, hand back a token that
-    **restates an execution** no recorded answer authorised: a state no conforming
-    hub can be in, and precisely the one a consumer's own retry logic would be
-    written against.
-
-    Arranged by seeding the id the fake mints for the answer, so ``record`` refuses
-    it as a duplicate — a refusal the operation cannot have caused, which is the
-    shape that separates "the write failed" from "the act was refused".
-    """
-    engine = FakeAssistantEngine()
-    binding = _binding()
-    confirmed = PermissionDecision.from_request(
-        ActionRequest(
-            tool=_TRANSMITTING_TOOL,
-            parameters={"to": "Alice@Example.ORG", "body": "hello"},
-            egress_binding=binding,
-        ),
-        PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="it discloses off-device"),
-        id="d-confirm",
-        decided_at=_RECIPIENT_AT,
-    )
-    await engine.trail.record(confirmed)
-    engine.hold_confirmation_decision("park-1", confirmed)
-    parked = engine.park("park-1", egress=binding)
-    await engine.trail.record(
-        confirmed.model_copy(
-            update={
-                "id": "decision-park-1-answer",
-                "ruling": PermissionRuling(outcome=PermissionOutcome.DENY, reason="a squatter"),
-                "decided_at": _RECIPIENT_AT,
-                "expires_at": None,
-            }
-        )
-    )
-
-    with pytest.raises(DuplicateDecisionError):
-        await engine.resume(
-            parked.token,
-            approved=True,
-            timeout=timedelta(seconds=30),
-            remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
-        )
-
-    assert [held.token.handle for held in await engine.pending_confirmations()] == ["park-1"]
-    assert await engine.recipient_grants.export() == []
-
-    resumed = await engine.resume(parked.token, approved=True, timeout=timedelta(seconds=30))
-
-    assert resumed.step is not None
-    assert resumed.step.disposition is Disposition.EXECUTED
-    assert resumed.recipient_grant is None
-
-
-async def test_a_successful_act_leaves_a_reference_that_resolves() -> None:
-    """The step names the decision that cleared it (ADR-0004 §7, ADR-0014 §4).
-
-    Before ADR-0235 this fake's resume recorded no decision at all, so its
-    ``approval_ref`` resolved to nothing on every path and could mislead nobody. Now
-    that the establishing act records one, a reference naming a different id would be
-    the dangling pointer ADR-0014 §4 exists to prevent — and it would be dangling in
-    the *one* state a consumer's own recovery test can resolve, which is the state
-    that would be believed.
-    """
-    engine = FakeAssistantEngine()
-    binding = _binding()
-    confirmed = PermissionDecision.from_request(
-        ActionRequest(
-            tool=_TRANSMITTING_TOOL,
-            parameters={"to": "Alice@Example.ORG", "body": "hello"},
-            egress_binding=binding,
-        ),
-        PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="it discloses off-device"),
-        id="d-confirm",
-        decided_at=_RECIPIENT_AT,
-    )
-    await engine.trail.record(confirmed)
-    engine.hold_confirmation_decision("park-1", confirmed)
-    parked = engine.park("park-1", egress=binding)
-
-    resumed = await engine.resume(
-        parked.token,
-        approved=True,
-        timeout=timedelta(seconds=30),
-        remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
-    )
-
-    assert resumed.step is not None
-    cleared = resumed.step.state.step("step-1")
-    assert cleared is not None
-    assert cleared.approval_ref is not None
-    answering = await engine.trail.get(cleared.approval_ref)
-    assert answering is not None
-    assert answering.resolves == confirmed.id
-    assert resumed.recipient_grant is not None
-    assert resumed.recipient_grant.established is not None
-
-
-async def test_a_declined_act_records_the_deny_the_carrier_claims() -> None:
-    """ADR-0235 §2, §4: ``DECLINED`` asserts a recorded answer, so one is recorded.
-
-    Supplied beside ``approved=False`` the argument "establishes nothing and changes
-    nothing else: the answer is recorded as a ``DENY`` exactly as it is today" —
-    ADR-0042 §4's guarantee — and the carrier's ``DECLINED`` is what says on the
-    outcome that this happened. A fake carrying it over an empty trail would let a
-    consumer's test pass against a state no conforming hub is ever in: production
-    exposes an auditable settled decision there, and the double would not.
-
-    The store is asserted empty beside it, because ``DECLINED`` is the one member
-    that never reaches ``RecipientGrantStore.record`` at all.
-    """
-    engine = FakeAssistantEngine()
-    binding = _binding()
-    confirmed = PermissionDecision.from_request(
-        ActionRequest(
-            tool=_TRANSMITTING_TOOL,
-            parameters={"to": "Alice@Example.ORG", "body": "hello"},
-            egress_binding=binding,
-        ),
-        PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="it discloses off-device"),
-        id="d-confirm",
-        decided_at=_RECIPIENT_AT,
-    )
-    await engine.trail.record(confirmed)
-    engine.hold_confirmation_decision("park-1", confirmed)
-    parked = engine.park("park-1", egress=binding)
-
-    resumed = await engine.resume(
-        parked.token,
-        approved=False,
-        timeout=timedelta(seconds=30),
-        remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
-    )
-
-    assert resumed.step is not None
-    assert resumed.step.disposition is Disposition.DENIED
-    assert resumed.recipient_grant is not None
-    assert resumed.recipient_grant.not_established is RecipientGrantNotEstablished.DECLINED
-    answers = [row for row in await engine.trail.export() if row.resolves == confirmed.id]
-    assert [row.ruling.outcome for row in answers] == [PermissionOutcome.DENY]
-    assert await engine.recipient_grants.export() == []
-
-
-async def test_an_approving_answer_on_a_park_bound_to_no_confirmation_is_refused() -> None:
-    """ADR-0235 §2's binding refusal, on its first shape as this fake reaches it.
-
-    A park no recorded ``CONFIRM`` is bound to has no ``EgressBinding`` for
-    ``established_from`` to transcribe from, which is the first of the four shapes §2
-    refuses. Refused before anything is answered, so the park survives it: nothing
-    recorded, nothing executed, and the same token then answers it without the
-    argument.
-    """
-    engine = FakeAssistantEngine()
-    parked = engine.park("park-1")
-
-    with pytest.raises(UngrantableActError, match="no recorded CONFIRM"):
-        await engine.resume(
-            parked.token,
-            approved=True,
-            timeout=timedelta(seconds=30),
-            remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
-        )
-
-    assert await engine.trail.export() == []
-    assert await engine.recipient_grants.export() == []
-    assert [held.token.handle for held in await engine.pending_confirmations()] == ["park-1"]
-
-    resumed = await engine.resume(parked.token, approved=True, timeout=timedelta(seconds=30))
-
-    assert resumed.step is not None
-    assert resumed.step.disposition is Disposition.EXECUTED
-    assert resumed.recipient_grant is None
-
-
-async def test_a_declining_answer_on_a_park_bound_to_no_confirmation_collects_no_act() -> None:
-    """The other answer, and the carrier ADR-0235 §6 gives it.
-
-    §2 rules that the argument supplied beside ``approved=False`` "establishes nothing
-    and changes nothing else: the answer is recorded as a ``DENY`` exactly as it is
-    today, the step is denied, and no grant is written" — ADR-0042 §4's guarantee,
-    which §2 states no exception to, and which is why a **refusal** here would be the
-    exception it declines to state. So this answer is not refused, and it is what a
-    ``resume`` without the argument is, byte for byte: a park with no bound ``CONFIRM``
-    has nothing for an answer to resolve, so nothing was recorded then and nothing is
-    recorded now.
-
-    The carrier is **absent** rather than ``DECLINED``, which §4 makes an *assertion*
-    that the answer was recorded: §6 gives the absent carrier to "every call that
-    collected no act", and a park holding no confirmation offers the act nothing to
-    ride. A consumer reaching this state through ``AssistantEngine`` therefore meets
-    the same denied outcome the concrete engine returns, and never an exception it
-    does not raise.
-    """
-    engine = FakeAssistantEngine()
-    parked = engine.park("park-1")
-
-    resumed = await engine.resume(
-        parked.token,
-        approved=False,
-        timeout=timedelta(seconds=30),
-        remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
-    )
-
-    assert resumed.step is not None
-    assert resumed.step.disposition is Disposition.DENIED
-    assert resumed.recipient_grant is None
-    assert await engine.trail.export() == []
-    assert await engine.recipient_grants.export() == []
-    assert await engine.pending_confirmations() == ()
-
-
-async def test_a_declining_answer_on_a_confirmation_with_no_binding_is_recorded_not_refused() -> (
-    None
-):
-    """The scope of the refusal above, pinned from the other side (ADR-0235 §2).
-
-    §2's binding refusal is stated over an **approving** answer alone, and the clause
-    beside it rules that the argument supplied with ``approved=False`` "establishes
-    nothing and changes nothing else: the answer is recorded as a ``DENY`` exactly as
-    it is today" — ADR-0042 §4's guarantee, which §2 declines to except. So where a
-    ``CONFIRM`` *is* bound and its ``egress_binding`` is ``None`` — the first of §2's
-    four refused shapes, and the state the fake's unbound park is nearest to — the
-    decline is recorded and carried as ``DECLINED``, exactly as the concrete runner
-    does it, whose own refusal reads ``remember_recipients_until is not None and
-    approved``.
-
-    Without this case the refusal above could grow to cover a decline the ADR
-    requires recorded, and every other test here would still pass.
-    """
-    engine = FakeAssistantEngine()
-    confirmed = _recorded_confirm(None)
-    await engine.trail.record(confirmed)
-    engine.hold_confirmation_decision("park-1", confirmed)
-    parked = engine.park("park-1")
-
-    resumed = await engine.resume(
-        parked.token,
-        approved=False,
-        timeout=timedelta(seconds=30),
-        remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
-    )
-
-    assert resumed.step is not None
-    assert resumed.step.disposition is Disposition.DENIED
-    assert resumed.recipient_grant is not None
-    assert resumed.recipient_grant.not_established is RecipientGrantNotEstablished.DECLINED
-    answers = [row for row in await engine.trail.export() if row.resolves == confirmed.id]
-    assert [row.ruling.outcome for row in answers] == [PermissionOutcome.DENY]
-    assert await engine.recipient_grants.export() == []
-
-
-async def test_a_nonconforming_recipient_grant_clock_does_not_prevent_a_decline() -> None:
-    """A decline reads no recipient-grant clock at all (ADR-0235 §1, §2; ADR-0042 §4).
-
-    §1's single reading exists for the **approving** path, where one instant is
-    compared against the chosen expiry and then stamped on the answer. A decline
-    compares nothing, so reading that clock to stamp the ``DENY`` would let a clock a
-    test moved for the *establishing* case stand between a user and the record of a
-    decision they made — a ``PlanningError`` where ADR-0042 §4 guarantees a recorded
-    denial. The concrete runner consults its establishing instant on the approving
-    path alone.
-
-    The clock is set naive, which is what :func:`checked_clock` refuses, and the
-    assertion is that the answer is recorded anyway and carries this fake's fixed
-    instant.
-    """
-    engine = FakeAssistantEngine()
-    confirmed = _recorded_confirm(_binding())
-    await engine.trail.record(confirmed)
-    engine.hold_confirmation_decision("park-1", confirmed)
-    parked = engine.park("park-1", egress=_binding())
-    engine.recipient_grant_clock = lambda: datetime(2026, 1, 1, 12, 0)  # noqa: DTZ001
-
-    resumed = await engine.resume(
-        parked.token,
-        approved=False,
-        timeout=timedelta(seconds=30),
-        remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
-    )
-
-    assert resumed.step is not None
-    assert resumed.step.disposition is Disposition.DENIED
-    assert resumed.recipient_grant is not None
-    assert resumed.recipient_grant.not_established is RecipientGrantNotEstablished.DECLINED
-    answers = [row for row in await engine.trail.export() if row.resolves == confirmed.id]
-    assert [row.ruling.outcome for row in answers] == [PermissionOutcome.DENY]
-    assert [row.decided_at for row in answers] == [_RECIPIENT_AT]
-
-
-async def test_a_settled_park_releases_the_confirmation_it_was_bound_to() -> None:
-    """A handle is a park's name and not a lifetime (ADR-0198 §1, ADR-0235 §2).
-
-    ``hold_confirmation_decision`` binds a recorded ``CONFIRM`` under the handle its
-    park is answered by, and a settled park is retained under that same handle. A
-    binding left behind by one would therefore be found by the **next** park minted
-    under it, and an act riding that park would transcribe an unrelated call's
-    account and destination set into a standing grant — from a confirmation whose own
-    answer was recorded long before, and about a call this park is not about.
-
-    So the release is asserted from the outside: the second park carries no egress at
-    all, and the act on it is refused as §2's first shape rather than establishing the
-    first park's recipients. The trail is asserted too, because the failing
-    implementation records a *second* answer resolving the first confirmation.
-    """
-    engine = FakeAssistantEngine()
-    binding = _binding()
-    confirmed = _recorded_confirm(binding)
-    await engine.trail.record(confirmed)
-    engine.hold_confirmation_decision("park-1", confirmed)
-    first = engine.park("park-1", egress=binding)
-    await engine.resume(first.token, approved=True, timeout=timedelta(seconds=30))
-
-    reused = engine.park("park-1")
-
-    with pytest.raises(UngrantableActError, match="no recorded CONFIRM"):
-        await engine.resume(
-            reused.token,
-            approved=True,
-            timeout=timedelta(seconds=30),
-            remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
-        )
-
-    assert await engine.recipient_grants.export() == []
-    assert [row.id for row in await engine.trail.export()] == [confirmed.id]
-
-
 async def test_the_goal_listing_refuses_an_oversized_result() -> None:
     """ADR-0085 §8c over ADR-0250 §15's listing, in the direction only a sender sees.
 
@@ -1699,6 +1220,27 @@ async def test_a_deletion_racing_a_first_read_leaves_no_chat_conversation() -> N
         )
 
 
+async def _started(engine: FakeAssistantEngine) -> str:
+    """Start a conversation on one device, so a message can be written into it."""
+    await engine.set_my_devices([ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)])
+    return (await engine.start_conversation()).id
+
+
+async def _reading(engine: FakeAssistantEngine, conversation: str) -> asyncio.Task[None]:
+    """Write one message, and return the read the fake's reader started for it.
+
+    The read is the activation that takes the message in and captures its episode
+    (ADR-0293 §6): the conversational capture left since ``converse`` retired
+    (ADR-0309 §5:1).
+    """
+    before = set(engine._chat_reads)
+    await engine.write_message(
+        conversation, message=UserMessage(device_id="phone", message_id="m-1", text="hello")
+    )
+    (read,) = set(engine._chat_reads) - before
+    return read
+
+
 async def test_a_forgotten_capture_whose_write_commits_then_cancels_leaves_no_episode() -> None:
     """ADR-0293 §2:6: a write committed and then cancelled is still cleaned up.
 
@@ -1708,7 +1250,7 @@ async def test_a_forgotten_capture_whose_write_commits_then_cancels_leaves_no_ep
     (#2696 round 5).
     """
     engine = FakeAssistantEngine()
-    conversation = (await engine.start_conversation()).id
+    conversation = await _started(engine)
     memory = engine.episode_memory
     entered, release = asyncio.Event(), asyncio.Event()
     original = memory.write_atomic
@@ -1722,9 +1264,7 @@ async def test_a_forgotten_capture_whose_write_commits_then_cancels_leaves_no_ep
         raise asyncio.CancelledError
 
     memory.write_atomic = commit_then_cancel  # type: ignore[method-assign]
-    turn = asyncio.create_task(
-        engine.converse("hello", timeout=timedelta(seconds=5), conversation_id=conversation)
-    )
+    turn = await _reading(engine, conversation)
     await entered.wait()
     await engine.forget_conversation(conversation)
     release.set()
@@ -1744,11 +1284,11 @@ async def test_a_cancelled_insert_never_withdraws_another_conversations_episode(
     """
     engine = FakeAssistantEngine()
     engine.activation_id_factory = lambda: "00000000-0000-4000-8000-0000000000cc"
-    first = (await engine.start_conversation()).id
-    await engine.converse("hello", timeout=timedelta(seconds=5), conversation_id=first)
+    first = await _started(engine)
+    await (await _reading(engine, first))
     address = "activation:00000000-0000-4000-8000-0000000000cc"
     assert await engine.episode_memory.get(address) is not None
-    second = (await engine.start_conversation()).id
+    second = await _started(engine)
     memory = engine.episode_memory
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -1758,9 +1298,7 @@ async def test_a_cancelled_insert_never_withdraws_another_conversations_episode(
         raise asyncio.CancelledError
 
     memory.write_atomic = cancelled_before_the_check  # type: ignore[method-assign]
-    turn = asyncio.create_task(
-        engine.converse("hello", timeout=timedelta(seconds=5), conversation_id=second)
-    )
+    turn = await _reading(engine, second)
     await entered.wait()
     await engine.forget_conversation(second)
     release.set()
@@ -1778,7 +1316,7 @@ async def test_a_forgotten_captures_cleanup_outlasts_its_callers_cancellation() 
     once the withdrawal is released, and the turn ends cancelled (#2696 r6).
     """
     engine = FakeAssistantEngine()
-    conversation = (await engine.start_conversation()).id
+    conversation = await _started(engine)
     memory = engine.episode_memory
     writing, write_go = asyncio.Event(), asyncio.Event()
     deleting, delete_go = asyncio.Event(), asyncio.Event()
@@ -1797,9 +1335,7 @@ async def test_a_forgotten_captures_cleanup_outlasts_its_callers_cancellation() 
         return await delete(record_id)
 
     memory.write_atomic = held_write  # type: ignore[method-assign]
-    turn = asyncio.create_task(
-        engine.converse("hello", timeout=timedelta(seconds=5), conversation_id=conversation)
-    )
+    turn = await _reading(engine, conversation)
     await writing.wait()
     await engine.forget_conversation(conversation)
     memory.delete = held_delete  # type: ignore[method-assign]
@@ -1826,7 +1362,7 @@ async def test_a_cancellation_landing_as_the_cleanup_finishes_still_cancels_the_
     cancelled, and the episode is still gone (#2696 round 7).
     """
     engine = FakeAssistantEngine()
-    conversation = (await engine.start_conversation()).id
+    conversation = await _started(engine)
     memory = engine.episode_memory
     writing, write_go = asyncio.Event(), asyncio.Event()
     deleting, delete_go = asyncio.Event(), asyncio.Event()
@@ -1845,9 +1381,7 @@ async def test_a_cancellation_landing_as_the_cleanup_finishes_still_cancels_the_
         return await delete(record_id)
 
     memory.write_atomic = held_write  # type: ignore[method-assign]
-    turn = asyncio.create_task(
-        engine.converse("hello", timeout=timedelta(seconds=5), conversation_id=conversation)
-    )
+    turn = await _reading(engine, conversation)
     await writing.wait()
     await engine.forget_conversation(conversation)
     memory.delete = held_delete  # type: ignore[method-assign]
@@ -1860,50 +1394,6 @@ async def test_a_cancellation_landing_as_the_cleanup_finishes_still_cancels_the_
 
     assert landed
     assert await memory.get(landed[0]) is None
-
-
-# --- ADR-0297 §3-§5: a stop reaches a running resume ------------------------------------
-
-
-async def test_a_stop_reaches_a_resume_while_it_runs_and_it_returns_stopped() -> None:
-    """A control activation runs from its admission to its finalization, so a stop finds it.
-
-    The stop lands while the resolving answer is being written — after the resume
-    admitted its activation — and the resume then returns what it established, stopped,
-    with no reply (ADR-0297 §4).
-    """
-    engine = FakeAssistantEngine()
-    known = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
-    engine.activation_id_factory = lambda: known
-    confirmed = _recorded_confirm(_binding())
-    await engine.trail.record(confirmed)
-    engine.hold_confirmation_decision("park-1", confirmed)
-    parked = engine.park("park-1", egress=_binding())
-    answers: list[ActivationStop] = []
-    record = engine.trail.record
-
-    async def stopping(decision: PermissionDecision) -> str:
-        if decision.resolves is not None:
-            answers.append(await engine.stop_activation(known))
-        return await record(decision)
-
-    engine.trail.record = stopping  # type: ignore[method-assign]
-
-    resumed = await engine.resume(
-        parked.token,
-        approved=True,
-        timeout=timedelta(seconds=30),
-        remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
-    )
-
-    assert answers == [ActivationStop.STOPPED]
-    assert resumed.stopped is True
-    assert resumed.reply is None
-    assert resumed.reply_degraded is False
-    assert resumed.step is not None
-    assert resumed.recipient_grant is not None
-    # Finalized: no longer running, and a second stop finds nothing it can mark.
-    assert await engine.stop_activation(known) is not ActivationStop.STOPPED
 
 
 # --- ADR-0293 §6, §10: the fake answers a written message, and can be told not to ------

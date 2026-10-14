@@ -38,7 +38,6 @@ from ai_assistant.core.types import (
     GoalAssociation,
     Idempotency,
     InputOrigin,
-    NewConversation,
     PlannerOutput,
     PlanStep,
     ProposedAction,
@@ -48,10 +47,8 @@ from ai_assistant.core.types import (
     TextChannelPayload,
     ToolCost,
     ToolDefinition,
-    WholeTextReply,
 )
 from ai_assistant.models import PydanticAIProvider
-from ai_assistant.orchestration.channels import ChannelProjection
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.testing import (
     FakeGoalAssociator,
@@ -128,35 +125,6 @@ class Composed:
     def conversations(self) -> ConversationStore:
         """The conversation store the lifecycle was handed."""
         return self.engine._conversations._conversations
-
-    async def say(self, text: str, conversation_id: str | None = None) -> ChannelResult:
-        """One text activation on a new conversation, or on the one named."""
-        target = (
-            NewConversation()
-            if conversation_id is None
-            else ChannelIdentity(channel_type="conversation", instance_id=conversation_id)
-        )
-        # ADR-0293 §11 takes the text conversational combination off ``receive``, and
-        # ``converse`` — which still runs it, for the turn carrying a reference — returns
-        # the bare outcome. These cases are about how that turn's episode is captured,
-        # so they drive the same admission ``converse`` does and read its receipt.
-        return await self.engine._receive(
-            ChannelInput(target=target, payload=TextChannelPayload(text=text)),
-            reply=WholeTextReply(),
-            timeout=_BUDGET,
-            projection=ChannelProjection("converse"),
-            typed_turn=True,
-        )
-
-    async def fail(self, conversation_id: str) -> str:
-        """One activation whose pass raises before capture; the episode it left."""
-        before = await self.held(conversation_id)
-        with pytest.raises(RuntimeError, match="the planner is down"):
-            await self.say(_FAILS, conversation_id)
-        after = await self.held(conversation_id)
-        assert after[: len(before)] == before
-        (recorded,) = after[len(before) :]
-        return recorded
 
     async def held(self, conversation_id: str) -> list[str]:
         """Every id the store physically holds on the conversation's channel."""

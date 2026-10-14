@@ -32971,18 +32971,6 @@ class ChannelInput(BaseModel):
     context: ChannelContext = Field(default_factory=ChannelContext)
 
 
-class TextChannelResult(BaseModel):
-    """The existing textual turn outcome.
-
-    It leaves with ``converse`` (ADR-0313 §4:6), whose own input is the one that
-    still produces it; ``receive`` refuses every conversational input (§4:1).
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: Literal["text"] = "text"
-    outcome: TurnOutcome
-
-
 class InformationalEventResult(BaseModel):
     """How an event's activation ended, and nothing it wrote (ADR-0313 §4:3-§4:5).
 
@@ -32999,10 +32987,10 @@ class InformationalEventResult(BaseModel):
     )
 
 
-ChannelOutcome = Annotated[
-    TextChannelResult | InformationalEventResult,
-    Field(discriminator="kind"),
-]
+#: What a channel's operation returns. ADR-0313 §4:6 makes it
+#: :class:`InformationalEventResult` alone: ``TextChannelResult`` and
+#: ``SpokenChannelResult`` left with ``converse`` and ``converse_spoken``.
+ChannelOutcome = InformationalEventResult
 
 
 class ChannelResult(BaseModel):
@@ -33015,21 +33003,9 @@ class ChannelResult(BaseModel):
 
     @model_validator(mode="after")
     def _consistent_channel(self) -> Self:
-        result = self.result
-        if isinstance(result, InformationalEventResult):
-            if self.channel is None or self.channel.channel_type != "informational_event":
-                msg = "an informational result requires an informational_event channel"
-                raise ValueError(msg)
-            return self
-        # A text result's check leaves with it and ``converse`` (ADR-0313 §4:6).
-        outcome = result.outcome
-        if (
-            self.channel is None
-            or self.channel.channel_type != "conversation"
-            or outcome.conversation_id is None
-            or self.channel.instance_id != outcome.conversation_id
-        ):
-            msg = "a conversational result must name its outcome's conversation"
+        # A conversational result's check left with ``converse`` (ADR-0313 §4:6).
+        if self.channel is None or self.channel.channel_type != "informational_event":
+            msg = "an informational result requires an informational_event channel"
             raise ValueError(msg)
         return self
 

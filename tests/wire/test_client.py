@@ -111,13 +111,13 @@ async def test_a_closed_door_is_never_a_fallback(tmp_path: Path) -> None:
     Nothing is spawned and nothing is built in-process, so **every** method fails
     the same way rather than some of them quietly working. Walking the surface is
     what makes that a property rather than a spot check: a fallback added to one
-    method would pass a test that only drove ``converse``.
+    method would pass a test that only drove another.
     """
     client = HubEngineClient(tmp_path / "hub.sock", read_timeout=_PATIENT)
     with pytest.raises(HubUnavailableError):
         await client.beliefs()
     with pytest.raises(HubUnavailableError):
-        await client.pending_confirmations()
+        await client.notification_preferences()
     with pytest.raises(HubUnavailableError):
         await client.forget("rec-1")
     assert not (tmp_path / "hub.sock").exists()
@@ -292,39 +292,6 @@ async def test_a_client_from_before_the_optional_memory_kind_is_refused_at_conne
     assert engine.calls == [], "refused before any request of this build's shape is decoded"
 
 
-async def test_a_turns_request_reaches_the_client_on_the_turn_it_belongs_to(
-    tmp_path: Path,
-) -> None:
-    """ADR-0248 §7: the member the bump at 37 is spent on actually crosses.
-
-    The version pin says the constant moved and the log entry says why; the sibling arms
-    above say a bump nothing reaches through the handshake buys nothing. The same holds
-    for the member the bump is *for*. ``TurnResult`` rides ``TurnOutcome.turn``,
-    ``TurnOutcome`` is what the promoted surface returns, ``project`` renders a model by
-    ``model_dump()``, and ``utterance`` is **required with no default** (§1) — so a
-    projection that dropped it would fail the client's decode with ``missing`` rather than
-    silently, and a client at 36 handed it fails ``extra_forbidden``, which is what the
-    handshake refusal above makes legible.
-
-    Driven over a real socket against a real ``serve_connection``, and asserted on what the
-    **client** decoded rather than on what the hub built.
-    """
-    engine = FakeAssistantEngine()
-    limits = ConnectionLimits(max_frame_bytes=_FRAME, read_timeout=_PATIENT, build="test")
-
-    async def _hub(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await serve_connection(engine, reader, writer, limits=limits)
-
-    async with _listening(tmp_path / "hub.sock", _hub) as client:
-        outcome = await client.converse("what did I say about the ledger", timeout=_PATIENT)
-
-    assert outcome.turn is not None
-    assert outcome.turn.utterance == "what did I say about the ledger"
-    assert outcome.turn.utterance == outcome.turn.goal.outcome, (
-        "§6's byte-equality holds of what crossed the wire too"
-    )
-
-
 # --- authenticating the hub from the kernel (ADR-0084 §1) ------------------
 
 
@@ -351,7 +318,7 @@ async def test_a_hub_running_as_another_user_is_refused_before_anything_is_sent(
 
     "A replaced socket belonging to another user is refused at that point whatever
     the directory modes were" — and the check runs **after ``connect()`` and before
-    sending anything**, so the utterance never leaves this process. The foreign uid
+    sending anything**, so the argument never leaves this process. The foreign uid
     is injected because a test cannot bind a socket as another user, but the *rule*
     under test is the comparison, not the syscall.
     """
@@ -364,7 +331,7 @@ async def test_a_hub_running_as_another_user_is_refused_before_anything_is_sent(
     monkeypatch.setattr("ai_assistant.wire.peer.peer_uid", lambda _sock: os.geteuid() + 1)
     async with _listening(tmp_path / "hub.sock", _hub) as client:
         with pytest.raises(ProtocolError, match="another user"):
-            await client.converse("something private", timeout=_PATIENT)
+            await client.add_story_note("story:1", "something private")
 
 
 # --- the serial connection's two rules (ADR-0084 §3) -----------------------
@@ -562,9 +529,9 @@ async def test_the_client_enforces_the_limit_it_was_told_and_not_one_of_its_own(
 
     async with _listening(tmp_path / "hub.sock", _hub) as client:
         with pytest.raises(OversizedValueError) as caught:
-            await client.converse("x" * 4000, timeout=_PATIENT)
+            await client.revoke("x" * 4000)
     assert caught.value.limit == published - ENVELOPE_RESERVE_BYTES
-    assert caught.value.field == "utterance"
+    assert caught.value.field == "source"
 
 
 async def test_the_argument_refusal_happens_before_any_request_frame_is_written(
@@ -594,7 +561,7 @@ async def test_the_argument_refusal_happens_before_any_request_frame_is_written(
 
     async with _listening(tmp_path / "hub.sock", _recording_hub) as client:
         with pytest.raises(OversizedValueError):
-            await client.converse("x" * 4000, timeout=_PATIENT)
+            await client.revoke("x" * 4000)
     await asyncio.sleep(0)
     assert seen == [], "the request must never have been written"
 
@@ -694,7 +661,7 @@ async def test_a_value_with_no_wire_form_is_refused_before_the_socket_is_opened(
     """ADR-0085 §9's "before any I/O", for the values ADR-0087 §2 gives no form.
 
     **Driven with no hub at all**, which is what makes it a test of the *ordering*
-    rather than of the refusal: if the utterance were validated after ``connect``,
+    rather than of the refusal: if the source were validated after ``connect``,
     this would raise ``HubUnavailableError`` instead. So the error a caller sees
     would depend on whether a hub happened to be up — a ``ValueError`` in-process, a
     transport failure over the wire — for one value both implementations must refuse
@@ -702,7 +669,7 @@ async def test_a_value_with_no_wire_form_is_refused_before_the_socket_is_opened(
     """
     client = HubEngineClient(tmp_path / "hub.sock", read_timeout=_PATIENT)
     with pytest.raises(ValueError, match="UTF-8"):
-        await client.converse("bad \ud800", timeout=_PATIENT)
+        await client.revoke("bad \ud800")
     # An *identifier* is refused one step earlier still, by Identifier's own
     # validation (ADR-0085 §3c) rather than by the projection — a different message
     # for the same obligation, and still before anything is opened.
@@ -752,7 +719,7 @@ async def test_a_well_formed_argument_still_reaches_the_socket(tmp_path: Path) -
     """
     client = HubEngineClient(tmp_path / "hub.sock", read_timeout=_PATIENT)
     with pytest.raises(HubUnavailableError):
-        await client.converse("perfectly ordinary", timeout=_PATIENT)
+        await client.revoke("perfectly ordinary")
 
 
 async def test_a_malformed_frame_arriving_mid_request_closes_with_no_reply(
@@ -1092,10 +1059,10 @@ async def test_a_result_payload_of_the_wrong_shape_is_a_protocol_error(tmp_path:
 
     async with _listening(tmp_path / "hub.sock", hub) as client:
         with pytest.raises(ProtocolError) as caught:
-            await client.converse("hello", timeout=_PATIENT)
+            await client.notification_preferences()
 
     rendered = str(caught.value)
-    assert "converse()" in rendered
+    assert "notification_preferences()" in rendered
     assert "a result frame" in rendered
     assert "extra_forbidden" in rendered
     assert isinstance(caught.value.__cause__, ValidationError)

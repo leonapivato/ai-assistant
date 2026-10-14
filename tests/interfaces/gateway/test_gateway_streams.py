@@ -27,8 +27,10 @@ from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import UnknownConversationError
 from ai_assistant.core.types import (
     ActionPlan,
+    ChatDevice,
     CurrentContext,
     DataTier,
+    DeviceAccess,
     Goal,
     GoalBrief,
     GoalInterpretation,
@@ -40,6 +42,7 @@ from ai_assistant.core.types import (
     SpokenAudioFormat,
     TimeOfDay,
     TurnResult,
+    UserMessage,
 )
 from ai_assistant.interfaces.gateway import streams
 from ai_assistant.interfaces.gateway.delivery import GATEWAY_PLAYS, DeliveryStream, write_stream
@@ -1017,13 +1020,13 @@ async def test_the_browser_forgets_one_conversation(harness: Harness) -> None:
     """§6's ``forget_conversation``, which "widens what a script on the gateway's own
     origin can spend, and the honest accounting is that it widens it by less than what
     is already there": ADR-0168 §6's residual has covered ``converse`` since milestone
-    13, and a turn can approve a tool, execute it and durably commit a non-idempotent
+    13, and a turn could approve a tool, execute it and durably commit a non-idempotent
     effect.
 
     Since ADR-0293 §11:4 forgetting is memory-only: the episodes go and the
     conversation stays listed."""
     harness.engine.hold_conversation("c-1")
-    await harness.engine.converse("hello", conversation_id="c-1", timeout=timedelta(seconds=5))
+    await _answered(harness.engine, "c-1")
 
     status, body = await harness.whole("POST", "/conversation/forget", {"conversation_id": "c-1"})
 
@@ -1032,6 +1035,21 @@ async def test_the_browser_forgets_one_conversation(harness: Harness) -> None:
     assert await harness.engine.episode_memory.export() == []
     _, listed = await harness.whole("POST", "/conversations", {})
     assert [one["id"] for one in listed["conversations"]] == ["c-1"]
+
+
+async def _answered(engine: FakeAssistantEngine, conversation_id: str) -> None:
+    """Write one message into a held conversation, and let the fake's reader answer it.
+
+    The episode the reader's activation captures is what forgetting destroys; a
+    ``converse`` turn put one there until it retired (ADR-0309 §5:1).
+    """
+    await engine.set_my_devices([ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)])
+    await engine.write_message(
+        conversation_id, message=UserMessage(device_id="phone", message_id="m-1", text="hello")
+    )
+    async with asyncio.timeout(10):
+        while engine._chat_reads:
+            await asyncio.gather(*engine._chat_reads)
 
 
 async def test_a_conversation_the_hub_declined_is_reported_as_a_declined_request() -> None:

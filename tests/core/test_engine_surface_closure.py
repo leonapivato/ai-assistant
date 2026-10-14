@@ -273,6 +273,21 @@ _NAMESPACE: Final = {
 #: **``EpisodeResponseKind`` left this roster with ADR-0284 §4:1**, which removes it
 #: together with the two fields that carried it — ``EpisodeProcessingRecord.response_kind``
 #: and ``EpisodeSummary.response_kind`` — so the walk no longer reaches it.
+#:
+#: **ADR-0309 §5:1 takes twenty-four off this roster**, and the paragraphs above that
+#: name them are their history. ``converse``, ``resume``, ``cancel_read`` and
+#: ``pending_confirmations`` were the only members that returned a ``TurnOutcome``, a
+#: ``Confirmation`` or a ``ReadCancellation``, or took a ``ContinuationToken`` or a
+#: ``TurnReference``, and ADR-0313 §4:6 takes ``TextChannelResult`` out of
+#: ``ChannelOutcome`` with ``converse``. So the walk reaches none of ``TurnOutcome``,
+#: ``TurnResult``, ``StepOutcome``, ``Disposition``, ``Confirmation``,
+#: ``ContinuationToken``, ``TurnReference``, ``ReadAnswerOutcome``,
+#: ``ReadCancellation``, ADR-0197 §8's four routed types, ADR-0250's
+#: ``GoalEngagement``, ``EngagementDisposition``, ``ReferenceOutcome`` and
+#: ``GoalDisambiguation``, ADR-0264 §7's three outbound types, ADR-0261 §7's
+#: ``DriveWithheld``, ``TextChannelResult``, or the two text reply declarations, which
+#: only ``TextChannelResult``'s ``TurnOutcome`` reached. They stay in ``core`` until the
+#: types lanes retire them; they are no longer contract surface.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
         "EpisodeCaptureReport",
@@ -288,38 +303,20 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "ChannelContextItem",
         "ChannelContext",
         "ChannelInput",
-        "WholeTextReply",
-        "StreamingTextReply",
         "SpokenReply",
-        "TextChannelResult",
         "InformationalEventResult",
         "ChannelResult",
         "Clarification",
         "ClarificationWithdrawal",
-        "EngagementDisposition",
         "GoalAbandonment",
-        "GoalDisambiguation",
-        "GoalEngagement",
         "GoalSummary",
-        "ReferenceOutcome",
-        "TurnReference",
-        "ReadAnswerOutcome",
-        "ReadCancellation",
         "SpokenRendering",
         "SpokenAudio",
         "SpokenAudioFormat",
-        "RoutedOperation",
-        "RoutableOperation",
-        "RouteOutcome",
-        "OperationConfirmation",
         "SpendTotal",
         "SpendPeriod",
         "ToolInvocation",
         "RecordedInvocation",
-        "ContinuationToken",
-        "Confirmation",
-        "StepOutcome",
-        "TurnOutcome",
         "Evidence",
         "BeliefSummary",
         "Belief",
@@ -330,8 +327,6 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "Question",
         "AnswerKind",
         "AnswerOutcome",
-        "Disposition",
-        "TurnResult",
         "ConversationDigest",
         "GrantableSource",
         "HeldNotification",
@@ -347,10 +342,6 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "ConnectedAccount",
         "ConnectionAct",
         "Warrant",
-        "OutboundStatement",
-        "OutboundReach",
-        "OutboundDestination",
-        "DriveWithheld",
         # ADR-0289 §4's nine story methods, and the types they carry. A store-side
         # type no method returns — ``StoryEntry``, ``StoryViewPage`` — is not here,
         # because the walk does not reach it.
@@ -561,13 +552,21 @@ def test_the_walk_really_is_transitive() -> None:
     A walk that stopped at the returned types would pass every assertion above
     while proving nothing: the twenty-four are all directly named, so a one-level
     walk reaches them too. These five are reachable **only** through two or more
-    field hops — ``StepFailure`` and ``ToolFailureKind`` through
-    ``StepOutcome.state -> ExecutionState -> StepExecution``, ``Provenance`` and
-    ``Validity`` through ``TurnOutcome.turn -> TurnResult.memories ->
-    MemoryRecord``, and ``PlanStep`` through ``TurnResult.plan -> ActionPlan``.
+    field hops — ``StoryFlagKind`` through ``StoryOutcome.refusal -> StoryRefusal.flag
+    -> StoryFlagName.flag -> StoryFlag``, ``StoryNoteAuthor`` through
+    ``StoryNoteOutcome.note -> StoryNote``, ``ReportedExtent`` through
+    ``Belief.attestation -> Attestation``, and ``EpisodePosition`` and ``Modality``
+    through ``EpisodePage.items -> EpisodeSummary``. The five it named before were
+    reached through ``TurnOutcome``, which no member returns since ADR-0309 §5:1.
     """
     reached = {kind.__name__ for kind in _reachable()}
-    assert {"StepFailure", "ToolFailureKind", "Provenance", "Validity", "PlanStep"} <= reached
+    assert {
+        "StoryFlagKind",
+        "StoryNoteAuthor",
+        "ReportedExtent",
+        "EpisodePosition",
+        "Modality",
+    } <= reached
 
 
 def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
@@ -827,9 +826,16 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
 
     **ADR-0313 §3:1 removes one**, ``converse_spoken``, with spoken conversation — so
     the count falls to seventy-nine. Its gateway route left with push-to-talk (§3:4).
+
+    **ADR-0309 §5:1 removes four**, ``converse``, ``resume``, ``cancel_read`` and
+    ``pending_confirmations``, with the old path's turn — so the count falls to
+    seventy-five. Their gateway routes left with the Ask panel and the confirmation
+    panels (§5:4).
     """
-    assert len(_method_names()) == 79
+    assert len(_method_names()) == 75
     assert "converse_spoken" not in _method_names()
+    for retired in ("converse", "resume", "cancel_read", "pending_confirmations"):
+        assert retired not in _method_names()
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -1644,6 +1650,12 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     core types a peer at 99 sends and accepts in shapes a hub at 100 refuses (§6:4,
     ADR-0124 §9:2).
 
+    **101 is ADR-0309 §5:1 and ADR-0313 §4:6, under both limbs.** ``AssistantEngine``
+    loses ``converse``, ``resume``, ``cancel_read`` and ``pending_confirmations``, so
+    the method set falls to **75** and a client at 100 may call four operations a hub
+    at 101 no longer answers; and ``ChannelOutcome`` loses ``TextChannelResult``, a
+    wire-carried core type (§6:4, ADR-0124 §9:2).
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1652,7 +1664,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (79, 100), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (75, 101), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

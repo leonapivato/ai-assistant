@@ -29,7 +29,6 @@ from ai_assistant.core.types import (
     EpisodeCaptureReport,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InformationalEventResult,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
@@ -237,11 +236,10 @@ class FakeActivation:
     def observe(self, result: TurnOutcome | ChannelResult) -> None:
         """Observe the fake's produced result before a size check can refuse it."""
         if isinstance(result, ChannelResult):
-            if isinstance(result.result, InformationalEventResult):
-                # ADR-0313 §4:3: an event's place takes no message, so it wrote none
-                # and nothing it wrote is returned; its episode keeps no outcome.
-                return
-            result = result.result.outcome
+            # ADR-0313 §4:3: an event's place takes no message, so it wrote none and
+            # nothing it wrote is returned; its episode keeps no outcome. An event is the
+            # one channel result (§4:6).
+            return
         self.outcome = result
         self.response = result.reply
 
