@@ -30,8 +30,9 @@ either bounds the trace stream itself — how long a trace survives to be measur
 — or shapes the memory accumulation leg 8's measures are computed over: whether
 each job that grows the user model is armed and how often it runs, how much one
 of its passes may read or propose, and the deadline every retrieval's embedding
-call is bound by. Two more are on it because §9 puts them there: the effective
-``search`` limit of each cardinality control (below).
+call is bound by. One more is on it because §9 puts it there: the effective
+``search`` limit of the one cardinality control a startup figure can describe
+(below).
 
 **Three more are on it because ADR-0141 §10 requires them**, and they widen that
 test from one accumulation to two. The notification chassis's cap, its retention
@@ -217,16 +218,20 @@ EMBEDDING_TIMEOUT_SECONDS: Final = "embedding_timeout_seconds"
 # §9 requires "for **every** cardinality control that can drive a traced read
 # past §3's ``records`` cap — not a named subset of them — the **effective**
 # ``search`` limit that control produces at the seam, which need not equal the
-# control's own value". Two hold the property at this date and neither is a
-# ``Settings`` field, so both figures are handed over by the composition root.
+# control's own value". One holds the property and has a fixed figure: the
+# ingestor's conflict probe. It is not a ``Settings`` field, so the composition root
+# hands the figure over.
+#
+# **Recall has no figure here** (ADR-0319 §4). It asks ``search`` for
+# ``RECALL_ITEM_LIMIT`` plus the records it may pass over (ADR-0282 §4:2), so its
+# limit depends on each activation's data and no startup figure can describe it.
+# §9:4 does not reach such a control; whether a recall read truncated is its own
+# trace's truncation declaration, as below.
 #
 # **These are diagnostics and they exclude nothing** (§9). A limit above §3's cap
 # of 256 says a window *could* truncate; whether one did is the individual
 # trace's own truncation declaration, and "a complete trace from a deployment
 # configured above the cap counts like any other".
-
-#: The largest ``limit`` a turn's retrieval reaches ``MemoryStore.search`` with.
-RETRIEVAL_SEARCH_LIMIT: Final = "retrieval_search_limit"
 
 #: The ``limit`` the ingestor's conflict probe reaches ``MemoryStore.search``
 #: with — the ceiling **plus two** (ADR-0079 §1). §9: "A ``conflict_limit`` of 255
@@ -313,7 +318,6 @@ ALLOWLIST_KEYS: Final[frozenset[str]] = frozenset(
         EPISODE_RETENTION_FINITE,
         EPISODE_RETENTION_SECONDS,
         EMBEDDING_TIMEOUT_SECONDS,
-        RETRIEVAL_SEARCH_LIMIT,
         CONFLICT_SEARCH_LIMIT,
         NOTIFICATION_QUEUE_LIMIT,
         NOTIFICATION_RETENTION_FINITE,
@@ -359,21 +363,17 @@ class ConfigurationStamp:
         self,
         *,
         sink: TraceSink,
-        retrieval_search_limit: int,
         conflict_search_limit: int,
         now: Clock = _utcnow,
     ) -> None:
-        """Hold the sink, the clock and the two figures only the root knows.
+        """Hold the sink, the clock and the figure only the root knows.
 
         Args:
             sink: The trace store's **append** seam.
-            retrieval_search_limit: The effective ``search`` limit the learning
-                loop's ``retrieval_limit`` produces (ADR-0119 §9). Supplied by the
-                composition root, which is the only layer that knows it —
-                ``Settings`` holds no such field, so "a ``Settings`` dump would
-                show neither".
             conflict_search_limit: The effective ``search`` limit the ingestor's
-                ``conflict_limit`` produces, which is the ceiling plus two.
+                ``conflict_limit`` produces, which is the ceiling plus two
+                (ADR-0119 §9). Supplied by the composition root, which is the only
+                layer that knows it: ``Settings`` holds no such field.
             now: The clock the instant is stamped from. §3 puts the stamp on the
                 emitter rather than on the store, because a store stamping on
                 append "would measure the write rather than the event". Guarded by
@@ -382,7 +382,6 @@ class ConfigurationStamp:
                 costs the trace and never the startup (§5).
         """
         self._sink = sink
-        self._retrieval_search_limit = retrieval_search_limit
         self._conflict_search_limit = conflict_search_limit
         self._now = checked_clock(now, owner="ConfigurationStamp")
 
@@ -454,7 +453,6 @@ class ConfigurationStamp:
             SCHEDULER_RUN_BUDGET_SECONDS: settings.scheduler_run_budget.total_seconds(),
             SCHEDULER_CHUNK_SIZE: settings.scheduler_chunk_size,
             EMBEDDING_TIMEOUT_SECONDS: settings.embedding_timeout_seconds,
-            RETRIEVAL_SEARCH_LIMIT: self._retrieval_search_limit,
             CONFLICT_SEARCH_LIMIT: self._conflict_search_limit,
             NOTIFICATION_QUEUE_LIMIT: settings.notification_queue_limit,
             RECONCILER_MAX_CONFLICTS: settings.reconciler_max_conflicts,
@@ -562,7 +560,6 @@ __all__ = [
     "RECONCILER_MAX_CONFLICTS",
     "RETENTION_PURGE_ARMED",
     "RETENTION_PURGE_SECONDS",
-    "RETRIEVAL_SEARCH_LIMIT",
     "SCHEDULER_CHUNK_SIZE",
     "SCHEDULER_RUN_BUDGET_SECONDS",
     "SEAM_STARTUP",

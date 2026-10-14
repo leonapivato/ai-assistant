@@ -2541,40 +2541,35 @@ class _LimitSpy(FakeMemoryStore):
         return await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
 
 
-async def test_build_composition_reports_the_two_effective_search_limits(
+async def test_build_composition_reports_the_effective_conflict_search_limit(
     tmp_path: Path,
 ) -> None:
     """What ADR-0119 §9's startup stamp is handed, and where it comes from.
 
-    The retrieval figure is the control's own value; the conflict figure is the
-    control **plus two**, because ADR-0079 §1's probe over-asks its ceiling. §9
-    requires the second and not the first: "a ``conflict_limit`` of 255 sits under
-    the cap while the probe it drives asks for 257".
+    The conflict figure is the control **plus two**, because ADR-0079 §1's probe
+    over-asks its ceiling: "a ``conflict_limit`` of 255 sits under the cap while the
+    probe it drives asks for 257". Recall's limit depends on each activation's data,
+    so the build hands over no figure for it (ADR-0319 §4).
     """
     composed = build_composition(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         assert isinstance(composed, Composition)
-        assert composed.retrieval_search_limit == composition_module.RETRIEVAL_LIMIT
         assert composed.conflict_search_limit == composition_module.CONFLICT_LIMIT + 2
         assert isinstance(composed.engine, Engine)
     finally:
         await composed.engine.aclose()
 
 
-async def test_build_composition_tunes_the_collaborators_to_the_figures_it_reports(
+async def test_build_composition_tunes_the_ingestor_to_the_figure_it_reports(
     tmp_path: Path,
 ) -> None:
     """The report is not a second opinion about what was built.
 
     §9's whole reason for saying *effective* is that the number must be the one
-    the machine is running on. If the root reported these figures while leaving
-    either collaborator on a default it does not control, a later change to that
-    default would silently make the operator's record wrong — which is the failure
-    this lane exists to avoid rather than one it may reintroduce.
-
-    **The conflict figure alone**: the retrieval figure tuned the old path's loop, and
-    no production retrieval is built with it since that path was deleted (ADR-0309
-    §5), so there is no collaborator left to hold it against.
+    the machine is running on. If the root reported this figure while leaving the
+    ingestor on a default it does not control, a later change to that default would
+    silently make the operator's record wrong — which is the failure this lane exists
+    to avoid rather than one it may reintroduce.
     """
     composed = build_composition(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
@@ -2621,48 +2616,6 @@ async def test_the_conflict_probe_asks_the_store_for_the_reported_figure() -> No
     )
 
     assert store.limits == [composition_module.CONFLICT_LIMIT + 2]
-
-
-def test_the_retrieval_budget_is_the_depth_the_reach_evidence_bought() -> None:
-    """The figure itself, pinned to the measurement that chose it (ADR-0162 §9).
-
-    Every other test here holds the figure *symbolically* — that the stamp reports
-    what the loop was built with — and would pass just as well on a budget of 5 or 1.
-    None of them notices the number going back, which is what this one is for. It
-    was 15 on #1029's re-rank analysis, and §9 takes it to 30 on the probe's reach
-    sweep: complete intake (ADR-0162 §1)
-    removes the 63.1% ceiling that made depth in beliefs worthless, the probe's
-    belief-reach curve runs 55.1% at 5 to 81.2% at 50 and is still climbing, and
-    30+10 reaches 85.1% union all-gold-reached against the incumbent 15+15's 79.8%.
-
-    Reverting it is allowed — it is tuning, not a ratified bound, and §9 marks the
-    value **provisional** pending ADR-0160 §5's byte-budgeted pool — but it costs a
-    deliberate edit here rather than passing as a tidy-up, because the evidence
-    lives in a comment and a comment fails nothing.
-    """
-    assert composition_module.RETRIEVAL_LIMIT == 30
-
-
-def test_the_episodic_supplement_is_bounded_at_thirty_and_never_above_the_beliefs() -> None:
-    """ADR-0224 §1's bound, and the ceiling it now meets.
-
-    Two figures, one test, because the second is what the first means. The value
-    began at 5 on a judgement, went to 15 on ADR-0160 §1's measurement, came back to
-    10 on ADR-0162 §9's reach sweep, and goes to 30 here — not because the episodes
-    got better but because #1844's replay priced them: widening the *existing* blind
-    read buys ≈ +3.6 points of LoCoMo accuracy, converted through pilot-5's own
-    scored answers, for no additional model call and no new read, against ≈ +1.3 at
-    30+15. What it spends is prompt bytes on the budget ADR-0158 §5 still leaves
-    unset. The **relation** is not tuning: it is where the product thesis stops
-    being documentation, since whatever the two numbers become, nobody can configure
-    a system that asks for more transcript than belief. At 30 against 30 that
-    ceiling is **met** rather than satisfied with slack, which is the parity ADR-0160
-    §2 admitted and ADR-0224 §2 exercises — so the second assertion is
-    not-greater-than, and a strictly-less-than one would now fail rather than merely
-    read oddly.
-    """
-    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT == 30
-    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT <= composition_module.RETRIEVAL_LIMIT
 
 
 class TestBuildMeasureReader:

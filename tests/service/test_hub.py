@@ -253,7 +253,6 @@ def _composed(engine: FakeEngine, sink: TraceSink | None = None) -> Composition:
     return Composition(
         engine=cast("Engine", engine),
         trace_sink=sink if sink is not None else FakeTraceSink(),
-        retrieval_search_limit=5,
         conflict_search_limit=102,
     )
 

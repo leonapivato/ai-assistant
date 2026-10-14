@@ -646,7 +646,6 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
             # reads correctly as a hub that came up and served nothing.
             await ConfigurationStamp(
                 sink=composed.trace_sink,
-                retrieval_search_limit=composed.retrieval_search_limit,
                 conflict_search_limit=composed.conflict_search_limit,
             ).record(settings)
 
