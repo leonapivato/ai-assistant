@@ -1,6 +1,6 @@
 # 319. The decisions the cutover left standing over deleted code retire, the stamp drops recall's limit, and an unasked memory question is logged
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-10-14
 - Scope: the phases after understanding, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): the records [#2836](https://github.com/leonapivato/ai-assistant/issues/2836) asks for, for the ratified decisions whose code the cutover's deletion lanes removed or are removing, and four decisions those deletions leave to be recorded.
 - Dependency: [ADR-0309](0309-the-phases-are-built-beside-the-old-path-and-one-cutover-switches-the-controller-over-deletes-the-old-path-and-goes-live-in-one-deploy.md), ADR-0313 and ADR-0318, all Accepted.
@@ -33,9 +33,9 @@ event-summary stage and the interim tidy-up. `AssistantEngine` lost `converse`, 
 `revoke_authorization`, `answer`, `questions`, `interrupted_questions`, `forget_question`,
 `grantable_decisions` and `establish_recipient_grant`, with their commands and panels.
 
-**What is being deleted.** Lanes in flight delete the old planner (`planning/planner.py`),
-the parked-reads store (`permissions/parked_reads.py`), the deferred-question store
-(`memory/deferral_store.py`) and the goal authorizations
+**What was deleted after `5bffba96`.** By `d0e8fdfd` the residue lanes had deleted the old
+planner (`planning/planner.py`), the parked-reads store (`permissions/parked_reads.py`), the
+deferred-question store (`memory/deferral_store.py`, #3012) and the goal authorizations
 (`permissions/goal_authorizations.py`); `planning/goals.py` retires under ADR-0309 §5:1. The
 owner ruled on 2026-10-14 (#2816) that the old planner, the query composer and the streaming
 completer retire with their seams, and that `context/` is deleted and `learning/` kept. At
@@ -89,9 +89,11 @@ queue; and leave every producer of `UserConfirmation` to the authority milestone
 > `CONTRIBUTING.md` → "Finishing an ADR PR" requires have returned green on one tree
 > and the dispatcher's authorization to ratify stands.
 
-> **Normative.** The lanes that implement §4 and §5, the stamp lane of #2989 and the
-> deferred-question store's deletion lane, merge only after this decision has merged
-> `Accepted`.
+> **Normative.** The stamp lane of #2989 merges only after this decision has merged
+> `Accepted`. The deferred-question store's deletion lane (#3012) merged ahead of this
+> decision, and its `memory_write_deferred` log carries the proposal's id; a follow-up lane
+> brings that log to §5:1's shape, the ruling's kind and the memory kind with no proposal
+> id, and merges after this decision.
 
 > **Normative.** Each clause this decision retires keeps binding the code it governs until
 > the lane that removes that code merges, and no lane builds on it meanwhile.
