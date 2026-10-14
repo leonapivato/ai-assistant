@@ -2182,12 +2182,13 @@ class EgressBinderContract(ABC):
 
         The input is the one #2232 names: a search at the configured provider whose
         binding carries ``closed_loop`` ``True`` and whose declaration costs
-        ``CostBasis.UNKNOWN``, which is the independent ground §7 gives for the
-        ``CONFIRM`` that parks it. Arm E says the read then **dispatches**; §11 fences
+        ``CostBasis.UNKNOWN``, which is the independent ground §7 gave for the
+        ``CONFIRM`` that parked it. Arm E said the read then **dispatched**; §11 fenced
         this lane to ``tools/``, so what is asserted here is the equality that dispatch
-        rests on — the derived binding equalling the recorded one, instead of the
-        ``OPERATION_CHANGED`` ADR-0244 §6's clause 4 returns when it does not. The
-        park-level dispatch is the engine's arm, not this suite's.
+        rested on — the derived binding equalling the recorded one, instead of the
+        ``OPERATION_CHANGED`` ADR-0244 §6's clause 4 returned when it did not. The
+        park-level dispatch was the engine's arm, never this suite's, and retired with
+        the parked read at the cutover (ADR-0319).
 
         **This case asserts the opposite of the one it replaces.** The superseded case
         drove exactly this input and asserted ``EgressBindingError``, because the seam
@@ -2303,12 +2304,13 @@ class EgressBinderContract(ABC):
         and returns ``OPERATION_CHANGED``." The origin reaches this seam as the
         destination-bearing argument the answer rebuilds the request from, so a changed
         configuration is a changed supplied form — and the equality refusal fires on it
-        exactly as it did before the transcription. The transcription repairs the park
+        exactly as it did before the transcription. The transcription repaired the park
         nobody could answer; it does not weaken what an approval covers.
 
-        The park's staying ``OPEN`` and the ``OPERATION_CHANGED`` are the engine's half
-        of this arm (§11 fences lane 2 to ``tools/``); what is owed here is the refusal
-        they follow from, and that the recorded binding is untouched by it.
+        The park's staying ``OPEN`` and the ``OPERATION_CHANGED`` were the engine's half
+        of this arm (§11 fenced lane 2 to ``tools/``), and retired with the parked read
+        at the cutover (ADR-0319); what is owed here is the refusal they followed from,
+        and that the recorded binding is untouched by it.
         """
         searcher = https_tool()
         self.register_egress(binder, searcher)
@@ -2606,10 +2608,11 @@ class EgressBinderContract(ABC):
         The input is the park ADR-0247 §12's Arm E names, so the case says the
         transcription count did not quietly become five: the re-derived binding carries
         ``closed_loop`` transcribed from ``approved`` and ``forecast_reach`` defaulted,
-        and equals the approved binding — which is what keeps the answer from being
-        ``OPERATION_CHANGED`` (#2232). What fails it is a ``rebind`` that **invents**
-        the fact: any value but ``False`` on this path derives a binding unequal to the
-        recorded one and refuses every park a deployment can actually hold. On the
+        and equals the approved binding — which is what kept the parked read's answer
+        from being ``OPERATION_CHANGED`` (#2232) until it retired at the cutover
+        (ADR-0319). What fails it is a ``rebind`` that **invents** the fact: any value
+        but ``False`` on this path derives a binding unequal to the recorded one, and
+        would have refused every park a deployment could hold. On the
         parks §11 admits, transcribing and defaulting are indistinguishable by
         construction, so the case pins the equality rather than claiming to tell them
         apart — and §14 defers the resumable forecast park, naming the ADR that would
