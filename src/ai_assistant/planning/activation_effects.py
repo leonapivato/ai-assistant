@@ -3,13 +3,14 @@
 ADR-0306 §5:4 has a call or a message that gets an effect record claimed by writing
 that record before it runs, "in one indivisible plan-store step that also decides the
 stop and §5's backstop", and §6:2 and §6:4 state what the claim and the finish refuse.
-The decisions are written here rather than in each store, for the reason
-:mod:`ai_assistant.planning.stops` gives of its own: two statements of one rule are
-two places for it to drift. Each store's job is the indivisible step the decision is
-taken inside, not the decision.
+The decisions are written here rather than in each store because two statements of
+one rule are two places for it to drift. Each store's job is the indivisible step the
+decision is taken inside, not the decision.
 
 The canonical fake in :mod:`ai_assistant.testing` re-implements this rather than
-importing it, for the reason :mod:`ai_assistant.planning.effects` gives.
+importing it. That is the point of a conformance suite: the shared cases are what stop
+the two drifting, and a fake that imported this module would pull in the subsystem it
+stands in for.
 """
 
 from __future__ import annotations

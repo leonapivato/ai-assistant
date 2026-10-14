@@ -21,31 +21,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 
 from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
-    ActionPlan,
-    ActionQuote,
     ActivationEffect,
     ActivationEffectClaim,
-    EffectKey,
-    Goal,
-    GoalAttempt,
-    GoalInterpretation,
-    Ground,
-    IntendedAction,
-    IntendedActionMinting,
-    MemorySource,
-    PlanStep,
-    Provenance,
-    ReadRequest,
-    StepOutputRef,
-    StepStatus,
-    StepTransition,
     ToolOutcome,
 )
 from ai_assistant.testing.cancellation import settle
@@ -55,7 +38,6 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from ai_assistant.core.protocols import PlanStore
-    from ai_assistant.core.types import ExecutionState
     from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -92,187 +74,6 @@ def _message(effect_id: str, *, activation: str = "act-1") -> ActivationEffect:
     """A message's effect record as claimed, with no outcome and no position."""
     return ActivationEffect(
         id=effect_id, activation_id=activation, round="r1", place="c-1", claimed_at=_WHEN
-    )
-
-
-# --- builders the SQLite store's own tests import ----------------------------
-#
-# They build the rows of the members ADR-0309 §5 retires, which this suite no longer
-# pins; `test_sqlite_plan_store.py` still drives them.
-#: The arguments digest every scripted quote carries. A fixed, well-formed
-#: ``Sha256Hex``: the store compares it against nothing (ADR-0267 §2), so what matters
-#: here is only that the record is constructible and round-trips.
-_QUOTE_DIGEST = "a" * 64
-
-#: When a scripted quote was read. Fixed, because **no clause orders quotes by it**
-#: (§1): the tuple's position is the order, and a store that sorted by this would be
-#: the second implementation of §2's rule.
-_QUOTE_READ_AT = datetime(2026, 1, 2, tzinfo=UTC)
-
-
-def _goal(goal_id: str = "g1", *, statement: str = "relocate to Lisbon") -> Goal:
-    """A goal opened at revision 1, in the shape ADR-0249 §3 mints."""
-    return Goal(
-        id=goal_id,
-        conversation_id="c1",
-        interpretation=(
-            GoalInterpretation(
-                revision=1,
-                outcome=statement,
-                outcome_ground=Ground.USER_STATED,
-                outcome_span=statement,
-                recorded_at=_WHEN,
-                raised_by="t-1",
-            ),
-        ),
-        provenance=Provenance(
-            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_WHEN
-        ),
-        created_at=_WHEN,
-    )
-
-
-def _revision(
-    revision: int, *, outcome: str = "relocate to Lisbon in September"
-) -> GoalInterpretation:
-    """One interpretation revision, in the shape ADR-0249 §1 admits.
-
-    Grounded ``INFERRED`` rather than ``USER_STATED`` because nothing here is a span
-    of any turn's request — the suite records revisions, it does not resolve grounds,
-    and §7's resolution is L3's.
-    """
-    return GoalInterpretation(
-        revision=revision,
-        outcome=outcome,
-        outcome_ground=Ground.INFERRED,
-        recorded_at=_WHEN,
-        raised_by=f"t-{revision}",
-    )
-
-
-def _attempt(attempt_id: str = "a1", goal_id: str = "g1") -> GoalAttempt:
-    """A freshly opened attempt: ``UNDERSTAND``/``RUNNING``, nothing spent (§5, §6)."""
-    return GoalAttempt(id=attempt_id, goal_id=goal_id, opened_at=_WHEN)
-
-
-def _plan(  # noqa: PLR0913 — the plan's own fields, each a distinct thing an arm varies
-    plan_id: str = "p1",
-    goal_id: str = "g1",
-    *,
-    steps: int = 1,
-    read_request: ReadRequest | None = None,
-    supersedes: str | None = None,
-    targets_revision: int | None = 1,
-) -> ActionPlan:
-    """A plan the store accepts: stamped, as ADR-0249 §8 requires every saved plan.
-
-    ``targets_revision`` defaults to the revision every goal this suite builds stands
-    at, because a plan whose stamp is still absent is one ``save_plan`` refuses (§8).
-    The arm that drives that refusal passes ``None`` explicitly.
-    """
-    return ActionPlan(
-        id=plan_id,
-        goal_id=goal_id,
-        steps=tuple(
-            PlanStep(id=f"s{index}", intent=f"step {index}", capability="send_email")
-            for index in range(1, steps + 1)
-        ),
-        created_at=_WHEN,
-        read_request=read_request,
-        supersedes=supersedes,
-        targets_revision=targets_revision,
-    )
-
-
-def _intended(action_id: str = "ia1", *, serves: tuple[str, ...] = ()) -> IntendedAction:
-    """One intended action, minted by ``orchestration`` in the shape ADR-0265 §1 admits."""
-    return IntendedAction(id=action_id, intent=f"perform {action_id}", serves=serves)
-
-
-def _minting(
-    *actions: IntendedAction, goal_id: str = "g1", expected_version: int = 0
-) -> IntendedActionMinting:
-    """The command that appends ``actions`` to ``goal_id`` (ADR-0265 §5)."""
-    return IntendedActionMinting(
-        goal_id=goal_id, actions=actions, expected_version=expected_version
-    )
-
-
-def _quote(
-    *, action: str = "ia1", amount: str = "120", currency: str = "EUR", digest: str = _QUOTE_DIGEST
-) -> ActionQuote:
-    """One quote for ``action``, at the shape ADR-0267 §1 declares."""
-    return ActionQuote(
-        intended_action=action,
-        arguments_digest=digest,
-        amount=Decimal(amount),
-        currency=currency,
-        plan="p1",
-        read_from=StepOutputRef(step="s1", field="price"),
-        read_at=_QUOTE_READ_AT,
-    )
-
-
-#: The effect key an arm claims under, and the one it claims under when a case needs an
-#: **unequal** key — the Sunday booking, one intended action and two keys. Neither
-#: carries an egress binding: ADR-0259 §1's binding limb is `core`'s to arm, and what a
-#: store is held to is that two equal keys are one row and two unequal keys are not.
-_KEY: Final[EffectKey] = EffectKey(tool_id="book_room", parameters_digest="a" * 64)
-
-
-def _effect_plan(
-    plan_id: str = "p1",
-    *,
-    goal_id: str = "g1",
-    actions: tuple[str | None, ...] = ("ia1",),
-    supersedes: str | None = None,
-    targets_revision: int = 1,
-) -> ActionPlan:
-    """A plan whose steps name intended actions, for ADR-0259 §2's row scoping.
-
-    One step per entry of ``actions``, each naming that entry — ``None`` included, which
-    is the shape ADR-0265 §4 leaves and §2 refuses an effect claim of.
-    """
-    return ActionPlan(
-        id=plan_id,
-        goal_id=goal_id,
-        steps=tuple(
-            PlanStep(
-                id=f"s{index}",
-                intent="book a room",
-                capability="book_room",
-                intended_action=action,
-            )
-            for index, action in enumerate(actions, start=1)
-        ),
-        created_at=_WHEN,
-        supersedes=supersedes,
-        targets_revision=targets_revision,
-    )
-
-
-def _claim(
-    state: ExecutionState,
-    step_id: str = "s1",
-    *,
-    attempt_id: str = "a1",
-    activation_id: str | None = None,
-) -> StepTransition:
-    """The transition that claims a step — bound tool, authorisation, attempt.
-
-    ``attempt_id`` is required on a ``→ RUNNING`` transition (ADR-0255 §3) and names
-    the attempt :func:`_owned` opens, which is the one every arm here claims under.
-    ``activation_id`` is optional on it (ADR-0297 §2), and only the stop arms name one.
-    """
-    return StepTransition(
-        execution_id=state.id,
-        step_id=step_id,
-        to_status=StepStatus.RUNNING,
-        expected_version=state.version,
-        bound_tool="smtp",
-        approval_ref="perm-1",
-        attempt_id=attempt_id,
-        activation_id=activation_id,
     )
 
 
