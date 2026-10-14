@@ -1164,6 +1164,34 @@ def test_a_field_a_hosts_record_factory_adds_is_cleared_like_an_extra() -> None:
     assert result.stdout.startswith("read failed|ValueError")
 
 
+@pytest.mark.parametrize("handler", ["ours", "a host's"])
+def test_a_sole_mapping_arguments_keys_carry_no_words(handler: str) -> None:
+    # Adversarial review, round 4: logging makes a sole mapping argument the record's
+    # ``args`` itself, and only its values were looked at.
+    if handler == "ours":
+        stream = _configured_on_a_bare_root()
+    else:
+        root = logging.getLogger()
+        for one in list(root.handlers):
+            root.removeHandler(one)
+        stream = io.StringIO()
+        root.addHandler(logging.StreamHandler(stream))
+        configure_logging(Settings())
+    failure = ValueError(_MESSAGE)
+    log = logging.getLogger("thirdparty")
+
+    log.error("failures: %s", {failure: 1})
+    log.error("failures: %s", {str(failure): 1}, exc_info=failure)
+    log.error("read %(count)d of %(what)s", {"count": 2, "what": failure})
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    lines = out.splitlines()
+    assert lines[0] == "failures: {ValueError: 1}"
+    assert lines[1] == "failures: {'ValueError': 1}"
+    assert "read 2 of ValueError" in lines, "named interpolation still reads the mapping"
+
+
 def test_an_argument_holding_itself_is_masked_not_walked_forever() -> None:
     stream = _configured_on_a_bare_root()
     held: list[object] = [ValueError(_MESSAGE)]
