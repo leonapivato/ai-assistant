@@ -896,13 +896,17 @@ _STORY_CALLS: Final = (
 
 #: #2893, #2944: a story read shows the notes a tidy-up has taken in, so a move or a split
 #: can name the note a summary's line came from instead of restating it; said where a story
-#: read is offered beside the story calls.
+#: read is offered beside the story calls. A note moved away leaves nothing pending on the
+#: story it left, and a tidy-up reads only what is pending, so the story it left is given a
+#: note saying where the matter went before it is tidied.
 _OLDER_NOTES: Final = (
     " A story's views show only its notes since it was last tidied; read the story to see "
     "its older notes too, newest first a page at a time. To move or split something a "
-    "story's summary holds, read the story, find the note it came from, and name that "
-    "note by its label in the move or the split rather than restating it as a new note; "
-    "then tidy the story it left, so its summary drops it."
+    "story's summary holds, read the story and find the note it came from, if one did, and "
+    "name that note by its label in the move or the split rather than restating it as a "
+    "new note. Then note on the story it left where that went, and tidy that story so its "
+    "summary drops it: a tidy-up reads only what came since the last, and a note moved "
+    "away is not that."
 )
 
 
@@ -950,10 +954,13 @@ _NEVER_TIDIED: Final = "never"
 _NONE_NEWER: Final = "none"
 _NO_OLDER: Final = "none on this page"
 #: #2944: beside a tidied story's summary, where a story read is offered and notes may be
-#: shown, that its lines came from notes a story read lists by label. It adds nothing to
-#: the view: it points at the full view ADR-0307 §6:5 already lets planning look up.
+#: shown, that its lines may have come from notes a story read lists by label. A summary
+#: can be built from episodes alone, and planning is not told which, so the cue says
+#: "may". It adds nothing to the view: it points at the full view ADR-0307 §6:5 already
+#: lets planning look up.
 _FROM_OLDER_NOTES: Final = (
-    "older notes a tidy-up took in: read the story to see them by their labels"
+    "what tidy-ups took in, which may include older notes: read the story to see any by "
+    "their labels"
 )
 _NO_EPISODES: Final = "none shown"
 _SHOWN_ABOVE: Final = "shown above under this label"
@@ -1230,7 +1237,7 @@ class _Request:
         every pass (§6:3-§6:4). On a pass that may not be shown a note, the notes part
         is absent, saying nothing of them (ADR-0305 §4).
 
-        A tidied story says beside its summary that a story read lists the older notes
+        A tidied story says beside its summary that a story read lists any older notes
         its lines came from, where a story read is offered and notes may be shown, and
         not on a read's own view, which lists them (#2944).
         """

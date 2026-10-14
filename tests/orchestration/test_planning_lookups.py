@@ -13,6 +13,9 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from test_planning import _earlier, _inputs, _instruction, _remembered, _sent, _stage
 from test_planning_stories import _note, _story
+from test_story_tidy_up import _note as _tidy_note
+from test_story_tidy_up import _reply, _summary, _tidy_up, _trip
+from test_story_tidy_up import _story as _tidy_story
 
 from ai_assistant.core.types import (
     LabelKind,
@@ -20,6 +23,7 @@ from ai_assistant.core.types import (
     PlanningLabel,
     ProposedCall,
     RoundResponse,
+    StoryActor,
 )
 from ai_assistant.orchestration.lookups import READ_STORY
 from ai_assistant.orchestration.planning import (
@@ -30,6 +34,8 @@ from ai_assistant.orchestration.planning import (
     PlanningStories,
 )
 from ai_assistant.orchestration.story_calls import STORY_CALLS
+from ai_assistant.orchestration.story_tidy_up import TidyUpResult
+from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import PlanningRound
@@ -304,7 +310,8 @@ async def test_planning_is_told_a_story_read_shows_older_notes_where_it_can_read
     """#2893, #2944: said beside the story calls, only where a story read is offered too.
 
     With it, the procedure for moving what a summary holds: read the story, name the note
-    the line came from rather than restating it, then tidy the story it left.
+    the line came from rather than restating it, then note on the story it left where it
+    went and tidy that story.
     """
     stage, completer, _ = _stage()
 
@@ -314,11 +321,43 @@ async def test_planning_is_told_a_story_read_shows_older_notes_where_it_can_read
     assert "Stories are yours to keep" in instruction
     assert ("read the story to see its older notes too" in instruction) is reads
     procedure = (
-        "To move or split something a story's summary holds, read the story, find the note "
-        "it came from, and name that note by its label in the move or the split rather than "
-        "restating it as a new note; then tidy the story it left, so its summary drops it."
+        "To move or split something a story's summary holds, read the story and find the "
+        "note it came from, if one did, and name that note by its label in the move or the "
+        "split rather than restating it as a new note. Then note on the story it left where "
+        "that went, and tidy that story so its summary drops it: a tidy-up reads only what "
+        "came since the last, and a note moved away is not that."
     )
     assert (procedure in instruction) is reads
+
+
+async def test_a_note_moved_away_leaves_the_story_it_left_nothing_to_tidy_until_noted() -> None:
+    """#2944: the premise of the procedure's last step, over the canonical fakes.
+
+    A note a tidy-up took in, moved to another story, leaves nothing pending on the story
+    it left, so tidying that story reads nothing and its summary keeps the line. A note
+    there saying where the matter went is what the next tidy-up reads, and it rewrites.
+    """
+    stories, memory, trip = await _trip()
+    car = await _tidy_story(stories, "a-2")
+    inspection = await _tidy_note(stories, trip, "The car's inspection is due before Porto.")
+    first = FakeModelProvider(_reply(["Porto trip.", "Car inspection before departure."]))
+    assert (await _tidy_up(first, stories, memory).run(trip)).result is TidyUpResult.WRITTEN
+
+    moved = await stories.move(trip, car, actor=StoryActor.PLANNING, notes=(inspection,))
+    assert moved.refusal is None
+    idle = FakeModelProvider(_reply(["unused"]))
+    left = await _tidy_up(idle, stories, memory).run(trip)
+
+    assert left.result is TidyUpResult.NOTHING_TO_READ
+    assert idle.calls == []
+    assert await _summary(stories, trip) == ["Porto trip.", "Car inspection before departure."]
+
+    await _tidy_note(stories, trip, "The car's inspection now lives with the car story.")
+    second = FakeModelProvider(_reply(["Porto trip."]))
+    noted = await _tidy_up(second, stories, memory).run(trip)
+
+    assert noted.result is TidyUpResult.WRITTEN
+    assert await _summary(stories, trip) == ["Porto trip."]
 
 
 # --- a tidied story's summary points at the story read (#2944) ---------------------------------
@@ -336,13 +375,14 @@ _STORY_READS = (*STORY_CALLS, READ_STORY)
     ],
     ids=["tidied", "never_tidied", "notes_withheld"],
 )
-async def test_a_tidied_storys_view_says_a_read_lists_the_notes_its_summary_came_from(
+async def test_a_tidied_storys_view_says_a_read_lists_any_notes_its_summary_came_from(
     fields: dict[str, Any], cued: bool
 ) -> None:
-    """#2944: beside the summary of a story a tidy-up has taken notes into, never otherwise.
+    """#2944: beside the summary of a story a tidy-up has written, never otherwise.
 
-    Where no note may be shown the notes part says nothing of notes (ADR-0305 §4), so
-    neither does this.
+    It says "may": a summary can be built from episodes alone, and the view does not say
+    which. Where no note may be shown the notes part says nothing of notes (ADR-0305 §4),
+    so neither does this.
     """
     stage, completer, _ = _stage()
 
@@ -354,7 +394,8 @@ async def test_a_tidied_storys_view_says_a_read_lists_the_notes_its_summary_came
     assert (_CUE in shown) is cued
     if cued:
         assert shown[_CUE] == (
-            "older notes a tidy-up took in: read the story to see them by their labels"
+            "what tidy-ups took in, which may include older notes: read the story to see any "
+            "by their labels"
         )
         assert list(shown).index(_CUE) == list(shown).index("summary") + 1
 
