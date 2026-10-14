@@ -26,22 +26,12 @@ from gateway_timing import Clock, Timers
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import UnknownConversationError
 from ai_assistant.core.types import (
-    ActionPlan,
     ChatDevice,
-    CurrentContext,
     DataTier,
     DeviceAccess,
-    Goal,
-    GoalBrief,
-    GoalInterpretation,
-    Ground,
-    MemorySource,
     NotificationCandidate,
     NotificationDelivery,
-    Provenance,
     SpokenAudioFormat,
-    TimeOfDay,
-    TurnResult,
     UserMessage,
 )
 from ai_assistant.interfaces.gateway import streams
@@ -74,37 +64,6 @@ _BUNDLE = {
 
 #: The token ADR-0131 §4 mints, distinctive so a case can search a whole body for it.
 _TOKEN = "9." + "c4" * 16
-
-
-def _turn(utterance: str) -> TurnResult:
-    """A turn whose plan has no step — a real ratified shape, not a stub."""
-    goal = Goal(
-        id="g-1",
-        interpretation=(
-            GoalInterpretation(
-                revision=1,
-                outcome=utterance,
-                outcome_ground=Ground.USER_STATED,
-                outcome_span=utterance,
-                recorded_at=_AT,
-                raised_by="t-1",
-            ),
-        ),
-        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT),
-        created_at=_AT,
-    )
-    return TurnResult(
-        utterance=goal.statement,
-        goal=GoalBrief.of(goal),
-        context=CurrentContext(
-            now=_AT,
-            time_of_day=TimeOfDay.AFTERNOON,
-            is_weekend=False,
-            within_working_hours=True,
-        ),
-        memories=(),
-        plan=ActionPlan(id="p-1", goal_id=goal.id, steps=(), created_at=_AT),
-    )
 
 
 def _delivery(number: int = 1) -> NotificationDelivery:

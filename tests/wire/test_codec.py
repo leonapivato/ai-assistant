@@ -40,7 +40,7 @@ from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import pytest
-from pydantic import TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from ai_assistant.core.types import (
     ActionRequest,
@@ -49,12 +49,13 @@ from ai_assistant.core.types import (
     BeliefSummary,
     CapabilityEffect,
     CapabilityResult,
-    Confirmation,
-    ContinuationToken,
     CostBasis,
     DataTier,
+    EncodableText,
     Evidence,
+    FrozenJsonMapping,
     Idempotency,
+    Identifier,
     MemoryKind,
     PermissionDecision,
     PermissionOutcome,
@@ -81,6 +82,38 @@ def _both(value: object) -> bytes:
         "two encoders only because conformance is defined by output"
     )
     return encoded
+
+
+class _Token(BaseModel):
+    """The continuation token's shape: one opaque handle, frozen, nothing extra."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    handle: Identifier
+
+
+class _ConfirmationShaped(BaseModel):
+    """ADR-0087 §5e's confirmation-shaped input, declared here rather than borrowed.
+
+    §5e's composite vectors "state the field set they were built over inline, so that a
+    vector remains verifiable whatever the surface ADR settles", and the ``Confirmation``
+    that used to supply this one leaves ``core`` with the old path (ADR-0309 §5). So the
+    vector keeps its own input: the same eight members under the same names, the same
+    ``extra="forbid"`` and ``frozen=True``, ``parameters`` the same
+    ``FrozenJsonMapping``, and the three members every vector holds at ``null`` typed
+    as nothing else. The bytes and their lengths are the ratified ones, unchanged.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tool_id: Identifier
+    tool_description: EncodableText
+    parameters: FrozenJsonMapping
+    reason: EncodableText
+    token: _Token
+    egress: None
+    read: None
+    authorization: None
 
 
 # --- §5a. Strings ----------------------------------------------------------
@@ -554,19 +587,19 @@ def test_a_confirmation_sorts_its_parameters_however_it_was_built(
 
     ``FrozenDict.__eq__`` compares as a ``dict`` and ``__hash__`` uses a
     ``frozenset``, so key order is invisible to equality — but ``__iter__`` yields
-    insertion order and the encoder sees it. Two ``==``-equal ``Confirmation``
+    insertion order and the encoder sees it. Two ``==``-equal confirmation-shaped
     values therefore get two byte strings under ``model_dump_json()`` and one here.
 
     ``"Z"`` sorting before ``"body"`` is the code-point rule showing it is not
     case-insensitive.
     """
     values: dict[str, Any] = {"to": "a@b", "body": "hi", "Z": 1}
-    confirmation = Confirmation(
+    confirmation = _ConfirmationShaped(
         tool_id="t-1",
         tool_description="send",
         parameters={name: values[name] for name in order},
         reason="external",
-        token=ContinuationToken(handle="h-1"),
+        token=_Token(handle="h-1"),
         egress=None,
         read=None,
         authorization=None,
@@ -594,22 +627,22 @@ def test_the_vectors_reject_every_near_miss_measured_while_writing_the_adr() -> 
     """
     belief_input: dict[str, Any] = {"b": 1, "a": 2}
     # 1. `model_dump_json()`: insertion order, `P1Y`, `null` for a non-finite float.
-    assert Confirmation(
+    assert _ConfirmationShaped(
         tool_id="t-1",
         tool_description="send",
         parameters={"to": "a@b", "Z": 1},
         reason="external",
-        token=ContinuationToken(handle="h-1"),
+        token=_Token(handle="h-1"),
         egress=None,
         read=None,
         authorization=None,
     ).model_dump_json().encode() != canonical_payload(
-        Confirmation(
+        _ConfirmationShaped(
             tool_id="t-1",
             tool_description="send",
             parameters={"to": "a@b", "Z": 1},
             reason="external",
-            token=ContinuationToken(handle="h-1"),
+            token=_Token(handle="h-1"),
             egress=None,
             read=None,
             authorization=None,
