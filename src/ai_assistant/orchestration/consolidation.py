@@ -146,10 +146,10 @@ _PROPOSABLE_KINDS: Final = frozenset({"semantic", "preference", "procedural"})
 #: out, so a legitimate envelope is orders of magnitude below this.
 _MAX_REPLY_CHARS: Final = 128 * 1024
 
-#: How many decode misses :func:`_entries` tolerates before giving up, for
-#: ``planning.planner``'s reason: a failed ``raw_decode`` costs work proportional
-#: to how far into the reply it reached, so attempting one at every brace of a
-#: brace-dense reply is quadratic and blocks the event loop.
+#: How many decode misses :func:`_entries` tolerates before giving up, because a
+#: failed ``raw_decode`` costs work proportional to how far into the reply it
+#: reached, so attempting one at every brace of a brace-dense reply is quadratic
+#: and blocks the event loop.
 _MAX_EXTRACTION_MISSES: Final = 256
 
 #: How much of one record's content the prompt carries. A consolidation chunk is
@@ -1259,8 +1259,7 @@ def _entries(content: str) -> list[object] | None:
 def _extract_object(content: str) -> dict[str, object] | None:
     r"""Decode the reply's envelope, tolerating prose and decoy objects around it.
 
-    ADR-0071's ``raw_decode`` scan, in the shape ``ModelBackedObserver`` and
-    ``planning.planner`` already use. **It returns the first object that carries a
+    ADR-0071's ``raw_decode`` scan. **It returns the first object that carries a
     ``beliefs`` list, not the first object it decodes**, and keeps the first object
     as a fallback only if no envelope is found. A reply like
     ``Here is context {"note": "x"}\n{"beliefs": [...]}`` is ordinary — a model

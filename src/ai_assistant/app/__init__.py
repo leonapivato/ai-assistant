@@ -4,8 +4,8 @@ This package is the classic composition root — the single layer, at the
 application's entry point, licensed to import the concrete subsystem
 implementations, name them, and assemble them into a ready
 :class:`~ai_assistant.orchestration.Engine` façade. Every other layer depends on
-contracts; only here are ``SqliteMemoryStore``, ``ModelBackedPlanner``,
-``ThresholdActionPolicy`` and the rest constructed.
+contracts; only here are ``SqliteMemoryStore``, ``ThresholdActionPolicy`` and
+the rest constructed.
 
 It exists as its own package because **both** natural homes are barred (ADR-0042
 §2): ``orchestration`` may import no concrete subsystem (ADR-0022 §1), and an
