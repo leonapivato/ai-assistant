@@ -881,7 +881,7 @@ _WITHHELD = "[message withheld: the record carries an exception]"
 
 @pytest.fixture(autouse=True)
 def root_logging_is_this_test_s_own() -> Iterator[None]:
-    """Give back the root logger's handlers, level and handler filters as found.
+    """Give back the root logger's handlers, level, and handler filters and reports as found.
 
     ``configure_logging`` attaches the scrubbing filter to every root handler, and
     pytest's own capture handlers are made once per session and reused, so a filter
@@ -892,6 +892,7 @@ def root_logging_is_this_test_s_own() -> Iterator[None]:
     level = root.level
     held = [one for one in (*handlers, logging.lastResort) if one is not None]
     filters = [(one, list(one.filters)) for one in held]
+    reports = [(one, vars(one).get("handleError")) for one in held]
     yield
     for one in list(root.handlers):
         if one not in handlers:
@@ -902,6 +903,11 @@ def root_logging_is_this_test_s_own() -> Iterator[None]:
     root.setLevel(level)
     for one, kept in filters:
         one.filters[:] = kept
+    for one, report in reports:
+        if report is None:
+            vars(one).pop("handleError", None)
+        else:
+            one.handleError = report  # type: ignore[method-assign]
 
 
 def _ours() -> logging.StreamHandler[io.StringIO]:
@@ -992,8 +998,7 @@ def test_no_extra_rides_a_replaced_record_so_a_host_format_naming_one_fails_with
 ) -> None:
     # Adversarial review, round 4 under the second holder: an extra kept because it
     # was a number printed an SSN. No extra is copied — none masked, none kept — so a
-    # host format naming one fails in the host's own handler, and the stdlib's report
-    # of that failure prints the fixed message and ``()`` alone.
+    # host format naming one fails in the host's own handler.
     stream = _configured_under_a_hosts_handler("%(ssn)09d %(message)s")
 
     logging.getLogger("thirdparty").error(
@@ -1007,6 +1012,61 @@ def test_no_extra_rides_a_replaced_record_so_a_host_format_naming_one_fails_with
     assert "--- Logging error ---" in err, "the host's handler reports its own failure"
     assert f"Message: {_WITHHELD + chr(10) + 'ValueError'!r}" in err
     assert "Arguments: ()" in err
+
+
+def test_a_host_handlers_failure_inside_an_except_block_reports_none_of_the_handled_words(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Adversarial review, round 1 under the third holder: ``logger.exception`` inside
+    # an ``except`` block, and a host format naming an extra. The formatting failure
+    # chains the exception being handled, and the stdlib's report prints that chain
+    # with its words; this net's report prints its classes and frames alone.
+    stream = _configured_under_a_hosts_handler("%(request_id)s %(message)s")
+
+    try:
+        _raise_with_content()
+    except _ReadFailedError:
+        logging.getLogger("thirdparty").exception("request failed", extra={"request_id": "safe-id"})
+
+    err = capsys.readouterr().err
+    _assert_no_content(stream.getvalue() + err)
+    assert "--- Logging error ---" in err
+    assert "KeyError" in err, "the failure is shown by its class"
+    assert "in _raise_with_content" in err, "and the handled exception by its frames"
+    assert "Arguments: ()" in err
+
+
+def test_a_processor_formatter_hosts_failure_on_a_wrapped_event_reports_no_words(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The same failure, on a structlog event a host formats through
+    # ``ProcessorFormatter`` with a format naming an extra.
+    stream = _hosted_by_processor_formatter("%(message)s|%(detail)s")
+
+    try:
+        _raise_with_content()
+    except _ReadFailedError as failure:
+        structlog.get_logger("host").warning("read_failed", exc_info=failure)
+
+    err = capsys.readouterr().err
+    _assert_no_content(stream.getvalue() + err)
+    assert "--- Logging error ---" in err
+    assert "read_failed" in err, "the message is the event, put through the structlog net"
+
+
+def test_a_host_handlers_failure_on_its_own_record_is_reported_by_the_host(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Only a record this net built is reported this way; a host's own failure on a
+    # record that carries no exception is the stdlib's to report, as before the net.
+    _configured_under_a_hosts_handler("%(request_id)s %(message)s")
+
+    logging.getLogger("thirdparty").error("plain")
+
+    err = capsys.readouterr().err
+    assert "--- Logging error ---" in err
+    assert "Message: 'plain'" in err
+    assert "Call stack:" in err, "the stdlib's own report"
 
 
 @pytest.mark.parametrize(
