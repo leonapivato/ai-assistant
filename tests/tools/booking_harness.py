@@ -345,27 +345,21 @@ async def bound(
     return call.binding
 
 
-def authorised(  # noqa: PLR0913 — one keyword per fact a ruling fixes; a case varies one at a time
+def authorised(
     definition: ToolDefinition,
     parameters: Mapping[str, FrozenJson],
     binding: EgressBinding | None,
     *,
     decision_id: str = "d-1",
-    step_id: str = "step-1",
-    execution_id: str | None = None,
     decided_at: datetime | None = None,
 ) -> ToolCall:
-    """One authorised call, as the runner would have built it.
+    """One authorised call, as authorizing would have built it.
 
     Args:
         definition: The declaration being invoked.
         parameters: The call's arguments.
         binding: The binding the seam derived.
         decision_id: The decision's id, which a case varies to make two dispatches.
-        step_id: Unused: the step the request served, until the old path's steps
-            retired (ADR-0309 §5).
-        execution_id: Unused: the execution the step belonged to, which the retired
-            executor required to agree with the call's (ADR-0044 §1, #253).
         decided_at: When the ruling was taken.
 
     Returns:
