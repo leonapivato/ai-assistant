@@ -12,14 +12,7 @@ from __future__ import annotations
 import inspect
 from typing import Final
 
-from ai_assistant.core.types import (
-    ActionPlan,
-    BriefElement,
-    GoalBrief,
-    PlanExport,
-    PlanStep,
-    TurnResult,
-)
+from ai_assistant.core.types import PlanExport
 from ai_assistant.wire import client, envelope, server
 
 #: The version ADR-0253's L1 moves to, and the one it moves from.
@@ -106,42 +99,6 @@ def test_the_entry_records_what_did_not_move() -> None:
     assert "no migration is owed" in entry
     assert "parked-read store" in entry, "and the marker that does not move at all"
     assert "ConversationExport" in entry
-
-
-def test_the_ground_is_true_of_the_types_themselves() -> None:
-    """The entry's claim, checked against the tree rather than the prose.
-
-    ``wire/codec.py`` renders a model by ``model_dump()`` and all three models set
-    ``extra="forbid"``, so the six new members on every plan a hub sends are what make
-    a turn undecodable by a client at 40. **A defaulted member is still a shape
-    change**: the arm dumps a plan that declares none of them and finds all six.
-    """
-    for member in _STEP_MEMBERS:
-        assert member in PlanStep.model_fields
-    assert "interpretations" in ActionPlan.model_fields
-    for model in (PlanStep, ActionPlan, TurnResult):
-        assert model.model_config.get("extra") == "forbid"
-
-    plain = PlanStep(id="s1", intent="do it", capability="cap")
-    dumped = plain.model_dump()
-    for member in _STEP_MEMBERS:
-        assert member in dumped, "emitted on every step, not only a declaring one"
-
-
-def test_the_brief_the_planner_sees_gains_nothing() -> None:
-    """§10: "``GoalBrief`` and ``BriefElement`` gain nothing".
-
-    The brief carries an element's text and the **kind** of its ground and nothing
-    else; it does not carry an element's ``id``, its ``applicability``, or any
-    reference, and a planner names an element by its ``D`` label (ADR-0249 §9) — "which
-    is what makes the resolvable set exactly what the loop chose to render". Whether a
-    brief ever renders an applicability is **not decided** and is fired by a measured
-    planner failure (§11).
-    """
-    assert set(BriefElement.model_fields) == {"text", "ground"}
-    for absent in ("id", "applicability", "conditions_ids"):
-        assert absent not in BriefElement.model_fields
-    assert "revision" not in GoalBrief.model_fields, "ADR-0249 §8's own containment"
 
 
 def test_the_stored_record_version_moved_by_exactly_one_too() -> None:

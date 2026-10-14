@@ -14,18 +14,12 @@ import inspect
 from typing import Final
 
 from ai_assistant.core.types import (
-    ActionQuote,
-    ChargedOutput,
     ConversationExport,
     Idempotency,
-    PermissionDecision,
     PermissionOutcome,
-    PermissionRuling,
     PlanExport,
     Reversibility,
     RiskLevel,
-    ToolDefinition,
-    VerificationKind,
 )
 from ai_assistant.wire import client, envelope, server, surface
 
@@ -33,16 +27,12 @@ from ai_assistant.wire import client, envelope, server, surface
 _MOVED_TO: Final = 52
 _MOVED_FROM: Final = 51
 
-#: The two grounds §8 gives, one field each.
-_GROUNDS: Final = ((PermissionRuling, "proved_quote"), (ToolDefinition, "charged_output"))
-
 #: The enumerations §8 leaves alone, which is why no third ground exists.
 _UNMOVED_ENUMS: Final = (
     PermissionOutcome,
     RiskLevel,
     Reversibility,
     Idempotency,
-    VerificationKind,
 )
 
 
@@ -102,55 +92,6 @@ def test_the_entry_records_what_did_not_move() -> None:
     assert "back-filled" in entry, "and no record is rewritten or re-decided"
 
 
-def test_each_ground_is_true_of_the_types_themselves() -> None:
-    """The entry's two claims, checked against the tree rather than the prose.
-
-    ``wire/codec.py`` renders a model by ``model_dump()`` and both models set
-    ``extra="forbid"``, so the new member on every ruling a decision carries, and the
-    new member on every definition it embeds, are what make a decision undecodable by a
-    client at the previous version.
-    """
-    for model, field in _GROUNDS:
-        assert field in model.model_fields
-        assert model.model_config.get("extra") == "forbid"
-
-    dumped = PermissionRuling(outcome=PermissionOutcome.DENY, reason="no").model_dump()
-    assert "proved_quote" in dumped, "emitted on every ruling, not only a populated one"
-
-
-def test_the_decision_is_what_carries_both_members_across_a_frame() -> None:
-    """§8's stated ground: *"each cross the wire inside a ``PermissionDecision``"*.
-
-    Asserted where it could stop being true. If a later lane stopped promoting every
-    method that returns a decision, the two grounds would need restating rather than
-    inheriting — and the check is over the promoted set rather than over one name.
-    ``grantable_decisions`` was the third until it left the surface (ADR-0313 §5:1).
-    """
-    returning = {"recent_decisions", "export_decisions"}
-
-    assert returning <= surface.METHODS
-    assert PermissionDecision.model_fields["ruling"].annotation is PermissionRuling
-    assert PermissionDecision.model_fields["tool"].annotation is ToolDefinition
-    assert "proved_quote" not in PermissionDecision.model_fields, "§1: it gains no field"
-
-
-def test_the_minted_record_reaches_a_frame_only_inside_the_declaration() -> None:
-    """§8: :class:`ChargedOutput` rides the second ground rather than adding to it.
-
-    It is carried by one field of one model, so ``ToolDefinition`` is the one promoted
-    shape annotated with it, and the assertion is over every model this lane could have
-    put it on.
-    """
-    carrying = [
-        f"{model.__name__}.{field}"
-        for model in (ToolDefinition, PermissionDecision, PermissionRuling, PlanExport)
-        for field, info in model.model_fields.items()
-        if info.annotation in {ChargedOutput, ChargedOutput | None}
-    ]
-
-    assert carrying == ["ToolDefinition.charged_output"]
-
-
 def test_no_enumeration_gained_a_member_so_there_is_no_third_ground() -> None:
     """§8: no ``StrEnum`` value a peer at the previous version refuses.
 
@@ -160,7 +101,6 @@ def test_no_enumeration_gained_a_member_so_there_is_no_third_ground() -> None:
     rather than by vocabularies, which is why.
     """
     assert len(set(PermissionOutcome)) == 3, "ADR-0021 §3's three, and this decision adds none"
-    assert len(set(VerificationKind)) == 3, "ADR-0253 §4's three, untouched here"
     for enumeration in _UNMOVED_ENUMS:
         assert set(enumeration), "read, so a removal fails here too"
 
@@ -219,25 +159,6 @@ def test_a_peer_at_the_previous_version_and_one_at_this_refuse_each_other() -> N
     assert "version {env.PROTOCOL_VERSION}" in inspect.getsource(client)
     assert "version {version}" in inspect.getsource(client)
     assert envelope.VERSION_MISMATCH, "and the refusal carries its own code (ADR-0124 §6)"
-
-
-def test_the_quote_reaches_a_frame_only_by_the_pin() -> None:
-    """§8's *"for the first time"* claim, checked rather than recited.
-
-    ``AuthorizationProjection.quote`` carries a three-field ``QuoteView`` and not a
-    quote, and ``Authorization`` crosses whole in no frame (the entry at 48's own
-    reading), so before this lane an ``ActionQuote`` reached no frame at all. The arm
-    that fails a later lane putting one somewhere else and leaving this entry's reading
-    stale.
-    """
-    carrying = [
-        f"{model.__name__}.{field}"
-        for model in (PermissionRuling, PermissionDecision, ToolDefinition)
-        for field, info in model.model_fields.items()
-        if info.annotation in {ActionQuote, ActionQuote | None}
-    ]
-
-    assert carrying == ["PermissionRuling.proved_quote"]
 
 
 def test_nothing_of_this_decision_is_configurable() -> None:

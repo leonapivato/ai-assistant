@@ -12,35 +12,15 @@ written to its shape.
 from __future__ import annotations
 
 import inspect
-from datetime import UTC, datetime
 from typing import Final
 
 from ai_assistant.core.protocols import AssistantEngine
-from ai_assistant.core.types import (
-    Clarification,
-    ClarificationWithdrawal,
-    ConversationExport,
-    Goal,
-    GoalAbandonment,
-    GoalDisambiguation,
-    GoalEngagement,
-    GoalQuestion,
-    GoalSummary,
-    PlanExport,
-    ReferenceOutcome,
-    TurnOutcome,
-    TurnReference,
-)
+from ai_assistant.core.types import ConversationExport, PlanExport
 from ai_assistant.wire import client, envelope, server, surface
-
-_WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
 #: The version ADR-0250's M1 moves to, and the one it moves from.
 _MOVED_TO: Final = 40
 _MOVED_FROM: Final = 39
-
-#: The four members §5 puts on ``TurnOutcome``, which is the first of the four grounds.
-_OUTCOME_MEMBERS: Final = ("goal_engagement", "clarification", "reference", "disambiguation")
 
 #: The three operations §§12 and 15 promote.
 _OPERATIONS: Final = ("goals", "withdraw_clarification", "abandon_goal")
@@ -97,30 +77,6 @@ def test_the_entry_records_what_did_not_move() -> None:
     assert "no compatibility shim" in entry.lower(), "ADR-0084 §3 is the mechanism"
 
 
-def test_each_ground_is_true_of_the_types_and_the_surface_themselves() -> None:
-    """The entry's four claims, checked against the tree rather than the prose.
-
-    ``wire/codec.py`` renders a model by ``model_dump()`` and both models set
-    ``extra="forbid"``, so the four new members on every turn a hub sends and the new
-    field on every goal are what make a turn undecodable by a client at 39 — and a
-    method a hub at 39 does not have is an unknown method to it.
-    """
-    for member in _OUTCOME_MEMBERS:
-        assert member in TurnOutcome.model_fields
-    assert "last_engaged_in" in Goal.model_fields
-    for model in (TurnOutcome, Goal):
-        assert model.model_config.get("extra") == "forbid"
-
-    dumped = TurnOutcome(turn=None, step=None).model_dump()
-    for member in _OUTCOME_MEMBERS:
-        assert member in dumped, "emitted on every outcome, not only a populated one"
-
-    # ``converse`` and ``converse_streaming`` carried ``reference``; ADR-0293 §11 and
-    # ADR-0309 §5:1 retired both, so no promoted method carries it now. The three
-    # operations left the surface with the old path too (ADR-0309 §5:1).
-    assert not set(_OPERATIONS) & surface.METHODS
-
-
 def test_a_peer_at_the_previous_version_and_one_at_this_refuse_each_other() -> None:
     """§19: ADR-0084 §3's exact-match handshake, and the refusal names both versions.
 
@@ -166,59 +122,16 @@ def test_the_stored_record_versions_moved_and_the_others_did_not() -> None:
     assert ConversationExport.model_fields["schema_version"].default >= 2
 
 
-def test_the_records_the_seams_hold_reach_no_promoted_surface() -> None:
-    """§19: what M1 lands in ``core`` and deliberately does not promote.
-
-    ``GoalQuestion`` is ``PlanStore``'s record and reaches a client only as the
-    :class:`Clarification` §10 assembles from it — the id, the text and the deadline,
-    and nothing else. Asserted where it could stop being true: no field of any promoted
-    model is annotated with the record itself, so a lane that put one on
-    ``TurnOutcome`` fails here and has to read ADR-0250 §10 rather than discover it in
-    review.
-    """
-    promoted = (
-        TurnOutcome,
-        GoalEngagement,
-        GoalDisambiguation,
-        GoalSummary,
-        Clarification,
-        TurnReference,
-    )
-    carrying = [
-        f"{model.__name__}.{field}"
-        for model in promoted
-        for field, info in model.model_fields.items()
-        if info.annotation in {GoalQuestion, GoalQuestion | None}
-    ]
-
-    assert carrying == [], "the record is the store's; a surface is handed a Clarification"
-
-
 def test_the_three_operations_left_the_protocol_and_the_wire() -> None:
     """§§12, 15 promoted three operations; ADR-0309 §5:1 retired them.
 
     They were promoted by being ``AssistantEngine`` members (ADR-0130 §9), so the walk
     that reached them was ``wire/surface.py``'s derivation, and leaving the Protocol is
-    what takes them off the wire. The vocabularies they answered stay in ``core`` until
-    the types lanes retire them.
+    what takes them off the wire.
     """
     for operation in _OPERATIONS:
         assert not hasattr(AssistantEngine, operation)
         assert operation not in surface.METHODS
-    assert {
-        ClarificationWithdrawal.WITHDRAWN,
-        ClarificationWithdrawal.NOTHING_TO_WITHDRAW,
-    } == set(ClarificationWithdrawal)
-    assert {
-        GoalAbandonment.ABANDONED,
-        # ADR-0261 §6's fourth member, which is a wire ground of its own: it crosses a
-        # frame from the promoted `abandon_goal`, so a peer one `PROTOCOL_VERSION` back
-        # validates the value against a three-member enumeration and fails it.
-        GoalAbandonment.ABANDONED_EFFECT_IN_FLIGHT,
-        GoalAbandonment.ALREADY_CLOSED,
-        GoalAbandonment.NO_SUCH_GOAL,
-    } == set(GoalAbandonment)
-    assert len(set(ReferenceOutcome)) == 4
 
 
 def _entry_for(version: int) -> str:

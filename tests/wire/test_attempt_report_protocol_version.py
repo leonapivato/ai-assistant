@@ -12,36 +12,12 @@ from __future__ import annotations
 import inspect
 from typing import Final
 
-from ai_assistant.core.types import (
-    AttemptOutcome,
-    AttemptPhase,
-    AttemptReport,
-    AttemptState,
-    AttemptTransition,
-    ConversationExport,
-    GoalStatus,
-    PlanExport,
-    ToolDefinition,
-    TurnOutcome,
-    VerificationKind,
-)
+from ai_assistant.core.types import ConversationExport, PlanExport
 from ai_assistant.wire import client, envelope, server, surface
 
 #: The version ADR-0262's L1 moves to, and the one it moves from.
 _MOVED_TO: Final = 51
 _MOVED_FROM: Final = 50
-
-#: The two grounds §8 gives, one field each.
-_GROUNDS: Final = ((TurnOutcome, "attempt_report"), (ToolDefinition, "postconditions"))
-
-#: The enumerations §8 says gain no member, which is why no third ground exists.
-_UNMOVED_ENUMS: Final = (
-    AttemptOutcome,
-    GoalStatus,
-    AttemptState,
-    AttemptPhase,
-    VerificationKind,
-)
 
 
 def test_the_protocol_version_moved_past_the_figure_this_decision_reached() -> None:
@@ -96,66 +72,16 @@ def test_the_entry_records_what_did_not_move() -> None:
     assert "no compatibility shim" in entry.lower(), "ADR-0084 §3 is the mechanism"
 
 
-def test_each_ground_is_true_of_the_types_themselves() -> None:
-    """The entry's two claims, checked against the tree rather than the prose.
-
-    ``wire/codec.py`` renders a model by ``model_dump()`` and both models set
-    ``extra="forbid"``, so the new member on every outcome a hub sends, and the new
-    tuple on every definition a decision embeds, are what make a turn undecodable by a
-    client at the previous version.
-    """
-    for model, field in _GROUNDS:
-        assert field in model.model_fields
-        assert model.model_config.get("extra") == "forbid"
-
-    dumped = TurnOutcome(turn=None, step=None).model_dump()
-    assert "attempt_report" in dumped, "emitted on every outcome, not only a populated one"
-
-
-def test_no_enumeration_gained_a_member_so_there_is_no_third_ground() -> None:
-    """§8: *"**no new enumeration**"*, and no member added to the five it names.
-
-    This is the ground this lane does **not** have, asserted because it is the one a
-    reader would expect: every bump since 5 that was not a method-set change has had at
-    least one ``StrEnum`` value a peer at the previous version refuses. This one has
-    none — ``AttemptReport.outcome`` is typed by a vocabulary ADR-0249 and ADR-0261
-    already fixed at seven, which is why an older peer's failure is
-    ``extra_forbidden`` on the member and never a refused value inside it.
-    """
-    assert len(set(AttemptOutcome)) == 7, "ADR-0249 §5's six as ADR-0261 §3 made them seven"
-    assert len(set(VerificationKind)) == 3, "ADR-0253 §4's three, and this decision adds none"
-    for enumeration in _UNMOVED_ENUMS:
-        assert set(enumeration), "read, so a removal fails here too"
-
-
 def test_the_write_command_reaches_no_frame_at_all() -> None:
     """§8: ``execution_versions`` is not a third ground, and the reason is structural.
 
-    ``AttemptTransition`` is ``PlanStore``'s write command; ``PlanStore`` is not
-    promoted (ADR-0255 §11) and no wire operation takes one. Asserted where it could
-    stop being true — a lane that promoted an operation taking one would fail here and
-    have to move this number rather than discover the mismatch at a handshake that
+    The write command carrying it was ``PlanStore``'s, ``PlanStore`` is not promoted
+    (ADR-0255 §11), and no wire operation commits an attempt. Asserted where it could
+    stop being true — a lane that promoted an operation committing one would fail here
+    and have to move this number rather than discover the mismatch at a handshake that
     passed.
     """
-    assert "execution_versions" in AttemptTransition.model_fields
     assert not any("attempt" in method and "commit" in method for method in surface.METHODS)
-
-
-def test_the_minted_model_reaches_a_frame_only_inside_the_outcome() -> None:
-    """§8: :class:`AttemptReport` rides the first ground rather than adding to it.
-
-    It is carried by no stored record and by no export — *"riding ``TurnOutcome``
-    alone"* — so ``TurnOutcome`` is the one promoted model annotated with it, and the
-    assertion is over every promoted model this lane could have put it on.
-    """
-    carrying = [
-        f"{model.__name__}.{field}"
-        for model in (TurnOutcome, PlanExport, ConversationExport, AttemptTransition)
-        for field, info in model.model_fields.items()
-        if info.annotation in {AttemptReport, AttemptReport | None}
-    ]
-
-    assert carrying == ["TurnOutcome.attempt_report"]
 
 
 def test_no_stored_record_version_moved_with_this_lane() -> None:
