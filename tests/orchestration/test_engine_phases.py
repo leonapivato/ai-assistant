@@ -30,7 +30,6 @@ from structlog.testing import capture_logs
 from test_activation_state import _admitted
 from test_authorizer import _ACTIVATION, _episode
 from test_engine import AT, Harness, NoStepPlanner
-from test_loop_search import _ACCOUNT, _CONFIGURED_SEARCH
 from test_planning import _episode as _past_episode
 from test_planning import _understanding
 from understanding_support import (
@@ -57,6 +56,8 @@ from ai_assistant.core.types import (
     ActivationStop,
     Attestation,
     BeliefBand,
+    BoundAccount,
+    CanonicalDestination,
     CapabilityEffect,
     CapabilityResult,
     ChannelIdentity,
@@ -67,6 +68,7 @@ from ai_assistant.core.types import (
     ControllerStage,
     CostBasis,
     DataTier,
+    DestinationProtocol,
     DeviceAccess,
     DiagnosticKind,
     DiagnosticSource,
@@ -154,7 +156,7 @@ from ai_assistant.orchestration.understanding import (
     UnderstandingStage,
     WindowsStage,
 )
-from ai_assistant.permissions.policy import ThresholdActionPolicy
+from ai_assistant.permissions.policy import ConfiguredSearchDestination, ThresholdActionPolicy
 from ai_assistant.testing import (
     FakeDiagnosticSink,
     FakeEgressBinder,
@@ -167,6 +169,7 @@ from ai_assistant.testing import (
     FakeToolCallingCompleter,
     FakeWebSearcher,
 )
+from ai_assistant.testing.searching import DEFAULT_SEARCH_ORIGIN
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -189,6 +192,25 @@ _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
 
 #: How long a case waits for the reader to settle before it fails, rather than hangs.
 _SETTLE: Final = 5.0
+
+#: The connected account the fake searcher's origin is registered against.
+_ACCOUNT: Final = BoundAccount(identity="search@example.com", reference="search-account")
+
+#: What this deployment is configured with, as ADR-0247 §2 hands it to the policy: the
+#: connection reference the search is registered against and the canonical destination
+#: set its origin canonicalises to. Equal by construction to what the binder registers
+#: for :data:`_ACCOUNT`, which is what makes a search here one *at the configured
+#: provider* (§1).
+_CONFIGURED_SEARCH: Final = ConfiguredSearchDestination(
+    reference=_ACCOUNT.reference,
+    destinations=frozenset(
+        {
+            CanonicalDestination(
+                protocol=DestinationProtocol.HTTPS, canonical=f"{DEFAULT_SEARCH_ORIGIN}:443"
+            )
+        }
+    ),
+)
 
 #: A booking in the world: not safe to repeat, its outcome can be unknown, high risk.
 _BOOK: Final = ToolDefinition(

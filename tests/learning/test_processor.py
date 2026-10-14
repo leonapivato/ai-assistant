@@ -12,6 +12,7 @@ from ai_assistant.core.protocols import FeedbackProcessor
 from ai_assistant.core.types import (
     FeedbackEvent,
     FeedbackKind,
+    MemoryDecisionKind,
     MemoryKind,
     MemorySource,
     Placement,
@@ -21,6 +22,8 @@ from ai_assistant.core.types import (
     SemanticMemory,
 )
 from ai_assistant.learning import RuleBasedFeedbackProcessor
+from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
+from ai_assistant.testing import FakeTraceSink
 
 #: When the user *said* it: the event's own instant, and a fact about the world.
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -440,3 +443,75 @@ async def test_a_failure_of_the_clock_itself_is_not_relabelled() -> None:
 
     with pytest.raises(RuntimeError, match="the clock provider is down"):
         await processor.process(_event())
+
+
+# --------------------------------------------------------------------------- #
+# The processor's proposal through the real write path (ADR-0009, ADR-0217 §7)  #
+# --------------------------------------------------------------------------- #
+
+
+async def test_feedback_becomes_a_reusable_memory() -> None:
+    """ADR-0009's vertical: explicit feedback becomes a durable memory the system reuses.
+
+    The real processor, the real policy, the real ingestor and the real store, and
+    no loop: learning proposes, the policy disposes and the store persists.
+    """
+    store = InMemoryMemoryStore()
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=DefaultMemoryPolicy()
+    )
+    processor = RuleBasedFeedbackProcessor(id_factory=lambda: "pref-1")
+    event = FeedbackEvent(
+        kind=FeedbackKind.PREFERENCE,
+        memory_kind=MemoryKind.PREFERENCE,
+        content="prefers concise replies",
+        subject="email tone",
+        created_at=_WHEN,
+    )
+
+    [proposal] = await processor.process(event)
+    result = await ingestor.ingest(proposal)
+
+    assert result.decision.kind is MemoryDecisionKind.ACCEPT  # user-asserted -> accepted
+    assert result.record_id == "pref-1"
+    stored = await store.get("pref-1")
+    assert isinstance(stored, PreferenceMemory)
+    assert stored.preference == "prefers concise replies"
+    # The default event is not an act, so what lands is ADR-0217 §6's default
+    # placement, which is ADR-0199 §3's placement of the record's class.
+    assert stored.placement == Placement()
+    assert [r.id for r in (await store.search("concise")).records] == ["pref-1"]
+
+
+async def test_a_guarded_write_lands_in_the_store_still_placed_for_the_owner() -> None:
+    """ADR-0217 §7's act, over the real write path rather than at the processor alone.
+
+    The cases above stop at what the processor returns. ``MemoryIngestor`` rules on
+    the proposal and writes it, and a stage that dropped or defaulted the placement
+    would leave the owner's act accepted, reported as stored, and absent from the
+    record. So this asserts on what the **store** holds.
+    """
+    store = InMemoryMemoryStore()
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=DefaultMemoryPolicy()
+    )
+    processor = RuleBasedFeedbackProcessor(id_factory=lambda: "guarded-1")
+    event = FeedbackEvent(
+        kind=FeedbackKind.PREFERENCE,
+        memory_kind=MemoryKind.PREFERENCE,
+        content="prefers not to be asked about the appointment aloud",
+        created_at=_WHEN,
+        guarded=True,
+    )
+
+    [proposal] = await processor.process(event)
+    result = await ingestor.ingest(proposal)
+
+    assert result.decision.kind is MemoryDecisionKind.ACCEPT
+    stored = await store.get("guarded-1")
+    assert stored is not None
+    assert stored.placement == Placement(
+        reach=PlacementReach.OWNER,
+        set_by=PlacementSetter.OWNER_ACT,
+        set_at=_WHEN,
+    )
