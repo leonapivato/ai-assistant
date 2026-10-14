@@ -150,7 +150,6 @@ from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls
 from ai_assistant.orchestration.traces import OperationTraces
 from ai_assistant.permissions import (
     SqliteAuditTrail,
-    SqliteGoalAuthorizationStore,
     SqliteRecipientGrantStore,
 )
 from ai_assistant.planning import (
@@ -924,16 +923,6 @@ async def _sqlite_recipient_grant_store(now: Clock) -> None:
             store.close()
 
 
-async def _sqlite_goal_authorization_store(now: Clock) -> None:
-    """``live_for`` evaluates liveness and is the store's only clock read."""
-    with tempfile.TemporaryDirectory() as directory:
-        store = SqliteGoalAuthorizationStore(path=Path(directory) / "authorizations.db", now=now)
-        try:
-            await store.live_for("goal-1", "tool-1")
-        finally:
-            store.close()
-
-
 async def _recipient_grant_operations(now: Clock) -> None:
     """The operations read the clock for the instant a revocation carries (ADR-0235 §7).
 
@@ -1076,7 +1065,6 @@ SEAMS = [
     Seam("SqliteNotificationOutbox", _sqlite_notification_outbox, NotificationOutboxError),
     Seam("SqliteNotificationStore", _sqlite_notification_store, NotificationStoreError),
     Seam("SqlitePlanStore", _sqlite_plan_store, PlanningError),
-    Seam("SqliteGoalAuthorizationStore", _sqlite_goal_authorization_store, ClockReadingError),
     Seam("SqliteRecipientGrantStore", _sqlite_recipient_grant_store, ClockReadingError),
     # ADR-0235 §3's three clock reads — the listing's one-per-window instant, the
     # answer's stamp and the revoking record's — behind one guard at the store, and
@@ -1400,12 +1388,6 @@ PROPAGATED: Final[dict[str, str]] = {
     "FakeRecipientGrants": _UNDECLARED,
     "RuleBasedFeedbackProcessor": (
         "documented at ``learning/processor.py:146``, and `learning` owns no error class"
-    ),
-    "SqliteGoalAuthorizationStore": (
-        "documented at ``permissions/goal_authorizations.py``'s constructor: a clock this "
-        "process cannot read is a **wiring bug** rather than a store fault, and translating "
-        "it would have the policy take ADR-0254 §6's bar — and log that the store could not "
-        "be read — about a store that answered perfectly well"
     ),
     "SqliteRecipientGrantStore": _UNDECLARED,
     "StoreHealthReader": _UNDECLARED,
