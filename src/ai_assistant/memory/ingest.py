@@ -2255,12 +2255,10 @@ class MemoryIngestor:
         reached by a second road. The proposals ingested before the raise stay
         applied, exactly as the per-proposal loop leaves them today.
 
-        **The deferral queue is not reached from here** (ADR-0115 §5). ADR-0028 ruled
-        that a writer does not learn to queue and ADR-0078 §3 puts the durable
-        question on the orchestration write stage, so this returns one result per
-        proposal and the stage parks what deferred, after this call. A durable write
-        to a second store inside a memory lock would also fix a lock order across two
-        stores that nothing acquires in either direction today.
+        **Nothing is parked from here** (ADR-0115 §5). This returns one result per
+        proposal and touches no store but this one, so whatever becomes of an
+        ``ASK_USER`` ruling is the orchestration write stage's, after this call
+        (ADR-0309 §5).
 
         Args:
             reading: What one reader pass produced. Observed **whole** on this
@@ -2615,16 +2613,12 @@ class MemoryIngestor:
         )
         # The resolved ids come back on **every** ruling (ADR-0078 §4). ADR-0028 §3
         # declined this and named the exact condition for revisiting — a consumer
-        # that needs to *show* the user what a proposal contradicted — and a
-        # deferred question is that consumer, at a higher stake than presentation:
-        # the shown set is the bound on what an answer to the question authorises
-        # (ADR-0078 §5). Nothing new is computed; the value the copy above already
-        # carries across the policy seam now crosses the writer seam too, so a
-        # coordinator can enqueue a question about the conflicts the policy actually
-        # saw instead of re-deriving `_detect_conflicts` in `orchestration` (the
-        # duplication ADR-0028 §4 deleted) or re-detecting at answer time, by which
-        # point the set has moved and the user would have authorised something other
-        # than what they were shown.
+        # that needs to *show* the user what a proposal contradicted. Nothing new is
+        # computed; the value the copy above already carries across the policy seam
+        # crosses the writer seam too, so a caller reads the conflicts the policy
+        # actually saw instead of re-deriving `_detect_conflicts` in `orchestration`
+        # (the duplication ADR-0028 §4 deleted) or re-detecting later, by which point
+        # the set has moved.
         return _Ingested(
             result=MemoryIngestResult(
                 decision=decision, record_id=applied.record_id, conflicts=resolved

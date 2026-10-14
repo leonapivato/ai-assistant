@@ -61,7 +61,6 @@ async def test_an_ask_user_ruling_writes_nothing_and_logs_one_event_by_id() -> N
         outcome = await stage.write(_proposal("deferred-1"))
 
     assert outcome.result.decision.kind is MemoryDecisionKind.ASK_USER
-    assert outcome.admission is None
     assert await store.get("deferred-1") is None
     events = [entry for entry in logs if entry["event"] == DEFERRED_EVENT]
     assert events == [

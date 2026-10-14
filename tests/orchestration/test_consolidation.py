@@ -39,8 +39,6 @@ from ai_assistant.core.types import (
     MAX_TOPICS_PER_RECORD,
     Attestation,
     BeliefBand,
-    DeferralAdmission,
-    DeferralAdmissionOutcome,
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
@@ -64,14 +62,12 @@ from ai_assistant.orchestration.consolidation import (
     _render,
 )
 from ai_assistant.orchestration.writes import DEFERRED_EVENT, WriteOutcome
-from ai_assistant.service.scheduler import Job, Scheduler
 from ai_assistant.testing import (
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
     FakeModelProvider,
 )
-from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -218,26 +214,6 @@ class _CapturingWrites:
         return outcome
 
 
-class _RefusingWrites(_CapturingWrites):
-    """The real gate, with an ``ASK_USER`` ruling reported as a refused question.
-
-    The deferred-question queue returned that admission at its cap, and it retired
-    (ADR-0309 §5): a real write stage no longer reports one. The consolidation
-    stage still halts on it until its own lane removes that arm, so the halt is
-    driven here through the outcome the stage reads.
-    """
-
-    async def write(self, proposal: MemoryUpdateProposal) -> WriteOutcome:
-        """Delegate, then report a deferral as the queue at its cap reported it."""
-        outcome = await super().write(proposal)
-        if outcome.result.decision.kind is not MemoryDecisionKind.ASK_USER:
-            return outcome
-        return WriteOutcome(
-            result=outcome.result,
-            admission=DeferralAdmission(outcome=DeferralAdmissionOutcome.REFUSED),
-        )
-
-
 def _stage(
     *,
     store: MemoryStore,
@@ -270,12 +246,6 @@ def _gated(store: FakeMemoryStore) -> _CapturingWrites:
     """
     writer = FakeMemoryWriter(store=store, policy=DefaultMemoryPolicy(), now=_now)
     return _CapturingWrites(MemoryWriteStage(writer=writer))
-
-
-def _refusing(store: FakeMemoryStore) -> _RefusingWrites:
-    """The real gate over ``store``, reporting every deferral as refused."""
-    writer = FakeMemoryWriter(store=store, policy=DefaultMemoryPolicy(), now=_now)
-    return _RefusingWrites(MemoryWriteStage(writer=writer))
 
 
 async def _seeded(records: Sequence[MemoryRecord]) -> FakeMemoryStore:
@@ -460,34 +430,6 @@ async def test_the_question_reaching_the_user_says_the_warrant_is_external() -> 
     )
 
 
-# --- ADR-0106 §10, case 8: a refused question retains its material -----------
-
-
-async def test_a_refused_question_leaves_the_chunk_unrecorded_and_re_proposes_it() -> None:
-    """§6, §10 case 8, and ADR-0111 §5: retained, not consumed.
-
-    Run against a write stage that reports every deferral as refused (the queue at
-    its cap, as it was before it retired), because a run with spare capacity cannot
-    fail on this. A
-    consolidator that emitted more tainted proposals than the cap admits would
-    otherwise rule correctly, persist nothing and move on: the black hole ADR-0106
-    §6's routing clause exists to close, arriving by the one door that clause left
-    open.
-
-    The assertion is on the **walk**, not on a counter: the chunk must not be
-    recorded as done, so the very same records come back on the next run.
-    """
-    store = await _seeded([_record("r1", source=MemorySource.EXTERNAL), _record("r2")])
-    writes = _refusing(store)
-
-    report = await _stage(store=store, writes=writes).run()
-
-    assert report.halted is True
-    assert report.chunks == 0, "the chunk must not be recorded as done"
-    resumed = await store.walk_records(CONSOLIDATION_WALK, limit=50)
-    assert {record.id for record in resumed.records} == {"r1", "r2"}
-
-
 def _proposal(record: MemoryRecord) -> MemoryUpdateProposal:
     """A minimal proposal, for the cases that need one the producer would not make."""
     return MemoryUpdateProposal(proposed=record, rationale="a proposal this test needs to exist")
@@ -535,12 +477,13 @@ async def test_a_run_stops_at_its_budget_and_resumes_where_it_stopped() -> None:
         id_factory=lambda: "consolidated-1",
     )
 
-    with _loop_time_after_one_chunk():
+    with _loop_time_after_one_chunk(), structlog.testing.capture_logs() as logs:
         report = await stage.run()
 
     assert report.chunks == 1
     assert report.exhausted is False
-    assert report.halted is False
+    recorded = [entry for entry in logs if entry["event"] == "consolidation_run_finished"]
+    assert [entry["disposition"] for entry in recorded] == ["budget_spent"]
     resumed = await store.walk_records(CONSOLIDATION_WALK, limit=50)
     assert [record.id for record in resumed.records][:2] == ["r3", "r4"]
 
@@ -661,7 +604,6 @@ async def test_a_chunk_that_justifies_nothing_still_records_itself_as_done() -> 
     report = await _stage(store=store, writes=writes, reply='{"beliefs": []}').run()
 
     assert report.proposed == 0
-    assert report.halted is False
     assert report.exhausted is True
     assert (await store.walk_records(CONSOLIDATION_WALK, limit=50)).records == ()
 
@@ -797,26 +739,6 @@ class _ExplodingWrites:
         """Fail where a real store failure would: after the chunk's work began."""
         msg = "the store is broken"
         raise MemoryStoreError(msg)
-
-
-async def test_two_runs_over_a_full_queue_re_propose_the_same_material() -> None:
-    """ADR-0106 §6: retained *and re-proposed*, not merely retained.
-
-    Case 8's second half, and the one that distinguishes a chunk left unrecorded
-    from a chunk left unrecorded *and never revisited*. ADR-0078 §7 chose a cap that
-    "refuses the *new* question rather than evicting an old one" on the ground that
-    "the producer still holds what it proposed and can re-propose" — and a scheduled
-    job walking a cursor is the one producer for which holding is not automatic.
-    """
-    store = await _seeded([_record("r1", source=MemorySource.EXTERNAL), _record("r2")])
-    writes = _refusing(store)
-
-    first = await _stage(store=store, writes=writes).run()
-    second = await _stage(store=store, writes=writes).run()
-
-    assert first.halted is True
-    assert second.halted is True
-    assert second.examined == first.examined, "the same material must come back"
 
 
 async def test_the_stage_uses_the_fake_policy_only_where_the_ruling_is_not_the_subject() -> None:
@@ -1091,39 +1013,14 @@ async def test_an_inadmissible_proposal_bound_is_refused_at_construction(
         )
 
 
-async def test_a_halted_run_is_recorded_distinguishably_from_an_exhausted_one() -> None:
-    """ADR-0111 §9: a halt is a completed run that did not exhaust its work.
-
-    Recording it as a failure would make a queue at its cap indistinguishable from a
-    broken store; recording it as an ordinary completion would make a job that has
-    stopped making progress invisible. The record carries a ``disposition`` an
-    operator can read, and it is the **job's** to write — ``Scheduler._run_job``
-    states that "the job's result is never logged" because it "cannot know which
-    results are safe to render", which is right and is why this report, whose every
-    field is a count or a disposition, records itself.
-
-    Asserted on the emitted event rather than on the returned report, because the
-    report already carries ``halted`` and a test reading it back would pass an
-    implementation that told nobody.
-    """
-    store = await _seeded([_record("r1", source=MemorySource.EXTERNAL), _record("r2")])
-    writes = _refusing(store)
-
-    with structlog.testing.capture_logs() as logs:
-        report = await _stage(store=store, writes=writes).run()
-
-    assert report.halted is True
-    recorded = [entry for entry in logs if entry["event"] == "consolidation_run_finished"]
-    assert len(recorded) == 1, "exactly one operational record per run (ADR-0111 §9)"
-    assert recorded[0]["disposition"] == "halted"
-    assert recorded[0]["log_level"] == "info", (
-        "a refusal the corpus rules correct must not be emitted at a severity an "
-        "operator's monitoring treats as a fault"
-    )
-
-
 async def test_an_exhausted_run_records_a_different_disposition() -> None:
-    """The other half of the distinction: without it, ``halted`` says nothing."""
+    """ADR-0111 §9: the job records its own disposition, once, at ``info``.
+
+    An exhausted run says so; one that spent its budget says ``budget_spent``
+    instead (:func:`test_a_run_stops_at_its_budget_and_resumes_where_it_stopped`).
+    The record is the job's to write, because ``Scheduler._run_job`` never logs a
+    job's result.
+    """
     store = await _seeded([_record("r1"), _record("r2")])
     writes = _gated(store)
 
@@ -1131,8 +1028,9 @@ async def test_an_exhausted_run_records_a_different_disposition() -> None:
         await _stage(store=store, writes=writes, reply='{"beliefs": []}').run()
 
     recorded = [entry for entry in logs if entry["event"] == "consolidation_run_finished"]
-    assert len(recorded) == 1
+    assert len(recorded) == 1, "exactly one operational record per run (ADR-0111 §9)"
     assert recorded[0]["disposition"] == "exhausted"
+    assert recorded[0]["log_level"] == "info"
 
 
 @pytest.mark.parametrize(
@@ -1172,41 +1070,6 @@ async def test_an_inadmissible_run_budget_is_refused_at_construction(
             run_budget=budget,  # type: ignore[arg-type] # the point
             now=_now,
         )
-
-
-async def test_a_halted_run_reaches_the_scheduler_as_a_completion_not_a_failure() -> None:
-    """ADR-0111 §9 end to end, through the real ``Scheduler``.
-
-    §9's third clause is that a halted run "is recorded as a **completed run** that
-    did not exhaust its work, **not as a failure**", and only ``Scheduler._run_job``
-    records a run as completed. So the generic ``hub_scheduler_job_completed`` is
-    required to fire here — §9 asks for it — and what it cannot carry is the "did
-    not exhaust its work" half, which is what ``consolidation_run_finished`` adds.
-
-    The pair is therefore not the "second record for the same refusal" §9's second
-    clause forbids: that clause bars a second record **at a severity an operator's
-    monitoring treats as a fault**, and its own §Context is about a warning-level
-    failure record plus an asyncio ERROR traceback. Both records here are ``info``
-    and neither says failure — which this case asserts rather than argues.
-    """
-    store = await _seeded([_record("r1", source=MemorySource.EXTERNAL), _record("r2")])
-    writes = _refusing(store)
-    stage = _stage(store=store, writes=writes)
-    scheduler = Scheduler([Job(name="consolidation", interval=timedelta(hours=1), run=stage.run)])
-
-    with structlog.testing.capture_logs() as logs:
-        scheduler.start()
-        # One turn of the loop is enough: every job is due at its first tick
-        # (ADR-0083 §7), so the run happens before the first sleep.
-        await settle()
-        await scheduler.aclose()
-
-    events = [entry["event"] for entry in logs]
-    assert "hub_scheduler_job_failed" not in events, "a halt is not a failure (ADR-0111 §9)"
-    assert events.count("hub_scheduler_job_completed") == 1
-    halts = [entry for entry in logs if entry["event"] == "consolidation_run_finished"]
-    assert [entry["disposition"] for entry in halts] == ["halted"]
-    assert {entry["log_level"] for entry in logs if entry["event"] in events} <= {"info", "debug"}
 
 
 async def test_a_record_cannot_forge_this_renderers_own_container_syntax() -> None:
