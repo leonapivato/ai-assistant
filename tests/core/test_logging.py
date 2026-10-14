@@ -986,12 +986,15 @@ def test_a_class_name_put_in_is_not_matched_again() -> None:
         pytest.param(lambda failure: [failure], id="list"),
         pytest.param(lambda failure: {"read": (failure,)}, id="dict of tuple"),
         pytest.param(lambda failure: {failure}, id="set"),
+        pytest.param(lambda failure: deque([failure]), id="deque"),
+        pytest.param(lambda failure: MappingProxyType({"read": failure}), id="mapping proxy"),
     ],
 )
 def test_an_exception_inside_an_argument_names_only_its_class(
     shape: Callable[[BaseException], object],
 ) -> None:
-    # Adversarial review, round 1: only a direct argument was looked at.
+    # Adversarial review, rounds 1 and 2: only a direct argument was looked at, then
+    # only a builtin container.
     stream = _configured_on_a_bare_root()
 
     logging.getLogger("thirdparty").error("failures: %s", shape(ValueError(_MESSAGE)))
@@ -999,6 +1002,76 @@ def test_an_exception_inside_an_argument_names_only_its_class(
     out = stream.getvalue()
     _assert_no_content(out)
     assert "ValueError" in out
+
+
+def test_an_argument_this_net_cannot_look_inside_is_masked() -> None:
+    # Adversarial review, round 2: a finished future's repr carries its exception's,
+    # and nothing in the record names that exception.
+    stream = _configured_on_a_bare_root()
+
+    async def run() -> None:
+        future = asyncio.get_running_loop().create_future()
+        future.set_exception(ValueError(_MESSAGE))
+        logging.getLogger("thirdparty").error("waited on %r (%s)", future, range(3))
+        future.exception()
+
+    asyncio.run(run())
+
+    assert stream.getvalue() == f"waited on {REDACTED!r} ({REDACTED})\n"
+
+
+@pytest.mark.parametrize("conversion", ["%r", "%a", "%s"])
+def test_a_multiline_exception_text_formatted_as_an_argument_carries_no_words(
+    conversion: str,
+) -> None:
+    # Adversarial review, round 2: ``%r`` escapes the newline, so neither the text
+    # nor any line of it is in the formatted message. Each argument is cleared first.
+    stream = _configured_on_a_bare_root()
+    failure = ValueError(f"{_MESSAGE}\n{_CHAINED}")
+
+    logging.getLogger("thirdparty").error(
+        f"read failed: {conversion}", str(failure), exc_info=failure
+    )
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert out.startswith("read failed: ")
+
+
+def test_a_multiline_exception_text_escaped_into_the_message_carries_no_words() -> None:
+    stream = _configured_on_a_bare_root()
+    failure = ValueError(f"{_MESSAGE}\n{_CHAINED}")
+
+    logging.getLogger("thirdparty").error(
+        f"read failed: {str(failure)!r} {str(failure)!a}", exc_info=failure
+    )
+
+    _assert_no_content(stream.getvalue())
+
+
+def test_a_groups_message_and_an_exceptions_notes_printed_alone_carry_no_words() -> None:
+    stream = _configured_on_a_bare_root()
+    member = ValueError(_LOCAL)
+    member.add_note(_CHAINED)
+    group = ExceptionGroup(_MESSAGE, [member])
+
+    logging.getLogger("thirdparty").error(
+        f"pass failed: {group.message}, {member.__notes__[0]}", exc_info=group
+    )
+
+    _assert_no_content(stream.getvalue())
+
+
+def test_bytes_are_masked_and_an_unhashable_rebuilt_key_does_not_drop_the_line() -> None:
+    stream = _configured_on_a_bare_root()
+
+    logging.getLogger("thirdparty").error(
+        "header %r, seen %s", _MESSAGE.encode(), {frozenset({ValueError(_LOCAL)}): 1}
+    )
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert out == f"header {REDACTED!r}, seen {{{REDACTED!r}: 1}}\n"
 
 
 def test_an_argument_holding_itself_is_masked_not_walked_forever() -> None:
@@ -1062,6 +1135,67 @@ def test_a_repr_cut_short_by_reprlib_is_masked() -> None:
     out = stream.getvalue()
     _assert_no_content(out)
     assert "Exception in callback _raise_it(ValueError([redacted])" in out
+
+
+def test_an_exceptions_text_nested_in_an_extra_is_cleared() -> None:
+    # Adversarial review, round 2: only a top-level string extra was cleared.
+    root = logging.getLogger()
+    for one in list(root.handlers):
+        root.removeHandler(one)
+    stream = io.StringIO()
+    hosts = logging.StreamHandler(stream)
+    hosts.setFormatter(logging.Formatter("%(message)s|%(detail)s"))
+    root.addHandler(hosts)
+    configure_logging(Settings())
+    failure = _caught(_raise_with_content)
+
+    logging.getLogger("thirdparty").error(
+        "read failed",
+        exc_info=failure,
+        extra={"detail": {"reason": str(failure), str(failure): [str(failure)]}},
+    )
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert "_ReadFailedError" in out
+
+
+def test_a_host_formatting_through_structlogs_processor_formatter_keeps_working() -> None:
+    # Adversarial review, round 2: a structlog event wrapped for ProcessorFormatter
+    # carries its event dict as the record's message; made a string, the formatter
+    # failed on it and the event was lost.
+    root = logging.getLogger()
+    for one in list(root.handlers):
+        root.removeHandler(one)
+    root.setLevel(logging.INFO)
+    stream = io.StringIO()
+    hosts = logging.StreamHandler(stream)
+    hosts.setFormatter(
+        structlog.stdlib.ProcessorFormatter(
+            processors=[
+                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                structlog.dev.ConsoleRenderer(colors=False),
+            ]
+        )
+    )
+    root.addHandler(hosts)
+    structlog.configure(
+        processors=[structlog.stdlib.ProcessorFormatter.wrap_for_formatter],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+    )
+    install_redaction()
+    failure = _caught(_raise_with_content)
+
+    structlog.get_logger("host").warning("read_failed", api_key="sk-live-SECRET", exc_info=failure)
+    logging.getLogger("thirdparty").error("foreign failed: %s", failure, exc_info=failure)
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert "sk-live-SECRET" not in out
+    assert "read_failed" in out
+    assert "_ReadFailedError" in out
+    assert "foreign failed: " in out
 
 
 def test_groups_sharing_members_are_logged_without_building_their_repr() -> None:
