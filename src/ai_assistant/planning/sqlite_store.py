@@ -371,12 +371,16 @@ class SqlitePlanStore:
         unlabelled database is one this code is creating now, and it is stamped.
 
         The marker is read through :meth:`_read_meta`, so a store holding conflicting
-        rows for it is refused rather than resolved by row order (issue #349).
+        rows for it is refused rather than resolved by row order (issue #349). The
+        file's tables are checked first (:meth:`_refuse_foreign_tables`), so a missing
+        or rewritten marker cannot pass an older store off as a fresh or a current one.
 
         Raises:
-            PlanningError: If the schema version is not this code's, or the marker is
-                ambiguous or unparseable.
+            PlanningError: If the file holds a table this code does not create, the
+                schema version is not this code's, or the marker is ambiguous or
+                unparseable.
         """
+        self._refuse_foreign_tables(conn)
         version = self._read_meta(conn, "schema_version")
         if not version:
             conn.execute(
@@ -391,6 +395,40 @@ class SqlitePlanStore:
             f"the plan store at {self._path!r} has schema_version={held}, but this code "
             f"reads version {_SCHEMA_VERSION} only; refusing to open it rather than read it "
             f"blindly (a store written before the cutover has no reader, ADR-0309 §6)"
+        )
+        raise PlanningError(msg)
+
+    def _refuse_foreign_tables(self, conn: sqlite3.Connection) -> None:
+        """Refuse a file holding a table this code does not create, whatever its label.
+
+        The version marker is what tells a store written before the cutover from this
+        one, but a marker is one row: deleted, a pre-cutover file reads as a database
+        this code is creating and is stamped, and rewritten to 11, it reads as current.
+        Either way its ``goals``, ``plans`` or ``executions`` would stay in the file and
+        outside :meth:`SqlitePlanStore.export` and :meth:`SqlitePlanStore.clear`,
+        which is ADR-0004 §6 failing in silence. So the tables are read first: a file
+        this code wrote holds ``meta`` and :data:`_RECORD_COLUMNS`' tables and nothing
+        else, and any other table is refused before anything is written. Nothing in it
+        is read or migrated (ADR-0309 §6). SQLite's own ``sqlite_`` tables are not the
+        file's records and are passed over.
+
+        Raises:
+            PlanningError: If the file holds any other table.
+        """
+        own = {"meta", *_RECORD_COLUMNS}
+        foreign = sorted(
+            str(name)
+            for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            # Lower-cased: SQLite identifiers are case-insensitive, so `META` is `meta`.
+            if str(name).lower() not in own and not str(name).lower().startswith("sqlite_")
+        )
+        if not foreign:
+            return
+        msg = (
+            f"the plan store at {self._path!r} holds tables this code neither creates nor "
+            f"reads ({', '.join(foreign)}); a store written before the cutover has no reader "
+            f"(ADR-0309 §6), and opening this one would leave their records outside export "
+            f"and clear (ADR-0004 §6), so it is refused as it stands"
         )
         raise PlanningError(msg)
 
