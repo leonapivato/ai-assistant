@@ -1,6 +1,6 @@
 # 320. The clauses left standing over the residue lanes' removed members and types retire, and the reading-level write path retires
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-14
 - Scope: the phases after understanding, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): the records [#3018](https://github.com/leonapivato/ai-assistant/issues/3018) asks for, for the ratified clauses that bind the `core` members and types the residue lanes removed after ADR-0319's survey, and the decision [#2685](https://github.com/leonapivato/ai-assistant/issues/2685) asks for on its `MemoryWriter` half.
 - Dependency: [ADR-0294](0294-readers-no-longer-ingest-into-memory-and-what-they-wrote-stays.md), [ADR-0309](0309-the-phases-are-built-beside-the-old-path-and-one-cutover-switches-the-controller-over-deletes-the-old-path-and-goes-live-in-one-deploy.md) and [ADR-0319](0319-the-decisions-the-cutover-left-standing-over-deleted-code-retire-the-stamp-drops-recalls-limit-and-an-unasked-memory-question-is-logged.md), all Accepted.
