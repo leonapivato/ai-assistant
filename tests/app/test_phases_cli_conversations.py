@@ -10,8 +10,9 @@ leaves the conversation alone (ADR-0074 §2, §8; ADR-0293 §2:4, §5:7).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from io import StringIO
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from phases_composition_support import Phased, build_phased
@@ -26,6 +27,11 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import ConversationDigest
 
 pytestmark = pytest.mark.integration
+
+#: How long before its turns a forgotten conversation is started. ``cli._when`` renders
+#: to the minute, so a span whose ends are back to back on the real clock would render
+#: both ends alike, and a prompt that swapped them would still read right.
+EARLIER: Final = timedelta(hours=1)
 
 
 @pytest.fixture
@@ -47,6 +53,18 @@ async def composed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIter
         await built.engine.aclose()
 
 
+async def _started_earlier(composed: Phased) -> str:
+    """A conversation started :data:`EARLIER` than now, so its span's ends render apart.
+
+    The conversation store's clock alone is held back, and only while the conversation
+    starts: its turns are then recorded at the instants they land, an hour on.
+    """
+    started = datetime.now(UTC) - EARLIER
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(composed.conversations, "_clock", lambda: started)
+        return await composed.start_conversation()
+
+
 def _cleared(output: StringIO) -> None:
     output.truncate(0)
     output.seek(0)
@@ -66,11 +84,15 @@ def _assert_prompt_shown(rendered: str, expected: ConversationDigest, turns: int
     output happens to carry (a date has several).
     """
     assert expected.last_turn_at is not None
+    started, last = cli._when(expected.started_at), cli._when(expected.last_turn_at)
+    # Ends that render alike could not tell a prompt showing them swapped from one
+    # showing them right.
+    assert started != last
     lines = [line.strip() for line in rendered.splitlines()]
     assert "About to forget this conversation" in lines
     assert expected.id in lines
-    assert f"Started: {cli._when(expected.started_at)}" in lines
-    assert f"Turns recorded: {turns}, the last at {cli._when(expected.last_turn_at)}" in lines
+    assert f"Started: {started}" in lines
+    assert f"Turns recorded: {turns}, the last at {last}" in lines
     # ADR-0293 §5:7: what forgetting removes, that the conversation is still read,
     # and that only deleting removes it — said before the answer is taken.
     flat = _flat(rendered)
@@ -115,7 +137,8 @@ async def test_forget_conversation_shows_the_count_and_span_before_destroying(
     composed: Phased, output: StringIO
 ) -> None:
     """§8: the ceremony is the count and span, not every turn — what a person can judge."""
-    existing = (await composed.say("hello")).conversation_id
+    existing = await _started_earlier(composed)
+    await composed.say("hello", existing)
     await composed.say("again", existing)
     expected = await composed.engine.conversation(existing)
     assert expected is not None
@@ -155,7 +178,8 @@ async def test_forget_conversation_leaves_it_alone_when_the_answer_is_no(
     composed: Phased, output: StringIO
 ) -> None:
     """A refusal is a valid outcome, and it exits 0 — nothing went wrong."""
-    existing = (await composed.say("hello")).conversation_id
+    existing = await _started_earlier(composed)
+    await composed.say("hello", existing)
     expected = await composed.engine.conversation(existing)
     assert expected is not None
     _cleared(output)
