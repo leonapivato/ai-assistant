@@ -61,7 +61,6 @@ from ai_assistant.core.types import (
     MAX_TOPICS_PER_PROPOSAL,
     MAX_TOPICS_PER_RECORD,
     BeliefBand,
-    DeferralAdmissionOutcome,
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
@@ -459,10 +458,10 @@ class ConsolidationReport:
         examined: How many records those chunks yielded to selection.
         proposed: How many proposals reached the write stage.
         committed: How many earned a committing ruling.
-        deferred: How many became a question the queue accepted — admitted, or
-            suppressed as a duplicate of one already pending. Both are disposals:
-            the proposal is represented by a question the user can answer, which
-            is what separates them from the refusal that halts a run (#811).
+        deferred: How many earned an ``ASK_USER`` ruling. The writer writes
+            nothing on that ruling and the write stage logs it (ADR-0309 §5), so
+            the proposal is disposed of and its chunk is recorded as done like any
+            other.
         rejected: How many the gate refused outright.
         discarded_unusable: Model output that could not be used, counted rather
             than repaired, re-prompted for, or invented around (ADR-0077 §4).
@@ -479,12 +478,11 @@ class ConsolidationReport:
             model that honestly proposed exactly the cap — which is the confusion
             this counting exists to remove (ADR-0077 §2, §4).
         exhausted: Whether the walk reached the end of the store. ``False`` on a
-            run that spent its budget or halted, and the two are distinguishable
-            through :attr:`halted`.
-        halted: Whether the run stopped at a chunk it could not record as done
-            (ADR-0111 §5). A completed run that did not exhaust its work, never a
-            failure — recording it as one would make a queue at its cap
-            indistinguishable from a broken store (ADR-0111 §9).
+            run that spent its budget.
+        halted: Always ``False``. It named a run stopped at a question the
+            deferred-question queue refused at its cap, and that queue has retired
+            (ADR-0309 §5). It stays only until the engine's trace, which reads it,
+            drops that read in its own lane.
     """
 
     chunks: int = 0
@@ -537,9 +535,10 @@ class ConsolidationStage:
             memory: The store this walks, through the ``MemoryStore`` contract.
             writes: The orchestration write stage. **The only route to the store's
                 write path** (ADR-0106 §6): a job calling ``MemoryWriter.ingest``
-                directly would rule ``ASK_USER`` on a thousand consolidations and
-                persist not one question, because the writer writes nothing on that
-                ruling and the *stage* is what enqueues.
+                directly would take a second route to the store, and its
+                ``ASK_USER`` rulings would go unrecorded, because the writer writes
+                nothing on that ruling and the *stage* is what logs it (ADR-0309
+                §5).
             model: The model seam that reads each chunk. The only dependency on the
                 LLM; no provider SDK is imported (golden rule 4).
             chunk_size: How many records one chunk examines (ADR-0111 §4). Passed
@@ -580,13 +579,6 @@ class ConsolidationStage:
         spread across a store and a scheduler. Anything raising between the two —
         a model failure, a store error, a cancellation at shutdown — leaves the
         recorded position unchanged, so the chunk is re-processed on the next run.
-
-        **A refused question halts the run** (ADR-0111 §5) and the chunk is *not*
-        recorded as done, so its material is retained and re-proposed later rather
-        than consumed (ADR-0106 §6). Halting also stops the run spending further
-        model calls producing questions for a queue that has already answered
-        ``REFUSED`` because it is at its cap — a condition nothing but a user
-        answering will clear, so it cannot change part-way through a run.
 
         **A generalisation the policy folds onto one of its own citations is a
         refusal this run survives.** ADR-0081 §1 refuses a write landing at an id
@@ -632,7 +624,7 @@ class ConsolidationStage:
         deadline = loop.time() + self._run_budget.total_seconds()
         chunks = examined = proposed = committed = deferred = rejected = 0
         unusable = over_limit = self_cited = 0
-        exhausted = halted = False
+        exhausted = False
         # What this run has already proposed. A committed consolidation is a new
         # record above the cursor, so a later chunk of this same run would examine
         # it — and feeding a run its own output back is not merely wasteful, it
@@ -673,9 +665,6 @@ class ConsolidationStage:
             unusable += outcome.unusable
             over_limit += outcome.over_limit
             self_cited += outcome.self_cited
-            if outcome.refused:
-                halted = True
-                break
             # Only now: everything above is durable, so the cursor lags its
             # effects rather than leading them.
             await self._memory.advance_walk(self._walk, position=chunk.position)
@@ -691,7 +680,6 @@ class ConsolidationStage:
             discarded_over_limit=over_limit,
             refused_self_citing=self_cited,
             exhausted=exhausted,
-            halted=halted,
         )
         _record_run(report)
         return report
@@ -743,7 +731,7 @@ class ConsolidationStage:
         # supplied its own labels rather than nothing. It is updated here and
         # nowhere else, so it does not depend on how the chunk's proposals route, on
         # whether the write stage commits any of them, or on whether the cursor
-        # advances: a run that halts at an unrecorded chunk (ADR-0111 §5) leaves
+        # advances: a run that ends at an unrecorded chunk (ADR-0111 §5) leaves
         # nothing behind, there being nothing durable to leave.
         vocabulary.offer(records)
         conversation = [
@@ -803,16 +791,9 @@ class ConsolidationStage:
                 outcome = outcome.with_self_cited()
                 continue
             kind = written.result.decision.kind
-            admission = written.admission
             if kind is MemoryDecisionKind.REJECT:
                 outcome = outcome.with_rejected()
             elif kind is MemoryDecisionKind.ASK_USER:
-                if admission is not None and admission.outcome is DeferralAdmissionOutcome.REFUSED:
-                    # The queue is at its cap. The proposal has not been disposed
-                    # of, so the run halts and the chunk stays unrecorded: its
-                    # material is retained and re-proposed on a later run rather
-                    # than consumed (ADR-0106 §6, ADR-0111 §5).
-                    return outcome.with_refused()
                 outcome = outcome.with_deferred()
             else:
                 outcome = outcome.with_committed()
@@ -971,7 +952,6 @@ class _ChunkOutcome:
     unusable: int = 0
     over_limit: int = 0
     self_cited: int = 0
-    refused: bool = False
     produced: frozenset[str] = frozenset()
 
     def with_committed(self) -> _ChunkOutcome:
@@ -979,7 +959,7 @@ class _ChunkOutcome:
         return replace(self, committed=self.committed + 1)
 
     def with_deferred(self) -> _ChunkOutcome:
-        """One more question the queue admitted."""
+        """One more ``ASK_USER`` ruling, which wrote nothing."""
         return replace(self, deferred=self.deferred + 1)
 
     def with_rejected(self) -> _ChunkOutcome:
@@ -990,21 +970,14 @@ class _ChunkOutcome:
         """One more proposal the write path refused for folding onto a citation."""
         return replace(self, self_cited=self.self_cited + 1)
 
-    def with_refused(self) -> _ChunkOutcome:
-        """The queue refused a question, so the run halts and the chunk stays open."""
-        return replace(self, refused=True)
-
 
 def _record_run(report: ConsolidationReport) -> None:
     """Write the one operational record a run owes (ADR-0111 §9).
 
-    §9 requires that "a run that halts under §5 without processing its remaining
-    work is recorded as a **completed run that did not exhaust its work**, not as a
-    failure" — because recording a halt as a failure makes a queue at its cap
-    indistinguishable from a broken store, and recording it as an ordinary
-    completion makes a job that has stopped making progress invisible. The
-    ``disposition`` field is what an operator reads: ``exhausted``, ``budget_spent``
-    or ``halted``.
+    A run that spent its budget before the walk reached the end of the store is a
+    completed run that did not exhaust its work, not a failure, and an operator
+    tells it from one that did by the ``disposition`` field: ``exhausted`` or
+    ``budget_spent``.
 
     **The job records it, not the scheduler**, because ``Scheduler._run_job``
     states in terms that "the job's result is never logged. The scheduler is
@@ -1017,13 +990,11 @@ def _record_run(report: ConsolidationReport) -> None:
     **Exactly one record per run**, which is §9's second clause. The scheduler's own
     ``hub_scheduler_job_completed`` says the job ran and how long it took; this says
     what the run concluded, at ``info``, so nothing an operator's monitoring treats
-    as a fault is emitted for a refusal the corpus rules correct.
+    as a fault is emitted for a run that ended as designed.
     """
     _log.info(
         "consolidation_run_finished",
-        disposition=(
-            "halted" if report.halted else "exhausted" if report.exhausted else "budget_spent"
-        ),
+        disposition="exhausted" if report.exhausted else "budget_spent",
         chunks=report.chunks,
         examined=report.examined,
         proposed=report.proposed,

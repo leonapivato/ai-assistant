@@ -30,11 +30,7 @@ from ai_assistant.core.types import MemoryDecisionKind
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import MemoryWriter
-    from ai_assistant.core.types import (
-        DeferralAdmission,
-        MemoryIngestResult,
-        MemoryUpdateProposal,
-    )
+    from ai_assistant.core.types import MemoryIngestResult, MemoryUpdateProposal
 
 _log = structlog.get_logger(__name__)
 
@@ -54,14 +50,9 @@ class WriteOutcome:
     Attributes:
         result: The ruling and the id written, exactly as the ``MemoryWriter``
             returned it.
-        admission: Always ``None``. It named what the deferred-question queue did
-            with an ``ASK_USER`` ruling's question, and that queue has retired
-            (ADR-0309 §5). It stays only until the consolidation stage that reads
-            it, and the type it carries, leave in their own lanes.
     """
 
     result: MemoryIngestResult
-    admission: DeferralAdmission | None = None
 
 
 class MemoryWriteStage:

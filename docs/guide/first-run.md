@@ -109,14 +109,8 @@ hub_ready       data_dir=/home/you/.ai-assistant pid=3941190 remote=None
 listener of any kind. That is the default and it is what you want on one
 machine. [`remote-hub.md`](remote-hub.md) is the other case.
 
-The data directory now exists, with one file per store plus the lock and the
-socket:
-
-```text
-audit.db  connections.db  conversations.db  deferrals.db  grants.db
-memory.db  notifications.db  outbox.db  plans.db  reads.db
-traces.db  hub.lock  hub.sock
-```
+The data directory now exists, with one `.db` file per store — `memory.db`,
+`audit.db`, `traces.db` and the rest — plus `hub.lock` and `hub.sock`.
 
 All of them are `0600`. `hub.lock` is what stops a second hub taking the same
 directory.

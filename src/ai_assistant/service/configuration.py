@@ -55,9 +55,9 @@ nothing here rewrites it.
 clause excludes by name — ``data_dir``, ``embedder``, the model routes and their
 credentials. Both reader source paths fall under that clause, so "the source is
 configured at all" stays invisible for both readers. The transport's four
-figures, the four permission-gate thresholds, the deferral queue's tuning, the two
-readers' *content* bounds, the locale, the log level and the drain budget: each
-shapes the system, none shapes a quantity the leg-8 measures are computed from,
+figures, the four permission-gate thresholds, the two readers' *content* bounds,
+the locale, the log level and the drain budget: each shapes the system, none
+shapes a quantity the leg-8 measures are computed from,
 and §9's "when in doubt, leave it off" decides the ones that are arguable. A later
 change that needs one adds it, which is the same rule §9 states for a cardinality
 control added later.
@@ -175,8 +175,8 @@ CONSOLIDATION_SECONDS: Final = "consolidation_interval_seconds"
 # --- the allowlist: what one scheduled run may do -----------------------------
 
 #: The per-run deadline a chunked scheduled walk is bound by (ADR-0111 §4). It is
-#: what decides an ``INCOMPLETE`` outcome, so a measure counting halted runs is
-#: reading a rate this figure sets.
+#: what ends a run before its walk reaches the end of the store, so a measure
+#: counting runs that did not exhaust their work is reading a rate this figure sets.
 SCHEDULER_RUN_BUDGET_SECONDS: Final = "scheduler_run_budget_seconds"
 
 #: How many records one chunk of a scheduled walk examines (ADR-0111 §4). §9
