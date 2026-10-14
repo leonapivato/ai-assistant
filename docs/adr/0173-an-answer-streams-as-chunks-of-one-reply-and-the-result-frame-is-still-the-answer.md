@@ -1,6 +1,6 @@
 # 173. An answer streams as chunks of one reply, and the result frame is still the answer
 
-- Status: Partially superseded by ADR-0293 (§4's `converse_streaming` as an entry on the engine surface, once the first build lands) and ADR-0296 (§2:2's `ReplyChunk` payload and §2:3's bar on a sequence number, each only as it reaches the change stream's chunk frames) and ADR-0319 (§3, §4:1–§4:2, §4:4, §4:6, §5–§9, §10:3, §14:1–§14:4, §14:6–§14:7, §14:9–§14:11 and §14:13)
+- Status: Partially superseded by ADR-0293 (§4's `converse_streaming` as an entry on the engine surface, once the first build lands) and ADR-0296 (§2:2's `ReplyChunk` payload and §2:3's bar on a sequence number, each only as it reaches the change stream's chunk frames) and ADR-0319 (§3, §4:1–§4:2, §4:4, §4:6, §5–§9, §10:3, §14:1–§14:4, §14:6–§14:7, §14:9–§14:11 and §14:13) and ADR-0320 (§2:2, in what ADR-0296 left of it, and §4:3)
 - Date: 2026-08-21
 - Note (2026-09-18): ADR-0274 §4 adds `receive_streaming`, whose terminal
   value wraps a conversational outcome in `ChannelResult`. This uses §4's
@@ -69,6 +69,7 @@
   header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
 - Partially superseded: 2026-10-14 by ADR-0319 — §3, §4:1–§4:2, §4:4, §4:6, §5–§9, §10:3, §14:1–§14:4, §14:6–§14:7, §14:9–§14:11 and §14:13. They governed `converse_streaming`, the `StreamingCompleter` seam with `models/streaming.py`, and the composing stage's stream; the chunk frame and `ReplyChunk`'s shape stand (ADR-0296 §4:3). Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0320 — §2:2, in what ADR-0296 left of it, and §4:3. They governed `ReplyChunk` on a reply stream, and the mapping of `converse_streaming`'s yielded union onto the frames; the `CHUNK` frame kind, §4:5's reflection rule and what ADR-0319 left of §§10–12 stand. Every other clause stands. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

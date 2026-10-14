@@ -1,6 +1,6 @@
 # 110. What closes a validity window without the user: a covered reading's absence, and never a clock
 
-- Status: Partially superseded by ADR-0115 (§10's ruling that the mechanism is buildable on the `core` surface that exists, and its clause that `MemoryWriter` is untouched and no new member is authorised) and ADR-0117 (§3's condition 3 and the carrier its containment rule compares — the record's envelope validity window becomes the extent its attestation reports — with §3's matching consequence sentence; and §10's buildability ruling again, which acquires one further optional `core/types.py` field)
+- Status: Partially superseded by ADR-0115 (§10's ruling that the mechanism is buildable on the `core` surface that exists, and its clause that `MemoryWriter` is untouched and no new member is authorised) and ADR-0117 (§3's condition 3 and the carrier its containment rule compares — the record's envelope validity window becomes the extent its attestation reports — with §3's matching consequence sentence; and §10's buildability ruling again, which acquires one further optional `core/types.py` field) and ADR-0320 (§3, §4, §5 and §5a)
 - Date: 2026-08-06
 - **Partially superseded: 2026-08-07 by
   [ADR-0115](0115-the-writer-contract-carries-the-reading.md), in the scope the
@@ -248,6 +248,7 @@
   ADR-0082 §7: ADR-0070 §1's condition is that the amending ADR **exists**, and
   ADR-0161 lands in this same change. Refs #1198, #1190.
 - Refs #112, #639, #729 (leg 7 fork 4), #631, #632.
+- Partially superseded: 2026-10-14 by ADR-0320 — §3, §4, §5 and §5a. They governed the absence reconciliation `MemoryWriter.ingest_reading` performs over a covered reading: when an absence closes a window, what absence is, the close's obligations and its serialisation; §1, §2's coverage, §7 and §8 stand. Every other clause stands. They bind the code they govern until the lane ADR-0320 §1:3 names removes it (ADR-0320 §1:4). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

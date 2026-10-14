@@ -1,6 +1,6 @@
 # 115. The writer contract carries the reading: one call, one hold, one reconciliation
 
-- Status: Partially superseded by ADR-0319 (§5:2–§5:4, §7:4 and §7:7)
+- Status: Superseded by ADR-0320; partially superseded before it by ADR-0319 (§5:2–§5:4, §7:4 and §7:7)
 - Date: 2026-08-07
 - **Note (2026-08-07): ratified, over one waived `blocker`.** `Proposed` →
   `Accepted`, in the separate lane #633 requires. The outcome ADR-0070 §1 obliges
@@ -131,6 +131,7 @@
   the clause that *forces* this contract rather than merely permitting it. Refs #729,
   #639, #803, #248, #458.
 - Partially superseded: 2026-10-14 by ADR-0319 — §5:2–§5:4, §7:4 and §7:7. They governed queuing an `ASK_USER` ruling from a reading, into `memory/deferral_store.py`. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Superseded: 2026-10-14 by ADR-0320 — the whole decision. Every clause still in force governed `MemoryWriter.ingest_reading`: its signature, its serialisation across a covered reading, its arms without a coverage, its observation of the reading, its conformance cases and its triad. They bind the code they govern until the lane ADR-0320 §1:3 names removes it (ADR-0320 §1:4). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 117. Absence is judged against the extent a source reports, not against the window the store keeps
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0320 (§3:1–§3:3, §9:2 and §9:3)
 - Date: 2026-08-08
 - **Decides `core` surface and implements none of it.** One **optional field** on
   `Attestation` in `core/types.py`, the small frozen value object it takes, and
@@ -54,6 +54,7 @@
   with it. Where a later ADR *changes* one of them, that change owes its own record
   and this ADR is owed a matching one.
 - Refs #828, #827, #804, #639, #729.
+- Partially superseded: 2026-10-14 by ADR-0320 — §3:1–§3:3, §9:2 and §9:3. They governed ADR-0110 §3's containment judged against the extent in both `MemoryWriter` implementations, and the writer suite's and implementations' tests of it; the extent (§2, §6), the calendar's coverage (§5), §4, §8:1, §9:1 and §9:4 stand. Every other clause stands. They bind the code they govern until the lane ADR-0320 §1:3 names removes it (ADR-0320 §1:4). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 279. The fenced runs that bind nothing are restated as marks where they carry a rule
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0320 (§2:1–§2:8)
 - Date: 2026-09-26
 - Authorization: on 2026-09-26 the owner answered "do your recommendations" to the
   dispatcher's recommendation on #2563, which was to write a new ADR restating the
@@ -14,6 +14,7 @@
   signatures of `RoutingRecorder`, `RoutingTrail` and two `AssistantEngine` members —
   so it owes both review lenses. It changes no Protocol, no `core` type, no code and
   no `PROTOCOL_VERSION`: every clause below describes what `main` already carries.
+- Partially superseded: 2026-10-14 by ADR-0320 — §2:1–§2:8. They governed the `RoutingRecorder` and `RoutingTrail` Protocols, with `RoutedOperationRecord` and `RoutingTrailError`; §3's `guard` and `unguard` stand. Every other clause stands. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 194. A ceiling on what the world may cost is decided before the act, and an unknown price is never zero
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0320 (§6:8)
 - Date: 2026-08-25
 - **Note (2026-09-03): §1's three named transition cases are consequences of the one
   selection rule and not an enumeration an implementation may branch on — and the
@@ -96,6 +96,7 @@
   forbids it. If ADR-0192's ratified text lands differing from what this ADR
   cites, this ADR's own §9 is where that is reconciled, at the cost of a
   paragraph — which is the cost that document names for finding it early.
+- Partially superseded: 2026-10-14 by ADR-0320 — §6:8. They governed what the ceiling adds to a `Confirmation` and its card, which are gone; the ceiling, `SpendLedger` and §4:7's refusal window stand. Every other clause stands. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

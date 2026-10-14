@@ -1,6 +1,6 @@
 # 8. Situational context: `CurrentContext` and a source seam
 
-- Status: Partially superseded by ADR-0319 (§2, §3, §4's bullets on a failing optional source and a key collision, and §5's working-hours window and source clock, with ADR-0026's amendments to them); §§2, 4–5 amended by ADR-0026
+- Status: Partially superseded by ADR-0319 (§2, §3, §4's bullets on a failing optional source and a key collision, and §5's working-hours window and source clock, with ADR-0026's amendments to them) and ADR-0320 (§1, §4's sentence adding `ContextError` with its third bullet, and §6); §§2, 4–5 amended by ADR-0026
 - Date: 2026-07-17
 - Amended: 2026-07-21 by ADR-0026 — §4's "a valid CurrentContext can always be
   built" now holds for a *conforming* clock: a reading that is naive,
@@ -13,6 +13,7 @@
   the ContextSource/CurrentContext shapes, and everything else in §§2, 4–5
   stand.
 - Partially superseded: 2026-10-14 by ADR-0319 — §2, §3, §4's bullets on a failing optional source and a key collision, and §5's working-hours window and source clock, with ADR-0026's amendments to them. They governed the `ContextProvider` seam, the assembler and its sources in `context/`, and the two `Settings` fields that went with them; `CurrentContext`, `TimeOfDay`, `ContextError` and the timezone stand. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0320 — §1, §4's sentence adding `ContextError` with its third bullet, and §6. They governed `CurrentContext`, `TimeOfDay`, `ContextError` and the facets §6 deferred onto `CurrentContext`, which left `core`; §4's first bullet and §5's `timezone` stand. Every other clause stands. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,8 +1,9 @@
 # 39. What a finished step durably records about why
 
-- Status: Partially superseded by ADR-0319 (§6, and §7's bullet on cross-restart retry)
+- Status: Partially superseded by ADR-0319 (§6, and §7's bullet on cross-restart retry) and ADR-0320 (§1–§5; §7's bullets on `abandon_running` and on recovery not reading `kind`; §8; and §10 but its `PlanExport.schema_version` bullet)
 - Date: 2026-07-22
 - Partially superseded: 2026-10-14 by ADR-0319 — §6, and §7's bullet on cross-restart retry. They governed what `StepExecutor` in `orchestration/executor.py` wrote and retried; `StepFailure` and its rules stand. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0320 — §1–§5; §7's bullets on `abandon_running` and on recovery not reading `kind`; §8; and §10 but its `PlanExport.schema_version` bullet. They governed `StepFailure`, `StepExecution.failure` and `StepTransition.failure`, `planning/execution.py` and the plan stores' step cases; §10's `PlanExport` version rule stands. Every other clause stands. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

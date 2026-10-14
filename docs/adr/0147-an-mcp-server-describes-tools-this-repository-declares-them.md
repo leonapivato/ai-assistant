@@ -1,6 +1,6 @@
 # 147. An MCP server describes tools; this repository declares them
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0320 (§6:7)
 - Date: 2026-08-13
 - **Note (2026-08-13): ratified.** `Proposed` → `Accepted`, after **both**
   required reviews came back green on one tree — adversarial **APPROVE with no
@@ -47,6 +47,7 @@
   ADR-0017 §3, of ADR-0016 §7's remaining deferrals, or of #74.
 - **A stacked addition under ADR-0082 §1; no record is owed on any earlier ADR
   and none is written.** §11 names the clauses and applies the test to each.
+- Partially superseded: 2026-10-14 by ADR-0320 — §6:7. They governed `StepExecution.output` as a projection carrying content with no origin; §6:1–§6:6 stand. Every other clause stands. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
