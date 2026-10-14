@@ -1673,19 +1673,63 @@ def test_the_root_handlers_come_back_in_their_order() -> None:
     assert root.handlers == [first, second]
 
 
+class _ContendedLock:
+    """The logging module's lock, reporting when one thread finds it held.
+
+    Delegates to the lock it wraps, so mutual exclusion is unchanged, including
+    with code that took the lock by its own reference. A non-blocking attempt
+    comes first: the holder's reentrant acquire succeeds and only another
+    thread's fails, so the failure is the observation "it is blocked" that a
+    timeout could only guess at. ``contender`` names the one thread watched, so
+    a stray thread logging meanwhile is not mistaken for it.
+    """
+
+    def __init__(self, inner: threading.RLock, contended: threading.Event) -> None:
+        self._inner = inner
+        self._contended = contended
+        self.contender: threading.Thread | None = None
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._inner.acquire(blocking=False):
+            return True
+        if threading.current_thread() is self.contender:
+            self._contended.set()
+        return blocking and self._inner.acquire(timeout=timeout)
+
+    def release(self) -> None:
+        self._inner.release()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 def test_concurrent_configuration_on_a_bare_root_installs_one_handler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Issue #2980: the first caller is held between finding no handler and adding
-    # its own while a second caller runs as far as it can. Unlocked, the second
-    # also finds none and adds one; under the logging module's lock it waits, then
-    # finds the first's.
+    # its own until a second caller has either reached its own ``addHandler`` --
+    # having found no handler too -- or found the logging module's lock held, to
+    # find the first's once let through. Unlocked, the second reaches
+    # ``addHandler`` and two are installed however long it is delayed (issue
+    # #2985); under the lock it is blocked, and one is. No timeout decides which.
     root = logging.getLogger()
     for one in list(root.handlers):
         root.removeHandler(one)
     settings = Settings()
     add = logging.Logger.addHandler
+    observed = threading.Event()
+    # The lock ``_install_stdlib_net`` and ``addHandler`` take; typeshed does not
+    # declare it, since it is the module's own.
+    lock = _ContendedLock(logging._lock, observed)  # type: ignore[attr-defined]
+    monkeypatch.setattr(logging, "_lock", lock)
     second: list[threading.Thread] = []
+    waited: list[bool] = []
     failures: list[BaseException] = []
 
     def configure() -> None:
@@ -1693,19 +1737,25 @@ def test_concurrent_configuration_on_a_bare_root_installs_one_handler(
             configure_logging(settings)
         except BaseException as exc:
             failures.append(exc)
+            observed.set()
 
     def adding(self: logging.Logger, handler: logging.Handler) -> None:
         if not second:
             other = threading.Thread(target=configure)
+            lock.contender = other
             second.append(other)
             other.start()
-            other.join(timeout=0.5)
+            # A guard against a hang only: its expiry fails the test below.
+            waited.append(observed.wait(timeout=30))
+        elif threading.current_thread() is lock.contender:
+            observed.set()
         add(self, handler)
 
     monkeypatch.setattr(logging.Logger, "addHandler", adding)
     configure_logging(settings)
-    second[0].join(timeout=10)
+    second[0].join(timeout=30)
 
+    assert waited == [True], "the second caller neither reached addHandler nor waited"
     assert not second[0].is_alive()
     assert not failures
     _ours()
