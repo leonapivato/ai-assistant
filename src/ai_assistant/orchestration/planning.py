@@ -58,6 +58,17 @@ already recorded with the episode are carried in, and the round's new ones are
 recorded with it. Episode notes take no label. A place-window item that links to an
 activation is shown with that activation's episode label.
 
+**The same exchange, shown once** (ADR-0276 §3, read with ADR-0307 §5:6 and §6:1; #2951).
+An episode whose exchange the place window already shows, by items linked to its
+activation, is that exchange shown twice. Its messages stay in the place window, under
+its label. Wherever the episode itself is rendered, its entry keeps the label and
+everything only the episode carries, its notes, status, verdicts and evidence among
+them, and each text the place window shows whole is replaced by a line saying so: its
+input, where the user's linked items are that input; its response, where the
+assistant's linked items are the messages it wrote; and a round's message, where one of
+the assistant's linked items is that message. A text the window shows only in part, or
+not at all, is rendered as before, and an episode no item links to is rendered whole.
+
 **Recorded before anything goes out** (§2:3 to §2:4, §3:1). The round is appended through
 :class:`RoundRecorder` before :meth:`PlanningStage.plan` returns, so its message is
 written and its calls run only after the append has returned. An append that fails is
@@ -936,6 +947,13 @@ _NO_EPISODES: Final = "none shown"
 _SHOWN_ABOVE: Final = "shown above under this label"
 _NOTHING_DONE: Final = "nothing recorded"
 _NO_MEANING: Final = "no meaning understood"
+#: ADR-0276 §3 (#2951): a text of an episode the place window already shows under its label.
+_IN_PLACE_WINDOW: Final = "shown in the place window under this label, not repeated here"
+#: How one text is made of several messages: the chat's input of the messages it took in
+#: (``ChatInput.text``) and an episode's response of the messages it wrote
+#: (``PhaseWorking.outcome``) each join them with it. Were either to join otherwise, a
+#: text would no longer match its items and would be shown again, never dropped.
+_JOINED: Final = "\n\n"
 _INHERITED: Final = "a larger matter this story is part of"
 _TIDY_STARTED: Final = (
     "started: it runs on its own, and how it went is recorded on the story, not here"
@@ -995,6 +1013,14 @@ class _Shown:
     marked: bool = False
 
 
+@dataclass
+class _PlaceTexts:
+    """What the place window shows of one episode, by who wrote it (ADR-0276 §3)."""
+
+    user: list[str] = field(default_factory=list)
+    assistant: list[str] = field(default_factory=list)
+
+
 class _Request:
     """One round's rendered request, assigning labels as it shows things."""
 
@@ -1008,6 +1034,15 @@ class _Request:
         self.shown = _Shown()
         # The episodes rendered whole so far, so one shown again is named by its label.
         self._rendered: set[str] = set()
+        # What the place window shows of each episode it links to: the user's texts and
+        # the assistant's, each in the window's order (ADR-0276 §3, ADR-0307 §5:6). An
+        # item someone else wrote is never shown, so it shows nothing of an episode.
+        self._in_place: dict[str, _PlaceTexts] = {}
+        for item in inputs.place.items:
+            if item.episode_id is None or item.author is PlaceAuthor.OTHER:
+                continue
+            texts = self._in_place.setdefault(item.episode_id, _PlaceTexts())
+            (texts.user if item.author is PlaceAuthor.USER else texts.assistant).append(item.text)
 
     def rendered(self, offered: Sequence[OfferedTool]) -> str:
         """The request's JSON object, as one string."""
@@ -1122,7 +1157,8 @@ class _Request:
                 excerpt_chars=self._excerpt_chars,
                 owner_records=self._inputs.owner_records,
             )
-            shown.append(self._episode(self._book.label(LabelKind.EPISODE, record.id), projection))
+            label = self._book.label(LabelKind.EPISODE, record.id)
+            shown.append(self._episode(label, projection, record_id=record.id))
             self._rendered.add(record.id)
         return shown
 
@@ -1151,7 +1187,8 @@ class _Request:
                     excerpt_chars=self._excerpt_chars,
                     owner_records=self._inputs.owner_records,
                 )
-                episode = self._episode(self._book.label(LabelKind.EPISODE, record.id), projection)
+                label = self._book.label(LabelKind.EPISODE, record.id)
+                episode = self._episode(label, projection, record_id=record.id)
                 self._rendered.add(record.id)
                 stories = self._inputs.recalled_stories.get(record.id, ())
                 if stories:
@@ -1251,7 +1288,7 @@ class _Request:
             record, excerpt_chars=self._excerpt_chars, owner_records=self._inputs.owner_records
         )
         self._rendered.add(record.id)
-        return self._episode(label, projection)
+        return self._episode(label, projection, record_id=record.id)
 
     def _short(self, view: ShortView, *, inherited: bool = False) -> dict[str, object]:
         """A story's short view (ADR-0300 §6:2), under the same minimum (ADR-0304 §4)."""
@@ -1337,7 +1374,9 @@ class _Request:
             else f"{fact[:bound]}… (cut: {bound} of {len(fact)} chars)",
         }
 
-    def _episode(self, label: str, projection: EpisodeProjection) -> dict[str, object]:
+    def _episode(
+        self, label: str, projection: EpisodeProjection, *, record_id: str
+    ) -> dict[str, object]:
         """Another episode, shown whole: the episode window's, recall's or a story's.
 
         An outside episode (ADR-0303 §3:2) is outside content planning has read (§3:1),
@@ -1346,28 +1385,36 @@ class _Request:
         outside content, its input came from outside, whose understood meaning it is
         still shown, or it shows evidence or a marked note. What the reader's audience
         withholds of it is not read.
+
+        Where the place window links items to it, each of its texts the window shows
+        whole says so in its place, and the rest is rendered as before (ADR-0276 §3,
+        #2951).
         """
+        place = self._in_place.get(record_id, _PlaceTexts())
         shown: dict[str, object] = {"label": label, "at": projection.occurred_at.isoformat()}
         if projection.origin is InputOrigin.OUTSIDE:
             shown["input"] = "an outside report, not shown"
             self.shown.marked = True
-        elif projection.input is not None:
-            shown["input"] = _text(projection.input)
+        elif (given := _unless_in_place(projection.input, place.user)) is not None:
+            shown["input"] = given
         if projection.meaning is not None:
             shown["understood_then"] = projection.meaning
         steps = [STEP_DISPOSITION_PHRASES[one] for one in projection.step_dispositions]
         steps += [ROUTE_OUTCOME_PHRASES[one] for one in projection.route_outcomes]
         if steps:
             shown["what_happened"] = steps
-        if projection.response is not None:
-            shown["response"] = _text(projection.response)
+        response = _unless_in_place(projection.response, place.assistant)
+        if response is not None:
+            shown["response"] = response
         if projection.status is not None and projection.reason is not None:
             shown["ended"] = f"{projection.status.value}: {projection.reason.value}"
         if projection.derived_from_external:
             shown["outside_content"] = _OUTSIDE
             self.shown.marked = True
         if projection.rounds:
-            shown["rounds"] = [self._episode_round(one) for one in projection.rounds]
+            shown["rounds"] = [
+                self._episode_round(one, place.assistant) for one in projection.rounds
+            ]
         if projection.evidence:
             # ADR-0308 §3:1, §5:5: the episode's evidence, each item's text and its mark
             # and never its source label, under the reader's audience as the projection
@@ -1379,11 +1426,17 @@ class _Request:
             self.shown.marked = True
         return shown
 
-    def _episode_round(self, one: ProjectedRound) -> dict[str, object]:
-        """One of another episode's rounds: its message, and its notes where shown."""
+    def _episode_round(self, one: ProjectedRound, written: Sequence[str]) -> dict[str, object]:
+        """One of another episode's rounds: its message, and its notes where shown.
+
+        Its message says it is in the place window where one of ``written``, the
+        assistant's items the window links to the episode, is that message whole.
+        """
         shown: dict[str, object] = {}
-        if one.message is not None:
-            shown["message"] = _text(one.message)
+        message = one.message
+        if message is not None:
+            in_place = any(_shows(message, (text,)) for text in written)
+            shown["message"] = _IN_PLACE_WINDOW if in_place else _text(message)
         if one.notes is not None:
             shown["notes"] = _text(one.notes)
             if one.notes_marked:
@@ -1496,6 +1549,29 @@ def _text(projected: ProjectedText) -> str:
     if projected.cut:
         return f"{projected.text}… (cut: {len(projected.text)} of {projected.full_chars} chars)"
     return projected.text
+
+
+def _unless_in_place(projected: ProjectedText | None, texts: Sequence[str]) -> str | None:
+    """A projected text as shown, or the line saying the place window shows it whole."""
+    if projected is None:
+        return None
+    return _IN_PLACE_WINDOW if _shows(projected, texts) else _text(projected)
+
+
+def _shows(projected: ProjectedText, texts: Sequence[str]) -> bool:
+    """Whether the place window shows ``projected`` whole, as ``texts`` joined (ADR-0276 §3).
+
+    ``texts`` are the items the window links to the episode, in its order. The
+    projection carries a prefix and the whole text's length, so the window shows the
+    text where joining the items gives that length and begins with that prefix: the
+    items are the episode's own, so a match is that text. An item missing from the
+    window, a message cut to fit the place or a text joined otherwise does not match,
+    and the text is shown as before.
+    """
+    if not texts:
+        return False
+    whole = _JOINED.join(texts)
+    return len(whole) == projected.full_chars and whole.startswith(projected.text)
 
 
 def _more_older(count: int, page: int) -> str:
