@@ -1053,8 +1053,11 @@ class SqliteAuditTrail:
         """
         rows = conn.execute(_READ_SCHEMA_VERSION).fetchall()
         if not rows:
+            # Folded as SQLite folds an identifier (ASCII only), because a table declared
+            # ``Decisions`` is the very table every statement here reads while
+            # ``sqlite_master`` keeps the spelling it was declared with.
             if conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'decisions'"
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) = 'decisions'"
             ).fetchone():
                 msg = (
                     f"the audit trail at {self._path!r} holds decisions but no "
