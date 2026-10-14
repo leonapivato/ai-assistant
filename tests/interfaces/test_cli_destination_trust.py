@@ -140,8 +140,8 @@ def test_the_three_command_names_are_the_ones_the_decision_fixed() -> None:
     under any name. The vocabulary qualifies with ``destination`` for ADR-0186 §1's
     naming rule coming out the same way a third time: on this surface ``grant``,
     ``amend``, ``revoke``, ``grants`` and ``granted`` already name ``SourceGrant`` and
-    ``remember-recipients``, ``recipient-grants`` and ``revoke-recipient-grant``
-    already name ``RecipientGrant``.
+    ``recipient-grants`` and ``revoke-recipient-grant`` already name
+    ``RecipientGrant``.
     """
     names = {command.name for command in cli.app.registered_commands}
 
@@ -167,17 +167,17 @@ def test_the_standing_listing_takes_no_limit() -> None:
 def test_no_flag_on_any_command_performs_the_other_act() -> None:
     """§5: "**No flag on any command performs the other act**."
 
-    ``--until`` stays ``establish_recipient_grant``'s expiry and gains no sibling here,
-    and the trust command takes no expiry at all — ADR-0238 §1 fixes the record at five
+    The trust command takes no expiry at all — ADR-0238 §1 fixes the record at five
     fields with no ``expires_at``, so a ``--until`` would be a ``core/types.py`` change
-    against that clause rather than a flag a surface may add (§2, §14).
+    against that clause rather than a flag a surface may add (§2, §14). The command
+    that carried the other act, ``remember-recipients``, is retired (ADR-0313 §5:1).
     """
     group = typer.main.get_command(cli.app)
     commands = dict(group.commands)  # type: ignore[attr-defined]
 
     assert [param.name for param in commands["trust-destinations"].params] == ["decision_id"]
     assert [param.name for param in commands["revoke-destination-trust"].params] == ["record_id"]
-    assert "trust" not in {param.name for param in commands["remember-recipients"].params}
+    assert "remember-recipients" not in commands
 
 
 # --- §3: the five facts, stated before the act is collected ------------------
@@ -420,66 +420,6 @@ def test_a_successful_revocation_claims_only_what_the_boolean_establishes(
         assert forbidden not in rendered
 
 
-def test_the_grantable_listing_states_the_five_facts_before_any_id_is_typed(
-    monkeypatch: pytest.MonkeyPatch, output: StringIO
-) -> None:
-    """§3: "**before it collects the act**", which on a terminal is before the typing.
-
-    §1 puts the offer at the listing — "The user names a decision from a listing that
-    already renders the canonical destination set ``core`` derived" — so this is where a
-    user meets the five facts, beside the next-step line that names both acts. A
-    statement only the performing command printed would have been read after the decision
-    to perform it rather than before.
-    """
-    engine = FakeAssistantEngine()
-    _wire(monkeypatch, engine)
-
-    async def _grantable(*, limit: int = 20) -> tuple[object, ...]:
-        return (_ELIGIBLE,)
-
-    monkeypatch.setattr(engine, "grantable_decisions", _grantable)
-    CliRunner().invoke(cli.app, ["remember-recipients"])
-    rendered = _flat(output.getvalue())
-
-    assert "not the question of whether I may talk" in rendered
-    assert "drawn from things I hold about you" in rendered
-    assert "carries no end date" in rendered
-    assert "not repaired by this" in rendered
-    assert rendered.index("assistant trust-destinations <decision-id>") < rendered.index(
-        "carries no end date"
-    ), "the command is offered and the facts follow it on the same screen, before any typing"
-
-
-# --- §5: the next-step line names both acts, as two acts ---------------------
-
-
-def test_the_grantable_listing_names_both_acts_as_two(
-    monkeypatch: pytest.MonkeyPatch, output: StringIO
-) -> None:
-    """§5: both acts side by side over the same decision id, named as two questions.
-
-    This is what discharges ADR-0238 §1's "knowing it was a second question" at the
-    point of discovery, and it is the whole of the coupling between the two acts. It
-    performs **no trust read** to do it: the line is a fixed statement of what the two
-    commands are, not a rendering of any destination's current state.
-    """
-    engine = FakeAssistantEngine()
-    _wire(monkeypatch, engine)
-
-    async def _grantable(*, limit: int = 20) -> tuple[object, ...]:
-        return (_ELIGIBLE,)
-
-    monkeypatch.setattr(engine, "grantable_decisions", _grantable)
-    result = CliRunner().invoke(cli.app, ["remember-recipients"])
-    rendered = _flat(output.getvalue())
-
-    assert result.exit_code == 0
-    assert "neither completes the other" in rendered
-    assert "assistant remember-recipients <decision-id> --until <instant>" in rendered
-    assert "assistant trust-destinations <decision-id>" in rendered
-    assert "standing_destination_trust" not in [call[0] for call in engine.calls]
-
-
 # --- §9: the decisions page offers the act ------------------------------------
 
 
@@ -488,19 +428,14 @@ def test_the_decisions_page_offers_the_act_and_states_the_five_facts(
 ) -> None:
     """§3 on the route §9 prescribes, which is the one a refused follow-up sends users to.
 
-    ``TRUST_MISSING``'s statement names ``assistant decisions`` **and not** ``assistant
-    remember-recipients``, because the decision recording that refusal carries
-    ``planned_with_external_content`` and the decision the user granted from has been
-    resolved — so the other listing "can therefore be empty at exactly the moment its
-    guidance is followed" (§9). A user arriving here and typing the command would
-    otherwise read the five facts only after performing the act, which is what §3's
-    "before it collects the act" forbids.
+    ``assistant decisions`` carries resolved decisions, and the earlier decision
+    remains a valid subject of the trust act (§9). A user arriving here and typing the
+    command would otherwise read the five facts only after performing the act, which is
+    what §3's "before it collects the act" forbids.
 
-    **The grant act is not offered here**, and that is a decision rather than an
-    omission: ADR-0235 §3's availability set is what ``remember-recipients`` renders and
-    a row here may fail it for reasons this page does not compute, so naming that command
-    beside a row it cannot judge would be this surface deriving an availability it was
-    not given.
+    **The grant act is not offered here**: ``remember-recipients`` left the command line
+    (ADR-0313 §5:1), so the other question is named by the listing that stays,
+    ``assistant recipient-grants``.
     """
     engine = FakeAssistantEngine()
     _wire(monkeypatch, engine)
@@ -515,6 +450,8 @@ def test_the_decisions_page_offers_the_act_and_states_the_five_facts(
     assert result.exit_code == 0
     assert "assistant trust-destinations <decision-id>" in rendered
     assert "neither completes the other" in rendered
+    assert "'assistant recipient-grants'" in rendered
+    assert "remember-recipients" not in rendered
     assert "not the question of whether I may talk" in rendered
     assert "drawn from things I hold about you" in rendered
     assert "carries no end date" in rendered
