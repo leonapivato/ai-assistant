@@ -1858,6 +1858,7 @@ class PhasePath:
         story_calls: StoryCalls | None = None,
         look_ups: LookUps | None = None,
         now: Callable[[], datetime] = _utcnow,
+        timezone: str = "UTC",
         new_effect_id: Callable[[], str] = _new_effect_id,
         diagnostics: DiagnosticSink | None = None,
     ) -> None:
@@ -1903,6 +1904,8 @@ class PhasePath:
                 look-up reads under the pass's audience (ADR-0307 §6:6); ``None``
                 where no look-up is offered.
             now: The clock a step's start and an effect's claim are read from.
+            timezone: The IANA name of the zone planning is shown the current time in
+                (#2964), handed on to planning: ``Settings.timezone``.
             new_effect_id: Mints the *couldn't finish* message's effect record id.
             diagnostics: The diagnostic record's write seam, handed on to planning
                 and digesting, which this path builds (ADR-0314 §4:4); ``None`` where
@@ -1932,6 +1935,7 @@ class PhasePath:
             excerpt_chars=excerpt_chars,
             model=planning_model,
             now=now,
+            timezone=timezone,
             diagnostics=diagnostics,
         )
         self._digesting = DigestingStage(

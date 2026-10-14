@@ -18,7 +18,8 @@ story links; the place window and the episode window; what both recall runs foun
 (ADR-0308 §3), each episode by its records with the labels of the stories it is in, and
 each memory record only where its source is not outside; this activation's earlier
 rounds and their notes, shown on every pass whatever the audience; acting's outcomes;
-the offered capabilities and the channel kind's description; the current time; and
+the offered capabilities and the channel kind's description; the current time, in the
+configured zone with its offset and the zone's name beside it (#2964); and
 digested evidence, which the digesting stage and recall's digest supply, each digest
 under the label of the result it read and each item under its source's label (ADR-0308
 §5:1). The episode window's and the found episodes' notes follow the reader's audience
@@ -95,6 +96,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final, Protocol
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -1046,12 +1048,19 @@ class _Request:
     """One round's rendered request, assigning labels as it shows things."""
 
     def __init__(
-        self, inputs: PlanningInputs, book: _LabelBook, *, excerpt_chars: int, now: datetime
+        self,
+        inputs: PlanningInputs,
+        book: _LabelBook,
+        *,
+        excerpt_chars: int,
+        now: datetime,
+        zone: ZoneInfo,
     ) -> None:
         self._inputs = inputs
         self._book = book
         self._excerpt_chars = excerpt_chars
         self._now = now
+        self._zone = zone
         self.shown = _Shown()
         # Whether a story read is offered this round, set as the request is rendered.
         self._reads_stories = False
@@ -1072,7 +1081,10 @@ class _Request:
         inputs = self._inputs
         self._reads_stories = _offers_story_reads(offered)
         document: dict[str, object] = {
-            "now": self._now.isoformat(),
+            # The current instant in the user's configured zone, with its offset, and the
+            # zone's IANA name, so a time told is told in local time (#2964).
+            "now": self._now.astimezone(self._zone).isoformat(),
+            "time_zone": self._zone.key,
             "place": self._place(),
             "understanding": self._understanding(),
             "place_window": [self._item(item) for item in inputs.place.items],
@@ -1789,6 +1801,7 @@ class PlanningStage:
         excerpt_chars: int,
         model: str | None = None,
         now: Callable[[], datetime] = _utcnow,
+        timezone: str = "UTC",
         new_id: Callable[[], str] = _new_round_id,
         diagnostics: DiagnosticSink | None = None,
     ) -> None:
@@ -1800,6 +1813,9 @@ class PlanningStage:
             excerpt_chars: The bound :func:`project_episode` cuts an episode's texts to.
             model: Optional ``"provider:model"`` override for planning's rounds.
             now: The clock the current time and ``recorded_at`` are read from.
+            timezone: The IANA name of the zone the request shows the current time in,
+                with its offset and the name beside it (#2964): ``Settings.timezone``,
+                the one timezone source. ``recorded_at`` stays UTC.
             new_id: Mints a round's id.
             diagnostics: The diagnostic record's write seam (ADR-0314 §4:4): the
                 rendered request and the offered tools before each round, and the
@@ -1808,10 +1824,14 @@ class PlanningStage:
 
         Raises:
             ValueError: If ``excerpt_chars`` is below 1.
+            ZoneInfoNotFoundError: If ``timezone`` names no known zone. ``Settings``
+                refuses one at load, so a composition root reaching here has already
+                been validated.
         """
         if excerpt_chars < 1:
             msg = "planning's excerpt bound must be at least 1"
             raise ValueError(msg)
+        self._zone = ZoneInfo(timezone)
         self._completer = completer
         self._recorder = recorder
         self._excerpt_chars = excerpt_chars
@@ -1835,7 +1855,9 @@ class PlanningStage:
         """
         book = _LabelBook(inputs.labels)
         offered = offered_tools(inputs.capabilities)
-        request = _Request(inputs, book, excerpt_chars=self._excerpt_chars, now=self._now())
+        request = _Request(
+            inputs, book, excerpt_chars=self._excerpt_chars, now=self._now(), zone=self._zone
+        )
         rendered = request.rendered(offered)
         messages = (
             Message(
