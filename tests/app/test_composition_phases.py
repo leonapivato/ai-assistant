@@ -5,7 +5,8 @@ The switch removed the opt-in: every deployment's engine holds a
 It reuses the objects the root already holds — one plan store, one trail, one memory
 store, one story store — and its policy holds no goal authorizations and no goal quotes
 (ADR-0306 §4:11). Planning is offered every capability the phases' tools advertise: the
-registry's, the configured search, and the assistant's own records' (ADR-0306 §2:7).
+registry's, the configured search, and the assistant's own records' (ADR-0306 §2:7), the
+clock apart, since planning's input carries the current time (#2942).
 
 **Nothing here opens a socket.** Every case builds the engine over a hashing embedder and
 closes it; a deployment that connects an account names an ``.invalid`` origin (RFC 6761
@@ -49,9 +50,9 @@ SEARCH_ORIGIN: Final = "https://search.example.invalid"
 
 
 async def _offered(phases: PhasePath) -> tuple[ToolDefinition, ...]:
-    """What planning is offered: every capability the phases' tools advertise."""
+    """What planning is offered: every capability the phases' tools advertise, bar one."""
     assert phases._capabilities is None, "no fixed list: every one advertised"
-    return await phases._tools.offered(await phases._tools.capabilities())
+    return await phases._offered()
 
 
 def test_the_opt_in_is_gone() -> None:
@@ -84,18 +85,21 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(
         assert 1 <= RECALL_SECOND_RUN_CAP <= RECALLED_ITEMS_MAX
         assert phases._memory is engine._memory
         assert engine._chat_turn_budget == PHASES_TURN_BUDGET
-        # ADR-0306 §2:7: every capability the tools advertise — here the registry's
-        # current time and remembering; no search, account or booking is configured,
-        # so none of theirs. Planning's story calls that write are offered beside them
+        # ADR-0306 §2:7: every capability the tools advertise — here remembering; no
+        # search, account or booking is configured, so none of theirs, and the clock
+        # the registry holds is not offered, since planning's input carries ``now``
+        # (#2942). Planning's story calls that write are offered beside them
         # (ADR-0300 §10, ADR-0303 §9), with their label arguments, and its look-ups
         # (ADR-0307 §6:6), with theirs.
         offered = await _offered(phases)
         assert {str(one.capability) for one in offered} == {
-            "report_current_time",
             "remember",
             *STORY_CALL_CAPABILITIES,
             *LOOK_UP_CAPABILITIES,
         }
+        # ADR-0048 §1: the clock stays registered, and selection still finds it.
+        clock = await phases._tools.find("report_current_time")
+        assert [str(one.id) for one in clock] == ["current_time"]
         assert phases._label_arguments == {**STORY_LABEL_ARGUMENTS, **LOOK_UP_LABEL_ARGUMENTS}
         # One look-ups runner behind every look-up, over the root's own memory store and
         # the story views' reads, whose scope the path opens around acting.
@@ -141,7 +145,6 @@ async def test_a_connected_search_is_offered_without_the_origin_the_hub_fills(
         assert phases is not None
         offered = {str(one.capability): one for one in await _offered(phases)}
         assert set(offered) == {
-            "report_current_time",
             "web_search",
             "remember",
             *STORY_CALL_CAPABILITIES,
@@ -185,7 +188,6 @@ async def test_a_configured_booking_act_is_offered_with_its_endpoint_filled(
         assert phases is not None
         offered = {str(one.capability): one for one in await _offered(phases)}
         assert set(offered) == {
-            "report_current_time",
             "booking_availability",
             "book_stay",
             "remember",

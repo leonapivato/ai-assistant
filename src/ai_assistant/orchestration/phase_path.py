@@ -77,7 +77,11 @@ against the assistant's own records (ADR-0306 §3:3), so :class:`PhaseTools` put
 declarations in front of authorizing's selection beside the deployment's registry, and
 routes a search call to the ``WebSearcher`` that proposes and performs it. The search's
 ``origin`` is the connected account's: planning is offered the search without it, and
-the hub fills it from the searcher's own proposal (``WebSearcher.request``).
+the hub fills it from the searcher's own proposal (``WebSearcher.request``). **The clock
+apart** (#2942): planning's input carries the current time, so it is never offered
+``report_current_time``, which would spend a round (ADR-0315 §2:1) reading what it has
+(ADR-0211's decline test). The registry keeps the tool (ADR-0048 §1), and a call naming
+it is refused as any capability planning was not offered is.
 
 **Recall's second run** (ADR-0308 §2, ADR-0309 §3's row 6). The controller runs one
 stage per name, so :meth:`PhasePath.recall_stage` hands it one ``recall`` stage: the
@@ -380,6 +384,11 @@ _GONE: Final = "the place took no message: the conversation is gone or refused i
 #: The search refusals that leave a search's outcome unknown: it may have reached the
 #: provider, and an unknown outcome is reported as unknown (ADR-0312 §2, ADR-0306 §5:13).
 _UNKNOWN_SEARCHES: Final = frozenset({"deadline_expired", "transport_failed"})
+
+#: The capabilities planning is never offered, though a registry holds them: the clock,
+#: since planning's input carries ``now`` (#2942). ``tools`` declares it (ADR-0048 §1),
+#: and ``orchestration`` names it by its capability, as ``capability_alias`` does.
+_NOT_OFFERED: Final = frozenset({"report_current_time"})
 
 #: The activation whose round's calls are running, by what it holds of what it was given:
 #: a search's records are handed to it as the search returns them (ADR-0309 §5:10).
@@ -1895,7 +1904,7 @@ class PhasePath:
             writer: The place's writer.
             capabilities: The capabilities planning is offered, by name (§4:2), or
                 ``None``, the default, for every one ``tools`` advertises, read as each
-                round is planned.
+                round is planned. Either way the clock is left out (#2942).
             round_limit: The most rounds an activation runs (ADR-0307 §8:4).
             round_wait: How long the step running a round's calls waits on its
                 digests at most: the call's deadline that bounds the wait (§8:2).
@@ -2338,11 +2347,7 @@ class PhasePath:
             rounds=working.planning_rounds(),
             labels=working.labels.labels,
             outcomes=working.outcomes(),
-            capabilities=await self._tools.offered(
-                await self._tools.capabilities()
-                if self._capabilities is None
-                else self._capabilities
-            ),
+            capabilities=await self._offered(),
             label_arguments=self._label_arguments,
             evidence=tuple(working.evidence),
             outside_content_read=working.read_outside_content,
@@ -2355,6 +2360,17 @@ class PhasePath:
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         working.planned(planned)
+
+    async def _offered(self) -> tuple[ToolDefinition, ...]:
+        """The declarations this round offers planning (ADR-0306 §2:7), the clock apart.
+
+        Planning's input carries ``now``, so the clock's call would only spend a round
+        on what it has (#2942): it is left out of the offer, and stays registered.
+        """
+        names = (
+            await self._tools.capabilities() if self._capabilities is None else self._capabilities
+        )
+        return await self._tools.offered([name for name in names if name not in _NOT_OFFERED])
 
     async def _notes_checked(self, planned: PlannedRound, working: PhaseWorking) -> PlannedRound:
         """Refuse whole, before authorizing, a move or a split naming a note not held.
