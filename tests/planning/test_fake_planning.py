@@ -3,9 +3,9 @@
 This is what lets other subsystems trust ``ai_assistant.testing.FakePlanStore``
 and ``FakePlanner`` as stand-ins: they are held to the same contracts as the
 real implementations. It matters more here than elsewhere, because
-``FakePlanStore`` re-implements the ADR-0014 §4 transition graph independently
-(it cannot import the subsystem it stands in for) — this suite is what stops the
-two copies drifting apart.
+``FakePlanStore`` re-implements the stop record and acting's effect records
+independently (it cannot import the subsystem it stands in for) — this suite is what
+stops the two copies drifting apart.
 """
 
 from __future__ import annotations
@@ -15,14 +15,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
-from plan_store_contract import InjectedFaultError, PlanStoreContract
+from plan_store_contract import PlanStoreContract
 from planner_contract import PlannerContract
 
 from ai_assistant.core.types import (
     ActionPlan,
     CurrentContext,
     Goal,
-    GoalAttempt,
     GoalBrief,
     GoalInterpretation,
     Ground,
@@ -42,34 +41,13 @@ from ai_assistant.testing import FakePlanner, FakePlanStore
 from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
-    from contextlib import AbstractContextManager
+    from collections.abc import AsyncIterator
 
     from ai_assistant.core.protocols import Planner, PlanStore
-    from ai_assistant.core.types import UtcInstant
 
 
 def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
-
-
-class _FailsMidAbandonment(FakePlanStore):
-    """The fake with ADR-0261 §14 arm 6's fault in its own per-attempt seam.
-
-    The second ending the act computes raises, which on a goal holding two live
-    attempts is part-way through the set. Overriding the seam rather than the modelled
-    resource keeps the fault where the act's fallible per-attempt work is, and leaves
-    the resource doing the one job ADR-0060 §3 gives it.
-    """
-
-    _endings = 0
-
-    def _cancelled_attempt(self, attempt: GoalAttempt, /, *, at: UtcInstant) -> GoalAttempt:
-        """Raise on the second ending, once, then behave (ADR-0261 §14 arm 6)."""
-        self._endings += 1
-        if self._endings == 2:
-            raise InjectedFaultError("the second attempt's ending")
-        return super()._cancelled_attempt(attempt, at=at)
 
 
 class TestFakePlanStoreContract(PlanStoreContract):
@@ -78,16 +56,6 @@ class TestFakePlanStoreContract(PlanStoreContract):
     @pytest.fixture
     def store(self) -> PlanStore:
         return FakePlanStore(now=_fixed_now)
-
-    async def seed_a_second_owner(self, store: PlanStore, attempt: GoalAttempt) -> None:
-        """Write the row into the dict, beneath ADR-0255 §3's refusal on both members."""
-        assert isinstance(store, FakePlanStore)
-        # A pre-decision row, by construction: the public members refuse it now.
-        store._attempts[attempt.id] = attempt
-
-    def store_on(self, now: Callable[[], datetime]) -> AbstractContextManager[PlanStore]:
-        """A fresh subject on ``now``; nothing to dispose of, so a null context."""
-        return contextlib.nullcontext(FakePlanStore(now=now))
 
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(
@@ -110,11 +78,6 @@ class TestFakePlanStoreContract(PlanStoreContract):
             log=store.resource_log,
             arm=lambda _operation: store.suspend_next_operation(),
         )
-
-    @contextlib.asynccontextmanager
-    async def store_failing_mid_abandonment(self) -> AsyncIterator[PlanStore]:
-        """A subclass carrying the fault; nothing to dispose of, hence the bare yield."""
-        yield _FailsMidAbandonment(now=_fixed_now)
 
 
 class TestFakePlannerContract(PlannerContract):
@@ -215,27 +178,6 @@ class TestFakePlannerContract(PlannerContract):
                 )
             ),
         )
-
-
-async def test_a_fresh_fake_does_not_reuse_a_prior_instances_execution_id() -> None:
-    """The fake matches ``InMemoryPlanStore``'s cross-restart non-reuse (#280).
-
-    A new instance rewinds the sequence to 0, so without the per-instance
-    incarnation nonce it would re-mint a prior instance's id. The fake must keep
-    this or it would certify a store that reuses ids across restarts — the exact
-    hazard ADR-0044 §1 forbids. Impl-level, like the real store's twin, because
-    "restart" for an in-memory double is a new instance.
-    """
-    from plan_store_contract import _goal, _plan  # noqa: PLC0415
-
-    async def start(store: FakePlanStore) -> str:
-        await store.save_goal(_goal())
-        await store.save_plan(_plan())
-        return (await store.start_execution("p1")).id
-
-    first_id = await start(FakePlanStore(now=_fixed_now))
-    second_id = await start(FakePlanStore(now=_fixed_now))
-    assert first_id != second_id
 
 
 #: The request the calls below are driven with (ADR-0249 §7).

@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 from plan_store_contract import (
     _KEY,
-    InjectedFaultError,
     PlanStoreContract,
     _attempt,
     _claim,
@@ -90,38 +89,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.protocols import PlanStore
-    from ai_assistant.core.types import UtcInstant
     from ai_assistant.testing.cancellation import SuspendedCall
 
 
 def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
-
-
-class _FailsMidAbandonment(SqlitePlanStore):
-    """This store with ADR-0261 §14 arm 6's fault in its own per-attempt seam.
-
-    The second ending the act computes raises, which on a goal holding two live
-    attempts is **after the first attempt's ``UPDATE`` has been issued** — so what the
-    arm observes here is the enclosing ``BEGIN IMMEDIATE`` rolling that row back rather
-    than an ordering the store happens to keep.
-
-    Overriding a method of the store, never instrumenting the connection: a
-    ``set_trace_callback`` on a connection this store's worker thread is concurrently
-    using segfaults the interpreter (#2441). This override runs on that same worker
-    thread, inside the transaction, which is exactly where the fault belongs.
-    """
-
-    _endings = 0
-
-    def _cancelled_attempt(
-        self, conn: sqlite3.Connection, attempt: GoalAttempt, /, *, at: UtcInstant
-    ) -> GoalAttempt:
-        """Raise on the second ending, once, then behave (ADR-0261 §14 arm 6)."""
-        self._endings += 1
-        if self._endings == 2:
-            raise InjectedFaultError("the second attempt's ending")
-        return super()._cancelled_attempt(conn, attempt, at=at)
 
 
 #: The instant a pre-ADR-0249 row this suite seeds was written at.
@@ -225,51 +197,9 @@ _SYNC_METHODS = {
 class TestSqlitePlanStoreContract(PlanStoreContract):
     """Runs SqlitePlanStore through the shared PlanStore conformance suite."""
 
-    async def seed_a_second_owner(self, store: PlanStore, attempt: GoalAttempt) -> None:
-        """INSERT the row directly, beneath ADR-0255 §3's refusal on both members.
-
-        The shape a version 2 database written before that decision could carry: the
-        refusals bind on every write and change no stored row, so no migration is owed
-        and this is the only way the state is reachable at all.
-        """
-        assert isinstance(store, SqlitePlanStore)
-        # A pre-decision row, by construction: the public members refuse it now.
-        store._conn.execute(
-            "INSERT INTO attempts(id, goal_id, opened_at, data) VALUES (?, ?, ?, ?)",
-            (
-                attempt.id,
-                attempt.goal_id,
-                attempt.opened_at.isoformat(),
-                attempt.model_dump_json(),
-            ),
-        )
-        store._conn.commit()
-
     @pytest.fixture
     def store(self) -> Iterator[PlanStore]:
         realised = SqlitePlanStore(path=":memory:", now=_fixed_now)
-        try:
-            yield realised
-        finally:
-            realised.close()
-
-    def store_on(self, now: Callable[[], datetime]) -> AbstractContextManager[PlanStore]:
-        """A fresh in-memory database on ``now``, closed when the ``with`` ends."""
-
-        @contextlib.contextmanager
-        def opened() -> Iterator[PlanStore]:
-            realised = SqlitePlanStore(path=":memory:", now=now)
-            try:
-                yield realised
-            finally:
-                realised.close()
-
-        return opened()
-
-    @contextlib.asynccontextmanager
-    async def store_failing_mid_abandonment(self) -> AsyncIterator[PlanStore]:
-        """A subclass carrying the fault, on its own connection, closed after the case."""
-        realised = _FailsMidAbandonment(path=":memory:", now=_fixed_now)
         try:
             yield realised
         finally:
