@@ -407,10 +407,9 @@ def _checked_amount(value: Decimal | int | str, *, field: str) -> Decimal:
     ``Decimal(1)`` and states a one-unit price that satisfies almost any ceiling, which
     is the refusal ADR-0267 §4 states because the implementation language will not.
 
-    The order is :func:`~ai_assistant.orchestration.charges.charge_read`'s: finiteness
-    **before** the sign, because ``Decimal("sNaN") < 0`` raises rather than answering,
-    and ``"NaN"``, ``"Infinity"`` and ``"-Infinity"`` are strings ``Decimal``
-    **accepts**.
+    Finiteness is tested **before** the sign, because ``Decimal("sNaN") < 0`` raises
+    rather than answering, and ``"NaN"``, ``"Infinity"`` and ``"-Infinity"`` are
+    strings ``Decimal`` **accepts**.
 
     Args:
         value: The configured amount.
@@ -445,11 +444,11 @@ def _checked_amount(value: Decimal | int | str, *, field: str) -> Decimal:
 def _checked_currency(value: str, *, field: str) -> str:
     """Return ``value`` if it is ADR-0267 §1's ISO-4217 shape, or refuse it.
 
-    **Shape and never a register**, exactly as
-    :func:`~ai_assistant.orchestration.charges._iso_4217_shaped` reads one: validating
-    against the live table would make a record's decoding depend on a list that changes
-    when currencies are withdrawn, and silently upcasing ``"usd"`` would treat a
-    lowercase code and a typo'd one differently for no reason a caller can see.
+    **Shape and never a register**: validating against the live table would make a
+    record's decoding depend on a list that changes when currencies are withdrawn, and
+    silently upcasing ``"usd"`` would treat a lowercase code and a typo'd one
+    differently for no reason a caller can see. So ``"usd"`` and ``"EURO"`` are each
+    refused rather than repaired.
 
     Args:
         value: The configured code.

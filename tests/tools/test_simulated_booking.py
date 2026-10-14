@@ -55,12 +55,8 @@ from booking_harness import (
 from ai_assistant.core.errors import ClassifiedToolError
 from ai_assistant.core.types import (
     ActionPlan,
-    ActionQuote,
     ActionRequest,
     AttemptState,
-    AuthorizationBasis,
-    BoundKind,
-    CoverageMember,
     EffectKey,
     ExecutionState,
     Goal,
@@ -76,7 +72,6 @@ from ai_assistant.core.types import (
     PlanStep,
     Provenance,
     ProvisioningState,
-    ResolutionRule,
     SecretName,
     SecretScope,
     StepExecution,
@@ -86,10 +81,7 @@ from ai_assistant.core.types import (
     StepTransition,
     ToolFailureKind,
     ToolOutcome,
-    ValueBound,
-    ValueResolution,
 )
-from ai_assistant.orchestration.charges import ChargeTest, charge_read, charge_test
 from ai_assistant.orchestration.executor import Dispatch, StepExecutor
 from ai_assistant.orchestration.quotes import quote_read
 from ai_assistant.orchestration.reconciling import ReconciliationStage
@@ -118,28 +110,11 @@ if TYPE_CHECKING:
     from ai_assistant.tools.builtin import SimulatedBookingIntegration
     from ai_assistant.tools.registry import InMemoryToolRegistry
 
-#: The intended action a quote and a charge are read against, and the plan they sit in.
+#: The intended action a quote is read against, and the plan it sits in.
 _ACTION: Final = "act-1"
 _PLAN: Final = "plan-1"
 _GOAL: Final = "g-1"
 _STEP: Final = "step-1"
-
-#: A bound a case reads a quote against. ADR-0254 §4's ``MONEY`` reading compares an
-#: amount at the quote's own currency, byte for byte.
-_UNDER_200: Final = CoverageMember(
-    kind=BoundKind.MONEY,
-    bound=ValueBound(
-        kind=BoundKind.MONEY,
-        currency=CURRENCY,
-        maximum=Decimal("200"),
-        maximum_exclusive=False,
-    ),
-    basis=AuthorizationBasis(
-        act=_ACTION,
-        span="up to 200 euros",
-        resolution=ValueResolution(rule=ResolutionRule.AS_STATED),
-    ),
-)
 
 
 # --------------------------------------------------------------------------- #
@@ -398,12 +373,12 @@ async def test_a_booking_for_an_unavailable_day_writes_nothing_and_advances_noth
 
 
 # --------------------------------------------------------------------------- #
-# arm 7: the charge is readable, agreeing and disagreeing — and the finding
+# arm 7: the charge is readable, agreeing and disagreeing with the price
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
-    ("charge_amount", "charge_currency", "holds"),
+    ("charge_amount", "charge_currency", "agrees"),
     [
         ("120.00", CURRENCY, True),
         ("140.00", CURRENCY, False),
@@ -411,51 +386,24 @@ async def test_a_booking_for_an_unavailable_day_writes_nothing_and_advances_noth
     ],
     ids=["agreeing", "amount-disagrees", "currency-disagrees"],
 )
-async def test_the_charge_reads_and_adr_0271_s_finding_fires_when_it_disagrees(
-    charge_amount: str, charge_currency: str, holds: bool
+async def test_the_booking_reports_the_charge_it_is_configured_with(
+    charge_amount: str, charge_currency: str, agrees: bool
 ) -> None:
-    """Arm 7, **extended to assert ADR-0271 §3's finding** (ADR-0273 §10).
-
-    §10's own clause: *"where the comparison has landed by the time this lane runs, the
-    lane extends arm 7 to assert the finding"*. It has — ``orchestration/charges.py``
-    and ``verification.classify_bound_step`` are on ``main`` — so this drives the three
-    configurations through to the verification result rather than stopping at the
-    reading.
+    """Arm 7: the charge is readable, and configurable apart from the price (ADR-0273 §10).
 
     **The three differ in configuration alone**, and the last two are independently
     configurable, which is §5's requirement. **A disagreeing charge is not a provider
     whose ``quoted_output`` lies** (§2): a quote is prospective and a charge is
-    retrospective, and §3 of ADR-0271 exists precisely for the case where the two
-    differ. This provider offers no hold and no conditional execution **on purpose**
-    (§7) — one that validated the quoted amount atomically with the act would make the
-    finding undemonstrable.
+    retrospective, so the booking reports the charge it was configured with even where
+    that is not the price its availability read stated. This provider offers no hold
+    and no conditional execution **on purpose** (§7).
     """
     result, _ = await _book(charge_amount=charge_amount, charge_currency=charge_currency)
     output = _succeeded(result)
 
-    charge = charge_read(BOOKING_ACT, output)
-    assert charge is not None
-    assert charge.amount == Decimal(charge_amount)
-    assert charge.currency == charge_currency
-
-    pinned = ActionQuote(
-        intended_action=_ACTION,
-        arguments_digest="0" * 64,
-        amount=Decimal(PRICE),
-        currency=CURRENCY,
-        plan=_PLAN,
-        read_from=StepOutputRef(step=_STEP, field=PRICE_AMOUNT_KEY),
-        read_at=DECIDED_AT,
-    )
-    verdict = charge_test(
-        status=StepStatus.SUCCEEDED,
-        definition=BOOKING_ACT,
-        output=output,
-        pinned=pinned,
-        member=_UNDER_200,
-    )
-
-    assert verdict is (ChargeTest.HOLDS if holds else ChargeTest.FAILS)
+    assert output[CHARGED_AMOUNT_KEY] == charge_amount
+    assert output[CHARGED_CURRENCY_KEY] == charge_currency
+    assert (Decimal(charge_amount) == Decimal(PRICE) and charge_currency == CURRENCY) is agrees
 
 
 # --------------------------------------------------------------------------- #
@@ -1400,11 +1348,9 @@ async def test_the_charge_does_not_vary_with_the_commit_count(tmp_path: Path) ->
         output = _succeeded(
             await drive(registry, seam, BOOKING_ACT, arguments(day), decision_id=f"d-{index}")
         )
-        charge = charge_read(BOOKING_ACT, output)
-        assert charge is not None
-        charges.append((charge.amount, charge.currency))
+        charges.append((output[CHARGED_AMOUNT_KEY], output[CHARGED_CURRENCY_KEY]))
 
-    assert charges == [(Decimal(PRICE), CURRENCY)] * 3
+    assert charges == [(PRICE, CURRENCY)] * 3
     assert await booking.store.commit_count() == 3
 
 
