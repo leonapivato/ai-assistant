@@ -91,6 +91,25 @@ _LEAVES: frozenset[type] = frozenset(
     }
 )
 
+#: The generic shapes a walked annotation may be built from. Each is walked through its
+#: arguments; an origin outside them is one the walk has not been taught, so it is
+#: refused rather than passed.
+_SHAPES: frozenset[object] = frozenset(
+    {
+        tuple,
+        list,
+        dict,
+        set,
+        frozenset,
+        collections.abc.Awaitable,
+        collections.abc.Callable,
+        collections.abc.Iterable,
+        collections.abc.Mapping,
+        collections.abc.Sequence,
+        typing.Union,
+    }
+)
+
 #: Where the seams' annotations resolve. They are written under ``from __future__
 #: import annotations`` with names imported under ``TYPE_CHECKING``, so each owner's
 #: own module namespace is laid over these.
@@ -146,8 +165,10 @@ def _annotation_types(annotation: object, seen: set[int] | None = None) -> list[
     mapping value and an ``Annotated`` origin are all type arguments; a ``Callable``'s
     parameters arrive as a list, which ``get_args`` does not descend; and ``FrozenJson``
     names itself, so the walk stops at a cycle rather than at a recursion limit. A
-    ``Literal``'s arguments are values and an ``Annotated``'s metadata is not a type, so
-    neither is descended: a string found is then a forward reference and nothing else.
+    parameterized generic's **origin** is named too, so ``Envelope[str]`` reaches
+    ``Envelope`` and its own fields rather than only ``str``. A ``Literal``'s arguments
+    are values and an ``Annotated``'s metadata is not a type, so neither is descended: a
+    string found is then a forward reference and nothing else.
     """
     seen = set() if seen is None else seen
     while isinstance(annotation, TypeAliasType):
@@ -161,7 +182,12 @@ def _annotation_types(annotation: object, seen: set[int] | None = None) -> list[
     origin = get_origin(annotation)
     if origin is Literal:
         return found
-    arguments = get_args(annotation)[:1] if origin is Annotated else get_args(annotation)
+    if origin is Annotated:
+        arguments = get_args(annotation)[:1]
+    else:
+        arguments = get_args(annotation)
+        if origin is not None:
+            found.extend(_annotation_types(origin, seen))
     for argument in arguments:
         found.extend(_annotation_types(argument, seen))
     return found
@@ -232,6 +258,7 @@ def _holes(annotations: Mapping[str, object]) -> list[str]:
             elif (
                 isinstance(found, type)
                 and found not in _CARRIERS
+                and found not in _SHAPES
                 and not _crossed(found)
                 and not issubclass(found, Enum)
                 and found not in _LEAVES
@@ -240,22 +267,37 @@ def _holes(annotations: Mapping[str, object]) -> list[str]:
     return holes
 
 
-def _carriers(reached: Mapping[str, type]) -> list[str]:
-    """Each field of a reached type that admits a Tier 0 carrier, with the carriers."""
+def _admitting(annotations: Mapping[str, object]) -> list[str]:
+    """Each annotation among ``annotations`` admitting a Tier 0 carrier, with the carriers."""
     return [
-        f"{name}.{field_name} admits {carriers}"
-        for name, model in sorted(reached.items())
-        for field_name, annotation in _fields(model).items()
+        f"{where} admits {carriers}"
+        for where, annotation in sorted(annotations.items())
         if (carriers := [one for one in _annotation_types(annotation) if one in _CARRIERS])
     ]
+
+
+def _seam_annotations(seams: Sequence[Callable[..., object]]) -> dict[str, object]:
+    """Every parameter and return annotation of ``seams``, by where it is written."""
+    return {
+        f"{seam.__qualname__}.{name}": annotation
+        for seam in seams
+        for name, annotation in _hints(seam).items()
+    }
+
+
+def _field_annotations(reached: Mapping[str, type]) -> dict[str, object]:
+    """Every field annotation of every type in ``reached``, by where it is written."""
+    return {
+        f"{name}.{field_name}": annotation
+        for name, model in reached.items()
+        for field_name, annotation in _fields(model).items()
+    }
 
 
 def test_every_seam_resolves_and_names_what_it_is_handed() -> None:
     """A seam whose annotations named nothing would make the walk below vacuous."""
     for seam in _SEAMS:
-        hints = _hints(seam)
-        assert hints, f"{seam.__qualname__} has no annotations to read"
-        assert not _holes({f"{seam.__qualname__}.{name}": one for name, one in hints.items()})
+        assert _hints(seam), f"{seam.__qualname__} has no annotations to read"
 
 
 def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() -> None:
@@ -422,23 +464,22 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "joined it is one ADR-0221 §7's reliance now rests on, so judge it and add it here"
     )
 
-    holes = _holes(
-        {
-            f"{name}.{field_name}": annotation
-            for name, model in reachable.items()
-            for field_name, annotation in _fields(model).items()
-        }
-    )
+    # The seams' own annotations are checked as well as the types they reach: a carrier
+    # written on a seam's parameter is the shortest way a secret could reach a model.
+    annotations = _seam_annotations(_SEAMS) | _field_annotations(reachable)
+
+    holes = _holes(annotations)
     assert not holes, (
-        "a field the walk cannot see through could carry a secret past it unseen; "
+        "an annotation the walk cannot see through could carry a secret past it unseen; "
         "rebuild the model, name the type where it is defined, or judge the new leaf: "
         f"{holes}"
     )
 
-    assert not _carriers(reachable), (
+    carriers = _admitting(annotations)
+    assert not carriers, (
         "ADR-0221 §7's reliance is that no model the phases call is supplied anything "
         "holding a Tier 0 value, and capture stores what they write without inspecting "
-        f"it: {_carriers(reachable)}"
+        f"it: {carriers}"
     )
 
 
@@ -470,8 +511,40 @@ def test_the_walk_finds_a_carrier_behind_an_alias_a_container_and_a_constructor(
     reached = _reachable([_Nested | None, Sequence[_Handed]])
 
     assert set(reached) == {"Secrets", "_Aliased", "_Handed", "_Nested"}
-    assert _carriers(reached) == [
+    assert _admitting(_field_annotations(reached)) == [
         f"_Aliased.held admits {[SecretStr]}",
         f"_Handed.read admits {[Secrets]}",
         f"_Nested.raw admits {[SecretBytes]}",
+    ]
+
+
+@dataclasses.dataclass(frozen=True)
+class _Envelope[T]:
+    payload: T
+    credential: SecretStr | None = None
+
+
+def test_the_walk_crosses_a_parameterized_generic_to_its_own_fields() -> None:
+    """``_Envelope[str]`` reaches ``_Envelope`` itself, so a carrier among its fields is found."""
+    reached = _reachable([tuple[_Envelope[str], ...]])
+
+    assert set(reached) == {"_Envelope"}
+    assert _admitting(_field_annotations(reached)) == [f"_Envelope.credential admits {[SecretStr]}"]
+
+
+async def _handed_a_secret(
+    text: str,
+    *,
+    credential: SecretStr | None = None,
+    keys: Sequence[core_types.SecretValue] = (),
+) -> Mapping[str, SecretBytes]:
+    raise NotImplementedError
+
+
+def test_a_carrier_written_on_a_seam_itself_is_found() -> None:
+    """A seam's own parameter or return is checked, not only the types it reaches."""
+    assert _admitting(_seam_annotations([_handed_a_secret])) == [
+        f"_handed_a_secret.credential admits {[SecretStr]}",
+        f"_handed_a_secret.keys admits {[SecretStr]}",
+        f"_handed_a_secret.return admits {[SecretBytes]}",
     ]
