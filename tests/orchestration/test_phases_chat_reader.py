@@ -348,8 +348,8 @@ async def test_messages_written_while_one_runs_wait_and_are_taken_in_as_one_inpu
 
 
 async def test_a_marking_that_fails_part_way_ends_as_couldnt_finish() -> None:
-    """§9:1, §10:2: what was marked is consumed, so its activation's failure is written;
-    what was not is taken in by the next activation."""
+    """ADR-0317 §3:3, ADR-0293 §10:2: what was marked is consumed, so its activation's
+    failure is written; what was not is taken in by the next activation."""
     store = _FailsSecondMarking()
     memory = FakeMemoryStore(now=lambda: AT)
     before = _idle(store, memory)
@@ -391,7 +391,7 @@ async def test_a_defect_marking_part_way_is_logged_at_error_and_still_answered()
 async def test_a_failure_once_the_phases_began_writes_couldnt_finish_once(
     error: Exception,
 ) -> None:
-    """§9:1: the phases' run writes the message, and nothing writes it again (#2900)."""
+    """ADR-0317 §3:3: the phases' run writes the message, and nothing again (#2900)."""
     harness = phases_harness(_FailingRounds(error))
     conversation = await open_conversation(harness)
     with capture_logs():

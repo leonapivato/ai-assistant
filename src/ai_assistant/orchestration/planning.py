@@ -814,9 +814,11 @@ _NEEDS_YOU: Final = (
     "say or do would let it run, and never describe a way to approve it. "
 )
 
-#: #2864: a call that brings no result brings no later round, and an activation that
-#: writes nothing reads *couldn't finish* (ADR-0293 §9:1), so a round that acts on the
-#: request says so itself; empty text still writes no message (§3:2).
+#: #2864: a call that brings no result brings no later round, so a round that acts on the
+#: request says so itself: that is how the user hears that the assistant acted, and an
+#: activation that ends silent ends done with no reply (ADR-0317 §2, §5). Empty text
+#: still writes no message (ADR-0307 §3:2), and is left only where the user asked
+#: nothing of the round.
 _REPLY: Final = (
     "When you act on what the user asked, this round's message tells them so, even in one "
     "short line, such as that you'll keep something in mind: it may be the only reply they "

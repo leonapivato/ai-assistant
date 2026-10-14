@@ -137,11 +137,13 @@ class ActivationState:
     spoken_degraded: bool = False
     no_words: bool = False
     #: The phases ended the pass without finishing it, having returned rather than
-    #: raised: the round limit ended it, or it wrote nothing (ADR-0307 §3:7, ADR-0293
-    #: §9:1). The *couldn't finish* message is owed, so the pass is classified
-    #: ``failed / processing_failed`` (ADR-0275 §5:3's sixth row) and the current state
-    #: reads *couldn't finish* beside that message (ADR-0293 §8:3). A stop still
-    #: classifies first: a stop is no failure (ADR-0297 §4).
+    #: raised: the round limit or the loop guard ended it, or its last message was
+    #: refused or lost with none recorded after it (ADR-0317 §3:2-§3:4). Never set for
+    #: an activation that ended silent, which has finished (§2). The *couldn't finish*
+    #: message is owed, so the pass is classified ``failed / processing_failed``
+    #: (ADR-0275 §5:3's sixth row, ADR-0317 §3:5) and the current state reads
+    #: *couldn't finish* beside that message (ADR-0293 §8:3). A stop still classifies
+    #: first: a stop is no failure (ADR-0297 §4).
     unfinished: bool = False
     #: The episode's id once its conversation recorded the turn (ADR-0283 §7:1): set
     #: when ``ConversationStore.record_turn`` returned the conversation, so the
@@ -638,7 +640,8 @@ def terminal_status(  # noqa: C901, PLR0911, PLR0912 — ADR-0275's ordered term
 
     A phases pass that returned unfinished (:attr:`ActivationState.unfinished`) is
     ``failed / processing_failed``: it could not finish, so the state shows *couldn't
-    finish* beside the message saying so (ADR-0293 §8:3, §9:1).
+    finish* beside the message saying so (ADR-0293 §8:3, ADR-0317 §3:5). One that
+    returned silent has finished, and is ``completed / returned`` (ADR-0317 §2:3).
     """
     if state.stopped:
         return ProcessingStatus.INTERRUPTED, ProcessingReason.STOPPED

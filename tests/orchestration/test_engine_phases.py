@@ -290,6 +290,8 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     story_calls: bool = False,
     look_ups: bool = False,
     diagnostics: FakeDiagnosticSink | None = None,
+    path: type[PhasePath] = PhasePath,
+    authorizing: type[AuthorizingStage] = AuthorizingStage,
 ) -> Callable[[Harness], PhasePath]:
     """The thin path as the composition root builds it, over the harness's own stores.
 
@@ -298,7 +300,8 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     planning's story calls too, over that store and the harness's memory store, with
     the tidy-up ``tidy_up`` builds, as the composition root wires them (ADR-0300 §10).
     ``look_ups`` offers planning's look-ups (ADR-0307 §6:6), over the harness's memory
-    store and the story views' reads, as the composition root wires them.
+    store and the story views' reads, as the composition root wires them. ``path`` and
+    ``authorizing`` are the classes built, which a case may vary.
     """
 
     def build(harness: Harness) -> PhasePath:
@@ -343,10 +346,10 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             conversations=harness.conversation_store, max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES
         )
         place: MessageWriter = chat if wrap is None else wrap(chat)
-        return PhasePath(
+        return path(
             completer=completer,
             provider=digests if digests is not None else FakeModelProvider(reply=_DIGESTED),
-            authorizing=AuthorizingStage(
+            authorizing=authorizing(
                 registry=tools,
                 policy=policy if policy is not None else _Policy(),
                 memory_policy=FakeMemoryPolicy(),
@@ -824,8 +827,8 @@ async def test_a_message_the_place_did_not_take_is_finished_without_a_position(
     episode = await _settled(harness, conversation)
 
     effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
-    # The round's message, then the *couldn't finish* an activation that wrote nothing
-    # owes (ADR-0293 §9:1), which the place took no better.
+    # The round's message, then the *couldn't finish* an activation whose last message
+    # did not come back done owes (ADR-0317 §3:4), which the place took no better.
     assert [one.round is None for one in effects] == [False, True]
     assert all(one.outcome is outcome and one.position is None for one in effects)
     assert all((one.reason is not None) is reason for one in effects)
@@ -851,7 +854,7 @@ class _FailsOnce:
 
 
 async def test_a_message_that_fails_beside_a_remember_still_lists_what_was_remembered() -> None:
-    """ADR-0293 §9:1: *couldn't finish* lists the effects the records say happened.
+    """ADR-0317 §3:1: *couldn't finish* lists the effects the records say happened.
 
     The remember beside the failing message finished, so it is listed, though the step
     it ran in ended ``failed``; the message's own record is finished unknown.
@@ -937,24 +940,6 @@ async def test_two_results_digested_side_by_side_are_both_kept() -> None:
 # --- the ends that write *couldn't finish* ----------------------------------------------
 
 
-async def test_an_activation_that_writes_nothing_writes_couldnt_finish() -> None:
-    """ADR-0293 §9:1: a round with no text and no call ends having written nothing."""
-    harness = _harness(FakeToolCallingCompleter.scripted(RoundResponse()))
-    conversation = await _conversation(harness)
-
-    await _say(harness, conversation, "hi")
-    episode = await _settled(harness, conversation)
-
-    assert _said(await _messages(harness, conversation))[1:] == [
-        (MessageAuthor.ASSISTANT, COULDNT_FINISH)
-    ]
-    assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.NOTHING_DUE)
-    assert episode.outcome == COULDNT_FINISH
-    # It could not finish, and the state says so beside the message (ADR-0293 §8:3).
-    assert _classified(episode) == (ProcessingStatus.FAILED, ProcessingReason.PROCESSING_FAILED)
-    assert await _last_ended(harness, conversation) is ActivationEnding.COULDNT_FINISH
-
-
 async def test_the_round_limit_writes_couldnt_finish_after_earlier_messages() -> None:
     """ADR-0307 §3:7, §8:4: a loop of refused calls is ended by the round limit."""
     refused = RoundResponse(text="Trying.", calls=(_call("c1", "nowhere"),))
@@ -1029,7 +1014,7 @@ async def test_a_deadline_ending_writes_couldnt_finish_and_the_state_says_so() -
 
 
 async def test_an_activation_whose_every_message_the_place_refused_reads_couldnt_finish() -> None:
-    """ADR-0293 §9:1: every message gone is an activation that wrote nothing."""
+    """ADR-0317 §3:4: its last message did not come back done, and none came after it."""
     completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Hello."))
     harness = _harness(completer, writer=_Gone())
     conversation = await _conversation(harness)
@@ -1850,7 +1835,7 @@ async def test_couldnt_finish_lists_an_unknown_outcome_as_unknown() -> None:
 async def test_couldnt_finish_is_written_where_the_effect_records_cannot_be_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ADR-0293 §9:1: the fixed message is owed whatever the effect history's store says."""
+    """ADR-0317 §3:1: the fixed message is owed whatever the effect history's store says."""
     completer = FakeToolCallingCompleter.scripted()
     harness = _harness(completer)
 
