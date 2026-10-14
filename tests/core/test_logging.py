@@ -1031,9 +1031,9 @@ def test_a_host_handlers_failure_inside_an_except_block_reports_none_of_the_hand
 
     err = capsys.readouterr().err
     _assert_no_content(stream.getvalue() + err)
-    assert "--- Logging error ---" in err
-    assert "KeyError" in err, "the failure is shown by its class"
-    assert "in _raise_with_content" in err, "and the handled exception by its frames"
+    assert "--- Logging error ---" in err, "the stdlib's own report"
+    assert "Formatting field not found in record: 'request_id'" in err
+    assert "During handling" not in err, "cut from the exception being handled"
     assert "Arguments: ()" in err
 
 
@@ -1060,7 +1060,42 @@ def test_a_forwarding_handlers_targets_failure_reports_none_of_the_handled_words
     err = capsys.readouterr().err
     _assert_no_content(stream.getvalue() + err)
     assert "--- Logging error ---" in err
-    assert "in _raise_with_content" in err
+    assert "During handling" not in err
+
+
+def test_a_socket_handlers_recovery_still_runs_on_a_replaced_records_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Adversarial review, round 4 under the third holder: a root handler's own
+    # ``handleError`` was bypassed for a replaced record, so a socket handler kept a
+    # failed socket instead of closing it to reconnect.
+    class FailedSocket:
+        closed = False
+
+        def sendto(self, *_args: object) -> None:
+            raise OSError("send failed")
+
+        def close(self) -> None:
+            self.closed = True
+
+    root = logging.getLogger()
+    for one in list(root.handlers):
+        root.removeHandler(one)
+    handler = logging.handlers.DatagramHandler("localhost", 9)
+    handler.closeOnError = True
+    sock = FailedSocket()
+    handler.sock = sock  # type: ignore[assignment]  # a fake socket that fails to send
+    root.addHandler(handler)
+    configure_logging(Settings())
+
+    try:
+        _raise_with_content()
+    except _ReadFailedError:
+        logging.getLogger("thirdparty").exception("read failed")
+
+    assert sock.closed, "the handler's own recovery ran"
+    assert handler.sock is None
+    _assert_no_content(capsys.readouterr().err)
 
 
 def test_a_processor_formatter_hosts_failure_on_a_wrapped_event_reports_no_words(

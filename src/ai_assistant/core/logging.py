@@ -498,8 +498,8 @@ class _UnscrubbableError(Exception):
 class _Replaced(logging.LogRecord):
     """A record this net built in place of one that carried an exception.
 
-    Its own type, so a handler's failure to emit it is reported without the failure's
-    chain (:class:`_ReportsContentFree`).
+    Its own type, so a handler's failure to emit it is cut from the exception being
+    handled before the handler reports it (:func:`_cut_from_the_handled`).
     """
 
 
@@ -656,8 +656,8 @@ def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
     message is :data:`_WITHHELD` followed by each exception's class and frames
     (:func:`_exception_text`). It has no arguments and **no extra**: none is masked
     and none is kept, so a host's format that names one fails in that host's handler,
-    whose report of the failure prints the failure's classes and frames, the fixed
-    message and ``()`` alone (:class:`_ReportsContentFree`). The
+    whose report of the failure is cut from the exception being handled
+    (:func:`_cut_from_the_handled`), and prints the fixed message and ``()``. The
     description is the message, not ``exc_text``, so a formatter that discards
     ``exc_text`` — ``ProcessorFormatter`` does, by default — still prints it; and no
     ``exc_info`` is left for a formatter to render its own way.
@@ -757,25 +757,23 @@ class _ContentFreeHandler(logging.StreamHandler[TextIO]):
         del record
 
 
-def _report_replaced(record: logging.LogRecord) -> None:
-    """Report a handler's failure to emit a record this net built, content-free.
+def _cut_from_the_handled() -> None:
+    """Cut the failure being handled from what it was raised during.
 
     A host's format that names an extra fails on a record this net built (it has
-    none), in the host's own handler. The stdlib's report of that failure prints the
-    failure's chain, and a record logged inside an ``except`` block —
-    ``logger.exception``, the commonest of all — chains the exception being handled,
-    words and all. So this report prints the failure's chain by its classes and
-    frames alone (:func:`_describe`), then the record's fixed message and ``()``; and
-    it says nothing where ``logging.raiseExceptions`` is off, as the stdlib's does.
+    none), in the host's own handler. A record logged inside an ``except`` block —
+    ``logger.exception``, the commonest of all — makes that failure chain the
+    exception being handled, and a handler's report of the failure (the stdlib's
+    prints the whole chain) would print its words. The failure is the handler's own,
+    raised over a record that holds none of the words, so its link to what came
+    before is dropped, and the handler then reports it as it always does. Nothing
+    else about the failure is changed.
     """
-    try:
-        if not logging.raiseExceptions or sys.stderr is None:
-            return
-        failure = sys.exc_info()[1]
-        shown = "".join(_describe(failure)) if failure is not None else ""
-        sys.stderr.write(f"--- Logging error ---\n{shown}Message: {record.msg!r}\nArguments: ()\n")
-    except Exception:  # noqa: S110 — a report that fails says nothing, as the stdlib's
-        pass
+    failure = sys.exc_info()[1]
+    if failure is not None:
+        failure.__cause__ = None
+        failure.__context__ = None
+        failure.__suppress_context__ = True
 
 
 #: ``logging.Handler.handleError`` as it was when this module was imported.
@@ -783,40 +781,40 @@ _HANDLERS_HANDLE_ERROR: Final = logging.Handler.handleError
 
 
 def _handle_error(self: logging.Handler, record: logging.LogRecord) -> None:
-    """``logging.Handler.handleError``, reporting a record this net built content-free.
+    """``logging.Handler.handleError``, over a failure cut from the handled exception.
 
-    Installed on the ``Handler`` class itself, so every handler that does not
-    override ``handleError`` reports a failure on a replaced record by
-    :func:`_report_replaced` — one the net never attached to included, such as the
-    target a ``MemoryHandler`` on the root logger forwards the replaced record to.
-    Every other record is reported as it was before.
+    Installed on the ``Handler`` class itself, so every handler that reaches it —
+    one the net never attached to included, such as the target a ``MemoryHandler``
+    on the root logger forwards a replaced record to — reports a failure on a record
+    this net built without the exception being handled (:func:`_cut_from_the_handled`).
+    The report itself is the stdlib's.
     """
     if type(record) is _Replaced:
-        _report_replaced(record)
-        return
+        _cut_from_the_handled()
     _HANDLERS_HANDLE_ERROR(self, record)
 
 
 class _ReportsContentFree:
-    """A root handler's own ``handleError``, reporting a replaced record content-free.
+    """A root handler's own ``handleError``, over a failure cut from the handled exception.
 
     For a handler whose class overrides ``handleError``, so the ``Handler`` class's
-    (:func:`_handle_error`) is never reached. A record this net built is reported by
-    :func:`_report_replaced`; every other record by the handler's own ``handleError``.
+    (:func:`_handle_error`) may never be reached. On a record this net built, the
+    failure is cut from the exception being handled (:func:`_cut_from_the_handled`);
+    then the handler's own ``handleError`` runs, for every record, so what it does on
+    a failure — a socket handler closes its socket to reconnect — is kept.
     """
 
     def __init__(self, hosts: Callable[[logging.LogRecord], None]) -> None:
         self._hosts = hosts
 
     def __call__(self, record: logging.LogRecord) -> None:
-        """Report a failure to emit ``record``.
+        """Handle a failure to emit ``record``.
 
         Args:
             record: The record that could not be emitted.
         """
         if type(record) is _Replaced:
-            _report_replaced(record)
-            return
+            _cut_from_the_handled()
         self._hosts(record)
 
 
@@ -832,9 +830,10 @@ def _install_stdlib_net(level: int | None) -> None:
     level, as ``logging.basicConfig`` did. ``basicConfig`` does nothing at all
     where the root already has a handler — under pytest, or in a host that
     configured logging first — so the net is attached here rather than left to it.
-    A failure to emit a record this net built reports none of the exception being
-    handled: the ``Handler`` class's ``handleError`` is replaced once
-    (:func:`_handle_error`), which reaches a handler the net never attached to, and
+    A failure to emit a record this net built is cut from the exception being handled
+    before it is reported (:func:`_cut_from_the_handled`): the ``Handler`` class's
+    ``handleError`` is replaced once (:func:`_handle_error`), which reaches a
+    handler the net never attached to, and
     each root handler's own is wrapped once (:class:`_ReportsContentFree`), which
     reaches one whose class overrides it.
     """
