@@ -40,6 +40,7 @@ triad is concerned, and every other job of it did not.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sys
@@ -305,6 +306,23 @@ def root_logging_is_this_test_s_own() -> Iterator[None]:
     Yields:
         Nothing; the root logger and its handlers are restored on the way out.
     """
+    with root_logging_restored():
+        yield
+
+
+@contextlib.contextmanager
+def root_logging_restored() -> Iterator[None]:
+    """Restore the root logger's handlers, in order, its level, and their net on exit.
+
+    The body of :func:`root_logging_is_this_test_s_own`, apart so that
+    ``tests/core/test_logging.py`` can pin what it restores. The handlers come back
+    as the exact sequence they were (issue #2977): a test that removed the first of
+    ``[A, B]`` and had it re-appended would hand on ``[B, A]``, and a later test
+    would read its records through the handlers in another order.
+
+    Yields:
+        Nothing; the root logger and its handlers are restored on the way out.
+    """
     root = logging.getLogger()
     handlers = list(root.handlers)
     level = root.level
@@ -314,12 +332,7 @@ def root_logging_is_this_test_s_own() -> Iterator[None]:
     try:
         yield
     finally:
-        for one in list(root.handlers):
-            if one not in handlers:
-                root.removeHandler(one)
-        for one in handlers:
-            if one not in root.handlers:
-                root.addHandler(one)
+        root.handlers[:] = handlers
         root.setLevel(level)
         for one, kept in filters:
             one.filters[:] = kept

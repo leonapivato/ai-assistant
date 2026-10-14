@@ -49,6 +49,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import PosixPath, PurePosixPath, PureWindowsPath, WindowsPath
+from types import TracebackType
 from typing import TYPE_CHECKING, Any, Final, TextIO, cast
 from uuid import UUID
 
@@ -340,9 +341,18 @@ def _chain(failure: BaseException, seen: set[int]) -> list[tuple[BaseException, 
         current = earlier
 
 
-def _describe(failure: BaseException, seen: set[int] | None = None) -> list[str]:
+#: An exception, with the traceback it is shown with.
+type _Raised = tuple[BaseException, TracebackType | None]
+
+
+def _describe(
+    failure: BaseException, frames: TracebackType | None, seen: set[int] | None = None
+) -> list[str]:
     """``failure`` as its frames and class, with its chain and a group's members.
 
+    ``failure``'s own frames are those of ``frames``: its ``__traceback__``, or the
+    traceback an ``exc_info`` tuple names with it, which a caller may have saved or
+    shortened. Every exception chained to it or held in it is shown with its own.
     Each frame is its file, line, function and source line. What is never read:
     the exception's message, a chained or held exception's message, its notes,
     and any frame's locals — each can carry what the user or a model said. A
@@ -355,7 +365,8 @@ def _describe(failure: BaseException, seen: set[int] | None = None) -> list[str]
     seen = set() if seen is None else seen
     lines: list[str] = []
     for one, link in _chain(failure, seen):
-        lines.extend(traceback.format_list(traceback.extract_tb(one.__traceback__)))
+        shown = frames if one is failure else one.__traceback__
+        lines.extend(traceback.format_list(traceback.extract_tb(shown)))
         lines.append(f"{_class_name(one)}\n")
         if isinstance(one, BaseExceptionGroup):
             held = one.exceptions
@@ -366,34 +377,33 @@ def _describe(failure: BaseException, seen: set[int] | None = None) -> list[str]
                     continue
                 lines.extend(
                     f"| {line}"
-                    for line in "".join(_describe(member, seen)).splitlines(keepends=True)
+                    for line in "".join(_describe(member, member.__traceback__, seen)).splitlines(
+                        keepends=True
+                    )
                 )
         if link is not None:
             lines.append(f"\n{link}\n\n")
     return lines
 
 
-def _described(failure: BaseException) -> _Described:
-    """``failure`` rendered by :func:`_describe`, as one marked string."""
-    return _Described("".join(_describe(failure)).rstrip("\n"))
+def _described(failure: BaseException, frames: TracebackType | None) -> _Described:
+    """``failure`` shown with ``frames``, rendered by :func:`_describe`, as one marked string."""
+    return _Described("".join(_describe(failure, frames)).rstrip("\n"))
 
 
-def _raised(exc_info: object) -> BaseException | None:
+def _raised(exc_info: object) -> _Raised | None:
     """The exception an ``exc_info`` value names, read as the renderer would read it.
 
     An exception, an ``exc_info`` tuple, or any other true value for the exception
     being handled — structlog's own reading, so nothing the renderer would have
-    found is missed here.
+    found is missed here. A tuple's exception comes with the tuple's traceback
+    (:func:`_exc_info_raised`), as the renderer would show it.
     """
-    if isinstance(exc_info, BaseException):
-        return exc_info
-    if isinstance(exc_info, tuple) and len(exc_info) == len(("type", "value", "traceback")):
-        held = exc_info[1]
-        if isinstance(held, BaseException):
-            return held
-    if exc_info:
-        return sys.exc_info()[1]
-    return None
+    named = _exc_info_raised(exc_info)
+    if named is None and exc_info:
+        _, held, frames = sys.exc_info()
+        named = None if held is None else (held, frames)
+    return named
 
 
 def scrub_exceptions(
@@ -428,13 +438,13 @@ def scrub_exceptions(
             dropped rather than emitted with its exception intact.
     """
     try:
-        failure = _raised(event_dict.pop("exc_info", None))
-        if failure is not None:
-            event_dict["exception"] = _described(failure)
+        raised = _raised(event_dict.pop("exc_info", None))
+        if raised is not None:
+            event_dict["exception"] = _described(*raised)
         elif "exception" in event_dict:
             given = event_dict["exception"]
             if isinstance(given, BaseException):
-                event_dict["exception"] = _described(given)
+                event_dict["exception"] = _described(given, given.__traceback__)
             elif not isinstance(given, _Described):
                 event_dict["exception"] = REDACTED
     except Exception as exc:  # losing a log line beats leaking one
@@ -454,7 +464,7 @@ def _write_exception(sio: TextIO, exc_info: ExcInfo) -> None:
         structlog.DropEvent: If the exception cannot be rendered.
     """
     try:
-        sio.write("\n" + _described(exc_info[1]))
+        sio.write("\n" + _described(exc_info[1], exc_info[2]))
     except Exception as exc:  # losing a log line beats leaking one
         raise structlog.DropEvent from exc
 
@@ -503,16 +513,24 @@ class _Replaced(logging.LogRecord):
     """
 
 
-def _exc_info_raised(exc_info: object) -> BaseException | None:
-    """The exception a stdlib ``exc_info`` names: an ``exc_info`` tuple's, or itself.
+def _exc_info_raised(exc_info: object) -> _Raised | None:
+    """The exception a stdlib ``exc_info`` names, with the traceback it is shown with.
 
-    Unlike :func:`_raised`, a true value is never read as "the exception being
-    handled": the logging module resolved that when the record was made, and a
-    record may be emitted long after, on another thread.
+    An ``exc_info`` tuple's exception comes with the tuple's own traceback, which a
+    caller may have saved or shortened and which need not be the exception's
+    current ``__traceback__``; an exception comes with its own. Unlike
+    :func:`_raised`, a true value is never read as "the exception being handled":
+    the logging module resolved that when the record was made, and a record may be
+    emitted long after, on another thread.
     """
     if isinstance(exc_info, tuple) and len(exc_info) == len(("type", "value", "traceback")):
-        exc_info = exc_info[1]
-    return exc_info if isinstance(exc_info, BaseException) else None
+        held, frames = exc_info[1], exc_info[2]
+        if not isinstance(held, BaseException):
+            return None
+        return held, frames if isinstance(frames, TracebackType) else None
+    if isinstance(exc_info, BaseException):
+        return exc_info, exc_info.__traceback__
+    return None
 
 
 def _extras(record: logging.LogRecord) -> list[str]:
@@ -520,8 +538,8 @@ def _extras(record: logging.LogRecord) -> list[str]:
     return [key for key in vars(record) if key not in _RECORD_FIELDS]
 
 
-def _carried(record: logging.LogRecord) -> list[BaseException]:
-    """The exceptions ``record`` carries, its ``exc_info``'s first.
+def _carried(record: logging.LogRecord) -> list[_Raised]:
+    """The exceptions ``record`` carries, its ``exc_info``'s first, each with its traceback.
 
     Shallow, and only this: the exception its ``exc_info`` names; its message, when
     that is an exception; an exception that is directly one of its arguments (a
@@ -532,14 +550,17 @@ def _carried(record: logging.LogRecord) -> list[BaseException]:
     ``extra={"error": err}`` — and an exception held deeper is the call site's to
     keep out of a log (ADR-0004 §5).
     """
-    candidates: list[object] = [_exc_info_raised(record.exc_info), record.msg]
+    candidates: list[object] = [record.msg]
     args = record.args
     if isinstance(args, Mapping):
         candidates.extend(args.values())
     elif isinstance(args, tuple):
         candidates.extend(args)
     candidates.extend(getattr(record, key) for key in _extras(record))
-    return [one for one in candidates if isinstance(one, BaseException)]
+    named = _exc_info_raised(record.exc_info)
+    carried = [] if named is None else [named]
+    carried.extend((one, one.__traceback__) for one in candidates if isinstance(one, BaseException))
+    return carried
 
 
 def _fresh(record: logging.LogRecord, msg: object, kept: Iterable[str] = ()) -> logging.LogRecord:
@@ -593,7 +614,9 @@ def _scrubbed_event(record: logging.LogRecord) -> logging.LogRecord:
     ``exc_info``; or an exception directly as an extra — it is handed on as a fresh
     record (:func:`_fresh`) with no extra but the plumbing ``ProcessorFormatter``
     reads, as a foreign record is: a factory can put an exception's text in one. Its
-    ``exc_info`` is rendered as class and frames.
+    ``exc_info`` is rendered as class and frames, and, where the event dict has no
+    ``exception`` of its own, put there: ``ProcessorFormatter`` clears ``exc_text`` by
+    default, and the event dict is what it renders.
     """
     given = cast("dict[str, Any]", record.msg)
     held: dict[str, Any] = dict(given)
@@ -605,6 +628,13 @@ def _scrubbed_event(record: logging.LogRecord) -> logging.LogRecord:
         # ``except Exception`` and reach the line that logged the record.
         raise _UnscrubbableError from exc
     raised = _exc_info_raised(record.exc_info)
+    exc_text = _exception_text([raised] if raised is not None else [], record.exc_text)
+    if raised is not None and "exception" not in scrubbed:
+        # A host's record factory set the record's ``exc_info``; structlog's
+        # ``wrap_for_formatter`` passes none. In ``exc_text`` alone, the class and
+        # frames would be cleared by ``ProcessorFormatter`` before it rendered.
+        scrubbed["exception"] = exc_text
+        exc_text = None
     extras = [key for key in _extras(record) if key not in _STRUCTLOG_PLUMBING]
     carries = (
         raised is not None
@@ -620,12 +650,12 @@ def _scrubbed_event(record: logging.LogRecord) -> logging.LogRecord:
     else:
         safe = copy.copy(record)
         safe.msg = scrubbed
-    safe.exc_text = _exception_text([raised] if raised is not None else [], record.exc_text)
+    safe.exc_text = exc_text
     safe.exc_info = None
     return safe
 
 
-def _exception_text(carried: Sequence[BaseException], exc_text: str | None) -> str | None:
+def _exception_text(carried: Sequence[_Raised], exc_text: str | None) -> str | None:
     """A record's exceptions as class and frames, or ``None`` if it has none to show.
 
     Each carried exception is rendered by :func:`_describe`, with its chain and a
@@ -637,7 +667,9 @@ def _exception_text(carried: Sequence[BaseException], exc_text: str | None) -> s
     """
     if carried:
         seen: set[int] = set()
-        shown = ["".join(_describe(one, seen)) for one in carried if id(one) not in seen]
+        shown = [
+            "".join(_describe(one, frames, seen)) for one, frames in carried if id(one) not in seen
+        ]
         return _Described("\n".join(part.rstrip("\n") for part in shown))
     if isinstance(exc_text, _Described) or not exc_text:
         return exc_text
@@ -736,7 +768,7 @@ class _ContentFreeFormatter(logging.Formatter):
         raised = _exc_info_raised(ei)
         if raised is None:
             return ""
-        return str(_described(raised))
+        return str(_described(*raised))
 
 
 class _ContentFreeHandler(logging.StreamHandler[TextIO]):
@@ -836,26 +868,34 @@ def _install_stdlib_net(level: int | None) -> None:
     handler the net never attached to, and
     each root handler's own is wrapped once (:class:`_ReportsContentFree`), which
     reaches one whose class overrides it.
+
+    All of it is done under the logging module's own lock, as ``basicConfig`` does
+    its check and install: two concurrent calls on a root with no handler would
+    otherwise each find none and each install one, and every record would print
+    twice. The lock is reentrant, and ``addHandler`` takes it too.
     """
-    if logging.Handler.handleError is not _handle_error:
-        logging.Handler.handleError = _handle_error  # type: ignore[method-assign]
-    root = logging.getLogger()
-    if level is not None and not root.handlers:
-        ours = _ContentFreeHandler()
-        ours.setFormatter(_ContentFreeFormatter("%(message)s"))
-        root.addHandler(ours)
-        root.setLevel(level)
-    for handler in [*root.handlers, logging.lastResort]:
-        if handler is None:
-            continue
-        if not any(isinstance(one, _ScrubRecords) for one in handler.filters):
-            handler.addFilter(_ScrubRecords())
-        if not isinstance(handler, _ContentFreeHandler) and not isinstance(
-            handler.handleError, _ReportsContentFree
-        ):
-            # An instance attribute, so the handler's ``self.handleError(record)`` finds
-            # it ahead of its class's method.
-            handler.handleError = _ReportsContentFree(handler.handleError)  # type: ignore[method-assign]
+    # The lock ``basicConfig``, ``dictConfig`` and ``addHandler`` hold; typeshed does
+    # not declare it, since it is the module's own.
+    with logging._lock:  # type: ignore[attr-defined]
+        if logging.Handler.handleError is not _handle_error:
+            logging.Handler.handleError = _handle_error  # type: ignore[method-assign]
+        root = logging.getLogger()
+        if level is not None and not root.handlers:
+            ours = _ContentFreeHandler()
+            ours.setFormatter(_ContentFreeFormatter("%(message)s"))
+            root.addHandler(ours)
+            root.setLevel(level)
+        for handler in [*root.handlers, logging.lastResort]:
+            if handler is None:
+                continue
+            if not any(isinstance(one, _ScrubRecords) for one in handler.filters):
+                handler.addFilter(_ScrubRecords())
+            if not isinstance(handler, _ContentFreeHandler) and not isinstance(
+                handler.handleError, _ReportsContentFree
+            ):
+                # An instance attribute, so the handler's ``self.handleError(record)``
+                # finds it ahead of its class's method.
+                handler.handleError = _ReportsContentFree(handler.handleError)  # type: ignore[method-assign]
 
 
 def _configure(level: int) -> None:
