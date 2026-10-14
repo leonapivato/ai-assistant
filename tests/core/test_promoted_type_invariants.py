@@ -23,8 +23,6 @@ from pydantic import ValidationError
 
 from ai_assistant.core.types import (
     ActionPlan,
-    AnswerKind,
-    AnswerOutcome,
     BeliefBand,
     BeliefSummary,
     Confirmation,
@@ -39,7 +37,6 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemorySource,
     Provenance,
-    ReplyChunk,
     StepOutcome,
     TimeOfDay,
     TurnOutcome,
@@ -123,38 +120,6 @@ class TestStepOutcome:
         """It is the key that addresses ``state.steps``; a blank one addresses nothing."""
         with pytest.raises(ValidationError):
             StepOutcome(disposition=Disposition.EXECUTED, state=_state(), step_id="   ")
-
-
-class TestAnswerOutcome:
-    """ADR-0078 §8's two rules about what an answer leaves behind."""
-
-    def test_an_applied_answer_names_the_record_it_left_live(self) -> None:
-        """Otherwise it claims a correction landed while naming nothing."""
-        with pytest.raises(ValidationError, match="APPLIED"):
-            AnswerOutcome(kind=AnswerKind.APPLIED, question_id="q-1")
-
-    def test_an_answer_that_wrote_nothing_names_no_record(self) -> None:
-        """The other direction: a rejection with a record id is a lie about a write."""
-        with pytest.raises(ValidationError, match="REJECTED"):
-            AnswerOutcome(kind=AnswerKind.REJECTED, question_id="q-1", record_id="rec-1")
-
-    @pytest.mark.parametrize(
-        "kind", [AnswerKind.APPLIED, AnswerKind.REJECTED, AnswerKind.STALE, AnswerKind.NOT_OPEN]
-    )
-    def test_only_a_re_deferral_carries_a_successor(self, kind: AnswerKind) -> None:
-        """A follow-on question belongs to a re-deferral alone (§8)."""
-        record_id = "rec-1" if kind is AnswerKind.APPLIED else None
-        with pytest.raises(ValidationError, match=kind.name):
-            AnswerOutcome(kind=kind, question_id="q-1", record_id=record_id, successor_refused=True)
-
-    def test_a_re_deferral_may_carry_one_or_report_that_it_could_not(self) -> None:
-        """The discriminating half, over the one outcome the rule admits."""
-        assert (
-            AnswerOutcome(
-                kind=AnswerKind.REDEFERRED, question_id="q-1", successor_refused=True
-            ).successor
-            is None
-        )
 
 
 class TestBeliefSummary:
@@ -250,46 +215,6 @@ def _parked() -> StepOutcome:
         step_id="s-1",
         confirmation=_confirmation(),
     )
-
-
-class TestReplyChunk:
-    """ADR-0173 §2's one member, and the two it deliberately refuses to have."""
-
-    def test_a_chunk_carries_its_text(self) -> None:
-        """The ordinary case, unnormalised: a chunk is a rendering of the answer."""
-        assert ReplyChunk(text=" world").text == " world"
-
-    def test_a_blank_chunk_is_refused(self) -> None:
-        """§2: "A chunk conveying no text is not written at all".
-
-        ``NonBlankEncodableText`` rather than ``EncodableText``, for ADR-0170 §3's
-        reason one level down: admitting an empty chunk would oblige every client to
-        decide whether it means "nothing yet" or "something ended", and a provider
-        that yields an empty delta is coalesced by the stage instead.
-        """
-        with pytest.raises(ValidationError):
-            ReplyChunk(text="   ")
-        with pytest.raises(ValidationError):
-            ReplyChunk(text="")
-
-    def test_a_chunk_carries_no_sequence_number_and_no_final_flag(self) -> None:
-        """§2 refuses both on ADR-0084 §3's own argument against a second length.
-
-        Order is already fixed by the byte order of a length-prefixed sequence on
-        one connection, so an index would be a second claim about the same fact —
-        and ``FrameKind`` already discriminates the terminal frame, so a frame that
-        is a chunk by kind and final by flag is two answers to one question.
-        Asserted over the whole field set rather than by naming two members, so a
-        *third* claim added later fails here too.
-        """
-        assert set(ReplyChunk.model_fields) == {"text"}
-        with pytest.raises(ValidationError):
-            ReplyChunk(text="x", index=0)  # type: ignore[call-arg]  # extra="forbid"
-
-    def test_a_chunk_is_frozen(self) -> None:
-        """Every promoted model is, and a chunk crossing the wire is no exception."""
-        with pytest.raises(ValidationError):
-            ReplyChunk(text="x").text = "y"
 
 
 class TestTurnOutcomeReply:
@@ -454,30 +379,15 @@ class TestTurnOutcomeStopped:
 
 
 class TestWhatIsDeliberatelyNotConstrained:
-    """Two shapes ADR-0085 §4b rules **stay prose**, asserted so they stay that way.
+    """A shape ADR-0085 §4b rules **stays prose**, asserted so it stays that way.
 
     §4b is explicit that "every other ``None`` when… in these docstrings stays
     prose, because it describes *when* a value is absent rather than constraining
     which combinations exist… and a validator cannot check a fact about how the
-    value was produced." Both cases below read like missing invariants and are
-    not; a later reader's instinct is to add them, and a test is what records that
+    value was produced." The case below reads like a missing invariant and is
+    not; a later reader's instinct is to add it, and a test is what records that
     the omission was decided rather than overlooked.
     """
-
-    def test_a_re_deferral_need_not_name_a_successor_or_a_refusal(self) -> None:
-        """§4b constrains ``successor``/``successor_refused`` in **one** direction.
-
-        The table says they "are set **only when** ``kind`` is ``REDEFERRED``" — not
-        that a re-deferral must set one. Requiring exactly one would encode
-        ``successor_refused``'s own condition, which is a fact about *how* the
-        outcome was produced ("only where the parent was destroyed mid-apply, since
-        an exempt admission never consults the cap"), and no validator can check
-        that. It would also be this lane authoring a `core` constraint no ADR
-        ratified, which is what golden rule 5 and ADR-0015 §5 exist to prevent.
-        """
-        outcome = AnswerOutcome(kind=AnswerKind.REDEFERRED, question_id="q-1")
-        assert outcome.successor is None
-        assert outcome.successor_refused is False
 
     def test_a_recovered_resume_may_carry_no_turn(self) -> None:
         """``TurnOutcome.turn`` is ``None`` on a resume driven from a recovered park.

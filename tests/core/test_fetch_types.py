@@ -1,4 +1,4 @@
-"""The five values and one enumeration ADR-0230 §4 adds, and what each refuses.
+"""The values and the one enumeration ADR-0230 §4 adds, and what each refuses.
 
 §14 item 17 asks that "the models refuse what §1 says they refuse", arm for arm, and
 this file is the half of that item which lives in `core`: the ``ReadAsk`` validator's
@@ -30,7 +30,6 @@ from ai_assistant.core.types import (
     ReadKind,
     ReadRequest,
     SemanticMemory,
-    ShownFile,
     SourceListing,
     SourceListingEntry,
 )
@@ -184,20 +183,6 @@ def test_an_outcome_carrying_neither_is_refused() -> None:
 # --- what each value carries, and what it may not ---------------------------
 
 
-def test_a_shown_file_has_no_field_a_capability_could_sit_in() -> None:
-    """§4's containment is a property of the type (§14 item 20's structural half).
-
-    "A ``Planner`` receives no ``handle``, no ``token`` and no ``SourceListing``, so an
-    implementation that rendered every field of every value it was handed, logged them,
-    or returned them discloses no capability, because there is none on the value to
-    disclose."
-
-    Asserted over the field *set* rather than by naming the two absentees, so a field
-    added tomorrow fails here on the day it is added.
-    """
-    assert set(ShownFile.model_fields) == {"name", "size_bytes", "modified_at"}
-
-
 def test_a_listing_entry_carries_a_handle_and_no_path() -> None:
     """§4: an entry "carries **no path, no root and no directory component**"."""
     assert set(SourceListingEntry.model_fields) == {
@@ -208,7 +193,7 @@ def test_a_listing_entry_carries_a_handle_and_no_path() -> None:
     }
 
 
-@pytest.mark.parametrize("model", [SourceListingEntry, ShownFile, SourceListing, FetchOutcome])
+@pytest.mark.parametrize("model", [SourceListingEntry, SourceListing, FetchOutcome])
 def test_every_value_this_decision_adds_refuses_an_unknown_field(model: type[BaseModel]) -> None:
     """``extra="forbid"`` on each, which is also what §12's version move turns on."""
     with pytest.raises(ValidationError):

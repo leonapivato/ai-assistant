@@ -27,7 +27,6 @@ from ai_assistant.core.types import (
     BriefElement,
     EvidenceApplicability,
     EvidenceBasis,
-    EvidenceDigest,
     EvidenceHistory,
     EvidenceStanding,
     ExecutionState,
@@ -45,10 +44,7 @@ from ai_assistant.core.types import (
     InterpretedOutput,
     MemorySource,
     PlanExport,
-    PlannerOutput,
     PlanStep,
-    ProposedElement,
-    ProposedUnderstanding,
     Provenance,
     ReadAsk,
     ReadKind,
@@ -1855,8 +1851,8 @@ def test_every_other_kind_refuses_a_structure(kind: ReadKind, extra: dict[str, o
 # --- ADR-0249 §9, §10: the two projections that cross the planning seam --------
 
 
-def test_a_brief_and_a_digest_carry_no_field_a_ground_reference_could_sit_in() -> None:
-    """ADR-0249 §16 item 4(a), structural and over the projections alone.
+def test_a_brief_carries_no_field_a_ground_reference_could_sit_in() -> None:
+    """ADR-0249 §16 item 4(a), structural and over the projection alone.
 
     "``GoalBrief`` and ``EvidenceDigest`` carry **no field in which a ground reference
     could sit** — no ``evidence_id``, no record id, no evidence row id, no span —
@@ -1875,6 +1871,10 @@ def test_a_brief_and_a_digest_carry_no_field_a_ground_reference_could_sit_in() -
     effect, no execution, no step, no outcome and no indication of whether the action
     has already been performed", and its ``serves`` carries the brief's own labels,
     which are minted per call and persisted nowhere.
+
+    ``EvidenceDigest``, the other projection the quoted item names, left ``core``
+    with the ``Planner`` seam it was handed across (ADR-0309 §5), so the brief's
+    field sets are what this pins now.
     """
     forbidden = {"evidence_id", "span", "record_id", "memory_id", "evidence_row_id", "address"}
 
@@ -1882,15 +1882,6 @@ def test_a_brief_and_a_digest_carry_no_field_a_ground_reference_could_sit_in() -
     assert set(BriefElement.model_fields) == {"text", "ground"}
     assert set(BriefAction.model_fields) & forbidden == set()
     assert set(BriefAction.model_fields) == {"intent", "serves"}
-    assert set(EvidenceDigest.model_fields) & forbidden == set()
-    assert set(EvidenceDigest.model_fields) == {
-        "requested",
-        "supported",
-        "read_at",
-        "as_of",
-        "verdict",
-        "standing",
-    }
     assert set(GoalBrief.model_fields) == {
         "goal_id",
         "outcome",
@@ -2029,53 +2020,6 @@ def test_an_interpretation_admits_one_further_shape_than_an_element() -> None:
 
     with pytest.raises(ValidationError, match="ADR-0249 §1"):
         GoalElement(text="relocate to Lisbon", ground=Ground.USER_STATED)
-
-
-def test_a_proposed_understanding_states_an_outcome_or_retains_one() -> None:
-    """ADR-0249 §7: exactly two shapes, so omitting the objective is unconstructible."""
-    retained = ProposedUnderstanding(retains_outcome=True)
-    assert retained.outcome is None
-
-    restated = ProposedUnderstanding(
-        outcome="the new reading", outcome_ground=Ground.USER_STATED, outcome_span="the new"
-    )
-    assert restated.retains_outcome is False
-
-    with pytest.raises(ValidationError, match="ADR-0249 §7"):
-        ProposedUnderstanding()
-    with pytest.raises(ValidationError, match="ADR-0249 §7"):
-        ProposedUnderstanding(retains_outcome=True, outcome="both at once")
-    with pytest.raises(ValidationError, match="ADR-0249 §7"):
-        ProposedUnderstanding(outcome="no ground")
-
-
-def test_a_proposed_element_is_new_or_retaining_and_never_both() -> None:
-    """§7: "a retaining element carries ``retains`` **and nothing else**"."""
-    assert ProposedElement(retains="C1").retains == "C1"
-    assert ProposedElement(text="a", ground=Ground.INFERRED).ground is Ground.INFERRED
-
-    with pytest.raises(ValidationError, match="ADR-0249 §7"):
-        ProposedElement(retains="C1", text="and a restatement")
-    with pytest.raises(ValidationError, match="ADR-0249 §7"):
-        ProposedElement(text="no ground")
-    with pytest.raises(ValidationError, match="ADR-0249 §1"):
-        ProposedElement(text="a", ground=Ground.FROM_EVIDENCE, span="not a label")
-
-
-def test_a_planner_output_proposes_nothing_by_default() -> None:
-    """§7: ``None`` is "the semantically correct answer for a planner that knows
-    nothing of this envelope", and is never read as an error.
-
-    **Three fields since ADR-0265 §2**, which partially supersedes §7's enumeration in
-    the count alone: an empty ``actions`` "means the planner proposes no new intended
-    action", on the identical argument, and "no implementation reads an empty
-    ``actions`` as an error, a degradation or an instruction to re-plan".
-    """
-    output = PlannerOutput(plan=ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_WHEN))
-
-    assert output.understanding is None
-    assert output.actions == ()
-    assert set(PlannerOutput.model_fields) == {"plan", "understanding", "actions"}
 
 
 # --- ADR-0249 §5, §6: the attempt ---------------------------------------------
