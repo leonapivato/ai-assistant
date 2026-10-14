@@ -2555,7 +2555,12 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     §4:1 has ``receive`` refuse the spoken conversational combination, which a hub
 #:     at 99 accepted. A peer at 99 calls a method a hub at 100 does not route and
 #:     sends a member it refuses as extra (§6:4, ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 100
+#: 101: ADR-0309 §5:1 removes ``converse``, ``resume``, ``cancel_read`` and
+#:     ``pending_confirmations`` from the promoted ``AssistantEngine`` method set, and
+#:     ADR-0313 §4:6 takes ``TextChannelResult`` out of the ``ChannelResult`` a
+#:     ``receive`` returns, which is ``InformationalEventResult`` alone. A peer at 100
+#:     calls four methods a hub at 101 does not route (ADR-0313 §6:4, ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 101
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

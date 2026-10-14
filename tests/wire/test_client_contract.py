@@ -79,7 +79,6 @@ from assistant_engine_contract import (
     _UNHELD_SOURCE,
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
-    SETTLED_SINGLE_SLOT,
     SPEAKABLE_NOTIFICATION,
     SPEND_ZERO_CEILING,
     UNSPEAKABLE_NOTIFICATION,
@@ -90,9 +89,6 @@ from assistant_engine_contract import (
     DerivedPlacementSubject,
     InvocationSubject,
     ReadSubject,
-    RoutedParkSubject,
-    SettledParkSubject,
-    SingleSlotParkSubject,
     SpendSubject,
     backwards_clock,
     fake_belief_holder,
@@ -105,19 +101,10 @@ from assistant_engine_contract import (
 )
 
 from ai_assistant.core.types import (
-    BoundAccount,
-    ContinuationToken,
-    DestinationProtocol,
-    DiscloserProvenance,
-    EgressBinding,
-    EgressDestination,
-    EgressSpan,
     GrantScope,
     Placement,
     PlacementReach,
     PlacementSetter,
-    RoutableOperation,
-    SpanCoverage,
 )
 from ai_assistant.testing import AUTHORIZATION_GOAL, FakeAssistantEngine, opening_act
 from ai_assistant.wire import (
@@ -225,39 +212,6 @@ async def serving(
         yield await hub.start()
     finally:
         await hub.aclose()
-
-
-def _binding() -> EgressBinding:
-    """One whole egress binding, for a park the shared suite's ADR-0178 clauses reach.
-
-    A destination-bearing occurrence and a description-only one, so the derived set
-    has a recipient member rather than falling back to the account. Built here
-    rather than shared with the in-process suite's copy: this one has to survive
-    the *frame* as well as the reduction, which is the thing this subject adds.
-    """
-    return EgressBinding(
-        spans=(
-            EgressSpan(
-                argument="body",
-                provenance=DiscloserProvenance.USER_AUTHORED,
-                extent=5,
-            ),
-            EgressSpan(
-                argument="to",
-                provenance=DiscloserProvenance.SYSTEM_SELECTED,
-                extent=17,
-                destination=EgressDestination(
-                    protocol=DestinationProtocol.SMTP,
-                    supplied="Alice@Example.ORG",
-                    canonical="alice@example.org",
-                ),
-            ),
-        ),
-        account=BoundAccount(identity="work@example.com", reference="conn-0001"),
-        transport_endpoint="test://endpoint/one",
-        planned_with_external_content=False,
-        coverage=SpanCoverage.NOT_COVERED,
-    )
 
 
 class TestHubEngineClientContract(AssistantEngineContract):
@@ -521,29 +475,6 @@ class TestHubEngineClientContract(AssistantEngineContract):
             yield client
 
     @pytest.fixture
-    async def routed_park(self, tmp_path: Path) -> AsyncIterator[RoutedParkSubject]:
-        """A client of a hub holding a single answerable **routed** park.
-
-        Arranged hub-side and answered over the wire, which is the whole of what this
-        binding adds: ADR-0197 §8 says no module under ``wire/`` changes for the routed
-        member beyond the version constant, because "a result payload takes the shape of
-        the method's own declared return annotation" — so if that is true, the card, its
-        token and the resumed outcome cross with no second declaration, and if it is not,
-        these cases are where it shows.
-
-        The belief the park is about is held by the hub's engine, and the client reads it
-        back through ``belief`` over the same connection — so the effect is observed the
-        way a spoke would observe it.
-        """
-        backing = FakeAssistantEngine()
-        held = backing.hold("rec-routed", content="the user likes jazz")
-        backing.park_routed("routed-1", operation=RoutableOperation.FORGET, subject=(held,))
-        async with serving(backing, tmp_path / "hub.sock") as client:
-            yield RoutedParkSubject(
-                engine=client, token=ContinuationToken(handle="routed-1"), belief_id=held.id
-            )
-
-    @pytest.fixture
     async def derived_placement(self, tmp_path: Path) -> AsyncIterator[DerivedPlacementSubject]:
         """A client of a hub holding a belief the derivation placed (ADR-0217 §3).
 
@@ -565,79 +496,6 @@ class TestHubEngineClientContract(AssistantEngineContract):
         )
         async with serving(backing, tmp_path / "hub.sock") as client:
             yield DerivedPlacementSubject(engine=client, record_id=held.id)
-
-    @pytest.fixture
-    async def parked_engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
-        """A client of a hub holding a single answerable park.
-
-        The park lives in the *hub's* engine and the token crosses the wire, which
-        is ADR-0084 §7's whole subject: the client is stateless with respect to
-        tokens, so the one it resumes with is the one ``pending_confirmations()``
-        just handed it over a connection that has since closed.
-        """
-        backing = FakeAssistantEngine()
-        backing.park("h-1", egress=_binding())
-        async with serving(backing, tmp_path / "hub.sock") as client:
-            yield client
-
-    @pytest.fixture
-    async def settled_park(self, tmp_path: Path) -> AsyncIterator[SettledParkSubject]:
-        """A client of a hub whose park is settled, and the token that still names it.
-
-        **Settled hub-side and restated over the wire**, which is what this binding
-        adds: ADR-0198 §7 bumps no ``PROTOCOL_VERSION`` and changes no module under
-        ``wire/``, on the ground that the decision changes no byte any payload can
-        take — ``TurnOutcome``'s shape is untouched, and a client built against the
-        older behaviour is handed a success where it expected a typed refusal, a case
-        every ratified client already handles since a *first* resume produces it. If
-        that is true, the restatement crosses with no second declaration; if it is
-        not, these cases are where it shows.
-        """
-        backing = FakeAssistantEngine()
-        backing.park("h-1", egress=_binding())
-        token = ContinuationToken(handle="h-1")
-        await backing.resume(token, approved=True, timeout=_PATIENT)
-        async with serving(backing, tmp_path / "hub.sock") as client:
-            yield SettledParkSubject(engine=client, token=token)
-
-    @pytest.fixture
-    async def settled_park_without_its_execution(
-        self, tmp_path: Path
-    ) -> AsyncIterator[SettledParkSubject]:
-        """:attr:`settled_park`'s subject whose hub-side ``executions`` are empty.
-
-        Arranged hub-side, as it arises — a client reaches plan state through nothing
-        at all. What the binding adds is the failure's *classification* over a socket:
-        ADR-0198 §2's ``PlanningError`` has to arrive as a typed error frame the client
-        reconstructs, rather than as a dropped connection, which is what
-        ``wire/server.py`` turns anything that is not an ``AssistantError`` into.
-        """
-        backing = FakeAssistantEngine()
-        backing.park("h-1", egress=_binding())
-        token = ContinuationToken(handle="h-1")
-        await backing.resume(token, approved=True, timeout=_PATIENT)
-        backing.executions.clear()
-        async with serving(backing, tmp_path / "hub.sock") as client:
-            yield SettledParkSubject(engine=client, token=token)
-
-    @pytest.fixture
-    async def single_slot_parks(self, tmp_path: Path) -> AsyncIterator[SingleSlotParkSubject]:
-        """A client of a hub at a ceiling of one, holding a settled record and a park.
-
-        The ceiling is the hub engine's, as every construction-time property is: a
-        client supplies none of them and reads their consequences over the wire, which
-        is exactly how a spoke meets ADR-0198 §4's bound — as a token that stops
-        restating.
-        """
-        backing = FakeAssistantEngine(max_outstanding_confirmations=SETTLED_SINGLE_SLOT)
-        backing.park("h-1", egress=_binding())
-        settled = ContinuationToken(handle="h-1")
-        await backing.resume(settled, approved=True, timeout=_PATIENT)
-        backing.park("h-2", egress=_binding())
-        async with serving(backing, tmp_path / "hub.sock") as client:
-            yield SingleSlotParkSubject(
-                engine=client, settled=settled, parked=ContinuationToken(handle="h-2")
-            )
 
     @pytest.fixture
     async def decisions(self, tmp_path: Path) -> AsyncIterator[DecisionSubject]:

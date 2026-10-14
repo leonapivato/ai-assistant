@@ -129,10 +129,8 @@ if TYPE_CHECKING:
         ChatDevice,
         ChatStreamEnd,
         ClarificationWithdrawal,
-        Confirmation,
         ConnectedAccount,
         ConnectionAct,
-        ContinuationToken,
         ConversationDigest,
         ConversationSummary,
         DestinationTrustRecord,
@@ -152,7 +150,6 @@ if TYPE_CHECKING:
         PermissionDecision,
         Placement,
         Question,
-        ReadCancellation,
         RecipientGrant,
         RecordedInvocation,
         SecretValue,
@@ -172,8 +169,6 @@ if TYPE_CHECKING:
         StorySummaryView,
         StoryView,
         TranscriptPage,
-        TurnOutcome,
-        TurnReference,
         UserMessage,
         UtcInstant,
     )
@@ -310,38 +305,6 @@ class HubClient:
             timeout=timeout,
         )
 
-    async def converse(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, relayed to the hub (ADR-0029 §4)
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> TurnOutcome:
-        """Run one turn on the hub (ADR-0085 §3).
-
-        Args:
-            utterance: What the user said.
-            timeout: The budget for the whole turn.
-            conversation_id: The conversation to continue, or ``None``.
-            reference: What the turn answers, or which goal it is about, or ``None``
-                (ADR-0250 §11). Relayed and never inspected: resolving it is the
-                hub's, against records only the hub holds.
-
-        Returns:
-            What the turn did.
-        """
-        selected = (
-            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
-        )
-        return await self._call(  # type: ignore[no-any-return]
-            "converse",
-            utterance=utterance,
-            timeout=timeout,
-            conversation_id=selected,
-            reference=reference,
-        )
-
     async def _stream_call(
         self, method: str, payload: dict[str, object], *, idle: timedelta | None = None
     ) -> AsyncIterator[Any]:
@@ -423,81 +386,12 @@ class HubClient:
         finally:
             await hang_up(writer)
 
-    async def resume(
-        self,
-        token: ContinuationToken,
-        *,
-        approved: bool,
-        timeout: timedelta,  # noqa: ASYNC109 - the caller's budget, relayed to the hub (ADR-0029 §4)
-        remember_recipients_until: UtcInstant | None = None,
-    ) -> TurnOutcome:
-        """Relay the user's consent for a parked step (ADR-0042 §4).
-
-        **The establishing act rides this call and no second one** (ADR-0235 §2), so
-        the answer and the standing request cross in one frame: an act split across
-        two calls is one a client can half-perform, and the half that survives is an
-        approval the user believed was standing.
-
-        **One local refusal, and it is the argument's own type rather than the act's**
-        (ADR-0085 §9). Every refusal of the *act* is a fact about a record only the
-        hub holds — the confirmation's binding, and the instant the hub's own clock
-        will stamp on the answer — so those arrive as ``UngrantableActError`` in a
-        typed error frame like any other. What is refused here is a value with no
-        determinate offset: ADR-0087 §2d's encoder spells every instant with a ``Z``,
-        so a naive one would cross **relabelled as UTC** rather than refused. An
-        **absent** argument is absent from the payload rather than ``null`` (ADR-0085
-        §10), which :func:`~ai_assistant.wire.codec.arguments_object` does for every
-        optional argument on this client.
-
-        Args:
-            token: The continuation the confirmation carried.
-            approved: What the user said.
-            timeout: The budget for the resumed turn.
-            remember_recipients_until: The instant the user asked this call's
-                recipients be remembered until, or ``None`` where they asked for
-                nothing standing. Relayed and never defaulted, derived, extended or
-                rounded here (ADR-0235 §1).
-
-        Returns:
-            What the resumed pass did, carrying what became of the standing request
-            on ``recipient_grant`` where one was made.
-        """
-        until = (
-            None
-            if remember_recipients_until is None
-            else utc_instant(remember_recipients_until, name="remember_recipients_until")
-        )
-        return await self._call(  # type: ignore[no-any-return]
-            "resume",
-            token=token,
-            approved=approved,
-            timeout=timeout,
-            remember_recipients_until=until,
-        )
-
-    async def cancel_read(self, token: ContinuationToken, /) -> ReadCancellation:
-        """Relay a withdrawal of a parked read's question (ADR-0244 §11).
-
-        **The client relays and decides nothing.** Which of the three states the call
-        reached is a fact about a row and a task only the hub holds — the park's own
-        compare-and-swap, and whether a dispatch is running in that process — so this
-        method carries the opaque token across and returns what came back.
-
-        Args:
-            token: The continuation the read's confirmation carried.
-
-        Returns:
-            Which of ADR-0244 §11's three states the hub reached.
-        """
-        return await self._call("cancel_read", token=token)  # type: ignore[no-any-return]
-
     async def stop_activation(self, activation_id: Identifier, /) -> ActivationStop:
         """Relay a stop of one running activation (ADR-0297 §5).
 
-        **The client relays and decides nothing**, exactly as :meth:`cancel_read`
-        does: whether the activation was running, had ended or was never known is a
-        fact about the hub's own process, the only place the running activations are
-        held (ADR-0297 §3:1).
+        **The client relays and decides nothing**: whether the activation was
+        running, had ended or was never known is a fact about the hub's own process,
+        the only place the running activations are held (ADR-0297 §3:1).
 
         Args:
             activation_id: The activation to stop, as the conversation's current state
@@ -532,9 +426,8 @@ class HubClient:
     async def withdraw_clarification(self, question_id: Identifier, /) -> ClarificationWithdrawal:
         """Relay a withdrawal of a goal's clarification (ADR-0250 §12).
 
-        **The client relays and decides nothing**, exactly as :meth:`cancel_read`
-        does: which of the two states the call reached is a fact about a row only the
-        hub holds.
+        **The client relays and decides nothing**: which of the two states the call
+        reached is a fact about a row only the hub holds.
 
         Args:
             question_id: The clarification to withdraw.
@@ -1180,17 +1073,6 @@ class HubClient:
                     return
             except _StreamIdleError:
                 continue
-
-    async def pending_confirmations(self) -> tuple[Confirmation, ...]:
-        """Every parked confirmation the hub can currently resolve.
-
-        ADR-0084 §7's remedy for a token a previous process life minted: enumerate
-        the parks from durable state and take a freshly minted continuation.
-
-        Returns:
-            The parks, each with a token that resolves now.
-        """
-        return await self._call("pending_confirmations")  # type: ignore[no-any-return]
 
     # --- the four grant operations (ADR-0102 §12 item 4) --------------------
 

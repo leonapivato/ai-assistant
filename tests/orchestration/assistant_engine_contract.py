@@ -1166,91 +1166,6 @@ class ReadSubject:
     trail: SeededReadTrail
 
 
-@dataclass(frozen=True, slots=True)
-class RoutedParkSubject:
-    """An engine holding one answerable **routed** park, and what it is about (§7).
-
-    ADR-0197 §12 puts the routed resume's coverage in this shared suite rather than in
-    one implementation's own tests, "because every implementation of that surface owes
-    it": ``resume``'s *contract* moved, and a contract that moved for one implementation
-    only is not a contract.
-
-    **A subject rather than a bare engine**, because the clauses are about what did and
-    did not happen to the user's own data, and the only way to ask that through the
-    promoted surface is to know which record the park is about. Everything the cases
-    below read is on the surface itself — ``belief`` says whether the destruction ran,
-    ``export_decisions`` says whether a ruling was recorded — so the three bindings
-    arrange the *premise* and share every assertion.
-
-    Attributes:
-        engine: The subject under test.
-        token: The continuation the routed park is answered by. It is the card's own
-            token, handed over rather than re-minted: ADR-0197 §7 makes a routed park
-            doubly unreachable from the surface — ``pending_confirmations`` does not
-            list it and no durable store recovers it — so a case that had to ask for
-            the token could not exist.
-        belief_id: The belief the parked ``forget`` would destroy. ``forget`` is the
-            member chosen because its effect is observable through the promoted surface
-            in both directions: ``belief`` answers the record before and ``None`` after.
-    """
-
-    engine: AssistantEngine
-    token: ContinuationToken
-    belief_id: str
-
-
-#: The ceiling ADR-0198 §4's bound is built at, for the subject that observes it.
-#: **One**, because §4 reuses ``max_outstanding_confirmations`` as the size of the
-#: retained set and one is the smallest value at which a discard is reachable in two
-#: settlements rather than in a thousand. It is a construction-time property of a
-#: deployment, so it is a separate subject rather than a knob a case turns —
-#: :attr:`AssistantEngineContract.tiny_engine`'s reasoning, one setting over.
-SETTLED_SINGLE_SLOT: Final = 1
-
-
-@dataclass(frozen=True, slots=True)
-class SettledParkSubject:
-    """An engine whose park is **settled**, and the token that still names it (§1).
-
-    **A subject rather than a bare engine, because a settled binding is not
-    enumerable.** ADR-0052 §1 step 2 skips a binding the trail no longer holds
-    pending, and ADR-0198 §4 rules that ``pending_confirmations`` neither lists a
-    settled binding nor mints a token for one — that is the whole reason a
-    restatement had to become a `resume` and could not be a listing. So a case that
-    had to *ask* for the token could not exist, and the fixture hands it over.
-
-    Attributes:
-        engine: The subject under test, holding the settled record.
-        token: The continuation the settled binding is restated by.
-    """
-
-    engine: AssistantEngine
-    token: ContinuationToken
-
-
-@dataclass(frozen=True, slots=True)
-class SingleSlotParkSubject:
-    """A subject at :data:`SETTLED_SINGLE_SLOT` that has settled one park and holds one.
-
-    **Its existence is the first of §4's three facts.** At a ceiling of one, a second
-    park can only have been admitted beside :attr:`settled`'s record if that record
-    holds **no** ceiling slot — which is §4's rule, and the one an implementation
-    that counted retention with the parks would fail before a case ran. The fixture
-    settles the first park and parks the second, in that order, because that order is
-    the only one the ceiling admits.
-
-    Attributes:
-        engine: The subject under test.
-        settled: The token of the **older**, already-answered binding, retained at
-            the moment the fixture hands the subject over.
-        parked: The token of the **newer**, still-answerable park.
-    """
-
-    engine: AssistantEngine
-    settled: ContinuationToken
-    parked: ContinuationToken
-
-
 #: When the placed candidate below was noticed. Fixed, and comfortably behind every
 #: clock a binding wires — the concrete engine's is frozen at :data:`AT`, and the
 #: canonical fake's stores read the wall clock, so an instant either could call the
@@ -1317,6 +1232,10 @@ def near_ceiling_limit(candidate: NotificationCandidate) -> int:
     unspoken = NotificationDelivery(delivery_id=_WIDEST_DELIVERY_ID, notification=candidate)
     return len(_encode(project(unspoken))) + _RENDERING_HEADROOM
 
+
+#: The members ADR-0309 §5:1 retires with the old path's turn: "Retire ``converse``;
+#: ``resume``, ``pending_confirmations``, ``cancel_read``".
+RETIRED_TURN_MEMBERS: Final = ("converse", "resume", "cancel_read", "pending_confirmations")
 
 #: The one triple ADR-0206 §3 places as speakable on a channel of unbounded
 #: audience, and a candidate carrying it. Built from the placement predicate's own
@@ -1390,10 +1309,10 @@ class AssistantEngineContract(
     def granting_engine(self) -> AssistantEngine:
         """A subject holding **exactly one** grantable source, named :data:`_SOURCE`.
 
-        A separate subject rather than a step in a test, for ``parked_engine``'s
-        reason: which sources exist is a property of what the composition root
-        *built* (ADR-0102 §7), not something the surface can be asked to change. An
-        implementation has to be handed to the suite already holding one.
+        A separate subject rather than a step in a test: which sources exist is a
+        property of what the composition root *built* (ADR-0102 §7), not something
+        the surface can be asked to change. An implementation has to be handed to the
+        suite already holding one.
 
         It must hold no grant on that source, so the first ``grant`` in each test
         below is the first grant. It must carry a configured location for it, so
@@ -1518,117 +1437,16 @@ class AssistantEngineContract(
 
     @pytest.fixture
     @abstractmethod
-    def routed_park(self) -> RoutedParkSubject:
-        """A subject holding **exactly one** answerable routed park, on a ``forget``.
-
-        The routed twin of :attr:`parked_engine`, and it is a fixture for that one's
-        reason twice over. A park is reached inside a turn, so an implementation has to
-        be handed to the suite already holding one — and a *routed* park is not reachable
-        even then: ADR-0197 §7 rules that ``pending_confirmations`` does not list it and
-        that it is not recovered across a restart, so there is no surface call that
-        produces or re-mints its token.
-
-        The belief the park is about must be **held** by the subject, so a case can ask
-        the surface whether the destruction ran. The subject must have recorded no
-        permission decision for the park, so ``export_decisions`` is a usable control.
-        """
-
-    @pytest.fixture
-    @abstractmethod
     def derived_placement(self) -> DerivedPlacementSubject:
         """A subject holding **exactly one** belief the derivation placed (ADR-0217 §3).
 
-        A fixture for :attr:`routed_park`'s reason: no call on this surface writes a
-        ``DERIVED`` placement — ADR-0204 §2's evaluation runs inside a turn and
+        A fixture because no call on this surface writes a ``DERIVED`` placement —
+        ADR-0204 §2's evaluation runs inside a turn and
         ADR-0217 §4's proposal is a producer's — so an implementation has to be handed
         to the suite already holding one.
 
         The belief must be **held and readable**, so that a ``None`` from an act is
         unambiguously §7's refusal rather than a record that was never there.
-        """
-
-    @pytest.fixture
-    @abstractmethod
-    def parked_engine(self) -> AssistantEngine:
-        """A subject holding **exactly one** answerable parked confirmation, on an egress call.
-
-        The resume path cannot be reached by calling the surface: parking is the
-        *policy's* ruling, reached inside a turn, so an implementation has to be
-        handed to the suite already in that state. It is a fixture rather than a
-        step in a test for that reason — and it is the shape ADR-0042 §4's whole
-        park/render/relay sequence depends on, so a suite that skipped it would
-        leave a client with no shared account of the one interaction a human is in
-        the middle of.
-
-        **The park is on an *egress* call** (ADR-0178 §3, §5). The clause below
-        binds every producer of a
-        :class:`~ai_assistant.core.types.ConfirmationEgress`, and a fixture that
-        parked a non-egress call would leave it vacuous for that subject — which is
-        exactly how a canonical fake comes to assemble the member some other way
-        and still pass a suite. What the confirmation carries is otherwise
-        unconstrained: which account, which arguments and how many occurrences are
-        each implementation's own.
-        """
-
-    @pytest.fixture
-    @abstractmethod
-    def settled_park(self) -> SettledParkSubject:
-        """A subject whose park is **settled**, and the token that still names it (§1).
-
-        The fixture answers the park; what the cases below do is present its token a
-        second time. It is a fixture rather than two lines in each case for the reason
-        :attr:`parked_engine` is one and one of its own: settling needs a park, which
-        parking is the policy's ruling reached inside a turn, and the answered token is
-        then unreachable — ADR-0198 §4 rules that ``pending_confirmations`` neither
-        lists a settled binding nor mints a token for one.
-
-        The subject must have settled **exactly one** park and must still retain it, so
-        the restatement under test is the record §1 installs rather than an accident of
-        a table too small or too large.
-        """
-
-    @pytest.fixture
-    @abstractmethod
-    def settled_park_without_its_execution(self) -> SettledParkSubject:
-        """:attr:`settled_park`'s subject whose plan store **no longer holds** the execution.
-
-        ADR-0198 §2 rules that a restatement's ``StepOutcome.state`` is re-read from the
-        plan store at the moment of the restatement and is never a snapshot cached at
-        settlement — ``StepOutcome.state`` is "the durable execution state after the
-        last transition committed", and a cached value stops being that as soon as
-        anything advances the execution (ADR-0139 §2). Where the execution is no longer
-        held there is nothing to read, and §2's answer is a ``PlanningError`` rather than
-        an assertion about an outcome the engine cannot see.
-
-        **A fixture because no call on this surface removes an execution.** The
-        promoted surface reaches plan state through no member at all, so the state has
-        to be arranged behind the engine — which is how it arises in a deployment, when
-        a user erases their history under ADR-0119 or a store is rebuilt beneath a
-        process that is still running.
-
-        **Without it an implementation that cached the outcome passes every other case
-        in this section** and answers with an ``ExecutionState`` the store has stopped
-        holding.
-        """
-
-    @pytest.fixture
-    @abstractmethod
-    def single_slot_parks(self) -> SingleSlotParkSubject:
-        """A subject at :data:`SETTLED_SINGLE_SLOT` holding one settled record and one park.
-
-        The shape the suite already uses for a zero-ceiling ledger
-        (:data:`SPEND_ZERO_CEILING` behind :attr:`spending`), one setting over: a
-        ceiling is a construction-time property of a deployment rather than something a
-        caller changes mid-flight, so the subject is built at it and handed over.
-
-        The fixture settles one park and then parks another, in that order — the only
-        order a ceiling of one admits, and the order that makes the subject's *existence*
-        evidence for ADR-0198 §4's first clause.
-
-        **Without it an implementation that retained every settled record forever, or
-        discarded the newest instead of the oldest, passes every other case in this
-        section**, because each of them presents one token to a table nothing has
-        crowded.
         """
 
     @pytest.fixture
@@ -1825,18 +1643,30 @@ class AssistantEngineContract(
         assert "start" not in surface
         assert "aclose" not in surface
 
+    @pytest.mark.parametrize("member", RETIRED_TURN_MEMBERS)
+    def test_the_old_paths_turn_members_are_gone(
+        self, engine: AssistantEngine, member: str
+    ) -> None:
+        """ADR-0309 §5:1: the old path's turn members leave every implementation.
+
+        Asserted over the **subject** as well as the Protocol: unlike a lifecycle
+        method, which a concrete engine may keep, a retired member an implementation
+        kept would be a door to the old path's turn that no contract describes.
+        """
+        assert not hasattr(AssistantEngine, member)
+        assert not hasattr(engine, member)
+
     async def test_every_enumeration_returns_a_tuple(self, engine: AssistantEngine) -> None:
         """ADR-0085 §3b: a caller that mutated a returned page changed nothing.
 
-        ``pending_confirmations`` is the one this pins: it returned a ``list``
-        before, and a surface this size with one method returning a mutable
-        page is a wart a spoke author has to remember.
+        ``pending_confirmations`` was the one this pinned, returning a ``list`` before,
+        until it retired (ADR-0309 §5:1); a surface this size with one method returning
+        a mutable page is a wart a spoke author has to remember.
         """
         assert isinstance(await engine.beliefs(), tuple)
         assert isinstance(await engine.questions(), tuple)
         assert isinstance(await engine.interrupted_questions(), tuple)
         assert isinstance(await engine.recent_conversations(), tuple)
-        assert isinstance(await engine.pending_confirmations(), tuple)
 
     # --- ADR-0206: what a poll that asks for a rendering gets --------------
     #
@@ -4895,28 +4725,6 @@ class AssistantEngineContract(
         taken = set(inspect.signature(AssistantEngine.standing_recipient_grants).parameters)
 
         assert taken == {"self"}
-
-    async def test_resume_declares_the_argument_as_keyword_only_and_defaulted(self) -> None:
-        """§2: ``resume`` gains **one** keyword-only argument and gains nothing else.
-
-        "No second argument, no widened return, and no change to ``token``,
-        ``approved`` or ``timeout``." Asserted over the signature, because that is
-        what ``wire/surface.py`` derives the wire mapping from and what a spoke
-        author reads — and because the default is what makes every existing call
-        behave byte for byte as it did.
-        """
-        parameters = inspect.signature(AssistantEngine.resume).parameters
-
-        assert set(parameters) == {
-            "self",
-            "token",
-            "approved",
-            "timeout",
-            "remember_recipients_until",
-        }
-        argument = parameters["remember_recipients_until"]
-        assert argument.kind is inspect.Parameter.KEYWORD_ONLY
-        assert argument.default is None
 
     # --- ADR-0242 §2, §4: the destination-trust surface's three --------------
     #

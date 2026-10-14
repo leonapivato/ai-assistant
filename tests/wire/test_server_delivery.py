@@ -186,7 +186,7 @@ def _other(correlation: str = "r-9") -> env.Envelope:
     return env.Envelope(
         kind=env.FrameKind.REQUEST,
         id=correlation,
-        method="pending_confirmations",
+        method="notification_preferences",
         payload={},
     )
 

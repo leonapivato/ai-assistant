@@ -69,7 +69,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from itertools import count
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 
 import structlog
 
@@ -82,7 +82,6 @@ from ai_assistant.core.device_context import (
 from ai_assistant.core.episode_encoding import check_detail, check_list
 from ai_assistant.core.errors import (
     ActivationStoppedError,
-    AuthorizationError,
     ChannelProcessingError,
     ChannelProcessingTimeoutError,
     ClaimRefused,
@@ -117,7 +116,6 @@ from ai_assistant.core.types import (
     AttemptReport,
     AttemptState,
     AttemptTransition,
-    AuthorizationProjection,
     AuthorizationSettlement,
     AuthorizationView,
     Belief,
@@ -173,7 +171,6 @@ from ai_assistant.core.types import (
     PlacementSetter,
     ProcessingStatus,
     ReadAnswerOutcome,
-    ReadCancellation,
     ReadKind,
     RecallOutcome,
     RecordedChannelTrigger,
@@ -394,7 +391,6 @@ if TYPE_CHECKING:
         DurableIdentifier,
         EncodableText,
         ExecutionState,
-        FrozenJsonMapping,
         GrantableSource,
         GrantScope,
         HeldNotification,
@@ -2558,23 +2554,6 @@ def _windows_expired(working: _ActivationPass) -> Exception | None:
     if _summarized_event(working):
         return ChannelProcessingTimeoutError("informational event processing timed out")
     return ModelTimeoutError(_WINDOWS_EXPIRED)
-
-
-def _retired(member: str) -> NoReturn:
-    """Refuse a member of the old path, which the cutover retired (ADR-0309 §2:6, §5:1).
-
-    Every activation runs through the phases, and the controller's one table has no row
-    for the old path's turn, so a member that would start one is refused before any
-    admission, store write or model call: never a half-run activation.
-
-    Raises:
-        ConfigurationError: Always.
-    """
-    msg = (
-        f"{member} retired at the cutover: every activation runs through the phases, so "
-        "write a message into a conversation instead (ADR-0309 §2:6, §5:1)"
-    )
-    raise ConfigurationError(msg)
 
 
 def _wired_phases(  # noqa: PLR0913 — the path, the two wirings it needs beside it, and the three seams it is handed
@@ -4755,10 +4734,9 @@ class Engine:
         reply: WholeTextReply | SpokenReply | None,
         timeout: timedelta,  # noqa: ASYNC109 — operation budget
         projection: ChannelProjection,
-        typed_turn: bool = False,
     ) -> ChannelResult:
         self._reject_if_closing()
-        accepted, capability = snapshot(input, reply, typed_turn=typed_turn)
+        accepted, capability = snapshot(input, reply)
         if projection.method == "receive":
             check_payload(
                 {"input": accepted, "reply": capability, "timeout": timeout},
@@ -4770,10 +4748,8 @@ class Engine:
         )
         if not event:
             # ADR-0313 §4:1: an event is the one combination `receive` admits, and
-            # `snapshot` refused every other but `converse`'s own typed input, which
-            # reaches this engine through no member: `converse` retired at the cutover
-            # (ADR-0309 §5:1). A conversation's input is a message written into it,
-            # which the chat's reader takes in (ADR-0293 §11).
+            # `snapshot` has already refused every other. A conversation's input is a
+            # message written into it, which the chat's reader takes in (ADR-0293 §11).
             msg = (
                 "unsupported channel input and reply combination: an event with text "
                 "and no reply is the one receive admits (ADR-0313 §4:1)"
@@ -4858,50 +4834,6 @@ class Engine:
             target, input.payload.text, input.payload.modality, input.context
         )
         return await self._phases_event(resolved, deadline=deadline, projection=projection)
-
-    async def converse(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, threaded to the seam which owns the deadline (ADR-0029 §4)
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> TurnOutcome:
-        """Run one turn and drive the step it produces (ADR-0042 §3, ADR-0074 §2).
-
-        **Retired at the cutover** (ADR-0309 §2:6, §5:1). Every activation
-        runs through the phases and nothing runs the old path's turn, so this member
-        refuses before any work. The engine-surface deletion lane removes it.
-
-        Raises:
-            RuntimeError: If shutdown has begun.
-            ConfigurationError: Otherwise, always.
-        """
-        del utterance, timeout, conversation_id, reference
-        self._reject_if_closing()
-        _retired("converse")
-
-    async def resume(
-        self,
-        token: ContinuationToken,
-        *,
-        approved: bool,
-        timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, threaded to the seam (ADR-0029 §4)
-        remember_recipients_until: UtcInstant | None = None,
-    ) -> TurnOutcome:
-        """Answer a parked confirmation and continue its step (ADR-0042 §3, §4).
-
-        **Retired at the cutover** (ADR-0309 §2:6, §5:1). Every activation
-        runs through the phases and nothing runs the old path's turn, so this member
-        refuses before any work. The engine-surface deletion lane removes it.
-
-        Raises:
-            RuntimeError: If shutdown has begun.
-            ConfigurationError: Otherwise, always.
-        """
-        del token, approved, timeout, remember_recipients_until
-        self._reject_if_closing()
-        _retired("resume")
 
     async def _admit_control(  # noqa: PLR0913 — existing resolution facts, never authority
         self,
@@ -5000,68 +4932,6 @@ class Engine:
                 await self._activation_coordinator.append(state)
         except TimeoutError:
             return
-
-    async def cancel_read(self, token: ContinuationToken, /) -> ReadCancellation:
-        """Withdraw a parked read's question, or interrupt the read it dispatched.
-
-        ADR-0244 §11's one operation, for this operation kind alone (#2217). It takes
-        no other argument, no reason, no free text and no deadline.
-
-        **It takes the same compare-and-swap the answer takes**, so a cancellation
-        racing an answer is decided by that one write and by nothing else: a
-        cancellation that lost it answers ``NOTHING_TO_CANCEL`` where the answer is
-        already running or done, and an answer that lost it returns
-        ``ALREADY_SETTLED``. **Neither party acts on a park the other took.**
-
-        **Cancelling an open park records no answer.** ``ActionPolicy.resolve`` is not
-        called, no ruling is recorded, and the decision on the trail stays the
-        unresolved ``CONFIRM`` it was — the whole difference from a denial, which *is* a
-        ruling. Its decision therefore returns to ``grantable_decisions`` where
-        ADR-0235 §3's other six conditions hold (ADR-0244 §5).
-
-        **Cancelling a dispatched read cancels the task running it.** ADR-0241 §7's
-        accounting is unchanged and is the seam's: the claim is completed before the
-        cancellation re-raises, with ``interrupted_outcome`` and an ``UNKNOWN`` cost, and
-        the channel is released. The interrupted ``resume`` produces **no**
-        ``TurnOutcome`` at all — the cancellation is a teardown and is converted into
-        neither an outcome nor a refusal — and what tells the user is this answer, which
-        is the act they performed. **The park stays ``APPROVED``**: no caller assumes
-        the query did not leave, and the recourse is to ask again.
-
-        **It reaches only a dispatch running in this process**, and answers
-        ``NOTHING_TO_CANCEL`` otherwise, which is true of what this process can do.
-
-        Args:
-            token: The opaque continuation naming the park.
-
-        Returns:
-            Which of ADR-0244 §11's three states this call reached.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            UnknownContinuationError: If ``token`` names no park this engine holds.
-        """
-        self._reject_if_closing()
-        check_arguments("cancel_read", max_bytes=self._max_payload_bytes, token=token)
-        return await self._tracked(self._cancel_read(token), "cancel_read", checked=True)
-
-    async def _cancel_read(self, token: ContinuationToken) -> ReadCancellation:
-        """Resolve the handle and hand the park to the cancellation.
-
-        **Never a denial** (ADR-0084 §7): a handle naming no park is
-        ``UnknownContinuationError``, exactly as ``resume`` raises it, and never a
-        ``NOTHING_TO_CANCEL`` that would tell a caller its question was already gone.
-        """
-        park_id = self._read_parks.get(token.handle)
-        operations = self._parked_reads
-        if park_id is None or operations is None:
-            msg = (
-                "this token names no parked read in this engine; it may be from an "
-                "earlier run of the process, or it may name a parked step or a routed "
-                "operation, neither of which this operation cancels (ADR-0244 §11)"
-            )
-            raise UnknownContinuationError(msg)
-        return await operations.cancel(park_id)
 
     async def stop_activation(self, activation_id: Identifier, /) -> ActivationStop:
         """Stop one running activation: its mark, then its stop record (ADR-0297 §3, §5).
@@ -7365,231 +7235,6 @@ class Engine:
         self._reject_if_closing()
         return await self._track(work, "follow_chat", traced=False)
 
-    async def pending_confirmations(self) -> tuple[Confirmation, ...]:
-        """Recover, from durable state, every confirmation a user may still answer (ADR-0052 §1).
-
-        The durable counterpart to the in-process ``_parked`` table. A restarted
-        process has an empty table, and a park whose process-scoped token was
-        dropped — or that :meth:`converse` never handed back because it raised after
-        the runner durably parked the step — is likewise unreachable in memory
-        (#287). This reconstructs each such confirmation from state that *is*
-        durable: the parked executions in the :class:`PlanStore` and the recorded
-        ``CONFIRM`` in the :class:`AuditTrail`.
-
-        It enumerates ``plans.active_executions()``, finds each ``AWAITING_APPROVAL``
-        step, recovers its still-pending ``CONFIRM`` by the ``(execution_id,
-        step_id)`` binding (``trail.pending_confirmation``; a binding already
-        resolved returns ``None`` and is skipped — the #257 hazard ADR-0044 §2b
-        closes is not re-presented), and reads the raw parameters from the plan step
-        (the trail holds only a digest). Each recovered confirmation is assigned a
-        continuation token and registered in ``_parked`` so a subsequent
-        :meth:`resume` resolves it through the ordinary path — routed, because the
-        entry carries ``confirmation_id=None``, through the runner's restart
-        recovery (ADR-0044 §3) rather than a cached id.
-
-        **Idempotent and bounded.** A binding already named by a ``_parked`` entry
-        reuses that entry's token rather than minting a second, and every entry whose
-        binding is *no longer* pending — recovered or in-process, resolved since a
-        previous call, here or by another engine over the same durable stores — is
-        evicted (:meth:`_reconcile`). So repeated calls return stable tokens, the
-        table stays bounded by the number of distinct durably-parked bindings, and a
-        resolution out of this engine's sight strands nothing (it neither leaks an
-        entry nor pins the confirmation ceiling with a dead in-process park).
-        Recovered entries are additionally **excluded from the confirmation ceiling**
-        (:meth:`_admit_and_reserve`): they are bounded by durable state, not by client
-        behaviour. Recovery presents parks that already happened and are already
-        durable — refusing to surface one would strand it (ADR-0052 §2).
-
-        **A settled binding is neither listed nor minted for, and the retained
-        records are not reached at all** (ADR-0198 §4). The skip above is what does
-        it and it is unchanged: a binding whose ``CONFIRM`` the trail no longer holds
-        pending is exactly a settled one, and re-presenting it would be the #257
-        hazard ADR-0044 §2b closes. The reconciliation below likewise ranges over
-        ``_parked`` alone — a settled record is not a park, so it is neither evicted
-        by it nor treated as one — which is why the answer to "did my answer land?"
-        is :meth:`resume` and not this listing: an enumeration carrying settled
-        bindings would put a resolved action back in front of a user in the type
-        whose whole purpose is "what you may still answer".
-
-        Returns:
-            One :class:`Confirmation` per durably-parked, still-unresolved step,
-            each carrying an opaque token to relay on :meth:`resume`. Empty when no
-            execution is parked awaiting an answer.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            PlanningError: If the store cannot be read.
-            AuditError: If the trail cannot be read.
-        """
-        self._reject_if_closing()
-        # Tracked like converse/resume: recovery reads the plan store and the audit
-        # trail, so shutdown must drain it before closing those connections (§2).
-        return await self._tracked(
-            self._pending_confirmations(), "pending_confirmations", checked=True
-        )
-
-    async def _pending_confirmations(self) -> tuple[Confirmation, ...]:
-        """Enumerate the durably-parked confirmations and reconcile the table.
-
-        **Serialized against recovery *and* resolution** (``_recovery_lock``):
-        enumeration spans several ``await``s and ends in :meth:`_reconcile`,
-        reading both the trail (``pending_confirmation``) and ``_parked`` and then
-        minting into ``_parked`` — all state :meth:`_resume` also mutates when it
-        resolves a binding (it records the resolving decision through the runner and
-        evicts the binding's ``_parked`` entry). Both :meth:`_pending_confirmations`
-        and :meth:`_resume` take this one lock, so a resolution can neither run
-        *during* an enumeration nor leave it half-observed: recovery never reads a
-        live ``CONFIRM`` that a concurrent resume then resolves before recovery mints
-        its token (which would hand back a stale, unanswerable confirmation), and a
-        prune only ever runs against the bindings the same call observed. Without the
-        shared lock this held only *incidentally*, by the await placement between the
-        read and the mint here and between the resolve and the evict in
-        :meth:`_resume` — an invariant a later edit could silently break (round 3
-        review). Recovery and resolution are both off the latency-critical path
-        (human-paced confirmations, a cold restart path), so serializing them costs
-        nothing that matters.
-
-        **A routed park is not listed here, and is not recovered across a restart**
-        (ADR-0197 §7). ADR-0052 §1's algorithm walks ``plans.active_executions()`` and
-        reads the pending ``CONFIRM`` out of the audit trail; a routed park has neither, so
-        recovery would mean a second durable park store built for this one shape. What a
-        lost routed park costs is one repeated sentence: **nothing has happened yet** — the
-        operation has not run, no side effect is pending, and the resolution is a lookup
-        the next ask redoes in the same way. An enumeration is refused rather than merely
-        omitted, because it would have to render the card again and §7's card is
-        engine-assembled from a resolution this process still holds.
-
-        What this call *does* do for a routed park is evict the expired ones, which
-        reclaims their ceiling slots earlier. That is opportunistic housekeeping and is
-        never what makes an expired park unusable — :meth:`_claim_routed_park`'s check,
-        inside the claim and under this same lock, is.
-        """
-        async with self._recovery_lock:
-            self._evict_expired_routes()
-            recovered: list[Confirmation] = []
-            live: set[tuple[str, str]] = set()
-            for state in await self._plans.active_executions():
-                plan = await self._plans.get_plan(state.plan_id)
-                if plan is None:  # pragma: no cover — an execution without its plan is corrupt
-                    continue
-                for step in state.steps:
-                    if step.status is not StepStatus.AWAITING_APPROVAL:
-                        continue
-                    confirmed = await self._trail.pending_confirmation(
-                        execution_id=state.id, step_id=step.step_id
-                    )
-                    if confirmed is None:
-                        # The binding is already resolved (ADR-0044 §3 step 1), or holds
-                        # no CONFIRM; either way there is nothing to present.
-                        continue
-                    planned = next((s for s in plan.steps if s.id == step.step_id), None)
-                    if planned is None:  # pragma: no cover — a step not in its plan is corrupt
-                        continue
-                    live.add((state.id, step.step_id))
-                    one = await self._recovered_confirmation(
-                        state.id, step.step_id, planned.parameters, confirmed
-                    )
-                    if one is not None:
-                        recovered.append(one)
-            await self._reconcile(live)
-            return tuple(recovered) + await self._pending_read_confirmations()
-
-    async def _pending_read_confirmations(self) -> tuple[Confirmation, ...]:
-        """Enumerate the open read parks beside the parked steps (ADR-0244 §5).
-
-        **A second population in one operation, and that is what keeps one renderer.**
-        ADR-0178 §5's fourth clause already rules that "a recovered confirmation
-        carries the **same** egress content a live one carries" so that "a surface
-        therefore needs one renderer, not two"; a read's confirmation is a third
-        population of the same type, and a surface that already renders ADR-0178 §7's
-        floor renders it with the one branch ADR-0244 §4's discriminator gives it.
-
-        **The enumeration settles an expired park rather than offering it**, so this
-        never offers a question that cannot be answered and the settlement happens at
-        the read rather than in a sweep of its own (``ParkedReadOperations.outstanding``).
-        **It settles nothing else**: an open park that has not expired is offered, never
-        closed, whatever any other record says — ADR-0244 §6's one-gate clause.
-
-        **Idempotent and holding no ceiling slot.** A park already named by a handle
-        reuses that handle rather than minting a second (:meth:`_handle_for_park`), and
-        a read park neither consults nor occupies ``max_outstanding_confirmations``:
-        refusing to surface a park that already exists would strand it, which is
-        ADR-0052 §2's own reason.
-
-        **A park whose decision the trail no longer holds is omitted rather than
-        half-rendered.** The reason and the declaration live only in the trail (ADR-0042
-        §4), so there is no question to put; the park keeps its own deadline and the
-        expiry above is what eventually closes it.
-
-        **The handle table is reconciled against the store and not against this
-        snapshot.** A handle whose park the store no longer holds — dropped with its
-        conversation (ADR-0244 §3) — is evicted; a handle naming a **settled** park is
-        kept, because ADR-0244 §6 requires a second ``resume`` on such a token to return
-        ``ALREADY_SETTLED`` rather than meet ``UnknownContinuationError``.
-
-        Returns:
-            One confirmation per open, unexpired, renderable park, oldest first.
-        """
-        operations = self._parked_reads
-        if operations is None:
-            return ()
-        open_parks = await operations.outstanding()
-        live = {park.id for park in open_parks}
-        for handle, park_id in list(self._read_parks.items()):
-            if park_id not in live and await operations.get(park_id) is None:
-                self._read_parks.pop(handle, None)
-        offered: list[Confirmation] = []
-        for park in open_parks:
-            # The trail read belongs **here** and not on the parking turn's path: this
-            # operation already declares ``AuditError`` (ADR-0052 §1), and a park it did
-            # not write is one it holds no decision for.
-            confirmation = await self._read_confirmation(
-                park, await self._trail.get(park.decision_id)
-            )
-            if confirmation is not None:
-                offered.append(confirmation)
-        return tuple(offered)
-
-    async def _reconcile(self, live: set[tuple[str, str]]) -> None:
-        """Evict every ``_parked`` entry whose durable binding is no longer pending (ADR-0052 §2).
-
-        A ``_parked`` entry — recovered (``turn is None``) *or* an in-process converse
-        park (``turn is not None``) — becomes dead once its ``(execution_id,
-        step_id)`` binding is resolved, and that resolution can happen out of this
-        engine's sight: another engine over the same durable stores answers it (the
-        durable-resume topology this whole feature exists for). A dead entry the
-        table never removes would leak — and, for a converse park, keep counting
-        toward the confirmation ceiling forever, refusing every later turn (#287,
-        round 5). So both kinds are reconciled here.
-
-        **The check is authoritative per binding, not a snapshot difference.** An
-        entry whose binding is in ``live`` was just observed pending, so it is kept
-        without a re-query. Any *other* entry is re-checked directly against the
-        trail: a binding that returns ``None`` has been resolved (or holds no
-        ``CONFIRM``) and its entry is evicted; one that still returns a ``CONFIRM`` is
-        kept. Re-checking rather than trusting "absent from the enumeration snapshot"
-        is what makes pruning a converse park **safe against a concurrent
-        ``converse``** that parked *after* this call read ``active_executions``: that
-        fresh park is not in ``live``, but its binding is genuinely pending, so the
-        re-query keeps it. ``converse`` does not take ``_recovery_lock``, so without
-        this authoritative re-check a snapshot-difference prune would strand it.
-
-        Runs under ``_recovery_lock`` (its caller holds it), and a same-engine
-        ``resume`` — the only path that also evicts — takes the same lock, so no
-        eviction races this reconciliation.
-        """
-        candidates = [
-            (handle, parked)
-            for handle, parked in self._parked.items()
-            if (parked.execution_id, parked.step_id) not in live
-        ]
-        for handle, parked in candidates:
-            pending = await self._trail.pending_confirmation(
-                execution_id=parked.execution_id, step_id=parked.step_id
-            )
-            if pending is None:
-                self._parked.pop(handle, None)
-
     # --- the delivery surface (ADR-0131 §1, §4) ----------------------------
 
     async def next_notification(
@@ -8431,44 +8076,6 @@ class Engine:
         return await self._tracked(
             operations.revoke_authorization(named), "revoke_authorization", checked=True
         )
-
-    async def _authorization_projection(
-        self, confirmation_id: str
-    ) -> AuthorizationProjection | None:
-        """ADR-0254 §11's projection for one recorded ``CONFIRM``, or ``None``.
-
-        The one read behind all three assembly sites — the live park, the recovered
-        park and the read park — so a surface needs one renderer and a restart renders
-        what the question rendered (§11, ADR-0178 §5's fourth clause).
-
-        **Absence means the answer establishes nothing, and it means only that**: a
-        deployment wiring no authorization store, a `CONFIRM` failing one of §1's four
-        proposal conditions, and a proposal the store refused at the write. §1 already
-        rules that outcome — *"the answer establishes nothing: the `CONFIRM` is resolved
-        and the one call is authorised by route (a)"*.
-
-        **A store that could not be read is not one of those, and is not answered
-        ``None``.** A row it failed to return may be durable and may be established by
-        an approval, so calling it absent would put a question in front of the user that
-        named no bound and then established one — which §11 refuses in terms. The fault
-        propagates and :meth:`_recovered_confirmation` refuses **that** confirmation,
-        which is ADR-0178 §4's own sanctioned degradation: *"a surface that cannot
-        render it may refuse that confirmation rather than every confirmation"*.
-        Adversarial and architecture review, round 2, ``blocker``.
-
-        Args:
-            confirmation_id: The recorded ``CONFIRM``'s own id.
-
-        Returns:
-            The projection, or ``None``.
-
-        Raises:
-            AuthorizationError: If the authorization store could not be read.
-        """
-        operations = self._authorization_operations
-        if operations is None:
-            return None
-        return await operations.projection_for(confirmation_id)
 
     def _announced_authorizations(
         self, disposition: StepDisposition, recorded: RecordedGoal | None
@@ -15691,63 +15298,6 @@ class Engine:
             ),
         )
 
-    async def _recovered_confirmation(
-        self,
-        execution_id: str,
-        step_id: str,
-        parameters: FrozenJsonMapping,
-        confirmed: PermissionDecision,
-    ) -> Confirmation | None:
-        """Assemble a :class:`Confirmation` for a durably-parked step (ADR-0052 §1).
-
-        The counterpart to :meth:`_confirmation` on the recovery path: the tool
-        content and ruling ``reason`` come from the ``CONFIRM`` recovered from the
-        trail, and the parameters from the plan step (the trail holds only a
-        digest). The token names a ``_parked`` entry with ``turn=None`` and
-        ``confirmation_id=None`` (:meth:`_handle_for_binding`), so a subsequent
-        :meth:`resume` routes through the runner's restart recovery.
-        """
-        handle = self._handle_for_binding(execution_id, step_id)
-        try:
-            authorization = await self._authorization_projection(confirmed.id)
-        except AuthorizationError as exc:
-            # **This one park is withheld and the rest of the listing stands**, which is
-            # ADR-0178 §4's own degradation — *"a surface that cannot render it may
-            # refuse that confirmation rather than every confirmation"* — and is what
-            # this method already does for a park whose decision the trail no longer
-            # holds. Rendering it with ``authorization`` ``None`` instead would state
-            # that answering establishes no standing authority, which a row the store
-            # merely failed to return does not establish; and raising would teach
-            # `pending_confirmations` a class its contract does not declare, which
-            # ADR-0254 §16 rules out (*"two members on an existing Protocol and no other
-            # change to it"*). Logged **by class and by no value** (ADR-0145 §8).
-            # Adversarial and architecture review, round 2, ``blocker``.
-            _log.warning(
-                "confirmation_withheld",
-                decision_id=confirmed.id,
-                step_id=step_id,
-                refused_by=type(exc).__name__,
-            )
-            return None
-        return Confirmation(
-            tool_id=confirmed.tool.id,
-            tool_description=confirmed.tool.description,
-            parameters=parameters,
-            reason=confirmed.ruling.reason,
-            token=ContinuationToken(handle=handle),
-            egress=_confirmation_egress(confirmed),
-            # ADR-0244 §16: a step's confirmation is unchanged in every member and at
-            # every assembly site, and gains ``read`` ``None``.
-            read=None,
-            # ADR-0254 §11's recovery clause in terms: "A restart between the question
-            # and the answer recovers the row and renders the same projection". This is
-            # the one site that **reads** the store for it, because a recovered park has
-            # no disposition to carry the row across a process boundary — and it is a
-            # site where reading is safe: nothing is parked by this call, and the park it
-            # renders was committed by a run that has long since returned.
-            authorization=authorization,
-        )
-
     async def _read_confirmation(
         self, park: ParkedRead, recorded: PermissionDecision | None
     ) -> Confirmation | None:
@@ -15856,30 +15406,6 @@ class Engine:
         handle = self._mint_handle()
         self._reserved.discard(handle)
         self._read_parks[handle] = park_id
-        return handle
-
-    def _handle_for_binding(self, execution_id: str, step_id: str) -> str:
-        """A continuation handle for a recovered binding, reused if already held.
-
-        Idempotency and boundedness (ADR-0052 §2): if a ``_parked`` entry already
-        names this ``(execution_id, step_id)`` binding — from an earlier recovery
-        call — its handle is returned rather than a second minted, so repeated
-        :meth:`pending_confirmations` calls yield stable tokens and the table stays
-        bounded by the number of distinct durably-parked bindings. Otherwise a fresh
-        unique handle is minted and the recovered entry registered. Runs to
-        completion with no ``await`` from the uniqueness check to the write, so the
-        mint-and-register is atomic against concurrency, as :meth:`_mint_handle` is.
-        """
-        for existing, parked in self._parked.items():
-            if parked.execution_id == execution_id and parked.step_id == step_id:
-                return existing
-        handle = self._mint_handle()
-        # _mint_handle reserves the handle against in-flight turns; a recovered park
-        # goes straight into the table it counts against, so the reservation is released.
-        self._reserved.discard(handle)
-        self._parked[handle] = _Parked(
-            turn=None, execution_id=execution_id, step_id=step_id, confirmation_id=None
-        )
         return handle
 
 

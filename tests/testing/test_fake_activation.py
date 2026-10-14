@@ -1,41 +1,31 @@
-"""Faults retain the fake's independent M36 contract behavior."""
+"""Faults retain the fake's independent M36 contract behavior.
+
+A conversation's episode is captured from the activation the fake's reader runs for a
+written message (ADR-0293 §6), the one conversational input left since ``converse``
+retired (ADR-0309 §5:1); an event's from ``receive`` (ADR-0313 §4:1).
+"""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+import asyncio
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
 
 from ai_assistant.core.errors import MemoryStoreError, OversizedValueError
 from ai_assistant.core.types import (
-    ActionPlan,
+    ActivationEnding,
     ChannelIdentity,
     ChannelInput,
     ChannelResult,
-    CurrentContext,
-    Disposition,
+    ChatDevice,
+    DeviceAccess,
     EpisodicMemory,
-    ExecutionState,
-    GoalBrief,
-    GoalStatus,
-    Ground,
-    NewConversation,
-    ProcessingReason,
-    RoutableOperation,
-    RoutedOperation,
-    RouteOutcome,
-    StepExecution,
-    StepOutcome,
-    StepStatus,
+    InformationalEventResult,
     TextChannelPayload,
-    TextChannelResult,
-    TimeOfDay,
-    TurnOutcome,
-    TurnResult,
-    WholeTextReply,
+    UserMessage,
 )
-from ai_assistant.orchestration.channels import ChannelProjection
 from ai_assistant.testing import FakeAssistantEngine, FakeMemoryStore
 
 if TYPE_CHECKING:
@@ -44,28 +34,31 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import MemoryWrite
 
 _BUDGET = timedelta(seconds=10)
-_AT = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
 
 
-async def _typed(
-    engine: FakeAssistantEngine, target: ChannelIdentity | NewConversation | None = None
-) -> ChannelResult:
-    """One typed turn through the admission ``converse`` runs, and its receipt.
-
-    ``receive`` admits no conversational input (ADR-0313 §4:1) and ``converse``
-    returns the bare outcome; these cases are about how a conversation's episode is
-    captured, so they drive the same admission ``converse`` does and read its receipt.
-    """
-    return await engine._receive(
+async def _event(engine: FakeAssistantEngine, text: str = "the door opened") -> ChannelResult:
+    """One informational event through ``receive``, and its receipt."""
+    return await engine.receive(
         ChannelInput(
-            target=NewConversation() if target is None else target,
-            payload=TextChannelPayload(text="hello"),
+            target=ChannelIdentity(channel_type="informational_event", instance_id="door"),
+            payload=TextChannelPayload(text=text),
         ),
-        reply=WholeTextReply(),
+        reply=None,
         timeout=_BUDGET,
-        projection=ChannelProjection("converse"),
-        typed_turn=True,
     )
+
+
+async def _written(engine: FakeAssistantEngine) -> str:
+    """Start a conversation, write one message into it, and let the reader take it in."""
+    await engine.set_my_devices([ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)])
+    conversation = (await engine.start_conversation()).id
+    await engine.write_message(
+        conversation, message=UserMessage(device_id="phone", message_id="m-1", text="hello")
+    )
+    async with asyncio.timeout(10):
+        while engine._chat_reads:
+            await asyncio.gather(*engine._chat_reads)
+    return conversation
 
 
 class RefusingMemory(FakeMemoryStore):
@@ -76,7 +69,7 @@ class RefusingMemory(FakeMemoryStore):
 
 
 @pytest.mark.parametrize("fault", ["id", "write"])
-async def test_capture_failure_retains_reply_and_reports_only_confirmed_addresses(
+async def test_capture_failure_retains_the_result_and_reports_only_confirmed_addresses(
     fault: str,
 ) -> None:
     engine = FakeAssistantEngine()
@@ -84,39 +77,22 @@ async def test_capture_failure_retains_reply_and_reports_only_confirmed_addresse
         engine.activation_id_factory = lambda: "not-a-uuid"
     else:
         engine.episode_memory = RefusingMemory()
-    result = await _typed(engine)
-    assert isinstance(result.result, TextChannelResult)
-    typed = result.result.outcome
-    assert typed.reply
-    assert typed.capture_degraded
+    result = await _event(engine)
+    assert result.result == InformationalEventResult(ended=ActivationEnding.DONE)
     assert result.capture.state == "degraded"
     assert await engine.episode_memory.export() == []
-    if fault == "id":
-        assert result.capture.activation_id is None
-        assert result.capture.episode_id is None
-    else:
-        assert result.capture.activation_id is not None
-        assert result.capture.episode_id is not None  # index committed before the content failed
+    # An event's episode has no conversation index to commit ahead of its content, so
+    # a refused write confirms no address: only the activation id it was admitted with.
+    assert result.capture.episode_id is None
+    assert (result.capture.activation_id is None) == (fault == "id")
 
 
-async def test_rejected_legacy_input_persists_nothing() -> None:
+async def test_rejected_input_persists_nothing() -> None:
     engine = FakeAssistantEngine(max_payload_bytes=512)
     with pytest.raises(OversizedValueError):
-        await engine.converse("x" * 1024, timeout=_BUDGET)
+        await _event(engine, "x" * 1024)
     assert await engine.episode_memory.export() == []
     assert engine.conversations_held == {}
-
-
-async def test_recovered_control_degrades_and_replay_does_not_capture() -> None:
-    engine = FakeAssistantEngine()
-    engine.hold_conversation("unrelated")
-    confirmation = engine.park("private-token")
-    first = await engine.resume(confirmation.token, approved=False, timeout=_BUDGET)
-    assert first.capture_degraded
-    assert await engine.episode_memory.export() == []
-    second = await engine.resume(confirmation.token, approved=False, timeout=_BUDGET)
-    assert not second.capture_degraded
-    assert await engine.episode_memory.export() == []
 
 
 async def test_a_colliding_activation_id_moves_no_episode_to_the_second_conversation() -> None:
@@ -126,18 +102,18 @@ async def test_a_colliding_activation_id_moves_no_episode_to_the_second_conversa
     """
     engine = FakeAssistantEngine()
     engine.activation_id_factory = lambda: "00000000-0000-4000-8000-0000000000aa"
-
-    async def new_conversation() -> tuple[str, str]:
-        result = await _typed(engine)
-        assert result.channel is not None
-        return result.channel.instance_id, result.capture.state
-
-    first, first_state = await new_conversation()
-    second, second_state = await new_conversation()
     address = "activation:00000000-0000-4000-8000-0000000000aa"
 
+    first = await _written(engine)
+    second = await _written(engine)
+
     assert first != second
-    assert (first_state, second_state) == ("recorded", "degraded")
+    episode = await engine.episode_memory.get(address)
+    assert isinstance(episode, EpisodicMemory)
+    assert episode.processing_record is not None
+    assert episode.processing_record.trigger.channel == ChannelIdentity(
+        channel_type="conversation", instance_id=first
+    ), "the first capture holds the address, and the second's degraded"
     second_digest = await engine.conversation(second)
     assert second_digest is not None
     assert second_digest.recorded_turns == 0
@@ -157,95 +133,14 @@ async def test_a_conversation_colliding_with_a_standalone_episode_cannot_claim_i
     engine = FakeAssistantEngine()
     engine.activation_id_factory = lambda: "00000000-0000-4000-8000-0000000000bb"
     address = "activation:00000000-0000-4000-8000-0000000000bb"
-    event = await engine.receive(
-        ChannelInput(
-            target=ChannelIdentity(channel_type="informational_event", instance_id="door"),
-            payload=TextChannelPayload(text="the door opened"),
-        ),
-        reply=None,
-        timeout=_BUDGET,
-    )
+    event = await _event(engine)
     assert event.capture.state == "recorded"
     assert await engine.episode_memory.get(address) is not None
 
-    texted = await _typed(engine)
+    conversation = await _written(engine)
 
-    assert texted.capture.state == "degraded"
-    assert texted.channel is not None
-    conversation = texted.channel.instance_id
     digest = await engine.conversation(conversation)
     assert digest is not None
     assert digest.recorded_turns == 0
     assert await engine.forget_conversation(conversation) is False, "its place holds nothing"
     assert await engine.episode_memory.get(address) is not None
-
-
-def _driven(disposition: Disposition) -> StepOutcome:
-    """A step the pass drove to ``disposition``, over a one-step execution state."""
-    return StepOutcome(
-        disposition=disposition,
-        step_id="s-1",
-        state=ExecutionState(
-            id="exec-1",
-            plan_id="p-1",
-            steps=(StepExecution(step_id="s-1", status=StepStatus.PENDING),),
-            updated_at=_AT,
-        ),
-    )
-
-
-def _turn() -> TurnResult:
-    """A turn a reply can be composed over (``TurnOutcome`` refuses prose without one)."""
-    return TurnResult(
-        utterance="do it",
-        goal=GoalBrief(
-            goal_id="g-1",
-            outcome="get it done",
-            outcome_ground=Ground.USER_STATED,
-            status=GoalStatus.ACTIVE,
-        ),
-        context=CurrentContext(
-            now=_AT, time_of_day=TimeOfDay.MORNING, within_working_hours=True, is_weekend=False
-        ),
-        memories=(),
-        plan=ActionPlan(id="p-1", goal_id="g-1", steps=(), created_at=_AT, targets_revision=1),
-    )
-
-
-@pytest.mark.parametrize("verdict", ["routed", "driven"])
-async def test_a_verdict_reached_before_the_output_was_refused_is_recorded(verdict: str) -> None:
-    """ADR-0284 §5:2: the verdict lives on its stage entry, and a later failure keeps it.
-
-    The reply is refused as oversized only after the route performed or the step ran,
-    so the failed episode still carries that verdict — nothing else on the record says
-    what the pass did.
-    """
-    engine = FakeAssistantEngine(max_payload_bytes=2048)
-    expected: tuple[Disposition | None, RouteOutcome | None]
-    if verdict == "routed":
-        engine.turn_outcome = TurnOutcome(
-            turn=None,
-            routed=RoutedOperation(
-                operation=RoutableOperation.FORGET, outcome=RouteOutcome.PERFORMED
-            ),
-            reply="x" * 3000,
-        )
-        expected = (None, RouteOutcome.PERFORMED)
-    else:
-        engine.turn_outcome = TurnOutcome(
-            turn=_turn(), step=_driven(Disposition.EXECUTED), reply="x" * 3000
-        )
-        expected = (Disposition.EXECUTED, None)
-    with pytest.raises(OversizedValueError):
-        await engine.converse("hello", timeout=_BUDGET)
-    (episode,) = await engine.episode_memory.export()
-    assert isinstance(episode, EpisodicMemory)
-    processing = episode.processing_record
-    assert processing is not None
-    assert processing.reason is ProcessingReason.OUTPUT_OVERSIZED
-    verdicts = [
-        (entry.step_disposition, entry.route_outcome)
-        for entry in processing.stages
-        if entry.step_disposition is not None or entry.route_outcome is not None
-    ]
-    assert verdicts == [expected]

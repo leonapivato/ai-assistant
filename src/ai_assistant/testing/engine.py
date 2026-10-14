@@ -35,10 +35,9 @@ import asyncio
 import contextlib
 import hashlib
 from base64 import b64encode
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from typing import TYPE_CHECKING, Final, assert_never, cast
+from typing import TYPE_CHECKING, Final, assert_never
 from uuid import UUID, uuid4
 
 from ai_assistant.core.channel_validation import snapshot
@@ -47,7 +46,6 @@ from ai_assistant.core.device_context import current_requesting_device
 from ai_assistant.core.episode_encoding import check_detail, check_list
 from ai_assistant.core.errors import (
     ActivationStoppedError,
-    AuditError,
     ConversationStoreError,
     GrantError,
     InvalidGrantError,
@@ -60,8 +58,6 @@ from ai_assistant.core.errors import (
     StoryStoreError,
     UngrantableActError,
     UngrantableSourceError,
-    UnknownContinuationError,
-    UnknownConversationError,
     UntrustableDestinationError,
 )
 from ai_assistant.core.types import (
@@ -94,13 +90,11 @@ from ai_assistant.core.types import (
     CurrentContext,
     DestinationTrust,
     DestinationTrustRecord,
-    Disposition,
     DriveWithheld,
     EgressBinding,
     EpisodeCaptureReport,
     EpisodeChunk,
     EpisodePage,
-    ExecutionState,
     ForecastNotRead,
     Goal,
     GoalAbandonment,
@@ -113,9 +107,7 @@ from ai_assistant.core.types import (
     InformationalEventResult,
     MemoryKind,
     MemorySource,
-    NewConversation,
     NotificationDelivery,
-    OperationConfirmation,
     OutboundReach,
     OutboundStatement,
     PermissionDecision,
@@ -128,21 +120,12 @@ from ai_assistant.core.types import (
     Provenance,
     Question,
     QuestionState,
-    ReadAnswerOutcome,
-    ReadCancellation,
     ReadKind,
     RecipientGrant,
-    RecipientGrantNotEstablished,
-    RecipientGrantOutcome,
     RecordedChannelTrigger,
     RecordedInvocation,
-    RecordedResumeTrigger,
     RecordedSpeechInput,
     Retirement,
-    RoutableOperation,
-    RoutedOperation,
-    RouteOutcome,
-    SkipReason,
     SourceGrant,
     SpendTotal,
     SpokenAudio,
@@ -151,8 +134,6 @@ from ai_assistant.core.types import (
     SpokenDeliveryState,
     SpokenRendering,
     SpokenReply,
-    StepExecution,
-    StepOutcome,
     StepStatus,
     StoryActor,
     StoryMember,
@@ -161,10 +142,8 @@ from ai_assistant.core.types import (
     StoryNoteId,
     StoryOutcome,
     TextChannelPayload,
-    TextChannelResult,
     TimeOfDay,
     TurnOutcome,
-    TurnReference,
     TurnResult,
     Warrant,
     WholeTextReply,
@@ -189,8 +168,6 @@ from ai_assistant.orchestration.channels import (
     UNCAPTURED,
     ChannelProjection,
     captured_result,
-    conversation_target,
-    text_result,
 )
 from ai_assistant.orchestration.chat import (
     ChatInput,
@@ -232,7 +209,6 @@ from ai_assistant.orchestration.payloads import (
     utc_instant,
 )
 from ai_assistant.orchestration.recipient_grants import (
-    record_the_grant,
     rides_an_establishing_act,
 )
 from ai_assistant.orchestration.stories import (
@@ -281,7 +257,6 @@ if TYPE_CHECKING:
         NonBlankEncodableText,
         NotificationPreferences,
         ReplyCapability,
-        RoutedListing,
         SecretValue,
         SourceReadRecord,
         StoryHeader,
@@ -298,52 +273,6 @@ if TYPE_CHECKING:
 
 #: A fixed instant, so a fake engine's output is deterministic without a clock.
 _AT = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
-
-#: The three :class:`~ai_assistant.core.types.ReadAnswerOutcome` members ADR-0244 §9
-#: says a **ruling is recorded** for, so that this fake records one on exactly those and
-#: on no other.
-#:
-#: ``DISPATCHED`` is the resolving ``ALLOW``; ``DECLINED`` is the ``DENY`` the user asked
-#: for; and ``AUTHORITY_CHANGED`` is the approving answer the policy refused, whose
-#: ruling "**is** recorded" for ADR-0004 §7's reason. The other four say in terms that
-#: nothing was ruled — a spent park, an expired one, a changed operation and a
-#: deployment that cannot answer — and a fake that wrote a row for one of them would
-#: certify a consumer against a trail no hub writes.
-#: The four :class:`~ai_assistant.core.types.ReadAnswerOutcome` members that **spend the
-#: park**, so this fake claims the question on exactly those and leaves it standing on
-#: the rest.
-#:
-#: ADR-0244 §6 puts the availability clauses **before** the gate, and §9 says so member
-#: by member: ``UNAVAILABLE_NOW`` is clause 2 and ``OPERATION_CHANGED``'s first two
-#: grounds are clause 4, both of which precede clause 5 — "a park spent on an answer the
-#: subject check would have refused is an answer the user has to give again for no
-#: reason". ``EXPIRED`` is here because §10 settles it, and ``ALREADY_SETTLED`` is here
-#: because the member *asserts* the question is gone: this fake reaches it by itself when
-#: the park is absent, and a consumer scripting it over an open one is asking for a state
-#: whose own report would contradict the table behind it.
-#:
-#: **``OPERATION_CHANGED`` is modelled on its first two grounds**, which §9 names first:
-#: its third — a refused resolving append — leaves the park spent, and a fake given one
-#: scripted member cannot be both. The open reading is the one a consumer must be able to
-#: drive a retry from, and a consumer that meets the spent reading against a hub meets
-#: ``ALREADY_SETTLED``, which every surface already handles.
-_READ_OUTCOMES_THAT_SPEND_THE_PARK: Final = frozenset(
-    {
-        ReadAnswerOutcome.DISPATCHED,
-        ReadAnswerOutcome.DECLINED,
-        ReadAnswerOutcome.AUTHORITY_CHANGED,
-        ReadAnswerOutcome.EXPIRED,
-        ReadAnswerOutcome.ALREADY_SETTLED,
-    }
-)
-
-_READ_OUTCOMES_THAT_RULE: Final = frozenset(
-    {
-        ReadAnswerOutcome.DISPATCHED,
-        ReadAnswerOutcome.DECLINED,
-        ReadAnswerOutcome.AUTHORITY_CHANGED,
-    }
-)
 
 #: How far each activity stamp advances per event. A logical clock rather than a
 #: real one: it keeps the ordering deterministic and keeps the fake free of a wall
@@ -403,46 +332,6 @@ def _check_positive_int(value: int, *, name: str) -> None:
         raise ValueError(msg)
 
 
-@dataclass(frozen=True, slots=True)
-class _Settled:
-    """What one answered continuation token still names (ADR-0198 §1).
-
-    The fake's counterpart to the engine's own settled record, and it retains the
-    same three immutable facts and no fourth: the disposition the resolution
-    reached, the binding's ``step_id``, and the ``tool_id`` the step bound. The
-    execution **state** is deliberately absent — §2 rules it re-read at the moment
-    of the restatement rather than snapshotted at settlement, so it is held in
-    :attr:`FakeAssistantEngine.executions`, which stands in for a plan store and
-    which a test can empty to reach §2's store-no-longer-holds-it case.
-    """
-
-    execution_id: str
-    step_id: str
-    tool_id: str | None
-    disposition: Disposition
-
-
-@dataclass(frozen=True, slots=True)
-class _CollectedAct:
-    """The establishing act one ``resume`` collected, once its refusals have passed.
-
-    Present exactly where ``remember_recipients_until`` was supplied and the call was
-    not refused, which is why it carries the recorded answer as a value rather than as
-    an optional one: ADR-0235 §2's refusals fire **before** anything is answered, so a
-    collected act with no recorded answer is not a state this fake can be in, and
-    :class:`~ai_assistant.core.types.RecipientGrantOutcome` never has to describe one.
-    """
-
-    confirmed: PermissionDecision
-    answer: PermissionDecision
-    expires_at: datetime
-
-
-#: The answer a routed pass this fake resolved carries. Fixed rather than composed,
-#: because a fake originates no model call — and present rather than ``None`` because
-#: ADR-0197 §8 makes a routed pass that is not a park owe one.
-_ROUTED_REPLY: Final = "the assistant did what you asked."
-
 #: The step statuses ADR-0262 §4's **third** ending condition admits, stated as the
 #: three it names rather than as the four it excludes: *"every step of every execution
 #: it names stands ``SUCCEEDED``, ``FAILED`` or ``SKIPPED`` — so none stands
@@ -470,8 +359,9 @@ class FakeAssistantEngine:
     lives is ADR-0087 §9's open question and change 4's to answer.
 
     Attributes:
-        turn_outcome: What :meth:`converse` returns. Defaults to a turn whose plan
-            had no step — a real ratified shape, not a stub.
+        turn_outcome: The turn the activation the reader runs for a written message
+            ends with (ADR-0293 §6, §10). Defaults to a turn whose plan had no step —
+            a real ratified shape, not a stub.
         outbound_statement: ADR-0264 §7's statement every outcome this engine
             *composes* carries, or ``None`` — the default — for a fresh
             ``NOT_REACHED`` minted per outcome. Script it to drive a rendering
@@ -510,12 +400,10 @@ class FakeAssistantEngine:
                 Guarded exactly as the concrete engine guards it, for the reason
                 below: a limit that cannot bind fails *open* across every argument
                 check and every result check this double performs (#1686).
-            max_outstanding_confirmations: The ceiling ADR-0198 §4 reuses as the
-                bound on :attr:`settled`. This fake parks by a lever rather than by
-                admitting a turn, so the ceiling's *backpressure* half has nothing
-                here to bind; what it does bind is the retention, which is the half
-                a conformance case can reach. A subject built at one is how §4's
-                discard is made cheap to observe. Guarded exactly as the concrete
+            max_outstanding_confirmations: The concrete engine's confirmation
+                ceiling. It bound the settled records a ``resume`` restated (ADR-0198
+                §4), which left with ``resume`` (ADR-0309 §5:1), so nothing here reads
+                it now. Guarded exactly as the concrete
                 engine guards it, **classification included**: ADR-0084 §4's
                 substitutability runs in both directions, so a fake that admitted a
                 deployment no engine admits would let a consumer's tests pass over a
@@ -544,7 +432,6 @@ class FakeAssistantEngine:
         # measures against this one number (#1686).
         _check_positive_int(max_payload_bytes, name="max_payload_bytes")
         self._max_payload_bytes = max_payload_bytes
-        self._max_outstanding = max_outstanding_confirmations
         #: The notification surface's whole state, public so a consumer can
         #: seed it: ``await engine.notification_store.admit(candidate,
         #: policy=engine.notification_policy)`` is how a held record gets
@@ -578,13 +465,6 @@ class FakeAssistantEngine:
         #: can have one.
         placement_ticks = count(1)
         self.placement_clock: Callable[[], datetime] = lambda: _AT + _TICK * next(placement_ticks)
-        #: The routed parks this engine will resolve, by continuation handle
-        #: (ADR-0197 §7). Deliberately a **second** table beside ``parked``: a routed
-        #: park and a tool park are answered through one method and one token space,
-        #: and what tells them apart is which table the handle is in — which is the
-        #: arrangement the real engine has, so a consumer's test cannot pass here on a
-        #: shape no implementation may take.
-        self.routed_parked: dict[str, OperationConfirmation] = {}
         self.questions_open: dict[str, Question] = {}
         self.questions_interrupted: dict[str, Question] = {}
         #: Questions in a terminal state — declined, applied, stale, re-deferred.
@@ -653,56 +533,18 @@ class FakeAssistantEngine:
         #: whose later answer then retires the belief that took it. Each repair to the
         #: present state left the next case open, so what is kept is the history.
         self._spent: set[str] = set()
-        self.parked: dict[str, Confirmation] = {}
-        #: The **read** parks this engine holds, by handle (ADR-0244 §5). A fourth
-        #: table beside ``parked``, ``routed_parked`` and ``settled``, for their
-        #: reason: which table a handle is in is what decides what a ``resume``
-        #: presenting it gets. Populated by :meth:`park_read`, enumerated by
-        #: ``pending_confirmations`` beside the step parks, and emptied by the answer
-        #: or the cancellation that settles it.
+        #: The **read** parks this engine holds, by handle (ADR-0244 §5), populated by
+        #: :meth:`park_read`. What ``resume``, ``pending_confirmations`` and
+        #: ``cancel_read`` did with one left with them (ADR-0309 §5:1); what is left is
+        #: :meth:`hold_confirmation_decision`'s binding, which ``grantable_decisions``
+        #: reads.
         self.read_parked: dict[str, Confirmation] = {}
-        #: The handles of read parks whose dispatch this engine is "running", for
-        #: ADR-0244 §11's second state. Public and mutable because ``INTERRUPTED`` is
-        #: otherwise unreachable on a fake that performs no real send, and a consumer
-        #: rendering that member needs a way to reach it.
-        self.read_dispatching: set[str] = set()
-        #: Every read-park handle this engine has ever held, so a token presented after
-        #: its park was answered, denied or cancelled is **answered rather than
-        #: refused** — ``ALREADY_SETTLED`` on ``resume`` and ``NOTHING_TO_CANCEL`` on
-        #: ``cancel_read`` — which is ADR-0244 §6's and §11's own rule. A handle in
-        #: neither this set nor any park table is unknown, and raises.
-        self._read_handles: set[str] = set()
         #: The decision each **live** read park names, by handle (ADR-0244 §5). What
         #: §5's eighth ``grantable_decisions`` condition is decided from: a decision a
         #: park holds ``OPEN``, ``APPROVED`` or ``DENIED`` is not one the establishing
         #: act may ride. A cancellation removes the entry, because a cancelled park's
         #: decision is the one that returns to the listing.
         self._read_decisions: dict[str, str] = {}
-        #: The terminal fact each **settled** read park keeps, by handle (ADR-0244 §3,
-        #: §9). ``EXPIRED`` where the deadline was what closed it, ``ALREADY_SETTLED``
-        #: otherwise — because §9 states ``EXPIRED`` over the disposition "whether this
-        #: call settled it or an earlier read did", so a second answer to an expired
-        #: question reads the same to a user as the first.
-        self.read_settled: dict[str, ReadAnswerOutcome] = {}
-        #: What each read park's answer will produce, by handle. ``DISPATCHED`` unless a
-        #: test scripts otherwise, so a consumer can be driven through every member of
-        #: :class:`~ai_assistant.core.types.ReadAnswerOutcome` without this fake having
-        #: to reach the state each names.
-        self.read_answers: dict[str, ReadAnswerOutcome] = {}
-        #: The bindings this engine has **answered** and still retains, by handle and
-        #: oldest settlement first (ADR-0198 §1, §4). A third table beside ``parked``
-        #: and ``routed_parked`` for their reason: which table a handle is in is what
-        #: decides what a ``resume`` presenting it gets, and a settled record is not a
-        #: park — it holds no live turn, authorises nothing, and is never enumerated
-        #: by ``pending_confirmations``. Bounded by
-        #: ``max_outstanding_confirmations``, discarding the least recently settled.
-        self.settled: dict[str, _Settled] = {}
-        #: The execution state each settled binding names, standing in for the plan
-        #: store a restatement re-reads (ADR-0198 §2). Public and mutable because
-        #: §2's other clause — where the store no longer holds the execution, the
-        #: restatement raises ``PlanningError`` and asserts nothing — is reachable
-        #: only by taking one out, and no call on this surface removes one.
-        self.executions: dict[str, ExecutionState] = {}
         self.turn_outcome: TurnOutcome | None = None
         #: ADR-0264 §7's statement, for every outcome this engine composes itself, or
         #: ``None`` — the default — for :meth:`_outbound`'s fresh ``NOT_REACHED``.
@@ -1273,26 +1115,6 @@ class FakeAssistantEngine:
             raise ValueError(msg)
         return reported
 
-    def _resolve(self, conversation_id: str | None) -> str:
-        """Continue the conversation named, or start one where none was (ADR-0074 §1).
-
-        **An id this engine does not know is refused, not silently started.**
-        Silently starting one turns a typo or a stale copy-paste into "my
-        conversation vanished" and lands the user's continuation somewhere they
-        cannot find — and a fake that started one instead would let a client's tests
-        pass over the exact path the real engine refuses.
-        """
-        if conversation_id is None:
-            candidate = f"c-{next(self._conversation_ids)}"
-            while candidate in self._used_conversation_ids:
-                candidate = f"c-{next(self._conversation_ids)}"
-            return self.hold_conversation(candidate)
-        if conversation_id not in self.conversations_held:
-            msg = f"no conversation {conversation_id!r}"
-            raise UnknownConversationError(msg)
-        self.activity[conversation_id] = self._tick()
-        return conversation_id
-
     async def receive(
         self,
         input: ChannelInput,  # noqa: A002 — contract spelling
@@ -1309,55 +1131,21 @@ class FakeAssistantEngine:
             input, reply=reply, timeout=timeout, projection=ChannelProjection("receive")
         )
 
-    async def converse(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,  # noqa: ASYNC109 — contract budget
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> TurnOutcome:
-        """Adapt a legacy text call through shared channel admission.
-
-        ``reference`` travels beside the input rather than on it: ``ChannelInput``
-        carries no conversation options since ADR-0313 §4:2.
-        """
-        result = await self._receive(
-            ChannelInput(
-                target=conversation_target(conversation_id),
-                payload=TextChannelPayload(text=utterance),
-            ),
-            reply=WholeTextReply(),
-            timeout=timeout,
-            projection=ChannelProjection("converse"),
-            typed_turn=True,
-            reference=reference,
-        )
-        assert isinstance(result.result, TextChannelResult)  # noqa: S101 — validated result
-        return result.result.outcome
-
-    async def _receive(  # noqa: PLR0913 — the channel call's three, the entry's projection, and `converse`'s own two
+    async def _receive(
         self,
         input: ChannelInput,  # noqa: A002 — ADR-0274 names the public parameter
         *,
         projection: ChannelProjection,
-        reply: WholeTextReply | SpokenReply | None,
+        reply: SpokenReply | None,
         timeout: timedelta,  # noqa: ASYNC109 — contract budget
-        typed_turn: bool = False,
-        reference: TurnReference | None = None,
     ) -> ChannelResult:
-        """Process the channel using the fake's existing scripted outcomes.
-
-        ``reference`` is ``converse``'s own, and nothing else passes one.
-        """
-        supplied, capability = snapshot(input, reply, typed_turn=typed_turn)
-        if projection.method == "receive":
-            check_payload(
-                {"input": supplied, "reply": capability, "timeout": timeout},
-                max_bytes=self._max_payload_bytes,
-                subject="the arguments to receive()",
-            )
-        self._validate_legacy_channel(supplied, timeout, projection.method, reference)
+        """Process the channel using the fake's existing scripted outcomes."""
+        supplied, capability = snapshot(input, reply)
+        check_payload(
+            {"input": supplied, "reply": capability, "timeout": timeout},
+            max_bytes=self._max_payload_bytes,
+            subject=f"the arguments to {projection.method}()",
+        )
         activation = FakeActivation.channel(supplied, capability, _AT)
         activation.identify(self.activation_id_factory)
         self._running_activations.append(activation)
@@ -1365,9 +1153,7 @@ class FakeAssistantEngine:
         result: ChannelResult | None = None
         failure: BaseException | None = None
         try:
-            result = await self._dispatch_channel(
-                supplied, capability, timeout, projection, activation, reference
-            )
+            result = await self._dispatch_channel(supplied, capability, timeout, activation)
             # Output bounds are processing obligations even when no capture
             # envelope could be allocated and finalization must return early.
             self._check_channel_result(result, projection)
@@ -1412,129 +1198,32 @@ class FakeAssistantEngine:
         assert result is not None  # noqa: S101 — a successful dispatch returned a value
         return captured_result(result, report)
 
-    def _validate_legacy_channel(
-        self,
-        supplied: ChannelInput,
-        timeout: timedelta,
-        method: str,
-        reference: TurnReference | None,
-    ) -> None:
-        """Apply legacy local refusals before the fake admits an activation."""
-        if method == "receive":
-            return
-        selected = (
-            None if isinstance(supplied.target, NewConversation) else supplied.target.instance_id
-        )
-        assert isinstance(supplied.payload, TextChannelPayload)  # noqa: S101 — validated combination
-        check_arguments(
-            method,
-            max_bytes=self._max_payload_bytes,
-            utterance=supplied.payload.text,
-            timeout=timeout,
-            conversation_id=selected,
-            reference=reference,
-        )
-
     def _check_channel_result(
         self, result: ChannelResult | None, projection: ChannelProjection
     ) -> None:
         if result is not None:
             self._checked(projection.terminal(result), projection.method)
 
-    async def _dispatch_channel(  # noqa: PLR0913 — the admitted call and `converse`'s own reference
+    async def _dispatch_channel(
         self,
         supplied: ChannelInput,
         capability: ReplyCapability | None,
         timeout: timedelta,  # noqa: ASYNC109 — caller processing budget
-        projection: ChannelProjection,
         activation: FakeActivation,
-        reference: TurnReference | None,
     ) -> ChannelResult:
+        """Run an admitted event: admission refuses every other input (ADR-0313 §4:1)."""
         target = supplied.target
-        selected = None if isinstance(target, NewConversation) else target.instance_id
-        if isinstance(target, ChannelIdentity) and target.channel_type == "informational_event":
-            if timeout.total_seconds() <= 0:
-                # ADR-0313 §4:5: the event's budget ran out before anything ran; the
-                # call answers it with *couldn't finish* once the episode froze.
-                raise ModelTimeoutError("the event's budget ran out before it was understood")
-            activation.understand()
-            self.calls.append(("receive", {"input": supplied, "reply": capability}))
-            result = _event_result(target, ActivationEnding.DONE)
-            activation.observe(result)
-            return result
-        # Admission refuses every conversational input but `converse`'s own typed one
-        # (ADR-0313 §4:1), so a text payload is all that reaches here.
-        assert isinstance(supplied.payload, TextChannelPayload)  # noqa: S101 — validated combination
-        outcome = await self._legacy_converse(
-            supplied.payload.text,
-            timeout=timeout,
-            conversation_id=selected,
-            reference=reference,
-            activation=activation,
-        )
-        self._checked(projection.text(outcome), projection.method)
-        return text_result(outcome)
-
-    async def _legacy_converse(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-        activation: FakeActivation | None = None,
-    ) -> TurnOutcome:
-        """Run one turn against a conversation, minting one if none is named.
-
-        ``reference`` is **accepted and recorded, and resolved by nothing**, which is
-        what the concrete engine does in ADR-0250 §19's M1: that lane lands the
-        contract at unchanged behaviour and rules that "no reference is resolved". A
-        consumer asserts that the value crossed the seam by reading :attr:`calls`.
-        """
-        selected = (
-            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
-        )
-        check_arguments(
-            "converse",
-            max_bytes=self._max_payload_bytes,
-            utterance=utterance,
-            timeout=timeout,
-            conversation_id=selected,
-            reference=reference,
-        )
-        self.calls.append(
-            (
-                "converse",
-                {
-                    "utterance": utterance,
-                    "conversation_id": selected,
-                    "reference": reference,
-                },
-            )
-        )
-        held = self._resolve(selected)
-        if activation is not None:
-            activation.resolved(held)
-            activation.understand()
-        # ``reply`` is populated because ADR-0170 §4 obliges an answer on every shape
-        # but a park and a recovered resume, and ``TurnOutcome`` refuses an outcome
-        # that owes one and carries none. A fake that returned ``None`` here would
-        # let a client's tests pass over a shape the type does not admit.
-        outcome = self.turn_outcome or TurnOutcome(
-            turn=_turn(utterance),
-            conversation_id=held,
-            reply=f"This fake engine composed no real answer to {utterance.strip()!r}.",
-        )
-        # ADR-0264 §7's member, on the scripted outcome and the synthesised one alike:
-        # this pass composed a reply, so it carries a statement and never ``None`` —
-        # which §7 reserves for a pass that "neither established a contact nor composed
-        # a reply" (#2381).
-        if outcome.conversation_id is None:
-            outcome = outcome.model_copy(update={"conversation_id": held})
-        outcome = self._stating(outcome)
-        if activation is not None:
-            activation.observe(outcome)
-        return self._checked(outcome, "converse")
+        assert isinstance(target, ChannelIdentity)  # noqa: S101 — admission refuses every other target
+        assert target.channel_type == "informational_event"  # noqa: S101 — as above
+        if timeout.total_seconds() <= 0:
+            # ADR-0313 §4:5: the event's budget ran out before anything ran; the
+            # call answers it with *couldn't finish* once the episode froze.
+            raise ModelTimeoutError("the event's budget ran out before it was understood")
+        activation.understand()
+        self.calls.append(("receive", {"input": supplied, "reply": capability}))
+        result = _event_result(target, ActivationEnding.DONE)
+        activation.observe(result)
+        return result
 
     @staticmethod
     def _allocate_episode(conversation_id: str, activation: FakeActivation) -> str:
@@ -1579,255 +1268,11 @@ class FakeAssistantEngine:
         ):
             self.deliveries[episode] = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
 
-    async def resume(
-        self,
-        token: ContinuationToken,
-        *,
-        approved: bool,
-        timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
-        remember_recipients_until: UtcInstant | None = None,
-    ) -> TurnOutcome:
-        """Answer a parked confirmation, restate an answer already given, or refuse.
-
-        **Two kinds of park, one method and one token space** (ADR-0197 §7). A handle in
-        :attr:`routed_parked` answers a routed operation and its outcome carries ``step``
-        ``None`` and ``routed`` non-``None``; every other handle answers a parked step and
-        is ruled exactly as it was before ADR-0197. A token in neither is unresolvable and
-        yields ``UnknownContinuationError`` and never a denial (ADR-0084 §7).
-
-        **A handle in :attr:`settled` is answered rather than refused** (ADR-0198 §§1-3).
-        Resolving a parked step retains its binding under the handle, and a later
-        ``resume`` presenting that token **restates** the recorded answer: it returns an
-        outcome describing the settled binding and raises nothing. The restatement is
-        returned **whatever ``approved`` carries** and the recorded answer stands
-        unchanged, because a park is answered once (ADR-0044 §2b) and a second answer is
-        never honourable whatever it says. It performs nothing: no tool, no ruling, no
-        composed reply, no captured episode.
-
-        **A routed park is not retained** (§6), which is why the routed branch runs first
-        and is unchanged: it is claimed once and atomically, and a second presentation of
-        its token still falls through to the refusal below.
-        """
-        # Validated locally and before any I/O, exactly as the concrete engine
-        # validates it (ADR-0085 §9): ``UtcInstant`` is a pydantic annotation, so an
-        # in-process caller is not checked against it by anything else, and a fake
-        # that let a naive instant through would certify a consumer against a hub
-        # that refuses it.
-        until = (
-            None
-            if remember_recipients_until is None
-            else utc_instant(remember_recipients_until, name="remember_recipients_until")
-        )
-        check_arguments(
-            "resume",
-            max_bytes=self._max_payload_bytes,
-            token=token,
-            approved=approved,
-            timeout=timeout,
-            remember_recipients_until=until,
-        )
-        activation: FakeActivation | None = None
-
-        def admit() -> None:
-            nonlocal activation
-            if activation is None:
-                # This fake's parks are seeded recovered work with no durable
-                # conversation association. Never infer one from the handle.
-                activation = FakeActivation(
-                    trigger=RecordedResumeTrigger(
-                        channel=None,
-                        approved=approved,
-                        remember_recipients_until=until,
-                    ),
-                    at=_AT,
-                )
-                activation.identify(self.activation_id_factory)
-                # ADR-0297 §3:1: a control activation is running from its admission to
-                # its finalization, as a channel one is, so a stop can reach it.
-                self._running_activations.append(activation)
-
-        result: TurnOutcome | None = None
-        failure: BaseException | None = None
-        try:
-            result = await self._resolve_control(token, approved=approved, until=until, admit=admit)
-        except BaseException as exc:
-            failure = exc
-        if activation is not None:
-            admitted = activation
-            if result is not None and admitted.stopped:
-                # ADR-0297 §4: a stopped resume composes nothing and carries no reply,
-                # every other member as it established them.
-                result = result.model_copy(
-                    update={"stopped": True, "reply": None, "reply_degraded": False}
-                )
-            if result is not None:
-                admitted.observe(result)
-            try:
-                report = await admitted.finish(
-                    memory=self.episode_memory,
-                    conversations=self.conversations_held,
-                    allocate=lambda conversation: self._allocate_episode(conversation, admitted),
-                    max_bytes=self._max_payload_bytes,
-                    failure=failure,
-                    check_output=lambda: self._checked(result, "resume"),
-                )
-            finally:
-                self._ended(admitted)
-            self._commit_episode(admitted, report)
-            if result is not None:
-                result = result.model_copy(
-                    update={
-                        "capture_degraded": result.capture_degraded or report.state != "recorded"
-                    }
-                )
-        # A resume is not a turn call: one that raised raises as it would have, stopped or
-        # not (ADR-0297 §4, ADR-0275 §5:6), and a stopped one that returned returns.
-        if failure is not None:
-            raise failure
-        assert result is not None  # noqa: S101 — a successful control resolution
-        return self._checked(result, "resume")
-
-    async def _resolve_control(
-        self,
-        token: ContinuationToken,
-        *,
-        approved: bool,
-        until: datetime | None,
-        admit: Callable[[], None],
-    ) -> TurnOutcome:
-        self.calls.append(("resume", {"token": token.handle, "approved": approved}))
-        if token.handle in self._read_handles:
-            # **A parked read is answered through ``resume`` and through no second
-            # operation** (ADR-0244 §6), and taken first because every branch below is
-            # written about a parked step or a routed park.
-            return await self._answer_read(
-                token.handle, approved=approved, remember_recipients_until=until, on_resolving=admit
-            )
-        if token.handle in self.routed_parked:
-            if until is not None and approved:
-                # A routed park records no ``PermissionDecision`` and carries no
-                # egress binding, so there is nothing for a grant to be transcribed
-                # from (ADR-0235 §2). Refused **before** the park is claimed, so the
-                # operation may still be asked for again.
-                msg = (
-                    "this token names a routed operation rather than a confirmation about "
-                    "an outbound call, so answering it establishes no standing recipient "
-                    "grant; nothing was claimed (ADR-0235 §2)"
-                )
-                raise UngrantableActError(msg)
-            admit()
-            return await self._resume_routed(token.handle, approved=approved)
-        if token.handle not in self.parked:
-            # **A restatement establishes nothing and consults the argument no more
-            # than it consults ``approved``** (ADR-0198 §§1-3, ADR-0235 §4): it drives
-            # nothing, so its outcome carries ``recipient_grant`` ``None``.
-            return self._restate(token.handle)
-        # **The act is refused or recorded before the park is evicted** (ADR-0235
-        # §1, §2), so a refusal leaves the park exactly where it was and the same
-        # token answers it again without the argument — and the order is the
-        # concrete engine's, where the runner records the resolving decision inside
-        # the critical section that then replaces the park with its settled record.
-        # A fake that settled first would, on a trail that refused the write, leave
-        # a token restating an execution no answer authorised: a state no conforming
-        # hub can be in, and the one a consumer's own retry logic is written against.
-        collected: _CollectedAct | None = None
-        if until is not None:
-            collected = await self._collect_the_act(
-                token.handle, until, approved=approved, on_resolving=admit
-            )
-        # ``collected`` is ``None`` where no argument was supplied, and on the one
-        # further path that collects no act: a declining answer on a park this
-        # engine holds no recorded ``CONFIRM`` for, which is the state below.
-        admit()
-        confirmation = self.parked.pop(token.handle)
-        # **The binding is released with the park it was bound to**, and here rather
-        # than at :meth:`hold_confirmation_decision`'s own scope: a handle is a park's
-        # name and not a lifetime, so a decision left behind by a settled park would
-        # be found by the *next* park minted under that handle — and an act riding it
-        # would transcribe an unrelated call's account and destination set into a
-        # standing grant. Released **after** the refusals above, so a park that
-        # survived one keeps its binding and the same token answers it again.
-        self._parked_decisions.pop(token.handle, None)
-        # **The reference names the decision that actually cleared the step**, where
-        # this path recorded one (ADR-0004 §7, ADR-0014 §4). Before ADR-0235 nothing
-        # on this fake's resume recorded a decision at all, so the reference resolved
-        # to nothing on every path and could mislead nobody; now that the
-        # establishing act records one, a reference naming a *different* id would be
-        # the dangling ``approval_ref`` ADR-0014 §4 exists to prevent, in the one
-        # state a consumer can actually resolve.
-        cleared_by = (
-            (f"decision-{token.handle}" if collected is None else collected.answer.id)
-            if approved
-            else None
-        )
-        # **A denial is a result, not an exception** (ADR-0042 §4): the adapter
-        # conveys consent, the policy rules on it, and the engine records and
-        # executes. Only ``approved=False -> DENY`` is guaranteed; ``approved=True``
-        # may still be refused. Raising here instead would give a client a failure
-        # path the in-process engine does not have.
-        resolved = StepOutcome(
-            disposition=Disposition.EXECUTED if approved else Disposition.DENIED,
-            state=ExecutionState(
-                id=f"exec-{token.handle}",
-                plan_id=f"plan-{token.handle}",
-                steps=(
-                    StepExecution(
-                        step_id="step-1",
-                        # A succeeded step names the decision that cleared it, and a
-                        # denied one names why it was skipped: the type refuses a
-                        # step that claims either without saying so (ADR-0004 §7).
-                        status=StepStatus.SUCCEEDED if approved else StepStatus.SKIPPED,
-                        attempts=1 if approved else 0,
-                        approval_ref=cleared_by,
-                        bound_tool=confirmation.tool_id if approved else None,
-                        skip_reason=None if approved else SkipReason.APPROVAL_DENIED,
-                        started_at=_AT if approved else None,
-                        finished_at=_AT if approved else None,
-                    ),
-                ),
-                updated_at=_AT,
-            ),
-            step_id="step-1",
-            tool_id=confirmation.tool_id,
-        )
-        # Answered once, and now **retained** rather than forgotten (ADR-0198 §1).
-        # The eviction above and this write are one step with no ``await`` between
-        # them, which is §1's same-critical-section clause as this fake can state it:
-        # there is no instant at which the handle names neither a park nor a settled
-        # record. The state is filed where a restatement re-reads it from, never
-        # carried on the record itself (§2).
-        self.executions[resolved.state.id] = resolved.state
-        self._retain(
-            token.handle,
-            _Settled(
-                execution_id=resolved.state.id,
-                step_id=resolved.step_id,
-                tool_id=resolved.tool_id,
-                disposition=resolved.disposition,
-            ),
-        )
-        recipient_grant = (
-            None if collected is None else await self._establish_recipients(token.handle, collected)
-        )
-        # ``turn`` is ``None`` here because this engine parks nothing from a live
-        # turn — the shape a **recovered** park produces after a restart, which
-        # ADR-0052 §3 ratifies. The *step* is what a resume is for and is always
-        # present (ADR-0085 §4).
-        #
-        # **And `outbound_statement` is absent**, which is ADR-0264 §7's one `None`
-        # case rather than an omission: a recovered park is a pass ADR-0170 §4
-        # composes nothing for, and this engine established no contact on it. It is
-        # not ADR-0198 §1's restatement, which carries the value — that pass is the
-        # one below, over a *settled* binding.
-        return self._checked(
-            TurnOutcome(turn=None, step=resolved, recipient_grant=recipient_grant), "resume"
-        )
-
     def hold_confirmation_decision(self, handle: str, decision: PermissionDecision) -> None:
         """Bind a recorded ``CONFIRM`` to a park, so an establishing act can ride it.
 
         **A lever, because no sequence of surface calls reaches the state**, which is
-        :meth:`park`'s own reason one record over. ADR-0235 §2 has the act ride *the
+        :meth:`park_read`'s own reason one record over. ADR-0235 §2 has the act ride *the
         answer to a recorded ``CONFIRM``*, and
         :meth:`~ai_assistant.core.types.RecipientGrant.established_from` transcribes
         the grant's ``tool``, ``account`` and destination set **from that decision**
@@ -1888,533 +1333,6 @@ class FakeAssistantEngine:
             msg = f"the recipient-grant clock returned a non-conforming reading: {exc}"
             raise PlanningError(msg) from exc
 
-    async def _collect_the_act(
-        self,
-        handle: str,
-        remember_recipients_until: datetime,
-        *,
-        approved: bool,
-        on_resolving: Callable[[], None],
-    ) -> _CollectedAct | None:
-        """Refuse the establishing act, or record the answer it rides (ADR-0235 §1, §2).
-
-        **Every refusal here fires before anything is answered**, so the park survives
-        it and the same token answers the confirmation again without the argument —
-        the shape §2 states in terms and the one
-        :meth:`~ai_assistant.orchestration.runner.StepRunner.resume` already has.
-
-        **A park no recorded ``CONFIRM`` is bound to collects no act, and the two
-        answers part company on it exactly as §2 parts them.** The state is this
-        fake's own — :meth:`park` mints a park and
-        :meth:`hold_confirmation_decision` was never called, where every durable park
-        a hub holds has a recorded ``CONFIRM`` — but the engine is reached through
-        ``AssistantEngine`` all the same, so what ``resume`` does here is the
-        contract's to say and not this fake's.
-
-        An **approving** answer is refused, which is §2's binding refusal on its first
-        shape: there is no ``EgressBinding`` for
-        :meth:`~ai_assistant.core.types.RecipientGrant.established_from` to transcribe
-        from, the park survives, and the same token answers it again without the
-        argument. A **declining** one is *not* refused, because §2 rules that the
-        argument supplied beside ``approved=False`` "establishes nothing and changes
-        nothing else: the answer is recorded as a ``DENY`` exactly as it is today, the
-        step is denied, and no grant is written" — ADR-0042 §4's guarantee, which §2
-        states no exception to. "Exactly as it is today" is what settles the carrier
-        too: a park with no bound ``CONFIRM`` has nothing for an answer to resolve, so
-        nothing is recorded here and nothing is recorded by a ``resume`` without the
-        argument either, and ``DECLINED`` — which §4 makes an *assertion* that the
-        answer was recorded — would be the one thing that is false of it. So the act
-        is reported absent (§6, "every call that collected no act"), and the outcome
-        is byte for byte the one a plain ``resume`` returns.
-
-        **The declining answer reads no clock.** ADR-0235 §1's single reading exists
-        for the approving path, where one instant is compared against the chosen expiry
-        and then stamped on the answer; a decline compares nothing, so it is stamped
-        with this fake's fixed instant and a non-conforming ``recipient_grant_clock``
-        never stands between a user and the record of a decision they made
-        (ADR-0042 §4). The concrete runner consults its establishing instant on the
-        approving path alone for the same reason.
-
-        Args:
-            handle: The park being answered.
-            remember_recipients_until: The instant the user chose.
-            approved: What the user said.
-            on_resolving: Admit capture before recording the resolving answer.
-
-        Returns:
-            The collected act — the bound ``CONFIRM``, the answer just recorded, and
-            the instant the grant would expire at — or ``None`` where a declining
-            answer met a park no ``CONFIRM`` is bound to and there was no act to
-            collect.
-
-        Raises:
-            UngrantableActError: On an approving answer, if no recorded ``CONFIRM`` is
-                bound to this park, if §2's binding conditions refuse it, or if §1's
-                expiry does.
-            AuditError: If the trail refuses the answer (:meth:`_record_the_answer`).
-        """
-        confirmed = self._parked_decisions.get(handle)
-        if confirmed is None:
-            if not approved:
-                return None
-            msg = (
-                "this token names a park this engine holds no recorded CONFIRM whose "
-                "recipients could be made standing, so this answer establishes no "
-                "recipient grant; the confirmation is unaffected and may still be "
-                "answered (ADR-0235 §2)"
-            )
-            raise UngrantableActError(msg)
-        establishing_at: datetime | None = None
-        if approved:
-            self._check_establishable(confirmed)
-            establishing_at = self._establishing_instant(remember_recipients_until)
-        on_resolving()
-        answer = await self._record_the_answer(
-            handle,
-            confirmed,
-            at=establishing_at if establishing_at is not None else _AT,
-            approved=approved,
-        )
-        return _CollectedAct(
-            confirmed=confirmed, answer=answer, expires_at=remember_recipients_until
-        )
-
-    def _check_establishable(self, confirmed: PermissionDecision) -> None:
-        """Refuse an establishing act on a confirmation it may not ride (ADR-0235 §2).
-
-        The same two conditions §3 places on the recorded population, on the held
-        one, and refused before anything is answered — so the park survives and the
-        same token answers it again without the argument. It takes the bound
-        ``CONFIRM`` rather than the handle, which is the concrete runner's own
-        signature: a park this engine holds no decision for is refused one step
-        earlier (:meth:`_collect_the_act`) and never reaches here.
-
-        Args:
-            confirmed: The recorded ``CONFIRM`` the park is bound to.
-
-        Raises:
-            UngrantableActError: If its ``egress_binding`` is not an
-                :class:`~ai_assistant.core.types.EgressBinding`, or if that binding
-                carries ``planned_with_external_content``.
-        """
-        binding = confirmed.egress_binding
-        if not isinstance(binding, EgressBinding):
-            msg = (
-                "this confirmation records no egress call whose recipients could be made "
-                "standing, so this answer establishes no recipient grant; the confirmation "
-                "is unaffected and may still be answered (ADR-0235 §2)"
-            )
-            raise UngrantableActError(msg)
-        if binding.planned_with_external_content:
-            msg = (
-                "this confirmation records a call planned over external content; you may "
-                "approve such a call, and may not in that act make its recipients standing "
-                "(ADR-0193 §2, §4; ADR-0235 §2)"
-            )
-            raise UngrantableActError(msg)
-
-    def _establishing_instant(self, remember_recipients_until: datetime) -> datetime:
-        """Read the clock once, and refuse an expiry that is not strictly after it.
-
-        ADR-0235 §1: one reading, used for both the comparison and the answer this
-        engine records, because two reads admit an expiry that passes the check and
-        fails ``established_from``'s constructor.
-
-        Raises:
-            UngrantableActError: If the chosen instant is at or before that reading.
-                The message names the instant it was compared against.
-        """
-        decided_at = self._recipient_now()
-        if remember_recipients_until <= decided_at:
-            msg = (
-                f"a standing recipient grant expires strictly after the answer that "
-                f"establishes it; {remember_recipients_until.isoformat()} is at or before "
-                f"{decided_at.isoformat()}, the instant this answer would carry, so nothing "
-                f"was recorded (ADR-0235 §1)"
-            )
-            raise UngrantableActError(msg)
-        return decided_at
-
-    async def _record_the_answer(
-        self, handle: str, confirmed: PermissionDecision, *, at: datetime, approved: bool
-    ) -> PermissionDecision:
-        """Author and record the resolving decision this act rides (ADR-0193 §2).
-
-        Called **before** the park is evicted, so a trail that refuses the write
-        leaves the park exactly where it was and the token still answerable — the
-        order the concrete engine has, where the runner records inside the critical
-        section that later replaces the park with its settled record.
-
-        **On both answers**, because ADR-0042 §4 guarantees the ``DENY``'s record and
-        ADR-0235 §4's ``DECLINED`` asserts it on the carrier. This engine holds no
-        ``ActionPolicy``, so the ruling is the one an approving or declining answer
-        produces; a consumer wanting a policy that declines an *approving* answer is
-        exercising a hub's own thresholds rather than this double.
-
-        Args:
-            handle: The park being answered.
-            confirmed: The recorded ``CONFIRM`` the park is bound to.
-            at: The instant to stamp, which on an approving answer is the one
-                ADR-0235 §1's expiry was already compared against, and on a declining
-                one is this fake's fixed instant — a decline reads no clock at all.
-            approved: What the user said.
-            on_resolving: Admit capture before recording the resolving answer.
-
-        Returns:
-            The recorded resolving decision.
-
-        Raises:
-            AuditError: If the trail refuses the answer. It propagates, because a
-                trail that will not hold the record of a decision is not a state
-                this engine may report an outcome over.
-        """
-        answer = PermissionDecision.from_confirmation(
-            confirmed,
-            _approving(confirmed) if approved else _declining(),
-            id=f"decision-{handle}-answer",
-            decided_at=at,
-        )
-        await self.trail.record(answer)
-        return answer
-
-    async def _establish_recipients(
-        self, handle: str, collected: _CollectedAct
-    ) -> RecipientGrantOutcome:
-        """Say what became of the act this ``resume`` collected.
-
-        Reached **after** the step has executed and settled, so nothing here raises
-        and everything here is reported on the carrier (ADR-0235 §6). The three
-        refusing members are read from the **type** of the refusal ``record`` raised
-        and from nothing else — no message is parsed, no count taken, and no listing
-        read afterwards (ADR-0235 §11).
-
-        Reached only where an act was collected, and a collected act always carries a
-        recorded answer (:meth:`_collect_the_act`): the refusals fire before anything
-        is answered, so there is no state here in which the carrier would have to
-        describe an answer that was never made.
-        """
-        if collected.answer.ruling.outcome is not PermissionOutcome.ALLOW:
-            # The one member that never reaches the store (ADR-0235 §4): the
-            # resolving ruling was not an ``ALLOW``, so no grant could be established
-            # from it and ``RecipientGrantStore.record`` was not called at all.
-            return RecipientGrantOutcome(not_established=RecipientGrantNotEstablished.DECLINED)
-        grant = RecipientGrant.established_from(
-            collected.confirmed,
-            collected.answer,
-            id=f"recipient-grant-{handle}",
-            expires_at=collected.expires_at,
-        )
-        # **The mapping is reached for rather than restated** (ADR-0235 §4, §11): a
-        # second copy of "which member does this refusal mean" would let a
-        # consumer's tests certify against a hub that answers differently.
-        return await record_the_grant(self.recipient_grants, grant)
-
-    def _retain(self, handle: str, settled: _Settled) -> None:
-        """Record one answered binding under its handle, within ADR-0198 §4's bound.
-
-        The bound is ``max_outstanding_confirmations`` and no figure is invented: the
-        number of answers a client can be uncertain about at once is bounded by the
-        number of tokens it can hold at once. A **count**, never a lifetime — no
-        clock is read, so nothing here makes a token's answerability depend on how
-        long a user stared at a page — and the discard is the **least recently
-        settled**, which this table's insertion order already is, since a handle
-        settles at most once and a restatement reads without re-inserting.
-        """
-        while len(self.settled) >= self._max_outstanding:
-            self.settled.pop(next(iter(self.settled)))
-        self.settled[handle] = settled
-
-    def _restate(self, handle: str) -> TurnOutcome:
-        """Say what a settled binding was decided, or refuse a token naming nothing.
-
-        The restatement's shape is ADR-0170 §4's second one exactly (ADR-0198 §2):
-        ``turn`` ``None``, ``routed`` ``None``, ``reply`` ``None`` and
-        ``reply_degraded`` ``False``, beside a ``step`` carrying the resolution's
-        immutable facts and a ``confirmation`` of ``None`` — which the type's own
-        validator already requires of a disposition that is not
-        ``AWAITING_CONFIRMATION``.
-
-        **The state is re-read here and never cached at settlement.**
-        ``StepOutcome.state`` is the durable execution state after the last transition
-        committed, and a value snapshotted at settlement stops being that the moment
-        anything advances the execution (ADR-0139 §2). Where :attr:`executions` no
-        longer holds it — the fake's spelling of a plan store that has dropped it —
-        this raises ``PlanningError`` and asserts nothing about the outcome, because
-        an outcome it cannot read is not one it may state.
-
-        Args:
-            handle: The continuation handle presented, naming no park.
-
-        Returns:
-            The restated outcome.
-
-        **The refusal names both remedies, because at this point the two kinds of
-        park are indistinguishable.** A handle reaching here is a step park unknown,
-        aged out of ADR-0198 §4's bound or minted by an earlier engine — for which
-        ``pending_confirmations`` re-mints a token — *or* a routed park already
-        claimed, for which ADR-0197 §7 rules that ``pending_confirmations`` "does
-        **not** list a routed park" and the remedy is §7's own sentence: nothing has
-        happened yet, so the operation is asked for again rather than resumed again.
-        Naming only the first would teach a surface the one remedy that cannot help a
-        routed token, and this fake is what every interface adapter's tests are
-        written against — so it states what ``Engine._restate`` states (#1653).
-
-        Args:
-            handle: The continuation handle presented, naming no park.
-
-        Returns:
-            The restated outcome.
-
-        Raises:
-            UnknownContinuationError: If the handle names no settled record either —
-                unknown, minted by an earlier engine, discarded under ADR-0198 §4's
-                bound, or a **routed** park already claimed (ADR-0197 §7).
-                **Never a denial** (ADR-0084 §7).
-            PlanningError: If the settled binding's execution is no longer held.
-        """
-        settled = self.settled.get(handle)
-        if settled is None:
-            msg = (
-                "this token names no step awaiting confirmation in this engine, and no answer "
-                "this engine still holds; it may be from an earlier run of the process, or its "
-                "answer may have aged out. If it named a routed operation, this engine can no "
-                "longer say whether that operation ran: a routed park is evicted the moment it "
-                "is claimed, is never listed and is never re-minted, so ask for the operation "
-                "again rather than resuming this token, and the answer will say what it finds. "
-                "If it named a parked step, pending_confirmations() re-mints a token for any "
-                "park that is still answerable"
-            )
-            raise UnknownContinuationError(msg)
-        state = self.executions.get(settled.execution_id)
-        if state is None:
-            msg = f"the store no longer holds execution {settled.execution_id!r} for this token"
-            raise PlanningError(msg)
-        restated = StepOutcome(
-            disposition=settled.disposition,
-            state=state,
-            step_id=settled.step_id,
-            tool_id=settled.tool_id,
-            confirmation=None,
-        )
-        # **ADR-0264 §7 gives a restatement `NOT_REACHED` and not `None`**, and names
-        # it among the three passes that carry the value: it "drives nothing and
-        # searches nothing", so there is nothing it could have reached. It composes no
-        # prose of its own, and §7's rendering asymmetry — `NOT_REACHED` renders only
-        # beside a reply — is the *surface's* rule rather than a reason to leave the
-        # member absent here. The concrete engine carries it on this shape for the same
-        # reason, and a fake that did not would let a client's test pass over an
-        # outcome no engine produces.
-        return self._checked(
-            TurnOutcome(turn=None, step=restated, outbound_statement=self._outbound()), "resume"
-        )
-
-    # --- the two accumulation legs ----------------------------------------
-
-    async def _answer_read(
-        self,
-        handle: str,
-        *,
-        approved: bool,
-        remember_recipients_until: datetime | None,
-        on_resolving: Callable[[], None],
-    ) -> TurnOutcome:
-        """Answer one parked read, or restate that its question is spent (ADR-0244 §6, §9).
-
-        **One answer, at most one dispatch, however many times a token is presented.**
-        The park is removed at the answer, so a second ``resume`` on the same token
-        returns ``ALREADY_SETTLED``, consults nothing and mints nothing — which is the
-        clause ADR-0244 §6 states over a durable compare-and-swap, held here by the
-        table this fake keeps.
-
-        **The establishing act rides this answer exactly as it rides a step's**
-        (ADR-0244 §5, ADR-0235 §2), and this fake performs the same two refusals through
-        the same helpers — **before the park is spent**, so a refused act leaves the
-        question standing and the same token answers it again without the argument. A
-        fake that ignored the argument would certify a consumer against an engine that
-        refuses it, which is exactly ADR-0026 §7's failure: the request would be
-        reported as landed on a binding no grant may cover.
-
-        **The member a dispatching answer carries is scriptable** (:attr:`read_answers`),
-        because a fake that performs no real send cannot *reach* ``AUTHORITY_CHANGED``,
-        ``OPERATION_CHANGED`` or ``UNAVAILABLE_NOW`` — and a surface obliged to render a
-        fixed statement per member needs every member reachable (ADR-0244 §13).
-
-        Args:
-            handle: The continuation handle naming the park.
-            approved: The user's own answer.
-            on_resolving: Admit capture only after the park was claimed for a ruling.
-            remember_recipients_until: The instant a standing request names, or ``None``.
-
-        Returns:
-            The outcome, carrying ``read_answer`` and never ``read_confirmation``.
-
-        Raises:
-            UngrantableActError: If the act may not ride this park's confirmation, or the
-                expiry is not strictly after the instant the answer would carry. Raised
-                **before the park is spent** (ADR-0235 §1, §2; ADR-0244 §5).
-        """
-        # **The act's two refusals, before anything is claimed or recorded** (ADR-0235
-        # §1, §2; ADR-0244 §5), and **only where an act was asked for**: an ordinary
-        # approval requests no standing authority, so nothing here may test one — a user
-        # must be able to approve a lookup without also being told their binding cannot
-        # carry a grant they never requested.
-        confirmation = self.read_parked.get(handle)
-        if confirmation is None:
-            # **A duplicate answer performs nothing and restates what was decided**
-            # (ADR-0244 §6): it consults no policy, opens no channel, records nothing and
-            # mints nothing — and, because it performs nothing, it touches **no other
-            # state either**. In particular a dispatch this process is running stays
-            # running and stays cancellable: repeated answers and cancellation are two
-            # operations over one park (§11), and a restatement that tore down the
-            # registry would let a double-clicked button make the act unreachable.
-            #
-            # **The member is the park's own terminal disposition**, which is why one is
-            # kept: §9 states ``EXPIRED`` over the disposition "whether this call settled
-            # it or an earlier read did", so a fake that only remembered *that* a question
-            # was gone would report a park an earlier read expired as merely settled — and
-            # a surface would render the wrong one of two fixed statements.
-            return TurnOutcome(
-                turn=None,
-                read_answer=self.read_settled.get(handle, ReadAnswerOutcome.ALREADY_SETTLED),
-            )
-        # **The act's two refusals, before anything is claimed or recorded** (ADR-0235
-        # §1, §2; ADR-0244 §5), and **only where an act was asked for**: an ordinary
-        # approval requests no standing authority, so nothing here may test one — a user
-        # must be able to approve a lookup without being told their binding cannot carry
-        # a grant they never requested.
-        wants_act = remember_recipients_until is not None
-        confirmed = self._parked_decisions.get(handle)
-        # The **one** instant this answer carries (ADR-0235 §1): read once here, compared
-        # against the chosen expiry here, and stamped on the record below. A second
-        # reading admits an expiry that passes the check and fails
-        # ``RecipientGrant.established_from``'s constructor, which is the failure that
-        # clause exists to remove rather than to narrow.
-        at = _AT
-        if wants_act and approved:
-            if confirmed is None:
-                msg = (
-                    "this token names a park this engine holds no recorded CONFIRM whose "
-                    "recipients could be made standing, so this answer establishes no "
-                    "recipient grant; the question is unaffected and may still be "
-                    "answered (ADR-0235 §2)"
-                )
-                raise UngrantableActError(msg)
-            self._check_establishable(confirmed)
-            assert remember_recipients_until is not None  # noqa: S101 — `wants_act` is the guard
-            at = self._establishing_instant(remember_recipients_until)
-        # **What this answer reaches, decided before the question is claimed** (ADR-0244
-        # §6): the availability clauses precede the gate, so a member whose ground is one
-        # of them must leave the park exactly where it was.
-        outcome = (
-            ReadAnswerOutcome.DECLINED
-            if not approved
-            else self.read_answers.get(handle, ReadAnswerOutcome.DISPATCHED)
-        )
-        if outcome in _READ_OUTCOMES_THAT_SPEND_THE_PARK:
-            # **The gate, taken before any resolution is recorded** (ADR-0244 §6): a
-            # caller that lost it rules nothing and records nothing, and there is no
-            # window in which a settled decision stands beside an open question. The
-            # disposition is kept beside the eviction, which is §3's "a settled park keeps
-            # its terminal facts" at the one fact this fake can be asked about again.
-            self._settle_read(handle, outcome)
-        if outcome in _READ_OUTCOMES_THAT_RULE:
-            on_resolving()
-        grant: RecipientGrantOutcome | None = None
-        if outcome in _READ_OUTCOMES_THAT_RULE and confirmed is not None:
-            # **Only the outcomes ADR-0244 §9 says carry a ruling record one.**
-            # ``DISPATCHED`` is the resolving ``ALLOW``, ``DECLINED`` is the ``DENY`` the
-            # user asked for, and ``AUTHORITY_CHANGED`` is the approving answer the policy
-            # refused, whose ruling "**is** recorded". The other four state in terms that
-            # nothing was ruled, so a fake writing a row for one would certify a consumer
-            # against a trail no hub writes.
-            try:
-                answer = await self._record_the_answer(
-                    handle,
-                    confirmed,
-                    at=at,
-                    approved=outcome is ReadAnswerOutcome.DISPATCHED,
-                )
-            except AuditError:
-                # **A refused resolving append is never raised out of a read's answer**
-                # (ADR-0244 §6): "it is **returned and not raised**, because a refusal on
-                # ``resume`` is a result". Clause 5 makes the already-resolved ground
-                # unreachable here — the park's one answer was taken above — so what this
-                # is is one of that class's other grounds, or a fault. The answer is not
-                # recorded, **the park stays spent**, nothing is dispatched, and the
-                # outcome is ``OPERATION_CHANGED``.
-                #
-                # The step path still propagates it, and the asymmetry is ADR-0244 §6
-                # rather than an inconsistency: a step's resume has a disposition it must
-                # author over a decision the trail would not hold, and a read's has a
-                # member for exactly this.
-                self._settle_read(handle, ReadAnswerOutcome.OPERATION_CHANGED)
-                return TurnOutcome(turn=None, read_answer=ReadAnswerOutcome.OPERATION_CHANGED)
-            if wants_act:
-                assert remember_recipients_until is not None  # noqa: S101 — `wants_act` is the guard
-                grant = await self._establish_recipients(
-                    handle,
-                    _CollectedAct(
-                        confirmed=confirmed,
-                        answer=answer,
-                        expires_at=remember_recipients_until,
-                    ),
-                )
-        if outcome is not ReadAnswerOutcome.DISPATCHED:
-            # ADR-0170 §4's second shape on every one of them: ``turn`` ``None``,
-            # ``reply`` ``None`` (ADR-0244 §9, §10). Nothing is sent and the parked
-            # turn's own reply stands.
-            return TurnOutcome(turn=None, recipient_grant=grant, read_answer=outcome)
-        # ADR-0244 §8: a resumed turn, not a step. ``turn`` is a real ``TurnResult``,
-        # ``step`` is ``None``, and the reply is composed — which is where §8 partially
-        # supersedes ADR-0052 §3's ``TurnOutcome(turn=None, step=<resolution>)``.
-        return TurnOutcome(
-            turn=self._read_turn(confirmation),
-            reply="Here is what that lookup found.",
-            recipient_grant=grant,
-            read_answer=ReadAnswerOutcome.DISPATCHED,
-            # ADR-0264 §7: this pass composed a reply, so it carries a statement.
-            # **Only this one of the read answers does**: every other member returns
-            # above with `turn` and `reply` `None`, establishing no contact and
-            # composing nothing, which is exactly §7's `None` case — and it is where
-            # the concrete engine leaves the member absent too.
-            outbound_statement=self._outbound(),
-        )
-
-    def _settle_read(self, handle: str, outcome: ReadAnswerOutcome) -> None:
-        """Take the question and keep the one terminal fact a later answer reads.
-
-        ADR-0244 §3's "a settled park keeps its terminal facts and loses its content", at
-        the one fact this fake can be asked about again: §9 states ``EXPIRED`` over the
-        **disposition** rather than over which call discovered it, so a park an earlier
-        read expired must answer ``EXPIRED`` to every later one. Every other terminal
-        member reads as ``ALREADY_SETTLED``, which is what §9 says a second answer to an
-        answered, denied or cancelled park gets.
-
-        **It does not touch the dispatch registry** (ADR-0244 §11): what a settlement
-        ends is the *question*, and a read this process is running is a separate fact
-        that a cancellation still reaches.
-
-        Args:
-            handle: The park being settled.
-            outcome: The member this answer reached.
-        """
-        self.read_parked.pop(handle, None)
-        self.read_settled[handle] = (
-            ReadAnswerOutcome.EXPIRED
-            if outcome is ReadAnswerOutcome.EXPIRED
-            else ReadAnswerOutcome.ALREADY_SETTLED
-        )
-
-    @staticmethod
-    def _read_turn(confirmation: Confirmation) -> TurnResult:
-        """A resumed turn over the approved read, shaped as ADR-0244 §8 fixes it.
-
-        Two members would be the parked turn's and two the resumed turn's on a real
-        engine; this fake holds no parked turn, so it builds a coherent one rather than
-        pretending to have recovered it.
-        """
-        return _turn(str(confirmation.parameters.get("query", "the parked lookup")))
-
     async def stop_activation(self, activation_id: Identifier, /) -> ActivationStop:
         """Stop one running activation, as the engine does (ADR-0297 §3, §5).
 
@@ -2442,51 +1360,6 @@ class FakeAssistantEngine:
             ActivationStop.NO_SUCH_ACTIVATION if episode is None else ActivationStop.ALREADY_ENDED,
             "stop_activation",
         )
-
-    async def cancel_read(self, token: ContinuationToken, /) -> ReadCancellation:
-        """Withdraw a parked read's question, or interrupt the read it dispatched.
-
-        ADR-0244 §11's three states, and a token naming no read park this engine has
-        ever held raises ``UnknownContinuationError`` — **never a denial** (ADR-0084 §7),
-        and never a ``NOTHING_TO_CANCEL`` that would tell a caller its question was
-        already gone.
-
-        **Cancelling an open park records no answer**, which is the whole difference
-        from a denial: nothing here writes a ruling, and this fake's ``resume`` on the
-        same token afterwards returns ``ALREADY_SETTLED``.
-
-        Args:
-            token: The continuation naming the park.
-
-        Returns:
-            Which of ADR-0244 §11's three states this call reached.
-
-        Raises:
-            UnknownContinuationError: If the handle names no read park this engine holds
-                or has held.
-        """
-        check_arguments("cancel_read", max_bytes=self._max_payload_bytes, token=token)
-        self.calls.append(("cancel_read", {"token": token.handle}))
-        if token.handle not in self._read_handles:
-            msg = (
-                "this token names no parked read in this engine; it may name a parked "
-                "step or a routed operation, neither of which this operation cancels "
-                "(ADR-0244 §11)"
-            )
-            raise UnknownContinuationError(msg)
-        if token.handle in self.read_dispatching:
-            # **The park stays ``APPROVED`` and is not re-opened**: the question was
-            # answered, the call was made, and no caller assumes the query did not leave.
-            self.read_dispatching.discard(token.handle)
-            return self._checked(ReadCancellation.INTERRUPTED, "cancel_read")
-        if self.read_parked.pop(token.handle, None) is not None:
-            # **A cancelled park's decision is the one that returns to the listing**
-            # (ADR-0244 §5): a cancellation writes no resolution and never will, so §5's
-            # eighth condition stops excluding it and §3's seven govern the row.
-            self._read_decisions.pop(token.handle, None)
-            self.read_settled[token.handle] = ReadAnswerOutcome.ALREADY_SETTLED
-            return self._checked(ReadCancellation.WITHDRAWN, "cancel_read")
-        return self._checked(ReadCancellation.NOTHING_TO_CANCEL, "cancel_read")
 
     async def goals(
         self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
@@ -3764,20 +2637,6 @@ class FakeAssistantEngine:
 
     # --- durable recovery --------------------------------------------------
 
-    async def pending_confirmations(self) -> tuple[Confirmation, ...]:
-        """Hand back every park that is still answerable, with a resolvable token.
-
-        **Two populations in one operation** (ADR-0244 §5): the parked steps and the
-        open read parks, each carrying the discriminator ADR-0244 §4 gives it, so a
-        surface needs one renderer and not two (ADR-0178 §5).
-        """
-        self.calls.append(("pending_confirmations", {}))
-        return self._checked(
-            (*self.parked.values(), *self.read_parked.values()), "pending_confirmations"
-        )
-
-    # --- the grant surface (ADR-0102 §1) -----------------------------------
-
     async def grantable_sources(self) -> tuple[GrantableSource, ...]:
         """List the **grantable** held sources, each with its location and live grant.
 
@@ -4888,67 +3747,6 @@ class FakeAssistantEngine:
         self.grants_recorded.append(record)
         return record
 
-    def park(
-        self,
-        handle: str,
-        *,
-        tool_id: str = "t-1",
-        egress: EgressBinding | None = None,
-        authorization: AuthorizationProjection | None = None,
-    ) -> Confirmation:
-        """Park one confirmation this engine will resolve, and return it.
-
-        **The egress member is reduced from the binding by the same rule the real
-        engine uses** (ADR-0178 §5): ``account_identity`` from
-        ``egress.account.identity``, ``spans`` from ``egress.spans``, and each of
-        ``planned_with_external_content`` and ``coverage`` transcribed from the
-        binding's own (ADR-0181 §3, ADR-0233 §4) — never a constant of this fake's,
-        which would be the second carriage those clauses forbid. ``None`` where no
-        binding is given. That identity is what makes this fake a
-        producer the shared contract's ADR-0178 §3 clause can be held to — a fake
-        assembling the member some other way would pass a suite written against
-        itself.
-
-        Args:
-            handle: The continuation handle this park is answered by.
-            tool_id: The parked call's tool.
-            egress: The binding the ruling was taken over, or ``None`` for a
-                non-egress ``CONFIRM``. Reduced here rather than accepted
-                pre-reduced, so the reduction is the thing under test.
-            authorization: What answering would establish (ADR-0254 §11), or ``None``
-                where answering proposes no row — which is every park this fake makes
-                unless a caller states otherwise.
-
-        Returns:
-            The parked confirmation.
-        """
-        confirmation = Confirmation(
-            tool_id=tool_id,
-            tool_description="a tool the fake engine parked",
-            parameters={},
-            reason="the policy wants a human answer",
-            token=ContinuationToken(handle=handle),
-            egress=(
-                None
-                if egress is None
-                else ConfirmationEgress(
-                    account_identity=egress.account.identity,
-                    spans=egress.spans,
-                    planned_with_external_content=egress.planned_with_external_content,
-                    coverage=egress.coverage,
-                )
-            ),
-            # A step's confirmation, so ``read`` is absent (ADR-0244 §4, §16).
-            read=None,
-            # ADR-0254 §11, and **absent unless the caller states one**: §1's four
-            # proposal conditions decide presence, and this fake proposes no row — so
-            # ``None`` is what is true of a park it made, and a surface that renders the
-            # member is exercised by passing one.
-            authorization=authorization,
-        )
-        self.parked[handle] = confirmation
-        return confirmation
-
     def park_read(
         self,
         handle: str,
@@ -4960,10 +3758,9 @@ class FakeAssistantEngine:
     ) -> Confirmation:
         """Park one **read** this engine will answer, and return its question (§4, §5).
 
-        The read twin of :meth:`park`, and it exists for that method's reason: a park is
-        reached inside a turn, so an implementation has to be handed to a suite that
-        drives one — and a surface lane needs a question to render without a search
-        account, a policy and a trail behind it.
+        A lever, because a park is reached inside a turn, so an implementation has to
+        be handed to a suite that drives one — and a surface lane needs a question to
+        render without a search account, a policy and a trail behind it.
 
         **``parameters`` carry the exact query**, because ADR-0244 §13 makes that what a
         surface renders and forbids a summary, an abbreviation, a truncation, a re-cased
@@ -4977,12 +3774,12 @@ class FakeAssistantEngine:
             handle: The continuation handle this park is answered by.
             query: The composed query, byte for byte as a ruling was taken over it.
             origin: The origin the request names.
-            egress: The binding the ruling was taken over, reduced here exactly as
-                :meth:`park` reduces it. ``None`` builds a question with no egress
+            egress: The binding the ruling was taken over, reduced here by the rule
+                the real engine uses (ADR-0178 §5). ``None`` builds a question with no egress
                 member, which ADR-0244 §4 says a real ``WEB_SEARCH`` park never has —
                 and which a surface must still not crash on.
-            authorization: What answering would establish (ADR-0254 §11), on
-                :meth:`park`'s own terms.
+            authorization: What answering would establish (ADR-0254 §11), or
+                ``None`` where answering proposes no row.
 
         Returns:
             The parked read's confirmation.
@@ -5004,11 +3801,10 @@ class FakeAssistantEngine:
                 )
             ),
             read=ReadKind.WEB_SEARCH,
-            # ADR-0254 §11, on :meth:`park`'s own terms.
+            # ADR-0254 §11, absent unless the caller states one.
             authorization=authorization,
         )
         self.read_parked[handle] = confirmation
-        self._read_handles.add(handle)
         return confirmation
 
     def _park_excludes(self, decision_id: str) -> bool:
@@ -5035,127 +3831,6 @@ class FakeAssistantEngine:
             Whether a read park this engine holds excludes it.
         """
         return decision_id in self._read_decisions.values()
-
-    def dispatching_read(self, handle: str) -> None:
-        """Put a parked read's dispatch "in flight", so a cancellation can interrupt it.
-
-        A lever, for :meth:`park`'s own reason: this fake performs no real send, so
-        ADR-0244 §11's second state — a read this process had dispatched and had not
-        completed — is reachable through no sequence of surface calls, and a surface
-        rendering ``INTERRUPTED`` needs it reachable.
-
-        **It takes the question out of the listing**, because a dispatch is only ever
-        reached **after** the park was settled ``APPROVED`` (ADR-0244 §6's clauses 5 and
-        6): a fake that left it standing would offer a question already answered, and a
-        consumer would read ``INTERRUPTED`` beside a park it could answer again — which
-        is exactly the state §11 says is not reachable, since "a cancelled dispatch
-        leaves the park ``APPROVED`` and does not re-open it".
-
-        Args:
-            handle: The continuation handle naming the park.
-        """
-        self.read_dispatching.add(handle)
-        self._read_handles.add(handle)
-        self._settle_read(handle, ReadAnswerOutcome.DISPATCHED)
-
-    def park_routed(
-        self, handle: str, *, operation: RoutableOperation, subject: RoutedListing
-    ) -> OperationConfirmation:
-        """Park one routed confirmation this engine will resolve, and return it (§7).
-
-        The routed twin of :meth:`park`, and it exists for that method's reason: a park
-        is reached inside a turn, so an implementation has to be handed to a suite
-        already holding one. ADR-0197 §7 makes a routed park doubly unreachable from the
-        surface — ``pending_confirmations`` does not list it, and no durable store
-        recovers it — so a lever is the *only* way a conformance case can reach the
-        resume path at all.
-
-        The card is assembled here rather than accepted pre-built, so what the shared
-        suite holds this fake to is the type's own invariants: exactly one subject, of
-        the arm ``operation`` names.
-
-        Args:
-            handle: The continuation handle this park is answered by.
-            operation: Which confirm-owed operation is waiting on the user's answer.
-            subject: The display subject, as a one-element listing.
-
-        Returns:
-            The parked confirmation, whose token the caller relays back to
-            :meth:`resume`.
-        """
-        confirmation = OperationConfirmation(
-            operation=operation, subject=subject, token=ContinuationToken(handle=handle)
-        )
-        self.routed_parked[handle] = confirmation
-        return confirmation
-
-    async def _resume_routed(self, handle: str, *, approved: bool) -> TurnOutcome:
-        """Answer a routed park, and perform what the answer authorised (ADR-0197 §7).
-
-        **Claimed once**: the entry is removed before anything is performed, so a second
-        presentation of the token — whatever its ``approved`` value — falls through to
-        :meth:`resume`'s unknown-token refusal.
-
-        **The refusal is returned, never raised.** ``approved`` ``False`` yields
-        ``RouteOutcome.REFUSED`` and no ``PermissionDeniedError``, because no
-        ``ActionPolicy`` was consulted and no ``PermissionDecision`` recorded — ADR-0197
-        §13's partial supersession of ADR-0042 §4, scoped to exactly this case.
-
-        The operation is performed by calling this engine's own implementation of it
-        (ADR-0197 §2), so a routed ``forget`` and a typed-door ``forget`` destroy the
-        same belief through the same code.
-        """
-        card = self.routed_parked.pop(handle)
-        operation = card.operation
-        if not approved:
-            outcome = RouteOutcome.REFUSED
-        else:
-            await self._perform_routed(card)
-            outcome = RouteOutcome.PERFORMED
-        # A routed pass that is not a park **owes an answer** (ADR-0197 §8), and this
-        # one composes nothing — a fake originates no model call — so it carries the
-        # fixed sentence below. Carrying `reply=None` instead would be the one routed
-        # shape §8 refuses outright, so the fake could not even construct its own
-        # outcome; carrying `reply_degraded=True` would claim a composition that failed.
-        return self._checked(
-            TurnOutcome(
-                turn=None,
-                routed=RoutedOperation(operation=operation, outcome=outcome),
-                reply=_ROUTED_REPLY,
-                # ADR-0264 §7's routed pass that is **not** a park: an answer is owed
-                # and prose exists, so the member is a statement and not `None`. The
-                # `None` §7 reserves belongs to the pass that *parked*, on which
-                # ADR-0197 §10 rules "the composing stage is not reached"; this is the
-                # pass that answered it.
-                outbound_statement=self._outbound(),
-            ),
-            "resume",
-        )
-
-    async def _perform_routed(self, card: OperationConfirmation) -> None:
-        """Call this engine's own implementation of the card's operation (ADR-0197 §2).
-
-        The scalar identity is read off the display subject by ADR-0197 §5's mapping —
-        ``Belief.id``, ``Question.id``, ``SourceGrant.source`` — and it is the identity
-        the façade is called with, never the record.
-        """
-        (subject,) = card.subject
-        match card.operation:
-            case RoutableOperation.FORGET:
-                await self.forget(cast("Belief", subject).id)
-            case RoutableOperation.FORGET_QUESTION:
-                await self.forget_question(cast("Question", subject).id)
-            case RoutableOperation.REVOKE:
-                await self.revoke(cast("SourceGrant", subject).source)
-            case RoutableOperation.GUARD:
-                await self.guard(cast("Belief", subject).id)
-            case RoutableOperation.UNGUARD:
-                await self.unguard(cast("Belief", subject).id)
-            case _:  # pragma: no cover — `OperationConfirmation` admits no read-only member
-                msg = f"{card.operation.value} is read-only and is never confirmed"
-                raise AssertionError(msg)
-
-    # --- the clauses no type expresses -------------------------------------
 
     def _checked[T](self, result: T, method: str) -> T:
         """Refuse a result the contract does not admit, before returning it (§8c)."""
@@ -5215,22 +3890,6 @@ def _approving(confirmed: PermissionDecision) -> PermissionRuling:
         outcome=PermissionOutcome.ALLOW,
         reason="the fake engine records the answer the user gave",
         authorised_by=confirmed.id,
-    )
-
-
-def _declining() -> PermissionRuling:
-    """The resolving ``DENY`` a declining answer produces.
-
-    ``authorised_by`` is unset and refused if set: ``PermissionRuling`` admits an
-    authorisation pointer on an ``ALLOW`` alone, which is the same "only the coherent
-    outcome may carry this" rule the record's own lifetime validator uses.
-
-    Returns:
-        The ruling.
-    """
-    return PermissionRuling(
-        outcome=PermissionOutcome.DENY,
-        reason="the fake engine records the answer the user gave",
     )
 
 

@@ -1,39 +1,28 @@
-"""``cancel_read`` crosses the wire, and every promoted method binds to its signature.
+"""A positional-only parameter crosses the wire, and every promoted method binds.
 
-**The defect this module exists for (#2243) was invisible to every suite in the
-tree**, and the reason is worth stating because it decides where the regression
-belongs. ``AssistantEngine.cancel_read`` declares its token **positional-only** —
-``async def cancel_read(self, token: ContinuationToken, /)``, as ADR-0244 §11
-states the signature — and ``wire/server.py``'s one dispatch site called every
-promoted method by keyword splat. So the CLI's ``assistant cancel-read`` and the
-browser's "Cancel this lookup" both raised ``TypeError`` inside the hub, which is
-not an ``AssistantError``, so it escaped the error handler and **the connection
-dropped with no reply**. Both surfaces ADR-0244 §13 names for this kind offered
-the act; neither could perform it.
-
-Nine modules mention ``cancel_read`` and every one of them called an engine **in
-process**, where Python binds the token positionally and the ``/`` is satisfied.
-The single wire-level test asserted that the *name* is in the promoted set, which
-was true and said nothing about whether dispatching it binds. So what is pinned
-here is the seam itself: a real client, a real ``AF_UNIX`` socket, a real
-``serve_connection``, and the canonical fake behind it — the level at which the
-bug is reachable and below which it is not.
+**The defect this module was written for (#2243) was invisible to every suite in the
+tree.** ``AssistantEngine.cancel_read`` declared its token **positional-only**, and
+``wire/server.py``'s one dispatch site called every promoted method by keyword splat,
+so the hub raised ``TypeError`` — not an ``AssistantError`` — and **the connection
+dropped with no reply**. ``cancel_read`` left the surface with the old path's turn
+(ADR-0309 §5:1); the kind of parameter that broke it did not. ``stop_activation``,
+``withdraw_clarification`` and ``abandon_goal`` each take their subject the same way,
+and ``wire/surface.py`` cites this module as the pin on the call shape, so it keeps
+its name and its subject moves to ``stop_activation``.
 
 **Two kinds of binding, and the second is what keeps this from recurring.** The
-first drives ADR-0244 §11's three states and its unknown-token refusal over the
-socket, which is the defect itself. The second is signature-shaped rather than
-method-shaped: it holds that *every* promoted method's declared arguments reach
-its declared parameters, so a future operation that lands with a positional-only
-parameter is covered on the day it lands rather than on the day a QA run finds it
-on a live hub. That is ``wire/surface.py``'s own principle — read the mapping off
-the Protocol rather than transcribing a table — applied to the test that guards it.
+first drives a positional-only method over a real client, a real ``AF_UNIX`` socket
+and a real ``serve_connection``, with the canonical fake behind it — the level at
+which the defect was reachable and below which it was not. The second is
+signature-shaped rather than method-shaped: it holds that *every* promoted method's
+declared arguments reach its declared parameters, so a future operation that lands
+with a positional-only parameter is covered on the day it lands. That is
+``wire/surface.py``'s own principle — read the mapping off the Protocol rather than
+transcribing a table — applied to the test that guards it.
 
-**The four socket cases are marked ``integration`` and the two signature ones are
-not**, which is ``CONTRIBUTING.md`` → "Testing" applied as
-``tests/wire/test_client_overlay.py`` reads it: "a Unix socket is the filesystem".
-The split is real rather than cosmetic — the signature bindings need no socket, no
-temporary directory and no event loop, and would still run where binding one is
-forbidden.
+**The socket case is marked ``integration`` and the two signature ones are not**,
+which is ``CONTRIBUTING.md`` → "Testing" applied as ``tests/wire/test_client_overlay.py``
+reads it: "a Unix socket is the filesystem".
 """
 
 from __future__ import annotations
@@ -46,9 +35,8 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 
-from ai_assistant.core.errors import UnknownContinuationError
 from ai_assistant.core.protocols import AssistantEngine
-from ai_assistant.core.types import ContinuationToken, ReadCancellation
+from ai_assistant.core.types import ActivationStop
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import HubEngineClient, serve_connection
 from ai_assistant.wire.server import ConnectionLimits
@@ -65,8 +53,8 @@ _PATIENT: Final = timedelta(seconds=30)
 #: ADR-0084 §3's default frame size.
 _ORDINARY_FRAME: Final = 16 * 1024 * 1024
 
-#: The handle the park under test is answered by.
-_HANDLE: Final = "read-park-1"
+#: The activation the stop under test names, which no running activation holds.
+_ACTIVATION: Final = "00000000-0000-4000-8000-0000000000cc"
 
 
 class _DeliverySlots:
@@ -117,112 +105,35 @@ def _unlink(path: Path) -> None:
     path.unlink(missing_ok=True)
 
 
-def _parked() -> FakeAssistantEngine:
-    """An engine holding one ``OPEN`` read park, at :data:`_HANDLE`."""
-    engine = FakeAssistantEngine()
-    engine.park_read(_HANDLE, query="what is the tide at noon")
-    return engine
-
-
 @pytest.mark.integration
-async def test_cancelling_an_open_park_over_the_wire_withdraws_it(tmp_path: Path) -> None:
-    """#2243's reproduction, and ADR-0244 §11's first state.
+async def test_a_positional_only_argument_reaches_the_engine_over_the_wire(
+    tmp_path: Path,
+) -> None:
+    """#2243's shape, on a method that still carries it.
 
-    Before the fix this did not return ``WITHDRAWN``; it did not return at all. The
-    hub raised ``TypeError: Engine.cancel_read() got some positional-only arguments
-    passed as keyword arguments: 'token'``, which is not an ``AssistantError``, so
-    the handler did not catch it and the connection closed unanswered — what a user
-    saw was a transport fault rather than the act they performed.
+    ``stop_activation`` declares its activation id positional-only, as ``cancel_read``
+    declared its token. A dispatcher that splatted it by keyword would raise
+    ``TypeError`` inside the hub and drop the connection, and the client would report
+    the hub hung up rather than return one of ADR-0297 §5's answers.
     """
-    backing = _parked()
+    backing = FakeAssistantEngine()
 
     async with _serving(backing, tmp_path / "hub.sock") as client:
-        assert await client.cancel_read(ContinuationToken(handle=_HANDLE)) is (
-            ReadCancellation.WITHDRAWN
-        )
+        assert await client.stop_activation(_ACTIVATION) is ActivationStop.NO_SUCH_ACTIVATION
 
-    assert ("cancel_read", {"token": _HANDLE}) in backing.calls, (
-        "the token reached the engine rather than dying in the dispatcher's splat"
+    assert ("stop_activation", {"activation_id": _ACTIVATION}) in backing.calls, (
+        "the id reached the engine rather than dying in the dispatcher's splat"
     )
-
-
-@pytest.mark.integration
-async def test_cancelling_a_dispatched_read_over_the_wire_interrupts_it(tmp_path: Path) -> None:
-    """ADR-0244 §11's second state: "cancelling a dispatched read cancels the task".
-
-    Unreachable over the wire before the fix for the same one reason as the other
-    two — the token never got as far as discriminating anything, so no disposition
-    was reachable and the member's own clause could not be exercised on a hub.
-    """
-    backing = _parked()
-    backing.read_dispatching.add(_HANDLE)
-
-    async with _serving(backing, tmp_path / "hub.sock") as client:
-        assert await client.cancel_read(ContinuationToken(handle=_HANDLE)) is (
-            ReadCancellation.INTERRUPTED
-        )
-
-
-@pytest.mark.integration
-async def test_cancelling_a_settled_park_over_the_wire_reports_nothing_to_cancel(
-    tmp_path: Path,
-) -> None:
-    """ADR-0244 §11's third state, reached by cancelling the same park twice.
-
-    **The second call is the subject and the first is the arrangement**: what makes
-    the third member reachable is a park that has already been settled, and the only
-    way to settle one here is to cancel it.
-
-    **What this does *not* show is a connection surviving**, and the distinction is
-    worth stating because the opposite reading is the natural one. ``HubEngineClient``
-    runs each call "on a connection of its own" — connect, handshake, one request,
-    close — so a hub that hung up after answering the first would still answer the
-    second over a fresh socket. What a drop *does* change is the answer's kind: the
-    client reports the hub hung up rather than returning a member, which is what the
-    two assertions below rule out, once each.
-    """
-    async with _serving(_parked(), tmp_path / "hub.sock") as client:
-        token = ContinuationToken(handle=_HANDLE)
-
-        assert await client.cancel_read(token) is ReadCancellation.WITHDRAWN
-        assert await client.cancel_read(token) is ReadCancellation.NOTHING_TO_CANCEL
-
-
-@pytest.mark.integration
-async def test_an_unknown_token_comes_back_as_a_refusal_and_not_a_transport_fault(
-    tmp_path: Path,
-) -> None:
-    """ADR-0084 §7's refusal, over the wire, at the operation #2243 made unreachable.
-
-    ``UnknownContinuationError`` at ``cancel_read`` could not be raised before the
-    fix, because nothing got as far as the handle table. It is an ``AssistantError``,
-    so it crosses as an ADR-0085 §10a error frame and is reconstructed here — which
-    is the distinction the defect erased: a *refusal* the caller can render, rather
-    than a transport fault that says nothing about what happened. A hub that dropped
-    this connection would raise ``HubUnavailableError`` here instead, which is
-    precisely what a user saw for every token before the fix.
-
-    **The second call is about the park, not the socket.** Each call gets its own
-    connection, so it says nothing about one staying open; what it says is that the
-    refusal was inert — the park it did not name is still there to be withdrawn.
-    """
-    async with _serving(_parked(), tmp_path / "hub.sock") as client:
-        with pytest.raises(UnknownContinuationError):
-            await client.cancel_read(ContinuationToken(handle="no-such-park"))
-
-        assert await client.cancel_read(ContinuationToken(handle=_HANDLE)) is (
-            ReadCancellation.WITHDRAWN
-        ), "the refused call settled nothing, so the park it did not name is still open"
 
 
 @pytest.mark.parametrize("method", sorted(METHODS))
 def test_every_promoted_methods_arguments_reach_their_declared_parameters(method: str) -> None:
     """The general guard: no promoted method is dispatchable only by luck of its kinds.
 
-    **This is the binding #2243 lacked.** ``cancel_read`` was the first method on the
-    surface with a positional-only parameter and the dispatcher's keyword splat had
-    never met one, so the defect was a property of a *signature kind* rather than of
-    a method — and the test that catches it has to be shaped that way too. Every
+    **This is the binding #2243 lacked.** ``cancel_read``, since retired, was the first
+    method on the surface with a positional-only parameter and the dispatcher's keyword
+    splat had never met one, so the defect was a property of a *signature kind* rather
+    than of a method — and the test that catches it has to be shaped that way too. Every
     method here is asked the question the hub asks at dispatch: given the arguments
     the surface declares, does the call shape the server builds actually bind to the
     signature, with every argument arriving at its own parameter?

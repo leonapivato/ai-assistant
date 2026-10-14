@@ -20,13 +20,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import pytest
 from browser_drive import driving
 from playwright.async_api import expect
+
+from ai_assistant.core.types import ChatDevice, DeviceAccess, UserMessage
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -102,6 +104,22 @@ def _seed(drive: Drive, conversation_id: str, *, turns: int) -> None:
     drive.engine.conversations_held[conversation_id] = held.model_copy(
         update={"recorded_turns": turns, "last_turn_at": _LAST_TURN}
     )
+
+
+async def _answered(drive: Drive, conversation_id: str) -> None:
+    """Write one message into a held conversation, and let the fake's reader answer it.
+
+    The episode the reader's activation captures is what forgetting destroys; a
+    ``converse`` turn put one there until it retired (ADR-0309 §5:1).
+    """
+    engine = drive.engine
+    await engine.set_my_devices([ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)])
+    await engine.write_message(
+        conversation_id, message=UserMessage(device_id="phone", message_id="m-1", text="hello")
+    )
+    async with asyncio.timeout(10):
+        while engine._chat_reads:
+            await asyncio.gather(*engine._chat_reads)
 
 
 async def _open_listing(drive: Drive) -> None:
@@ -302,7 +320,7 @@ async def test_a_forget_refreshes_the_listing_and_states_what_was_forgotten(
     """
     async with driving(gateway_browser, tmp_path) as drive:
         drive.engine.hold_conversation("c-1")
-        await drive.engine.converse("hello", conversation_id="c-1", timeout=timedelta(seconds=5))
+        await _answered(drive, "c-1")
         _seed(drive, "c-1", turns=3)
         await _open_listing(drive)
         answered = _answering(drive, accept=True)

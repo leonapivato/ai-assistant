@@ -13,7 +13,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 from datetime import timedelta
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 import pytest
 from channel_receiver_contract import event_input
@@ -33,7 +33,6 @@ from ai_assistant.core.types import (
     ActivationEnding,
     ChannelIdentity,
     ChannelInput,
-    ContinuationToken,
     InformationalEventResult,
     NewConversation,
     SpeechChannelPayload,
@@ -44,9 +43,6 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.controller import ACTIVATION_RULES
 from ai_assistant.orchestration.engine import Engine
 from ai_assistant.testing import FakeToolCallingCompleter
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable
 
 _BUDGET: Final = timedelta(seconds=10)
 _RECORDING: Final = SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
@@ -85,35 +81,6 @@ def test_the_controller_runs_one_table() -> None:
     init = controller.ActivationController.__init__
     assert init.__kwdefaults__ is not None
     assert init.__kwdefaults__["rules"] is ACTIVATION_RULES
-
-
-def _retired_call(harness: Harness, member: str) -> Awaitable[object]:
-    """A call to ``member``, one of the old path's entries the switch retired."""
-    if member == "converse":
-        return harness.engine.converse("hello", timeout=_BUDGET)
-    return harness.engine.resume(
-        ContinuationToken(handle="token-1"), approved=True, timeout=_BUDGET
-    )
-
-
-@pytest.mark.parametrize("member", ["converse", "resume"])
-async def test_a_retired_member_refuses_before_any_work(member: str) -> None:
-    """§5:1: a clear refusal, never a half-run activation.
-
-    ``converse_spoken`` refused here too until ADR-0313 §3:1 took it off the surface,
-    which ``ChannelReceiverContract`` pins on every implementation.
-    """
-    completer = FakeToolCallingCompleter()
-    harness = phases_harness(completer)
-    await open_conversation(harness)
-    before = await harness.conversations.recent(limit=50)
-
-    with pytest.raises(ConfigurationError, match=f"{member} retired at the cutover"):
-        await _retired_call(harness, member)
-
-    assert await episodes(harness.memory) == []
-    assert completer.calls == []
-    assert await harness.conversations.recent(limit=50) == before
 
 
 @pytest.mark.parametrize("fresh", [True, False])

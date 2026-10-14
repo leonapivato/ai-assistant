@@ -197,7 +197,7 @@ def test_the_promoted_method_set_did_not_move() -> None:
     The absolute count is pinned in ``tests/core/test_engine_surface_closure.py``
     beside the version, which is the one place either figure lives.
     """
-    assert "converse" in surface.METHODS
+    assert "receive" in surface.METHODS
     assert not any(method.startswith("charge") for method in surface.METHODS)
     assert not any("quote" in method for method in surface.METHODS)
 

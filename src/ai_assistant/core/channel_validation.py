@@ -8,9 +8,7 @@ and read the same declaration of where each channel type's input comes from
 **No conversational combination is on the surface.** A typed message is written
 into a conversation as an act in the medium (ADR-0293 §11), and spoken
 conversation retired at the cutover (ADR-0313 §3:2), so ``receive`` admits an
-event alone (§4:1). The one input that still carries the text conversational
-combination is the one ``converse`` builds for itself, until ``converse`` leaves
-(ADR-0309 §5:1), and that caller alone says so with ``typed_turn``.
+event alone (§4:1).
 """
 
 from __future__ import annotations
@@ -26,7 +24,6 @@ from ai_assistant.core.types import (
     NewConversation,
     ReplyCapability,
     TextChannelPayload,
-    WholeTextReply,
 )
 
 if TYPE_CHECKING:
@@ -48,7 +45,7 @@ _INPUT_ORIGINS: Final[Mapping[str, InputOrigin]] = MappingProxyType(
 
 
 def snapshot(
-    supplied: ChannelInput, reply: ReplyCapability | None, *, typed_turn: bool = False
+    supplied: ChannelInput, reply: ReplyCapability | None
 ) -> tuple[ChannelInput, ReplyCapability | None]:
     """Copy and validate nested caller data before processing can suspend.
 
@@ -59,9 +56,6 @@ def snapshot(
     Args:
         supplied: The channel input as the caller handed it.
         reply: The reply capability the caller offered, or ``None``.
-        typed_turn: ``True`` only for the input ``converse`` builds for its own
-            turn, the one entry that still admits the text conversational
-            combination (see :func:`validate_combination`).
 
     Returns:
         The detached input and reply capability.
@@ -83,26 +77,21 @@ def snapshot(
     if accepted is None:
         msg = "invalid channel input or reply declaration"
         raise ValueError(msg) from None
-    validate_combination(accepted, accepted_reply, typed_turn=typed_turn)
+    validate_combination(accepted, accepted_reply)
     return accepted, accepted_reply
 
 
-def validate_combination(
-    supplied: ChannelInput, reply: ReplyCapability | None, *, typed_turn: bool = False
-) -> None:
+def validate_combination(supplied: ChannelInput, reply: ReplyCapability | None) -> None:
     """Refuse every combination outside the dispatch table this entry admits.
 
     ADR-0274 §4's table, less its conversational rows: ADR-0293 §11 takes the text
     one off the surface and ADR-0313 §3:2 retires the spoken one, so an
     informational event with text and no reply is the one combination admitted
-    (§4:1). ``typed_turn`` admits the text conversational combination with a whole
-    text reply as well, for ``converse``'s own input alone; no streaming
-    combination remains.
+    (§4:1). ``converse``'s own typed input left with ``converse`` (ADR-0309 §5:1).
 
     Args:
         supplied: The detached channel input.
         reply: The detached reply capability, or ``None``.
-        typed_turn: Whether this is ``converse``'s own input.
 
     Raises:
         ValueError: If the combination is not in the table.
@@ -110,12 +99,7 @@ def validate_combination(
     target = supplied.target
     kind = "conversation" if isinstance(target, NewConversation) else target.channel_type
     text = isinstance(supplied.payload, TextChannelPayload)
-    valid = False
-    if kind == "informational_event":
-        valid = text and reply is None
-    elif kind == "conversation":
-        valid = typed_turn and text and isinstance(reply, WholeTextReply)
-    if not valid:
+    if not (kind == "informational_event" and text and reply is None):
         msg = "unsupported channel input and reply combination"
         raise ValueError(msg)
 

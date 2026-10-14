@@ -41,7 +41,6 @@ from assistant_engine_contract import (
     _UNHELD_SOURCE,
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
-    SETTLED_SINGLE_SLOT,
     SPEAKABLE_NOTIFICATION,
     SPEND_ZERO_CEILING,
     UNSPEAKABLE_NOTIFICATION,
@@ -53,9 +52,6 @@ from assistant_engine_contract import (
     DerivedPlacementSubject,
     InvocationSubject,
     ReadSubject,
-    RoutedParkSubject,
-    SettledParkSubject,
-    SingleSlotParkSubject,
     SpendSubject,
     backwards_clock,
     held_placement,
@@ -97,7 +93,6 @@ from ai_assistant.core.types import (
     CapabilityResult,
     CostBasis,
     DataTier,
-    Disposition,
     EvidenceDigest,
     Goal,
     GoalAssociation,
@@ -1077,144 +1072,6 @@ class TestEngineContract(AssistantEngineContract):
         await built.start()
         try:
             yield DerivedPlacementSubject(engine=built, record_id="rec-derived")
-        finally:
-            await built.aclose()
-
-    @pytest.fixture
-    async def routed_park(self) -> AsyncIterator[RoutedParkSubject]:
-        """One wired engine holding a single answerable routed park.
-
-        Reached by driving a **real** turn through the routing stage, so the card the
-        suite then answers is the one ADR-0197 §5 resolved and §7 registered — not a
-        fixture's idea of one. That is the only way to reach it: §7 rules that a routed
-        park is not listed by ``pending_confirmations`` and not recovered across a
-        restart, so nothing on the surface can produce or re-mint its token afterwards.
-
-        The belief is seeded before the turn because §5's lookup reads the store the
-        operation itself reads; without it the route would resolve to nothing and end in
-        ``NOT_FOUND`` rather than parking.
-        """
-        records = FakeMemoryStore(now=lambda: AT)
-        await records.write_atomic(
-            [
-                MemoryWrite(
-                    record=SemanticMemory(
-                        id="rec-routed",
-                        content="the user likes jazz",
-                        fact="the user likes jazz",
-                        validity=Validity(),
-                        provenance=Provenance(
-                            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
-                        ),
-                    ),
-                    mode=MemoryWriteMode.INSERT_IF_ABSENT,
-                )
-            ]
-        )
-        built = _wire(routes="jazz", memory=records)
-        await built.start()
-        try:
-            outcome = await built.converse("forget that I like jazz", timeout=timedelta(seconds=30))
-            assert outcome.routed is not None
-            assert outcome.routed.confirmation is not None
-            yield RoutedParkSubject(
-                engine=built,
-                token=outcome.routed.confirmation.token,
-                belief_id="rec-routed",
-            )
-        finally:
-            await built.aclose()
-
-    @pytest.fixture
-    async def parked_engine(self) -> AsyncIterator[AssistantEngine]:
-        """One wired engine holding a single answerable park.
-
-        Reached by driving a real turn over a tool the policy confirms, so the
-        confirmation the suite then renders and relays is the one the permission
-        stage actually recorded — not a fixture's idea of one.
-        """
-        built = _wire(parks=True)
-        await built.start()
-        try:
-            outcome = await built.converse("send the note", timeout=timedelta(seconds=30))
-            assert outcome.step is not None
-            assert outcome.step.disposition is Disposition.AWAITING_CONFIRMATION
-            yield built
-        finally:
-            await built.aclose()
-
-    @pytest.fixture
-    async def settled_park(self) -> AsyncIterator[SettledParkSubject]:
-        """One wired engine that has answered its park, and the token that named it.
-
-        Settled by driving the **real** resolution — a real turn parks over a tool the
-        policy confirms, and a real ``resume`` records the answer through the runner —
-        so the retained record under test is the one ADR-0198 §1 installs inside the
-        resolution's own critical section, not a fixture's idea of one.
-        """
-        built = _wire(parks=True)
-        await built.start()
-        try:
-            outcome = await built.converse("send the note", timeout=timedelta(seconds=30))
-            assert outcome.step is not None
-            assert outcome.step.confirmation is not None
-            token = outcome.step.confirmation.token
-            resolved = await built.resume(token, approved=True, timeout=timedelta(seconds=30))
-            assert resolved.step is not None
-            assert resolved.step.disposition is Disposition.EXECUTED
-            yield SettledParkSubject(engine=built, token=token)
-        finally:
-            await built.aclose()
-
-    @pytest.fixture
-    async def settled_park_without_its_execution(self) -> AsyncIterator[SettledParkSubject]:
-        """:attr:`settled_park`'s subject whose plan store has been emptied behind it.
-
-        Emptied through the store's **own** data-rights operation rather than by
-        reaching into its dict, because that is how the state arises: a user erases
-        their history, or a store is rebuilt beneath a process still running. ``clear``
-        refuses while any execution has a live step, so it also witnesses that the
-        settlement really completed before the execution went away.
-        """
-        plans = FakePlanStore(now=lambda: AT)
-        built = _wire(parks=True, plans=plans)
-        await built.start()
-        try:
-            outcome = await built.converse("send the note", timeout=timedelta(seconds=30))
-            assert outcome.step is not None
-            assert outcome.step.confirmation is not None
-            token = outcome.step.confirmation.token
-            await built.resume(token, approved=True, timeout=timedelta(seconds=30))
-            assert await plans.clear() > 0
-            yield SettledParkSubject(engine=built, token=token)
-        finally:
-            await built.aclose()
-
-    @pytest.fixture
-    async def single_slot_parks(self) -> AsyncIterator[SingleSlotParkSubject]:
-        """One wired engine at a ceiling of one, holding a settled record and a park.
-
-        **The second turn is admitted only because retention holds no ceiling slot.**
-        This engine's ceiling is one, and ``_admit_and_reserve`` refuses a turn that
-        would exceed it — so an implementation that counted the settled record with
-        the parks would raise inside this fixture rather than fail an assertion, which
-        is the loudest place for it to happen.
-        """
-        built = _wire(parks=True, max_outstanding_confirmations=SETTLED_SINGLE_SLOT)
-        await built.start()
-        try:
-            first = await built.converse("send the note", timeout=timedelta(seconds=30))
-            assert first.step is not None
-            assert first.step.confirmation is not None
-            settled = first.step.confirmation.token
-            await built.resume(settled, approved=True, timeout=timedelta(seconds=30))
-
-            second = await built.converse("send another note", timeout=timedelta(seconds=30))
-            assert second.step is not None
-            assert second.step.confirmation is not None
-            yield SingleSlotParkSubject(
-                engine=built, settled=settled, parked=second.step.confirmation.token
-            )
         finally:
             await built.aclose()
 
