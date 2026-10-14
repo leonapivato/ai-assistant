@@ -303,7 +303,7 @@ def notification_is_speakable(candidate: NotificationCandidate) -> bool:
     """Whether ADR-0206 §3 places this candidate as speakable into a room.
 
     **Decided from three recorded fields and from nothing else** (ADR-0206 §3,
-    ADR-0199 §2). Not from ``summary``, ``detail``, ``references``, ``goal_id`` or
+    ADR-0199 §2). Not from ``summary``, ``detail``, ``references`` or
     ``confidence``; not by keyword, not by pattern, not by a classifier, and not by
     asking a model. A candidate whose ``summary`` names a subject no ADR has placed
     still renders where its triple is placed, and one whose ``summary`` is

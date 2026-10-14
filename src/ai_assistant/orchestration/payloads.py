@@ -344,8 +344,7 @@ def encoded_text_bytes(text: str) -> int:
     the escaped body of ``a + b`` is the escaped body of ``a`` followed by that of
     ``b``. A caller bounding a value it is accumulating can therefore keep a running
     total instead of re-encoding the whole of it on every step, which is the
-    difference between the composing stage's ceiling costing linear work and
-    quadratic.
+    difference between a ceiling costing linear work and quadratic.
 
     Args:
         text: The string to measure.
@@ -397,7 +396,7 @@ def check_payload(value: object, *, max_bytes: int, subject: str) -> None:
         value: The payload to measure.
         max_bytes: The contract limit in bytes.
         subject: What is being measured, for the message — ``"the arguments to
-            converse()"``, ``"the result of beliefs()"``.
+            receive()"``, ``"the result of beliefs()"``.
 
     Raises:
         OversizedValueError: If the payload's canonical encoding exceeds
@@ -544,10 +543,8 @@ def page_argument(value: int, *, name: str) -> int:
     error rather than a condition of the system, so an adapter that lets a user
     supply either should refuse an out-of-range value at its own parse boundary.
 
-    **The type is checked before the range, and a ``bool`` is excluded**, in the
-    guard shape :class:`~ai_assistant.orchestration.engine.Engine`'s own
-    ``max_outstanding_confirmations`` and ``LearningLoop``'s retrieval limit
-    already use. Neither half is pedantry:
+    **The type is checked before the range, and a ``bool`` is excluded.** Neither
+    half is pedantry:
 
     * ``0 <= 1.5 < 2**63`` is *true*, so a range check alone admits a float — which
       then reaches the store and fails inside slice arithmetic, after I/O has begun
@@ -663,10 +660,10 @@ def non_blank_text(value: str, *, name: str) -> str:
 #: The uses a **new** grant may name, in declaration order (ADR-0294 §4).
 #:
 #: ``GrantScope`` keeps ``INGEST`` — a recorded grant naming it stays readable,
-#: exportable and revocable, and a revocation still transcribes it — but "a new
-#: grant names a non-empty subset of ``FACET`` and ``NOTIFY``", because nothing
-#: reads a source under ``INGEST`` any more. Written as an exclusion from the enum
-#: rather than as a list of the two, so the refusal is of the one retired member.
+#: exportable and revocable, and a revocation still transcribes it — but a new
+#: grant names ``NOTIFY`` alone (ADR-0318 §6:2), because nothing reads a source
+#: under ``INGEST`` any more. Written as an exclusion from the enum rather than as
+#: a list, so the refusal is of the one retired member.
 GRANTABLE_SCOPES: Final[tuple[GrantScope, ...]] = tuple(
     use for use in GrantScope if use is not GrantScope.INGEST
 )

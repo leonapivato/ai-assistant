@@ -352,10 +352,9 @@ class UpcomingEventStage:
         **Nothing is read without a live ``NOTIFY`` grant** (§2, ADR-0133 §5). The
         source is not resolved, not opened and not parsed: opening the user's
         calendar *is* the act the grant is about. No other member substitutes,
-        because ADR-0133 §2 rules the three uses independent — a live ``INGEST``
-        grant on this calendar authorises this read no more than a ``FACET`` one
-        does — and ADR-0133 §3 rules that no grant recorded before the member
-        existed acquires it.
+        because ADR-0133 §2 rules the uses independent — a live ``INGEST`` grant on
+        this calendar does not authorise this read — and ADR-0133 §3 rules that no
+        grant recorded before the member existed acquires it.
 
         ADR-0097 §5a's three driver rules apply unchanged. No ``await`` stands
         between the ``live()`` answer and ``read()``; the grant is re-checked when

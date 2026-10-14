@@ -61,7 +61,6 @@ from ai_assistant.core.types import (
     STORY_STANDING_RECENT,
     EpisodicMemory,
     InputOrigin,
-    RecordedChannelTrigger,
     StoryEffectState,
     StoryEntry,
     StoryMember,
@@ -283,7 +282,7 @@ def _moment(record: EpisodicMemory, activation_id: str) -> StoryStandingEpisode:
             outside=external,
         )
     trigger = processing.trigger
-    origin = trigger.origin if isinstance(trigger, RecordedChannelTrigger) else None
+    origin = trigger.origin
     latest = processing.understanding[-1] if processing.understanding else None
     return StoryStandingEpisode(
         activation_id=activation_id,

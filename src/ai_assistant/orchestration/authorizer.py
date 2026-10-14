@@ -16,9 +16,8 @@ arguments do not satisfy (ADR-0145 §2), and the least severe tool is selected. 
 that cannot be bound to exactly one tool is not done, with its reason, and no ruling is
 sought.
 
-**Then the checks, in order** (§4:1). The policy, ``ActionPolicy``, built without goal
-authorizations and goal quotes; its request carries no ``goal`` and no
-``intended_action`` (§4:11). Then the outside-content stand-in (§4:4 to §4:6). Then, for
+**Then the checks, in order** (§4:1). The policy, ``ActionPolicy`` (§4:11). Then the
+outside-content stand-in (§4:4 to §4:6). Then, for
 remembering, ``MemoryPolicy`` (§4:3). A call runs only where every check that applies
 allows it. A deny, or a memory reject, is *not done* with the reason (§4:9); a confirm,
 a stand-in send to the user, or a memory ask is *needs you* (§4:8). Nothing parks and

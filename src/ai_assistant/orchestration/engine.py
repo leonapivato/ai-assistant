@@ -33,9 +33,9 @@ not the ``AssistantEngine`` Protocol a client sees, which names none of these.
 
 **No operation here reads a source to propose what it read into memory**
 (ADR-0294 §1). The calendar's and the email source's scheduled ingestion are
-retired; what a reader still feeds is the request-path facet and the
-upcoming-event producer, each over its own reader instance and under its own grant
-use (ADR-0294 §2).
+retired; what a reader still feeds is the upcoming-event producer, over its own
+reader instance and under its own grant use (ADR-0294 §2). The request-path facet
+it also fed left with the old path (ADR-0318 §6:2).
 
 Nothing concrete is imported: every collaborator arrives by injection and is seen
 only through its Protocol or through this package's own stage objects (CLAUDE.md
@@ -106,7 +106,6 @@ from ai_assistant.core.types import (
     PlacementSetter,
     ProcessingStatus,
     RecallOutcome,
-    RecordedChannelTrigger,
     ReplyCapability,
     SpokenAudioFormat,
     SpokenRendering,
@@ -791,7 +790,8 @@ def _consolidated(report: ConsolidationReport) -> Observation:
 
     **A run that returns is ``OK``.** A run stopped at a question the
     deferred-question queue refused at its cap was the one halt ADR-0111 §9 gave
-    ``INCOMPLETE``, and that queue has retired: an ``ASK_USER`` ruling is counted
+    ``INCOMPLETE``, and that queue has retired, so nothing produces ``INCOMPLETE``
+    any more (#3025, ADR-0319 §5): an ``ASK_USER`` ruling is counted
     as deferred and its chunk recorded as done (ADR-0319 §5), so a run that
     returns has either exhausted the store or spent its budget, and both are
     completed runs. ``exhausted`` tells those two apart, so it is carried as a
@@ -1138,15 +1138,6 @@ class _TurnPass(_ActivationPass):
         """The conversation has been begun and the input resolved against it."""
         return self.input is not None
 
-    # A turn the phases plan makes none of the retired path's decisions and wires none
-    # of its stages (ADR-0309 §2:6).
-    routing_wired = route_decided = route_taken = event_summarized = property(lambda _: False)
-    associated = asks_which_goal = disambiguation_asked = continues_goal = property(lambda _: False)
-    reconciliation_wired = reconciled = turn_decided = turn_raised_question = property(
-        lambda _: False
-    )
-    plan_has_steps = drive_decided = parked = reply_composed = property(lambda _: False)
-
 
 @dataclass(slots=True)
 class _EventPass(_ActivationPass):
@@ -1174,15 +1165,10 @@ class _EventPass(_ActivationPass):
         """Always: this is an event's working set."""
         return True
 
-    # An event makes none of a turn's decisions and wires none of a turn's stages, and
-    # the event-summary stage runs no more (ADR-0313 §4:3).
-    conversation_resolved = routing_wired = route_decided = route_taken = property(lambda _: False)
-    event_summarized = property(lambda _: False)
-    associated = asks_which_goal = disambiguation_asked = continues_goal = property(lambda _: False)
-    reconciliation_wired = reconciled = turn_decided = turn_raised_question = property(
-        lambda _: False
-    )
-    plan_has_steps = drive_decided = parked = reply_composed = property(lambda _: False)
+    @property
+    def conversation_resolved(self) -> bool:
+        """Never: an event resolves no conversation."""
+        return False
 
 
 def _resolved_turn(working: _TurnPass) -> ResolvedChannelInput:
@@ -1533,18 +1519,19 @@ class Engine:
                 a total. It is the ledger face and **never** the gate: an adapter
                 able to call the admission has acquired the ability to spend a
                 budget, which is ADR-0029 §1's argument one seam over.
-            reads: The source-read trail — the **same instance** the three drivers
-                record into (a composition-root single-instance obligation of the
-                same shape as ``plans`` and ``trail``; ADR-0185 §4). The façade
-                reads it **query-only**, for :meth:`recent_reads` and
-                :meth:`export_reads`, and records nothing: authoring a row stays the
-                driver's, on the seam that gated the read (ADR-0185 §5).
+            reads: The source-read trail — the **same instance** the one driver left,
+                the upcoming-event stage, records into (a composition-root
+                single-instance obligation of the same shape as ``plans`` and ``trail``;
+                ADR-0185 §4). The façade reads it **query-only**, for
+                :meth:`recent_reads` and :meth:`export_reads`, and records nothing:
+                authoring a row stays the driver's, on the seam that gated the read
+                (ADR-0185 §5).
 
                 **This is the wide seam's only holder**, which is the arrangement
                 ADR-0185 §4 designed and §12 left this surface to complete.
                 ``SourceReadTrail`` deliberately does not inherit
-                ``SourceReadRecorder``, and the three drivers are annotated with the
-                narrow one — so a driver cannot *name* ``recent`` or ``export``, and
+                ``SourceReadRecorder``, and the driver is annotated with the narrow
+                one — so a driver cannot *name* ``recent`` or ``export``, and
                 ADR-0093 §5's forbidden cursor stays out of a sensor's reach. That
                 narrowing is what makes this parameter necessary rather than
                 convenient: there is no collaborator the façade already holds that
@@ -1640,17 +1627,17 @@ class Engine:
                 in this package, and ADR-0102 §2 records that reusing a word for a
                 different type one constructor over is how two things come to be
                 confused at a glance.
-            recipient_grant_operations: The five recipient-grant operations
-                (ADR-0235 §3, §7) — the **only** object in this package holding a
+            recipient_grant_operations: The three recipient-grant operations
+                ADR-0313 §5:1 left on the surface (ADR-0235 §3, §7) — the **only**
+                object in this package holding a
                 :class:`~ai_assistant.core.protocols.RecipientGrantStore`, which is
                 the face ADR-0193 §1 withholds from the policy and from the trail and
                 which ``app/composition.py``'s own comment already anticipated
                 passing *"whole to whatever performs it"*. The façade delegates
-                ``grantable_decisions``, ``establish_recipient_grant``,
                 ``standing_recipient_grants``, ``recent_recipient_grants`` and
                 ``revoke_recipient_grant`` to it.
 
-                **Required, on ``grant_operations``' argument exactly**: these five
+                **Required, on ``grant_operations``' argument exactly**: these three
                 are ``AssistantEngine`` methods and the shared conformance suite runs
                 against this class, so an engine that could be built without them is
                 one whose surface is conditionally present.
@@ -2389,8 +2376,8 @@ class Engine:
         ADR-0026 §4: ``core`` raises a bare ``ValueError`` because it cannot know
         what its caller will do with the failure, and "each subsystem translates at
         its own boundary". `orchestration` has no error of its own, so a seam here
-        borrows "the error of the stage that read the clock" — goal construction
-        raises ``PlanningError``, expiry raises ``MemoryStoreError``, and this
+        borrows "the error of the stage that read the clock" — a recipient-grant
+        operation raises ``PlanningError``, expiry raises ``MemoryStoreError``, and this
         reading exists only to place the trace horizon, so it raises
         ``TraceStoreError``. Untranslated, a mis-wired clock would reach the hub's
         scheduler as a raw ``ValueError`` from an operation whose failures are
@@ -2435,9 +2422,9 @@ class Engine:
         window through ADR-0130 §3's seam. The disposition is that seam's and the
         policy's; nothing here selects, ranks or influences one (ADR-0132 §8).
 
-        **Independent of the request-path facet** (ADR-0132 §3). It has its own
-        reader instance, its own interval and its own grant scope, so neither
-        consumer's read waits on or derives anything from the other's.
+        **Independent of any other read of the calendar** (ADR-0132 §3). It has its
+        own reader instance, its own interval and its own grant scope, so its read
+        waits on and derives nothing from another's.
 
         Tracked like every other public method, so shutdown drains the offer it is
         in the middle of before closing the stores it is writing through
@@ -2463,8 +2450,8 @@ class Engine:
                 flight (ADR-0132 §2, ADR-0133 §5). Distinct from the error above:
                 that one is a deployment that cannot ask, this one is a user who
                 has not said yes. **No other grant substitutes** — ADR-0133 §2
-                rules the three uses independent, so a live ``INGEST`` grant on this
-                calendar authorises this read no more than a ``FACET`` one does.
+                rules the uses independent, so a live ``INGEST`` grant on this
+                calendar does not authorise this read.
             GrantError: If the grant store could not answer. Propagated rather than
                 converted, so a store fault stays distinguishable from a refusal
                 (ADR-0097 §5a).
@@ -3630,8 +3617,8 @@ class Engine:
     async def forget_notification(self, notification_id: Identifier) -> bool:
         """Destroy one notification (§9, ADR-0004 §6).
 
-        ADR-0007's data right in :meth:`forget_question`'s shape, and
-        unconditional like every other deletion on this façade. Beside
+        ADR-0007's data right, unconditional like every other deletion on this
+        façade. Beside
         :meth:`dismiss_notification` deliberately: that one ends actionability
         and leaves the record readable, so this is the surface the delete right
         reaches and that one is not.
@@ -4496,12 +4483,12 @@ class Engine:
         outbox state changes — and no rendering is attempted on a request whose
         arguments were refused.
 
-        **This method holds no** ``MemoryStore`` **and no** ``ContextProvider``
-        **while answering** (ADR-0206 §3). The placement is decided from three
-        recorded fields of the candidate the outbox handed over, and nothing on this
-        path issues a store query of any kind, resolves ``references``, or reads a
-        record — which is what keeps ADR-0204 §3's test where ADR-0204 §5 puts it,
-        on the producer, rather than on a delivery that has nothing in hand.
+        **This method holds no** ``MemoryStore`` **while answering** (ADR-0206 §3). The
+        placement is decided from three recorded fields of the candidate the outbox
+        handed over, and nothing on this path issues a store query of any kind, resolves
+        ``references``, or reads a record — which is what keeps ADR-0204 §3's test where
+        ADR-0204 §5 puts it, on the producer, rather than on a delivery that has nothing
+        in hand.
 
         Args:
             acknowledging: The ``delivery_id`` being confirmed, or ``None``.
@@ -4575,11 +4562,11 @@ class Engine:
     def _check_plays(plays: tuple[SpokenAudioFormat, ...]) -> tuple[SpokenAudioFormat, ...]:
         """Refuse a ``plays`` naming a format that does not exist, and normalise it.
 
-        **An empty one is admitted rather than refused**, unlike ``converse_spoken``'s
-        (ADR-0200 §3), and the asymmetry is ADR-0206 §1's: there, an empty preference
-        order is a call that could not be answered whatever the synthesizer produces;
-        here it is the ordinary state of every caller that cannot play audio, and it
-        asks for no rendering rather than for an impossible one.
+        **An empty one is admitted rather than refused**, unlike the retired
+        ``converse_spoken``'s (ADR-0200 §3), and the asymmetry is ADR-0206 §1's: there,
+        an empty preference order was a call that could not be answered whatever the
+        synthesizer produces; here it is the ordinary state of every caller that cannot
+        play audio, and it asks for no rendering rather than for an impossible one.
 
         **It coerces rather than requiring the member, so the two implementations of
         this contract agree.** Over the wire, ``wire.surface`` derives this argument's
@@ -5158,9 +5145,10 @@ class Engine:
         record's construction are the operations object's, and **no store is written
         on any refusal**.
 
-        **A second question asked as a second question** (ADR-0238 §1): this is not
-        ``establish_recipient_grant`` with a flag, it records no answer to any
-        confirmation, and neither operation reads the other's store.
+        **A second question asked as a second question** (ADR-0238 §1): this was never
+        ``establish_recipient_grant`` with a flag (that act has since left the engine,
+        ADR-0313 §5:1), it records no answer to any confirmation, and it reads no
+        recipient-grant store.
 
         Raises:
             RuntimeError: If the engine is shutting down.
@@ -5701,7 +5689,7 @@ class Engine:
         timeout, an unbounded wait ends in ``SIGKILL`` — which destroys exactly
         the ADR-0029 §4 bookkeeping the drain exists to preserve, committed under
         a shield so that "a shutdown that stops waiting politely" cannot leave a
-        step ``RUNNING`` with its classification unwritten.
+        claimed call with its outcome unwritten.
 
         **Phase B cancels what is left and then awaits it, unbounded.** Three
         things make that safe, and each is load-bearing:
@@ -5950,9 +5938,7 @@ class Engine:
                 activation_id=taken.activation_id,
                 window=taken.window,
                 conversation_id=taken.conversation_id,
-                trigger_origin=(
-                    trigger.origin if isinstance(trigger, RecordedChannelTrigger) else None
-                ),
+                trigger_origin=None if trigger is None else trigger.origin,
                 owner_records=True,
             ),
         )
@@ -6020,9 +6006,7 @@ class Engine:
                 # An activation whose id was not minted has a degraded capture
                 # (ADR-0275 §2); its rounds still need one to claim under.
                 activation_id=_uuid() if activation_id is None else activation_id,
-                trigger_origin=(
-                    trigger.origin if isinstance(trigger, RecordedChannelTrigger) else None
-                ),
+                trigger_origin=None if trigger is None else trigger.origin,
                 owner_records=True,
             ),
         )
@@ -6183,8 +6167,7 @@ class Engine:
         ``shielded=False`` and scope-shields its own mutating steps instead, which
         satisfies both texts — see :meth:`_poll`.
         Every public method that touches a connection-owning store runs through
-        here, so none can be racing a store call when :meth:`aclose` closes it —
-        recovery reads the plan store and the audit trail, so it is tracked too. The
+        here, so none can be racing a store call when :meth:`aclose` closes it. The
         public methods reject a closing engine *before* building ``coro``
         (:meth:`_reject_if_closing`), so this never receives work it must throw away
         un-awaited.
@@ -6830,13 +6813,13 @@ class Engine:
         for the implementation the conformance suite measures the others against.
 
         **On a mutating call this runs after the work has committed, and the effect
-        stands.** A ``converse`` that ran a tool, persisted its execution and
-        captured the exchange, and only then produced a
-        :class:`~ai_assistant.core.types.TurnOutcome` too large to carry, raises here
-        with all of that already durable. That is not an ordering this lane chose and
-        it is not one it can fix: no measurement of a *result* can precede producing
-        it, and a wire client meets the identical situation one frame further out —
-        the hub runs the turn and then cannot send what came back.
+        stands.** The old path's ``converse`` was the case: a turn that ran a tool,
+        persisted its execution and captured the exchange, and only then produced an
+        outcome too large to carry, raised here with all of that already durable. That
+        is not an ordering this lane chose and it is not one it can fix: no measurement
+        of a *result* can precede producing it, and a wire client meets the identical
+        situation one frame further out — the hub runs the turn and then cannot send
+        what came back.
 
         **ADR-0085 §8e names this residual and declines to design around it.** The
         unbounded factor is ``Belief.evidence`` under `REINFORCE` (#473), which

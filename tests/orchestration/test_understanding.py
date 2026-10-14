@@ -49,7 +49,6 @@ from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
 )
 from ai_assistant.orchestration.understanding import (
-    ConversationWindow,
     RecentEpisodes,
     SuppliedWindow,
     TranscriptWindow,
@@ -155,12 +154,12 @@ async def _understand(  # noqa: PLR0913 — the stage's own inputs, each default
     text: str = "Book the second one.",
     *,
     channel: ChannelIdentity = CONVERSATION,
-    window: SuppliedWindow | ConversationWindow | TranscriptWindow | None = None,
+    window: SuppliedWindow | TranscriptWindow | None = None,
     audience: TurnSupply = BOUNDED,
     episodes: bool = True,
     deadline: float = math.inf,
 ) -> ActivationUnderstanding:
-    channel_window = ConversationWindow(CONVERSATION, ()) if window is None else window
+    channel_window = TranscriptWindow(CONVERSATION, ()) if window is None else window
     windows = await pipeline.windows.assemble(channel_window, audience=audience, episodes=episodes)
     fetched = await fetch_held(
         pipeline.memory, episode_ids=windows.episode_ids, recalled_ids=(), audience=audience
@@ -409,59 +408,14 @@ async def test_missing_windows_are_rendered_as_missing() -> None:
     assert sent["episode_window"].startswith("missing")
 
 
-async def test_a_conversation_tail_renders_both_halves_under_h_labels() -> None:
-    """§3: each tail record is one item, its identifier the record's stored id."""
-    tail = (_episode("conv:c-1:1", at=AT - timedelta(minutes=2)),)
-    model = FakeModelProvider.scripted(_proposal(meaning_ground="supplied", meaning_labels=["H1"]))
-    understood = await _understand(
-        _stage(model, await _store()), window=ConversationWindow(CONVERSATION, tail), episodes=False
-    )
-    (item,) = _sent(model)["channel_window"]
-    # ADR-0284 §8: the projection's input and response, never the record's `content`.
-    assert item["input"] == "Find a campsite near Riverside."
-    assert item["response"] == "Riverside and Pine Flat both have space."
-    assert "exchange_as_recorded" not in item
-    (referent,) = understood.meaning_referents
-    assert (referent.kind, referent.id, referent.source) == (
-        "channel_item",
-        "conv:c-1:1",
-        "conversation:c-1",
-    )
-
-
-async def test_a_tail_record_alone_in_the_channel_window_shows_no_understanding_version() -> None:
-    """ADR-0276 §4, standing under ADR-0284: the channel window renders no stored understanding.
-
-    A turn on a channel of unbounded audience takes no episode window and is shown its
-    tail through the channel window alone, so a tail record there carries its two
-    halves and its status — and no earlier understanding, which was
-    derived from whatever that pass's windows held. Only a record also in the episode
-    window carries one, on the turns that have that window.
-    """
-    understood = ActivationUnderstanding(
-        version=1,
-        recorded_at=AT,
-        producer=UnderstandingProducer.INTERPRETATION,
-        meaning="UNDERSTOOD-THEN-SENTINEL",
-        meaning_ground=UnderstandingGround.STATED,
-    )
-    tail = (_episode("conv:c-1:1", at=AT - timedelta(minutes=2), understanding=(understood,)),)
-    model = FakeModelProvider.scripted(_proposal())
-    await _understand(
-        _stage(model, await _store()), window=ConversationWindow(CONVERSATION, tail), episodes=False
-    )
-    (item,) = _sent(model)["channel_window"]
-    assert item["input"] == "Find a campsite near Riverside."
-    assert item["status"] == "completed"
-    assert "understood_then" not in item
-    assert "UNDERSTOOD-THEN-SENTINEL" not in model.calls[0].messages[1].content
-
-
 # --- the episode window -----------------------------------------------------------------
 
 
 async def test_the_same_exchange_in_both_windows_is_rendered_once_under_its_h_label() -> None:
-    """§3: no `P` label, not counted toward the bound, one referent never two."""
+    """§3: no `P` label, not counted toward the bound, one referent never two.
+
+    The channel item is a supplied one whose id names the episode the window holds.
+    """
     own = _episode(
         "conv:c-1:1",
         at=AT - timedelta(minutes=1),
@@ -487,9 +441,10 @@ async def test_the_same_exchange_in_both_windows_is_rendered_once_under_its_h_la
             ]
         )
     )
-    understood = await _understand(
-        _stage(model, memory, limit=1), window=ConversationWindow(CONVERSATION, (own,))
+    window = SuppliedWindow(
+        ChannelContext(history=(ChannelContextItem(text="Campsites?", item_id=own.id),))
     )
+    understood = await _understand(_stage(model, memory, limit=1), window=window)
     sent = _sent(model)
     (item,) = sent["channel_window"]
     assert item["also_in_episode_window"] is True
@@ -745,7 +700,7 @@ async def test_a_spoken_turn_takes_no_episode_window() -> None:
 # --- disclosure and audience --------------------------------------------------------------
 
 
-async def test_an_unbounded_audience_withholds_an_owner_placed_tail_record_silently() -> None:
+async def test_an_unbounded_audience_withholds_an_owner_placed_episode_silently() -> None:
     """§4: withheld from every rendering, label and referent."""
     placed = _episode(
         "conv:c-1:1",
@@ -754,14 +709,9 @@ async def test_an_unbounded_audience_withholds_an_owner_placed_tail_record_silen
     )
     spoken = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
     model = FakeModelProvider.scripted(_proposal())
-    await _understand(
-        _stage(model, await _store()),
-        window=ConversationWindow(CONVERSATION, (placed, _episode("conv:c-1:2"))),
-        audience=spoken,
-        episodes=False,
-    )
+    await _understand(_stage(model, await _store(placed, _episode("conv:c-1:2"))), audience=spoken)
     assert "OWNER-ONLY-SENTINEL" not in model.calls[0].messages[1].content
-    assert [item["label"] for item in _sent(model)["channel_window"]] == ["H1"]
+    assert [item["label"] for item in _sent(model)["episode_window"]] == ["P1"]
 
 
 async def test_a_bounded_audience_withholds_nothing() -> None:
@@ -772,11 +722,7 @@ async def test_a_bounded_audience_withholds_nothing() -> None:
     )
     bounded = BoundedAudienceSupply(speakable_attested_sources=frozenset())
     model = FakeModelProvider.scripted(_proposal())
-    await _understand(
-        _stage(model, await _store(placed)),
-        window=ConversationWindow(CONVERSATION, (placed,)),
-        audience=bounded,
-    )
+    await _understand(_stage(model, await _store(placed)), audience=bounded)
     assert "OWNER-ONLY-SENTINEL" in model.calls[0].messages[1].content
 
 

@@ -90,7 +90,6 @@ from ai_assistant.core.types import (
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
-    RecordedChannelTrigger,
     RecordedTextInput,
     SemanticMemory,
     StoryMember,
@@ -615,11 +614,7 @@ def _provenance_of(record: RecalledRecord) -> RecallProvenance:
         outside = rests_on_recorded_external_content(record.provenance)
     else:
         processing = record.processing_record
-        outside = (
-            processing is not None
-            and isinstance(processing.trigger, RecordedChannelTrigger)
-            and processing.trigger.origin is not InputOrigin.USER
-        )
+        outside = processing is not None and processing.trigger.origin is not InputOrigin.USER
     return RecallProvenance.OUTSIDE if outside else RecallProvenance.USER
 
 
@@ -639,19 +634,18 @@ def _excerpt_of(record: RecalledRecord) -> str:
     if processing is None:
         return record.content
     trigger = processing.trigger
-    if isinstance(trigger, RecordedChannelTrigger):
-        if trigger.origin is InputOrigin.USER:
-            payload = trigger.payload
-            text = payload.text if isinstance(payload, RecordedTextInput) else payload.transcript
-            if text is not None:
-                return text
-        elif processing.understanding:
-            return processing.understanding[-1].meaning
-        else:
-            channel = trigger.channel
-            return (
-                "a report received"
-                if channel is None
-                else f"a report received on {channel.channel_type}:{channel.instance_id}"
-            )
+    if trigger.origin is InputOrigin.USER:
+        payload = trigger.payload
+        text = payload.text if isinstance(payload, RecordedTextInput) else payload.transcript
+        if text is not None:
+            return text
+    elif processing.understanding:
+        return processing.understanding[-1].meaning
+    else:
+        channel = trigger.channel
+        return (
+            "a report received"
+            if channel is None
+            else f"a report received on {channel.channel_type}:{channel.instance_id}"
+        )
     return record.content

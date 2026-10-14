@@ -334,10 +334,10 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     """ADR-0221 §7's reliance, stated at the phases' seams rather than assumed.
 
     **The records** (carried from ADR-0221 §11 test 13, judged there and still true of
-    their fields). ``EpisodicMemory``, ``SemanticMemory``, ``PreferenceMemory`` and
-    ``ProceduralMemory`` with ``Provenance``, ``Attestation``, ``ReportedExtent``,
-    ``Validity``, ``Placement`` and ``Capture`` hold Tier 1 memory text, identifiers,
-    clocks and closed values. ``EpisodeProcessingRecord`` (ADR-0275) holds identifiers,
+    their fields). ``EpisodicMemory`` and ``SemanticMemory`` with ``Provenance``,
+    ``Attestation``, ``ReportedExtent``, ``Validity``, ``Placement`` and ``Capture``
+    hold Tier 1 memory text, identifiers, clocks and closed values.
+    ``EpisodeProcessingRecord`` (ADR-0275) holds identifiers,
     closed values and clocks, and the trigger it recorded — ``RecordedChannelTrigger``
     with its input, channel, context items and reply kind, the user's own words among
     them, which ADR-0004 §1 puts in Tier 1. Its
@@ -383,8 +383,8 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     model wrote. That is why the tidy-up is not a seam of its own here: what its model
     writes reaches planning only as these lines, which this walk already crosses.
 
-    **Understanding's windows** (ADR-0276 §3, ADR-0293 §6:4). ``SuppliedWindow``,
-    ``ConversationWindow`` and ``TranscriptWindow``, with ``TranscriptMessage`` and
+    **Understanding's windows** (ADR-0276 §3, ADR-0293 §6:4). ``SuppliedWindow``
+    and ``TranscriptWindow``, with ``TranscriptMessage`` and
     ``DeletedMessage``, are the channel's own material: the messages people wrote,
     their positions, authors and identifiers, and the records above.
 
@@ -416,7 +416,6 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ChannelContext",
         "ChannelContextItem",
         "ChannelIdentity",
-        "ConversationWindow",
         "DeletedMessage",
         "DigestItem",
         "Digested",
@@ -438,8 +437,6 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "PlanningRound",
         "PlanningStories",
         "PlanningStory",
-        "PreferenceMemory",
-        "ProceduralMemory",
         "ProposedActivationUnderstanding",
         "ProposedCall",
         "ProposedReference",

@@ -94,9 +94,8 @@ class Preference:
     it never validated, and §1's order-independence would be gone with it: two
     selections over one candidate set could differ with nothing in the
     declarations having changed. The corpus makes this move wherever it matters
-    (``PlanStep`` deep-freezes its parameters, ``ToolCost`` is frozen in its own
-    right), so taking the copy is the established shape rather than a new
-    precaution.
+    (``ToolCost`` is frozen in its own right), so taking the copy is the established
+    shape rather than a new precaution.
 
     **A duplicate id is refused rather than resolved.** ``(a, a, b)`` gives ``a``
     two positions, and an implementation taking the first would order it before
@@ -244,16 +243,14 @@ def select(candidates: Sequence[ToolDefinition], preference: Preference, /) -> S
     declaration and the snapshot, so the minimum is a property of the set.
 
     Args:
-        candidates: The eligible declarations, which must be non-empty —
-            emptiness is ADR-0145 §4's ``INVALID_PARAMETERS`` and is the caller's
-            to report, since only the caller knows whether the set was empty
-            because ``find`` returned nothing or because the fit filter emptied
-            it.
+        candidates: The eligible declarations, which must be non-empty — emptiness is
+            the caller's to report (ADR-0145 §4), since only the caller knows whether
+            the set was empty because ``find`` returned nothing or because the fit
+            filter emptied it.
         preference: The validated snapshot the stage was constructed with.
 
     Returns:
-        The selection, or the tie that ADR-0144 §6 leaves for
-        ``AMBIGUOUS_CAPABILITY``.
+        The selection, or the tie that ADR-0144 §6 leaves to the caller.
 
     Raises:
         ValueError: If ``candidates`` is empty.
@@ -353,7 +350,7 @@ def model_supplied_keys(
     ADR-0254 §3: *"a system-supplied argument is filled by the system, never by the
     model, and one the model could influence is refused rather than asked about …
     **Where a plan step's own arguments name such a key at all, the request is not
-    built**"*. A plan step's parameters are a model's output, so a key this answers
+    built**"*. A proposed call's arguments are a model's output, so a key this answers
     with is one the model reached for and `orchestration` owns.
 
     **The refusal is a fault and never a question.** *"A user is never asked to

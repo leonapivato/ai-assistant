@@ -754,7 +754,7 @@ def _distinct_decisions(calls: Sequence[AuthorizedCall]) -> None:
 
 
 def _snapshot(one: AuthorizedCall) -> AuthorizedCall:
-    """Revalidate and detach one call, as the executor does before its claim.
+    """Revalidate and detach one call, as the old path's executor did before its claim.
 
     Rebuilt through validation, so nothing the caller still holds reaches what is
     claimed or invoked, and the call's own checks run again on the copy.

@@ -287,7 +287,7 @@ from ai_assistant.orchestration.story_links import admitted_episodes
 from ai_assistant.orchestration.story_privacy import SummaryVisibility
 from ai_assistant.orchestration.story_standing import story_standing
 from ai_assistant.orchestration.supplied_records import SuppliedRecords
-from ai_assistant.orchestration.understanding import ConversationWindow, fetch_held
+from ai_assistant.orchestration.understanding import fetch_held
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
@@ -391,7 +391,7 @@ _UNKNOWN_SEARCHES: Final = frozenset({"deadline_expired", "transport_failed"})
 
 #: The capabilities planning is never offered, though a registry holds them: the clock,
 #: since planning's input carries ``now`` (#2942). ``tools`` declares it (ADR-0048 §1),
-#: and ``orchestration`` names it by its capability, as ``capability_alias`` does.
+#: and ``orchestration`` names it by its capability.
 _NOT_OFFERED: Final = frozenset({"report_current_time"})
 
 #: The activation whose round's calls are running, by what it holds of what it was given:
@@ -1700,19 +1700,11 @@ def _fetched_outside(fetched: Fetched | None) -> tuple[str, ...]:
 def _window_records(given: PhasePass) -> tuple[MemoryRecord, ...]:
     """The stored records the pass's windows gave the activation (ADR-0276 §3-§4).
 
-    A conversation window's tail records, where the channel window is one, and the
-    episode window's records as the understanding phase fetched them. The chat's
-    transcript window holds messages, not stored records, so it gives none.
+    The episode window's records as the understanding phase fetched them. The channel
+    window gives none: a supplied item and a transcript message are not stored records.
     """
-    windows = given.windows
-    channel = (
-        windows.channel.records
-        if windows is not None and isinstance(windows.channel, ConversationWindow)
-        else ()
-    )
     fetched = given.understanding_fetch
-    episodes = () if fetched is None or fetched.episodes is None else fetched.episodes
-    return (*channel, *episodes)
+    return () if fetched is None or fetched.episodes is None else fetched.episodes
 
 
 def _hold_given(given: PhasePass, working: PhaseWorking) -> None:

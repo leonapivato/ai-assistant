@@ -109,7 +109,6 @@ from ai_assistant.core.types import (
     InputOrigin,
     MemoryKind,
     Message,
-    RecordedChannelTrigger,
     Role,
     StoryFlag,
     StoryFlagKind,
@@ -758,11 +757,7 @@ class StoryTidyUp:
             if not isinstance(record, EpisodicMemory) or activation_of(record) != activation_id:
                 return False
             processing = record.processing_record
-            if (
-                processing is None
-                or not isinstance(processing.trigger, RecordedChannelTrigger)
-                or processing.trigger.origin is not InputOrigin.OUTSIDE
-            ):
+            if processing is None or processing.trigger.origin is not InputOrigin.OUTSIDE:
                 return False
         return True
 

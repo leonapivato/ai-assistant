@@ -83,7 +83,7 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 #: How many of the conversation's recent messages the window holds (ADR-0293 §7:5:
-#: the kind declares its window size). The replay bound the episode tail had
+#: the kind declares its window size). The replay bound the retired episode tail had
 #: (``HISTORY_REPLAY_BOUND``), so the window an input arrives with is as wide as it was.
 CHAT_WINDOW_SIZE: Final = 20
 

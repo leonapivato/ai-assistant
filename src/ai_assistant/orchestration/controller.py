@@ -8,8 +8,7 @@ stage adds its decisions to the working set and never chooses what runs next.
 
 Everything here is orchestration-local (§3): no Protocol in ``core`` describes a
 stage or the controller, because nothing outside ``orchestration`` implements or
-calls either, and the interface is expected to change as later milestones split
-the turn loop and the drive into stages of their own.
+calls either.
 """
 
 from __future__ import annotations
