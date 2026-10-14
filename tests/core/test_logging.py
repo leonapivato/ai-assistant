@@ -7,7 +7,7 @@ import io
 import logging
 import subprocess
 import sys
-from collections import ChainMap, UserDict, deque
+from collections import ChainMap, UserDict, UserList, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -987,8 +987,8 @@ def test_a_hosts_format_keeps_the_logger_and_level_and_masks_each_extra() -> Non
 
     out = stream.getvalue()
     _assert_no_content(out)
-    assert out.startswith(f"ERROR thirdparty {_WITHHELD}|{REDACTED}\n")
-    assert "_ReadFailedError" in out
+    assert out.startswith(f"ERROR thirdparty {_WITHHELD}\n")
+    assert out.endswith(f"_ReadFailedError|{REDACTED}\n")
 
 
 @pytest.mark.parametrize(
@@ -1005,6 +1005,7 @@ def test_a_hosts_format_keeps_the_logger_and_level_and_masks_each_extra() -> Non
         pytest.param(lambda log, failure: log.error("%s", {"read": (failure,)}), id="nested"),
         pytest.param(lambda log, failure: log.error("%s", {failure}), id="set"),
         pytest.param(lambda log, failure: log.error("%s", deque([failure])), id="deque"),
+        pytest.param(lambda log, failure: log.error("%s", UserList([failure])), id="UserList"),
         pytest.param(
             lambda log, failure: log.error("%s", MappingProxyType({"read": failure})),
             id="mapping proxy",
@@ -1066,6 +1067,18 @@ def test_a_record_carrying_no_exception_prints_as_it_did() -> None:
     )
 
     assert stream.getvalue() == "header b'raw', read {'count': 2} of /data/x\n"
+
+
+def test_a_record_holding_more_than_the_net_checks_is_withheld() -> None:
+    # Fail closed: an exception past the walk's limit would not be found. A value
+    # met again counts, so repeating one cannot hide what follows it.
+    stream = _configured_on_a_bare_root()
+
+    logging.getLogger("thirdparty").error("ids: %s", ["same"] * 20_000 + [ValueError(_MESSAGE)])
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert out == "[message withheld: the record holds more than this net checks]\n"
 
 
 def test_an_exception_passed_twice_is_shown_once() -> None:
@@ -1156,7 +1169,7 @@ def test_a_field_a_hosts_record_factory_adds_is_masked_like_an_extra() -> None:
     )
 
     assert _MESSAGE not in result.stdout
-    assert result.stdout.startswith(f"{_WITHHELD}|{REDACTED}\nValueError")
+    assert result.stdout == f"{_WITHHELD}\nValueError|{REDACTED}\n\n"
 
 
 def test_a_message_another_handler_cached_is_not_handed_on() -> None:
@@ -1263,10 +1276,8 @@ def test_a_host_that_configured_structlog_has_its_root_handlers_scrubbed() -> No
     assert "_ReadFailedError" in stream.getvalue()
 
 
-def test_a_host_formatting_through_structlogs_processor_formatter_keeps_working() -> None:
-    # A structlog event wrapped for ProcessorFormatter carries its event dict as the
-    # record's message; made a string, the formatter fails on it and the event is
-    # lost. It is put through this module's structlog net instead.
+def _hosted_by_processor_formatter(fmt: str = "%(message)s") -> io.StringIO:
+    """A host that formats every record through structlog's ``ProcessorFormatter``."""
     root = logging.getLogger()
     for one in list(root.handlers):
         root.removeHandler(one)
@@ -1275,10 +1286,11 @@ def test_a_host_formatting_through_structlogs_processor_formatter_keeps_working(
     hosts = logging.StreamHandler(stream)
     hosts.setFormatter(
         structlog.stdlib.ProcessorFormatter(
+            fmt=fmt,
             processors=[
                 structlog.stdlib.ProcessorFormatter.remove_processors_meta,
                 structlog.dev.ConsoleRenderer(colors=False),
-            ]
+            ],
         )
     )
     root.addHandler(hosts)
@@ -1288,19 +1300,66 @@ def test_a_host_formatting_through_structlogs_processor_formatter_keeps_working(
         wrapper_class=structlog.stdlib.BoundLogger,
     )
     install_redaction()
+    return stream
+
+
+def test_a_structlog_event_formatted_by_a_hosts_processor_formatter_keeps_working() -> None:
+    # A structlog event wrapped for ProcessorFormatter carries its event dict as the
+    # record's message; made a string, the formatter fails on it and the event is
+    # lost. It is put through this module's structlog net instead.
+    stream = _hosted_by_processor_formatter()
     failure = _caught(_raise_with_content)
 
     structlog.get_logger("host").warning(
         "read_failed", api_key="sk-live-SECRET", held=failure, exc_info=failure
     )
-    logging.getLogger("thirdparty").error("foreign failed: %s", failure, exc_info=failure)
 
     out = stream.getvalue()
     _assert_no_content(out)
     assert "sk-live-SECRET" not in out
     assert "read_failed" in out
     assert "_ReadFailedError" in out
+
+
+def test_a_foreign_record_formatted_by_a_hosts_processor_formatter_keeps_its_class() -> None:
+    # Adversarial review, round 1 under this holder: ``ProcessorFormatter`` drops a
+    # record's ``exc_text`` by default, so the description travels in the message.
+    stream = _hosted_by_processor_formatter()
+
+    try:
+        _raise_with_content()
+    except _ReadFailedError:
+        logging.getLogger("thirdparty").exception("foreign failed: %s", _LOCAL)
+
+    out = stream.getvalue()
+    _assert_no_content(out)
     assert _WITHHELD in out
+    assert "_ReadFailedError" in out, "the class"
+    assert "in _raise_with_content" in out, "and the frames"
+
+
+def test_a_wrapped_structlog_events_factory_field_is_masked_when_it_carries_one() -> None:
+    # Adversarial review, round 1 under this holder: a host record factory's field
+    # rode a wrapped structlog event untouched.
+    made = logging.getLogRecordFactory()
+
+    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = made(*args, **kwargs)
+        record.failure = ValueError(_MESSAGE)
+        return record
+
+    logging.setLogRecordFactory(factory)
+    try:
+        stream = _hosted_by_processor_formatter("%(message)s|%(failure)s")
+        structlog.get_logger("host").warning("read_failed")
+        logging.getLogger("thirdparty").error("foreign failed")
+    finally:
+        logging.setLogRecordFactory(made)
+
+    out = stream.getvalue()
+    _assert_no_content(out)
+    assert out.count(f"|{REDACTED}") == len(("structlog event", "foreign record"))
+    assert "read_failed" in out
 
 
 def test_the_last_resort_handler_is_scrubbed_too() -> None:
