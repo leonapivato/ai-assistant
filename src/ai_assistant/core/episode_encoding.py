@@ -1,9 +1,8 @@
 """Canonical encoding of episode values: inspection, search text and projection.
 
-Inspection is ADR-0275's. ADR-0284 adds the two derivations every reader of an
-episode shares: :func:`episode_content`, its search text (§7), and
-:func:`project_episode`, what a model is shown of it (§8), with the one table of
-verdict phrases beside it. ADR-0286 adds :func:`episode_extends`, the one test of
+Inspection is ADR-0275's. ADR-0284 adds the two derivations every reader of an episode
+shares: :func:`episode_content`, its search text (§7), and :func:`project_episode`, what
+a model is shown of it (§8). ADR-0286 adds :func:`episode_extends`, the one test of
 whether a revision of an open episode only extends the stored one (§3).
 """
 
@@ -14,16 +13,13 @@ import binascii
 import json
 import re
 from hashlib import sha256
-from types import MappingProxyType
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ai_assistant.core.errors import MemoryStoreError, StaleEpisodeReadError
 from ai_assistant.core.types import (
     ChannelIdentity,
-    ControllerStage,
-    Disposition,
     EncodableText,
     EpisodeChunk,
     EpisodeCursor,
@@ -36,18 +32,16 @@ from ai_assistant.core.types import (
     ProjectedEvidence,
     ProjectedRound,
     ProjectedText,
-    RecordedActivationTrigger,
     RecordedChannelTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
-    RouteOutcome,
     rests_on_recorded_external_content,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
-    from ai_assistant.core.types import ActivationDigest, ActivationLinks, PlanningRound
+    from ai_assistant.core.types import ActivationDigest, PlanningRound
 
 _MAX_PAGE = 100
 _MAX_CHUNK = 65536
@@ -188,8 +182,7 @@ def episode_content(record: EpisodicMemory) -> str:
     report by its sense alone, and an episode no stage understood by how it ended.
 
     **What it never includes** is §7:2's invariant: the input text of a trigger whose
-    ``origin`` is ``outside``. A resume carries no origin and no input (§2:4), so it
-    contributes no words either.
+    ``origin`` is ``outside``.
 
     **An open episode's** search text is empty (ADR-0286 §1, superseding §7:1 in
     when): the freezing write derives it, and this returns ``""`` until then.
@@ -218,7 +211,7 @@ def episode_content(record: EpisodicMemory) -> str:
     else:
         lines = [f"status {processing.status.value}, reason {processing.reason.value}"]
     trigger = processing.trigger
-    if isinstance(trigger, RecordedChannelTrigger) and trigger.origin is InputOrigin.USER:
+    if trigger.origin is InputOrigin.USER:
         words = _input_text(trigger)
         if words is not None and words.strip():
             lines.append(words)
@@ -226,55 +219,6 @@ def episode_content(record: EpisodicMemory) -> str:
 
 
 # --- the episode a model is shown (ADR-0284 §8) --------------------------------
-
-
-#: ADR-0284 §8:6's phrase for each :class:`~ai_assistant.core.types.Disposition`:
-#: the wording ADR-0221 §2's table gave the matching ``step_*`` member, byte for byte.
-STEP_DISPOSITION_PHRASES: Final[Mapping[Disposition, str]] = MappingProxyType(
-    {
-        Disposition.EXECUTED: "the selected tool ran",
-        Disposition.DENIED: "the action was refused by the permission policy",
-        Disposition.AWAITING_CONFIRMATION: "the action was parked for the user to confirm",
-        Disposition.NO_CAPABLE_TOOL: "no tool advertised the capability the step needed",
-        Disposition.AMBIGUOUS_CAPABILITY: (
-            "several tools advertised the capability, so none was chosen"
-        ),
-        Disposition.INVALID_PARAMETERS: (
-            "the step's arguments did not fit the declared schema of any capable tool"
-        ),
-        Disposition.EGRESS_UNBINDABLE: (
-            "the outbound call could not be described, so nothing was asked or sent"
-        ),
-        Disposition.EFFECT_ALREADY_CLAIMED: (
-            "this goal had already claimed the act, so nothing was dispatched"
-        ),
-        Disposition.EFFECT_UNSCOPED: (
-            "the plan did not say which act the step was, so nothing was dispatched"
-        ),
-    }
-)
-
-#: ADR-0284 §8:6's phrase for each :class:`~ai_assistant.core.types.RouteOutcome`:
-#: the wording ADR-0221 §2's table gave the matching ``routed_*`` member, byte for byte.
-#:
-#: **Two mappings, never one keyed by both enums.** They are ``StrEnum`` s sharing
-#: values — ``awaiting_confirmation`` and ``failed`` are members of each — and a
-#: ``StrEnum`` member hashes and compares as its value, so one mapping would hold a
-#: single phrase for both and render a parked route as a parked step, or the reverse.
-ROUTE_OUTCOME_PHRASES: Final[Mapping[RouteOutcome, str]] = MappingProxyType(
-    {
-        RouteOutcome.PERFORMED: "the assistant performed the operation the user asked for",
-        RouteOutcome.AWAITING_CONFIRMATION: "the operation was parked for the user to confirm",
-        RouteOutcome.REFUSED: "the user declined, so the operation was not performed",
-        RouteOutcome.AMBIGUOUS: "more than one record matched, so nothing was performed",
-        RouteOutcome.AMBIGUOUS_TRUNCATED: (
-            "more records matched than could be shown, so nothing was performed"
-        ),
-        RouteOutcome.NOT_FOUND: "nothing matched, so nothing was performed",
-        RouteOutcome.UNRECORDED: "the decision could not be recorded, so nothing was performed",
-        RouteOutcome.FAILED: "the operation was attempted and failed",
-    }
-)
 
 
 def project_episode(
@@ -309,9 +253,9 @@ def project_episode(
 
     The input is shown where the trigger's ``origin`` is ``user``, or where it is
     ``outside`` and ``admit_outside_input`` is set — which the understanding stage's
-    episode window and its recalled episodes alone do (§8:5). A resume carries no
-    origin and shows no input (§2:4). An episode with no processing record shows its ``content``
-    as its input instead (§8:2), the one path on which a model is shown ``content``.
+    episode window and its recalled episodes alone do (§8:5). An episode with no
+    processing record shows its ``content`` as its input instead (§8:2), the one path on
+    which a model is shown ``content``. No stage verdict is shown (ADR-0318 §3:1).
 
     Args:
         record: The stored episode, exactly as held.
@@ -347,7 +291,7 @@ def project_episode(
             derived_from_external=external,
         )
     trigger = processing.trigger
-    origin = trigger.origin if isinstance(trigger, RecordedChannelTrigger) else None
+    origin = trigger.origin
     shown = origin is InputOrigin.USER or (origin is InputOrigin.OUTSIDE and admit_outside_input)
     latest = processing.understanding[-1] if processing.understanding else None
     return EpisodeProjection(
@@ -358,16 +302,6 @@ def project_episode(
         meaning=None if latest is None else latest.meaning,
         meaning_ground=None if latest is None else latest.meaning_ground,
         unresolved=() if latest is None else latest.unresolved,
-        step_dispositions=tuple(
-            entry.step_disposition
-            for entry in processing.stages
-            if entry.stage is ControllerStage.DRIVE and entry.step_disposition is not None
-        ),
-        route_outcomes=tuple(
-            entry.route_outcome
-            for entry in processing.stages
-            if entry.stage is ControllerStage.ROUTING and entry.route_outcome is not None
-        ),
         response=response,
         status=processing.status,
         reason=processing.reason,
@@ -419,9 +353,8 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
     §3 admits:
 
     - a field at its unset value taking a value: the trigger's ``channel``, a speech
-      trigger's ``transcript``, each field of ``links``, ``recall``,
-      ``recall_second_run`` (ADR-0308 §7, in the addition alone) and ``outcome``
-      (from ``None``), and ``response_degraded`` and ``output_degraded`` (from
+      trigger's ``transcript``, ``recall``, ``recall_second_run`` (ADR-0308 §7, in the
+      addition alone) and ``outcome`` (from ``None``), and ``output_degraded`` (from
       ``False``);
     - entries appended at the end of ``understanding`` and of ``stages``, each under
       its bound, with its elided count grown by exactly what the bound dropped;
@@ -484,14 +417,12 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
     settled = before.model_copy(
         update={
             "trigger": _settled_trigger(before.trigger, after.trigger),
-            "links": _settled_links(before.links, after.links),
             "recall": after.recall if before.recall is None else before.recall,
             "recall_second_run": (
                 after.recall_second_run
                 if before.recall_second_run is None
                 else before.recall_second_run
             ),
-            "response_degraded": before.response_degraded or after.response_degraded,
             "output_degraded": before.output_degraded or after.output_degraded,
             "understanding": after.understanding,
             "understanding_elided": after.understanding_elided,
@@ -563,17 +494,15 @@ def _appended(
 
 
 def _settled_trigger(
-    before: RecordedActivationTrigger, after: RecordedActivationTrigger
-) -> RecordedActivationTrigger:
+    before: RecordedChannelTrigger, after: RecordedChannelTrigger
+) -> RecordedChannelTrigger:
     """``before``, with its channel and its transcript taken from ``after`` where unset."""
     settled = before
     if before.channel is None:
         settled = settled.model_copy(update={"channel": after.channel})
     if (
-        isinstance(settled, RecordedChannelTrigger)
-        and isinstance(settled.payload, RecordedSpeechInput)
+        isinstance(settled.payload, RecordedSpeechInput)
         and settled.payload.transcript is None
-        and isinstance(after, RecordedChannelTrigger)
         and isinstance(after.payload, RecordedSpeechInput)
     ):
         payload = settled.payload.model_copy(update={"transcript": after.payload.transcript})
@@ -581,21 +510,8 @@ def _settled_trigger(
     return settled
 
 
-def _settled_links(before: ActivationLinks, after: ActivationLinks) -> ActivationLinks:
-    """``before``, with each of its unset fields taken from ``after``."""
-    return before.model_copy(
-        update={
-            name: getattr(after, name)
-            for name in type(before).model_fields
-            if getattr(before, name) is None
-        }
-    )
-
-
-def _input_text(trigger: RecordedActivationTrigger) -> str | None:
-    """The trigger's exact payload text or transcript; a resume carries none."""
-    if not isinstance(trigger, RecordedChannelTrigger):
-        return None
+def _input_text(trigger: RecordedChannelTrigger) -> str | None:
+    """The trigger's exact payload text or transcript."""
     payload = trigger.payload
     if isinstance(payload, RecordedTextInput):
         return payload.text

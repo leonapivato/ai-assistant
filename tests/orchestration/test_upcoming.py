@@ -634,7 +634,7 @@ async def test_without_a_notify_grant_nothing_is_opened() -> None:
     assert harness.offered == []
 
 
-@pytest.mark.parametrize("other", [GrantScope.FACET, GrantScope.INGEST])
+@pytest.mark.parametrize("other", [GrantScope.INGEST])
 async def test_a_grant_for_another_use_does_not_authorise_this_read(other: GrantScope) -> None:
     """ADR-0133 §2 rules the three members independent, and this is the site.
 

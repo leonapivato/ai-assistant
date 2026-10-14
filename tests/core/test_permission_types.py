@@ -123,10 +123,10 @@ def test_digest_changes_when_the_payload_changes(parameters: dict[str, Any]) -> 
     )
 
 
-def test_digest_does_not_depend_on_the_tool_or_the_step() -> None:
-    """It binds the payload; the tool and step are compared as themselves."""
-    one = ActionRequest(tool=tool("smtp"), parameters={"to": "a"}, step_id="step-1")
-    other = ActionRequest(tool=tool("gmail"), parameters={"to": "a"}, step_id="step-2")
+def test_digest_does_not_depend_on_the_tool() -> None:
+    """It binds the payload; the tool is compared as itself."""
+    one = ActionRequest(tool=tool("smtp"), parameters={"to": "a"})
+    other = ActionRequest(tool=tool("gmail"), parameters={"to": "a"})
 
     assert one.parameters_digest == other.parameters_digest
 
@@ -306,8 +306,6 @@ def test_from_request_transcribes_the_subject() -> None:
     request = ActionRequest(
         tool=tool(),
         parameters={"to": "a"},
-        step_id="step-1",
-        execution_id="exec-1",
         intended_action="act-1",
     )
     ruling = PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine")
@@ -316,8 +314,6 @@ def test_from_request_transcribes_the_subject() -> None:
 
     assert made.tool == request.tool
     assert made.parameters_digest == request.parameters_digest
-    assert made.step_id == request.step_id
-    assert made.execution_id == request.execution_id  # ADR-0044 §1
     assert made.intended_action == request.intended_action  # ADR-0266 §7
     assert made.id == "d-1"
     assert made.decided_at == AT
@@ -364,7 +360,7 @@ def test_a_decision_is_detached_from_the_request_it_was_built_from(
     and `authorises` would go on answering `True`, which is the substitution
     ADR-0021 §1 exists to make detectable.
     """
-    request = ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1")
+    request = ActionRequest(tool=tool(), parameters={"to": "a"})
     ruling = PermissionRuling(outcome=PermissionOutcome.DENY, reason="no")
     made = PermissionDecision.from_request(request, ruling, id="d-1", decided_at=AT)
     before = made.model_dump(mode="json")
@@ -384,7 +380,7 @@ def test_a_request_is_detached_from_the_definition_it_was_built_from() -> None:
     declaration it never saw.
     """
     declared = tool()
-    request = ActionRequest(tool=declared, step_id="step-1")
+    request = ActionRequest(tool=declared)
 
     object.__setattr__(declared, "risk_level", RiskLevel.CRITICAL)
     object.__setattr__(declared.cost, "basis", CostBasis.UNKNOWN)
@@ -399,7 +395,7 @@ def test_a_substituted_definition_stops_a_decision_authorising_the_request() -> 
     The decision keeps the declaration the policy actually ruled on, so a
     request whose tool has since been rewritten no longer matches it.
     """
-    request = ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1")
+    request = ActionRequest(tool=tool(), parameters={"to": "a"})
     made = PermissionDecision.from_request(
         request,
         PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine"),
@@ -414,9 +410,7 @@ def test_a_substituted_definition_stops_a_decision_authorising_the_request() -> 
 
 
 def test_a_decision_authorises_the_request_it_was_made_about() -> None:
-    request = ActionRequest(
-        tool=tool(), parameters={"to": "a"}, step_id="step-1", execution_id="exec-1"
-    )
+    request = ActionRequest(tool=tool(), parameters={"to": "a"})
     made = PermissionDecision.from_request(
         request,
         PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine"),
@@ -430,29 +424,17 @@ def test_a_decision_authorises_the_request_it_was_made_about() -> None:
 @pytest.mark.parametrize(
     "substituted",
     [
-        ActionRequest(tool=tool("gmail"), parameters={"to": "a"}, step_id="step-1"),
-        ActionRequest(
-            tool=tool(risk_level=RiskLevel.CRITICAL), parameters={"to": "a"}, step_id="step-1"
-        ),
-        ActionRequest(
-            tool=tool(discloses=(DataTier.SECRET,)), parameters={"to": "a"}, step_id="step-1"
-        ),
-        ActionRequest(tool=tool(), parameters={"to": "b"}, step_id="step-1"),
-        ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-2"),
-        ActionRequest(tool=tool(), parameters={"to": "a"}),
-        ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1", execution_id="exec-2"),
-        ActionRequest(
-            tool=tool(), parameters={"to": "a"}, step_id="step-1", intended_action="act-b"
-        ),
+        ActionRequest(tool=tool("gmail"), parameters={"to": "a"}),
+        ActionRequest(tool=tool(risk_level=RiskLevel.CRITICAL), parameters={"to": "a"}),
+        ActionRequest(tool=tool(discloses=(DataTier.SECRET,)), parameters={"to": "a"}),
+        ActionRequest(tool=tool(), parameters={"to": "b"}),
+        ActionRequest(tool=tool(), parameters={"to": "a"}, intended_action="act-b"),
     ],
     ids=[
         "a rebound id",
         "a tampered risk level",
         "a widened disclosure",
         "different arguments",
-        "another step",
-        "no step at all",
-        "another execution",
         "an act the decision names none of",
     ],
 )
@@ -462,11 +444,10 @@ def test_a_decision_does_not_authorise_a_substituted_request(substituted: Action
     Taking the *request* is what makes this discharge ADR-0017 §3: a signature
     taking only a definition would have checked the tool and silently ignored
     the arguments — authorising an email to one recipient and executing it to
-    another, with every record still reading as consistent. The execution binding
-    (ADR-0044 §1) is the fourth conjunct: a decision made for execution A does not
-    authorise B's identical request.
+    another, with every record still reading as consistent. No step and no
+    execution is compared (ADR-0318 §6:1): neither record carries one.
     """
-    approved = ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1")
+    approved = ActionRequest(tool=tool(), parameters={"to": "a"})
     made = PermissionDecision.from_request(
         approved,
         PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine"),
@@ -498,9 +479,7 @@ def test_a_decision_authorises_only_a_request_that_is_an_attempt_at_its_own_act(
     way past the check. The ``None``/``None`` pair is the stored-row case and is the
     substitution list's own last entry, taken from the other side.
     """
-    approved = ActionRequest(
-        tool=tool(), parameters={"to": "a"}, step_id="step-1", intended_action="act-a"
-    )
+    approved = ActionRequest(tool=tool(), parameters={"to": "a"}, intended_action="act-a")
     made = PermissionDecision.from_request(
         approved,
         PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine"),
@@ -508,9 +487,7 @@ def test_a_decision_authorises_only_a_request_that_is_an_attempt_at_its_own_act(
         decided_at=AT,
     )
 
-    offered = ActionRequest(
-        tool=tool(), parameters={"to": "a"}, step_id="step-1", intended_action=act
-    )
+    offered = ActionRequest(tool=tool(), parameters={"to": "a"}, intended_action=act)
 
     assert made.authorises(offered) is authorised
 
@@ -521,7 +498,7 @@ def test_a_decision_written_before_the_field_authorises_a_request_carrying_none(
     fail-closed direction"* — so no migration is owed and nothing is repaired."""
     stored = PermissionDecision.model_validate(
         PermissionDecision.from_request(
-            ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1"),
+            ActionRequest(tool=tool(), parameters={"to": "a"}),
             PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine"),
             id="d-1",
             decided_at=AT,
@@ -529,7 +506,7 @@ def test_a_decision_written_before_the_field_authorises_a_request_carrying_none(
     )
 
     assert stored.intended_action is None
-    assert stored.authorises(ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1"))
+    assert stored.authorises(ActionRequest(tool=tool(), parameters={"to": "a"}))
 
 
 @pytest.mark.parametrize("outcome", [PermissionOutcome.CONFIRM, PermissionOutcome.DENY])
@@ -735,7 +712,7 @@ def test_a_lifetime_is_ordered_by_instant_not_wall_clock() -> None:
     assert made.expires_at.tzinfo is UTC
 
 
-@pytest.mark.parametrize("field", ["id", "step_id", "resolves"])
+@pytest.mark.parametrize("field", ["id", "resolves"])
 def test_a_decision_identifier_with_no_utf8_encoding_is_refused(field: str) -> None:
     """The last field family that could break the round-trip guarantee.
 
@@ -745,11 +722,7 @@ def test_a_decision_identifier_with_no_utf8_encoding_is_refused(field: str) -> N
     """
     bad = "d-" + chr(0xD800)
     fields: dict[str, Any] = {"id": "d-1", "resolves": None}
-    request = ActionRequest(tool=tool(), step_id="step-1")
-    if field == "step_id":
-        with pytest.raises(ValidationError, match="UTF-8"):
-            ActionRequest(tool=tool(), step_id=bad)
-        return
+    request = ActionRequest(tool=tool())
     fields[field] = bad
 
     with pytest.raises(ValidationError, match="UTF-8"):
@@ -867,7 +840,6 @@ def test_a_decision_survives_a_json_round_trip_with_its_definition_intact() -> N
             discloses=(DataTier.PERSONAL, DataTier.OPERATIONAL),
         ),
         parameters={"to": "a@example.com", "attachments": [{"name": "x"}]},
-        step_id="step-1",
     )
     made = PermissionDecision.from_request(
         request,

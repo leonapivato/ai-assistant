@@ -985,7 +985,7 @@ async def drive_the_probe(
     Returns:
         The invocation's result.
     """
-    request = ActionRequest(tool=definition, parameters={}, step_id=f"m25-{definition.id}")
+    request = ActionRequest(tool=definition, parameters={})
     decision = PermissionDecision.from_request(
         request,
         PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="the arm authorised the probe"),

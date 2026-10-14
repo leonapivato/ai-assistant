@@ -38,7 +38,6 @@ from ai_assistant.core.types import (
     MessageAuthor,
     MessageReceipt,
     NewMessage,
-    ParkedBinding,
     SendOutcome,
     TranscriptMessage,
     TranscriptPage,
@@ -95,8 +94,6 @@ def test_a_blank_identifier_is_refused() -> None:
     """An empty id identifies nothing while satisfying "an id is present"."""
     with pytest.raises(ValidationError):
         _conversation("   ")
-    with pytest.raises(ValidationError):
-        ParkedBinding(execution_id="", step_id="step-1")
 
 
 def test_an_export_refuses_a_conversation_stamped_deleted() -> None:

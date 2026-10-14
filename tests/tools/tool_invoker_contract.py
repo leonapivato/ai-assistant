@@ -195,7 +195,6 @@ def call_for(
     definition: ToolDefinition,
     *,
     parameters: Mapping[str, FrozenJson] | None = None,
-    step_id: str | None = "step-1",
     decision_id: str = "d-1",
     outcome: PermissionOutcome = PermissionOutcome.ALLOW,
 ) -> ToolCall:
@@ -205,9 +204,7 @@ def call_for(
     because that is what the contract asks callers to use and it is what makes a
     call whose subject disagrees with its request unarrangeable here.
     """
-    request = ActionRequest(
-        tool=definition, parameters=parameters or {"to": "someone@example.com"}, step_id=step_id
-    )
+    request = ActionRequest(tool=definition, parameters=parameters or {"to": "someone@example.com"})
     decision = PermissionDecision.from_request(
         request,
         PermissionRuling(outcome=outcome, reason=f"because it is {outcome}"),
@@ -1308,7 +1305,6 @@ class ToolInvokerContract:
         swapped = ActionRequest(
             tool=tool(),
             parameters={"to": "elsewhere@example.com"},
-            step_id=call.request.step_id,
         )
         call.__dict__["request"] = swapped
 
@@ -1366,7 +1362,6 @@ class ToolInvokerContract:
         malformed = ActionRequest.model_construct(
             tool=call.request.tool,
             parameters={"to": {"a", "set", "has", "no", "json"}},
-            step_id=call.request.step_id,
         )
         call.__dict__["request"] = malformed
 
@@ -2074,13 +2069,12 @@ class ToolInvokerContract:
             object.__setattr__(call.request.tool, "risk_level", RiskLevel.LOW)
         elif wiring == "unauthorised":
             call.__dict__["request"] = ActionRequest(
-                tool=tool(), parameters={"to": "elsewhere@example.com"}, step_id="step-1"
+                tool=tool(), parameters={"to": "elsewhere@example.com"}
             )
         elif wiring == "malformed-parameters":
             call.__dict__["request"] = ActionRequest.model_construct(
                 tool=call.request.tool,
                 parameters={"to": {"a", "set", "has", "no", "json"}},
-                step_id="step-1",
             )
 
         with pytest.raises(ToolBindingError):

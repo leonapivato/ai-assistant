@@ -68,7 +68,7 @@ _ADDED: dict[str, str] = {
 #: own — the gateway derives none of them, defaults none of them".
 _WELL_FORMED: dict[str, dict[str, Any]] = {
     "/sources": {},
-    "/grant": {"source": "calendar", "scope": ["facet"]},
+    "/grant": {"source": "calendar", "scope": ["notify"]},
     "/revoke": {"source": "calendar"},
     "/grants/recent": {},
     "/grants/standing": {},
@@ -164,11 +164,11 @@ async def test_a_sources_entry_renders_exactly_the_uses_its_live_grant_names() -
     """
     engine = FakeAssistantEngine()
     engine.hold_source("calendar", location="/home/owner/calendar.ics")
-    engine.hold_grant("calendar", scope=(GrantScope.FACET,))
+    engine.hold_grant("calendar", scope=(GrantScope.NOTIFY,))
     async with _harness(engine) as one:
         _, body = await one.whole("POST", "/sources", {})
 
-        assert body["sources"][0]["live"]["scope"] == ["facet"]
+        assert body["sources"][0]["live"]["scope"] == ["notify"]
 
 
 async def test_a_grant_relays_the_source_verbatim_and_normalises_nothing() -> None:
@@ -183,12 +183,12 @@ async def test_a_grant_relays_the_source_verbatim_and_normalises_nothing() -> No
     engine.hold_source("calendar", location="/somewhere")
     async with _harness(engine) as one:
         status, body = await one.whole(
-            "POST", "/grant", {"source": " calendar ", "scope": ["facet"]}
+            "POST", "/grant", {"source": " calendar ", "scope": ["notify"]}
         )
 
         assert status == 422
         assert body["fault"] == "assistant-declined"
-        assert engine.calls == [("grant", {"source": " calendar ", "scope": (GrantScope.FACET,)})]
+        assert engine.calls == [("grant", {"source": " calendar ", "scope": (GrantScope.NOTIFY,)})]
 
 
 async def test_a_grant_naming_ingest_is_the_hub_s_refusal_and_records_nothing() -> None:
@@ -205,7 +205,7 @@ async def test_a_grant_naming_ingest_is_the_hub_s_refusal_and_records_nothing() 
     engine.hold_source("calendar", location="/somewhere")
     async with _harness(engine) as one:
         status, body = await one.whole(
-            "POST", "/grant", {"source": "calendar", "scope": ["facet", "ingest"]}
+            "POST", "/grant", {"source": "calendar", "scope": ["notify", "ingest"]}
         )
 
         assert status == 400
@@ -225,12 +225,11 @@ async def test_a_grant_carries_the_whole_scope_the_browser_chose() -> None:
     engine.hold_source("calendar", location="/somewhere")
     async with _harness(engine) as one:
         status, body = await one.whole(
-            "POST", "/grant", {"source": "calendar", "scope": ["notify", "facet"]}
+            "POST", "/grant", {"source": "calendar", "scope": ["notify"]}
         )
 
         assert status == 200
-        # Declaration order is the record's own validator's, not this adapter's.
-        assert body["grant"]["scope"] == ["facet", "notify"]
+        assert body["grant"]["scope"] == ["notify"]
         assert body["grant"]["source"] == "calendar"
         assert body["grant"]["revokes"] is None
 
@@ -246,7 +245,7 @@ async def test_a_grant_naming_a_use_of_no_vocabulary_is_refused_before_the_hub()
     """
     async with _harness() as one:
         status, body = await one.whole(
-            "POST", "/grant", {"source": "calendar", "scope": ["facet", "everything"]}
+            "POST", "/grant", {"source": "calendar", "scope": ["notify", "everything"]}
         )
 
         assert status == 400
@@ -323,8 +322,8 @@ async def test_the_history_carries_what_distinguishes_a_revocation_from_a_grant(
     question of what stands to ``standing_grants``.
     """
     engine = FakeAssistantEngine()
-    granted = engine.hold_grant("calendar", scope=(GrantScope.FACET,))
-    engine.hold_grant("calendar", scope=(GrantScope.FACET,), revokes=granted.id)
+    granted = engine.hold_grant("calendar", scope=(GrantScope.NOTIFY,))
+    engine.hold_grant("calendar", scope=(GrantScope.NOTIFY,), revokes=granted.id)
     async with _harness(engine) as one:
         status, body = await one.whole("POST", "/grants/recent", {})
 
@@ -355,11 +354,11 @@ async def test_an_amendment_reaches_the_hub_as_two_calls_in_order() -> None:
     """
     engine = FakeAssistantEngine()
     engine.hold_source("calendar", location="/somewhere")
-    engine.hold_grant("calendar", scope=(GrantScope.FACET,))
+    engine.hold_grant("calendar", scope=(GrantScope.NOTIFY,))
     async with _harness(engine) as one:
         withdrawn_status, _ = await one.whole("POST", "/revoke", {"source": "calendar"})
         granted_status, _ = await one.whole(
-            "POST", "/grant", {"source": "calendar", "scope": ["facet", "notify"]}
+            "POST", "/grant", {"source": "calendar", "scope": ["notify"]}
         )
 
         assert (withdrawn_status, granted_status) == (200, 200)
@@ -766,7 +765,7 @@ async def test_a_source_with_no_configured_location_stays_grantable() -> None:
     async with _harness(engine) as one:
         listed_status, listed = await one.whole("POST", "/sources", {})
         granted_status, granted = await one.whole(
-            "POST", "/grant", {"source": "notes", "scope": ["facet"]}
+            "POST", "/grant", {"source": "notes", "scope": ["notify"]}
         )
 
         assert (listed_status, listed["sources"][0]["location"]) == (200, None)

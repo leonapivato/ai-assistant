@@ -604,8 +604,6 @@ class ForecasterContract:
         assert sorted(str(value) for value in request.parameters.values()) == sorted(
             [subject.origin, str(subject.latitude), str(subject.longitude)]
         )
-        assert request.step_id is None
-        assert request.execution_id is None
         assert request.egress_binding is None
 
     # --- the identity a record is attested to (ADR-0260 §4, §5) -------------

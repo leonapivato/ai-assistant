@@ -2497,7 +2497,7 @@ def test_grant_renders_the_location_before_it_asks(
         return False
 
     monkeypatch.setattr(cli, "_confirm_grant", _watching)
-    result = CliRunner().invoke(cli.app, ["grant", "calendar", "--scope", "facet"])
+    result = CliRunner().invoke(cli.app, ["grant", "calendar", "--scope", "notify"])
 
     assert result.exit_code == 0
     assert len(seen_at_prompt) == 1, "the user must be asked exactly once"
@@ -2528,7 +2528,7 @@ def test_a_blank_source_is_a_usage_error_and_never_a_traceback(
     opened = _wire_recording_opens(monkeypatch, _granting_engine())
 
     assert CliRunner().invoke(cli.app, ["revoke", "   "]).exit_code == 2
-    assert CliRunner().invoke(cli.app, ["grant", "   ", "--scope", "facet"]).exit_code == 2
+    assert CliRunner().invoke(cli.app, ["grant", "   ", "--scope", "notify"]).exit_code == 2
     assert opened == []
 
 
@@ -2538,7 +2538,7 @@ def test_a_repeated_scope_is_a_usage_error_and_never_a_traceback(
     """ADR-0097 §10 spells a duplicated scope as a refusal, not something to fold away.
 
     Both the client and the engine raise ``ValueError`` for it, which is again not
-    an :class:`AssistantError`, so ``--scope facet --scope facet`` escaped as a
+    an :class:`AssistantError`, so ``--scope notify --scope notify`` escaped as a
     traceback for the same reason a blank source did.
 
     **Refused at the parse boundary, which is asserted rather than asserted-about**
@@ -2550,7 +2550,7 @@ def test_a_repeated_scope_is_a_usage_error_and_never_a_traceback(
     opened = _wire_recording_opens(monkeypatch, _granting_engine())
 
     result = CliRunner().invoke(
-        cli.app, ["grant", "calendar", "--scope", "facet", "--scope", "facet", "--yes"]
+        cli.app, ["grant", "calendar", "--scope", "notify", "--scope", "notify", "--yes"]
     )
     assert result.exit_code == 2
     assert opened == []
@@ -2582,7 +2582,7 @@ def test_a_source_with_no_utf8_encoding_is_a_usage_error(
     result = CliRunner().invoke(cli.app, ["revoke", unwritable])
     assert result.exit_code == 2
     assert unwritable not in result.output
-    assert CliRunner().invoke(cli.app, ["grant", unwritable, "--scope", "facet"]).exit_code == 2
+    assert CliRunner().invoke(cli.app, ["grant", unwritable, "--scope", "notify"]).exit_code == 2
     assert opened == []
 
 
@@ -2613,13 +2613,9 @@ def test_grant_records_the_grant_once_the_user_agrees(
     engine = _granting_engine()
     _wire(monkeypatch, engine)
 
-    result = CliRunner().invoke(
-        cli.app, ["grant", "calendar", "--scope", "facet", "--scope", "notify"], input="y\n"
-    )
+    result = CliRunner().invoke(cli.app, ["grant", "calendar", "--scope", "notify"], input="y\n")
     assert result.exit_code == 0
-    assert [record.scope for record in engine.grants_recorded] == [
-        (GrantScope.FACET, GrantScope.NOTIFY)
-    ]
+    assert [record.scope for record in engine.grants_recorded] == [(GrantScope.NOTIFY,)]
     assert "Granted" in output.getvalue()
 
 
@@ -2644,14 +2640,16 @@ def test_a_pasted_revoke_hint_withdraws_the_source_it_was_printed_for(
     engine.hold_source("my calendar", location="/srv/calendar.ics")
     _wire(monkeypatch, engine)
 
-    granted = CliRunner().invoke(cli.app, ["grant", "my calendar", "--scope", "facet"], input="y\n")
+    granted = CliRunner().invoke(
+        cli.app, ["grant", "my calendar", "--scope", "notify"], input="y\n"
+    )
     assert granted.exit_code == 0
     confirmation = _flowed(output.getvalue())
     assert "Granted." in confirmation
     assert _pasted(confirmation, "assistant revoke", "'.") == ["assistant", "revoke", "my calendar"]
 
     already = len(output.getvalue())
-    again = CliRunner().invoke(cli.app, ["grant", "my calendar", "--scope", "facet"], input="n\n")
+    again = CliRunner().invoke(cli.app, ["grant", "my calendar", "--scope", "notify"], input="n\n")
     assert again.exit_code == 0
     prompt = _flowed(output.getvalue()[already:])
     assert "It is already granted" in prompt
@@ -2679,7 +2677,7 @@ def test_a_revoke_hint_is_withheld_where_the_source_name_cannot_be_shown(
     engine.hold_source(named, location="/srv/calendar.ics")
     _wire(monkeypatch, engine)
 
-    granted = CliRunner().invoke(cli.app, ["grant", named, "--scope", "facet"], input="y\n")
+    granted = CliRunner().invoke(cli.app, ["grant", named, "--scope", "notify"], input="y\n")
     assert granted.exit_code == 0
     assert [record.source for record in engine.grants_recorded] == [named], (
         "the grant is recorded byte-exact; only the printed hint is affected"
@@ -2690,7 +2688,7 @@ def test_a_revoke_hint_is_withheld_where_the_source_name_cannot_be_shown(
     assert "assistant revoke '" not in confirmation, "no argument is offered at all"
 
     already = len(output.getvalue())
-    again = CliRunner().invoke(cli.app, ["grant", named, "--scope", "facet"], input="n\n")
+    again = CliRunner().invoke(cli.app, ["grant", named, "--scope", "notify"], input="n\n")
     assert again.exit_code == 0
     prompt = _flowed(output.getvalue()[already:])
     assert "It is already granted" in prompt
@@ -2798,7 +2796,7 @@ def test_a_typed_ingest_scope_is_refused_at_the_door_and_nothing_is_sent(
     _wire(monkeypatch, engine)
 
     result = CliRunner().invoke(
-        cli.app, [command, "calendar", "--scope", "facet", "--scope", "ingest", "--yes"]
+        cli.app, [command, "calendar", "--scope", "notify", "--scope", "ingest", "--yes"]
     )
 
     assert result.exit_code == 2
@@ -2817,7 +2815,7 @@ def test_yes_supplies_the_answer_and_never_the_rendering(
     """
     _wire(monkeypatch, _granting_engine())
 
-    result = CliRunner().invoke(cli.app, ["grant", "calendar", "--scope", "facet", "--yes"])
+    result = CliRunner().invoke(cli.app, ["grant", "calendar", "--scope", "notify", "--yes"])
     assert result.exit_code == 0
     assert "/srv/calendar.ics" in output.getvalue()
 
@@ -2842,7 +2840,7 @@ def test_a_source_the_enumeration_does_not_carry_is_never_granted(
     engine.hold_source("notes", location="/srv/\udce9notes.md")
     _wire(monkeypatch, engine)
 
-    result = CliRunner().invoke(cli.app, ["grant", "notes", "--scope", "facet", "--yes"])
+    result = CliRunner().invoke(cli.app, ["grant", "notes", "--scope", "notify", "--yes"])
     assert result.exit_code == 1
     assert not [call for call in engine.calls if call[0] == "grant"]
     rendered = output.getvalue()
@@ -2863,7 +2861,7 @@ def test_a_source_with_no_configured_location_says_so_and_is_still_grantable(
     engine = _granting_engine(location=None)
     _wire(monkeypatch, engine)
 
-    result = CliRunner().invoke(cli.app, ["grant", "calendar", "--scope", "facet", "--yes"])
+    result = CliRunner().invoke(cli.app, ["grant", "calendar", "--scope", "notify", "--yes"])
     assert result.exit_code == 0
     assert "no configured location" in output.getvalue()
     assert len(engine.grants_recorded) == 1
@@ -2881,7 +2879,7 @@ def test_revoke_neither_prompts_nor_enumerates_first(
     unconfigured, which is unrevokable the moment anything checks.
     """
     engine = _granting_engine()
-    engine.hold_grant("calendar", scope=[GrantScope.FACET])
+    engine.hold_grant("calendar", scope=[GrantScope.NOTIFY])
     _wire(monkeypatch, engine)
 
     result = CliRunner().invoke(cli.app, ["revoke", "calendar"])
@@ -2902,7 +2900,7 @@ def test_revoke_never_claims_to_have_stopped_a_read(
     declines to promise more — so the client may not either.
     """
     engine = _granting_engine()
-    engine.hold_grant("calendar", scope=[GrantScope.FACET])
+    engine.hold_grant("calendar", scope=[GrantScope.NOTIFY])
     _wire(monkeypatch, engine)
 
     CliRunner().invoke(cli.app, ["revoke", "calendar"])
@@ -2945,8 +2943,8 @@ def test_grants_lists_both_acts_and_points_liveness_elsewhere(
     of this page most needs to be sent to.
     """
     engine = _granting_engine()
-    granted = engine.hold_grant("calendar", scope=[GrantScope.FACET])
-    engine.hold_grant("calendar", scope=[GrantScope.FACET], revokes=granted.id)
+    granted = engine.hold_grant("calendar", scope=[GrantScope.NOTIFY])
+    engine.hold_grant("calendar", scope=[GrantScope.NOTIFY], revokes=granted.id)
     _wire(monkeypatch, engine)
 
     result = CliRunner().invoke(cli.app, ["grants"])
@@ -3046,7 +3044,7 @@ def _amendable_engine() -> _ScriptedGrantEngine:
     """A hub holding one grantable source, already granted for one use."""
     engine = _ScriptedGrantEngine()
     engine.hold_source("calendar", location="/srv/calendar.ics")
-    engine.hold_grant("calendar", scope=[GrantScope.FACET, GrantScope.INGEST])
+    engine.hold_grant("calendar", scope=[GrantScope.INGEST, GrantScope.NOTIFY])
     return engine
 
 
@@ -3079,7 +3077,7 @@ def test_granted_renders_exactly_the_uses_a_grant_names(
 ) -> None:
     """ADR-0139 §3's third clause, which is the half a well-meaning view gets wrong.
 
-    A ``FACET``-only grant renders as ``FACET`` and **nothing else**: adding the
+    A ``NOTIFY``-only grant renders as ``NOTIFY`` and **nothing else**: adding the
     members it leaves out — greyed out, or listed as not yet allowed — presents the
     user's decision as a half-filled form, which is a nudge toward a wider grant on
     the one surface whose subject is what they actually decided. The whole
@@ -3087,15 +3085,14 @@ def test_granted_renders_exactly_the_uses_a_grant_names(
     that is asserted separately below.
     """
     engine = _granting_engine()
-    engine.hold_grant("calendar", scope=[GrantScope.FACET])
+    engine.hold_grant("calendar", scope=[GrantScope.NOTIFY])
     _wire(monkeypatch, engine)
 
     result = CliRunner().invoke(cli.app, ["granted"])
     assert result.exit_code == 0
     rendered = output.getvalue()
-    assert "looking at it while answering" in rendered
+    assert "raise things with you unprompted" in rendered
     assert "durably remembering" not in rendered
-    assert "raise things with you unprompted" not in rendered
 
 
 def test_granted_says_nothing_about_configuration_or_about_reads(
@@ -3111,7 +3108,7 @@ def test_granted_says_nothing_about_configuration_or_about_reads(
     author adds when the list looks sparse.
     """
     engine = _granting_engine()
-    engine.hold_grant("calendar", scope=[GrantScope.FACET])
+    engine.hold_grant("calendar", scope=[GrantScope.NOTIFY])
     _wire(monkeypatch, engine)
 
     result = CliRunner().invoke(cli.app, ["granted"])
@@ -3431,7 +3428,7 @@ def test_amend_is_refused_for_a_source_the_enumeration_does_not_carry(
     engine.hold_grant("journal", scope=[GrantScope.INGEST])
     _wire(monkeypatch, engine)
 
-    result = CliRunner().invoke(cli.app, ["amend", "journal", "--scope", "facet", "--yes"])
+    result = CliRunner().invoke(cli.app, ["amend", "journal", "--scope", "notify", "--yes"])
     assert result.exit_code == 1
     assert [call[0] for call in engine.calls] == ["grantable_sources"]
     rendered = output.getvalue()
@@ -3456,7 +3453,8 @@ def test_the_amend_scope_option_names_every_use_a_new_grant_may_name(
     result = CliRunner().invoke(cli.app, ["amend", "--help"])
     assert result.exit_code == 0
     help_text = re.sub(r"\s+", " ", result.output)
-    assert "facet" in help_text
+    # ADR-0318 §6:2: the offer is NOTIFY alone, named in words.
+    assert "facet" not in help_text
     assert "notify" in help_text
     # ADR-0294 §4: an amendment's new scope is a new grant, offered without INGEST.
     assert "ingest" not in help_text

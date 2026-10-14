@@ -38,7 +38,12 @@ from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 #: validate as, so the marker advances to 10 on the same terms. ADR-0315 §5 advances the
 #: record to schema_version 10, whose rounds lose the mark asking for another round, which
 #: a version-9 record does not validate as, so the marker advances to 11 on the same terms.
-EPISODE_RECORD_FORMAT: Final[int] = 11
+#: ADR-0318 §7:1 advances the record to schema_version 11, which loses the old path's
+#: links, resume trigger, compose-stage degradation and stage verdicts, and the memory
+#: store loses the parks index over ``links.parks``; a version-10 record does not
+#: validate as it, so the marker advances to 12, again with no migration or reader for
+#: an older store (ADR-0309 §6:4).
+EPISODE_RECORD_FORMAT: Final[int] = 12
 
 
 def check_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool:

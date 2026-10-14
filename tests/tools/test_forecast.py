@@ -1484,9 +1484,8 @@ def test_the_declaration_names_the_origin_and_the_coordinate_and_nothing_else() 
 async def test_a_request_carries_the_declaration_and_the_configured_place() -> None:
     """§4: the proposal, carrying "the arguments its own registered schema declares".
 
-    And ``None`` for ``step_id``, ``execution_id`` and ``egress_binding``: a forecast
-    decision has no plan step and no execution, and the binding is derived by
-    ``EgressBinder`` and accepted from nobody.
+    And ``None`` for ``egress_binding``: the binding is derived by ``EgressBinder``
+    and accepted from nobody.
     """
     subject = await built(channels=[answering(day())])
 
@@ -1499,8 +1498,6 @@ async def test_a_request_carries_the_declaration_and_the_configured_place() -> N
         "latitude": LATITUDE,
         "longitude": LONGITUDE,
     }
-    assert proposal.step_id is None
-    assert proposal.execution_id is None
     assert proposal.egress_binding is None
 
 

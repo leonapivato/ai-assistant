@@ -469,7 +469,7 @@ class TestHubEngineClientContract(AssistantEngineContract):
         """
         backing = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
         for index in range(_OVERFULL_GRANTS):
-            backing.hold_grant(f"source-{index}", scope=(GrantScope.FACET,))
+            backing.hold_grant(f"source-{index}", scope=(GrantScope.NOTIFY,))
         async with serving(backing, tmp_path / "hub.sock", max_frame_bytes=_TINY_FRAME) as client:
             yield client
 

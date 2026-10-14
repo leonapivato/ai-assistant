@@ -2222,7 +2222,6 @@ class PhasePath:
                     modality=Modality.TEXT,
                     supplied_withheld=working.supplied.withheld(given.supply),
                     derived_from_external=external,
-                    parked=None,
                     delivery=None,
                 )
                 state.holds_external(value=external)

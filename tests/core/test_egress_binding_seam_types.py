@@ -29,7 +29,6 @@ from ai_assistant.core.types import (
     DataTier,
     DestinationProtocol,
     DiscloserProvenance,
-    Disposition,
     EgressBinding,
     EgressDestination,
     EgressSpan,
@@ -339,20 +338,3 @@ def test_the_refusal_class_is_a_direct_subclass_of_the_hierarchy_root() -> None:
     """
     assert EgressBindingError.__bases__ == (AssistantError,)
     assert EgressBindingError.__subclasses__() == []
-
-
-def test_the_disposition_member_is_additive_and_distinguishable() -> None:
-    """ADR-0152 §9, §13: distinguishable from ``DENIED`` and from ``INVALID_PARAMETERS``.
-
-    A client that could not tell them apart would report "the assistant declined
-    to send this" for a tool whose declaration is malformed, which is a falsehood
-    about the user's own policy.
-    """
-    assert Disposition.EGRESS_UNBINDABLE.value == "egress_unbindable"
-    assert Disposition("egress_unbindable") is Disposition.EGRESS_UNBINDABLE
-    assert len({member.value for member in Disposition}) == len(Disposition)
-    assert Disposition.EGRESS_UNBINDABLE.value not in {
-        Disposition.DENIED.value,
-        Disposition.INVALID_PARAMETERS.value,
-        Disposition.NO_CAPABLE_TOOL.value,
-    }

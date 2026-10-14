@@ -102,11 +102,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.channel_validation import input_origin
 from ai_assistant.core.diagnostics import write_diagnostic, write_failure
-from ai_assistant.core.episode_encoding import (
-    ROUTE_OUTCOME_PHRASES,
-    STEP_DISPOSITION_PHRASES,
-    project_episode,
-)
+from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.errors import UnderstandingError
 from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
@@ -1069,7 +1065,7 @@ class _PlacedItem:
     """One item of the place window, what it shares with the episode window, its link.
 
     ``annotated`` is whether this item carries what the episode window would have added
-    about ``also`` — its status, verdicts and understanding. Several transcript messages
+    about ``also`` — its status and understanding. Several transcript messages
     can be one exchange — the user's message an activation took in and the reply it
     wrote — and that exchange is rendered once (ADR-0276 §3): the first of them in
     rendering order carries its annotations, and every one of them is marked as also in
@@ -1206,7 +1202,7 @@ class _ChannelItem:
         the one mark the place window gains: a story label naming it links nothing.
 
         ``also`` is the episode-window record the item names, where it names one: its
-        status, reason, verdicts and understanding ride here, rendered once (§3). A
+        status, reason and understanding ride here, rendered once (§3). A
         tail record is that episode itself; a supplied item or a transcript message is
         not a record and keeps its own text, gaining only those annotations, and only
         where ``annotated``: of several items that are one exchange, the first carries
@@ -1214,7 +1210,7 @@ class _ChannelItem:
 
         **A stored understanding version rides only on an item also in the episode
         window** — what that window would have added about it. On its own the channel
-        window renders a tail record's two halves, its status and its verdicts, and no
+        window renders a tail record's two halves and its status, and no
         understanding version: ADR-0276 §4 makes that the whole of what a turn on a
         channel of unbounded audience is shown of its tail, which takes no episode
         window, and ADR-0284 leaves that clause standing.
@@ -1456,10 +1452,10 @@ class _ProjectedEpisode:
         }
 
     def parts(self, *, understood: bool = True) -> dict[str, object]:
-        """Its time, input, response, status and reason, understanding and verdicts.
+        """Its time, input, response, status and reason, and understanding.
 
-        ADR-0284 §8:6: a rendering states the episode's status and reason, and the
-        phrase for each verdict it carries. ``understood`` is whether the latest
+        ADR-0284 §8:6 as ADR-0318 §3:1 leaves it: a rendering states the episode's
+        status and reason, and no verdict. ``understood`` is whether the latest
         understanding version is shown: the episode window and the recalled section
         show it (ADR-0276 §4, ADR-0281 §7), and a channel-window item shows it only
         where it is also in the episode window.
@@ -1477,7 +1473,7 @@ class _ProjectedEpisode:
         }
 
     def annotations(self, *, understood: bool) -> dict[str, object]:
-        """Its status and reason, its verdicts' phrases and, where shown, its understanding.
+        """Its status and reason and, where shown, its understanding.
 
         What a channel-window item gains where it names an episode the episode window
         holds (§3), and the part of :meth:`parts` that is about processing.
@@ -1497,10 +1493,6 @@ class _ProjectedEpisode:
                     for matter in projection.unresolved
                 ],
             }
-        verdicts = [STEP_DISPOSITION_PHRASES[member] for member in projection.step_dispositions]
-        verdicts += [ROUTE_OUTCOME_PHRASES[member] for member in projection.route_outcomes]
-        if verdicts:
-            rendered["what_became_of_it"] = verdicts
         return rendered
 
     def excerpt(self) -> str:

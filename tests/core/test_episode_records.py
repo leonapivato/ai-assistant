@@ -12,7 +12,6 @@ from ai_assistant.core.types import (
     ChannelContext,
     ChannelIdentity,
     ControllerRule,
-    ControllerStage,
     EpisodeCaptureReport,
     EpisodeCursor,
     EpisodePosition,
@@ -25,7 +24,6 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     Provenance,
     RecordedChannelTrigger,
-    RecordedResumeTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
     SpokenAudioFormat,
@@ -114,12 +112,14 @@ def test_the_episode_carries_no_disposition() -> None:
     assert "disposition" not in record.model_dump(mode="json")
 
 
-def test_the_record_is_schema_version_ten() -> None:
-    """ADR-0315 §5: ``schema_version`` advances to ``Literal[10]``; an earlier one is refused."""
+def test_the_record_is_schema_version_eleven() -> None:
+    """ADR-0318 §7:1: ``schema_version`` advances to ``Literal[11]``; an earlier one is refused."""
     data = _processing().model_dump(mode="json")
-    assert data["schema_version"] == 10
+    assert data["schema_version"] == 11
+    assert "links" not in data
+    assert "response_degraded" not in data
     with pytest.raises(ValidationError, match="literal_error"):
-        EpisodeProcessingRecord.model_validate({**data, "schema_version": 9})
+        EpisodeProcessingRecord.model_validate({**data, "schema_version": 10})
 
 
 def test_absent_processing_retains_other_producer_outcomes() -> None:
@@ -200,21 +200,6 @@ def test_the_trigger_requires_its_origin_and_carries_no_conversation_options() -
         RecordedChannelTrigger.model_validate(
             {**_processing().trigger.model_dump(mode="json"), "conversation": None}
         )
-
-
-def test_a_resume_records_its_stages() -> None:
-    """ADR-0284 §5:4-§5:5: a stageless resume is refused; one end entry, last, admits it."""
-    resume = _processing().model_copy(
-        update={
-            "trigger": RecordedResumeTrigger(channel=None, approved=True),
-            "understanding_omitted": UnderstandingOmission.NO_INPUT,
-        }
-    )
-    data = resume.model_dump(mode="json")
-    with pytest.raises(ValidationError, match="exactly one end entry"):
-        EpisodeProcessingRecord.model_validate({**data, "stages": []})
-    admitted = EpisodeProcessingRecord.model_validate(data)
-    assert [entry.stage for entry in admitted.stages] == [ControllerStage.END]
 
 
 def test_recorded_capture_requires_both_addresses() -> None:

@@ -104,7 +104,6 @@ def _decision(decision_id: str, *, at: datetime) -> PermissionDecision:
         ActionRequest(
             tool=confirmable(),
             parameters={"to": "a@example.com"},
-            step_id="step-1",
             egress_binding=_egress_binding(),
         ),
         PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="within policy"),

@@ -27,7 +27,7 @@ def grant(**overrides: object) -> SourceGrant:
     fields: dict[str, object] = {
         "id": "g-1",
         "source": "calendar",
-        "scope": (GrantScope.FACET,),
+        "scope": (GrantScope.NOTIFY,),
         "decided_at": AT,
     }
     fields.update(overrides)
@@ -39,9 +39,9 @@ def grant(**overrides: object) -> SourceGrant:
 
 def test_a_grant_with_a_valid_scope_is_accepted() -> None:
     """The control, so the refusals below are not passing for free."""
-    accepted = grant(scope=(GrantScope.FACET, GrantScope.INGEST))
+    accepted = grant(scope=(GrantScope.INGEST, GrantScope.NOTIFY))
 
-    assert accepted.scope == (GrantScope.FACET, GrantScope.INGEST)
+    assert accepted.scope == (GrantScope.INGEST, GrantScope.NOTIFY)
 
 
 def test_an_empty_scope_is_refused() -> None:
@@ -59,12 +59,12 @@ def test_an_empty_scope_is_refused() -> None:
 def test_a_repeated_use_is_refused() -> None:
     """Refused, not silently folded away (ADR-0097 §10).
 
-    ``(FACET, FACET)`` is a caller that has lost track of what it is asking for,
-    and quietly deduplicating would hide that at the one seam whose whole content
-    is what the user agreed to.
+    ``(NOTIFY, NOTIFY)`` is a caller that has lost track of what it is asking
+    for, and quietly deduplicating would hide that at the one seam whose whole
+    content is what the user agreed to.
     """
     with pytest.raises(ValidationError, match="at most once"):
-        grant(scope=(GrantScope.FACET, GrantScope.FACET))
+        grant(scope=(GrantScope.NOTIFY, GrantScope.NOTIFY))
 
 
 def test_scope_is_normalised_into_declaration_order() -> None:
@@ -77,10 +77,10 @@ def test_scope_is_normalised_into_declaration_order() -> None:
     already sorted; §10 enumerates the refusals it wants (empty, duplicated) and
     does not enumerate this one.
     """
-    reversed_order = grant(scope=(GrantScope.INGEST, GrantScope.FACET))
+    reversed_order = grant(scope=(GrantScope.NOTIFY, GrantScope.INGEST))
 
-    assert reversed_order.scope == (GrantScope.FACET, GrantScope.INGEST)
-    assert reversed_order == grant(scope=(GrantScope.FACET, GrantScope.INGEST))
+    assert reversed_order.scope == (GrantScope.INGEST, GrantScope.NOTIFY)
+    assert reversed_order == grant(scope=(GrantScope.INGEST, GrantScope.NOTIFY))
 
 
 def test_the_scopes_order_survives_a_json_round_trip() -> None:
@@ -90,12 +90,12 @@ def test_the_scopes_order_survives_a_json_round_trip() -> None:
     encoding has an order to encode, so the round trip is where that choice either
     pays or does not.
     """
-    original = grant(scope=(GrantScope.FACET, GrantScope.INGEST))
+    original = grant(scope=(GrantScope.INGEST, GrantScope.NOTIFY))
 
     reloaded = SourceGrant.model_validate(original.model_dump(mode="json"))
 
     assert reloaded == original
-    assert reloaded.scope == (GrantScope.FACET, GrantScope.INGEST)
+    assert reloaded.scope == (GrantScope.INGEST, GrantScope.NOTIFY)
 
 
 def test_notify_normalises_last_because_it_was_declared_last() -> None:
@@ -104,12 +104,12 @@ def test_notify_normalises_last_because_it_was_declared_last() -> None:
     Asserted through the record's own normalisation rather than off the enum,
     because that is where the order is load-bearing: two implementations must
     serialise one grant identically (ADR-0097 §10), and a member inserted rather
-    than appended would move ``(FACET, INGEST)`` grants that were written down
-    before it existed.
+    than appended would move ``INGEST`` grants that were written down before it
+    existed.
     """
-    scrambled = grant(scope=(GrantScope.NOTIFY, GrantScope.INGEST, GrantScope.FACET))
+    scrambled = grant(scope=(GrantScope.NOTIFY, GrantScope.INGEST))
 
-    assert scrambled.scope == (GrantScope.FACET, GrantScope.INGEST, GrantScope.NOTIFY)
+    assert scrambled.scope == (GrantScope.INGEST, GrantScope.NOTIFY)
 
 
 def test_a_scope_naming_notify_survives_a_json_round_trip_as_its_wire_value() -> None:
@@ -215,12 +215,12 @@ def test_an_unknown_field_is_refused() -> None:
 # --- the enum (ADR-0097 §2, §10) ---------------------------------------------
 
 
-def test_grant_scope_has_exactly_the_three_ratified_uses() -> None:
-    """Three members, each with a consumer decided, and no placeholder among them.
+def test_grant_scope_has_exactly_the_two_uses_that_stay() -> None:
+    """Two members, and no placeholder among them.
 
-    ``INGEST`` gates ``orchestration``'s ingestion stage, ``FACET`` gates the
-    ``context`` adapter ADR-0096 §4 unblocked, and ``NOTIFY`` gates a producer's
-    read (ADR-0133 §1) — whose consumer is ADR-0130's producer class, decided and
+    ``INGEST`` stays for the grants that name it (ADR-0294 §4:4), ``FACET`` left
+    with the request path's facets (ADR-0318 §6:2), and ``NOTIFY`` gates a
+    producer's read (ADR-0133 §1) — whose consumer is ADR-0130's producer class, decided and
     sequenced rather than imagined, which is what keeps this from being surface
     with no consumer (ADR-0045 §1, ADR-0028 §7). Content-level scope is still
     deferred with the condition that fires it (ADR-0097 §12, ADR-0133 §7), so a
@@ -233,8 +233,8 @@ def test_grant_scope_has_exactly_the_three_ratified_uses() -> None:
     was decided" — inserting it anywhere else would silently rewrite the
     serialised order of every existing grant that names two uses.
     """
-    assert list(GrantScope) == [GrantScope.FACET, GrantScope.INGEST, GrantScope.NOTIFY]
-    assert [use.value for use in GrantScope] == ["facet", "ingest", "notify"]
+    assert list(GrantScope) == [GrantScope.INGEST, GrantScope.NOTIFY]
+    assert [use.value for use in GrantScope] == ["ingest", "notify"]
 
 
 def test_grant_scope_is_a_plain_str_enum_and_carries_no_severity_order() -> None:
@@ -254,6 +254,6 @@ def test_grant_scope_is_a_plain_str_enum_and_carries_no_severity_order() -> None
     declaration rather than from the values. ``RiskLevel`` is the control, so this
     is a statement about a difference rather than about a class in isolation.
     """
-    assert isinstance(GrantScope.FACET, str)
+    assert isinstance(GrantScope.NOTIFY, str)
     assert GrantScope.__lt__ is str.__lt__
     assert RiskLevel.__lt__ is not str.__lt__

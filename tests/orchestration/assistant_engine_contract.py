@@ -405,7 +405,7 @@ def _ruling(decision_id: str, *, at: datetime) -> PermissionDecision:
     (ADR-0021 §1).
     """
     return PermissionDecision.from_request(
-        ActionRequest(tool=_RULED_TOOL, parameters={"to": "a@example.com"}, step_id="step-1"),
+        ActionRequest(tool=_RULED_TOOL, parameters={"to": "a@example.com"}),
         PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="within policy"),
         id=decision_id,
         decided_at=at,
@@ -2355,7 +2355,7 @@ class AssistantEngineContract(
         actual remedy is to pick a different source.
         """
         with pytest.raises(UngrantableSourceError):
-            await granting_engine.grant("no-such-source", scope=[GrantScope.FACET])
+            await granting_engine.grant("no-such-source", scope=[GrantScope.NOTIFY])
         assert await granting_engine.recent_grants() == ()
 
     async def test_a_source_differing_only_by_whitespace_is_refused_not_matched(
@@ -2372,7 +2372,7 @@ class AssistantEngineContract(
         the substitutability failure ADR-0084 §4 promotes this surface to prevent.
         """
         with pytest.raises(UngrantableSourceError):
-            await granting_engine.grant(f"  {_SOURCE}  ", scope=[GrantScope.FACET])
+            await granting_engine.grant(f"  {_SOURCE}  ", scope=[GrantScope.NOTIFY])
         assert await granting_engine.recent_grants() == ()
 
     async def test_revoking_a_source_no_reader_declares_is_not_refused_for_that(
@@ -2421,7 +2421,7 @@ class AssistantEngineContract(
         assert [one.source for one in offered] == [_SOURCE]
         for ungrantable in (_UNWRITABLE_SOURCE, _NOT_CANONICAL):
             with pytest.raises(UngrantableSourceError):
-                await defective_source_engine.grant(ungrantable, scope=[GrantScope.FACET])
+                await defective_source_engine.grant(ungrantable, scope=[GrantScope.NOTIFY])
         assert await defective_source_engine.recent_grants() == ()
 
     async def test_a_refusal_names_a_held_reader_and_never_an_unknown_value(
@@ -2448,12 +2448,12 @@ class AssistantEngineContract(
         message naming the reader is most tempted to add.
         """
         with pytest.raises(UngrantableSourceError) as unknown:
-            await defective_source_engine.grant("no-such-source", scope=[GrantScope.FACET])
+            await defective_source_engine.grant("no-such-source", scope=[GrantScope.NOTIFY])
         assert "no-such-source" not in str(unknown.value)
 
         for held in (_UNWRITABLE_SOURCE, _NOT_CANONICAL):
             with pytest.raises(UngrantableSourceError) as caught:
-                await defective_source_engine.grant(held, scope=[GrantScope.FACET])
+                await defective_source_engine.grant(held, scope=[GrantScope.NOTIFY])
             assert held.strip() in str(caught.value)
             assert "/srv/" not in str(caught.value)
 
@@ -2465,7 +2465,7 @@ class AssistantEngineContract(
         Without this an implementation that answered every enumeration empty and
         refused every grant would satisfy the case above completely.
         """
-        recorded = await defective_source_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        recorded = await defective_source_engine.grant(_SOURCE, scope=[GrantScope.NOTIFY])
         assert recorded.source == _SOURCE
         assert (await defective_source_engine.grantable_sources())[0].live is not None
 
@@ -2481,7 +2481,7 @@ class AssistantEngineContract(
         refusal rather than a second live grant, and the client's remedy is to
         re-read ``grantable_sources``.
         """
-        await granting_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        await granting_engine.grant(_SOURCE, scope=[GrantScope.NOTIFY])
         with pytest.raises(InvalidGrantError):
             await granting_engine.grant(_SOURCE, scope=[GrantScope.NOTIFY])
 
@@ -2575,10 +2575,10 @@ class AssistantEngineContract(
         A suite that only asserted refusals would pass against an implementation
         that refused everything.
         """
-        await granting_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        await granting_engine.grant(_SOURCE, scope=[GrantScope.NOTIFY])
         live = (await granting_engine.grantable_sources())[0].live
         assert live is not None
-        assert live.scope == (GrantScope.FACET,)
+        assert live.scope == (GrantScope.NOTIFY,)
 
         await granting_engine.revoke(_SOURCE)
         assert (await granting_engine.grantable_sources())[0].live is None
@@ -2609,7 +2609,7 @@ class AssistantEngineContract(
         an implementation that had dropped the revoked grant from the record, which
         ADR-0097 §6 forbids — revocation retires nothing and the history stays whole.
         """
-        granted = await back_dated_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        granted = await back_dated_engine.grant(_SOURCE, scope=[GrantScope.NOTIFY])
         withdrawn = await back_dated_engine.revoke(_SOURCE)
         assert withdrawn is not None
         # The premise the fixture exists to establish. Asserted rather than assumed,
@@ -2638,7 +2638,7 @@ class AssistantEngineContract(
         records — a fixed test clock, or a real one at any resolution — reaches that
         case immediately, and nothing else in this class would notice.
         """
-        await granting_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        await granting_engine.grant(_SOURCE, scope=[GrantScope.NOTIFY])
         await granting_engine.revoke(_SOURCE)
         page = await granting_engine.recent_grants()
         assert len(page) == 2
@@ -2705,7 +2705,7 @@ class AssistantEngineContract(
         """
         assert await granting_engine.standing_grants() == ()
 
-        await granting_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        await granting_engine.grant(_SOURCE, scope=[GrantScope.NOTIFY])
         assert [each.source for each in await granting_engine.standing_grants()] == [_SOURCE]
 
         await granting_engine.revoke(_SOURCE)
@@ -2736,7 +2736,7 @@ class AssistantEngineContract(
         both records are still on file, because an implementation that had deleted
         the revoked grant would otherwise satisfy the first.
         """
-        granted = await back_dated_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        granted = await back_dated_engine.grant(_SOURCE, scope=[GrantScope.NOTIFY])
         withdrawn = await back_dated_engine.revoke(_SOURCE)
         assert withdrawn is not None
         assert withdrawn.decided_at < granted.decided_at
@@ -2787,7 +2787,7 @@ class AssistantEngineContract(
         ``ValueError`` and deliberately not an ``AssistantError``, exactly as a
         blank identifier is on the rest of the surface.
         """
-        arguments = {"scope": [GrantScope.FACET]} if call == "grant" else {}
+        arguments = {"scope": [GrantScope.NOTIFY]} if call == "grant" else {}
         with pytest.raises(ValueError, match=r"\w"):
             await getattr(granting_engine, call)(blank, **arguments)
 
@@ -2803,17 +2803,16 @@ class AssistantEngineContract(
         with pytest.raises(ValueError, match=r"\w"):
             await granting_engine.grant(_SOURCE, scope=[])
         with pytest.raises(ValueError, match=r"\w"):
-            await granting_engine.grant(_SOURCE, scope=[GrantScope.FACET, GrantScope.FACET])
+            await granting_engine.grant(_SOURCE, scope=[GrantScope.NOTIFY, GrantScope.NOTIFY])
         assert await granting_engine.recent_grants() == ()
 
     @pytest.mark.parametrize(
         "scope",
         [
             [GrantScope.INGEST],
-            [GrantScope.FACET, GrantScope.INGEST],
             [GrantScope.INGEST, GrantScope.NOTIFY],
         ],
-        ids=["alone", "beside-facet", "beside-notify"],
+        ids=["alone", "beside-notify"],
     )
     async def test_a_scope_naming_ingest_is_refused_locally_and_records_nothing(
         self, granting_engine: AssistantEngine, scope: list[GrantScope]

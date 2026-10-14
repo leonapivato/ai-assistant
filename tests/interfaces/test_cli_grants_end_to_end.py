@@ -308,7 +308,7 @@ def test_a_typed_grant_is_what_the_producer_gate_reads(hub: _Hub, console_output
         hub.run(hub.engine.notice_upcoming_events())
 
     granted = CliRunner().invoke(
-        cli.app, ["grant", CALENDAR_READER_NAME, "--scope", "facet", "--scope", "notify", "--yes"]
+        cli.app, ["grant", CALENDAR_READER_NAME, "--scope", "notify", "--yes"]
     )
     assert granted.exit_code == 0
     assert "Granted" in console_output.getvalue()
@@ -341,7 +341,7 @@ def test_the_grant_record_holds_both_acts_after_the_commands_run(
     property of the table the two commands wrote to, and a fake that appends to a
     list satisfies it by having no other option.
     """
-    CliRunner().invoke(cli.app, ["grant", CALENDAR_READER_NAME, "--scope", "facet", "--yes"])
+    CliRunner().invoke(cli.app, ["grant", CALENDAR_READER_NAME, "--scope", "notify", "--yes"])
     CliRunner().invoke(cli.app, ["revoke", CALENDAR_READER_NAME])
 
     console_output.truncate(0)
@@ -371,7 +371,7 @@ def test_granted_reads_the_real_store_and_amend_leaves_both_acts_on_file(
     grant's, so a run that reported success while re-granting the old scope would
     fail here rather than read as a pass.
     """
-    CliRunner().invoke(cli.app, ["grant", CALENDAR_READER_NAME, "--scope", "facet", "--yes"])
+    CliRunner().invoke(cli.app, ["grant", CALENDAR_READER_NAME, "--scope", "notify", "--yes"])
     CliRunner().invoke(cli.app, ["amend", CALENDAR_READER_NAME, "--scope", "notify", "--yes"])
 
     console_output.truncate(0)
@@ -408,7 +408,7 @@ def test_a_source_nobody_configured_is_refused_before_anything_is_sent(
     ``received`` holds the enumeration and nothing after it: the client asked what
     could be offered, could not show a location for ``notes``, and stopped.
     """
-    result = CliRunner().invoke(cli.app, ["grant", "notes", "--scope", "facet", "--yes"])
+    result = CliRunner().invoke(cli.app, ["grant", "notes", "--scope", "notify", "--yes"])
 
     assert result.exit_code == 1
     rendered = _flat(console_output.getvalue())

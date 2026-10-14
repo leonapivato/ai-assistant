@@ -549,13 +549,13 @@ def test_a_row_renders_every_one_of_the_records_seven_fields(
     user's hands.
     """
     record = _record(
-        "r-7", source="calendar", use=GrantScope.FACET, outcome=ReadOutcome.COMPLETED, produced=14
+        "r-7", source="calendar", use=GrantScope.NOTIFY, outcome=ReadOutcome.COMPLETED, produced=14
     )
     rendered = _listing(output, monkeypatch, record)
 
     assert "r-7" in rendered  # its own id
     assert "calendar" in rendered  # source
-    assert "looking at it while answering" in rendered  # use, in words
+    assert "reading it to raise things with you unprompted" in rendered  # use, in words
     assert "2026-03-01 09:00:00.000000 UTC" in rendered  # checked_at, whole
     assert "completed" in rendered  # outcome
     assert "opened" in rendered  # opened-ness, a function of the outcome
@@ -577,7 +577,6 @@ def test_a_row_renders_every_one_of_the_records_seven_fields(
 @pytest.mark.parametrize(
     ("use", "phrase"),
     [
-        (GrantScope.FACET, "looking at it while answering"),
         (GrantScope.INGEST, "durably remembering what it says"),
         (GrantScope.NOTIFY, "reading it to raise things with you unprompted"),
     ],

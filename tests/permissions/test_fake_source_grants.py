@@ -220,7 +220,7 @@ async def test_the_narrow_fake_can_revoke_between_two_live_calls() -> None:
 
     assert await grants.live(source=SOURCE, use=GrantScope.INGEST) is not None
     assert await grants.live(source=SOURCE, use=GrantScope.INGEST) is None
-    assert await grants.live(source=SOURCE, use=GrantScope.FACET) is None
+    assert await grants.live(source=SOURCE, use=GrantScope.NOTIFY) is None
     assert grants.call_count == 3
 
 
@@ -229,7 +229,7 @@ async def test_the_narrow_fake_can_be_scripted_to_hold_a_revoked_grant() -> None
     granted = source_grant(SOURCE)
     grants = FakeSourceGrants([granted, revocation_of(granted)])
 
-    assert await grants.live(source=SOURCE, use=GrantScope.FACET) is None
+    assert await grants.live(source=SOURCE, use=GrantScope.NOTIFY) is None
 
 
 @pytest.mark.parametrize("calls", [0, 2])
@@ -239,7 +239,8 @@ async def test_revoke_after_lands_where_it_was_told_to(calls: int) -> None:
     grants.revoke_after(calls)
 
     answers = [
-        await grants.live(source=SOURCE, use=GrantScope.FACET) is not None for _ in range(calls + 1)
+        await grants.live(source=SOURCE, use=GrantScope.NOTIFY) is not None
+        for _ in range(calls + 1)
     ]
 
     assert answers == [True] * calls + [False]
@@ -326,18 +327,18 @@ async def test_the_snapshot_survives_a_subclass_that_forges_its_own_dict() -> No
         def __getattribute__(self, name: str) -> object:
             if name == "__dict__":
                 forged = dict(object.__getattribute__(self, "__dict__"))
-                forged["scope"] = (GrantScope.FACET, GrantScope.INGEST)
+                forged["scope"] = (GrantScope.INGEST, GrantScope.NOTIFY)
                 return forged
             return object.__getattribute__(self, name)
 
     store = FakeSourceGrantStore()
-    narrow = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,))
+    narrow = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.NOTIFY,))
     await store.record(_Forged.model_construct(**dict(narrow)))
 
     assert await store.live(source=SOURCE, use=GrantScope.INGEST) is None
-    held = await store.live(source=SOURCE, use=GrantScope.FACET)
+    held = await store.live(source=SOURCE, use=GrantScope.NOTIFY)
     assert held is not None
-    assert held.scope == (GrantScope.FACET,)
+    assert held.scope == (GrantScope.NOTIFY,)
 
 
 async def test_a_record_missing_a_field_is_refused_by_the_narrow_fakes_lever() -> None:

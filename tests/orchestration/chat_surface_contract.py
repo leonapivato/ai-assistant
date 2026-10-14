@@ -112,7 +112,6 @@ class ChatReaderSubject:
 
 _STATUS_REASON: dict[ProcessingStatus, tuple[ProcessingReason, ControllerRule]] = {
     ProcessingStatus.COMPLETED: (ProcessingReason.RETURNED, ControllerRule.NOTHING_DUE),
-    ProcessingStatus.WAITING: (ProcessingReason.CLARIFICATION, ControllerRule.NOTHING_DUE),
     ProcessingStatus.FAILED: (ProcessingReason.PROCESSING_FAILED, ControllerRule.STAGE_FAILED),
     ProcessingStatus.INTERRUPTED: (ProcessingReason.HUB_STOPPED, ControllerRule.HUB_STOPPED),
 }
@@ -388,7 +387,6 @@ class ChatSurfaceContract:
         ("status", "ending"),
         [
             (ProcessingStatus.COMPLETED, ActivationEnding.DONE),
-            (ProcessingStatus.WAITING, ActivationEnding.DONE),
             (ProcessingStatus.FAILED, ActivationEnding.COULDNT_FINISH),
             (ProcessingStatus.INTERRUPTED, ActivationEnding.INTERRUPTED),
         ],

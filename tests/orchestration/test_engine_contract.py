@@ -749,7 +749,7 @@ class TestEngineContract(AssistantEngineContract):
         built = _wire(
             max_payload_bytes=_TINY_LIMIT,
             grants=[
-                source_grant(f"source-{index}", scope=(GrantScope.FACET,))
+                source_grant(f"source-{index}", scope=(GrantScope.NOTIFY,))
                 for index in range(_OVERFULL_GRANTS)
             ],
         )

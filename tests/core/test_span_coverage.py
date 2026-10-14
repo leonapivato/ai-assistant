@@ -248,15 +248,11 @@ def test_authorises_answers_false_across_this_field_alone() -> None:
     approved = ActionRequest(
         tool=_TOOL,
         parameters={"body": "hi"},
-        step_id="step-1",
-        execution_id="exec-1",
         egress_binding=_binding(SpanCoverage.MODEL_ON_EVERY_PATH, _span()),
     )
     offered = ActionRequest(
         tool=_TOOL,
         parameters={"body": "hi"},
-        step_id="step-1",
-        execution_id="exec-1",
         egress_binding=_binding(SpanCoverage.NOT_COVERED, _span()),
     )
     recorded = PermissionDecision.from_request(

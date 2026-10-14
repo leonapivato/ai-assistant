@@ -34,7 +34,6 @@ from ai_assistant.core.types import (
     ActionRequest,
     CostBasis,
     DataTier,
-    Disposition,
     Idempotency,
     ParameterViolation,
     PermissionDecision,
@@ -933,30 +932,3 @@ def test_a_stored_decision_carrying_a_definition_with_parameters_round_trips() -
         decided_at=_AT,
     )
     assert PermissionDecision.model_validate(decision.model_dump(mode="json")) == decision
-
-
-# --- §4: the disposition the stage returns -----------------------------------
-
-
-def test_disposition_gains_invalid_parameters_as_an_additive_wire_value() -> None:
-    """One member, one value string, and every existing string byte-identical (§4)."""
-    assert Disposition.INVALID_PARAMETERS.value == "invalid_parameters"
-    assert Disposition("invalid_parameters") is Disposition.INVALID_PARAMETERS
-    assert {member.value for member in Disposition} == {
-        "executed",
-        "denied",
-        "awaiting_confirmation",
-        "no_capable_tool",
-        "ambiguous_capability",
-        "invalid_parameters",
-        # ADR-0152 §9's addition. It is listed because this assertion is a closure
-        # over the enum rather than a claim about ADR-0145's own member: adding a
-        # member is additive on the wire for the reason ADR-0145 §4 gives
-        # (ADR-0084 §4), and what this still pins is that no *existing* value
-        # string moved when one arrived.
-        "egress_unbindable",
-        # ADR-0259 §9's two, listed for the same reason and pinning the same thing:
-        # no existing value string moved when they arrived.
-        "effect_already_claimed",
-        "effect_unscoped",
-    }

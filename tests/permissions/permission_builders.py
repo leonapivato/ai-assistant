@@ -64,8 +64,8 @@ def tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
 
 
 def action(**overrides: object) -> ActionRequest:
-    """Build a request, overriding ``tool``, ``parameters`` or ``step_id``."""
-    fields: dict[str, object] = {"tool": tool(), "step_id": "step-1"}
+    """Build a request, overriding ``tool`` or ``parameters``."""
+    fields: dict[str, object] = {"tool": tool()}
     fields.update(overrides)
     return ActionRequest(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
 

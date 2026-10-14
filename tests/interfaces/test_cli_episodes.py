@@ -40,7 +40,6 @@ from ai_assistant.core.types import (
     RecallOutcome,
     RecallProvenance,
     RecordedChannelTrigger,
-    RecordedResumeTrigger,
     RecordedTextInput,
     StageEntry,
     StageOutcome,
@@ -406,7 +405,7 @@ def _understanding_section(record: EpisodicMemory) -> list[str]:
 
 #: Every member of each closed enum, spelled out so that a member added to the enum
 #: fails the coverage tests below until its rendering is looked at (ADR-0276 §2).
-_OMISSIONS = ("routed", "no_text", "no_input", "failed", "not_reached")
+_OMISSIONS = ("no_text", "failed", "not_reached")
 _GROUNDS = ("stated", "supplied", "inferred")
 #: ADR-0281 §7 adds ``memory``; the detail prints each kind's value as it is, so it
 #: renders with no table entry of its own.
@@ -822,18 +821,6 @@ def test_human_detail_renders_a_second_run_where_the_first_recorded_none() -> No
     ]
 
 
-def test_human_detail_of_a_resume_says_neither_run_was_recorded() -> None:
-    """A resume carries no recall decision of either run (ADR-0281 §6, ADR-0308 §7)."""
-    record = _staged(
-        _record("record", response="none"),
-        trigger=RecordedResumeTrigger(channel=_CHANNEL, approved=True),
-    )
-    assert _recall_section(record) == [
-        "Recall: none recorded",
-        "Recall (second run): none recorded",
-    ]
-
-
 def test_human_detail_of_a_record_stored_before_the_second_run_still_renders() -> None:
     """A stored record with no ``recall_second_run`` key validates and renders as absent."""
     record = _record("record", response="none")
@@ -995,7 +982,7 @@ def test_detail_renders_what_an_open_episode_has_appended() -> None:
         stages=(
             _stage(
                 ControllerStage.UNDERSTANDING,
-                ControllerRule.UNPLANNED,
+                ControllerRule.NOT_UNDERSTOOD,
                 StageOutcome.DONE,
                 millis=250,
             ),
@@ -1010,7 +997,7 @@ def test_detail_renders_what_an_open_episode_has_appended() -> None:
     assert "Response: sent" in lines
     assert _stage_section(record) == [
         "Stages:",
-        "  understanding (due: unplanned): done, 0.250s",
+        "  understanding (due: not_understood): done, 0.250s",
     ]
     assert _recall_section(record) == [
         "Recall: nothing_found",

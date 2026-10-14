@@ -271,8 +271,6 @@ async def test_request_carries_the_registered_origin_and_no_binding() -> None:
     assert proposal is not None
     assert proposal.tool == WEB_SEARCH
     assert dict(proposal.parameters) == {"origin": ORIGIN, "query": QUERY}
-    assert proposal.step_id is None
-    assert proposal.execution_id is None
     assert proposal.egress_binding is None
 
 

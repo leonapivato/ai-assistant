@@ -26,7 +26,6 @@ from phases_composition_support import (
 
 from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.types import (
-    ActivationLinks,
     ControllerRule,
     ControllerStage,
     EpisodeProcessingRecord,
@@ -417,11 +416,7 @@ async def test_a_forced_mismatch_ends_capture_and_leaves_no_episode(
         processing = _open(stored)
         assert stored is not None
         moved = stored.model_copy(
-            update={
-                "processing_record": processing.model_copy(
-                    update={"links": ActivationLinks(question_id="someone-else")}
-                )
-            }
+            update={"processing_record": processing.model_copy(update={"output_degraded": True})}
         )
         await composed.memory.write_atomic([MemoryWrite(record=moved)])
     finally:

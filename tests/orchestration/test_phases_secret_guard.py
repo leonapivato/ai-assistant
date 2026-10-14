@@ -338,10 +338,9 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     ``ProceduralMemory`` with ``Provenance``, ``Attestation``, ``ReportedExtent``,
     ``Validity``, ``Placement`` and ``Capture`` hold Tier 1 memory text, identifiers,
     clocks and closed values. ``EpisodeProcessingRecord`` (ADR-0275) holds identifiers,
-    closed values and clocks, the trigger it recorded — ``RecordedChannelTrigger`` and
-    ``RecordedResumeTrigger`` with their inputs, channels, context items and reply kinds,
-    the user's own words among them, which ADR-0004 §1 puts in Tier 1 — and
-    ``ActivationLinks`` and ``ParkedBinding``, which are identifiers. Its
+    closed values and clocks, and the trigger it recorded — ``RecordedChannelTrigger``
+    with its input, channel, context items and reply kind, the user's own words among
+    them, which ADR-0004 §1 puts in Tier 1. Its
     ``understanding`` (ADR-0276 §7), ``stages`` (ADR-0280 §7), ``recall`` (ADR-0281 §6),
     ``story_links`` (ADR-0300 §6:7), ``rounds`` and ``labels`` (ADR-0307 §10) and
     ``digests`` (ADR-0308 §7) each close their fields with ``extra="forbid"``: prose this
@@ -408,7 +407,6 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     assert set(reachable) == {
         "ActivationDigest",
         "ActivationLabels",
-        "ActivationLinks",
         "ActivationRecall",
         "ActivationUnderstanding",
         "Attestation",
@@ -433,7 +431,6 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "Message",
         "NewConversation",
         "OfferedTool",
-        "ParkedBinding",
         "PlaceItem",
         "PlaceWindow",
         "Placement",
@@ -454,7 +451,6 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "QuotedOutput",
         "RecalledItem",
         "RecordedChannelTrigger",
-        "RecordedResumeTrigger",
         "RecordedSpeechInput",
         "RecordedTextInput",
         "RefusedCall",

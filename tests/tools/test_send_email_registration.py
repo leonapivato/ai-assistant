@@ -156,7 +156,6 @@ def _authorised(parameters: Mapping[str, FrozenJson], binding: object) -> ToolCa
     request = ActionRequest(
         tool=SEND_EMAIL,
         parameters=parameters,
-        step_id="step-1",
         egress_binding=binding,  # type: ignore[arg-type]  # a case supplies None deliberately
     )
     decision = PermissionDecision.from_request(
@@ -527,7 +526,6 @@ async def test_an_ordinary_callable_reached_with_a_binding_is_refused() -> None:
     request = ActionRequest(
         tool=CURRENT_TIME,
         parameters={},
-        step_id="step-1",
         egress_binding=EgressBinding(
             spans=(),
             account=BoundAccount(identity=IDENTITY, reference=REFERENCE),

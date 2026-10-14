@@ -23,7 +23,6 @@ from ai_assistant.core.errors import (
     UnderstandingError,
 )
 from ai_assistant.core.types import (
-    ActivationLinks,
     ChannelIdentity,
     ControllerRule,
     EpisodeCaptureReport,
@@ -31,19 +30,14 @@ from ai_assistant.core.types import (
     ProcessingReason,
     ProcessingStatus,
     RecordedChannelTrigger,
-    RecordedResumeTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
-    RouteOutcome,
     SpeechChannelPayload,
-    TurnOutcome,
     UnderstandingOmission,
-    is_live_confirmation_park,
 )
 from ai_assistant.orchestration.controller import (
     DEFAULT_STAGE_RECORD_LIMIT,
     StageRecord,
-    stage_timed_out,
 )
 
 if TYPE_CHECKING:
@@ -58,10 +52,8 @@ if TYPE_CHECKING:
         ChannelInput,
         EpisodicMemory,
         Modality,
-        ParkedBinding,
         PlanningLabel,
         PlanningRound,
-        RecordedActivationTrigger,
         ReplyCapability,
         SpokenDelivery,
         StageEntry,
@@ -81,7 +73,6 @@ class CaptureFacts:
     modality: Modality
     supplied_withheld: bool
     derived_from_external: bool
-    parked: ParkedBinding | None
     delivery: SpokenDelivery | None
 
 
@@ -123,18 +114,14 @@ class EpisodeProgress:
 class ActivationState:
     """Mutable facts confined to the worker owning one admission."""
 
-    trigger: RecordedActivationTrigger
+    trigger: RecordedChannelTrigger
     activation_id: str | None
     started_at: datetime | None
     conversation_id: str | None
     facts: CaptureFacts | None = None
-    #: What the old path's compose stage reported. Nothing sets either since it left
-    #: (ADR-0309 §5); the rows of :func:`terminal_status` reading them leave with the
-    #: record's members they classify into.
-    outcome: TurnOutcome | None = None
+    #: The response the episode records (its ``outcome``): the phases' last message,
+    #: set when the pass captures.
     response: str | None = None
-    links: ActivationLinks = field(default_factory=ActivationLinks)
-    reply_degraded: bool = False
     spoken_degraded: bool = False
     no_words: bool = False
     #: The phases ended the pass without finishing it, having returned rather than
@@ -326,10 +313,7 @@ class ActivationState:
             trigger=self.trigger,
             status=status,
             reason=reason,
-            response_degraded=self.reply_degraded
-            or (self.outcome is not None and self.outcome.reply_degraded),
             output_degraded=self.spoken_degraded,
-            links=self.links,
             understanding=self.understanding,
             understanding_omitted=self._omission(),
             understanding_elided=self.understanding_elided,
@@ -346,11 +330,10 @@ class ActivationState:
         """The open record as the pass stands now (ADR-0286 §1, §3).
 
         It carries what the pass has recorded into the record's own fields — the
-        trigger as it stands, the links, the understanding versions, the recall
-        results and the stage entries ended so far, each under its bound — and no
-        status, reason, end time, omission or end entry. ``response_degraded`` and
-        ``output_degraded`` stay unset here: the freezing write sets them, and an
-        unset field may take a value then (§3:3).
+        trigger as it stands, the understanding versions, the recall results and the
+        stage entries ended so far, each under its bound — and no status, reason, end
+        time, omission or end entry. ``output_degraded`` stays unset here: the freezing
+        write sets it, and an unset field may take a value then (§3:3).
 
         Raises:
             ValueError: If admission metadata is incomplete.
@@ -365,7 +348,6 @@ class ActivationState:
             activation_id=self.activation_id,
             started_at=self.started_at,
             trigger=self.trigger,
-            links=self.links,
             understanding=self.understanding,
             understanding_elided=self.understanding_elided,
             stages=stages,
@@ -380,27 +362,18 @@ class ActivationState:
     def _stage_record(
         self, ended_at: datetime, failure: BaseException | None
     ) -> tuple[tuple[StageEntry, ...], int]:
-        """The stage record as capture writes it (ADR-0280 §5, §6; ADR-0284 §5:4).
+        """The stage record as capture writes it (ADR-0280 §5, §6).
 
-        A channel activation the controller never ended — cancelled at the admission
+        An activation the controller never ended — cancelled at the admission
         barrier, or ended at the speech edge — gains its end entry here, at the
         finalization reading: ``interrupted`` for a cancellation, ``no_text_input``
         for speech with no words or whose transcription failed, and
         ``ended_before_controller`` for any other end ahead of the controller.
 
-        **A resume records the stages it ran and one end entry, last** (ADR-0284
-        §5:4). Its stages are appended by the resume path as each ends; a stage that
-        failed appended the end entry with it. Otherwise the end entry is appended
-        here: ``interrupted`` for a cancellation, ``nothing_due`` for a resume that
-        returned — it continued the parked work and composed where it composes, and
-        nothing further is due — and ``stage_timed_out`` or ``stage_failed`` for one
-        that raised outside a recorded stage, classified as a stage's raise is. A
-        resume that continued no stage records the end entry alone.
-
         **A marked pass ends with the stop's end entry** (ADR-0297 §4), ahead of
         every other reading, a cancellation's included — at the point ADR-0280 §5:4
-        appends ``interrupted``, for a channel activation ended before the controller
-        was entered, and as a resume's end entry, whatever ended it.
+        appends ``interrupted``, for an activation ended before the controller was
+        entered.
 
         The state itself is not changed, so a second finalization reading builds the
         same record, and no exception, status or reason moves.
@@ -409,13 +382,6 @@ class ActivationState:
             rule = ControllerRule.STOPPED
         elif isinstance(failure, asyncio.CancelledError):
             rule = ControllerRule.INTERRUPTED
-        elif isinstance(self.trigger, RecordedResumeTrigger):
-            if failure is None:
-                rule = ControllerRule.NOTHING_DUE
-            elif stage_timed_out(failure):
-                rule = ControllerRule.STAGE_TIMED_OUT
-            else:
-                rule = ControllerRule.STAGE_FAILED
         elif self.understanding_omitted is UnderstandingOmission.NO_TEXT:
             rule = ControllerRule.NO_TEXT_INPUT
         else:
@@ -425,44 +391,16 @@ class ActivationState:
     def _omission(self) -> UnderstandingOmission | None:
         """ADR-0276 §5's classification, by where the pass ended and never by its text.
 
-        A pass that recorded a version records no omission, whatever ended it. A
-        resume carries no input. Otherwise the branch the pass took — ``routed``,
-        ``no_text``, ``failed`` — or ``not_reached`` for everything that ended ahead
-        of the stage's entry: a cancellation, an expired deadline, a failure in any
-        step before it.
+        A pass that recorded a version records no omission, whatever ended it.
+        Otherwise the branch the pass took — ``no_text``, ``failed`` — or
+        ``not_reached`` for everything that ended ahead of the stage's entry: a
+        cancellation, an expired deadline, a failure in any step before it.
         """
         if self.understanding:
             return None
-        if isinstance(self.trigger, RecordedResumeTrigger):
-            return UnderstandingOmission.NO_INPUT
         if self.understanding_omitted is not None:
             return self.understanding_omitted
         return UnderstandingOmission.NOT_REACHED
-
-    def relate(  # noqa: PLR0913 — each independently established relationship
-        self,
-        *,
-        predecessor_episode_id: str | None = None,
-        question_id: str | None = None,
-        read_park_id: str | None = None,
-        parked: ParkedBinding | None = None,
-        goal_id: str | None = None,
-        attempt_id: str | None = None,
-        parks: ParkedBinding | None = None,
-    ) -> None:
-        """Retain established relationships without manufacturing absent ones."""
-        known = {
-            "predecessor_episode_id": predecessor_episode_id,
-            "question_id": question_id,
-            "read_park_id": read_park_id,
-            "parked": parked,
-            "goal_id": goal_id,
-            "attempt_id": attempt_id,
-            "parks": parks,
-        }
-        self.links = self.links.model_copy(
-            update={name: value for name, value in known.items() if value is not None}
-        )
 
     def reserved_report(self) -> EpisodeCaptureReport:
         """Bound the receipt before capture, at the address fixed at admission.
@@ -489,7 +427,7 @@ class ActivationState:
 
 @dataclass
 class ActivationScope:
-    """One worker's holder, allowing validated resume admission in a tracked child."""
+    """One worker's holder of its admission, readable in a tracked child."""
 
     state: ActivationState | None = None
 
@@ -577,10 +515,14 @@ def _metadata(clock: Clock, id_factory: Callable[[], str]) -> tuple[str | None, 
     return activation_id, started_at
 
 
-def terminal_status(  # noqa: C901, PLR0911, PLR0912 — ADR-0275's ordered terminal branches, and ADR-0276 §6's row among them
+def terminal_status(  # noqa: PLR0911 — ADR-0275's ordered terminal branches, and ADR-0276 §6's row among them
     state: ActivationState, failure: BaseException | None
 ) -> tuple[ProcessingStatus, ProcessingReason]:
     """Apply ADR-0275's ordered terminal conditions without interpreting response prose.
+
+    ADR-0275 §5:3's table without rows 5, 8, 9 and 10, which classified the old
+    path's composition failure and its parks and questions, and with row 6 reading
+    "another declared operational error" alone (ADR-0318 §5:2).
 
     A pass whose end entry is the stop's — whose mark is set, which is the same fact
     (ADR-0297 §3:3) — is ``interrupted / stopped``, ahead of every other row, the
@@ -607,28 +549,10 @@ def terminal_status(  # noqa: C901, PLR0911, PLR0912 — ADR-0275's ordered term
         return ProcessingStatus.FAILED, ProcessingReason.UNDERSTANDING_FAILED
     if isinstance(failure, OversizedValueError):
         return ProcessingStatus.FAILED, ProcessingReason.OUTPUT_OVERSIZED
-    outcome = state.outcome
-    if state.reply_degraded or (outcome is not None and outcome.reply_degraded):
-        return ProcessingStatus.FAILED, ProcessingReason.COMPOSITION_FAILED
-    if (
-        isinstance(failure, AssistantError)
-        or (
-            outcome is not None
-            and outcome.routed is not None
-            and outcome.routed.outcome is RouteOutcome.FAILED
-        )
-        or (failure is None and state.unfinished)
-    ):
+    if isinstance(failure, AssistantError) or (failure is None and state.unfinished):
         return ProcessingStatus.FAILED, ProcessingReason.PROCESSING_FAILED
     if failure is not None:
         return ProcessingStatus.FAILED, ProcessingReason.INTERNAL_ERROR
-    if outcome is not None:
-        if outcome.read_confirmation is not None or is_live_confirmation_park(outcome):
-            return ProcessingStatus.WAITING, ProcessingReason.CONFIRMATION
-        if outcome.clarification is not None:
-            return ProcessingStatus.WAITING, ProcessingReason.CLARIFICATION
-        if outcome.disambiguation is not None:
-            return ProcessingStatus.WAITING, ProcessingReason.DISAMBIGUATION
     if state.no_words:
         return ProcessingStatus.COMPLETED, ProcessingReason.NO_CONTENT
     return ProcessingStatus.COMPLETED, ProcessingReason.RETURNED

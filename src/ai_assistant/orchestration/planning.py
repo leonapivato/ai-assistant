@@ -63,7 +63,7 @@ activation is shown with that activation's episode label.
 An episode whose exchange the place window already shows, by items linked to its
 activation, is that exchange shown twice. Its messages stay in the place window, under
 its label. Wherever the episode itself is rendered, its entry keeps the label and
-everything only the episode carries, its notes, status, verdicts and evidence among
+everything only the episode carries, its notes, status and evidence among
 them, and each text the place window shows whole is replaced by a line saying so: its
 input, where the user's linked items are that input; its response, where the
 assistant's linked items are the messages it wrote; and a round's message, where one of
@@ -102,11 +102,7 @@ import structlog
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.diagnostics import returned_written, write_diagnostic, write_failure
-from ai_assistant.core.episode_encoding import (
-    ROUTE_OUTCOME_PHRASES,
-    STEP_DISPOSITION_PHRASES,
-    project_episode,
-)
+from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.types import (
     BeliefBand,
     CapabilityResult,
@@ -120,7 +116,6 @@ from ai_assistant.core.types import (
     PlanningLabel,
     PlanningRound,
     ProposedCall,
-    RecordedChannelTrigger,
     RecordedTextInput,
     Role,
     StoryEffectState,
@@ -1447,10 +1442,6 @@ class _Request:
             shown["input"] = _IN_PLACE_WINDOW if place.input else _text(projection.input)
         if projection.meaning is not None:
             shown["understood_then"] = projection.meaning
-        steps = [STEP_DISPOSITION_PHRASES[one] for one in projection.step_dispositions]
-        steps += [ROUTE_OUTCOME_PHRASES[one] for one in projection.route_outcomes]
-        if steps:
-            shown["what_happened"] = steps
         if projection.response is not None:
             shown["response"] = _IN_PLACE_WINDOW if place.response else _text(projection.response)
         if projection.status is not None and projection.reason is not None:
@@ -1640,10 +1631,7 @@ def _input_of(record: EpisodicMemory) -> str | None:
     processing = record.processing_record
     if processing is None:
         return record.content
-    trigger = processing.trigger
-    if not isinstance(trigger, RecordedChannelTrigger):
-        return None
-    payload = trigger.payload
+    payload = processing.trigger.payload
     return payload.text if isinstance(payload, RecordedTextInput) else payload.transcript
 
 

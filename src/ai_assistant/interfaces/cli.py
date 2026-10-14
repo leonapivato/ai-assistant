@@ -549,10 +549,10 @@ def _distinct_scope(value: list[GrantScope]) -> list[GrantScope]:
     """Reject a repeated ``--scope`` during Typer's parameter parsing.
 
     ADR-0097 §10 spells a duplicated scope as a refusal rather than something to
-    fold away silently — ``(FACET, FACET)`` is a caller that has lost track of what
+    fold away silently — ``(NOTIFY, NOTIFY)`` is a caller that has lost track of what
     it is asking for — and both the client and the engine raise ``ValueError`` for
     it. That is not an :class:`AssistantError` either, so without this
-    ``assistant grant calendar --scope facet --scope facet`` escapes as a traceback
+    ``assistant grant calendar --scope notify --scope notify`` escapes as a traceback
     exactly as a blank source does.
 
     **Empty needs no check here**: the option is required, so Typer refuses a call
@@ -636,14 +636,14 @@ _GRANT_SCOPE_OPTION = typer.Option(
     callback=_distinct_scope,
     metavar=_SCOPE_METAVAR,
     help=(
-        "What this grant allows (repeatable): 'facet' to look at the source while "
-        "answering, 'notify' to read it in order to raise things with you unprompted."
+        "What this grant allows: 'notify' to read the source in order to raise "
+        "things with you unprompted."
     ),
 )
 
 #: The same option on ``amend``, and it carries the same uses for the same reason:
-#: an amendment's new scope is a new grant, so ADR-0294 §4 offers it ``FACET`` and
-#: ``NOTIFY`` and not ``INGEST``, and ADR-0139 §4:6 takes the new scope from that
+#: an amendment's new scope is a new grant, so ADR-0318 §6:2 offers it ``NOTIFY``
+#: alone, and not ``INGEST``, and ADR-0139 §4:6 takes the new scope from that
 #: offer. Nothing here may be trimmed further on the ground that the user granted a
 #: narrower set last time — that would be the surface deciding what the user
 #: permits on their behalf (ADR-0139 §3's second clause).
@@ -654,9 +654,8 @@ _AMEND_SCOPE_OPTION = typer.Option(
     callback=_distinct_scope,
     metavar=_SCOPE_METAVAR,
     help=(
-        "What the *new* grant allows (repeatable), replacing the old one entirely: "
-        "'facet' to look at the source while answering, 'notify' to read it in "
-        "order to raise things with you unprompted."
+        "What the *new* grant allows, replacing the old one entirely: 'notify' to "
+        "read the source in order to raise things with you unprompted."
     ),
 )
 
@@ -3058,12 +3057,8 @@ def grant(
     permission you were not shown is not one you gave. ``--yes`` supplies the
     answer; it never skips the rendering.
 
-    ``--scope facet`` lets me look at the source to answer what you are asking right
-    now, and remember nothing from it. ``--scope notify`` lets me read it in order
-    to raise things with you unprompted — it is permission to *read*, not a promise
-    that anything arrives. They are separate on purpose — "look at my calendar when
-    I ask, but do not raise it with me unprompted" is a thing people mean. Name as
-    many as you mean; naming one allows only that one.
+    ``--scope notify`` lets me read it in order to raise things with you
+    unprompted — it is permission to *read*, not a promise that anything arrives.
 
     A source can have one grant at a time. To change what a grant covers, use
     'assistant amend' — or revoke and grant yourself; both acts stay on the record
@@ -7485,8 +7480,6 @@ def _scope_phrase(scope: Sequence[GrantScope]) -> str:
     phrases = []
     for use in scope:
         match use:
-            case GrantScope.FACET:
-                phrases.append("looking at it while answering")
             case GrantScope.INGEST:
                 phrases.append("durably remembering what it says")
             case GrantScope.NOTIFY:

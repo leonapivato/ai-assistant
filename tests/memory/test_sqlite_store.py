@@ -71,8 +71,6 @@ from ai_assistant.core.types import (
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.memory._walk import mint_position
 from ai_assistant.memory.sqlite_store import (
-    _PARKS_EXECUTION,
-    _PARKS_STEP,
     _VEC_KNN_MAX_K,
     _run_to_completion,
 )
@@ -3025,7 +3023,7 @@ async def test_pre_m36_stores_are_refused_without_modification(tmp_path: Path, s
     assert db.stat().st_mode == mode
 
 
-@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 0])
+@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 0])
 def test_current_shape_with_missing_or_unsupported_marker_is_refused(
     tmp_path: Path, marker: int | None
 ) -> None:
@@ -3107,13 +3105,14 @@ async def test_a_channel_is_two_indexed_columns_written_with_the_record(tmp_path
         )
         assert "records_by_channel" in channel_plan
         assert "TEMP B-TREE" not in channel_plan  # the index already orders by number
-        parking_plan = _plan(
-            store,
-            f"SELECT data FROM records WHERE {_PARKS_EXECUTION} = ? AND {_PARKS_STEP} = ? "  # noqa: S608 — module literals; values bound
-            "ORDER BY rowid LIMIT 1",
-            ("execution", "step"),
-        )
-        assert "records_by_parking" in parking_plan
+        # ADR-0318 §8: the parks index left with ``links.parks``.
+        indexes = {
+            row[0]
+            for row in store._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'records'"
+            )
+        }
+        assert "records_by_parking" not in indexes
     finally:
         store.close()
 
@@ -3212,12 +3211,11 @@ async def test_episode_numbers_survive_a_reopen_and_are_never_reissued(tmp_path:
         reopened.close()
 
 
-async def test_a_corrupt_blob_is_still_deletable_under_the_parking_index(tmp_path: Path) -> None:
-    """SQLite evaluates ``records_by_parking``'s expression on every write and delete.
+async def test_a_corrupt_blob_is_still_deletable(tmp_path: Path) -> None:
+    """No index the store keeps evaluates a corrupt blob so as to refuse its deletion.
 
-    Unguarded, ``json_extract`` over a malformed blob raises inside that evaluation, so
-    the corrupt row could neither be rewritten nor deleted; guarded, it indexes as
-    ``NULL`` and the store can still remove it.
+    The parks index ADR-0318 §8 removed was the expression index this was pinned for;
+    the property stands for whatever the store indexes.
     """
     store = SqliteMemoryStore(
         traces_sink=FakeTraceSink(),

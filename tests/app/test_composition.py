@@ -1180,10 +1180,9 @@ async def _grant_the_calendar(engine: Engine) -> None:
 
     ``CALENDAR_READER_NAME`` rather than a literal, because ADR-0097 §1 keys a
     grant to the reader's **declared** identity and a grant naming anything else
-    covers nothing. ``FACET`` alone, so a case that needs the upcoming-event
-    producer's ``NOTIFY`` grants it in so many words.
+    covers nothing. ``NOTIFY``, the one use a new grant may name (ADR-0318 §6:2).
     """
-    await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.FACET])
+    await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.NOTIFY])
 
 
 async def test_build_engine_wires_the_upcoming_driver_on_a_configured_path(
@@ -2723,13 +2722,12 @@ async def test_build_engine_wires_no_producer_when_no_source_is_configured(
 async def test_the_producer_reads_only_on_a_notify_grant(tmp_path: Path) -> None:
     """ADR-0132 §2 and ADR-0133 §2, over the surface a person actually uses.
 
-    The uses are independent, so a grant naming ``FACET`` authorises nothing here:
-    "a live ``INGEST`` grant on this calendar authorises this read no more than a
-    ``FACET`` one does", and ADR-0133 §3 rules that no grant recorded before the
-    member existed acquires it. ``INGEST`` itself can no longer be granted through
-    the surface (ADR-0294 §4), so the stage's own cases carry that half. This is
-    what makes "do not raise my calendar with me unprompted" a sentence the user
-    can say while still letting the assistant answer questions from it.
+    The uses are independent: "a live ``INGEST`` grant on this calendar authorises
+    this read no more than a ``FACET`` one does", and ADR-0133 §3 rules that no grant
+    recorded before the member existed acquires it. ``INGEST`` can no longer be
+    granted through the surface (ADR-0294 §4) and ``FACET`` has left (ADR-0318 §6:2),
+    so the stage's own cases carry that half; here, no grant refuses the read and a
+    ``NOTIFY`` grant lets it run.
     """
     settings = Settings(
         embedder=EmbedderKind.HASHING, calendar_reader_path=_imminent_event_calendar(tmp_path)
@@ -2739,20 +2737,7 @@ async def test_the_producer_reads_only_on_a_notify_grant(tmp_path: Path) -> None
         with pytest.raises(SourceNotGrantedError):
             await engine.notice_upcoming_events()
 
-        # The facet use, granted — and still not this one.
         await _grant_the_calendar(engine)
-        with pytest.raises(SourceNotGrantedError):
-            await engine.notice_upcoming_events()
-
-        # Widening is a revocation followed by a new grant (ADR-0097 §4), which is
-        # part of what "the user grants this use separately" means in practice:
-        # adding ``NOTIFY`` to a standing grant is a decision the user takes, not an
-        # amendment something else can make on their behalf (ADR-0097 §8).
-        assert await engine.revoke(CALENDAR_READER_NAME) is not None
-        await engine.grant(
-            CALENDAR_READER_NAME,
-            scope=[GrantScope.FACET, GrantScope.NOTIFY],
-        )
         assert await engine.notice_upcoming_events() == 1
     finally:
         await engine.aclose()

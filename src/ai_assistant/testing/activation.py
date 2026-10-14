@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -17,36 +17,29 @@ from ai_assistant.core.errors import (
     OversizedValueError,
 )
 from ai_assistant.core.types import (
-    ActivationLinks,
     ActivationUnderstanding,
     Capture,
     ChannelIdentity,
     ControllerRule,
     ControllerStage,
-    Disposition,
     EpisodeCaptureReport,
     EpisodeProcessingRecord,
     EpisodicMemory,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
-    Modality,
     ProcessingReason,
     ProcessingStatus,
     Provenance,
     RecordedChannelTrigger,
-    RecordedResumeTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
-    RouteOutcome,
     SpeechChannelPayload,
     StageEntry,
     StageOutcome,
-    TurnOutcome,
     UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
-    is_live_confirmation_park,
 )
 from ai_assistant.orchestration.activation_cleanup import drain_registered
 
@@ -58,7 +51,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ChannelInput,
         ConversationDigest,
-        RecordedActivationTrigger,
         ReplyCapability,
     )
 
@@ -66,9 +58,9 @@ if TYPE_CHECKING:
 def ended_pass(
     at: datetime, rule: ControllerRule = ControllerRule.NOTHING_DUE
 ) -> tuple[StageEntry, ...]:
-    """The smallest stage record a channel activation's processing record admits.
+    """The smallest stage record an activation's processing record admits.
 
-    ADR-0280 §7 requires a channel activation's record to end in exactly one end
+    ADR-0280 §7 requires an activation's record to end in exactly one end
     entry, last. A test that builds a record by hand and is about something else
     passes this rather than spelling the entry out.
 
@@ -128,16 +120,14 @@ async def _drained(cleanup: Coroutine[object, object, None]) -> None:
 class FakeActivation:
     """One fake call's facts, passed explicitly rather than stored on its engine."""
 
-    trigger: RecordedActivationTrigger
+    trigger: RecordedChannelTrigger
     at: datetime
     conversation_id: str | None = None
     activation_id: str | None = None
     episode_id: str | None = None
-    outcome: TurnOutcome | None = None
     response: str | None = None
     spoken_degraded: bool = False
     no_words: bool = False
-    links: ActivationLinks = field(default_factory=ActivationLinks)
     output_failure: OversizedValueError | None = None
     #: Its conversation was forgotten while it ran (ADR-0293 §2:6): its capture writes
     #: nothing, and an episode already on its way is deleted once it lands.
@@ -246,8 +236,8 @@ class FakeActivation:
             activation_id=self.activation_id, episode_id=address, state="degraded"
         )
 
-    def status(self, failure: BaseException | None) -> tuple[ProcessingStatus, ProcessingReason]:  # noqa: C901, PLR0911 — independent ordered fake classification
-        """Classify the outcomes this deterministic fake can produce."""
+    def status(self, failure: BaseException | None) -> tuple[ProcessingStatus, ProcessingReason]:  # noqa: PLR0911 — independent ordered fake classification
+        """Classify the outcomes this deterministic fake can produce (ADR-0318 §5:2)."""
         if self.stopped:
             # ADR-0297 §4: ahead of every other row, a cancellation's included.
             return ProcessingStatus.INTERRUPTED, ProcessingReason.STOPPED
@@ -257,24 +247,10 @@ class FakeActivation:
             return ProcessingStatus.FAILED, ProcessingReason.TIMEOUT
         if isinstance(failure, OversizedValueError):
             return ProcessingStatus.FAILED, ProcessingReason.OUTPUT_OVERSIZED
-        outcome = self.outcome
-        if outcome is not None and outcome.reply_degraded:
-            return ProcessingStatus.FAILED, ProcessingReason.COMPOSITION_FAILED
-        if isinstance(failure, AssistantError) or (
-            outcome is not None
-            and outcome.routed is not None
-            and outcome.routed.outcome is RouteOutcome.FAILED
-        ):
+        if isinstance(failure, AssistantError):
             return ProcessingStatus.FAILED, ProcessingReason.PROCESSING_FAILED
         if failure is not None:
             return ProcessingStatus.FAILED, ProcessingReason.INTERNAL_ERROR
-        if outcome is not None:
-            if outcome.read_confirmation is not None or is_live_confirmation_park(outcome):
-                return ProcessingStatus.WAITING, ProcessingReason.CONFIRMATION
-            if outcome.clarification is not None:
-                return ProcessingStatus.WAITING, ProcessingReason.CLARIFICATION
-            if outcome.disambiguation is not None:
-                return ProcessingStatus.WAITING, ProcessingReason.DISAMBIGUATION
         return (
             ProcessingStatus.COMPLETED,
             ProcessingReason.NO_CONTENT if self.no_words else ProcessingReason.RETURNED,
@@ -284,11 +260,7 @@ class FakeActivation:
         """Build a structured fake record with no raw fields in its embedding text."""
         assert self.activation_id is not None  # noqa: S101 — incomplete envelopes never persist
         status, reason = self.status(failure)
-        modality = (
-            self.trigger.payload.modality
-            if isinstance(self.trigger, RecordedChannelTrigger)
-            else Modality.TEXT
-        )
+        modality = self.trigger.payload.modality
         record = EpisodicMemory(
             id=address,
             content="",
@@ -305,9 +277,7 @@ class FakeActivation:
                 trigger=self.trigger,
                 status=status,
                 reason=reason,
-                response_degraded=self.outcome is not None and self.outcome.reply_degraded,
                 output_degraded=self.spoken_degraded,
-                links=self.links,
                 understanding=self.understanding(),
                 understanding_omitted=self.omission(),
                 stages=self.stages(failure),
@@ -317,81 +287,24 @@ class FakeActivation:
         return record.model_copy(update={"content": episode_content(record)})
 
     def stages(self, failure: BaseException | None) -> tuple[StageEntry, ...]:
-        """ADR-0280 §7's record shape, with ADR-0284 §5's verdicts, over this fake's facts.
+        """ADR-0280 §7's record shape over this fake's facts.
 
-        The fake runs no controller. It records the one stage entry that carries a
-        verdict where its scripted result reached one — ``routing`` with the route's
-        outcome, or ``drive`` with the step's disposition (§5:2) — and the pass's one
-        end entry, choosing the rule from what it knows: ``stopped`` where its stop
-        mark is set (ADR-0297 §4); ``interrupted`` on a cancellation;
-        ``no_text_input`` for speech with no words;
-        ``stage_failed`` on any other failure; ``route_taken`` for a routed turn; and
-        ``nothing_due`` otherwise.
-
-        **A resume records its stages** (§5:4): the continued stage, due
-        ``park_answered`` with its verdict, then ``compose`` due ``reply_owed`` where
-        it replied, then the end entry. One that continued nothing records the end
-        entry alone.
-
-        **A verdict the pass reached survives a later failure.** The verdict entry reads
-        the observed result whether or not a failure followed it, so a reply refused as
-        oversized after its route performed still records the ``routing`` entry with
-        that outcome — what the engine's controller has already recorded by the time
-        the output is checked, and the one place §5:2 keeps the verdict.
+        The fake runs no controller. It records the pass's one end entry, choosing the
+        rule from what it knows: ``stopped`` where its stop mark is set (ADR-0297 §4);
+        ``interrupted`` on a cancellation; ``no_text_input`` for speech with no words;
+        ``stage_failed`` on any other failure; and ``nothing_due`` otherwise.
         """
-        resume = isinstance(self.trigger, RecordedResumeTrigger)
-        reached = self.outcome
-        outcome = None if failure is not None else reached
-        entries: list[StageEntry] = []
-        if reached is not None and reached.routed is not None:
-            entries.append(
-                self._entry(
-                    ControllerStage.ROUTING,
-                    ControllerRule.PARK_ANSWERED if resume else ControllerRule.ROUTE_UNCHECKED,
-                    route_outcome=reached.routed.outcome,
-                )
-            )
-        elif reached is not None and reached.step is not None:
-            entries.append(
-                self._entry(
-                    ControllerStage.DRIVE,
-                    ControllerRule.PARK_ANSWERED if resume else ControllerRule.PLAN_HAS_STEPS,
-                    step_disposition=reached.step.disposition,
-                )
-            )
-        if resume and outcome is not None and outcome.reply is not None:
-            entries.append(self._entry(ControllerStage.COMPOSE, ControllerRule.REPLY_OWED))
         if self.stopped:
             rule = ControllerRule.STOPPED
         elif isinstance(failure, asyncio.CancelledError):
             rule = ControllerRule.INTERRUPTED
-        elif not resume and self.no_words:
+        elif self.no_words:
             rule = ControllerRule.NO_TEXT_INPUT
         elif failure is not None:
             rule = ControllerRule.STAGE_FAILED
-        elif not resume and outcome is not None and outcome.routed is not None:
-            rule = ControllerRule.ROUTE_TAKEN
         else:
             rule = ControllerRule.NOTHING_DUE
-        return (*entries, *ended_pass(self.at, rule))
-
-    def _entry(
-        self,
-        stage: ControllerStage,
-        due: ControllerRule,
-        *,
-        step_disposition: Disposition | None = None,
-        route_outcome: RouteOutcome | None = None,
-    ) -> StageEntry:
-        return StageEntry(
-            stage=stage,
-            due=due,
-            started_at=self.at,
-            ended_at=self.at,
-            outcome=StageOutcome.DONE,
-            step_disposition=step_disposition,
-            route_outcome=route_outcome,
-        )
+        return ended_pass(self.at, rule)
 
     def understanding(self) -> tuple[ActivationUnderstanding, ...]:
         """The one version a pass that reached the stage records, and none otherwise."""
@@ -409,12 +322,8 @@ class FakeActivation:
 
     def omission(self) -> UnderstandingOmission | None:
         """ADR-0276 §5's classification, mirrored over the facts this fake holds."""
-        if isinstance(self.trigger, RecordedResumeTrigger):
-            return UnderstandingOmission.NO_INPUT
         if self.no_words:
             return UnderstandingOmission.NO_TEXT
-        if self.outcome is not None and self.outcome.routed is not None:
-            return UnderstandingOmission.ROUTED
         return None if self.understood else UnderstandingOmission.NOT_REACHED
 
     def was_forgotten(self) -> bool:
@@ -450,9 +359,7 @@ class FakeActivation:
                 activation_id=self.activation_id, episode_id=self.episode_id, state="degraded"
             )
 
-        if self.activation_id is None or (
-            isinstance(self.trigger, RecordedResumeTrigger) and self.conversation_id is None
-        ):
+        if self.activation_id is None:
             return degraded()
         try:
             if (

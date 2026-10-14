@@ -13,7 +13,6 @@ from ai_assistant.core.errors import (
     ModelError,
     ModelTimeoutError,
     OversizedValueError,
-    PlanningError,
     SpeechTimeoutError,
     UnderstandingError,
 )
@@ -33,7 +32,6 @@ from ai_assistant.core.types import (
     ProcessingReason,
     ProcessingStatus,
     RecordedChannelTrigger,
-    RecordedResumeTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
     SpeechChannelPayload,
@@ -73,16 +71,6 @@ def _admitted() -> ActivationState:
         WholeTextReply(),
         clock=lambda: _AT,
         id_factory=lambda: _ID,
-    )
-
-
-def _resumed() -> ActivationState:
-    """A resume's state, whose record arms leave with ``RecordedResumeTrigger`` (ADR-0309 §5)."""
-    return ActivationState(
-        trigger=RecordedResumeTrigger(channel=None, approved=True, remember_recipients_until=None),
-        activation_id=_ID,
-        started_at=_AT,
-        conversation_id=None,
     )
 
 
@@ -210,7 +198,7 @@ async def test_worker_contexts_keep_isolated_state_under_reversed_completion() -
     assert CURRENT_ACTIVATION.get() is None
 
 
-async def test_resume_admission_in_a_tracked_child_remains_visible_only_to_its_worker() -> None:
+async def test_admission_in_a_tracked_child_remains_visible_only_to_its_worker() -> None:
     scope = ActivationScope()
     state = _admitted()
     token = CURRENT_ACTIVATION.set(scope)
@@ -285,9 +273,9 @@ def test_a_pass_that_ends_ahead_of_the_stage_records_not_reached() -> None:
 
 def test_the_first_branch_taken_is_the_one_recorded() -> None:
     state = _admitted()
-    state.omit(UnderstandingOmission.ROUTED)
+    state.omit(UnderstandingOmission.NO_TEXT)
     state.omit(UnderstandingOmission.FAILED)
-    assert state.processing(_AT, None).understanding_omitted is UnderstandingOmission.ROUTED
+    assert state.processing(_AT, None).understanding_omitted is UnderstandingOmission.NO_TEXT
 
 
 def test_a_recorded_version_outranks_a_later_failure() -> None:
@@ -300,31 +288,7 @@ def test_a_recorded_version_outranks_a_later_failure() -> None:
     assert record.reason is ProcessingReason.PROCESSING_FAILED
 
 
-def test_a_resume_records_no_input() -> None:
-    state = _resumed()
-    assert state.processing(_AT, None).understanding_omitted is UnderstandingOmission.NO_INPUT
-
-
 # --- ADR-0280 §5, §6: the end entry supplied at finalization ----------------------------
-
-
-@pytest.mark.parametrize(
-    ("failure", "rule"),
-    [
-        (None, ControllerRule.NOTHING_DUE),
-        (asyncio.CancelledError(), ControllerRule.INTERRUPTED),
-        (ModelTimeoutError("the composition timed out"), ControllerRule.STAGE_TIMED_OUT),
-        (AssistantError("it failed outside a stage"), ControllerRule.STAGE_FAILED),
-    ],
-)
-def test_a_resume_that_continued_no_stage_records_the_end_entry_alone(
-    failure: BaseException | None, rule: ControllerRule
-) -> None:
-    """ADR-0284 §5:4: one end entry, last, due the rule that ended the resume."""
-    state = _resumed()
-    record = state.processing(_AT, failure)
-    assert [(entry.stage, entry.due) for entry in record.stages] == [(ControllerStage.END, rule)]
-    assert record.stages_elided == 0
 
 
 @pytest.mark.parametrize(
@@ -494,18 +458,6 @@ def test_a_marked_pass_that_never_entered_the_controller_ends_with_the_stops_ent
         ProcessingStatus.INTERRUPTED,
         ProcessingReason.STOPPED,
     )
-
-
-@pytest.mark.parametrize("failure", [None, ModelTimeoutError("late"), PlanningError("x")])
-def test_a_marked_resume_ends_with_the_stops_entry(failure: BaseException | None) -> None:
-    """§4:6: a resume, which the controller does not run, ends with the stop's entry."""
-    state = _resumed()
-    state.stop()
-    record = state.processing(_AT, failure)
-    assert [(entry.stage, entry.due) for entry in record.stages] == [
-        (ControllerStage.END, ControllerRule.STOPPED)
-    ]
-    assert record.reason is ProcessingReason.STOPPED
 
 
 @pytest.mark.parametrize(

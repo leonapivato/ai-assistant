@@ -129,7 +129,6 @@ def call_carrying(definition: object, bound: EgressBinding | None) -> ToolCall:
     request = ActionRequest(
         tool=definition,  # type: ignore[arg-type]  # the builder's own type
         parameters=arguments(),
-        step_id="step-1",
         egress_binding=bound,
     )
     decision = PermissionDecision.from_request(

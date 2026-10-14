@@ -2572,7 +2572,24 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     wire rebuilds an error by its name in ``core.errors``, so a hub at 102 may send
 #:     an error frame naming a class a client at 103 no longer has and refuses as a
 #:     protocol fault (ADR-0313 §6:4, ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 103
+#: 104: ADR-0318 §7:3 takes the old path's vocabulary off what the surface carries, in
+#:     one advance, on these grounds: the wire-carried ``EpisodicMemory.processing_record``
+#:     loses ``links`` (``ActivationLinks``, ``ParkedBinding``) and
+#:     ``response_degraded``, its ``trigger`` is a ``RecordedChannelTrigger`` alone
+#:     (``RecordedResumeTrigger`` leaves), and its ``schema_version`` moves to
+#:     ``Literal[11]`` (§4, §5:3, §7:1); its ``StageEntry`` records lose
+#:     ``step_disposition`` and ``route_outcome``, and ``ControllerStage`` and
+#:     ``ControllerRule`` the old path's members (ADR-0309 §3:6-§3:7);
+#:     ``ProcessingStatus`` loses ``waiting``, ``ProcessingReason`` ``confirmation``,
+#:     ``clarification``, ``disambiguation`` and ``composition_failed``, and
+#:     ``UnderstandingOmission`` ``routed`` and ``no_input``, carried by that record,
+#:     by ``episodes``' status filter and ``EpisodeSummary.status``, and by ``story``
+#:     (§5:1, §5:4); ``PermissionDecision`` loses ``step_id`` and ``execution_id``,
+#:     carried by ``recent_decisions`` and ``export_decisions`` (§6:1); and
+#:     ``GrantScope`` loses ``facet``, carried by the grant and read members (§6:2). A
+#:     peer at 103 refuses the version as unknown, and sends members and fields a hub at
+#:     104 refuses (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 104
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client
