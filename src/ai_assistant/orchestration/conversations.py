@@ -62,7 +62,6 @@ from ai_assistant.core.types import (
     DeviceChanges,
     DevicesChangedChange,
     EpisodicMemory,
-    MemoryKind,
     MessageAddedChange,
     NewMessage,
     ProcessingReason,
@@ -104,19 +103,6 @@ _log = structlog.get_logger(__name__)
 #: ADR-0072 §6 exists to prevent. Nothing reads it comparatively: retrieval is
 #: confidence-neutral (ADR-0072 §5) and inspection only renders it.
 CAPTURE_CONFIDENCE = 0.9
-
-#: The kinds a turn's *relevance* retrieval selects (ADR-0074 §6): the belief
-#: kinds, and never ``EPISODIC``. Capture puts tens of records a day into a store
-#: whose retrieval is otherwise kind-blind, so without this the first capture lane
-#: would silently change what every turn retrieves — a captured turn competing
-#: with beliefs for the retrieval budget — as a side effect nobody ratified.
-#: Cross-conversation episodic recall is a real capability and is deferred with
-#: its ranking question (§11).
-BELIEF_KINDS: tuple[MemoryKind, ...] = (
-    MemoryKind.SEMANTIC,
-    MemoryKind.PREFERENCE,
-    MemoryKind.PROCEDURAL,
-)
 
 #: How many conversations the retention reclaim shortlists per ``recent`` page.
 _RECLAIM_PAGE = 50
@@ -1152,7 +1138,6 @@ class ConversationLifecycle:
 
 
 __all__ = [
-    "BELIEF_KINDS",
     "CAPTURE_CONFIDENCE",
     "HISTORY_REPLAY_BOUND",
     "AssembledHistory",
