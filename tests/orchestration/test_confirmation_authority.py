@@ -3,13 +3,19 @@
 *The answer path is the only producer of a* ``UserConfirmation``, *and it produces
 one only from a deferral it has claimed.*
 
-The first two obligations are instance-wiring and a wiring test covers them
-(``tests/app/test_composition.py``). **This one is not**, and ADR-0078 §10 item 3 is
-explicit about why: "Nothing in the writer's six checks looks for a claim, so a
-helper that assembled a confirmation from a pending deferral's id, key and conflict
-ids — all of which reads expose — could retire a ``USER_ASSERTED`` record while every
-answer-path test still passed." A behavioural test cannot see a second producer that
-nothing happens to call yet; a structural one can.
+**The answer path retired with ``orchestration/questions.py`` (ADR-0309 §5)**, so
+the true state now is that no production module constructs a ``UserConfirmation``
+at all — while ``memory/policy.py`` still honours one as the user's own authority
+(ADR-0078 §5). The guard therefore pins **none**, not "at most one": a single new
+producer, claimed or not, is a new holder of that authority. **Any new producer is
+an authority change**: it belongs to the owner's authority work, and it has to
+change this test deliberately rather than pass it on its first appearance.
+
+ADR-0078 §10 item 3 is why the check is structural: "Nothing in the writer's six
+checks looks for a claim, so a helper that assembled a confirmation from a pending
+deferral's id, key and conflict ids — all of which reads expose — could retire a
+``USER_ASSERTED`` record while every answer-path test still passed." A behavioural
+test cannot see a producer that nothing happens to call yet; a structural one can.
 
 So this reads the source. ``tests/core/test_protocol_triad.py`` is the shape it
 copies — parse rather than import, and require *evidence* rather than a name.
@@ -29,19 +35,12 @@ import ai_assistant
 #: The production tree. Deliberately **not** ``tests/``: a test constructing a
 #: confirmation to drive the writer's floor is exercising ADR-0028 §8's conformance
 #: clause, which is a different obligation and a legitimate thing for a test to do.
-#: What may not exist is a second *production* producer of the authority.
+#: What may not exist is any *production* producer of the authority.
 _SRC: Final = Path(ai_assistant.__file__).resolve().parent
 
 #: The value whose construction is the authority. Named rather than discovered,
 #: because the obligation is about this one type.
 _AUTHORITY: Final = "UserConfirmation"
-
-#: The type whose presence in the enclosing signature proves the producer holds a
-#: claim. ``DeferralClaim`` carries the token ``claim`` minted and returned to that
-#: caller alone — and the token is on no other read, so holding it *is* holding the
-#: claim (ADR-0078 §2). A function taking a ``DeferredProposal`` instead would be
-#: reading something every enumeration publishes, which proves nothing.
-_CLAIM: Final = "DeferralClaim"
 
 
 @dataclass(frozen=True)
@@ -50,43 +49,6 @@ class _Construction:
 
     module: str
     function: str
-    holds_a_claim: bool
-
-
-def _annotation_names(node: ast.AST | None) -> set[str]:
-    """Every bare name mentioned in an annotation, however it is nested.
-
-    ``claim: DeferralClaim``, ``claim: DeferralClaim | None`` and
-    ``claim: "DeferralClaim"`` all have to count: the module under test uses
-    postponed annotations, so the annotation may be a string, and a defensive
-    signature may make it optional. Walking names rather than matching a shape is
-    what keeps the check about *what the function is handed*.
-    """
-    if node is None:
-        return set()
-    names: set[str] = set()
-    for child in ast.walk(node):
-        if isinstance(child, ast.Name):
-            names.add(child.id)
-        elif isinstance(child, ast.Constant) and isinstance(child.value, str):
-            try:
-                names |= _annotation_names(ast.parse(child.value, mode="eval").body)
-            except SyntaxError:  # pragma: no cover — not an annotation expression
-                continue
-    return names
-
-
-def _takes_a_claim(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    """Whether ``function`` is handed a :data:`_CLAIM` by one of its parameters."""
-    arguments = function.args
-    every = [
-        *arguments.posonlyargs,
-        *arguments.args,
-        *arguments.kwonlyargs,
-        *([arguments.vararg] if arguments.vararg else []),
-        *([arguments.kwarg] if arguments.kwarg else []),
-    ]
-    return any(_CLAIM in _annotation_names(argument.annotation) for argument in every)
 
 
 def _constructions(tree: ast.Module, module: str) -> list[_Construction]:
@@ -94,75 +56,61 @@ def _constructions(tree: ast.Module, module: str) -> list[_Construction]:
 
     A *call* rather than a mention: an import, a type annotation, a docstring and an
     ``isinstance`` check all name the type without producing one, and none of them
-    delegates the authority.
+    delegates the authority. A call outside any function — at module level or in a
+    class body — counts too, named ``<module>``: the guard is that none exists, so
+    a construction no function encloses may not slip past it.
     """
+    enclosing: dict[ast.AST, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            for inner in ast.walk(node):
+                if inner is not node:
+                    enclosing.setdefault(inner, node.name)
     found: list[_Construction] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        if not isinstance(node, ast.Call):
             continue
-        for inner in ast.walk(node):
-            if not isinstance(inner, ast.Call):
-                continue
-            callee = inner.func
-            named = (
-                callee.id
-                if isinstance(callee, ast.Name)
-                else callee.attr
-                if isinstance(callee, ast.Attribute)
-                else None
-            )
-            if named == _AUTHORITY:
-                found.append(
-                    _Construction(
-                        module=module, function=node.name, holds_a_claim=_takes_a_claim(node)
-                    )
-                )
+        callee = node.func
+        named = (
+            callee.id
+            if isinstance(callee, ast.Name)
+            else callee.attr
+            if isinstance(callee, ast.Attribute)
+            else None
+        )
+        if named == _AUTHORITY:
+            found.append(_Construction(module=module, function=enclosing.get(node, "<module>")))
     return found
+
+
+def _production_modules() -> list[Path]:
+    """Every module the scan parses: the whole production tree."""
+    return sorted(_SRC.rglob("*.py"))
 
 
 def _production_constructions() -> list[_Construction]:
     """Every place in ``src/ai_assistant`` that constructs the authority."""
     found: list[_Construction] = []
-    for path in sorted(_SRC.rglob("*.py")):
+    for path in _production_modules():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         found.extend(_constructions(tree, module=str(path.relative_to(_SRC))))
     return found
 
 
-def test_a_user_confirmation_is_constructed_in_exactly_one_place() -> None:
-    """A second producer is a second thing that can retire a user's assertion.
+def test_no_production_module_constructs_a_user_confirmation() -> None:
+    """A producer is a holder of the one authority that has never been delegable.
 
-    That is the one authority in this system that has never been delegable, so
-    ADR-0078 §3 makes it structural rather than a wiring rule. Nothing in the
-    writer's checks looks for a claim — they verify what the *authority* covers, not
-    who issued it — so a helper assembling one from a pending deferral's public fields
-    would pass every behavioural test on the answer path.
+    ``memory/policy.py`` still honours a ``UserConfirmation`` as the user's own act,
+    so whoever may construct one may retire a user's assertion. ADR-0078 §3 made
+    that one claimed producer; that producer retired (ADR-0309 §5), and a new one
+    is the owner's authority work, made by changing this assertion on purpose.
     """
     found = _production_constructions()
 
-    assert len(found) == 1, (
-        f"expected exactly one production producer of {_AUTHORITY}, found "
-        f"{[(one.module, one.function) for one in found]}. ADR-0078 §3: 'a second "
-        f"producer of confirmations is a second thing that can authorise retiring a "
-        f"user's assertion'."
-    )
-
-
-def test_the_one_place_that_constructs_it_holds_a_claim() -> None:
-    """And it is handed the claim, not merely the deferral (ADR-0078 §2, §3).
-
-    ``claim`` mints the token, returns it to that caller alone, and puts it on **no
-    other read** — ``get``, ``pending``, ``interrupted`` and ``export`` all return a
-    ``DeferredProposal``, which does not carry it. So a producer that takes a
-    ``DeferralClaim`` cannot have been reached without a claim having been taken,
-    while one that took a deferral id and a key would be reading what every
-    enumeration publishes.
-    """
-    [one] = _production_constructions()
-
-    assert one.holds_a_claim, (
-        f"{one.module}::{one.function} constructs a {_AUTHORITY} without being handed a "
-        f"{_CLAIM}. ADR-0078 §3: it 'produces one only from a deferral it has claimed'."
+    assert found == [], (
+        f"{[(one.module, one.function) for one in found]} constructs a {_AUTHORITY}. "
+        f"No production producer stands since the answer path retired (ADR-0309 §5); "
+        f"a new one is an authority change and has to change this test deliberately."
     )
 
 
@@ -177,12 +125,17 @@ def test_the_one_place_that_constructs_it_holds_a_claim() -> None:
         (
             "def make(claim: DeferralClaim):\n    return UserConfirmation(deferral_id=claim.x)",
             True,
-            "a construction from a claim",
+            "a construction by its bare name",
         ),
         (
-            "def make(deferral: DeferredProposal):\n    return UserConfirmation(deferral_id=1)",
+            "def make(deferral: DeferredProposal):\n    return t.UserConfirmation(deferral_id=1)",
             True,
-            "a construction from something that is not a claim",
+            "a construction through a module attribute",
+        ),
+        (
+            "CONFIRMED = UserConfirmation(deferral_id=1)",
+            True,
+            "a construction no function encloses",
         ),
         (
             "def make(claim: DeferralClaim) -> UserConfirmation:\n    return other()",
@@ -200,7 +153,7 @@ def test_the_one_place_that_constructs_it_holds_a_claim() -> None:
             "an isinstance check",
         ),
     ],
-    ids=["from-a-claim", "without-a-claim", "annotation-only", "docstring", "isinstance"],
+    ids=["bare-name", "attribute", "module-level", "annotation-only", "docstring", "isinstance"],
 )
 def test_only_a_call_counts_as_producing_the_authority(
     source: str, constructs: bool, label: str
@@ -211,33 +164,19 @@ def test_only_a_call_counts_as_producing_the_authority(
     assert bool(found) is constructs, label
 
 
-@pytest.mark.parametrize(
-    ("annotation", "holds"),
-    [
-        ("DeferralClaim", True),
-        ("DeferralClaim | None", True),
-        ('"DeferralClaim"', True),
-        ("DeferredProposal", False),
-        ("str", False),
-    ],
-    ids=["bare", "optional", "stringified", "a-deferral", "an-id"],
-)
-def test_a_claim_is_recognised_however_the_annotation_is_spelled(
-    annotation: str, holds: bool
-) -> None:
-    """Postponed annotations make the parameter a string; optionality is legitimate.
-
-    A check that only matched a bare ``ast.Name`` would pass the *positive* case
-    above by luck and quietly stop working the day the signature changed shape — which
-    is how a structural check becomes decoration.
-    """
-    node = ast.parse(f"def make(claim: {annotation}): ...").body[0]
-    assert isinstance(node, ast.FunctionDef)
-
-    assert _takes_a_claim(node) is holds
-
-
 def test_the_check_reads_the_production_tree_it_is_meant_to_guard() -> None:
-    """Guard the discovery step: a check pointed at nothing proves nothing."""
-    assert (_SRC / "orchestration" / "questions.py").is_file()
-    assert len(list(_SRC.rglob("*.py"))) > 20
+    """Guard the discovery step: a check pointed at nothing proves nothing.
+
+    A scan that finds no producer passes whether or not it looked, so this proves it
+    looked where the authority lives: the module that defines the type and the one
+    that honours it (ADR-0078 §5) are both among the files the scan parses.
+    """
+    scanned = {path.relative_to(_SRC).as_posix(): path for path in _production_modules()}
+
+    defined = ast.parse(scanned["core/types.py"].read_text(encoding="utf-8"))
+    assert any(
+        isinstance(node, ast.ClassDef) and node.name == _AUTHORITY for node in ast.walk(defined)
+    )
+    honoured = ast.parse(scanned["memory/policy.py"].read_text(encoding="utf-8"))
+    assert any(isinstance(node, ast.Name) and node.id == _AUTHORITY for node in ast.walk(honoured))
+    assert len(scanned) > 20
