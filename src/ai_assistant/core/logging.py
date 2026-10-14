@@ -25,8 +25,10 @@ the same should anything reach it. No content reaches a log (ADR-0314 §3:2).
 retrieved" — never pass through structlog's chain, and the stdlib's formatter
 appends a traceback with the exception's message. So each root handler is handed a
 scrubbed copy of every record (:class:`_ScrubRecords`): its exception rendered as
-class and frames, and every exception it carries named by its class wherever its
-message would have printed it, including the repr asyncio's message embeds.
+class and frames, every exception it carries named by its class wherever its
+message, arguments or extras would have printed it (the repr asyncio's message
+embeds included), and an argument or extra this net cannot look inside masked, as
+the redactor masks an unknown value.
 """
 
 from __future__ import annotations
@@ -36,20 +38,21 @@ import logging
 import re
 import sys
 import traceback
+from collections import deque
 from collections.abc import Mapping, Sequence, Set
 from dataclasses import fields, is_dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import PosixPath, PurePosixPath, PureWindowsPath, WindowsPath
-from typing import TYPE_CHECKING, Any, Final, TextIO
+from typing import TYPE_CHECKING, Any, Final, Self, TextIO, cast
 from uuid import UUID
 
 import structlog
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from collections.abc import MutableMapping
+    from collections.abc import Iterable, MutableMapping
 
     from structlog.typing import ExcInfo
 
@@ -452,36 +455,48 @@ def _write_exception(sio: TextIO, exc_info: ExcInfo) -> None:
         raise structlog.DropEvent from exc
 
 
-class _ClassName:
-    """An exception standing in a log record's arguments as its class alone.
+class _ClassName(str):
+    """An exception standing in a log record's arguments or extras as its class alone.
 
     ``%s`` and ``%r`` both print the class, so ``log.error("failed: %s", exc)``
-    renders ``failed: ValueError`` and never the exception's words.
+    renders ``failed: ValueError`` and never the exception's words. A string, so a
+    host's formatter that serialises an extra handles it as one.
     """
 
-    __slots__ = ("_name",)
+    __slots__ = ()
 
-    def __init__(self, failure: BaseException) -> None:
-        self._name = _class_name(failure)
+    def __new__(cls, failure: BaseException) -> Self:
+        """Name ``failure`` by its class.
 
-    def __str__(self) -> str:
-        return self._name
+        Args:
+            failure: The exception to stand in for.
+
+        Returns:
+            Its class's name, as :func:`_class_name` gives it.
+        """
+        return super().__new__(cls, _class_name(failure))
 
     def __repr__(self) -> str:
-        return self._name
-
-    def __format__(self, spec: str) -> str:
-        return format(self._name, spec)
+        return str.__str__(self)
 
 
 #: The attributes every ``LogRecord`` has, and those a formatter adds. Any other
 #: attribute was set by a call site's ``extra``, which a host's format may print.
 _RECORD_FIELDS: Final = frozenset(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
 
-#: The containers walked for an exception inside a record's arguments or extras.
-#: Builtins alone: a ``range`` or a library's lazy sequence is a ``Sequence`` whose
-#: walk can be unbounded, and none of them holds an exception in practice.
-_WALKED: Final = (list, tuple, dict, set, frozenset)
+#: The sequences walked inside a record's arguments and extras. Every mapping is
+#: walked; a sequence or set of any other type is masked, as an unknown object is:
+#: a ``range`` or a library's lazy sequence can be unbounded to walk, and its repr
+#: is the type's own to choose.
+_WALKED_SEQUENCES: Final = (list, tuple, set, frozenset, deque)
+
+#: The extras ``structlog.stdlib.ProcessorFormatter.wrap_for_formatter`` attaches,
+#: by which ``ProcessorFormatter`` tells a structlog event from a foreign record.
+_STRUCTLOG_PLUMBING: Final = frozenset({"_logger", "_name"})
+
+
+class _UnscrubbableError(Exception):
+    """A record this module could not make content-free, so it is dropped."""
 
 
 def _exc_info_raised(exc_info: object) -> BaseException | None:
@@ -496,40 +511,38 @@ def _exc_info_raised(exc_info: object) -> BaseException | None:
     return exc_info if isinstance(exc_info, BaseException) else None
 
 
-def _stand_in(value: object, found: list[BaseException], done: dict[int, object]) -> object:
-    """``value`` with each exception in it standing as its class alone.
+def _walked(value: object) -> Iterable[object] | None:
+    """What :func:`_carried` and :func:`_plain` look inside ``value`` at, or ``None``.
 
-    An exception becomes a :class:`_ClassName` and is added to ``found``. A builtin
-    container is walked, keys included, and rebuilt only if something inside it
-    changed, so a value with no exception in it is handed on as it was. A container
-    met again is given what it became the first time, so shared structure is walked
-    once; one met again while it is still being walked — a cycle — is masked.
+    A mapping's keys and values, or a walked sequence's items.
     """
-    if isinstance(value, BaseException):
-        found.append(value)
-        return _ClassName(value)
-    if not isinstance(value, _WALKED):
+    if isinstance(value, Mapping):
+        return [part for pair in value.items() for part in pair]
+    if isinstance(value, _WALKED_SEQUENCES):
         return value
-    if id(value) in done:
-        return done[id(value)]
-    done[id(value)] = REDACTED
-    result: object = value
-    if isinstance(value, dict):
-        pairs = [
-            (_stand_in(key, found, done), _stand_in(item, found, done))
-            for key, item in value.items()
-        ]
-        if any(
-            new_key is not key or new is not item
-            for (new_key, new), (key, item) in zip(pairs, value.items(), strict=True)
-        ):
-            result = dict(pairs)
-    else:
-        items = [_stand_in(item, found, done) for item in value]
-        if any(new is not item for new, item in zip(items, value, strict=True)):
-            result = tuple(items) if isinstance(value, tuple) else items
-    done[id(value)] = result
-    return result
+    return None
+
+
+def _carried(values: Iterable[object]) -> list[BaseException]:
+    """Every exception in ``values``, at any depth of a walked container.
+
+    Each container is looked inside once, so shared structure and a cycle end the
+    walk rather than repeating it.
+    """
+    pending = list(values)
+    found: list[BaseException] = []
+    seen: set[int] = set()
+    while pending:
+        one = pending.pop()
+        if isinstance(one, BaseException):
+            found.append(one)
+            continue
+        inside = _walked(one)
+        if inside is None or id(one) in seen:
+            continue
+        seen.add(id(one))
+        pending.extend(inside)
+    return found
 
 
 def _held(carried: Sequence[BaseException]) -> list[BaseException]:
@@ -558,7 +571,7 @@ def _plainly_built(failure: BaseException) -> bool:
 
     A group's arguments hold its members, and a group sharing members has a repr
     exponential in its nesting; an argument of any other type can be as costly. Those
-    reprs are never built here, and :func:`_unspoken` masks one where it appears.
+    reprs are never built here, and :class:`_Unsaid` masks one where it appears.
     """
     return all(type(arg) is str or type(arg) in _SAFE_EXACT_TYPES for arg in failure.args)
 
@@ -591,55 +604,158 @@ def _replaced(text: str, words: Mapping[str, str]) -> str:
     return "".join(parts)
 
 
-def _unspoken(text: str, failures: Sequence[BaseException]) -> str:
-    """``text`` with no word of any exception in ``failures`` left in it.
+class _Unsaid:
+    """What takes the words of a record's exceptions out of a string.
 
-    First each exception's text, and its repr where that is plainly built, is
-    replaced by its class wherever it appears: one pass, longest first, so a class
-    name put in is never matched again. That leaves a rendering this module could
-    not reproduce — asyncio's debug mode prints a callback's arguments through
-    ``reprlib``, which cuts a long repr to ``ValueError('P…_END')`` — so a line
-    still holding a carried exception's class followed by ``(`` is cut there, and
-    what followed is masked.
+    Each exception's text is replaced by its class wherever it appears, as are the
+    forms a formatter commonly turns it into: its ``repr`` and ``ascii`` (``%r``,
+    ``%a``, ``!r``, a container's repr), each of its lines on its own, and the
+    exception's own repr where that is plainly built. That leaves a rendering this
+    module could not reproduce — asyncio's debug mode prints a callback's arguments
+    through ``reprlib``, which cuts a long repr to ``ValueError('P…_END')`` — so a
+    line still holding a carried exception's class followed by ``(`` is cut there,
+    and what followed is masked.
 
     Over-matching is the intended direction, as for the redactor's keys: an
     exception whose text is a common word takes that word out of the rest of the
     text too.
     """
-    if not failures:
-        return text
-    words: dict[str, str] = {}
-    for failure in failures:
-        name = _class_name(failure)
-        said = [str(failure)]
-        if _plainly_built(failure):
-            said.append(repr(failure))
-        for one in said:
-            if one:
-                words.setdefault(one, name)
-    text = _replaced(text, words)
-    names = sorted({type(failure).__name__ for failure in failures}, key=len, reverse=True)
-    built = re.compile(r"\b(" + "|".join(re.escape(name) for name in names) + r")\(")
-    lines = []
-    for line in text.splitlines(keepends=True):
-        opened = built.search(line)
-        if opened is None:
-            lines.append(line)
-        else:
-            ending = line[len(line.rstrip("\r\n")) :]
-            lines.append(f"{line[: opened.start()]}{opened.group(1)}({REDACTED}){ending}")
-    return "".join(lines)
+
+    __slots__ = ("_built", "_words")
+
+    def __init__(self, failures: Sequence[BaseException]) -> None:
+        words: dict[str, str] = {}
+        for failure in failures:
+            name = _class_name(failure)
+            text = str(failure)
+            said = [text, repr(text), ascii(text), *text.splitlines()]
+            # Each text argument and note on its own: a group's ``str`` adds a count
+            # of its members to its message, and a call site can print either alone.
+            said.extend(arg for arg in failure.args if isinstance(arg, str))
+            said.extend(note for note in getattr(failure, "__notes__", ()) if isinstance(note, str))
+            if _plainly_built(failure):
+                said.append(repr(failure))
+            for one in said:
+                if one.strip():
+                    words.setdefault(one, name)
+        self._words = words
+        names = sorted({type(failure).__name__ for failure in failures}, key=len, reverse=True)
+        self._built = (
+            re.compile(r"\b(" + "|".join(re.escape(name) for name in names) + r")\(")
+            if names
+            else None
+        )
+
+    def __call__(self, text: str) -> str:
+        """``text`` with no word of the record's exceptions left in it.
+
+        Args:
+            text: A string the record would put in front of a formatter.
+
+        Returns:
+            The string, with each exception named by its class alone.
+        """
+        if self._built is None:
+            return text
+        text = _replaced(text, self._words)
+        lines = []
+        for line in text.splitlines(keepends=True):
+            opened = self._built.search(line)
+            if opened is None:
+                lines.append(line)
+            else:
+                ending = line[len(line.rstrip("\r\n")) :]
+                lines.append(f"{line[: opened.start()]}{opened.group(1)}({REDACTED}){ending}")
+        return "".join(lines)
+
+
+def _plain_leaf(value: object) -> object:
+    """A value that is neither a string, an exception nor a walked container, made plain.
+
+    A plain value is kept and an enum is named by its member, as the redactor names
+    one; anything else is masked. Bytes are masked too: they are raw data — a
+    library reporting a malformed document quotes its bytes — and never words this
+    net can match.
+    """
+    if type(value) in _SAFE_EXACT_TYPES:
+        return value
+    if isinstance(value, Enum):
+        return f"{type(value).__name__}.{value.name}"
+    return REDACTED
+
+
+def _hashable(key: object) -> object:
+    """A rebuilt mapping key, masked if rebuilding left it unhashable (a set become a list)."""
+    try:
+        hash(key)
+    except TypeError:
+        return REDACTED
+    return key
+
+
+def _plain(value: object, unsaid: _Unsaid, done: dict[int, object]) -> object:
+    """``value`` as plain values a formatter can print without an exception's words.
+
+    An exception stands as its class (:class:`_ClassName`) and a string loses the
+    words of the record's exceptions. A plain value is kept, an enum is named by its
+    member, and a mapping or walked sequence is rebuilt from its parts (a ``dict``, a
+    ``tuple``, or a ``list``). Anything else is masked, as the redactor masks it:
+    its repr is whatever it holds, which can be an exception this net never saw — a
+    finished task's repr carries its exception's. A container met again is given
+    what it became the first time; one met again while it is still being rebuilt —
+    a cycle — is masked.
+    """
+    if isinstance(value, BaseException):
+        return _ClassName(value)
+    if isinstance(value, str):
+        return unsaid(value)
+    inside = _walked(value)
+    if inside is None:
+        return _plain_leaf(value)
+    if id(value) in done:
+        return done[id(value)]
+    done[id(value)] = REDACTED
+    result: object
+    if isinstance(value, Mapping):
+        result = {
+            _hashable(_plain(key, unsaid, done)): _plain(item, unsaid, done)
+            for key, item in value.items()
+        }
+    else:
+        items = [_plain(item, unsaid, done) for item in inside]
+        result = tuple(items) if isinstance(value, tuple) else items
+    done[id(value)] = result
+    return result
+
+
+def _from_structlog(record: logging.LogRecord) -> bool:
+    """Whether ``record`` is a structlog event wrapped for ``ProcessorFormatter``.
+
+    Its message is the event dict, which ``ProcessorFormatter`` copies and renders
+    itself; turned into a string, the formatter fails on it.
+    """
+    return isinstance(record.msg, dict) and all(
+        hasattr(record, field) for field in _STRUCTLOG_PLUMBING
+    )
 
 
 def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
     """A copy of ``record`` that carries no exception's words.
 
     Every exception the record carries — its ``exc_info``, its message, one among
-    its arguments or its extras, at any depth of a builtin container — stands as its
-    class wherever it would be formatted. Then the message, rendered, and any
-    string extra lose every word of those exceptions, their chains and a group's
-    members (:func:`_unspoken`): asyncio's "Task exception was never retrieved"
-    embeds the task's repr, and that holds ``exception=ValueError('…')``.
+    its arguments or its extras, at any depth of a walked container — is found
+    first. Then the message, the arguments and the extras are made plain
+    (:func:`_plain`): an exception stands as its class, a string loses the words of
+    every one of those exceptions, their chains and a group's members, and an
+    object this net cannot look inside is masked. Each part is cleared *before* the
+    message is formatted, so ``%r`` cannot escape a word out of reach, and once, so a
+    class name put in is never read again. A message formatted before it was logged
+    is its own one part: asyncio's "Task exception was never retrieved" embeds the
+    task's repr, which holds ``exception=ValueError('…')``.
+
+    A structlog event wrapped for ``ProcessorFormatter`` keeps its event dict as
+    its message, put through this module's structlog net, :func:`scrub_exceptions`
+    then :func:`redact_sensitive`; its plumbing extras are left as they are.
 
     The copy's message has no arguments left to format. Its exception is rendered
     as its class and frames, as :func:`scrub_exceptions` renders one, and set as the
@@ -653,37 +769,58 @@ def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
     record as it was logged.
     """
     raised = _exc_info_raised(record.exc_info)
-    carried: list[BaseException] = [] if raised is None else [raised]
-    done: dict[int, object] = {}
-    named = copy.copy(record)
-    named.msg = _stand_in(record.msg, carried, done)
-    args = record.args
-    if isinstance(args, Mapping):
-        named.args = {key: _stand_in(value, carried, done) for key, value in args.items()}
-    elif isinstance(args, tuple):
-        named.args = tuple(_stand_in(value, carried, done) for value in args)
+    wrapped = _from_structlog(record)
     extras = {
-        key: _stand_in(value, carried, done)
+        key: value
         for key, value in vars(record).items()
-        if key not in _RECORD_FIELDS
+        if key not in _RECORD_FIELDS and not (wrapped and key in _STRUCTLOG_PLUMBING)
     }
-    failures = _held(carried)
-    text = _unspoken(named.getMessage(), failures)
+    args = record.args
+    arguments = list(args.values()) if isinstance(args, Mapping) else list(args or ())
+    message: list[object] = [] if wrapped else [record.msg]
+    unsaid = _Unsaid(_held(_carried([raised, *message, *arguments, *extras.values()])))
+    done: dict[int, object] = {}
 
     safe = copy.copy(record)
     for key, value in extras.items():
-        setattr(safe, key, _unspoken(value, failures) if isinstance(value, str) else value)
-    safe.msg = text
-    safe.args = ()
-    safe.message = text
-    if raised is not None:
-        safe.exc_text = _described(raised)
-    elif isinstance(record.exc_text, _Described) or not record.exc_text:
-        safe.exc_text = record.exc_text
+        setattr(safe, key, _plain(value, unsaid, done))
+    if wrapped:
+        safe.msg = _scrubbed_event(record)
     else:
-        safe.exc_text = REDACTED
+        named = copy.copy(record)
+        named.msg = _plain(record.msg, unsaid, done)
+        if isinstance(args, Mapping):
+            named.args = {key: _plain(value, unsaid, done) for key, value in args.items()}
+        elif args:
+            named.args = tuple(_plain(value, unsaid, done) for value in args)
+        text = named.getMessage()
+        safe.msg = text
+        safe.args = ()
+        safe.message = text
+    safe.exc_text = _exception_text(record, raised)
     safe.exc_info = None
     return safe
+
+
+def _scrubbed_event(record: logging.LogRecord) -> dict[str, Any]:
+    """A wrapped structlog event's dict, through :func:`scrub_exceptions` and the redactor."""
+    held: dict[str, Any] = dict(cast("dict[str, Any]", record.msg))
+    try:
+        event = scrub_exceptions(None, record.levelname.lower(), held)
+        return dict(redact_sensitive(None, record.levelname.lower(), event))
+    except structlog.DropEvent as exc:
+        # Not an ``Exception``: raised as is, it would pass every handler's own
+        # ``except Exception`` and reach the line that logged the record.
+        raise _UnscrubbableError from exc
+
+
+def _exception_text(record: logging.LogRecord, raised: BaseException | None) -> str | None:
+    """The text a formatter appends for ``record``'s exception: class and frames alone."""
+    if raised is not None:
+        return _described(raised)
+    if isinstance(record.exc_text, _Described) or not record.exc_text:
+        return record.exc_text
+    return REDACTED
 
 
 class _ScrubRecords(logging.Filter):
