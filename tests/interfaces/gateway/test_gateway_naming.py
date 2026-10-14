@@ -116,7 +116,7 @@ async def test_every_call_relayed_for_a_remote_browser_names_it() -> None:
 
     Driven over one shape of each kind the router dispatches: a plain relay
     (``/chat/start``), the two that also carry the device to the handler
-    (``/chat/devices``, ``/chat/message/write``) and a turn (``/ask``).
+    (``/chat/devices``, ``/chat/message/write``) and a read (``/conversations``).
     """
     engine = FakeAssistantEngine()
     await engine.set_my_devices([ChatDevice(device_id=_PHONE, access=DeviceAccess.READ_WRITE)])
@@ -132,16 +132,16 @@ async def test_every_call_relayed_for_a_remote_browser_names_it() -> None:
             "/chat/message/write",
             {"conversation_id": conversation, "message_id": "m-1", "text": "Hi."},
         )
-        asked = await _post(
-            one,
-            halves,
-            "/ask",
-            {"utterance": "what is on today", "reference": {"goal_id": "goal-1"}},
-        )
+        asked = await _post(one, halves, "/conversations", {})
 
     assert (started.status, devices.status, written.status) == (200,) * 3
     assert asked.status == 200, asked.body
-    assert set(_the_operations(log)) >= {"start_conversation", "my_devices", "write_message"}
+    assert set(_the_operations(log)) >= {
+        "start_conversation",
+        "my_devices",
+        "write_message",
+        "recent_conversations",
+    }
     assert _names(log, *_the_operations(log)) == {_PHONE}
     # §2:7 binds the message's device to the requesting device, which is the name: so
     # the device the page writes is the device the call acted for, from one source.

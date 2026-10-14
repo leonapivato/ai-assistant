@@ -1,18 +1,18 @@
 """The conversation surface, driven (#1371, ADR-0216 §2).
 
-Three gaps the owner found on a phone during milestone 14's QA, and every one of
-them is a fact about *time* rather than about the shipped bytes: which
-conversation the next ask lands in **after a tap**, what the page says about the
-thread **before** a new answer arrives, and what the listing says **after** a
-forget returns. ADR-0216 §2 puts exactly that class here — "ordering in time,
-concurrency, and what one handler does to a resource another holds" — and leaves
-the enumerations and must-contains in ``test_bundle.py``, which is why nothing
-below asserts that a string is present in ``app.js``.
+Gaps the owner found on a phone during milestone 14's QA, and each of them is a fact
+about *time* or about the screen rather than about the shipped bytes: what a row
+names, and what the listing says **after** a forget returns. ADR-0216 §2 puts exactly
+that class here — "ordering in time, concurrency, and what one handler does to a
+resource another holds" — and leaves the enumerations and must-contains in
+``test_bundle.py``, which is why nothing below asserts that a string is present in
+``app.js``.
 
-The first of the three was already on the page (``da52be6a``) and this module
-changes nothing about it. What it adds is the instrument it never had: a substring
-assertion that ``renderConversation``'s button calls ``resumeConversation`` pins
-the *shape* of the wiring and cannot say that pressing it moves the indicator.
+**A row no longer continues a conversation** (ADR-0309 §5:4). "Continue" moved the
+Ask form's selection into a thread, and the Ask form retired; the chat is where a
+conversation is continued, and its own listing opens each one. So the cases about
+which thread the next ask lands in, and about the digest read that said what it
+held, retired with it.
 """
 
 from __future__ import annotations
@@ -253,16 +253,19 @@ def _first_row(drive: Drive) -> Locator:
     return drive.page.locator("#conversation-list .conversation-row").first
 
 
-async def test_the_row_the_owner_taps_names_the_conversation_it_will_continue(
+async def test_a_row_names_its_conversation_and_offers_only_the_forget(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """The tap is a choice, and a choice needs the thing being chosen on screen.
+    """A row names the conversation it is about, and its one act is the forget.
 
-    A text assertion can say the row *renders* the id; what it cannot say is that the
-    id it renders is the one the indicator names afterwards. That is the property
-    worth having — the two are written by different functions from different
-    responses, and a listing keyed by activity and an indicator keyed by a tap are
-    exactly the pair that can disagree.
+    **Named**, because every other line about a conversation on this page names it —
+    the destroy ceremony and the outcome of a forget — and a row of two timestamps
+    gives the owner nothing to recognise the thread by.
+
+    **No "Continue"** (ADR-0309 §5:4): it continued a conversation into the Ask form,
+    which retired with the Ask panel, and the chat's own listing is where one is
+    opened. Asserted over the row's buttons rather than over the file, because a
+    control left on screen is what the owner would press.
 
     It is also laid out so an id cannot push the row off a phone, and the ids seeded
     here are what makes that assertion mean anything: an id is a hub value with no
@@ -279,127 +282,12 @@ async def test_the_row_the_owner_taps_names_the_conversation_it_will_continue(
         await _open_listing(drive)
         named = await _first_row(drive).locator(".conversation-name").inner_text()
         assert named in {f"Conversation {long}", f"Conversation {long.upper()}"}
-        await _first_row(drive).get_by_role("button", name="Continue").click()
-        await drive.page.wait_for_selector("#resumed:not([hidden])")
-        said = await drive.page.inner_text("#conversation")
-        assert said == f"{named}. Your next question continues it."
+        buttons = _first_row(drive).get_by_role("button")
+        await expect(buttons).to_have_count(1)
+        await expect(buttons).to_have_text("Forget")
         assert await drive.page.evaluate(
             "() => document.documentElement.scrollWidth <= document.documentElement.clientWidth"
         )
-
-
-async def test_tapping_continue_moves_the_indicator_to_that_conversation(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """#1371's first clause, as a fact about a tap rather than about a file.
-
-    The owner's report was that after tapping a conversation in the list they could
-    not tell which one the next ask would land in. The line that answers it is on the
-    page and ``test_bundle.py`` pins its two sentences; what no reading of ``app.js``
-    decides is whether pressing the button the listing renders actually reaches it.
-    This presses it.
-    """
-    async with driving(gateway_browser, tmp_path) as drive:
-        _seed(drive, "c-1", turns=3)
-        # Before the tap the page says the *other* of the two sentences, which is what
-        # makes the assertion after it about the tap rather than about the default.
-        assert "No conversation yet" in await drive.page.inner_text("#conversation")
-        await _open_listing(drive)
-        await _first_row(drive).get_by_role("button", name="Continue").click()
-        await drive.page.wait_for_function(
-            "() => document.getElementById('conversation').textContent.includes('c-1')"
-        )
-        said = await drive.page.inner_text("#conversation")
-        assert said == "Conversation c-1. Your next question continues it."
-
-
-async def test_leaving_the_thread_moves_the_indicator_back(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """And the control out of a thread moves it back, which is the other direction.
-
-    A page that only ever moved the indicator *into* a conversation would read as
-    correct on the tap above and still leave the owner unable to tell they had left
-    one — the state ``startFresh`` exists to reach.
-    """
-    async with driving(gateway_browser, tmp_path) as drive:
-        _seed(drive, "c-1", turns=3)
-        await _open_listing(drive)
-        await _first_row(drive).get_by_role("button", name="Continue").click()
-        await drive.page.wait_for_selector("#new-conversation:not([hidden])")
-        await drive.page.click("#new-conversation")
-        await drive.page.wait_for_function(
-            "() => document.getElementById('conversation').textContent"
-            + ".includes('No conversation yet')"
-        )
-        assert await drive.page.is_hidden("#new-conversation")
-
-
-async def test_resuming_states_what_the_thread_already_holds_before_any_new_ask(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """#1371's second clause, in the half the ratified contracts admit.
-
-    "The page renders only the answer to the new ask, never the prior turns, so
-    resume is invisible until the assistant references earlier context." The whole of
-    the owner's complaint is about the moment *before* a new answer, so that is where
-    this asserts: nothing has been asked, and the page already says the thread is not
-    empty and how far back it goes.
-
-    It is the count and the span, because that is the whole of what ``conversation``
-    hands a browser (ADR-0074 §8). The transcript half is #1818.
-    """
-    async with driving(gateway_browser, tmp_path) as drive:
-        _seed(drive, "c-1", turns=3)
-        await _open_listing(drive)
-        assert await drive.page.is_hidden("#resumed")
-        await _first_row(drive).get_by_role("button", name="Continue").click()
-        await drive.page.wait_for_selector("#resumed:not([hidden])")
-        said = await drive.page.inner_text("#resumed")
-        assert "3 recorded turn(s)" in said
-        assert "2026-08-22" in said
-        # Nothing was asked and no answer panel was ever shown, which is the property
-        # the clause is actually about: resume used to be invisible until one arrived.
-        assert await drive.page.is_hidden("#answer")
-
-
-async def test_a_thread_with_nothing_in_it_says_so_rather_than_printing_a_broken_span(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """A conversation with no turn is a real state and reads as one.
-
-    ``last_turn_at`` is ``None`` where no turn was ever recorded, and a span printed
-    with a missing end is a span nobody can read — the rule ``renderConversation``
-    already keeps one line up for the listing's own hint.
-    """
-    async with driving(gateway_browser, tmp_path) as drive:
-        drive.engine.hold_conversation("c-1")
-        await _open_listing(drive)
-        await _first_row(drive).get_by_role("button", name="Continue").click()
-        await drive.page.wait_for_selector("#resumed:not([hidden])")
-        said = await drive.page.inner_text("#resumed")
-        assert "Nothing has been recorded in it yet." in said
-        assert "null" not in said
-        assert "undefined" not in said
-
-
-async def test_the_resumed_line_goes_when_the_owner_leaves_the_thread(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """A count about a thread nobody is in is a claim the page must not leave standing.
-
-    This is the invariant ``setConversation`` carries, and it is why the clear lives
-    there rather than in the one caller: every route that changes the selection
-    invalidates the digest, and a reader cannot tell a stale count from a fresh one.
-    """
-    async with driving(gateway_browser, tmp_path) as drive:
-        _seed(drive, "c-1", turns=3)
-        await _open_listing(drive)
-        await _first_row(drive).get_by_role("button", name="Continue").click()
-        await drive.page.wait_for_selector("#resumed:not([hidden])")
-        await drive.page.click("#new-conversation")
-        await drive.page.wait_for_selector("#resumed", state="hidden")
-        assert await drive.page.inner_text("#resumed") == ""
 
 
 async def test_a_forget_refreshes_the_listing_and_states_what_was_forgotten(
@@ -488,140 +376,6 @@ async def test_declining_the_ceremony_destroys_nothing_and_states_nothing(
         assert not [one for one in drive.engine.calls if one[0] == "forget_conversation"]
 
 
-async def test_an_answer_landing_first_is_not_undone_by_the_digest_behind_it(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """A digest still in flight when a turn lands must not re-render a count it made stale.
-
-    Adversarial review round 1, ``major``, and the whole reason the guard counts
-    invalidations of the line rather than changes of selection. Continue ``c-1``, ask
-    a question in ``c-1`` while the digest read is still out, and let the answer
-    arrive first: ``renderOutcome`` reaches ``setConversation`` without touching
-    ``chose``, so a guard written against ``chose`` would let the digest through and
-    put back a count that is short by the turn just recorded.
-
-    An answer is one of the invalidators, and the *other* case is a different thread
-    being chosen — driven separately below, because only this one reaches
-    ``setConversation`` without passing through ``changeConversation``.
-
-    The digest request is held rather than raced for: ADR-0216 §7 forbids a fixed
-    sleep, and an ordering the driver *decides* is the only kind that cannot be lost
-    on a loaded runner. Nothing about the response is fabricated — what the page ends
-    up not being told is decided by the page, not by this test.
-    """
-    async with driving(gateway_browser, tmp_path) as drive:
-        _seed(drive, "c-1", turns=3)
-        reached = asyncio.Event()
-        released = asyncio.Event()
-        settled = asyncio.Event()
-        held: dict[str, object] = {}
-
-        async def hold(route: Route) -> None:
-            held["request"] = route.request
-            reached.set()
-            await released.wait()
-            with contextlib.suppress(Exception):
-                await route.continue_()
-
-        def note(request: object) -> None:
-            if request is held.get("request"):
-                settled.set()
-
-        drive.page.on("requestfailed", note)
-        drive.page.on("requestfinished", note)
-        await drive.page.route(lambda url: urlparse(url).path == "/conversation", hold)
-        await _open_listing(drive)
-        await _first_row(drive).get_by_role("button", name="Continue").click()
-        await reached.wait()
-        await drive.ask("what did we decide?")
-        # `releaseAsk` is the page's own "this turn is over", and it runs after the
-        # outcome has been rendered -- so past this the answer has already reached
-        # `setConversation`. Read as state rather than visibility: the turn ran, so the
-        # reference it carried was given up and the form hidden with it (ADR-0293 §11).
-        await drive.page.wait_for_selector("#ask-button:not([disabled])", state="attached")
-        await drive.page.wait_for_selector("#answer:not([hidden])")
-        assert await drive.page.is_hidden("#resumed")
-        released.set()
-        await settled.wait()
-        await drive.page.evaluate("() => null")
-        assert not [one for one in drive.engine.calls if one[0] == "conversation"]
-        assert await drive.page.is_hidden("#resumed")
-
-
-async def test_a_digest_for_a_thread_the_owner_has_left_reports_nothing_at_all(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """A read nobody is waiting for is stopped, not merely ignored.
-
-    Adversarial review round 2, ``major``. A guard on what this page *renders* leaves
-    the refusal path uncovered, because ``relay`` classifies a refusal and writes it
-    into the panel's fault slot itself, before any caller sees a value. Continue
-    ``c-1`` with its digest held, continue ``c-2`` and get its answer, let ``c-1`` be
-    destroyed from somewhere else, and the abandoned read would report "There is no
-    conversation of that name" over a panel whose selection and resumed line are
-    about ``c-2``.
-
-    So the read is aborted when the line it would write is cleared, and the assertion
-    is the strong one that follows: the gateway is never asked at all.
-    """
-    async with driving(gateway_browser, tmp_path) as drive:
-        _seed(drive, "c-1", turns=3)
-        _seed(drive, "c-2", turns=9)
-        reached = asyncio.Event()
-        released = asyncio.Event()
-        settled = asyncio.Event()
-        abandoned: dict[str, object] = {}
-        reads = {"n": 0}
-
-        async def hold_the_first_digest(route: Route) -> None:
-            reads["n"] += 1
-            if reads["n"] == 1:
-                abandoned["request"] = route.request
-                reached.set()
-                await released.wait()
-            # The abandoned request is cancelled while this handler is held, so
-            # continuing it raises rather than returning -- which is the fix working.
-            with contextlib.suppress(Exception):
-                await route.continue_()
-
-        def note(request: object) -> None:
-            if request is abandoned.get("request"):
-                settled.set()
-
-        drive.page.on("requestfailed", note)
-        drive.page.on("requestfinished", note)
-        await drive.page.route(
-            lambda url: urlparse(url).path == "/conversation", hold_the_first_digest
-        )
-        await _open_listing(drive)
-        rows = drive.page.locator("#conversation-list .conversation-row")
-        first = await rows.nth(0).locator(".conversation-name").inner_text()
-        await rows.nth(0).get_by_role("button", name="Continue").click()
-        await reached.wait()
-        # The thread the abandoned read is about is destroyed from somewhere that is
-        # not this page, which is the state that makes its refusal a refusal.
-        left = first.removeprefix("Conversation ")
-        drive.engine.conversations_held.pop(left)
-        drive.engine.activity.pop(left)
-        await rows.nth(1).get_by_role("button", name="Continue").click()
-        await drive.page.wait_for_selector("#resumed:not([hidden])")
-        stated = await drive.page.inner_text("#resumed")
-        released.set()
-        await settled.wait()
-        # One round trip, which is a later task: every microtask the abandoned read
-        # could still have been holding has drained by the time this answers.
-        await drive.page.evaluate("() => null")
-        # The read for the thread the owner left never reached the gateway at all; the
-        # one for the thread they are in did.
-        asked = [
-            one[1]["conversation_id"] for one in drive.engine.calls if one[0] == "conversation"
-        ]
-        assert left not in asked
-        assert asked
-        assert await drive.page.inner_text("#resumed") == stated
-        assert "no conversation" not in (await drive.page.inner_text("#conversations")).lower()
-
-
 async def test_a_refresh_that_lost_its_race_does_not_write_over_the_newer_listing(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
@@ -661,7 +415,7 @@ async def test_a_superseded_listing_read_cannot_put_back_a_row_the_newer_one_dro
     still exists, hold the page's *handling* of that answer, destroy ``doomed`` from
     somewhere else, and let a listing the owner asks for afterwards render the shorter
     truth. The held read resuming last would clear the list and repopulate it from its
-    older answer — putting ``doomed`` back with a "Continue" the hub will refuse,
+    older answer — putting ``doomed`` back as a row for a conversation that is gone,
     which is the page telling the owner something it has already told them is false.
 
     The older answer is the gateway's own, taken when the page really asked for it;

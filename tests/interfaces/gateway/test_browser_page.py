@@ -83,8 +83,8 @@ async def test_the_page_asks_the_gateway_for_everything_and_no_other_origin_for_
         await drive.page.reload()
         await drive.page.wait_for_selector("#bootstrap-form")
         await drive.admit()
-        await drive.ask("what is on today")
-        await drive.page.wait_for_selector("#answer:not([hidden])")
+        await drive.page.click("#conversations-button")
+        await drive.page.wait_for_selector("#conversations:not([hidden])")
 
         assert asked != []
         assert [url for url in asked if not url.startswith(f"{drive.origin}/")] == []

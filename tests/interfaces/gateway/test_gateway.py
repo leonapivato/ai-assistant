@@ -4,8 +4,12 @@
 that is deliberate: half of what ADR-0168 §8 rules is about *connections* — which
 survive a response and which do not, how many may be held, and what happens to
 one that has carried nothing — and none of that is visible from a handler call.
-Milestone 13's exit test is a browser round-tripping an `ask` and reading a
-legible hub-down fault, so the tests that stand for it speak HTTP.
+Milestone 13's exit test is a browser round-tripping a request and reading a
+legible hub-down fault, so the tests that stand for it speak HTTP. Since the Ask
+route retired (ADR-0309 §5:4) the request that stands for "asks the assistant for
+something" here is the conversations listing, and a turn's outcome is read through
+``/confirmation/resume`` (:class:`_Resuming`), the one route that still answers with
+one.
 
 Marked ``integration`` because a loopback socket is what they open.
 """
@@ -30,7 +34,9 @@ from gateway_timing import Clock, Timers
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError, UnknownConversationError
 from ai_assistant.core.types import (
+    DEFAULT_PAGE_SIZE,
     ActionPlan,
+    ConversationSummary,
     CurrentContext,
     Disposition,
     ExecutionState,
@@ -53,7 +59,7 @@ from ai_assistant.wire.errors import HubUnavailableError
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from ai_assistant.core.types import EncodableText, Identifier, TurnReference
+    from ai_assistant.core.types import ContinuationToken, UtcInstant
 
 pytestmark = pytest.mark.integration
 
@@ -72,16 +78,11 @@ _BUNDLE = {
 class _Unreachable(FakeAssistantEngine):
     """An engine whose hub is not there (ADR-0168 §9)."""
 
-    async def converse(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> TurnOutcome:
+    async def recent_conversations(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[ConversationSummary, ...]:
         """Fail the way a closed door fails: a transport error, not an answer."""
-        self.calls.append(("converse", {"utterance": utterance}))
+        self.calls.append(("recent_conversations", {"limit": limit, "offset": offset}))
         msg = "no hub is listening on that socket"
         raise HubUnavailableError(msg)
 
@@ -89,22 +90,17 @@ class _Unreachable(FakeAssistantEngine):
 class _Declining(FakeAssistantEngine):
     """An engine that received the request and declined it."""
 
-    async def converse(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> TurnOutcome:
+    async def recent_conversations(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[ConversationSummary, ...]:
         """Refuse the way the hub refuses: an ``AssistantError`` it authored."""
-        self.calls.append(("converse", {"utterance": utterance}))
+        self.calls.append(("recent_conversations", {"limit": limit, "offset": offset}))
         msg = "no conversation of that name"
         raise UnknownConversationError(msg)
 
 
 class _Blocking(FakeAssistantEngine):
-    """An engine that holds every turn open until a test releases it."""
+    """An engine that holds every listing open until a test releases it."""
 
     def __init__(self) -> None:
         """Start with nothing released and nothing in flight."""
@@ -112,18 +108,54 @@ class _Blocking(FakeAssistantEngine):
         self.release = asyncio.Event()
         self.occupied = asyncio.Event()
 
-    async def converse(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> TurnOutcome:
+    async def recent_conversations(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[ConversationSummary, ...]:
         """Occupy a hub connection until released, so the ceiling can be reached."""
         self.occupied.set()
         await self.release.wait()
-        return await super().converse(utterance, timeout=timeout, conversation_id=conversation_id)
+        return await super().recent_conversations(limit=limit, offset=offset)
+
+
+class _Resuming(FakeAssistantEngine):
+    """The canonical fake, answering ``resume`` with the outcome a case scripted.
+
+    ``/confirmation/resume`` is the one route that answers a browser with a turn's
+    outcome since the Ask route retired (ADR-0309 §5:4), so it is the route
+    ``_outcome_view``'s projection is read through. ADR-0216 §4's admission of a
+    subclass, used one layer down: where a case scripts :attr:`turn_outcome`, ``resume``
+    hands it back whole whatever the token names; where it scripts none, ``resume`` is
+    the fake's own.
+    """
+
+    async def resume(
+        self,
+        token: ContinuationToken,
+        *,
+        approved: bool,
+        timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
+        remember_recipients_until: UtcInstant | None = None,
+    ) -> TurnOutcome:
+        """Answer with the scripted outcome, or as the fake does where there is none.
+
+        Args:
+            token: The park's handle.
+            approved: The owner's answer.
+            timeout: The caller's budget.
+            remember_recipients_until: How long to remember the recipients.
+
+        Returns:
+            :attr:`turn_outcome` where a case scripted one, else the fake's answer.
+        """
+        if self.turn_outcome is not None:
+            self.calls.append(("resume", {"token": token.handle}))
+            return self.turn_outcome
+        return await super().resume(
+            token,
+            approved=approved,
+            timeout=timeout,
+            remember_recipients_until=remember_recipients_until,
+        )
 
 
 @dataclass
@@ -225,7 +257,7 @@ async def _harness(
     """Bind one gateway on a free port and tear it down afterwards."""
     settings = Settings(gateway_port=free_port(), **overrides)
     clock, timers = Clock(), Timers()
-    behind = engine or FakeAssistantEngine()
+    behind = engine or _Resuming()
     gateway = Gateway(
         settings=settings,
         engine=behind,
@@ -280,20 +312,18 @@ async def _exchange(harness: Harness, value: str) -> Answer:
     )
 
 
-def _ask(
+def _framed(
     harness: Harness,
+    path: str,
+    payload: dict[str, Any],
     *,
     header_half: str | None,
     cookie_half: str | None,
-    conversation: str | None = None,
 ) -> tuple[str, bytes]:
-    """Frame one `/ask`, with whichever halves the case presents."""
-    asked: dict[str, Any] = {"utterance": "what is on today", "reference": {"goal_id": "goal-1"}}
-    if conversation is not None:
-        asked["conversation_id"] = conversation
-    body = json.dumps(asked).encode()
+    """Frame one ``POST``, with whichever halves the case presents."""
+    body = json.dumps(payload).encode()
     lines = [
-        "POST /ask HTTP/1.1",
+        f"POST {path} HTTP/1.1",
         "Host: {host}",
         f"Origin: http://{harness.authority}",
         "Content-Type: application/json",
@@ -304,6 +334,26 @@ def _ask(
     if cookie_half is not None:
         lines.append(f"Cookie: assistant_session={cookie_half}")
     return "\n".join(lines), body
+
+
+def _request(
+    harness: Harness, *, header_half: str | None, cookie_half: str | None
+) -> tuple[str, bytes]:
+    """Frame one request that asks the assistant for something: the listing."""
+    return _framed(harness, "/conversations", {}, header_half=header_half, cookie_half=cookie_half)
+
+
+def _resume(
+    harness: Harness, *, header_half: str | None, cookie_half: str | None
+) -> tuple[str, bytes]:
+    """Frame one answer to a park, which :class:`_Resuming` answers as scripted."""
+    return _framed(
+        harness,
+        "/confirmation/resume",
+        {"token": "h-1", "approved": True},
+        header_half=header_half,
+        cookie_half=cookie_half,
+    )
 
 
 # --- ADR-0168 §3: the two things served without a session, and nothing else ---
@@ -334,7 +384,7 @@ async def test_an_unadmitted_assistant_request_is_refused_and_never_reaches_the_
     which is the class an earlier one-directional draft of the routing clause sent
     to the engine anyway.
     """
-    head, body = _ask(harness, header_half=None, cookie_half=None)
+    head, body = _request(harness, header_half=None, cookie_half=None)
 
     answer = await harness.send(head, body)
 
@@ -346,7 +396,7 @@ async def test_an_unadmitted_assistant_request_is_refused_and_never_reaches_the_
 async def test_a_refusal_carries_no_fact_about_the_hub(harness: Harness) -> None:
     """§3: a refusal carries "no assistant content, no fact about the hub's state,
     and no fact about whether the hub is reachable"."""
-    head, body = _ask(harness, header_half="not-a-session", cookie_half=None)
+    head, body = _request(harness, header_half="not-a-session", cookie_half=None)
 
     answer = await harness.send(head, body)
 
@@ -585,14 +635,32 @@ async def test_a_disclosed_value_ceases_when_its_ttl_elapses(harness: Harness) -
 # --- The exit test: an `ask` round-trips from a browser (#1230) ---
 
 
-async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
+async def test_an_admitted_request_round_trips_and_renders_what_the_hub_returned(
     harness: Harness,
 ) -> None:
     """Milestone 13's exit test, in the gateway's half of it.
 
-    A browser holding both halves asks, the request reaches the promoted engine
-    surface exactly once, and what comes back is the turn — the answer, the plan,
-    the step, and the conversation the browser keeps to continue.
+    A browser holding both halves asks the assistant for something, the request
+    reaches the promoted engine surface exactly once, and what comes back is what
+    the hub returned.
+    """
+    cookie_half, header_half = await _start_session(harness)
+    head, body = _request(harness, header_half=header_half, cookie_half=cookie_half)
+
+    answer = await harness.send(head, body)
+
+    assert answer.status == 200
+    assert answer.payload == {"conversations": []}
+    assert [call[0] for call in harness.engine.calls] == ["recent_conversations"]
+
+
+async def test_a_resumed_outcome_crosses_with_every_member_this_page_renders(
+    harness: Harness,
+) -> None:
+    """The turn's outcome, whole — the answer, the plan, the step and the conversation.
+
+    Read through ``/confirmation/resume``, the one route that answers with one since
+    the Ask route retired (ADR-0309 §5:4).
 
     The member set is asserted whole rather than by presence, because this
     enumeration is a decision (``_outcome_view``) and not a projection: a member
@@ -636,14 +704,17 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
     step was not claimed*" — so no reason, conjunct or refusal reaches this page, there
     being none the engine's own read could establish.
     """
+    harness.engine.turn_outcome = TurnOutcome(
+        turn=_turn_that_ran(), conversation_id="c-1", reply="Done."
+    )
     cookie_half, header_half = await _start_session(harness)
-    head, body = _ask(harness, header_half=header_half, cookie_half=cookie_half)
+    head, body = _resume(harness, header_half=header_half, cookie_half=cookie_half)
 
     answer = await harness.send(head, body)
 
     assert answer.status == 200
     outcome = answer.payload["outcome"]
-    assert outcome["conversation_id"]
+    assert outcome["conversation_id"] == "c-1"
     assert set(outcome) == {
         "conversation_id",
         "capture_degraded",
@@ -665,29 +736,7 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
         "drive_withheld",
         "authorizations",
     }
-    assert [call[0] for call in harness.engine.calls] == ["converse"]
-
-
-async def test_a_named_conversation_is_relayed_to_the_engine_unchanged(
-    harness: Harness,
-) -> None:
-    """The gateway relays what the browser named and re-derives nothing.
-
-    A conversation is the hub's (ADR-0074 §2); the id it hands back is "what a
-    client keeps and presents to continue", and the gateway is the second adapter
-    to carry that — the CLI already does it with ``--conversation``. Passing an id
-    the assistant does not know is the engine's refusal to author, not this
-    adapter's to invent.
-    """
-    cookie_half, header_half = await _start_session(harness)
-    first = await harness.send(*_ask(harness, header_half=header_half, cookie_half=cookie_half))
-    named = first.payload["outcome"]["conversation_id"]
-
-    await harness.send(
-        *_ask(harness, header_half=header_half, cookie_half=cookie_half, conversation=named)
-    )
-
-    assert harness.engine.calls[-1][1]["conversation_id"] == named
+    assert [call[0] for call in harness.engine.calls] == ["resume"]
 
 
 async def test_an_admitted_request_that_asks_the_assistant_for_nothing_never_reaches_it(
@@ -712,7 +761,7 @@ async def test_a_replaced_cookie_is_reported_as_its_own_condition(harness: Harne
     their session mysteriously ended" — so the status is not 401's.
     """
     _, header_half = await _start_session(harness)
-    head, body = _ask(harness, header_half=header_half, cookie_half="a-replacement")
+    head, body = _request(harness, header_half=header_half, cookie_half="a-replacement")
 
     answer = await harness.send(head, body)
 
@@ -772,7 +821,7 @@ async def test_the_composed_answer_reaches_the_browser_beside_the_step_account(
     account it renders today, never instead of it".
 
     Issue #1337 is the first half failing: ``_outcome_view`` enumerated the
-    pre-ADR-0170 members, so `/ask` answered 200 with the whole account and no
+    pre-ADR-0170 members, so the Ask route answered 200 with the account and no
     answer anywhere in it. The hub had composed one — the same ask through the CLI
     rendered it from the same store — and the browser was shown the plan and the
     disposition and never what the assistant said.
@@ -789,7 +838,7 @@ async def test_the_composed_answer_reaches_the_browser_beside_the_step_account(
     )
     cookie_half, header_half = await _start_session(harness)
 
-    answer = await harness.send(*_ask(harness, header_half=header_half, cookie_half=cookie_half))
+    answer = await harness.send(*_resume(harness, header_half=header_half, cookie_half=cookie_half))
 
     outcome = answer.payload["outcome"]
     assert outcome["reply"] == "I have sent the note."
@@ -816,7 +865,7 @@ async def test_a_turn_whose_answer_could_not_be_composed_says_so_and_keeps_its_a
     )
     cookie_half, header_half = await _start_session(harness)
 
-    answer = await harness.send(*_ask(harness, header_half=header_half, cookie_half=cookie_half))
+    answer = await harness.send(*_resume(harness, header_half=header_half, cookie_half=cookie_half))
 
     outcome = answer.payload["outcome"]
     assert outcome["reply"] is None
@@ -849,7 +898,7 @@ async def test_a_turn_that_owed_no_answer_carries_none_and_the_account_alone(
     )
     cookie_half, header_half = await _start_session(harness)
 
-    answer = await harness.send(*_ask(harness, header_half=header_half, cookie_half=cookie_half))
+    answer = await harness.send(*_resume(harness, header_half=header_half, cookie_half=cookie_half))
 
     outcome = answer.payload["outcome"]
     assert outcome["reply"] is None
@@ -1130,7 +1179,7 @@ async def test_the_door_checks_run_before_the_session_is_consulted(
     discloses whether one exists" — so a bad `Host` beside a good session is
     refused on the `Host`."""
     cookie_half, header_half = await _start_session(harness)
-    head, body = _ask(harness, header_half=header_half, cookie_half=cookie_half)
+    head, body = _request(harness, header_half=header_half, cookie_half=cookie_half)
 
     answer = await harness.send(head.replace("Host: {host}", "Host: rebound.example"), body)
 
@@ -1142,7 +1191,7 @@ async def test_no_cross_origin_headers_are_sent_and_no_preflight_is_honoured(
 ) -> None:
     """§7's second clause, in both halves."""
     answer = await harness.send("GET / HTTP/1.1\nHost: {host}")
-    preflight = await harness.send("OPTIONS /ask HTTP/1.1\nHost: {host}")
+    preflight = await harness.send("OPTIONS /conversations HTTP/1.1\nHost: {host}")
 
     assert not [name for name in answer.headers if name.startswith("access-control")]
     assert preflight.status == 400
@@ -1171,7 +1220,7 @@ async def test_the_hub_being_unreachable_is_a_transport_fault_and_closes_nothing
     failure as an answer", and §8: it "is not a refusal and closes nothing"."""
     async with _harness(_Unreachable()) as harness:
         cookie_half, header_half = await _start_session(harness)
-        head, body = _ask(harness, header_half=header_half, cookie_half=cookie_half)
+        head, body = _request(harness, header_half=header_half, cookie_half=cookie_half)
 
         answer = await harness.send(head, body)
 
@@ -1186,7 +1235,7 @@ async def test_a_request_the_hub_declined_is_a_different_fault() -> None:
     flattened into one message."""
     async with _harness(_Declining()) as harness:
         cookie_half, header_half = await _start_session(harness)
-        head, body = _ask(harness, header_half=header_half, cookie_half=cookie_half)
+        head, body = _request(harness, header_half=header_half, cookie_half=cookie_half)
 
         answer = await harness.send(head, body)
 
@@ -1235,7 +1284,7 @@ async def test_an_unadmitted_connection_carries_at_most_one_request(
 async def test_an_admitted_connection_may_carry_further_requests(harness: Harness) -> None:
     """§8: "An admitted connection may carry further requests"."""
     cookie_half, header_half = await _start_session(harness)
-    head, body = _ask(harness, header_half=header_half, cookie_half=cookie_half)
+    head, body = _request(harness, header_half=header_half, cookie_half=cookie_half)
     opened = await harness.connect()
 
     first = await harness.send(head, body, connection=opened)
@@ -1253,7 +1302,8 @@ async def test_a_request_past_the_size_bound_is_refused_naming_the_limit() -> No
         body = b"x" * 500
 
         answer = await harness.send(
-            f"POST /ask HTTP/1.1\nHost: {{host}}\nContent-Length: {len(body)}", body
+            f"POST /conversations HTTP/1.1\nHost: {{host}}\nContent-Length: {len(body)}",
+            body,
         )
 
         assert answer.status == 413
@@ -1276,7 +1326,7 @@ async def test_a_hub_connection_beyond_the_ceiling_is_refused_and_never_queued()
     engine = _Blocking()
     async with _harness(engine, gateway_max_hub_connections=1) as harness:
         cookie_half, header_half = await _start_session(harness)
-        head, body = _ask(harness, header_half=header_half, cookie_half=cookie_half)
+        head, body = _request(harness, header_half=header_half, cookie_half=cookie_half)
         held = asyncio.create_task(harness.send(head, body))
         await asyncio.wait_for(engine.occupied.wait(), timeout=5)
 
@@ -1429,8 +1479,11 @@ async def test_the_view_keeps_the_gates_verdict_apart_from_the_steps_outcome(
     done" reproduces #531 one status over. A turn with no step says so with
     ``None`` rather than with a success.
     """
+    harness.engine.turn_outcome = TurnOutcome(
+        turn=_turn_that_ran(), conversation_id="c-1", reply="Done."
+    )
     cookie_half, header_half = await _start_session(harness)
-    head, body = _ask(harness, header_half=header_half, cookie_half=cookie_half)
+    head, body = _resume(harness, header_half=header_half, cookie_half=cookie_half)
 
     answer = await harness.send(head, body)
 
@@ -1443,7 +1496,7 @@ async def test_no_session_value_appears_in_any_response_but_the_exchanges_own(
     """§6: "Neither half is placed in any response body except the bootstrap
     exchange's own reply"."""
     cookie_half, header_half = await _start_session(harness)
-    head, body = _ask(harness, header_half=header_half, cookie_half=cookie_half)
+    head, body = _request(harness, header_half=header_half, cookie_half=cookie_half)
 
     answer = await harness.send(head, body)
 

@@ -54,11 +54,10 @@
       <section id="console" class="panel" hidden>
         <h2>Talk</h2>
         <!--
-          The chat is where the assistant is talked to (ADR-0293): typed messages go
-          into a conversation there, and the assistant writes its reply back. This page
-          has no free-text Ask box any more — the one turn the chat cannot yet carry,
-          answering a clarification or taking a goal up, is offered beside the goal it
-          is about, in "What I am working on" (ADR-0250 §11, §13).
+          The chat is where the assistant is talked to (ADR-0293, ADR-0309 §5:4): typed
+          messages go into a conversation there, and the assistant writes its reply back.
+          This page has no Ask box and no push-to-talk: the Ask panel retired (ADR-0309
+          §5:4) and push-to-talk with it (ADR-0313 §3:4).
         -->
         <!--
           Opened by the owner rather than on load, because following the chat holds a
@@ -67,94 +66,6 @@
         <p class="choice">
           <button type="button" id="chat-button">Chat</button>
         </p>
-        <!--
-          Push to talk (ADR-0200 §10). One button, held down for as long as you are
-          speaking: the press ends before the request begins, which is why this needs
-          no socket, no upgrade and no chunked upload — the recording goes up complete
-          on one POST and the rendering comes back on that request's response.
-
-          **This page runs no speech engine of its own.** It records with
-          `MediaRecorder` and plays what the hub sent back, and it never reaches for
-          the browser's `SpeechRecognition` or its `speechSynthesis`. Three reasons,
-          and the third survives the other two being argued away: some implementations
-          of those APIs transmit to the browser vendor, which is an egress no boundary
-          in ADR-0174 §1 authorises; recognition in the page would make the edge decide
-          what a submission means, which ADR-0094 §6 forbids; and synthesis in the page
-          would speak text the hub's disclosure ruling never saw — which is exactly the
-          failure milestone 19's exit test is written to catch, performed by the browser
-          instead of by us.
-
-          It ships `hidden` and `app.js` reveals it: whether this browser will hand the
-          page a microphone at all is a fact only a script can ask for, and a control
-          that appeared regardless would be an offer the page cannot keep. Where the
-          answer is no it is revealed **disabled**, beside the sentence saying why —
-          absent-and-unexplained is the state an owner cannot act on.
-        -->
-        <button type="button" id="talk-button" hidden>Hold to talk</button>
-        <!--
-          The way out of a spoken wait, and the reason it is a control of its own rather
-          than a share of the reference turn's (#1500, ADR-0182 §7's fifth clause). `fetch` carries
-          no deadline of its own, so a socket that dies without settling leaves the page
-          waiting for ever with the button greyed out; this is what ends that wait. It
-          sends nothing and cancels nothing — a control that re-recorded would be the
-          silent retry ADR-0168 §9 forbids, wearing a button's clothes.
-
-          Hidden until there is a wait to leave. It is `type="button"` and outside any
-          form, so nothing about it can submit a question.
-        -->
-        <button type="button" id="stop-talking" hidden>Stop waiting</button>
-        <!--
-          What this browser can and cannot do about a microphone, and what is happening
-          while the button is held. One line rather than two, because they are never
-          both true: a page that cannot record never gets to be listening.
-        -->
-        <p class="hint" id="talk-state" hidden></p>
-        <!--
-          What the hub heard (ADR-0200 §4). Disclosed on every call that produced a
-          transcript, and it is a clause rather than a courtesy: "a push-to-talk surface
-          that cannot show the user what it heard cannot be corrected by them, and a
-          transcript the hub acted on but never showed is the one part of this path a
-          user has no other way to inspect".
-
-          **Outside the answer panel**, because it is not part of the answer:
-          `renderOutcome` clears that panel on every turn, and a transcript written into
-          it would be destroyed by the next question — including the typed one an owner
-          asks *because* they read what was heard and it was wrong.
-        -->
-        <p class="hint" id="heard" hidden></p>
-        <!--
-          Which conversation the next question lands in (#1371's first clause). Filled
-          by `app.js` on load as well as after a turn, because the id is now kept in
-          the session's own key family and survives a reload.
-        -->
-        <p class="hint" id="conversation"></p>
-        <!--
-          What is already in the thread the owner just chose to continue (#1371's
-          second clause). Written only by the act of continuing one from the listing,
-          and cleared by every other change of selection and by every answer — so it
-          is never a count that a turn since has made wrong.
-
-          **It is the count and the span and not a transcript**, because that is the
-          whole of what the promoted surface hands a browser: `conversation` returns a
-          `ConversationDigest`, which ADR-0074 §8 fixed as "the count and span rather
-          than every turn". Rendering what was *said* would need an operation nobody
-          has decided on, so this says how much is there and how far back rather than
-          pretending to say more. #1818 holds that half.
-        -->
-        <p class="hint" id="resumed" hidden></p>
-        <!--
-          The way out of a thread, and the only one there was not (#1429, adversarial
-          review round 3). Until this page kept a conversation across a reload, a
-          reload *was* the way to start a fresh one; now the selection comes back, so
-          a thread the hub will no longer accept — destroyed from a terminal, expired
-          — would be re-sent on every question with no control on screen to clear it.
-          The conversations listing cannot offer one: it can only "Continue" a
-          conversation it is showing, and this is about one it is not.
-
-          It is shown only while a conversation is selected, because with none it
-          would be a control that does nothing.
-        -->
-        <button type="button" id="new-conversation" hidden>Start a new conversation</button>
         <button type="button" id="conversations-button">Conversations</button>
         <button type="button" id="confirmations-button">What is waiting for your answer</button>
       </section>
@@ -523,35 +434,17 @@
 
       <!--
         The goal surface (ADR-0250 §15). The listing "from which a user learns what is
-        outstanding and obtains the references §11 and §13 take" — so each row carries
-        the two acts that settle a question and the two that act on the goal, and the
-        ids are on screen because the acts take them (§15).
+        outstanding" — so each row carries the act that withdraws its question and the
+        acts on the goal, and the ids are on screen because the acts take them (§15).
+        Answering and taking a goal up were turns on the Ask form, which retired with
+        the Ask panel (ADR-0309 §5:4).
       -->
       <section id="goals" class="panel" hidden>
         <h3>What I am working on</h3>
         <p class="hint">
           One line of work per entry, most recently taken up first. A goal waiting on
-          you shows the question it is waiting on; answering it is an ordinary turn
-          with that question attached. Pointing at a goal here is the only way one
-          moves between conversations — nothing searches across them on its own.
+          you shows the question it is waiting on.
         </p>
-        <!--
-          The one turn the chat cannot yet carry (ADR-0293 §11, ADR-0250 §11, §13):
-          answering a clarification, or taking a goal up from another conversation.
-          Shown only while one of the goal acts below has attached a reference, and it
-          carries its own way out, because a reference left attached to a turn the
-          owner has since changed their mind about would answer a question they no
-          longer meant to answer. What the turn did is shown under "What happened".
-        -->
-        <form id="ask-form" hidden>
-          <p class="hint" id="referencing"></p>
-          <label for="utterance">In your own words</label>
-          <textarea id="utterance" name="utterance" rows="3" required></textarea>
-          <p class="choice">
-            <button type="submit" id="ask-button">Send</button>
-            <button type="button" id="clear-reference">Never mind that one</button>
-          </p>
-        </form>
         <!--
           What the last act on this panel did, in the vocabulary's own words (ADR-0250
           §12). It is not a fault slot: every member of both vocabularies is something

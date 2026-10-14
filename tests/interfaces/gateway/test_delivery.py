@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -24,7 +23,6 @@ from ai_assistant.core.types import (
     NotificationDelivery,
     SpokenAudioFormat,
 )
-from ai_assistant.interfaces.gateway import delivery
 from ai_assistant.interfaces.gateway.delivery import (
     GATEWAY_PLAYS,
     DeliveryFanOut,
@@ -666,43 +664,22 @@ async def test_a_stalled_stream_is_abandoned_rather_than_queued_behind_a_termina
 # --- ADR-0206 §2: the gateway's own `plays`, and no browser's -----------------
 
 
-def test_the_gateways_plays_names_every_spoken_audio_format_member() -> None:
-    """§2: the gateway's ``plays`` names **every** member of ``SpokenAudioFormat``,
-    "so no format the synthesizer can produce is excluded by the caller".
+def test_the_gateways_plays_asks_for_no_rendering() -> None:
+    """ADR-0313 §3:6: "The gateway's poll asks for no rendering: its ``plays`` is
+    empty, so the hub renders none for it (ADR-0206 §1:2)".
 
-    Compared against the enumeration itself rather than against a literal list, which
-    is the whole of what makes it hold: a third member added to ``SpokenAudioFormat``
-    on ADR-0200 §9's measurement clause fails this until the gateway names it, which
-    is the state §2 forbids.
+    The page plays no spoken notification and shows it as text (§3:5), so a format
+    named here would be a rendering the hub synthesises for a page that drops it.
+    Pinned as the empty tuple rather than as "falsy", because ``plays`` is a value the
+    gateway supplies of its own (ADR-0206 §2) and ``None`` is not one its type admits.
     """
-    assert set(GATEWAY_PLAYS) == set(SpokenAudioFormat)
-    assert len(GATEWAY_PLAYS) == len(SpokenAudioFormat)
-
-
-def test_the_order_is_a_constant_this_module_holds_with_its_measurement() -> None:
-    """§2: "Their order is a constant the gateway holds, set by the implementing lane
-    from a recorded measurement of what browsers decode and changeable on a further
-    measurement without an ADR."
-
-    The measurement is in the constant's own docstring, beside the value it decided —
-    which is what "recorded" has to mean for a later lane to be able to check it
-    against a fresh one. Pinned here so that a lane reordering the tuple and leaving
-    the figures behind fails rather than passes: the two engines, their versions and
-    the call the page actually decodes through are what a re-measurement replaces.
-    """
-    recorded = delivery.__doc__ or ""
-    source = Path(delivery.__file__ or "").read_text(encoding="utf-8")
-    measured = source[source.index("#: What the gateway asks") : source.index("GATEWAY_PLAYS:")]
-    assert "decodeAudioData" in measured
-    assert "Chromium 151.0.7922.34" in measured
-    assert "WebKit 26.5" in measured
-    assert "2026-08-28" in measured
-    assert recorded != ""
+    assert GATEWAY_PLAYS == ()
 
 
 async def test_every_poll_carries_that_value_and_nothing_derived_from_a_browser() -> None:
     """§2: ``plays`` is "a value the gateway supplies of its own, fixed and identical
-    on every poll", and no browser "narrows, widens or reorders it".
+    on every poll", and no browser "narrows, widens or reorders it" — the empty value
+    ADR-0313 §3:6 makes it, on every poll.
 
     Two streams, two polls: the argument is the module constant on each, so it is
     neither assembled from how many streams are open nor recomputed per poll. §2
@@ -720,7 +697,7 @@ async def test_every_poll_carries_that_value_and_nothing_derived_from_a_browser(
     await engine.answer_one_poll()
     await engine.polling.wait()
 
-    assert [call[1]["plays"] for call in engine.calls] == [GATEWAY_PLAYS, GATEWAY_PLAYS]
+    assert [call[1]["plays"] for call in engine.calls] == [(), ()]
     fan_out.shutdown()
 
 

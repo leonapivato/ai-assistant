@@ -167,25 +167,23 @@ def notification(delivery: NotificationDelivery) -> dict[str, Any]:
     ADR-0130 §4 separates in terms.
 
     **One member and no other since ADR-0206 §8**, which widened this enumeration
-    once and closed it again: ``spoken``, the rendering of the summary the page
-    plays. Everything above binds unchanged — ``delivery_id`` still never reaches a
-    browser, and ADR-0206 adds no member by which one could acknowledge, retire,
-    withdraw or dismiss anything.
+    once and closed it again: ``spoken``. Everything above binds unchanged —
+    ``delivery_id`` still never reaches a browser, and ADR-0206 adds no member by which
+    one could acknowledge, retire, withdraw or dismiss anything.
 
-    **``spoken_rendering`` does not cross.** §8 is explicit that a member carrying
-    *why* no rendering arrived would be a value nothing on the page acts on: the
-    page's behaviour turns on whether a rendering arrived and on two facts about the
-    device, and this enumeration is closed against exactly the member no reader has.
-    It stays on :class:`~ai_assistant.core.types.NotificationDelivery`, where the
-    gateway logs it and a hub-side test reads it.
+    **``spoken`` is ``null`` on every value** (ADR-0313 §3:6). The page plays no spoken
+    notification and shows it as text (§3:5), and the gateway's poll asks for no
+    rendering (:data:`~ai_assistant.interfaces.gateway.delivery.GATEWAY_PLAYS` is
+    empty), so the hub renders none for it (ADR-0206 §1:2). It is written ``null``
+    here rather than projected from ``delivery.spoken``, so the clause holds by this
+    projection and not by the hub's answer: no rendering crosses to a page that no
+    longer plays one. **It is never omitted** (ADR-0206 §8:2), so a page reads one key
+    rather than testing for a key's presence.
 
-    **``spoken`` is ``null`` or an object of exactly ``content`` and ``media_type``,
-    and is never omitted** (§8). There is no third shape, so a page reads one key
-    rather than testing for a key's presence — which is the same discipline the four
-    members above already apply, one member further out. Projected member by member
-    rather than by dumping the model, so that a later member added to
-    :class:`~ai_assistant.core.types.SpokenAudio` cannot reach a browser because a
-    serializer carried it: what may cross is decided here.
+    **``spoken_rendering`` does not cross**, for §8's reason: a member carrying *why* no
+    rendering arrived would be a value nothing on the page acts on. It stays on
+    :class:`~ai_assistant.core.types.NotificationDelivery`, where the gateway logs it
+    and a hub-side test reads it.
 
     Args:
         delivery: What ``next_notification`` returned.
@@ -194,17 +192,12 @@ def notification(delivery: NotificationDelivery) -> dict[str, Any]:
         The value to write.
     """
     candidate = delivery.notification
-    spoken = delivery.spoken
     return {
         "kind": ValueKind.NOTIFICATION.value,
         "notification_class": candidate.notification_class,
         "summary": candidate.summary,
         "detail": candidate.detail,
-        "spoken": (
-            None
-            if spoken is None
-            else {"content": spoken.content, "media_type": spoken.media_type.value}
-        ),
+        "spoken": None,
     }
 
 
