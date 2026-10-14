@@ -862,8 +862,8 @@ class SqlitePlanStore:
 
         The document carries the two kinds of record this store holds: every stop
         record, and every activation effect record in claim order. Its goal, plan,
-        execution, attempt, question, evidence and goal-effect sections are empty,
-        because the members that wrote them retired (ADR-0309 §5).
+        execution, attempt, question, evidence and goal-effect sections left it with
+        the members that wrote them (ADR-0309 §5).
         """
         exported_at = self._now()
         async with self._lock:

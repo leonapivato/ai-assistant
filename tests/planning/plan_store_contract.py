@@ -372,7 +372,14 @@ class PlanStoreContract:
         await store.record_stop("act-1")
 
         export = await store.export()
-        assert export.schema_version == 18
+        assert export.schema_version == 19
+        # ADR-0309 §5: the old path's sections left the document.
+        assert set(export.model_dump()) == {
+            "schema_version",
+            "exported_at",
+            "stopped_activations",
+            "activation_effects",
+        }
         assert sorted(export.stopped_activations) == ["act-1", "act-2"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -636,7 +643,7 @@ class PlanStoreContract:
         await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
 
         export = await store.export()
-        assert export.schema_version == 18
+        assert export.schema_version == 19
         assert [one.id for one in export.activation_effects] == ["e1", "m1"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
 

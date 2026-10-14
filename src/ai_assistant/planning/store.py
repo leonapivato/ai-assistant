@@ -161,8 +161,7 @@ class InMemoryPlanStore:
 
         It carries what this store holds: the stop records and the activation effect
         records. The sections ADR-0309 §5 retired (goals, plans, executions,
-        attempts, questions, evidence and effect rows) export empty, since nothing
-        here writes them.
+        attempts, questions, evidence and effect rows) left the document with them.
 
         Raises:
             PlanningError: If the injected clock's reading is not conforming

@@ -119,14 +119,12 @@ def test_the_roster_finds_the_fields_adr_0196_names() -> None:
     """A roster that silently found nothing would pass forever.
 
     Named as a **subset**, deliberately: a further field must not have to be added
-    here to be covered, and the seven below are what is left of ADR-0196's Context
-    enumeration once the old path's holders began leaving with it (ADR-0309 §5), so
-    their disappearance from the roster is a change worth failing on.
+    here to be covered, and the five below are what is left of ADR-0196's Context
+    enumeration once the old path's holders left with it (ADR-0309 §5), so their
+    disappearance from the roster is a change worth failing on.
     """
     found = {(model.__name__, name) for model, name in _roster()}
     assert {
-        ("PlanStep", "parameters"),
-        ("StepExecution", "output"),
         ("ActionRequest", "parameters"),
         ("BoundEgressCall", "parameters"),
         ("ToolResult", "output"),
