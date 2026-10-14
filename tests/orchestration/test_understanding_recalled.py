@@ -32,8 +32,8 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.understanding import (
-    ConversationWindow,
     RecentEpisodes,
+    TranscriptWindow,
     UnderstandingStage,
 )
 from ai_assistant.testing import FakeMemoryStore, FakeModelProvider
@@ -126,7 +126,7 @@ async def _understand(
     return await staged.stage.understand(
         "Same as before.",
         channel=CONVERSATION,
-        window=ConversationWindow(CONVERSATION, ()),
+        window=TranscriptWindow(CONVERSATION, ()),
         audience=BOUNDED,
         episodes=staged.window if episodes else None,
         version=1,

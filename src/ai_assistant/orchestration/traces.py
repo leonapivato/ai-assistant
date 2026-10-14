@@ -135,6 +135,8 @@ class Observation:
             that halts under §5 without processing its remaining work is recorded
             as a completed run that did not exhaust its work, not as a failure".
             ADR-0119 §3 calls ``INCOMPLETE`` exactly that clause "given a value".
+            Nothing produces it since consolidation's halt went (#3025, ADR-0319
+            §5), so every reading today is ``OK``.
         metrics: Numbers and booleans the run observed, under keys that are
             literal constants in the module supplying them (§2's second clause).
             A quantity the run did not reach is **absent**, never zero (§3's

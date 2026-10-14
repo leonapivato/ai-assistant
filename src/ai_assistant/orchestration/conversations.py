@@ -593,11 +593,11 @@ class ConversationLifecycle:
         to two different horizons, episodes and the index that names them would
         expire on different days.
 
-        It is a **required** keyword with no default, deliberately. ADR-0074 §7
-        warns that an implementation inheriting ``confirmation_ttl``'s ``None``
-        default would ship unbounded episodic retention while looking like it
-        followed the ADR; a seam with no default cannot inherit one at all, and the
-        one place the default is decided is ``core.config.Settings``.
+        It is a **required** keyword with no default, deliberately. ADR-0074 §7 warns
+        that an implementation inheriting a ``None`` default would ship unbounded
+        episodic retention while looking like it followed the ADR; a seam with no
+        default cannot inherit one at all, and the one place the default is decided is
+        ``core.config.Settings``.
 
         Args:
             conversations: The durable conversation index.

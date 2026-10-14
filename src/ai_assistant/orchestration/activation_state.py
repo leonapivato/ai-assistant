@@ -133,8 +133,8 @@ class ActivationState:
     unfinished: bool = False
     #: The episode's id once its conversation recorded the turn (ADR-0283 §7:1): set
     #: when ``ConversationStore.record_turn`` returned the conversation, so the
-    #: episode is on the channel and any delivery row it wrote exists. ``None`` for a
-    #: standalone capture and for a conversational one that never got that far.
+    #: episode is on the channel. ``None`` for a standalone capture and for a
+    #: conversational one that never got that far.
     recorded_episode_id: str | None = None
     understanding: tuple[ActivationUnderstanding, ...] = ()
     understanding_elided: int = 0

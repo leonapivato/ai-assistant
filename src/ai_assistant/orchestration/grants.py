@@ -475,7 +475,7 @@ class GrantOperations:
         it stay total as ``GrantScope`` grows. The sweep is stated in ADR-0102 §5
         rather than left to be inferred "because the wrong version passes every test
         that exists": ``SourceGrants.live`` takes a ``use``, so an implementation
-        querying only ``FACET`` would resolve a ``FACET``-scoped grant and silently
+        querying only ``NOTIFY`` would resolve a ``NOTIFY``-scoped grant and silently
         fail to find an ``INGEST``-only one — leaving that grant unrevokable while
         :meth:`revoke` reported success by returning ``None``.
 

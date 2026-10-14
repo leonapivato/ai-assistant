@@ -45,7 +45,7 @@ from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.held_results import HeldResult
 from ai_assistant.orchestration.planning import PlaceWindow, PlanningInputs, PlanningStage
 from ai_assistant.orchestration.recall import RecallStage
-from ai_assistant.orchestration.understanding import ConversationWindow, UnderstandingStage
+from ai_assistant.orchestration.understanding import TranscriptWindow, UnderstandingStage
 from ai_assistant.testing import (
     FakeDiagnosticSink,
     FakeMemoryStore,
@@ -184,7 +184,7 @@ async def _understand(stage: UnderstandingStage) -> None:
     await stage.understand(
         "Book the dentist.",
         channel=_CONVERSATION,
-        window=ConversationWindow(_CONVERSATION, ()),
+        window=TranscriptWindow(_CONVERSATION, ()),
         audience=_AUDIENCE,
         episodes=None,
         version=1,

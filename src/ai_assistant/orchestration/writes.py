@@ -46,9 +46,8 @@ DEFERRED_EVENT: Final = "memory_write_deferred"
 class WriteOutcome:
     """What the write stage did with one proposal.
 
-    A frozen ``orchestration`` dataclass rather than a ``core`` model, for
-    :class:`~ai_assistant.orchestration.loop.TurnResult`'s reason (ADR-0042 §1): it
-    crosses no *subsystem* boundary.
+    A frozen ``orchestration`` dataclass rather than a ``core`` model (ADR-0042 §1):
+    it crosses no *subsystem* boundary.
 
     Attributes:
         result: The ruling and the id written, exactly as the ``MemoryWriter``

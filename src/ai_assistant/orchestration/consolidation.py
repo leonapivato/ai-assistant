@@ -38,8 +38,7 @@ Four boundaries, three of them the observer's and one this stage's alone:
   in a model's output.
 
 The envelope schema below is this implementation's, not a ratified seam: a second
-consolidator would legitimately prompt differently, exactly as a second
-``Observer`` or ``Planner`` would.
+consolidator would legitimately prompt differently.
 """
 
 from __future__ import annotations
@@ -406,8 +405,8 @@ _TOPIC_LABEL: Final[TypeAdapter[str]] = TypeAdapter(TopicLabel)
 def _topics(raw: object) -> tuple[str, ...]:
     """The entry's topics in canonical order, or ``()`` where it cannot be used.
 
-    ADR-0213 §4's rule, whole and identically to
-    :func:`ai_assistant.learning.observer._topics`: a response naming more than
+    ADR-0213 §4's rule, whole and identically to the retired observer's
+    ``_topics`` (ADR-0285): a response naming more than
     :data:`MAX_TOPICS_PER_PROPOSAL` labels, naming a value §3's canonical form
     refuses, or naming none yields **no topics on that record**. The entry is
     ignored — never repaired, never truncated to the bound, never re-prompted for —
@@ -1051,8 +1050,8 @@ def _render(records: Sequence[MemoryRecord], vocabulary: Sequence[str]) -> str:
     authorship where it belongs. The caution does not weaken with the term: ADR-0106
     §4's monotonicity is why a tainted ``DERIVED`` input is tainted material, so the
     prompt tells the model both are data. This renderer's vocabulary stays its own
-    rather than converging on ``composing``'s, which carries a band and a confidence
-    this line does not (#1453).
+    rather than converging on the retired composing stage's, which carried a band and
+    a confidence this line does not (#1453).
 
     Content is truncated to :data:`_CONTENT_BUDGET` characters per record: a chunk
     is fifty records by default and every one of them is Tier 1 material leaving

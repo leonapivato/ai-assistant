@@ -10,11 +10,11 @@ addressable over the socket at all, ``AssistantEngine`` is provided by
 `orchestration`, and the engine delegates rather than growing a store of its own.
 
 **Three operations and not five** (ADR-0242 §2). There is no ``trustable_decisions``
-read, because ADR-0242 §1's availability set is three conditions wide and
-``grantable_decisions``' own rows already satisfy every one of them a user is looking
-at; and there is no history read beside the standing one, because a trust record has
-**no ceiling and no expiry**, so a record that is not live has been revoked and needs
-no act.
+read, because ADR-0242 §1's availability set is three conditions wide and the rows of
+``grantable_decisions`` (retired since, ADR-0313 §5:1) already satisfied every one of
+them a user was looking at; and there is no history read beside the standing one,
+because a trust record has **no ceiling and no expiry**, so a record that is not live
+has been revoked and needs no act.
 
 **This object and ``app/composition.py`` are the only holders of a**
 :class:`~ai_assistant.core.protocols.DestinationTrustStore` **face outside the one

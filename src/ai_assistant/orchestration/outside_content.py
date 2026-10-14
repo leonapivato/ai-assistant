@@ -27,7 +27,6 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     InputOrigin,
     MemoryRecord,
-    RecordedChannelTrigger,
     rests_on_recorded_external_content,
 )
 
@@ -45,7 +44,7 @@ def from_outside(record: EpisodicMemory) -> bool:
     """
     processing = record.processing_record
     trigger = None if processing is None else processing.trigger
-    return isinstance(trigger, RecordedChannelTrigger) and trigger.origin is InputOrigin.OUTSIDE
+    return trigger is not None and trigger.origin is InputOrigin.OUTSIDE
 
 
 def carries_evidence(record: MemoryRecord) -> bool:

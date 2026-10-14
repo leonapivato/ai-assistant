@@ -1,16 +1,14 @@
 """The understanding stage: an activation read before it is associated (ADR-0276).
 
-One orchestration-local stage, of the kind :class:`~ai_assistant.orchestration.routing.RoutingStage`
-and :class:`~ai_assistant.orchestration.informational_events.InformationalEventStage`
-are: it holds an injected ``ModelProvider`` and reads no store, and it is **not a
-Protocol** (§1). The episode window's records are handed to it: ADR-0282's **windows
-stage**, below, holds the composition root's **episode selector** and records the
-window as ids, and the understanding phase fetches them (ADR-0282 §3, §5). It receives
-no goal, no candidate goal, no attempt, no plan, no retrieved memory and no
-context-provider state, and its prompt
-renders none of them — it reads the activation's input and the two windows §3 and §4
-define, and nothing else, save what recall kept for the pass and the short views of
-the candidate stories (ADR-0300 §6, superseding ADR-0276 §1:5 for those alone).
+One orchestration-local stage: it holds an injected ``ModelProvider`` and reads no
+store, and it is **not a Protocol** (§1). The episode window's records are handed to it:
+ADR-0282's **windows stage**, below, holds the composition root's **episode selector**
+and records the window as ids, and the understanding phase fetches them (ADR-0282 §3,
+§5). It receives no goal, no candidate goal, no attempt, no plan, no retrieved memory
+and no context-provider state, and its prompt renders none of them — it reads the
+activation's input and the two windows §3 and §4 define, and nothing else, save what
+recall kept for the pass and the short views of the candidate stories (ADR-0300 §6,
+superseding ADR-0276 §1:5 for those alone).
 
 **What recall kept** (ADR-0281 §7) renders as a third section, ``recalled``, labelled
 ``M1``, ``M2``… in recall's order, only where recall made a decision for the pass: its
@@ -34,8 +32,8 @@ whether it is marked, and a marked one as outside content, never as the user's w
 (ADR-0303 §3:7, §3:8). The proposal's ``story_labels`` name the matters the input belongs
 with: an ``S`` label resolves to its story, and a ``P`` or ``M`` label naming an episode
 to that episode's activation. So does an ``H`` label naming a channel item that links
-to an activation (ADR-0303 §7): a record of the conversation's tail, or an item that is
-one exchange with an episode of the episode window, to its episode's activation
+to an activation (ADR-0303 §7): a supplied item that is one exchange with an episode of
+the episode window, to its episode's activation
 (ADR-0301 §1:1); a transcript message to the activation the chat reader's bookkeeping
 records as having taken it in, which the reader brings with the window. All of it is
 read off what the pass already holds, and nothing is fetched. An item that links to no
@@ -50,13 +48,11 @@ referent, grounding a reading ``supplied`` as any label does; cited outside
 or there are none, the section says so.
 
 **Two windows, two label sequences** (§3). The **channel window** is what the channel
-supplied — ``ChannelContext.history`` then ``reply_to`` — or, on the conversation
-channel, the conversation's tail as ``ConversationLifecycle.history`` already read it
-for the pass, or — for an input the chat's reader brought in — the conversation's
-recent transcript, each message keeping its author (ADR-0293 §6:4, §6:5). Its items are
-labelled ``H1``, ``H2``… The **episode window** is what the
-selector returns (§4), labelled ``P1``, ``P2``… in the selector's order. The input
-carries no label: a reading grounded in the input alone is ``stated``. No label
+supplied — ``ChannelContext.history`` then ``reply_to`` — or, for an input the chat's
+reader brought in, the conversation's recent transcript, each message keeping its
+author (ADR-0293 §6:4, §6:5). Its items are labelled ``H1``, ``H2``… The **episode
+window** is what the selector returns (§4), labelled ``P1``, ``P2``… in the selector's
+order. The input carries no label: a reading grounded in the input alone is ``stated``. No label
 survives the call and none is persisted — each resolves, here, into an
 :class:`~ai_assistant.core.types.UnderstandingReferent` built from the material this
 module rendered, never from model output (§2).
@@ -144,7 +140,6 @@ if TYPE_CHECKING:
         ChannelContextItem,
         ChannelIdentity,
         EpisodeProjection,
-        MemoryRecord,
         StoryNote,
         StorySummaryLine,
         TranscriptMessage,
@@ -154,7 +149,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ChannelWindow",
-    "ConversationWindow",
     "EpisodeSelector",
     "RecentEpisodes",
     "SuppliedWindow",
@@ -378,20 +372,6 @@ class SuppliedWindow:
 
 
 @dataclass(frozen=True, slots=True)
-class ConversationWindow:
-    """The conversation channel's window: the tail the pass already read (ADR-0276 §3).
-
-    Attributes:
-        conversation: The conversation channel, rendered as each item's source.
-        records: ``ConversationLifecycle.history``'s records, oldest first, **before**
-            the disclosure predicate — the stage applies it (§4).
-    """
-
-    conversation: ChannelIdentity
-    records: tuple[MemoryRecord, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class TranscriptWindow:
     """The chat's window: its recent transcript, brought in with the input (ADR-0293 §6:4).
 
@@ -433,7 +413,7 @@ class TranscriptWindow:
     links: Mapping[int, str] = field(default_factory=dict)
 
 
-type ChannelWindow = SuppliedWindow | ConversationWindow | TranscriptWindow
+type ChannelWindow = SuppliedWindow | TranscriptWindow
 
 #: ADR-0276 §4's **episode selector**: one orchestration-local function the
 #: composition root wires into the windows stage (ADR-0282 §3), so its *method* changes by wiring a
@@ -538,8 +518,8 @@ class Windows:
         episode_ids: The ids of the episode window's records, in the selector's order,
             after the audience predicate; ``None`` where the pass takes no episode
             window (ADR-0276 §4:13), and then the selector was not called.
-        shared: The stored ids of the channel window's items the audience predicate
-            admitted: §3's *same exchange* ids, which the selector passes over rather
+        shared: The identifiers of the channel window's items: §3's *same exchange*
+            ids, which the selector passes over rather
             than counts, and which recall searches past.
     """
 
@@ -571,18 +551,16 @@ class WindowsStage:
         """The window decision for one pass.
 
         Args:
-            channel: The pass's channel window, stored records not yet filtered.
+            channel: The pass's channel window.
             audience: The pass's audience posture, which filters both windows (§4:9).
-            episodes: Whether the pass takes an episode window at all; ``False`` on
-                ``converse_spoken`` (ADR-0276 §4:13), and then no store is read.
+            episodes: Whether the pass takes an episode window at all; with ``False``
+                it takes none (ADR-0276 §4:13), and then no store is read.
 
         Returns:
             The windows, with the episode window as ids.
         """
         shared = frozenset(
-            item.identifier
-            for item in _channel_items(channel, audience)
-            if item.identifier is not None
+            item.identifier for item in _channel_items(channel) if item.identifier is not None
         )
         if not episodes:
             return Windows(channel=channel, episode_ids=None, shared=shared)
@@ -716,7 +694,8 @@ class UnderstandingStage:
         Args:
             model: The application's ordinary, already-wrapped route, carrying the
                 provider stack's retry policy (ADR-0011). ``complete`` is called with
-                no ``model=`` override, for ``RoutingStage``'s reason.
+                no ``model=`` override, since ADR-0013 §4 rules that an explicit
+                ``model=`` override disables routing.
             excerpt_chars: ``UNDERSTANDING_EXCERPT_CHARS``: the bound each episode's
                 input and response are cut to, the cut disclosed (§4).
             diagnostics: The diagnostic record's write seam (ADR-0314 §4:4): each
@@ -759,8 +738,8 @@ class UnderstandingStage:
                 records of both windows before anything is rendered (§4).
             episodes: The episode window's records, in the window's order, as the
                 understanding phase fetched them (ADR-0282 §5); ``None`` where the
-                pass takes no episode window, as on ``converse_spoken`` (§4, ADR-0250
-                §15). The audience predicate is applied to them again here.
+                pass takes no episode window (§4, ADR-0250 §15). The audience
+                predicate is applied to them again here.
             version: The version orchestration mints for this record.
             now: The clock ``recorded_at`` is read from.
             deadline: The pass's deadline on the running loop's clock (§5). No
@@ -855,7 +834,7 @@ class UnderstandingStage:
         recalled: tuple[EpisodicMemory | SemanticMemory, ...],
         stories: Candidates | None,
     ) -> _Brief:
-        """Render the prompt, filtering each window's stored records first (§3, §4)."""
+        """Render the prompt, filtering the episode window's stored records first (§3, §4)."""
         placed = _Placed.of(window, audience, episodes)
         shared = placed.shared
         window_episodes = placed.episodes
@@ -875,9 +854,9 @@ class UnderstandingStage:
             )
             labels[label] = one.item.referent
             # ADR-0303 §7:4: an item that links to an activation is a story label for
-            # it, as a P label naming that activation's episode is: a tail record or a
-            # one-exchange item by its stored episode (ADR-0301 §1:1), a transcript
-            # message by the reader's bookkeeping. Anything withheld has no label.
+            # it, as a P label naming that activation's episode is: a one-exchange
+            # item by its stored episode (ADR-0301 §1:1), a transcript message by the
+            # reader's bookkeeping. Anything withheld has no label.
             if one.link is not None:
                 story_members[label] = StoryMember(kind=StoryMemberKind.ACTIVATION, id=one.link)
         rendered_episodes: list[dict[str, object]] = []
@@ -1086,8 +1065,8 @@ class _Placed:
     activations the candidates are read for are exactly those the labels resolve to.
 
     Attributes:
-        items: The items in rendering order, stored records already filtered (§4).
-        shared: The stored ids of the items, ADR-0276 §3's *same exchange* ids.
+        items: The items in rendering order.
+        shared: The identifiers of the items, ADR-0276 §3's *same exchange* ids.
         episodes: The episode window's records the audience admits, in its order.
     """
 
@@ -1103,7 +1082,7 @@ class _Placed:
         episodes: Sequence[EpisodicMemory] | None,
     ) -> _Placed:
         """Read the window's items and resolve each one's link off the records held."""
-        items = _channel_items(window, audience)
+        items = _channel_items(window)
         shared = frozenset(item.identifier for item in items if item.identifier is not None)
         admitted: tuple[EpisodicMemory, ...] = ()
         if episodes is not None:
@@ -1157,7 +1136,7 @@ def _newness(one: _PlacedItem) -> tuple[int, datetime, str]:
 
     One window holds one kind of item, so only one part of the key ever differs.
     """
-    stored = one.item.episode if one.item.episode is not None else one.also
+    stored = one.also
     if stored is None:
         return (one.item.position or 0, _NO_TIME, "")
     return (one.item.position or 0, stored.occurred_at, stored.id)
@@ -1167,15 +1146,12 @@ def _newness(one: _PlacedItem) -> tuple[int, datetime, str]:
 class _ChannelItem:
     """One item of the channel window, with the referent its label resolves to.
 
-    ``episode`` is set exactly where the item is a recorded episode of the
-    conversation's tail, which renders through the projection (ADR-0284 §8:3,
-    superseding ADR-0276 §3:1's *"on ADR-0221's existing rendering"*); ``body`` is
-    what any other item renders.
+    ``body`` is what the item renders.
 
     ``link`` is the activation the item links to by its own record (ADR-0303 §7:1): a
-    tail record's, as ADR-0301 §1:1 resolves it, and a transcript message's, as the
-    reader's bookkeeping records it. A supplied item has none of its own, and links
-    only where it is one exchange with an episode of the episode window (§1:1).
+    transcript message's, as the reader's bookkeeping records it. A supplied item has
+    none of its own, and links only where it is one exchange with an episode of the
+    episode window (§1:1).
     ``position`` is a transcript message's place in its conversation, the medium's
     own item id (ADR-0303 §7:2), and what orders the window newest first.
     """
@@ -1183,7 +1159,6 @@ class _ChannelItem:
     identifier: str | None
     body: dict[str, object]
     referent: UnderstandingReferent
-    episode: EpisodicMemory | None = None
     link: str | None = None
     position: int | None = None
 
@@ -1202,31 +1177,21 @@ class _ChannelItem:
         the one mark the place window gains: a story label naming it links nothing.
 
         ``also`` is the episode-window record the item names, where it names one: its
-        status, reason and understanding ride here, rendered once (§3). A
-        tail record is that episode itself; a supplied item or a transcript message is
-        not a record and keeps its own text, gaining only those annotations, and only
-        where ``annotated``: of several items that are one exchange, the first carries
-        them and the rest are only marked, so the exchange is rendered once.
+        status, reason and understanding ride here, rendered once (§3). A supplied
+        item or a transcript message is not a record and keeps its own text, gaining
+        only those annotations, and only where ``annotated``: of several items that are
+        one exchange, the first carries them and the rest are only marked, so the
+        exchange is rendered once.
 
         **A stored understanding version rides only on an item also in the episode
-        window** — what that window would have added about it. On its own the channel
-        window renders a tail record's two halves and its status, and no
-        understanding version: ADR-0276 §4 makes that the whole of what a turn on a
-        channel of unbounded audience is shown of its tail, which takes no episode
-        window, and ADR-0284 leaves that clause standing.
+        window** — what that window would have added about it.
         """
         rendered: dict[str, object] = {"label": label, **self.body}
-        if self.episode is not None:
-            # ADR-0284 §8:5: the channel window does not admit an outside input's text.
-            projected = _ProjectedEpisode.of(
-                self.episode, excerpt_chars=excerpt_chars, admit_outside_input=False
-            )
-            rendered.update(projected.parts(understood=also is not None))
-        elif also is not None and annotated:
+        if also is not None and annotated:
             projected = _ProjectedEpisode.of(
                 also, excerpt_chars=excerpt_chars, admit_outside_input=False
             )
-            rendered.update(projected.annotations(understood=True))
+            rendered.update(projected.annotations())
         if also is not None:
             # §3: one exchange, rendered once, here; what the episode window would have
             # added about it — its status and what was understood then — rides here too.
@@ -1247,19 +1212,14 @@ class _ChannelItem:
         return None if also is None else activation_of(also)
 
 
-def _channel_items(window: ChannelWindow, audience: TurnSupply) -> list[_ChannelItem]:
-    """The channel window's items in supplied order (§3), stored records filtered (§4)."""
+def _channel_items(window: ChannelWindow) -> list[_ChannelItem]:
+    """The channel window's items in supplied order (§3)."""
     if isinstance(window, SuppliedWindow):
         supplied = [(item, "a recent item the channel supplied") for item in window.context.history]
         if window.context.reply_to is not None:
             supplied.append((window.context.reply_to, "the item this input replies to"))
         return [_supplied_item(item, role) for item, role in supplied]
-    if isinstance(window, TranscriptWindow):
-        return _transcript_items(window)
-    source = _channel_text(window.conversation)
-    return [
-        _tail_item(record, source) for record in admitted_to_understanding(audience, window.records)
-    ]
+    return _transcript_items(window)
 
 
 def _supplied_item(item: ChannelContextItem, role: str) -> _ChannelItem:
@@ -1276,8 +1236,6 @@ def _supplied_item(item: ChannelContextItem, role: str) -> _ChannelItem:
         ),
     )
 
-
-_TAIL_ITEM: Final = "an earlier exchange of this conversation, as the assistant recorded it"
 
 _TRANSCRIPT_ITEM: Final = "a recent message of this conversation"
 _REPLIED_TO_ITEM: Final = "an earlier message the input replies to"
@@ -1373,30 +1331,6 @@ def _message_item(
     )
 
 
-def _tail_item(record: MemoryRecord, source: str) -> _ChannelItem:
-    """One recorded exchange of this conversation, rendered through the projection."""
-    if not isinstance(record, EpisodicMemory):  # pragma: no cover — the tail is episodic
-        return _ChannelItem(
-            identifier=record.id,
-            body={"item": _TAIL_ITEM, "record": record.content},
-            referent=UnderstandingReferent(
-                kind="channel_item", id=record.id, source=source, excerpt=_excerpt(record.content)
-            ),
-        )
-    excerpt = _ProjectedEpisode.of(
-        record, excerpt_chars=UNDERSTANDING_REFERENT_EXCERPT_CHARS, admit_outside_input=False
-    ).excerpt()
-    return _ChannelItem(
-        identifier=record.id,
-        body={"item": _TAIL_ITEM},
-        referent=UnderstandingReferent(
-            kind="channel_item", id=record.id, source=source, excerpt=excerpt
-        ),
-        episode=record,
-        link=activation_of(record),
-    )
-
-
 # --- the episode window ------------------------------------------------------------
 
 
@@ -1451,14 +1385,14 @@ class _ProjectedEpisode:
             **self.parts(),
         }
 
-    def parts(self, *, understood: bool = True) -> dict[str, object]:
+    def parts(self) -> dict[str, object]:
         """Its time, input, response, status and reason, and understanding.
 
         ADR-0284 §8:6 as ADR-0318 §3:1 leaves it: a rendering states the episode's
-        status and reason, and no verdict. ``understood`` is whether the latest
-        understanding version is shown: the episode window and the recalled section
-        show it (ADR-0276 §4, ADR-0281 §7), and a channel-window item shows it only
-        where it is also in the episode window.
+        status and reason, and no verdict. The latest understanding version is shown:
+        the episode window and the recalled section show it (ADR-0276 §4, ADR-0281 §7),
+        and a channel-window item shows it only where it is also in the episode window,
+        through :meth:`annotations`.
         """
         projection = self.projection
         return {
@@ -1469,11 +1403,11 @@ class _ProjectedEpisode:
             "response_cut_to_first_chars": (
                 projection.response is not None and projection.response.cut
             ),
-            **self.annotations(understood=understood),
+            **self.annotations(),
         }
 
-    def annotations(self, *, understood: bool) -> dict[str, object]:
-        """Its status and reason and, where shown, its understanding.
+    def annotations(self) -> dict[str, object]:
+        """Its status and reason and, where it has one, its understanding.
 
         What a channel-window item gains where it names an episode the episode window
         holds (§3), and the part of :meth:`parts` that is about processing.
@@ -1483,7 +1417,7 @@ class _ProjectedEpisode:
         if projection.status is not None and projection.reason is not None:
             rendered["status"] = projection.status.value
             rendered["reason"] = projection.reason.value
-        if understood and projection.meaning is not None and projection.meaning_ground is not None:
+        if projection.meaning is not None and projection.meaning_ground is not None:
             rendered["understood_then"] = {
                 "provisional": "what the assistant understood then, not an established fact",
                 "meaning": projection.meaning,

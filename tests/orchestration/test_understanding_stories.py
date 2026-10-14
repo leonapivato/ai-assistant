@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
-from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
@@ -27,7 +26,6 @@ from story_support import (
     AT,
     CONVERSATION,
     EVENTS,
-    OWNER_ONLY,
     activation,
     address,
     episode,
@@ -61,7 +59,6 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
 from ai_assistant.orchestration.story_links import Candidates, ShortView, StoryCandidates
 from ai_assistant.orchestration.understanding import (
-    ConversationWindow,
     SuppliedWindow,
     TranscriptWindow,
     UnderstandingStage,
@@ -661,40 +658,11 @@ async def test_the_repair_statement_carries_no_rule_on_where_an_s_label_may_be_c
     assert "story_labels" not in statement
 
 
-# --- ADR-0301 §1: an H label naming a stored episode the pass admitted ------------------
-
-
-def _tail(*records: EpisodicMemory) -> ConversationWindow:
-    return ConversationWindow(CONVERSATION, records)
+# --- ADR-0301 §1: an H label naming an episode the pass admitted -------------------------
 
 
 def _statement(model: FakeModelProvider) -> str:
     return model.calls[1].messages[-1].content
-
-
-@pytest.mark.parametrize(
-    "episodes",
-    [None, ()],
-    ids=["a spoken turn, which takes no episode window", "beyond the selector's reach"],
-)
-async def test_a_tail_record_links_its_activation_through_its_h_label(
-    episodes: tuple[EpisodicMemory, ...] | None,
-) -> None:
-    model = FakeModelProvider(_proposal(story_labels=["H2", "S1", "H1", "H2"]))
-
-    understood = await _understand(
-        model,
-        stories=Candidates(views=(_TRIP,)),
-        episodes=episodes,
-        window=_tail(episode("a-3"), episode("a-4")),
-    )
-
-    first, second = _payload(model)["channel_window"]
-    assert (first["label"], second["label"]) == ("H1", "H2")
-    assert "also_in_episode_window" not in first
-    assert understood.story_links == (activation("a-4"), story("story:trip"), activation("a-3"))
-    assert understood.grounding_dropped == 0
-    assert len(model.calls) == 1
 
 
 async def test_an_h_label_cited_as_a_referent_stays_a_channel_item() -> None:
@@ -702,30 +670,17 @@ async def test_an_h_label_cited_as_a_referent_stays_a_channel_item() -> None:
         _proposal(meaning_ground="supplied", meaning_labels=["H1"], story_labels=["H1"])
     )
 
+    window = SuppliedWindow(
+        ChannelContext(history=(ChannelContextItem(text="Trip plans", item_id=address("a-3")),))
+    )
     understood = await _understand(
-        model, stories=Candidates(views=()), episodes=None, window=_tail(episode("a-3"))
+        model, stories=Candidates(views=()), episodes=(episode("a-3"),), window=window
     )
 
     # §1's fifth clause: outside `story_labels` the label resolves as it always did.
     (referent,) = understood.meaning_referents
     assert (referent.kind, referent.id) == ("channel_item", address("a-3"))
     assert understood.story_links == (activation("a-3"),)
-
-
-async def test_a_tail_record_also_in_the_episode_window_links_once_under_h() -> None:
-    model = FakeModelProvider(_proposal(story_labels=["H1"]))
-
-    understood = await _understand(
-        model,
-        stories=Candidates(views=()),
-        episodes=(episode("a-3"),),
-        window=_tail(episode("a-3")),
-    )
-
-    (item,) = _payload(model)["channel_window"]
-    assert item["also_in_episode_window"] is True
-    assert understood.story_links == (activation("a-3"),)
-    assert len(model.calls) == 1
 
 
 async def test_a_one_exchange_supplied_item_links_the_window_episode_s_activation() -> None:
@@ -744,27 +699,6 @@ async def test_a_one_exchange_supplied_item_links_the_window_episode_s_activatio
     assert understood.story_links == (activation("a-2"),)
     assert understood.grounding_dropped == 0
     assert len(model.calls) == 1
-
-
-async def test_a_withheld_tail_record_takes_no_label_to_cite() -> None:
-    bad = _proposal(story_labels=["H1", "H2"])
-    model = FakeModelProvider.scripted(bad, bad)
-
-    understood = await _understand(
-        model,
-        stories=Candidates(views=()),
-        episodes=None,
-        window=_tail(episode("a-3", placement=OWNER_ONLY), episode("a-4")),
-        audience=UNBOUNDED,
-    )
-
-    # ADR-0276 §4:9: on a turn of unbounded audience the owner-placed record reaches no
-    # rendering and no label, so the one H label is the record that was admitted.
-    (item,) = _payload(model)["channel_window"]
-    assert item["label"] == "H1"
-    assert '"H2"' in _statement(model)
-    assert understood.story_links == (activation("a-4"),)
-    assert understood.grounding_dropped == 1
 
 
 # --- ADR-0303 §7: an item that links to nothing, and the transcript's links ------------
@@ -902,29 +836,14 @@ async def test_a_supplied_item_naming_an_episode_the_window_does_not_hold_links_
     assert understood.grounding_dropped == 1
 
 
-async def test_a_tail_record_of_no_activation_links_nothing() -> None:
-    legacy = episode("a-3").model_copy(update={"processing_record": None})
-    model = FakeModelProvider(_proposal(story_labels=["H1"]))
-
-    understood = await _understand(
-        model, stories=Candidates(views=()), episodes=None, window=_tail(legacy)
-    )
-
-    (item,) = _payload(model)["channel_window"]
-    assert item["not_linkable"] is True
-    assert len(model.calls) == 1
-    assert understood.story_links == ()
-    assert understood.grounding_dropped == 1
-
-
 async def test_a_linkable_item_carries_no_mark() -> None:
     model = FakeModelProvider(_proposal())
 
+    window = SuppliedWindow(
+        ChannelContext(history=(ChannelContextItem(text="Trip plans", item_id=address("a-2")),))
+    )
     await _understand(
-        model,
-        stories=Candidates(views=()),
-        episodes=(episode("a-2"),),
-        window=_tail(episode("a-2"), episode("a-3")),
+        model, stories=Candidates(views=()), episodes=(episode("a-2"),), window=window
     )
 
     assert all("not_linkable" not in item for item in _payload(model)["channel_window"])
@@ -963,19 +882,6 @@ def test_a_transcript_s_links_are_newest_message_first_each_activation_once() ->
     )
 
     assert place_window_links(window, audience=BOUNDED, episodes=()) == ("a-3", "a-2", "a-1")
-
-
-def test_a_tail_s_links_are_newest_episode_first_and_a_withheld_record_brings_none() -> None:
-    window = _tail(
-        episode("a-3", at=AT - timedelta(hours=2)),
-        episode("a-4", at=AT - timedelta(hours=1), placement=OWNER_ONLY),
-        episode("a-5", at=AT),
-    )
-
-    assert place_window_links(window, audience=BOUNDED, episodes=None) == ("a-5", "a-4", "a-3")
-    # ADR-0276 §4:9: on a turn of unbounded audience the owner-placed record reaches no
-    # rendering and no label, so it brings no candidate either.
-    assert place_window_links(window, audience=UNBOUNDED, episodes=None) == ("a-5", "a-3")
 
 
 def test_a_supplied_item_links_only_as_one_exchange_with_the_episode_window() -> None:
