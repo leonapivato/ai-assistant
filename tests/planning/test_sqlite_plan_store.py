@@ -450,30 +450,42 @@ async def test_an_older_on_disk_schema_is_refused(tmp_path: Path, version: str) 
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
+@pytest.mark.parametrize(
+    "label",
+    ["10", None, "11"],
+    ids=["as-written", "its-marker-deleted", "its-marker-rewritten-to-current"],
+)
 async def test_a_pre_cutover_file_is_refused_and_left_exactly_as_it_was(
-    tmp_path: Path,
+    tmp_path: Path, label: str | None
 ) -> None:
-    """A version 10 file keeps its tables and its label, and gains none.
+    """A file holding the old path's records keeps them and its label, and gains nothing.
 
     The refusal precedes every write, so the file a user's old hub wrote is not
     half-adopted: no record table is created beside its own, and its marker is not
-    moved.
+    moved. **It rests on the tables, not on the marker alone**: a marker deleted or
+    rewritten to the current version would otherwise pass the file off as a fresh or a
+    current one, and its goals would stay in it and outside ``export`` and ``clear``
+    (ADR-0004 §6).
     """
     path = tmp_path / "plans.db"
     raw = sqlite3.connect(path)
     try:
         raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '10')")
+        if label is not None:
+            raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', ?)", (label,))
         raw.execute("CREATE TABLE goals(id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+        raw.execute("INSERT INTO goals(id, data) VALUES ('g1', '{}')")
         raw.commit()
     finally:
         raw.close()
 
-    with pytest.raises(PlanningError, match="schema_version=10"):
+    with pytest.raises(PlanningError, match=r"neither creates nor reads \(goals\)"):
         SqlitePlanStore(path=path, now=_fixed_now)
 
     assert _tables(path) == {"meta", "goals"}
-    assert _meta(path, "schema_version") == "10"
+    assert _meta(path, "schema_version") == label
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT id FROM goals").fetchall() == [("g1",)]
 
 
 async def test_a_non_numeric_schema_version_is_a_planning_error(tmp_path: Path) -> None:
