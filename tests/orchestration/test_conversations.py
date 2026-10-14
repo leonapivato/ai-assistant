@@ -24,22 +24,11 @@ import pytest
 from channel_episodes import channel_ids, conversation_episode
 
 from ai_assistant.core.errors import (
-    AssistantError,
     ConversationStoreError,
     MemoryStoreError,
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
-    ActionPlan,
-    Goal,
-    GoalBrief,
-    GoalInterpretation,
-    Ground,
-    MemorySource,
-    ParkedBinding,
-    ParkedRead,
-    ParkedReadDisposition,
-    Provenance,
     SpokenDelivery,
     SpokenDeliveryState,
     Validity,
@@ -48,12 +37,10 @@ from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.orchestration.conversations import (
     HISTORY_REPLAY_BOUND,
     ConversationLifecycle,
-    ParkingOrigin,
 )
 from ai_assistant.testing import (
     FakeConversationStore,
     FakeMemoryStore,
-    FakeParkedReads,
 )
 
 if TYPE_CHECKING:
@@ -95,7 +82,7 @@ class MovableClock:
 class Wiring:
     """A stage and the stores behind it, all sharing one clock."""
 
-    def __init__(  # noqa: PLR0913 — one knob per store seam a case may need to vary
+    def __init__(
         self,
         *,
         clock: MovableClock | None = None,
@@ -103,7 +90,6 @@ class Wiring:
         grace: timedelta = GRACE,
         memory: FakeMemoryStore | None = None,
         conversations: FakeConversationStore | None = None,
-        parked_reads: FakeParkedReads | None = None,
     ) -> None:
         self.clock = clock if clock is not None else MovableClock()
         self.retention = retention
@@ -113,16 +99,11 @@ class Wiring:
             if conversations is not None
             else FakeConversationStore(now=self.clock, retention=retention, tombstone_grace=grace)
         )
-        # ``None`` unless a case asks for one: a stage wired without one carries out
-        # §8 exactly as it did before ADR-0244 — which is the arm below that holds
-        # the absence.
-        self.parked_reads = parked_reads
         self.stage = ConversationLifecycle(
             conversations=self.conversations,
             memory=self.memory,
             retention=retention,
             now=self.clock,
-            parked_reads=parked_reads,
         )
 
     async def seed(  # noqa: PLR0913 — one keyword per axis a seeded episode varies
@@ -133,7 +114,6 @@ class Wiring:
         completed: bool = True,
         delivery: SpokenDelivery | None = None,
         occurred_at: datetime | None = None,
-        parks: ParkedBinding | None = None,
         expires_at: datetime | None = None,
         validity: Validity | None = None,
         unexpiring: bool = False,
@@ -154,7 +134,6 @@ class Wiring:
                 episode_id,
                 occurred_at=at,
                 completed=completed,
-                parks=parks,
                 expires_at=expires_at,
                 validity=validity or Validity(),
             )
@@ -460,56 +439,11 @@ async def test_the_digest_of_a_conversation_with_no_episodes_counts_none() -> No
     assert digest.last_turn_at is None
 
 
-# --- where a parked confirmation was parked (ADR-0283 §5) ----------------
-
-BINDING = ParkedBinding(execution_id="execution-1", step_id="step-1")
-
-
-async def test_a_resume_finds_its_conversation_through_the_parking_episode() -> None:
-    """§5: recovered through ``episode_parking``, never passed."""
-    wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
-    await wiring.seed(conversation.id, "activation:before")
-    parking = await wiring.seed(conversation.id, "activation:parking", parks=BINDING)
-
-    origin = await wiring.stage.conversation_of_binding(BINDING)
-
-    assert origin == ParkingOrigin(conversation_id=conversation.id, episode_id=parking)
-
-
-async def test_a_binding_no_live_episode_parked_finds_no_conversation() -> None:
-    """§5: no live parking episode keeps ADR-0275 §6:5's degraded behaviour."""
-    wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
-    parking = await wiring.seed(conversation.id, "activation:parking", parks=BINDING)
-    assert (
-        await wiring.stage.conversation_of_binding(
-            ParkedBinding(execution_id="execution-1", step_id="another-step")
-        )
-        is None
-    )
-    assert await wiring.memory.delete(parking) is True
-
-    assert await wiring.stage.conversation_of_binding(BINDING) is None
-
-
-async def test_a_binding_parked_in_a_deleted_conversation_finds_none() -> None:
-    """§5: recording a resumption under a stamped conversation would assert one gone."""
-    wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
-    await wiring.seed(conversation.id, "activation:parking", parks=BINDING)
-    await wiring.conversations.stamp_deleted(conversation.id)
-
-    assert await wiring.stage.conversation_of_binding(BINDING) is None
-
-
 # --- deletion: the ordered steps (ADR-0283 §8:1, ADR-0293 §2:3) ---------
 
 
-async def test_deletion_runs_its_steps_in_the_ratified_order(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """§8:1, as ADR-0293 §2:3 left it: the parked-reads drop, then the record's drop.
+async def test_deletion_runs_its_steps_in_the_ratified_order() -> None:
+    """§8:1, as ADR-0293 §2:3 left it: the stamp, then the record's drop.
 
     No channel is walked and no episode deleted: deleting a conversation forgets
     nothing.
@@ -530,24 +464,18 @@ async def test_deletion_runs_its_steps_in_the_ratified_order(
             return await super().delete(record_id)
 
     class Conversations(FakeConversationStore):
+        async def stamp_deleted(self, conversation_id: str) -> bool:
+            log.append("stamp_deleted")
+            return await super().stamp_deleted(conversation_id)
+
         async def drop_if_eligible(self, conversation_id: str) -> bool:
             log.append("drop_if_eligible")
             return await super().drop_if_eligible(conversation_id)
 
-    # ``FakeParkedReads`` is final, so its one call here is spied on the instance.
-    parks = FakeParkedReads()
-    drop = parks.drop_for_conversation
-
-    async def spied_drop(conversation_id: str, /) -> int:
-        log.append("drop_for_conversation")
-        return await drop(conversation_id)
-
-    monkeypatch.setattr(parks, "drop_for_conversation", spied_drop)
     memory = Memory(now=clock)
     wiring = Wiring(
         clock=clock,
         memory=memory,
-        parked_reads=parks,
         conversations=Conversations(now=clock, retention=RETENTION, tombstone_grace=GRACE),
     )
     conversation_id, episodes = await _seed_turns(wiring, 2)
@@ -555,7 +483,7 @@ async def test_deletion_runs_its_steps_in_the_ratified_order(
 
     assert await wiring.stage.delete(conversation_id) is True
 
-    assert log == ["drop_for_conversation", "drop_if_eligible"]
+    assert log == ["stamp_deleted", "drop_if_eligible"]
     assert await channel_ids(memory, conversation_id) == episodes
 
 
@@ -714,151 +642,6 @@ async def test_an_episode_landing_after_the_stamp_is_kept() -> None:
     clock.advance(GRACE)
     assert await wiring.stage.sweep_deletions() == 1
     assert await wiring.stage.sweep_deletions() == 0, "a re-run is a no-op"
-
-
-# --- the parked reads a deletion takes with it (ADR-0244 §3) -------------
-
-
-def _park(park_id: str, conversation_id: str, decision_id: str) -> ParkedRead:
-    """An ``OPEN`` park of ``conversation_id``, with its three content fields present."""
-    return ParkedRead(
-        id=park_id,
-        conversation_id=conversation_id,
-        decision_id=decision_id,
-        parameters={"origin": "search.example", "query": "bell tower porto"},
-        goal=GoalBrief.of(
-            Goal(
-                id=f"goal-{park_id}",
-                interpretation=(
-                    GoalInterpretation(
-                        revision=1,
-                        outcome="what is that bell tower in Porto",
-                        outcome_ground=Ground.USER_STATED,
-                        outcome_span="what is that bell tower in Porto",
-                        recorded_at=AT,
-                        raised_by="t-1",
-                    ),
-                ),
-                provenance=Provenance(
-                    source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
-                ),
-                created_at=AT,
-            )
-        ),
-        goal_id=f"goal-{park_id}",
-        plan=ActionPlan(
-            id=f"plan-{park_id}",
-            goal_id=f"goal-{park_id}",
-            steps=(),
-            created_at=AT,
-            rationale="answer from what is already here, and look the tower up",
-        ),
-        parked_at=AT,
-        expires_at=AT + DAY,
-        disposition=ParkedReadDisposition.OPEN,
-    )
-
-
-async def test_a_deletion_drops_this_conversations_parks_and_no_others() -> None:
-    """ADR-0244 §3: the conversation's deletion sequence drops its parks.
-
-    "Every park of that conversation, open or terminal, content and terminal facts
-    alike" — a terminal one holds no content, so what a deletion removes there is six
-    scalar facts, and leaving them would let a decision stay excluded from
-    ``grantable_decisions`` (§5's eighth condition) for a conversation that no longer
-    exists. Another conversation's park is untouched, which is the half a store-wide
-    drop would break.
-    """
-    parks = FakeParkedReads()
-    wiring = Wiring(parked_reads=parks)
-    conversation_id, _ = await _seed_turns(wiring, 1)
-    other_id, _ = await _seed_turns(wiring, 1)
-    await parks.park(_park("park-1", conversation_id, "decision-1"))
-    await parks.settle("park-1", disposition=ParkedReadDisposition.DENIED, at=AT)
-    await parks.park(_park("park-2", conversation_id, "decision-2"))
-    await parks.park(_park("park-3", other_id, "decision-3"))
-
-    assert await wiring.stage.delete(conversation_id) is True
-
-    assert await parks.get("park-1") is None, "the terminal row went too"
-    assert await parks.get("park-2") is None
-    assert await parks.park_of_decision("decision-2") is None
-    assert (await parks.get("park-3")) is not None, "another conversation is untouched"
-
-
-async def test_the_parks_of_a_conversation_another_sweep_already_dropped_still_go() -> None:
-    """The placement argument: the parks are dropped whatever the record's state.
-
-    A call arriving for a conversation another sweep already dropped still reaches
-    the parks, which is the one route to them ADR-0244 §3 names besides the deadline —
-    so the drop sits inside step 2, ahead of anything that depends on the record.
-    """
-    parks = FakeParkedReads()
-    wiring = Wiring(parked_reads=parks)
-    await parks.park(_park("park-1", "conversation-another-sweep-finished", "decision-1"))
-
-    assert await wiring.stage.delete("conversation-another-sweep-finished") is False
-
-    assert await parks.get("park-1") is None
-
-
-async def test_the_start_up_sweep_drops_the_parks_a_crashed_deletion_left() -> None:
-    """The drop is inside step 2, so the re-run carries it (ADR-0076, ADR-0244 §3).
-
-    A deletion interrupted after its stamp leaves the tombstone, and the sweep re-walks
-    the whole of step 2 — the parks included, because they are dropped there rather than
-    after the conditional drop. Placed after step 3 instead, the drop would be
-    unreachable to this sweep: ``drop_if_eligible`` removes the record and the tombstone
-    with it, and nothing enumerates the conversation again.
-    """
-    clock = MovableClock()
-    parks = FakeParkedReads()
-    wiring = Wiring(clock=clock, parked_reads=parks)
-    conversation_id, _ = await _seed_turns(wiring, 1)
-    await parks.park(_park("park-1", conversation_id, "decision-1"))
-    # The stamp with nothing after it: a process that died between §8's step 1 and its
-    # step 2, which is the state ADR-0076 exists to find.
-    assert await wiring.conversations.stamp_deleted(conversation_id) is True
-    clock.advance(GRACE)
-
-    assert await wiring.stage.sweep_deletions() == 1
-
-    assert await parks.get("park-1") is None
-
-
-async def test_a_park_store_fault_aborts_step_two_and_the_tombstone_stands() -> None:
-    """The residue of a partial failure is one the user can still reach and destroy.
-
-    The parks are dropped before the record, so a store that cannot be written leaves
-    the tombstone standing, which is what makes the next sweep finish it; the episodes
-    are not the deletion's to touch either way (ADR-0293 §2:3).
-    """
-    parks = FakeParkedReads()
-    wiring = Wiring(parked_reads=parks)
-    conversation_id, episodes = await _seed_turns(wiring, 1)
-    parks.fail_writes()
-
-    with pytest.raises(AssistantError):
-        await wiring.stage.delete(conversation_id)
-
-    assert await wiring.memory.get(episodes[0]) is not None, "nothing below the drop ran"
-    assert await wiring.conversations.stamped_conversation_ids() == [conversation_id]
-
-
-async def test_a_stage_with_no_park_store_deletes_exactly_as_it_did_before() -> None:
-    """``None`` drops nothing because there is nothing to drop (ADR-0244 §18's lane order).
-
-    A deployment that wired no store holds no park for any conversation, so the sequence
-    is what it was before this decision — and the absence is an ordinary state rather
-    than a degradation.
-    """
-    wiring = Wiring()
-    conversation_id, episodes = await _seed_turns(wiring, 1)
-
-    assert await wiring.stage.delete(conversation_id) is True
-
-    assert await wiring.memory.get(episodes[0]) is not None, "deleting forgets nothing"
-    assert await wiring.conversations.get(conversation_id) is None
 
 
 # --- the start-up sweep (ADR-0076) ---------------------------------------

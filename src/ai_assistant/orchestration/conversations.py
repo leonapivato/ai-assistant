@@ -12,12 +12,9 @@ handles by injection — owns the cross-store sequences:
 * **history** (ADR-0283 §4, §10; ADR-0284 §6:2) — every live episode of the
   conversation in number order within the replay bound, each paired with its
   delivery row;
-* **resume association** (§5) — a binding resolved through the episode that parked
-  it;
 * **deletion** (§8, as ADR-0293 §2:3 partially supersedes it) — stamp, which
-  deletes the transcript, drop the conversation's parked reads and the record
-  conditionally, and **destroy no episode**: deleting a conversation forgets
-  nothing;
+  deletes the transcript, then drop the record conditionally, and **destroy no
+  episode**: deleting a conversation forgets nothing;
 * **forgetting** (ADR-0293 §2:4-§2:8) — destroy every episode the conversation's
   channel holds, open ones told first, and leave the conversation and its
   transcript;
@@ -84,7 +81,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
         ConversationStore,
         MemoryStore,
-        ParkedReads,
     )
     from ai_assistant.core.types import (
         ChatDevice,
@@ -92,7 +88,6 @@ if TYPE_CHECKING:
         DeviceConversation,
         MemoryRecord,
         MessageReceipt,
-        ParkedBinding,
         SpokenDelivery,
         SpokenDeliveryReport,
         UserMessage,
@@ -629,20 +624,6 @@ class AssembledHistory:
     degraded: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class ParkingOrigin:
-    """Where a parked binding was parked: its conversation and its episode (ADR-0283 §5).
-
-    Attributes:
-        conversation_id: The conversation whose channel the parking episode is on.
-        episode_id: The parking episode's id, which a resumed episode relates as its
-            predecessor.
-    """
-
-    conversation_id: str
-    episode_id: str
-
-
 class ConversationLifecycle:
     """Owns every ``ConversationStore``/``MemoryStore`` sequence (ADR-0074 §9)."""
 
@@ -653,7 +634,6 @@ class ConversationLifecycle:
         memory: MemoryStore,
         retention: timedelta | None,
         now: Clock = _utcnow,
-        parked_reads: ParkedReads | None = None,
     ) -> None:
         """Wire the stage from the injected stores.
 
@@ -686,27 +666,11 @@ class ConversationLifecycle:
                 :func:`~ai_assistant.core.clock.checked_clock`, so a non-conforming
                 reading is this stage's own failure rather than a silently bad
                 timestamp.
-            parked_reads: The questions a recorded ``CONFIRM`` on a read left standing
-                (ADR-0244 §3), or ``None`` where this deployment wired no such store.
-                **Reached through the Protocol and never through a concrete one**
-                (golden rule 1), which is why ``drop_for_conversation`` is a member of
-                the contract rather than left to an implementation — and this stage is
-                where it is called from, being "the one layer that legitimately holds
-                both handles by injection" (ADR-0074 §9).
-
-                **Defaulted rather than required**, which is the one departure from
-                ``retention`` above and takes
-                :class:`~ai_assistant.orchestration.recipient_grants.RecipientGrantOperations`'
-                choice for the same object one seam over. A stage with no park store
-                carries §8 out exactly as it did before ADR-0244, because a deployment
-                that wired none holds no park for any conversation. ``None`` drops nothing
-                because there is nothing to drop.
         """
         self._conversations = conversations
         self._memory = memory
         self._retention = retention
         self._clock = checked_clock(now, owner="ConversationLifecycle")
-        self._parked_reads = parked_reads
         self.activation_writer = ActivationWriter(
             conversations=conversations,
             memory=memory,
@@ -804,35 +768,6 @@ class ConversationLifecycle:
             _log.warning("conversation_history_degraded", stage="history", exc_info=True)
             return AssembledHistory(degraded=True)
         return AssembledHistory(records=tuple(records), deliveries=deliveries)
-
-    async def conversation_of_binding(self, binding: ParkedBinding) -> ParkingOrigin | None:
-        """Where a parked confirmation was parked, or ``None`` (ADR-0283 §5).
-
-        A resumption cannot be *told* which conversation it is in — the adapter
-        relays an opaque token and nothing else — so the association is durable and
-        recovered rather than passed: ``MemoryStore.episode_parking`` finds the
-        episode whose own step parked ``binding`` (its ``links.parks``). Where that
-        episode's channel is a conversation, the conversation is that channel's
-        instance and the predecessor is that episode's id.
-
-        ``None`` where no live episode parked the binding, where it is on no
-        conversation's channel, and where the conversation is stamped or absent: all
-        three keep ADR-0275 §6:5's degraded, no-episode behaviour, because recording
-        the resumption under a fresh conversation would assert one the user never had.
-
-        Raises:
-            MemoryStoreError: If the memory store cannot be read.
-            ConversationStoreError: If the conversation store cannot be read.
-        """
-        episode = await self._memory.episode_parking(binding)
-        if episode is None or episode.processing_record is None:
-            return None
-        channel = episode.processing_record.trigger.channel
-        if channel is None or channel.channel_type != "conversation":
-            return None
-        if await self._conversations.get(channel.instance_id) is None:
-            return None
-        return ParkingOrigin(conversation_id=channel.instance_id, episode_id=episode.id)
 
     async def record_delivery(self, conversation_id: str, report: SpokenDeliveryReport) -> bool:
         """Apply one device's report to the turn it names (ADR-0205 §1, §3).
@@ -1023,7 +958,7 @@ class ConversationLifecycle:
         return forgot
 
     async def delete(self, conversation_id: str) -> bool:
-        """Delete a conversation: stamp, drop its parked reads, drop the record (§8).
+        """Delete a conversation: stamp it, then drop the record (§8).
 
         ADR-0283 §8:1 as ADR-0293 §2:3 partially supersedes it: deleting removes the
         conversation and its transcript, **and none of the episodes on its place**.
@@ -1033,10 +968,6 @@ class ConversationLifecycle:
         between the steps the stamped record is still there, so
         :meth:`sweep_deletions` finishes it (ADR-0076).
 
-        **The conversation's parked reads go with it** (ADR-0244 §3), through
-        ``ParkedReads.drop_for_conversation`` and never through a concrete store —
-        :meth:`_finish_deletion` carries the placement and its argument.
-
         Returns:
             ``True`` if this call stamped the conversation; ``False`` if it was
             already stamped or the id names nothing. Either way the sweep behind it
@@ -1044,8 +975,6 @@ class ConversationLifecycle:
 
         Raises:
             ConversationStoreError: If the store cannot be read or written.
-            AssistantError: If this conversation's parked reads could not be dropped.
-                The tombstone stands, and the next sweep finishes the job.
         """
         stamped = await self._conversations.stamp_deleted(conversation_id)
         try:
@@ -1096,46 +1025,18 @@ class ConversationLifecycle:
             cursor = batch[-1]
 
     async def _finish_deletion(self, conversation_id: str) -> bool:
-        """Destroy this conversation's parked reads, then ask for the drop (§8).
+        """Drop the stamped record once its grace has passed (§8).
 
-        ADR-0283 §8:1, in order, as ADR-0293 §2:3 leaves it: the parked reads' drop,
-        then ``drop_if_eligible``. **No episode is destroyed**: deleting a conversation
-        forgets nothing, and its episodes stay on its place until the user forgets
-        them (ADR-0293 §2:4). Idempotent: a run that dies part-way is re-run from the
-        beginning.
-
-        **The parked reads go first, and the position is argued rather than free**
-        (ADR-0244 §3). It is inside **step 2** and never after step 3, because
-        ``drop_if_eligible`` removes the record and its tombstone — after which nothing
-        enumerates this conversation again, and a park dropped there and interrupted
-        would be strandable with only its own deadline to free it. That is ADR-0238 §8's
-        stranding failure, the one ADR-0244 §3 contrasts a park against, and it is closed
-        here by running before the drop rather than by a reconciliation walk, a tombstone
-        of its own or a second lifecycle — none of which §3 admits.
-
-        It goes **before** the episode walk, so a call arriving for a conversation
-        another sweep already dropped still reaches the parks — the one route to them
-        ADR-0244 §3 names besides the deadline.
-
-        **An open park stranded by a crash anywhere in this sequence is not an
-        unrecoverable orphan** (ADR-0244 §3): it carries its own ``expires_at``,
-        ``outstanding`` enumerates it, and §10's expiry settles it and clears its content
-        with no reference to the conversation record. A terminal one holds no content at
-        all, so what is left is six scalar facts the next call removes.
+        ADR-0283 §8:1's last step, as ADR-0293 §2:3 leaves it. **No episode is
+        destroyed**: deleting a conversation forgets nothing, and its episodes stay on
+        its place until the user forgets them (ADR-0293 §2:4). Idempotent: a run that
+        dies part-way is re-run from the beginning.
 
         Returns:
             Whether the record was dropped. ``False`` while the grace still holds —
             the tombstone is deliberately kept alive past the deletion so a capture
             that commits and then dies is still swept.
-
-        Raises:
-            AssistantError: If the parked-read store could not be written. Nothing below
-                runs and the tombstone stands: the residue of a partial failure has to be
-                one the user can still reach and destroy, and a park is reachable through
-                the enumeration and self-clearing on its deadline.
         """
-        if self._parked_reads is not None:
-            await self._parked_reads.drop_for_conversation(conversation_id)
         return await self._conversations.drop_if_eligible(conversation_id)
 
     # --- retention reclaim (§7) ---------------------------------------------
@@ -1257,7 +1158,6 @@ __all__ = [
     "AssembledHistory",
     "ConversationDigest",
     "ConversationLifecycle",
-    "ParkingOrigin",
     "activation_ending",
     "check_devices_fit",
     "check_message_fits",
