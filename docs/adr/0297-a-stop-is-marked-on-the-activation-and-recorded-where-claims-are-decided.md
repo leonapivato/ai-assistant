@@ -1,6 +1,6 @@
 # 297. A stop is marked on the activation and recorded where claims are decided
 
-- Status: Partially superseded by ADR-0306 (§2:11's *and at no other write*, in the addition alone: the phases' effect claim is also refused on a stop record) and ADR-0319 (§2:2, §2:10, §4:6, §4:10, §4:12 and §4:14–§4:16)
+- Status: Partially superseded by ADR-0306 (§2:11's *and at no other write*, in the addition alone: the phases' effect claim is also refused on a stop record) and ADR-0319 (§2:2, §2:10, §4:6, §4:10, §4:12 and §4:14–§4:16) and ADR-0320 (§2:1, §2:3, §2:4 and §2:9)
 - Date: 2026-10-05
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: how a stop bites, which ships with the conversation channel (ADR-0293 §11:8, ADR-0295 §6).
 - Dependency: ADR-0295, ratified.
@@ -17,6 +17,7 @@
   accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the
   ratified body below are preserved.
 - Partially superseded: 2026-10-14 by ADR-0319 — §2:2, §2:10, §4:6, §4:10, §4:12 and §4:14–§4:16. They governed the turn's drive, `resume`, the step runner and executor, the goal and the old adapter. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0320 — §2:1, §2:3, §2:4 and §2:9. They governed `StepTransition.activation_id`, the step claim's naming rule, `PlanStore.commit_transition`'s stop conjunct and `StepExecution`'s non-field; `record_stop`, `PlanExport.stopped_activations`, `ClaimStopped` and §§3–5 stand. Every other clause stands. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

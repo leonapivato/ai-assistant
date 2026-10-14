@@ -1,6 +1,6 @@
 # 273. A simulated booking provider is a reference integration declared as the real one, and its act reaches nothing outside this deployment
 
-- Status: Partially superseded by ADR-0309 (what it declares and reads for the goal model)
+- Status: Partially superseded by ADR-0309 (what it declares and reads for the goal model) and ADR-0320 (§3:3 and §3:4)
 - Date: 2026-09-16
 - Partially superseded: 2026-10-11 by ADR-0309 — one scope. What it declares and reads for
   the goal model: the quote and verification outputs §2 declares, with §2:19, §2:21 and
@@ -10,6 +10,7 @@
   merges (ADR-0309 §1:3). This scoped replacement takes effect on ratification of ADR-0309.
   This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0320 — §3:3 and §3:4. They governed the booking's place in the `OutboundDestination` vocabulary, which left `core` with `Disposition` and `StepStatus`; the declarations and §3:1–§3:2 stand. Every other clause stands. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

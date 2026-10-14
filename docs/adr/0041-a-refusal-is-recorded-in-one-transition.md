@@ -1,7 +1,8 @@
 # 41. A refusal is recorded in one transition, whether or not anyone was asked
 
-- Status: Accepted
+- Status: Superseded by ADR-0320
 - Date: 2026-07-22
+- Superseded: 2026-10-14 by ADR-0320 — the whole decision. Every clause still in force governed the `PENDING → SKIPPED` edge on `APPROVAL_DENIED` in `PlanExecution`'s transition table, with `SkipReason` and `StepTransition`. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

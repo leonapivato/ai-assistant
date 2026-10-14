@@ -1,6 +1,6 @@
 # 125. One seam to the keyring, reading narrower than writing, and an unreachable keyring is not an absent secret
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0320 (§10:1)
 - Date: 2026-08-09
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-09**,
   the durability form ADR-0100 established. Three of the ADRs this decision rests
@@ -90,6 +90,7 @@
   and the rotation bullet at their edges: a disconnection never resets a
   reference's revision, and an active record over an empty slot is refused rather
   than repaired.
+- Partially superseded: 2026-10-14 by ADR-0320 — §10:1. They governed `DeferredProposal`'s refusal of a `DataTier.SECRET` proposal and the deferral queue, which left `core`. Every other clause stands. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

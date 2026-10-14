@@ -1,6 +1,6 @@
 # 26. The injected clock seam: a clock produces an aware instant
 
-- Status: Accepted, §2 amended by ADR-0030
+- Status: Partially superseded by ADR-0320 (§4's `context` → `ContextError` bullet, and its paragraphs on the context source, from "For `context` this is the substantive clause" to the two tests they oblige); §2 amended by ADR-0030
 - Date: 2026-07-21
 - Amended: 2026-07-21 by ADR-0030 — §2 step 4 converts and then
   canonicalises through core's single shared canonicaliser, applying §3's range
@@ -50,6 +50,7 @@
   entry that stands forever. `core/clock.py` re-propagates the stale name into a
   `src/` docstring, which ADR-0088 §7 leaves outside every mechanical check;
   #612 tracks that half. Refs #604.
+- Partially superseded: 2026-10-14 by ADR-0320 — §4's `context` → `ContextError` bullet, and its paragraphs on the context source, from "For `context` this is the substantive clause" to the two tests they oblige. They governed `ContextError` with `ClockContextSource`'s `required` marker and `AssemblingContextProvider._safe_contribute`; §4's other translations and §5's ordering stand. Every other clause stands. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

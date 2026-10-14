@@ -1,6 +1,6 @@
 # 96. A context facet carries its source and its two instants; staleness is legible, and an absent facet says nothing more
 
-- Status: Partially superseded by ADR-0319 (§3:3, §3:4, §5:5 and §5:6)
+- Status: Partially superseded by ADR-0319 (§3:3, §3:4, §5:5 and §5:6) and ADR-0320 (§1:1 and §4:1)
 - Date: 2026-08-03
 - **Note (2026-08-03): ratified.** `Proposed` → `Accepted`, in the separate lane
   #633 requires, after **both** required reviews came back green on the content
@@ -46,6 +46,7 @@
   this "with a producer in hand", "not one to guess here" — is satisfiable now and
   is what §6 leans on.
 - Partially superseded: 2026-10-14 by ADR-0319 — §3:3, §3:4, §5:5 and §5:6. They governed the context assembly and its reader adapter in `context/`. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0320 — §1:1 and §4:1. They governed `CurrentContext`'s optional facet fields and their presence in an assembly; the facets on `SourceReading` stand. Every other clause stands. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

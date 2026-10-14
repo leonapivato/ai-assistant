@@ -1,6 +1,6 @@
 # 64. The execution ordinal only moves forward, and the store proves it
 
-- Status: Accepted
+- Status: Superseded by ADR-0320
 - Date: 2026-07-24
 - **Not a contract change.** This ADR touches no Protocol in
   `core/protocols.py`, no `core` type, and no `Settings` field. It changes the
@@ -12,6 +12,7 @@
   "monotonic within one incarnation, never reset". This ADR does not change that
   claim; it records how the store now *enforces* it and what it deliberately does
   not defend against.
+- Superseded: 2026-10-14 by ADR-0320 — the whole decision. Every clause still in force governed `SqlitePlanStore`'s execution ordinal: `exec_counter`, its high-water mark and `created_seq`, with their checks at open and at every allocation. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
