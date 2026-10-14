@@ -65,7 +65,6 @@ from ai_assistant.core.types import (
     PreferenceMemory,
     Provenance,
     SemanticMemory,
-    TimeWindow,
     Validity,
 )
 from ai_assistant.memory import SqliteMemoryStore
@@ -1461,15 +1460,14 @@ def _strip_the_filter_index(path: Path) -> None:
 async def test_a_store_written_before_the_filter_index_gains_it_on_the_next_open(
     tmp_path: Path,
 ) -> None:
-    """The migration backfills both, or every structured read comes out empty.
+    """The migration backfills both, or the column and the index come out empty.
 
     The quiet failure ADR-0128's own ``valid_from`` migration names, one decision
     on: a store that carried every blob faithfully and left ``occurred_at``
-    ``NULL`` and ``record_labels`` empty would round-trip every record intact,
-    pass every count check, and answer *nothing* to every window and every label
-    filter — with no read reporting a fault. So the assertion is that the filters
-    **reach**, on both members, and it is made through the reads rather than
-    through the columns.
+    ``NULL`` and ``record_labels`` empty would round-trip every record intact and
+    pass every count check. No read queries the label index since ``select`` and
+    ``search``'s structured axes left, so the assertion is made through the column
+    and the index themselves.
     """
     path = tmp_path / "memory.db"
     embedder = HashingEmbedder(dimensions=8)
@@ -1486,15 +1484,22 @@ async def test_a_store_written_before_the_filter_index_gains_it_on_the_next_open
         traces_sink=FakeTraceSink(), path=path, embedder=embedder, now=_fixed_now
     )
     try:
-        window = TimeWindow(start=_MARCH, end=_APRIL)
-        assert {r.id for r in (await after.select(occurred_within=window)).records} == {"captured"}
-        assert {r.id for r in (await after.select(topics=["renovation"])).records} == {"captured"}
-        assert {r.id for r in (await after.select(participants=["alex"])).records} == {"captured"}
-        assert {r.id for r in (await after.select(about_person=["alex"])).records} == {"captured"}
-        found = await after.search("coffee", occurred_within=window, topics=["renovation"])
+        found = await after.search("coffee", limit=10)
         assert {r.id for r in found.records} == {"captured"}
     finally:
         after.close()
+    conn = sqlite3.connect(str(path))
+    try:
+        occurred = conn.execute("SELECT occurred_at FROM records WHERE id = 'captured'").fetchone()
+    finally:
+        conn.close()
+    assert occurred is not None
+    assert occurred[0] is not None, "occurred_at was not backfilled from the blob"
+    assert sorted((axis, value) for _, axis, value in _label_rows(path)) == [
+        ("participant", "alex"),
+        ("subject", "alex"),
+        ("topic", "renovation"),
+    ]
 
 
 def _label_rows(path: Path) -> list[tuple[object, ...]]:
@@ -1542,13 +1547,13 @@ async def test_erasing_a_record_takes_its_label_rows_with_it(
 
 
 async def test_rewriting_a_record_replaces_its_label_rows_rather_than_adding_to_them(
-    make_store: Callable[..., SqliteMemoryStore],
+    make_store: Callable[..., SqliteMemoryStore], tmp_path: Path
 ) -> None:
     """An upsert's index is the new record's, not the union of both versions.
 
     The accumulating failure is the one a delete-then-insert exists to prevent and
     an insert-only writer would produce: a record relabelled from ``renovation`` to
-    ``garden`` would go on being reached by ``renovation`` for ever, which is
+    ``garden`` would go on carrying ``renovation`` in the index for ever, which is
     ADR-0237 §1's "a comparison against a stored field" quietly becoming a
     comparison against a stored *history*.
     """
@@ -1566,17 +1571,11 @@ async def test_rewriting_a_record_replaces_its_label_rows_rather_than_adding_to_
 
     await store.add(relabelled)
 
-    assert {r.id for r in (await store.select(topics=["garden"])).records} == {"relabelled"}
-    stale = (
-        await store.select(topics=["renovation"]),
-        await store.select(participants=["alex"]),
-        await store.select(about_person=["alex"]),
-    )
-    for reached in stale:
-        assert reached.records == (), (
-            "a rewritten record is still reached by a value only its previous "
-            "version carried (ADR-0237 §1)"
-        )
+    assert sorted((axis, value) for _, axis, value in _label_rows(tmp_path / "memory.db")) == [
+        ("participant", "bob"),
+        ("subject", "bob"),
+        ("topic", "garden"),
+    ], "a rewritten record still carries a value only its previous version carried (ADR-0237 §1)"
 
 
 def _write_legacy_db(

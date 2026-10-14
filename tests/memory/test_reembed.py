@@ -42,7 +42,6 @@ from ai_assistant.core.types import (
     MemorySource,
     Provenance,
     SemanticMemory,
-    TimeWindow,
     Validity,
 )
 from ai_assistant.memory import SqliteMemoryStore
@@ -337,7 +336,9 @@ async def test_a_not_yet_live_record_stays_hidden_across_a_re_embed(tmp_path: Pa
         opened.close()
 
 
-async def test_the_structured_read_axes_survive_a_re_embed(tmp_path: Path) -> None:
+async def test_the_instant_column_and_the_label_index_survive_a_re_embed(
+    tmp_path: Path,
+) -> None:
     """The instant column and the label index cross the swap (ADR-0237 §1).
 
     The same class of quiet failure as the window column above, one decision on and
@@ -345,12 +346,11 @@ async def test_the_structured_read_axes_survive_a_re_embed(tmp_path: Path) -> No
     index; neither is in the blob, and the store's own backfill for the index runs
     only on the open that *creates* the table — which the work store's schema
     already has, empty. So a rebuild that carried every record faithfully and wrote
-    neither would swap in a store on which every window and every label filter
-    reaches nothing, with every record round-tripping intact and no read reporting
-    a fault.
+    neither would swap in a store whose column and index were silently empty.
 
-    Asserted through both reads rather than through the tables, because that is
-    where the failure would show and the tables are the mechanism.
+    Asserted through the tables, since no read queries the label index once
+    ``select`` and ``search``'s structured axes have left; ``occurred_at`` is still
+    the episode read's order.
     """
     store = tmp_path / "memory.db"
     when = _WHEN + timedelta(days=60)
@@ -371,15 +371,22 @@ async def test_the_structured_read_axes_survive_a_re_embed(tmp_path: Path) -> No
     assert outcome.swapped
     opened = SqliteMemoryStore(traces_sink=FakeTraceSink(), path=store, embedder=target)
     try:
-        window = TimeWindow(start=when - timedelta(days=1), end=when + timedelta(days=1))
-        assert {r.id for r in (await opened.select(occurred_within=window)).records} == {"captured"}
-        assert {r.id for r in (await opened.select(topics=["renovation"])).records} == {"captured"}
-        assert {r.id for r in (await opened.select(participants=["alex"])).records} == {"captured"}
-        assert {r.id for r in (await opened.select(about_person=["alex"])).records} == {"captured"}
-        found = await opened.search("espresso", occurred_within=window)
-        assert {r.id for r in found.records} == {"captured"}
+        found = await opened.search("espresso", limit=10)
+        assert {r.id for r in found.records} == {"captured", "other"}
     finally:
         opened.close()
+    occurred = _read(store, "SELECT id FROM records WHERE occurred_at IS NOT NULL")
+    assert occurred == [("captured",)]
+    labels = _read(
+        store,
+        "SELECT r.id, l.axis, l.value FROM record_labels l "
+        "JOIN records r ON r.rowid = l.record_rowid ORDER BY l.axis",
+    )
+    assert labels == [
+        ("captured", "participant", "alex"),
+        ("captured", "subject", "alex"),
+        ("captured", "topic", "renovation"),
+    ]
 
 
 async def test_an_interrupted_run_leaves_the_live_store_untouched(tmp_path: Path) -> None:
