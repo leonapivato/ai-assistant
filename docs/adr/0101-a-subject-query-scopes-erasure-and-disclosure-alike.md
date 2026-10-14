@@ -1,6 +1,6 @@
 # 101. A subject query scopes erasure and disclosure alike, and it matches a label rather than a person
 
-- Status: Accepted
+- Status: Accepted, §1's two operations and the clauses that specify them deferred by ADR-0320 to the owner's forgetting design
 - Date: 2026-08-04
 - **Note (2026-08-04): ratified.** `Proposed` → `Accepted`, in the separate lane
   #633 requires, after **both** required reviews came back green on the content
@@ -97,6 +97,7 @@
   `orchestration` calls. So a subject-scoped export is not a dimension missing from
   a surface; the surface is missing. Filed, and §7 is written against the tree
   rather than against the assumption.
+- Deferred: 2026-10-14 by ADR-0320 — §1's two operations, `MemoryStore.export`'s `about_person` scope (§1:1) and `MemoryStore.delete_about` (§1:2), with every clause that specifies them: §1:4, §2, §3, §4, §5, §6, §7 and §8. The owner ruled on 2026-10-14 (#3042) that they wait for the owner's forgetting design, which designs subject erasure over stories and people and decides whether they are built as written here, changed or replaced; no lane builds either before then (ADR-0320 §4). Nothing is superseded: §1:3 and §1:5 stand as written, and ADR-0100 §6's reservations stay unlifted while the operations wait. This record takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 

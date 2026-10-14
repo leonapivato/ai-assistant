@@ -1,6 +1,6 @@
 # 237. `search` filters on what the records already carry, and a structured read needs no query
 
-- Status: Partially superseded by ADR-0275 (§1's search and select predicates, extended with episodic model eligibility before candidate and result cuts) and ADR-0320 (§1:1–§1:3, §2:2, §2:4, §3:1–§3:4, §4:1, §4:3, §4:4, §5:1–§5:3, §6:2, §6:3, §7:1, §7:2, §7:5, §8:1, §8:2 and §9:1–§9:3)
+- Status: Partially superseded by ADR-0275 (§1's search and select predicates, extended with episodic model eligibility before candidate and result cuts) and ADR-0320 (§1:1–§1:3, §2:1, §2:2, §2:4, §3:1–§3:4, §4:1, §4:3, §4:4, §5:1–§5:3, §6:2, §6:3, §7:1, §7:2, §7:5, §8:1, §8:2 and §9:1–§9:3)
 - Date: 2026-09-05
 - Partially superseded: 2026-09-18 by ADR-0275 — Add the episodic-eligibility axis to
   search/select before cuts. All existing structured filters and matching rules remain.
@@ -11,7 +11,7 @@
   replacements recorded by the ADR-0275 note above took effect then; that note's
   "which remains Proposed" was true when written and is stale. The Status line above
   is unchanged (#2562).
-- Partially superseded: 2026-10-14 by ADR-0320 — §1:1–§1:3, §2:2, §2:4, §3:1–§3:4, §4:1, §4:3, §4:4, §5:1–§5:3, §6:2, §6:3, §7:1, §7:2, §7:5, §8:1, §8:2 and §9:1–§9:3. They governed `MemoryStore.select` and `search`'s `occurred_within`, `participants`, `topics` and `about_person` axes, with their matching, order, window and conformance cases; `search`'s shape and `limit`, §2:1's `TimeWindow`, §2:3, §6:1, §7:3, §7:4 and §8:3 stand. Every other clause stands. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0320 — §1:1–§1:3, §2:1, §2:2, §2:4, §3:1–§3:4, §4:1, §4:3, §4:4, §5:1–§5:3, §6:2, §6:3, §7:1, §7:2, §7:5, §8:1, §8:2 and §9:1–§9:3. They governed `MemoryStore.select` and `search`'s `occurred_within`, `participants`, `topics` and `about_person` axes, with `TimeWindow` and their matching, order, window and conformance cases; `search`'s shape and `limit`, §2:3, §6:1, §7:3, §7:4 and §8:3 stand. Every other clause stands. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2); §2:1's `TimeWindow` leaves in the lane ADR-0320 §1:3 names, and §2:1 binds it until then (ADR-0320 §1:4). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

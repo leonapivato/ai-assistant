@@ -1,6 +1,6 @@
 # 241. The search seam is handed the deadline it runs under, and an expiry is an outcome of its own
 
-- Status: Partially superseded by ADR-0319 (§3:1–§3:3, §3:5, §4:5, §6, §8 and §10)
+- Status: Partially superseded by ADR-0319 (§3:1–§3:3, §3:5, §4:5, §6, §8 and §10) and ADR-0320 (§12:8–§12:11 and §12:14)
 - Date: 2026-09-09
 - **Partially supersedes**
   [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
@@ -54,6 +54,7 @@
   ADR-0060, ADR-0118, ADR-0192, ADR-0194, ADR-0226 §5, ADR-0228 §4 and §10, ADR-0231,
   ADR-0238.
 - Partially superseded: 2026-10-14 by ADR-0319 — §3:1–§3:3, §3:5, §4:5, §6, §8 and §10. They governed the servicing site's deadline setting and dispositions. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-14 by ADR-0320 — §12:8–§12:11 and §12:14. They governed the arms over the turn's servicing path: the two-turn and within-turn replies, the three-bounds arm and the fault at the send's disposition; the `WebSearcher` arms stand. Every other clause stands. What they governed was deleted at the cutover, before ADR-0319's survey (#3041). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
