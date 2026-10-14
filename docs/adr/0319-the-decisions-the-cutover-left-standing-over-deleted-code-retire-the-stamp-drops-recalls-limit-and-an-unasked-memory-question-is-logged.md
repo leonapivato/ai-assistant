@@ -136,8 +136,9 @@ queue; and leave every producer of `UserConfirmation` to the authority milestone
 
 > **Normative.** Once the deferred-question store is deleted, an `ASK_USER` ruling the
 > orchestration write stage receives writes nothing and queues nothing, and the stage logs
-> it, with the ruling's kind and the proposal's id and memory kind and none of the
-> proposal's content.
+> it with the ruling's kind and the proposal's memory kind alone. The log carries no
+> identifier and no content of the proposal, since a memory id is not guaranteed free of
+> personal data (ADR-0004 §5).
 
 > **Normative.** Consolidation counts such a ruling as deferred and records its chunk as
 > done. Nothing is re-proposed for it.
@@ -217,7 +218,7 @@ Superseded in part (§3); every clause the middle column does not name stands:
 | ADR-0148 | §8:4, and §9:1–§9:4 as ADR-0306 left them | The egress `CONFIRM`'s content and the claimed plan step, in `orchestration/runner.py`; the authority milestone redoes asking the user |
 | ADR-0150 | §10:3 and §12:16 | The egress `CONFIRM` the step runner raised; the binding stands |
 | ADR-0162 | §9 | The answering supply's two limits, held equal to `orchestration/loop.py`'s |
-| ADR-0173 | §2:2–§2:3, §3, §4:1–§4:2, §4:4, §4:6, §5–§9, §10:3, §14:1–§14:4, §14:6–§14:7, §14:9–§14:11 and §14:13 | `converse_streaming`, `ReplyChunk`, the `StreamingCompleter` seam with `models/streaming.py`, and the composing stage's stream; the chunk frame stands |
+| ADR-0173 | §3, §4:1–§4:2, §4:4, §4:6, §5–§9, §10:3, §14:1–§14:4, §14:6–§14:7, §14:9–§14:11 and §14:13 | `converse_streaming`, the `StreamingCompleter` seam with `models/streaming.py`, and the composing stage's stream; the chunk frame and `ReplyChunk`'s shape stand (ADR-0296 §4:3) |
 | ADR-0175 | §3:1–§3:4 | The browser's streamed and whole turn, which no gateway route serves |
 | ADR-0177 | §5:5, §8:3–§8:8 and §9:1–§9:2 | The browser's `forget_question` ceremony, its answer to a confirmation, and `resume`'s budget; the authority milestone redoes asking the user |
 | ADR-0178 | §5:1–§5:4 and §9:4–§9:5 | The engine's two confirmation assembly sites and the parked step |
