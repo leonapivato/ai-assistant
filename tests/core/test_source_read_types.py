@@ -13,6 +13,7 @@ happened cannot be built at all, so no implementation has to defend against one.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from enum import StrEnum
 
 import pytest
 from pydantic import ValidationError
@@ -20,7 +21,6 @@ from pydantic import ValidationError
 from ai_assistant.core.types import (
     GrantScope,
     ReadOutcome,
-    ReadOutcomeKind,
     RiskLevel,
     SourceReadRecord,
 )
@@ -32,6 +32,25 @@ _UNGRANTED = (ReadOutcome.REFUSED, ReadOutcome.UNANSWERED)
 
 #: The three on which no reading exists, so nothing could have been produced.
 _READINGLESS = (*_UNGRANTED, ReadOutcome.FAILED)
+
+
+class _ForeignOutcome(StrEnum):
+    """Another vocabulary about another act, overlapping this one on two values.
+
+    The shape #2320 found: a ``StrEnum`` sharing exactly ``{"refused", "failed"}`` with
+    :class:`ReadOutcome` and nothing else, so pydantic, which validates a ``StrEnum``
+    field **by value**, would have converted either shared member silently. Declared
+    here rather than borrowed, because the guard under test refuses *any* enumeration
+    but the annotated one and the arms below are about that guard alone.
+    """
+
+    RETURNED_RECORDS = "returned_records"
+    EMPTY = "empty"
+    DUPLICATE = "duplicate"
+    TRUNCATED = "truncated"
+    REFUSED = "refused"
+    FAILED = "failed"
+    EXPIRED = "expired"
 
 
 def _record(**overrides: object) -> SourceReadRecord:
@@ -73,19 +92,17 @@ def test_the_outcomes_are_the_six_the_adr_names() -> None:
 
 @pytest.mark.parametrize(
     ("foreign", "grant"),
-    [(ReadOutcomeKind.REFUSED, None), (ReadOutcomeKind.FAILED, "g-1")],
+    [(_ForeignOutcome.REFUSED, None), (_ForeignOutcome.FAILED, "g-1")],
 )
-def test_the_planners_vocabularys_member_is_refused_on_a_shared_value(
-    foreign: ReadOutcomeKind, grant: str | None
+def test_a_foreign_vocabularys_member_is_refused_on_a_shared_value(
+    foreign: _ForeignOutcome, grant: str | None
 ) -> None:
     """#2320's reciprocal seam: the costlier of the two directions.
 
-    :class:`ReadOutcomeKind` (ADR-0251 §2) is the planner's vocabulary about an ask the
-    planner composed, and it shares exactly ``{"refused", "failed"}`` with this one —
-    pinned in ``tests/core/test_read_outcome_types.py``. Pydantic validates a ``StrEnum``
-    by value, so ``ReadOutcomeKind.REFUSED`` would have become :attr:`ReadOutcome.REFUSED`
-    here: *the first grant check answered ``None``, so the source is not resolved, not
-    opened and not parsed* (ADR-0097 §5, ADR-0185 §1), and — through
+    A foreign vocabulary sharing ``{"refused", "failed"}`` with this one is validated by
+    value, so its ``REFUSED`` would have become :attr:`ReadOutcome.REFUSED` here: *the
+    first grant check answered ``None``, so the source is not resolved, not opened and
+    not parsed* (ADR-0097 §5, ADR-0185 §1), and — through
     ``_grant_matches_outcome``, which then requires ``grant=None`` — a **durable,
     exported, operator-rendered row asserting an authorisation fact nobody established**.
     ADR-0185 §1 forbids exactly that over the neighbouring ``UNANSWERED``: folding the two
@@ -109,13 +126,13 @@ def test_the_planners_vocabularys_member_is_refused_on_a_shared_value(
         _record(outcome=foreign, grant=grant)
 
 
-def test_a_planner_member_sharing_no_value_was_refused_already() -> None:
+def test_a_foreign_member_sharing_no_value_was_refused_already() -> None:
     """#2320: the control. Five of the seven carry no value of these six.
 
     They raised before the guard and raise after it, which is why a caller checking one
     of them would have concluded the annotation was enforced.
     """
-    for outside in ReadOutcomeKind:
+    for outside in _ForeignOutcome:
         if outside.value in {member.value for member in ReadOutcome}:
             continue
         with pytest.raises(ValidationError):

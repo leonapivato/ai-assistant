@@ -1,7 +1,7 @@
 """ADR-0260's ``core`` vocabularies and what ``ForecastOutcome`` refuses.
 
-§13's arm (j) whole, the model half of its arm (b-prime), and the closures the three
-enumerations carry. What a *forecaster* owes over its own output — the confidence, the
+§13's arm (j) whole, the model half of its arm (b-prime), and the closure the refusal
+enumeration carries. What a *forecaster* owes over its own output — the confidence, the
 ``derived_from_external``, the placement and the ``reported_by`` equality — is the
 producer's rather than this value's (§4), and lives in ``tests/tools/test_forecast.py``
 where a production forecaster can be driven.
@@ -22,18 +22,15 @@ from ai_assistant.core.types import (
     DiscloserProvenance,
     EgressBinding,
     EgressSpan,
-    ForecastNotRead,
     ForecastOutcome,
     ForecastRefusal,
     MemoryRecord,
     MemorySource,
-    OutboundDestination,
     Placement,
     Provenance,
     ReportedExtent,
     SemanticMemory,
     SpanCoverage,
-    TurnOutcome,
     Validity,
 )
 
@@ -141,7 +138,7 @@ def _span() -> EgressSpan:
     )
 
 
-# --- the vocabularies (ADR-0260 §4, §10; ADR-0264 §5) -----------------------
+# --- the refusal vocabulary (ADR-0260 §4) ----------------------------------
 
 
 def test_the_refusal_vocabulary_is_the_six_the_decision_admits() -> None:
@@ -171,39 +168,6 @@ def test_the_refusal_vocabulary_is_the_six_the_decision_admits() -> None:
     assert ForecastRefusal.PROVIDER_REFUSED.value == "provider_refused"
     assert ForecastRefusal.UNATTESTED.value == "unattested"
     assert ForecastRefusal.NO_RESULT.value == "no_result"
-
-
-def test_the_user_facing_vocabulary_is_the_six_in_precedence_order() -> None:
-    """ADR-0260 §10: six members, "declared **in precedence order**".
-
-    The **order** is asserted and not only the membership, because §10 makes the
-    declaration order the precedence order a revising turn folds by — "the field carries
-    the **earliest-declared** member any servicing of the turn recorded" — so a member
-    inserted rather than appended would move a fold nobody decided to move.
-    """
-    assert [member.value for member in ForecastNotRead] == [
-        "not_configured",
-        "authorisation_awaited",
-        "spend_exhausted",
-        "declined",
-        "interrupted",
-        "unavailable",
-    ]
-
-
-def test_the_destination_vocabulary_gained_one_member_and_kept_its_order() -> None:
-    """ADR-0260 §10: ``FORECAST_PROVIDER`` renders **after** ``SEARCH_PROVIDER``.
-
-    ADR-0264 §5 makes the declaration order the render order and requires a later seam
-    to add "its own member with its own ADR" — so this is that section working rather
-    than a departure from it. The order is asserted because an inserted member would
-    change what every existing statement renders, and the member is a **class** of
-    destination: its value names no provider, host, account, connection or tool.
-    """
-    assert [member.value for member in OutboundDestination] == [
-        "search_provider",
-        "forecast_provider",
-    ]
 
 
 # --- ADR-0260 §13's arm (j): the exactly-one rule and the instant with it ---
@@ -388,7 +352,7 @@ def test_an_outcome_is_frozen() -> None:
         outcome.refusal = ForecastRefusal.UNATTESTED
 
 
-# --- the carried fact and the folded member (ADR-0260 §10, §11) -------------
+# --- the carried fact (ADR-0260 §11) ---------------------------------------
 
 
 def test_forecast_reach_defaults_to_false_on_both_carriers() -> None:
@@ -449,44 +413,6 @@ def test_a_ruling_is_bound_to_the_fact_it_was_taken_over() -> None:
     with_reach = without.model_copy(update={"forecast_reach": True})
 
     assert without != with_reach
-
-
-def test_a_turn_outcome_carries_the_folded_member_and_defaults_to_none() -> None:
-    """§10: one field, ``ForecastNotRead | None``, defaulting to ``None``.
-
-    "``None`` means the servicing recorded no ``ForecastDisposition``, and means nothing
-    else": a turn that serviced no forecast read, **and** a read the provider answered.
-    It is a widening rather than a change — a ``None``-defaulting member alters neither
-    ADR-0170 §4's three ``reply``-``None`` shapes nor its one ``reply_degraded`` shape —
-    and in particular it does not set ``reply_degraded``.
-    """
-    silent = TurnOutcome(turn=None)
-    told = TurnOutcome(turn=None, forecast_not_read=ForecastNotRead.UNAVAILABLE)
-
-    assert silent.forecast_not_read is None
-    assert told.forecast_not_read is ForecastNotRead.UNAVAILABLE
-    assert told.reply_degraded is False
-
-
-def test_the_forecast_member_rides_beside_the_search_one() -> None:
-    """§10, ADR-0264 §8: both statements ride together and neither is read off the other.
-
-    A turn that searched and read a forecast may carry both members, "each in its own
-    statement" — one says what act would change what a *lookup* produced, the other what
-    act would change what a *forecast read* produced, and a surface that suppressed
-    either because the other was present would leave a user told about one read and not
-    the other.
-    """
-    from ai_assistant.core.types import SearchNotServiced  # noqa: PLC0415 — one case needs it
-
-    outcome = TurnOutcome(
-        turn=None,
-        search_not_serviced=SearchNotServiced.UNAVAILABLE,
-        forecast_not_read=ForecastNotRead.DECLINED,
-    )
-
-    assert outcome.search_not_serviced is SearchNotServiced.UNAVAILABLE
-    assert outcome.forecast_not_read is ForecastNotRead.DECLINED
 
 
 def test_a_record_is_minted_with_the_placement_that_narrows_nothing() -> None:

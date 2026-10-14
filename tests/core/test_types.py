@@ -15,17 +15,11 @@ from ai_assistant.core.types import (
     BeliefBand,
     CurrentContext,
     DataTier,
-    DeferralAdmission,
-    DeferralAdmissionOutcome,
-    DeferralClaim,
     DeferralState,
     DeferredProposal,
     EpisodicMemory,
     FeedbackEvent,
     FeedbackKind,
-    Goal,
-    GoalInterpretation,
-    Ground,
     MemoryBase,
     MemoryDecision,
     MemoryDecisionKind,
@@ -135,8 +129,7 @@ def test_confidence_is_bounded() -> None:
 # The question ADR-0072 §3 declined and filed for the lane with the first
 # producer that could breach it. Enforced on the *value* rather than at the
 # `MemoryPolicy` gate, because the gate is not the only path a `Provenance`
-# takes: `Goal` carries one and reaches no gate at all, which is the half of
-# #432 this closes.
+# takes.
 
 
 @pytest.mark.parametrize("source", [MemorySource.OBSERVED, MemorySource.INFERRED])
@@ -356,33 +349,6 @@ def test_an_attested_provenance_round_trips_through_json() -> None:
 
     assert restored == prov
     assert restored.attestation == _ATTESTED_BY
-
-
-def test_a_goal_is_reached_by_the_attestation_rule_too() -> None:
-    """Why the rule is on the type and not at the `MemoryPolicy` gate (ADR-0092 §2).
-
-    `_derived_is_never_certain` states the argument in full: "the gate is not the
-    only path a `Provenance` takes — `Goal` carries one and reaches no
-    propose/dispose gate at all — and a validator on the value needs no gate." An
-    attested goal owes the same disclosure as an attested belief, and only a
-    validator reaches it.
-    """
-    with pytest.raises(ValidationError):
-        Goal(
-            id="g-1",
-            interpretation=(
-                GoalInterpretation(
-                    revision=1,
-                    outcome="book the flight the calendar implies",
-                    outcome_ground=Ground.USER_STATED,
-                    outcome_span="book the flight the calendar implies",
-                    recorded_at=_WHEN,
-                    raised_by="t-1",
-                ),
-            ),
-            provenance=Provenance(source=MemorySource.EXTERNAL, confidence=0.9, last_updated=_WHEN),
-            created_at=_WHEN,
-        )
 
 
 # --- the evidence bound is not on this type (ADR-0086 §1, §2) ----------------
@@ -668,38 +634,6 @@ def test_no_validator_conditions_the_marker_on_the_band(source: MemorySource, ma
     )
 
     assert prov.derived_from_external is marked
-
-
-def test_a_goal_carries_the_marker_too() -> None:
-    """It is a ``Provenance`` field, so it reaches everything that carries one.
-
-    Not an obligation ADR-0106 places on goals — its clauses are about memory
-    proposals — but the field's *presence* here is what the placement argument
-    (ADR-0045 §2) buys, and pinning it stops a later lane moving the marker onto
-    ``MemoryBase``, where ``Goal`` would silently lose it.
-    """
-    goal = Goal(
-        id="g",
-        interpretation=(
-            GoalInterpretation(
-                revision=1,
-                outcome="ship the thing",
-                outcome_ground=Ground.USER_STATED,
-                outcome_span="ship the thing",
-                recorded_at=_WHEN,
-                raised_by="t-1",
-            ),
-        ),
-        provenance=Provenance(
-            source=MemorySource.INFERRED,
-            confidence=0.6,
-            last_updated=_WHEN,
-            derived_from_external=True,
-        ),
-        created_at=_WHEN,
-    )
-
-    assert rests_on_recorded_external_content(goal.provenance) is True
 
 
 def test_band_values_are_stable_strings() -> None:
@@ -1665,46 +1599,6 @@ def test_the_fingerprint_and_the_key_survive_a_json_round_trip() -> None:
 
     assert rebuilt.proposal_fingerprint == proposal.proposal_fingerprint
     assert rebuilt.question_key == proposal.question_key
-
-
-@pytest.mark.parametrize(
-    ("outcome", "deferral", "valid"),
-    [
-        (DeferralAdmissionOutcome.ADMITTED, True, True),
-        (DeferralAdmissionOutcome.ADMITTED, False, False),
-        (DeferralAdmissionOutcome.SUPPRESSED, True, True),
-        (DeferralAdmissionOutcome.SUPPRESSED, False, False),
-        (DeferralAdmissionOutcome.REFUSED, False, True),
-        (DeferralAdmissionOutcome.REFUSED, True, False),
-    ],
-)
-def test_a_deferral_admission_has_exactly_three_shapes(
-    outcome: DeferralAdmissionOutcome, deferral: bool, valid: bool
-) -> None:
-    # Pinned the way ``MemoryDecision._outcome_fields_are_consistent`` pins a
-    # ruling's. Reaching for ``admission.deferral`` on a refusal is the dereference
-    # this validator exists to make impossible to write by accident (ADR-0078 §2).
-    held = _question() if deferral else None
-    if valid:
-        assert DeferralAdmission(outcome=outcome, deferral=held).outcome is outcome
-    else:
-        with pytest.raises(ValidationError):
-            DeferralAdmission(outcome=outcome, deferral=held)
-
-
-def test_a_deferral_claim_pairs_the_question_with_its_token() -> None:
-    # One value rather than two strings a caller could swap, the reason
-    # ``ParkedBinding`` is one.
-    claim = DeferralClaim(
-        deferral=_question(state=DeferralState.APPLYING, claimed_at=_WHEN), claim_id="a-token"
-    )
-    assert claim.claim_id == "a-token"
-    with pytest.raises(ValidationError):
-        claim.claim_id = "another"
-    with pytest.raises(ValidationError):
-        DeferralClaim(
-            deferral=_question(state=DeferralState.APPLYING, claimed_at=_WHEN), claim_id="   "
-        )
 
 
 def test_the_terminal_states_are_exactly_the_four_that_record_an_answer() -> None:

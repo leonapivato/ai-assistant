@@ -4,9 +4,8 @@
 answerable from `core` alone: construction, the two rosters, the derived set's
 correspondence with :class:`EgressBinding`'s, the **structural** claim that the
 derivation is declared once, the mutual exclusion of §3 at model level, ``authorises``
-answering ``False`` with no conjunct added, and §8's wire claim — which is a claim
-about the *shape a peer emits* and never about a version number, since ADR-0186 §13
-reads §8 as binding ADR-0184's own change rather than every later one.
+answering ``False`` with no conjunct added, and the sibling surviving the promoted
+surface's own return adapter (ADR-0186 §5).
 
 **The discrimination is also pinned over a real store**, in
 ``tests/permissions/test_audit.py``, because §10 asks for it there: the rows this
@@ -36,7 +35,6 @@ from ai_assistant.core.types import (
     CanonicalDestination,
     CapabilityEffect,
     CapabilityResult,
-    ConfirmationEgress,
     CostBasis,
     CoverageUnrecordedBinding,
     DataTier,
@@ -512,38 +510,7 @@ def test_from_request_transcribes_the_narrow_field_and_makes_no_sibling() -> Non
     assert recorded.egress_binding.planned_with_external_content is True
 
 
-# --- §8: no wire move, and the shape that now crosses -------------------------
-
-
-def test_this_decision_still_changes_no_shape_a_peer_emits() -> None:
-    """§8's first clause, pinned as the property it is rather than as a number.
-
-    **The absolute pin this used to be is gone, and its removal is the clause read
-    correctly rather than a relaxation.** §8 says ``PROTOCOL_VERSION`` "does not move
-    **for this decision**"; ADR-0186 §13 reads that as being about ADR-0184's own
-    change and "not a bar on any later one", and ADR-0186 §5 then moves the version
-    to 12 under ADR-0124 §9's **first** limb — two methods added to the promoted set.
-    A test asserting ``== 11`` here would have made a later, unrelated and correctly
-    reasoned bump look like a violation of this ADR, which is the failure
-    ``CONTRIBUTING.md`` -> "No state claims in living documents" is about. The one
-    place that number is pinned is
-    ``tests/core/test_engine_surface_closure.py``, where a lane moving it is made to
-    name the limb it is under.
-
-    What survives here is the half §8 actually decides and this module can check:
-    ADR-0124 §9's **second** limb did not fire for ADR-0184, because the shape a peer
-    emits is unchanged. ``ConfirmationEgress`` — the type that crosses, on
-    ``TurnOutcome.step.confirmation`` and as the element type of
-    ``pending_confirmations`` — gains no member and no origin-unrecorded variant, so a
-    peer at either version emits and accepts exactly what it did.
-    """
-    members = set(ConfirmationEgress.model_fields)
-
-    assert "planned_with_external_content" in members
-    # The widening §8's second clause forbids: a nullable member, or a second
-    # binding-shaped one, would be how an origin-unrecorded confirmation arrived.
-    assert ConfirmationEgress.model_fields["planned_with_external_content"].is_required()
-    assert not any(name.startswith("origin") for name in members)
+# --- §8: the shape that now crosses -------------------------------------------
 
 
 def test_the_sibling_survives_the_promoted_surfaces_own_return_adapter() -> None:

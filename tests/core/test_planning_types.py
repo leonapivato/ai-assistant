@@ -1,374 +1,122 @@
-"""Tests for the planning domain types (ADR-0014).
+"""Tests for ``StepFailure``, ``PlanExport``'s own members and the frozen-JSON annotations.
 
-The validators here exist to make illegal execution states unrepresentable, so
-these tests are mostly about what the types *refuse*.
+The frozen-JSON arms go through a local holder that declares each annotation exactly
+as the planning steps declared it, so each arm pins the annotation and nothing else.
+These tests are mostly about what the types *refuse*.
 """
 
 from __future__ import annotations
 
 import copy
-import json
 import pickle
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 from _int_str_digits import pinned_int_str_digits
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
-    MAX_HOP_LABELS,
-    TERMINAL_ATTEMPT_STATES,
-    ActionPlan,
-    AttemptOutcome,
-    AttemptPhase,
-    AttemptState,
-    BriefAction,
-    BriefElement,
-    EvidenceApplicability,
-    EvidenceBasis,
-    EvidenceHistory,
-    EvidenceStanding,
-    ExecutionState,
     FrozenDict,
-    Goal,
-    GoalAttempt,
-    GoalBrief,
-    GoalDeletion,
-    GoalElement,
-    GoalEvidence,
-    GoalInterpretation,
-    GoalStatus,
-    Ground,
-    InterpretationVerdict,
-    InterpretedOutput,
-    MemorySource,
+    FrozenJsonMapping,
+    FrozenJsonValue,
     PlanExport,
-    PlanStep,
-    Provenance,
-    ReadAsk,
-    ReadKind,
-    ReadRequest,
-    SkipReason,
-    StepExecution,
     StepFailure,
-    StepStatus,
-    StepTransition,
-    StructuredAsk,
-    TimeWindow,
     ToolFailureKind,
 )
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
-_PROV = Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_WHEN)
 
 
-def _goal(*, statement: str = "relocate to Lisbon in September", **overrides: object) -> Goal:
-    """A goal opened at revision 1 (ADR-0249 §3).
+class _FrozenJsonHolder(BaseModel):
+    """One field of each frozen-JSON annotation, declared as the planning steps declared them.
 
-    ``statement`` is taken as a keyword because it is no longer a field: it names the
-    single interpretation revision's ``outcome``, which the read-only projection
-    :attr:`~ai_assistant.core.types.Goal.statement` then answers with (§1).
+    ``FrozenJsonMapping`` and ``FrozenJsonValue`` are carried by live types —
+    ``ProposedCall.arguments`` and ``ToolDefinition.parameters_schema`` among them — and
+    the arms below pinned them through ``PlanStep.parameters`` and a step's ``output``,
+    which leave ``core`` with the old path (ADR-0309 §5). A holder with nothing else on
+    it keeps each arm about the annotation and nothing besides.
     """
-    fields: dict[str, object] = {
-        "id": "g1",
-        "conversation_id": "c1",
-        "interpretation": (
-            GoalInterpretation(
-                revision=1,
-                outcome=statement,
-                outcome_ground=Ground.USER_STATED,
-                outcome_span=statement,
-                recorded_at=_WHEN,
-                raised_by="t-1",
-            ),
-        ),
-        "provenance": _PROV,
-        "created_at": _WHEN,
-    }
-    return Goal(**(fields | overrides))  # type: ignore[arg-type]
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    parameters: FrozenJsonMapping = Field(default_factory=FrozenDict)
+    output: FrozenJsonValue = None
 
 
-def _evidence_row(*, attempt_id: str = "a1") -> GoalEvidence:
-    """One ``STANDING`` ``READ_OUTCOME`` row, in the shape ADR-0252 §1 admits."""
-    return GoalEvidence(
-        id="ev1",
-        goal_id="g1",
-        attempt_id=attempt_id,
-        basis=EvidenceBasis.READ_OUTCOME,
-        read_kind=ReadKind.SIGHTED_QUERY,
-        supported=(EvidenceApplicability(topics=("weather",)),),
-        supported_elided=0,
-        read_at=_WHEN,
-        records=("m1",),
-        returned=1,
-        admitted=1,
-        verdict="returned_records",
-        standing=EvidenceStanding.STANDING,
-    )
+def test_the_export_instant_refuses_a_naive_reading() -> None:
+    """ADR-0026 §5's second half: the producer led, so ``exported_at`` followed.
 
-
-def _histories(*goal_ids: str) -> tuple[EvidenceHistory, ...]:
-    """One empty history per goal, which ADR-0252 §13's closure rule requires.
-
-    "Exactly one entry per goal the export carries" — an empty history with a zero
-    count is a true answer for a goal that has recorded nothing, and is not an
-    omission, so every export below that carries a goal carries one of these.
-    """
-    return tuple(EvidenceHistory(goal_id=one) for one in goal_ids)
-
-
-def _step(**overrides: object) -> StepExecution:
-    fields: dict[str, object] = {"step_id": "s1"}
-    return StepExecution(**(fields | overrides))  # type: ignore[arg-type]
-
-
-_FINISHED = (StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.INDETERMINATE)
-_FAILURE = (StepStatus.FAILED, StepStatus.INDETERMINATE)
-
-
-def _claimed(status: StepStatus, **overrides: object) -> StepExecution:
-    """A step carrying the full set of marks a claimed step requires.
-
-    Supplies ``finished_at`` for the statuses that require one, and a
-    ``failure`` for ``FAILED``/``INDETERMINATE`` (ADR-0039 §2), so a test that
-    is about something else does not have to. Pass ``finished_at=None`` or
-    ``failure=None`` to opt out and exercise the invariant itself.
-    """
-    fields: dict[str, object] = {
-        "step_id": "s1",
-        "status": status,
-        "attempts": 1,
-        "bound_tool": "smtp",
-        "approval_ref": "perm-1",
-        "started_at": _WHEN,
-    }
-    if status in _FINISHED:
-        fields["finished_at"] = _WHEN
-    if status in _FAILURE:
-        fields["failure"] = StepFailure(message="boom")
-    return StepExecution(**(fields | overrides))  # type: ignore[arg-type]
-
-
-# --- Goal ---------------------------------------------------------------
-
-
-def test_goal_defaults_to_active() -> None:
-    assert _goal().status is GoalStatus.ACTIVE
-
-
-def test_goal_rejects_a_blank_statement() -> None:
-    """ADR-0249 §1: the non-blank refusal moves with the value it guards.
-
-    It is ``GoalInterpretation.outcome``'s :data:`NonBlankEncodableText` that refuses a
-    blank objective now — one type earlier than the validator ``Goal`` used to carry —
-    so "the refusal ``planning/sqlite_store.py`` argues for is preserved and is taken
-    one type earlier".
-    """
-    with pytest.raises(ValidationError):
-        _goal(statement="   ")
-
-
-def test_a_goal_carries_at_least_one_interpretation() -> None:
-    """ADR-0249 §1, §3: "no goal is ever constructed with an empty interpretation"."""
-    with pytest.raises(ValidationError, match="at least one interpretation"):
-        _goal(interpretation=())
-
-
-def test_a_goals_revisions_step_by_exactly_one() -> None:
-    """ADR-0249 §1: oldest first, each one greater than the element before it."""
-    with pytest.raises(ValidationError, match="one greater"):
-        _goal(
-            interpretation=(
-                GoalInterpretation(
-                    revision=1,
-                    outcome="first",
-                    outcome_ground=Ground.INFERRED,
-                    recorded_at=_WHEN,
-                    raised_by="t-1",
-                ),
-                GoalInterpretation(
-                    revision=3,
-                    outcome="third",
-                    outcome_ground=Ground.INFERRED,
-                    recorded_at=_WHEN,
-                    raised_by="t-3",
-                ),
-            )
-        )
-
-
-def test_the_statement_is_a_projection_and_not_a_stored_field() -> None:
-    """ADR-0249 §1: it has no setter, is not constructible, and is not in the dump.
-
-    And the goal **round-trips through construction from its own dump**, which is what
-    the projection being a property rather than a computed field buys: "a computed field
-    that serialised but could not be constructed from would break that round trip under
-    ``extra="forbid"``".
-    """
-    goal = _goal()
-
-    assert goal.statement == "relocate to Lisbon in September"
-    assert "statement" not in goal.model_dump()
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        Goal.model_validate({**goal.model_dump(), "statement": "a second authority"})
-    assert Goal.model_validate(goal.model_dump()) == goal
-
-
-def test_the_statement_follows_the_current_revision() -> None:
-    """§1: the **last** element is the goal's current interpretation."""
-    goal = _goal(
-        interpretation=(
-            GoalInterpretation(
-                revision=1,
-                outcome="the first reading",
-                outcome_ground=Ground.INFERRED,
-                recorded_at=_WHEN,
-                raised_by="t-1",
-            ),
-            GoalInterpretation(
-                revision=2,
-                outcome="the current reading",
-                outcome_ground=Ground.INFERRED,
-                recorded_at=_WHEN,
-                raised_by="t-2",
-            ),
-        )
-    )
-
-    assert goal.statement == "the current reading"
-    assert goal.revision == 2, "the revision a plan targets, and not the write version"
-    assert goal.version == 0, "which is a different value and is never read for it (§1)"
-
-
-def test_goal_refuses_naive_timestamps() -> None:
-    """ADR-0023 §3: ``core`` never attributes an offset it was not given."""
-    with pytest.raises(ValidationError, match="created_at must be timezone-aware"):
-        _goal(created_at=datetime(2026, 1, 1))  # noqa: DTZ001 — a naive value is the subject
-    with pytest.raises(ValidationError, match="deadline must be timezone-aware"):
-        _goal(deadline=datetime(2026, 9, 1))  # noqa: DTZ001 — a naive value is the subject
-
-
-def test_goal_converts_aware_timestamps_to_utc() -> None:
-    goal = _goal(
-        created_at=datetime(2026, 1, 1, 2, tzinfo=timezone(timedelta(hours=2))),
-        deadline=datetime(2026, 9, 1, 2, tzinfo=timezone(timedelta(hours=2))),
-    )
-    assert goal.created_at == datetime(2026, 1, 1, tzinfo=UTC)
-    assert goal.created_at.tzinfo is UTC
-    assert goal.deadline is not None
-    assert goal.deadline.tzinfo is UTC
-
-
-def test_the_clock_fed_planning_fields_refuse_a_naive_reading() -> None:
-    """ADR-0026 §5's second half: the producer led, so these five followed.
-
-    They were the last fields in ``core`` still attributing UTC to a naive
-    value, held back by ADR-0023 §6 only until every producer
-    (``PlanExecution``, ``InMemoryPlanStore``, ``FakePlanStore``) stored a
-    guarded clock. They all do now, so a naive
-    reading is refused at the seam by its named owner — and refused here too,
-    which is what makes the deferral closed rather than merely unenforced.
+    It was among the last fields in ``core`` still attributing UTC to a naive value,
+    held back by ADR-0023 §6 only until every producer stored a guarded clock. They all
+    do now, so a naive reading is refused at the seam by its named owner — and refused
+    here too, which is what makes the deferral closed rather than merely unenforced.
     """
     naive = datetime(2026, 1, 1)  # noqa: DTZ001 — the refusal is the subject
 
-    with pytest.raises(ValidationError, match="created_at must be timezone-aware"):
-        ActionPlan(id="p1", goal_id="g1", steps=(), created_at=naive)
-    with pytest.raises(ValidationError, match="started_at must be timezone-aware"):
-        _claimed(StepStatus.RUNNING, started_at=naive)
-    with pytest.raises(ValidationError, match="finished_at must be timezone-aware"):
-        _claimed(StepStatus.SUCCEEDED, finished_at=naive)
-    with pytest.raises(ValidationError, match="updated_at must be timezone-aware"):
-        ExecutionState(id="e1", plan_id="p1", steps=(), updated_at=naive)
     with pytest.raises(ValidationError, match="exported_at must be timezone-aware"):
         PlanExport(exported_at=naive)
 
 
-def test_the_clock_fed_planning_fields_convert_an_aware_reading_to_utc() -> None:
+def test_the_export_instant_converts_an_aware_reading_to_utc() -> None:
     """The other half of the type: an offset it *was* given is honoured, not kept.
 
-    Every field carries the ``.tzinfo is UTC`` assertion as well as the instant
-    one, because the instant alone does not distinguish the two behaviours:
-    aware datetimes compare by instant, so a regression storing the supplied
-    ``UTC+02:00`` reading verbatim satisfies ``== _WHEN`` while the conversion
-    this test is named for never happened (issue #236).
+    The ``.tzinfo is UTC`` assertion is made as well as the instant one, because the
+    instant alone does not distinguish the two behaviours: aware datetimes compare by
+    instant, so a regression storing the supplied ``UTC+02:00`` reading verbatim
+    satisfies ``== _WHEN`` while the conversion this test is named for never happened
+    (issue #236).
     """
     berlin = datetime(2026, 1, 1, 2, tzinfo=timezone(timedelta(hours=2)))
-
-    plan = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=berlin)
-    assert plan.created_at == _WHEN
-    assert plan.created_at.tzinfo is UTC
-
-    finished = _claimed(StepStatus.SUCCEEDED, started_at=berlin, finished_at=berlin)
-    assert finished.started_at == _WHEN
-    assert finished.started_at is not None
-    assert finished.started_at.tzinfo is UTC
-    assert finished.finished_at == _WHEN
-    assert finished.finished_at is not None
-    assert finished.finished_at.tzinfo is UTC
-
-    state = ExecutionState(id="e1", plan_id="p1", steps=(), updated_at=berlin)
-    assert state.updated_at == _WHEN
-    assert state.updated_at.tzinfo is UTC
 
     exported = PlanExport(exported_at=berlin).exported_at
     assert exported == _WHEN
     assert exported.tzinfo is UTC
 
 
-# --- PlanStep parameters are frozen all the way down --------------------
+# --- Frozen JSON parameters are frozen all the way down -------------------
 
 
-def test_step_parameters_are_frozen_at_the_top_level() -> None:
-    step = PlanStep(id="s1", intent="mail", capability="send_email", parameters={"to": "a@b.c"})
+def test_frozen_parameters_are_frozen_at_the_top_level() -> None:
+    holder = _FrozenJsonHolder(parameters={"to": "a@b.c"})
     with pytest.raises(TypeError):
-        step.parameters["to"] = "evil@example.com"  # type: ignore[index]
+        holder.parameters["to"] = "evil@example.com"  # type: ignore[index]
 
 
-def test_step_parameters_are_frozen_when_nested() -> None:
+def test_frozen_parameters_are_frozen_when_nested() -> None:
     """The point of deep-freezing: shallow ``frozen=True`` would miss this."""
-    step = PlanStep(
-        id="s1",
-        intent="mail",
-        capability="send_email",
-        parameters={"headers": {"reply_to": "a@b.c"}, "cc": ["x@y.z"]},
-    )
-    nested = step.parameters["headers"]
+    holder = _FrozenJsonHolder(parameters={"headers": {"reply_to": "a@b.c"}, "cc": ["x@y.z"]})
+    nested = holder.parameters["headers"]
     with pytest.raises(TypeError):
         nested["reply_to"] = "evil@example.com"  # type: ignore[index]
-    assert isinstance(step.parameters["cc"], tuple)
+    assert isinstance(holder.parameters["cc"], tuple)
 
 
-def test_step_parameters_do_not_alias_the_callers_dict() -> None:
-    """Mutating the source dict afterwards must not edit the frozen plan."""
+def test_frozen_parameters_do_not_alias_the_callers_dict() -> None:
+    """Mutating the source dict afterwards must not edit the frozen value."""
     source = {"to": "a@b.c"}
-    step = PlanStep(id="s1", intent="mail", capability="send_email", parameters=source)
+    holder = _FrozenJsonHolder(parameters=source)
     source["to"] = "evil@example.com"
-    assert step.parameters["to"] == "a@b.c"
+    assert holder.parameters["to"] == "a@b.c"
 
 
 def test_frozen_parameters_round_trip_through_json() -> None:
-    step = PlanStep(
-        id="s1",
-        intent="mail",
-        capability="send_email",
-        parameters={"to": "a@b.c", "tags": ["x"], "meta": {"n": 1}},
-    )
-    restored = TypeAdapter(PlanStep).validate_json(step.model_dump_json())
-    assert restored == step
+    holder = _FrozenJsonHolder(parameters={"to": "a@b.c", "tags": ["x"], "meta": {"n": 1}})
+    restored = TypeAdapter(_FrozenJsonHolder).validate_json(holder.model_dump_json())
+    assert restored == holder
     assert isinstance(restored.parameters["meta"], FrozenDict)
 
 
 def test_frozen_parameters_survive_a_deep_copy() -> None:
     """``MappingProxyType`` cannot do this, which is why ``FrozenDict`` exists."""
-    step = PlanStep(id="s1", intent="mail", capability="send_email", parameters={"meta": {"n": 1}})
-    assert copy.deepcopy(step) == step
-    assert step.model_copy(deep=True) == step
+    holder = _FrozenJsonHolder(parameters={"meta": {"n": 1}})
+    assert copy.deepcopy(holder) == holder
+    assert holder.model_copy(deep=True) == holder
 
 
 def test_frozen_parameters_survive_pickling() -> None:
-    step = PlanStep(id="s1", intent="mail", capability="send_email", parameters={"meta": {"n": 1}})
-    assert pickle.loads(pickle.dumps(step)) == step  # noqa: S301  # our own round-trip.
+    parameters = _FrozenJsonHolder(parameters={"meta": {"n": 1}}).parameters
+    assert pickle.loads(pickle.dumps(parameters)) == parameters  # noqa: S301  # our own round-trip.
 
 
 def test_frozen_dict_compares_equal_to_a_plain_mapping() -> None:
@@ -377,187 +125,32 @@ def test_frozen_dict_compares_equal_to_a_plain_mapping() -> None:
 
 def test_frozen_dict_has_no_mutable_backing_to_reach_for() -> None:
     """A private dict would still be a real bypass, not merely a rude one."""
-    step = PlanStep(id="s1", intent="i", capability="c", parameters={"recipient": "a@b.c"})
+    holder = _FrozenJsonHolder(parameters={"recipient": "a@b.c"})
 
     with pytest.raises(AttributeError):
-        step.parameters._items = ()  # type: ignore[attr-defined]
-    assert not hasattr(step.parameters, "_data")
-    assert step.parameters["recipient"] == "a@b.c"
+        holder.parameters._items = ()  # type: ignore[attr-defined]
+    assert not hasattr(holder.parameters, "_data")
+    assert holder.parameters["recipient"] == "a@b.c"
 
 
 def test_nested_frozen_dicts_are_equally_sealed() -> None:
-    step = PlanStep(
-        id="s1", intent="i", capability="c", parameters={"headers": {"reply_to": "a@b.c"}}
-    )
-    nested = step.parameters["headers"]
+    holder = _FrozenJsonHolder(parameters={"headers": {"reply_to": "a@b.c"}})
+    nested = holder.parameters["headers"]
 
     with pytest.raises(AttributeError):
         nested._items = ()  # type: ignore[union-attr]
 
 
 def test_frozen_dict_is_hashable_because_its_values_are_frozen() -> None:
-    step = PlanStep(id="s1", intent="mail", capability="send_email", parameters={"meta": {"n": 1}})
-    assert hash(step.parameters) == hash(step.parameters)
+    holder = _FrozenJsonHolder(parameters={"meta": {"n": 1}})
+    assert hash(holder.parameters) == hash(holder.parameters)
 
 
-def test_plan_rejects_duplicate_step_ids() -> None:
-    dup = PlanStep(id="s1", intent="a", capability="c")
-    with pytest.raises(ValidationError, match="unique"):
-        ActionPlan(id="p1", goal_id="g1", steps=(dup, dup), created_at=_WHEN)
-
-
-# --- A claimed step must be correlatable with its authorisation ---------
-
-
-@pytest.mark.parametrize(
-    "status",
-    [StepStatus.RUNNING, StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.INDETERMINATE],
-)
-def test_claimed_step_requires_an_approval_ref(status: StepStatus) -> None:
-    """ADR-0004 §7: a step that may have acted must name the decision that let it."""
-    with pytest.raises(ValidationError, match="approval_ref"):
-        _claimed(status, approval_ref=None)
-
-
-def test_claimed_step_requires_a_bound_tool() -> None:
-    with pytest.raises(ValidationError, match="bound_tool"):
-        _claimed(StepStatus.RUNNING, bound_tool=None)
-
-
-def test_claimed_step_requires_at_least_one_attempt() -> None:
-    with pytest.raises(ValidationError, match="at least one attempt"):
-        _claimed(StepStatus.RUNNING, attempts=0)
-
-
-def test_pending_step_needs_none_of_the_claim_marks() -> None:
-    assert _step().status is StepStatus.PENDING
-
-
-@pytest.mark.parametrize("blank", ["", "   "])
-def test_a_blank_approval_ref_is_not_an_approval(blank: str) -> None:
-    """An empty reference satisfies "is present" while identifying nothing."""
-    with pytest.raises(ValidationError, match="must not be blank"):
-        _claimed(StepStatus.RUNNING, approval_ref=blank)
-
-
-def test_a_blank_bound_tool_is_rejected() -> None:
-    with pytest.raises(ValidationError, match="must not be blank"):
-        _claimed(StepStatus.RUNNING, bound_tool="  ")
-
-
-def test_identifiers_are_stored_stripped() -> None:
-    step = _claimed(StepStatus.RUNNING, approval_ref="  perm-1  ")
-    assert step.approval_ref == "perm-1"
-
-
-# --- A step that has not run must not look like it has -------------------
-
-
-def test_a_pending_step_cannot_carry_fabricated_attempts() -> None:
-    """The ceiling is only consulted from FAILED, so this would slip past it."""
-    with pytest.raises(ValidationError, match="cannot have attempts"):
-        _step(attempts=1000)
-
-
-def test_a_pending_step_cannot_claim_to_have_started() -> None:
-    with pytest.raises(ValidationError, match="cannot have started_at"):
-        _step(started_at=_WHEN)
-
-
-def test_a_pending_step_predates_selection_and_approval() -> None:
-    with pytest.raises(ValidationError, match="predates tool selection"):
-        _step(bound_tool="smtp")
-
-
-def test_an_awaiting_step_must_name_what_is_being_approved() -> None:
-    with pytest.raises(ValidationError, match="requires the bound_tool"):
-        _step(status=StepStatus.AWAITING_APPROVAL)
-
-
-def test_an_awaiting_step_has_no_decision_yet() -> None:
-    with pytest.raises(ValidationError, match="undecided"):
-        _step(status=StepStatus.AWAITING_APPROVAL, bound_tool="smtp", approval_ref="perm-1")
-
-
-def test_awaiting_approval_is_not_a_claim() -> None:
-    """A step queued for approval has not run, so it needs no approval_ref yet."""
-    step = _step(status=StepStatus.AWAITING_APPROVAL, bound_tool="smtp")
-    assert step.approval_ref is None
-
-
-# --- Outcome fields must match the status -------------------------------
-
-
-def test_skipped_step_requires_a_reason() -> None:
-    with pytest.raises(ValidationError, match="requires a skip_reason"):
-        _step(status=StepStatus.SKIPPED)
-
-
-def test_skip_reason_is_rejected_on_a_step_that_was_not_skipped() -> None:
-    with pytest.raises(ValidationError, match="only valid for a SKIPPED"):
-        _step(skip_reason=SkipReason.SUPERSEDED)
-
-
-@pytest.mark.parametrize("status", _FAILURE)
-def test_a_failure_status_requires_a_failure(status: StepStatus) -> None:
-    """Required on FAILED *and* INDETERMINATE (ADR-0039 §2), both asserted.
-
-    INDETERMINATE is the half #208 is about: the state ADR-0014 §4 makes durable
-    because it must be resolved explicitly was the one finished status with no
-    durable account of itself.
-    """
-    with pytest.raises(ValidationError, match="requires a failure"):
-        _claimed(status, failure=None)
-
-
-def _with_failure(status: StepStatus) -> StepExecution:
-    """A step of ``status`` that is valid except for carrying a failure.
-
-    Each non-failure status has its own other requirements, so the scaffolding
-    differs; the failure is the single thing every one of them must reject.
-    """
-    failure = StepFailure(message="boom")
-    if status is StepStatus.PENDING:
-        return _step(failure=failure)
-    if status is StepStatus.AWAITING_APPROVAL:
-        return _step(status=status, bound_tool="smtp", failure=failure)
-    if status is StepStatus.SKIPPED:
-        return _step(status=status, skip_reason=SkipReason.SUPERSEDED, failure=failure)
-    return _claimed(status, failure=failure)
-
-
-@pytest.mark.parametrize(
-    "status",
-    [
-        StepStatus.PENDING,
-        StepStatus.AWAITING_APPROVAL,
-        StepStatus.RUNNING,
-        StepStatus.SUCCEEDED,
-        StepStatus.SKIPPED,
-    ],
-)
-def test_failure_is_forbidden_off_the_failure_statuses(status: StepStatus) -> None:
-    """Forbidden on each of the other five (ADR-0039 §2).
-
-    The redrawn rule is too-coarse-made-right, not lifted: a step carrying a
-    diagnostic stays readable as a step that did not succeed. A suite that
-    checked only the required half would certify one widened to "anything
-    finished".
-    """
-    with pytest.raises(ValidationError, match="only valid for a FAILED or INDETERMINATE"):
-        _with_failure(status)
-
-
-def test_output_is_rejected_on_a_step_that_did_not_succeed() -> None:
-    with pytest.raises(ValidationError, match="only valid for a SUCCEEDED"):
-        _claimed(StepStatus.RUNNING, output={"ref": "ABC"})
-
-
-def test_succeeded_step_carries_a_frozen_output() -> None:
-    step = _claimed(StepStatus.SUCCEEDED, output={"ref": "ABC"})
-    assert step.output is not None
+def test_a_mapping_output_is_frozen() -> None:
+    holder = _FrozenJsonHolder(output={"ref": "ABC"})
+    assert holder.output is not None
     with pytest.raises(TypeError):
-        step.output["ref"] = "XYZ"  # type: ignore[index]
+        holder.output["ref"] = "XYZ"  # type: ignore[index]
 
 
 # --- StepFailure --------------------------------------------------------
@@ -597,86 +190,6 @@ def test_step_failure_round_trips_through_json() -> None:
     assert TypeAdapter(StepFailure).validate_json(failure.model_dump_json()) == failure
 
 
-# --- ExecutionState -----------------------------------------------------
-
-
-def _execution(*steps: StepExecution, version: int = 0) -> ExecutionState:
-    return ExecutionState(
-        id="e1", plan_id="p1", steps=steps or (_step(),), version=version, updated_at=_WHEN
-    )
-
-
-def test_execution_is_active_while_any_step_is_non_terminal() -> None:
-    assert _execution(_step()).is_active
-
-
-def test_execution_is_inactive_once_every_step_is_terminal() -> None:
-    done = _claimed(StepStatus.SUCCEEDED)
-    skipped = _step(step_id="s2", status=StepStatus.SKIPPED, skip_reason=SkipReason.SUPERSEDED)
-    assert not _execution(done, skipped).is_active
-
-
-def test_failed_step_leaves_the_execution_active() -> None:
-    """FAILED is terminal only if nobody retries, so it must not read as done."""
-    assert _execution(_claimed(StepStatus.FAILED)).is_active
-
-
-def test_indeterminate_step_leaves_the_execution_active() -> None:
-    """An ambiguous step needs resolving, so it cannot count as finished."""
-    assert _execution(_claimed(StepStatus.INDETERMINATE)).is_active
-
-
-def test_only_a_running_step_counts_as_live() -> None:
-    assert _execution(_claimed(StepStatus.RUNNING)).has_live_step
-
-
-@pytest.mark.parametrize(
-    ("status", "extra"),
-    [
-        (StepStatus.FAILED, {}),
-        (StepStatus.INDETERMINATE, {}),
-    ],
-)
-def test_unfinished_but_not_running_steps_are_not_live(
-    status: StepStatus, extra: dict[str, object]
-) -> None:
-    """The bug this guards: blocking deletion on ``is_active`` voids erasure forever.
-
-    A step that failed with retries exhausted, or one left INDETERMINATE, never
-    becomes terminal on its own. If deletion keyed on ``is_active`` the goal
-    could never be erased — so the two predicates must stay distinct.
-    """
-    execution = _execution(_claimed(status, **extra))
-    assert execution.is_active
-    assert not execution.has_live_step
-
-
-# --- finished_at must match the status ----------------------------------
-
-
-@pytest.mark.parametrize(
-    ("status", "extra"),
-    [
-        (StepStatus.SUCCEEDED, {}),
-        (StepStatus.FAILED, {}),
-        (StepStatus.INDETERMINATE, {}),
-    ],
-)
-def test_finished_status_requires_finished_at(status: StepStatus, extra: dict[str, object]) -> None:
-    with pytest.raises(ValidationError, match="requires finished_at"):
-        _claimed(status, finished_at=None, **extra)
-
-
-def test_running_step_cannot_claim_to_have_finished() -> None:
-    with pytest.raises(ValidationError, match="cannot have finished_at"):
-        _claimed(StepStatus.RUNNING, finished_at=_WHEN)
-
-
-def test_pending_step_cannot_claim_to_have_finished() -> None:
-    with pytest.raises(ValidationError, match="cannot have finished_at"):
-        _step(finished_at=_WHEN)
-
-
 # --- Non-finite floats have no JSON representation ----------------------
 
 
@@ -684,26 +197,26 @@ def test_pending_step_cannot_claim_to_have_finished() -> None:
 def test_non_finite_parameters_are_rejected(bad: float) -> None:
     """These satisfy ``float`` but would change value on the way through JSON."""
     with pytest.raises(ValidationError, match="no JSON representation"):
-        PlanStep(id="s1", intent="i", capability="c", parameters={"x": bad})
+        _FrozenJsonHolder(parameters={"x": bad})
 
 
 def test_non_finite_values_are_rejected_when_nested() -> None:
     with pytest.raises(ValidationError, match="no JSON representation"):
-        PlanStep(id="s1", intent="i", capability="c", parameters={"a": {"b": [1.0, float("inf")]}})
+        _FrozenJsonHolder(parameters={"a": {"b": [1.0, float("inf")]}})
 
 
 def test_non_finite_output_is_rejected() -> None:
     with pytest.raises(ValidationError, match="no JSON representation"):
-        _claimed(StepStatus.SUCCEEDED, output={"score": float("nan")})
+        _FrozenJsonHolder(output={"score": float("nan")})
 
 
 def test_ordinary_floats_still_round_trip() -> None:
-    step = PlanStep(id="s1", intent="i", capability="c", parameters={"x": 1.5})
-    assert TypeAdapter(PlanStep).validate_json(step.model_dump_json()) == step
+    holder = _FrozenJsonHolder(parameters={"x": 1.5})
+    assert TypeAdapter(_FrozenJsonHolder).validate_json(holder.model_dump_json()) == holder
 
 
 # --- Values with no JSON encoding (issue #121) --------------------------
-# Plan parameters and step outputs are ``FrozenJson`` holders, so they inherit
+# Frozen-JSON parameters and outputs are ``FrozenJson`` holders, so they inherit
 # ``_freeze_json``'s refusal of a value that satisfies its Python type but has no
 # portable encoding — a lone surrogate ``str`` or an integer past CPython's
 # integer-string conversion limit. Checked by running the real encoder, so a key
@@ -719,12 +232,12 @@ def test_ordinary_floats_still_round_trip() -> None:
         pytest.param({"items": ["fine", "\ud800"]}, id="inside a sequence"),
     ],
 )
-def test_step_parameters_with_a_lone_surrogate_are_rejected(
+def test_parameters_with_a_lone_surrogate_are_rejected(
     parameters: dict[str, Any],
 ) -> None:
     """A lone surrogate is a ``str`` with no UTF-8 encoding (ADR-0021 §1)."""
     with pytest.raises(ValidationError, match="no JSON encoding"):
-        PlanStep(id="s1", intent="i", capability="c", parameters=parameters)
+        _FrozenJsonHolder(parameters=parameters)
 
 
 @pytest.mark.parametrize(
@@ -735,7 +248,7 @@ def test_step_parameters_with_a_lone_surrogate_are_rejected(
         pytest.param({"items": [10**5000]}, id="inside a sequence"),
     ],
 )
-def test_step_parameters_with_an_unrenderable_integer_are_rejected(
+def test_parameters_with_an_unrenderable_integer_are_rejected(
     parameters: dict[str, Any],
 ) -> None:
     """``json.dumps`` renders an int through ``str()``; CPython refuses one past
@@ -745,189 +258,28 @@ def test_step_parameters_with_an_unrenderable_integer_are_rejected(
     stays unrenderable under a raised or disabled ``PYTHONINTMAXSTRDIGITS``
     (#406)."""
     with pinned_int_str_digits(), pytest.raises(ValidationError, match="no JSON encoding"):
-        PlanStep(id="s1", intent="i", capability="c", parameters=parameters)
+        _FrozenJsonHolder(parameters=parameters)
 
 
-def test_a_step_output_with_a_lone_surrogate_is_rejected() -> None:
+def test_an_output_with_a_lone_surrogate_is_rejected() -> None:
     """The other ``FrozenJson`` holder inherits the same refusal (issue #121)."""
     with pytest.raises(ValidationError, match="no JSON encoding"):
-        _claimed(StepStatus.SUCCEEDED, output={"body": "\ud800"})
+        _FrozenJsonHolder(output={"body": "\ud800"})
 
 
 def test_a_large_but_renderable_value_still_round_trips() -> None:
     """The bound is "can it be encoded", not "is it big" or "is it astral"."""
-    step = PlanStep(
-        id="s1",
-        intent="i",
-        capability="c",
-        parameters={"n": 10**100, "emoji": "\U0001f389 done"},
-    )
-    assert TypeAdapter(PlanStep).validate_json(step.model_dump_json()) == step
+    holder = _FrozenJsonHolder(parameters={"n": 10**100, "emoji": "\U0001f389 done"})
+    assert TypeAdapter(_FrozenJsonHolder).validate_json(holder.model_dump_json()) == holder
 
 
-def test_execution_looks_up_a_step_by_id() -> None:
-    execution = _execution(_step(step_id="s1"), _step(step_id="s2"))
-    found = execution.step("s2")
-    assert found is not None
-    assert found.step_id == "s2"
-    assert execution.step("nope") is None
+# --- A single frozen-JSON value with no JSON encoding (issue #121, #409) ---
+# ``FrozenJsonValue`` is a single value rather than a mapping, so it inherits
+# _freeze_json's refusal of a value that satisfies its Python type but has no
+# portable encoding at the top level as well as nested.
 
 
-def test_execution_rejects_duplicate_step_ids() -> None:
-    with pytest.raises(ValidationError, match="unique"):
-        _execution(_step(step_id="s1"), _step(step_id="s1"))
-
-
-def test_execution_rejects_a_negative_version() -> None:
-    with pytest.raises(ValidationError):
-        _execution(version=-1)
-
-
-# --- StepTransition -----------------------------------------------------
-
-
-def _transition(to_status: StepStatus, **overrides: object) -> StepTransition:
-    fields: dict[str, object] = {
-        "execution_id": "e1",
-        "step_id": "s1",
-        "to_status": to_status,
-        "expected_version": 0,
-    }
-    if to_status is StepStatus.RUNNING:
-        # A claim names the attempt it is made under, and no other transition may
-        # carry one (ADR-0255 §3) — so the default belongs to this status alone.
-        fields["attempt_id"] = "a1"
-    return StepTransition(**(fields | overrides))  # type: ignore[arg-type]
-
-
-def test_transition_to_skipped_requires_a_reason() -> None:
-    with pytest.raises(ValidationError, match="requires a skip_reason"):
-        _transition(StepStatus.SKIPPED)
-
-
-@pytest.mark.parametrize("to_status", _FAILURE)
-def test_transition_to_a_failure_status_requires_a_failure(to_status: StepStatus) -> None:
-    """The same rule as ``StepExecution``, over ``to_status`` (ADR-0039 §2).
-
-    Both directions on both statuses: ``StepTransition`` and ``StepExecution``
-    are two validators expressing one rule, and are exactly the pair that can
-    drift.
-    """
-    with pytest.raises(ValidationError, match="requires a failure"):
-        _transition(to_status)
-
-
-@pytest.mark.parametrize(
-    "to_status",
-    [StepStatus.RUNNING, StepStatus.AWAITING_APPROVAL, StepStatus.SUCCEEDED],
-)
-def test_transition_forbids_a_failure_off_the_failure_statuses(to_status: StepStatus) -> None:
-    with pytest.raises(
-        ValidationError, match="only valid for a transition to FAILED or INDETERMINATE"
-    ):
-        _transition(to_status, failure=StepFailure(message="boom"))
-
-
-def test_transition_rejects_an_output_unless_succeeding() -> None:
-    with pytest.raises(ValidationError, match="only valid for a transition to SUCCEEDED"):
-        _transition(StepStatus.RUNNING, output={"ref": "ABC"})
-
-
-def test_transition_is_frozen() -> None:
-    transition = _transition(StepStatus.RUNNING)
-    with pytest.raises(ValidationError):
-        transition.to_status = StepStatus.SUCCEEDED
-
-
-def test_a_claim_requires_the_attempt_it_is_made_under() -> None:
-    """ADR-0255 §3's validator, in the direction that removes the absent case.
-
-    A ``→ RUNNING`` transition carrying no ``attempt_id`` does not construct, which is
-    why ``PlanStore.commit_transition`` never receives one and why no store is asked to
-    refuse a case no conforming implementation could be shown to obey. It is ADR-0039
-    §2's own shape — "required when the status is ``FAILED`` or ``INDETERMINATE``, and
-    forbidden on every other status" — applied to one more field.
-    """
-    with pytest.raises(ValidationError, match="requires an attempt_id"):
-        _transition(StepStatus.RUNNING, attempt_id=None)
-
-
-@pytest.mark.parametrize(
-    "to_status",
-    [status for status in StepStatus if status is not StepStatus.RUNNING],
-)
-def test_no_other_transition_may_name_an_attempt(to_status: StepStatus) -> None:
-    """The other direction, over **every** other status (ADR-0255 §3, §11).
-
-    Only a claim is made under an attempt: ``recovery.py``'s ``→ INDETERMINATE``, the
-    terminal writes and the skips each carry none today and may carry none after this
-    decision, so the field cannot become a second place a status is recorded.
-    """
-    with pytest.raises(ValidationError, match="only valid for a transition to RUNNING"):
-        _transition(
-            to_status,
-            attempt_id="a1",
-            **_payload_for(to_status),
-        )
-
-
-def test_a_claim_may_name_its_activation_or_none() -> None:
-    """ADR-0297 §2: ``activation_id`` is optional on a claim, not required.
-
-    The one activation with no id can be named by no stop, so a claim of it names no
-    activation and the stop conjunct is vacuous there — which is why the field is not
-    required on ``→ RUNNING`` as ``attempt_id`` is.
-    """
-    assert _transition(StepStatus.RUNNING).activation_id is None
-    assert _transition(StepStatus.RUNNING, activation_id="act-1").activation_id == "act-1"
-
-
-@pytest.mark.parametrize(
-    "to_status",
-    [status for status in StepStatus if status is not StepStatus.RUNNING],
-)
-def test_no_other_transition_may_name_an_activation(to_status: StepStatus) -> None:
-    """ADR-0297 §2: "its model validator forbids it on every other ``to_status``"."""
-    with pytest.raises(ValidationError, match="activation_id is only valid"):
-        _transition(to_status, activation_id="act-1", **_payload_for(to_status))
-
-
-def _payload_for(to_status: StepStatus) -> dict[str, object]:
-    """What a transition to ``to_status`` needs besides the field under test.
-
-    The other validators run first, so an arm about ``attempt_id`` has to hand each
-    status the payload its own rule requires or it would fail for that reason instead.
-    """
-    if to_status is StepStatus.SKIPPED:
-        return {"skip_reason": SkipReason.UNMET_DEPENDENCY}
-    if to_status in _FAILURE:
-        return {"failure": StepFailure(message="boom")}
-    return {}
-
-
-def test_transition_carries_no_approval_ref_requirement_of_its_own() -> None:
-    """A retry inherits the step's existing approval_ref, so the command may omit it.
-
-    Legality against the *current* status is the tracker's job, not the type's.
-    """
-    assert _transition(StepStatus.RUNNING).approval_ref is None
-
-
-# --- StepTransition output with no JSON encoding (issue #121, #409) ------
-# StepTransition.output is a FrozenJsonValue holder, exactly like
-# StepExecution.output, so it inherits _freeze_json's refusal of a value that
-# satisfies its Python type but has no portable encoding. #401 pinned that for
-# PlanStep.parameters and StepExecution.output; this carrier carries the same
-# guarantee and had no field-specific regression until #409.
-
-
-def test_a_transition_output_with_a_lone_surrogate_is_rejected() -> None:
-    """A lone surrogate is a ``str`` with no UTF-8 encoding (ADR-0021 §1)."""
-    with pytest.raises(ValidationError, match="no JSON encoding"):
-        _transition(StepStatus.SUCCEEDED, output={"body": "\ud800"})
-
-
-def test_a_transition_output_with_an_unrenderable_integer_is_rejected() -> None:
+def test_an_output_with_an_unrenderable_integer_is_rejected() -> None:
     """``json.dumps`` renders an int through ``str()``; CPython refuses one past
     its integer-string conversion limit, so the value has no JSON encoding.
 
@@ -935,435 +287,31 @@ def test_a_transition_output_with_an_unrenderable_integer_is_rejected() -> None:
     stays unrenderable under a raised or disabled ``PYTHONINTMAXSTRDIGITS``
     (#406)."""
     with pinned_int_str_digits(), pytest.raises(ValidationError, match="no JSON encoding"):
-        _transition(StepStatus.SUCCEEDED, output={"n": 10**5000})
+        _FrozenJsonHolder(output={"n": 10**5000})
 
 
-def test_an_ordinary_transition_output_still_round_trips() -> None:
+def test_an_ordinary_output_still_round_trips() -> None:
     """The bound is "can it be encoded", not "is it big" or "is it astral"."""
-    transition = _transition(
-        StepStatus.SUCCEEDED, output={"n": 10**100, "emoji": "\U0001f389 done"}
-    )
-    assert TypeAdapter(StepTransition).validate_json(transition.model_dump_json()) == transition
+    holder = _FrozenJsonHolder(output={"n": 10**100, "emoji": "\U0001f389 done"})
+    assert TypeAdapter(_FrozenJsonHolder).validate_json(holder.model_dump_json()) == holder
 
 
-def test_a_scalar_transition_output_is_accepted() -> None:
-    """output is a single ``FrozenJsonValue``, not a mapping: a bare scalar is a
-    valid output, so a regression narrowing the field to a mapping is caught.
+def test_a_scalar_output_is_accepted() -> None:
+    """The value is a single ``FrozenJsonValue``, not a mapping: a bare scalar is
+    valid, so a regression narrowing the annotation to a mapping is caught.
     """
-    transition = _transition(StepStatus.SUCCEEDED, output="done")
-    assert transition.output == "done"
-    assert TypeAdapter(StepTransition).validate_json(transition.model_dump_json()) == transition
+    holder = _FrozenJsonHolder(output="done")
+    assert holder.output == "done"
+    assert TypeAdapter(_FrozenJsonHolder).validate_json(holder.model_dump_json()) == holder
 
 
-def test_a_scalar_transition_output_with_a_lone_surrogate_is_rejected() -> None:
+def test_a_scalar_output_with_a_lone_surrogate_is_rejected() -> None:
     """A bare scalar runs through ``_freeze_json`` too, so an unencodable scalar
     is refused — not only an unencodable value nested inside a mapping. Guards a
     regression that checks mapping values but admits a bare unencodable string.
     """
     with pytest.raises(ValidationError, match="no JSON encoding"):
-        _transition(StepStatus.SUCCEEDED, output="\ud800")
-
-
-# --- GoalDeletion -------------------------------------------------------
-
-
-def test_refused_deletion_must_name_what_blocked_it() -> None:
-    with pytest.raises(ValidationError, match="must name the executions"):
-        GoalDeletion(deleted=False)
-
-
-def test_successful_deletion_cannot_be_blocked() -> None:
-    with pytest.raises(ValidationError, match="cannot be blocked_by"):
-        GoalDeletion(deleted=True, blocked_by=("e1",))
-
-
-def test_deletion_reports_erased_indeterminate_steps() -> None:
-    """The warning the contract promises the user has to survive in the result."""
-    result = GoalDeletion(deleted=True, plans_removed=1, indeterminate_steps=("s1",))
-    assert result.indeterminate_steps == ("s1",)
-
-
-# --- ADR-0226: the read request the planner may name beside its plan -----
-# §11 item 11: "Every condition §4 puts on the models is refused by the models,
-# arm for arm, and none of them is left to a caller." Each arm below is one of the
-# nine that section enumerates.
-
-
-def _hop(*labels: str) -> ReadAsk:
-    return ReadAsk(kind=ReadKind.CITATION_HOP, labels=labels)
-
-
-def _query(text: str = "which lender did you recommend?") -> ReadAsk:
-    return ReadAsk(kind=ReadKind.SIGHTED_QUERY, query=text)
-
-
-def test_a_plan_asks_for_no_read_by_default() -> None:
-    """ADR-0226 §4's default, which is what makes the field additive.
-
-    ``None`` is the semantically correct answer for a planner that knows nothing of
-    this envelope, and no implementation reads it as an error, a degradation, or an
-    instruction to service a default read — so the *positive* fact asserted here is
-    that constructing a plan exactly as every existing caller does still produces
-    one that asked for nothing.
-    """
-    plan = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_WHEN)
-
-    assert plan.read_request is None
-
-
-def test_a_request_carries_the_two_kinds_it_was_given() -> None:
-    """The positive case, so the refusals below cannot be satisfied by a model that
-    refuses everything."""
-    request = ReadRequest(asks=(_hop("M1", "M2"), _query()))
-
-    assert [ask.kind for ask in request.asks] == [ReadKind.CITATION_HOP, ReadKind.SIGHTED_QUERY]
-    assert request.asks[0].labels == ("M1", "M2")
-    assert request.asks[1].query == "which lender did you recommend?"
-
-
-def test_an_empty_request_is_refused() -> None:
-    """§11 item 11 names this arm as the one worth stating.
-
-    "A ``ReadRequest`` that admitted no ask would be a non-``None``
-    ``read_request``, which §8 defines as a turn the trigger fired on, servicing
-    nothing — a fire-rate numerator with no read under it." The instrument's
-    numerator is what this refusal protects, which is why the condition is the
-    model's and not a servicer's.
-    """
-    with pytest.raises(ValidationError, match="at least one ask"):
-        ReadRequest(asks=())
-
-
-def test_two_asks_of_one_kind_are_refused() -> None:
-    """ADR-0226 §2: "one emission may carry at most one ask of each kind".
-
-    Everything downstream is stated over one ask per kind — §6's budget and
-    cross-kind precedence, §7's deduplication, §9's per-kind counts — so a second
-    ask of a kind is not an emission with a defined servicing at all.
-    """
-    with pytest.raises(ValidationError, match="at most one ask of each kind"):
-        ReadRequest(asks=(_query("first"), _query("second")))
-
-
-@pytest.mark.parametrize("blank", ["", "   ", "\n\t "], ids=["empty", "spaces", "whitespace"])
-def test_a_sighted_query_ask_refuses_a_blank_query(blank: str) -> None:
-    """§4: "a non-blank query for ``SIGHTED_QUERY``".
-
-    A blank query is a fired trigger with nothing to search for: it would reach
-    ``assemble_by_band`` as an empty relevance selection, spend the budget's
-    ordering and the audit's counts on a read that asked for nothing, and register
-    in the fire rate as a judged insufficiency.
-    """
-    with pytest.raises(ValidationError):
-        ReadAsk(kind=ReadKind.SIGHTED_QUERY, query=blank)
-
-
-def test_a_sighted_query_ask_refuses_labels() -> None:
-    """§4: a ``SIGHTED_QUERY`` ask carries a query "and no labels".
-
-    An ask carrying both is two asks wearing one kind's name, and §6's precedence —
-    the hop first, the query second — has no answer for which half of it runs when.
-    """
-    with pytest.raises(ValidationError, match="must not carry labels"):
-        ReadAsk(kind=ReadKind.SIGHTED_QUERY, query="where?", labels=("M1",))
-
-
-def test_a_sighted_query_ask_refuses_a_missing_query() -> None:
-    """The other half of the same clause: the kind's own argument is required."""
-    with pytest.raises(ValidationError, match="must carry a query"):
-        ReadAsk(kind=ReadKind.SIGHTED_QUERY)
-
-
-def test_a_citation_hop_ask_refuses_naming_no_label() -> None:
-    """§4: "at least one label for ``CITATION_HOP``"."""
-    with pytest.raises(ValidationError, match="at least one label"):
-        ReadAsk(kind=ReadKind.CITATION_HOP)
-
-
-def test_a_citation_hop_ask_refuses_a_query() -> None:
-    """§4: a ``CITATION_HOP`` ask carries labels "and no query"."""
-    with pytest.raises(ValidationError, match="must not carry a query"):
-        ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1",), query="where?")
-
-
-def test_a_citation_hop_ask_refuses_a_third_label() -> None:
-    """ADR-0226 §6's cap, which is a measurement and not a round number.
-
-    Two is "the figure the replay's own real arm used", so the 47.6% conversion it
-    measured is the conversion of this bound rather than of a looser one. Uncapped,
-    two labels at ``MAX_EVIDENCE_CITATIONS`` would be 128 records against a
-    ``get_many`` that is contractually uncapped.
-    """
-    assert MAX_HOP_LABELS == 2
-    with pytest.raises(ValidationError, match="at most 2 labels"):
-        _hop("M1", "M2", "M3")
-
-
-# --- ADR-0231 §1: the ask that carries nothing -----------------------------
-# §18 item 5: "``ReadAsk(kind=WEB_SEARCH, query=…)``, ``labels=…`` and ``entry=…``
-# each refuse at construction, and a bare ``WEB_SEARCH`` ask validates — the arm of
-# §1 asserted at the model, not at a caller."
-
-
-def test_a_web_search_ask_carries_no_argument_at_all() -> None:
-    """§1's positive arm, so the three refusals below are not vacuous.
-
-    "A ``WEB_SEARCH`` ask states its kind and nothing else." The ask is
-    constructible from the kind alone, which is what makes the emission expressible
-    at all — every other kind's own argument is required, and a validator that read
-    this one through a neighbour's arm would refuse a conforming emission.
-    """
-    ask = ReadAsk(kind=ReadKind.WEB_SEARCH)
-
-    assert (ask.query, ask.labels, ask.entry) == (None, (), None)
-
-
-def test_a_web_search_ask_carrying_a_query_is_refused() -> None:
-    """§1, and this is the arm the whole kind's safety claim rests on.
-
-    "**The empty ask is the whole of this kind's safety mechanism, and it is a
-    property of the type rather than a rule an implementation is trusted to keep.**"
-    ``Planner.plan`` is handed ``memories`` read from a store under
-    ``Settings.data_dir``, so anything a planner writes is covered content whose
-    every covered path runs through the planner's own model call — and ADR-0155 §3's
-    third clause forbids that reaching an egress span. A query the model could write
-    would put the prohibition back "on the wrong side of the seam, where it would
-    depend on a model's compliance and on a reviewer noticing".
-    """
-    with pytest.raises(ValidationError, match="must not carry a query"):
-        ReadAsk(kind=ReadKind.WEB_SEARCH, query="flights to Lisbon")
-
-
-def test_a_web_search_ask_carrying_labels_is_refused() -> None:
-    """§1: no ``labels`` either, and the refusal is its own clause.
-
-    A label indexes the ``memories`` sequence, so an ask carrying one has named a
-    record beside a request whose query is composed from the utterance alone — two
-    kinds' arguments under one kind's name, which is the ambiguity ADR-0226 §3
-    exists to keep out of the emission.
-    """
-    with pytest.raises(ValidationError, match="must not carry labels"):
-        ReadAsk(kind=ReadKind.WEB_SEARCH, labels=("M1",))
-
-
-def test_a_web_search_ask_carrying_an_entry_is_refused() -> None:
-    """§1: and no ``entry``, which is the third of the three §1 enumerates."""
-    with pytest.raises(ValidationError, match="must not carry an entry"):
-        ReadAsk(kind=ReadKind.WEB_SEARCH, entry="F1")
-
-
-# ADR-0260 §13's arm (a): "A ``ReadAsk`` of this kind carrying a ``query``, carrying
-# ``labels``, carrying an ``entry`` and carrying a ``structure`` is refused, each with
-# its own message; one carrying none of the four constructs."
-
-
-def test_a_forecast_read_ask_carries_no_argument_at_all() -> None:
-    """ADR-0260 §3's positive arm, so the four refusals below are not vacuous.
-
-    "A ``FORECAST_READ`` ask **states its kind and nothing else**." The ask is
-    constructible from the kind alone, which is what makes the emission expressible at
-    all — every other kind's own argument is required, and a validator that read this
-    one through a neighbour's arm would refuse a conforming emission.
-    """
-    ask = ReadAsk(kind=ReadKind.FORECAST_READ)
-
-    assert (ask.query, ask.labels, ask.entry, ask.structure) == (None, (), None, None)
-
-
-@pytest.mark.parametrize(
-    ("argument", "complaint"),
-    [
-        pytest.param({"query": "will it rain on Saturday"}, "must not carry a query", id="query"),
-        pytest.param({"labels": ("M1",)}, "must not carry labels", id="labels"),
-        pytest.param({"entry": "F1"}, "must not carry an entry", id="entry"),
-        pytest.param(
-            {"structure": StructuredAsk(topics=("weather",))},
-            "must not carry a structure",
-            id="structure",
-        ),
-    ],
-)
-def test_a_forecast_read_ask_carrying_any_argument_is_refused(
-    argument: dict[str, Any], complaint: str
-) -> None:
-    """ADR-0260 §3, and this is the arm the whole kind's safety claim rests on.
-
-    "The ask carries **no query, no labels, no entry and no structure**, and that is
-    this kind's whole safety mechanism": the place a forecast is read for is the
-    deployment's own configured place, so a planner cannot name where — and the failure
-    mode ADR-0231 §1 is built against, a planner-writable field carrying covered content
-    to an egress seam, is **unreachable rather than forbidden**.
-
-    **Each of the four is refused separately and its message names this kind**, which is
-    §3's own clause — "each of the four existing arguments is refused **separately**,
-    because each would be a different mistake with a different fix" — and which is what
-    a shared arm reached by two kinds could otherwise get wrong by naming the search.
-    """
-    with pytest.raises(ValidationError, match=complaint):
-        ReadAsk(kind=ReadKind.FORECAST_READ, **argument)
-
-    with pytest.raises(ValidationError, match="forecast_read ask"):
-        ReadAsk(kind=ReadKind.FORECAST_READ, **argument)
-
-
-def test_a_request_naming_two_forecast_read_asks_is_refused() -> None:
-    """ADR-0260 §2: "one emission carries at most one ``FORECAST_READ`` ask".
-
-    ADR-0226 §2's rule binds unchanged, and it has to be asserted over this kind rather
-    than inherited for the reason it is asserted over the search: the ask carries no
-    argument, so two of them are the one case where a duplicate is invisible by
-    inspection — ``(ask, ask)`` is a pair of equal values, and a validator keyed on
-    anything but ``kind`` would let it through. "One ask is one read" is what the refusal
-    protects.
-    """
-    ask = ReadAsk(kind=ReadKind.FORECAST_READ)
-
-    with pytest.raises(ValidationError, match="at most one ask of each kind"):
-        ReadRequest(asks=(ask, ask))
-
-
-def test_a_request_naming_two_web_search_asks_is_refused() -> None:
-    """§1: "one emission carries at most one ``WEB_SEARCH`` ask".
-
-    ADR-0226 §2's rule "binds unchanged", and it has to be asserted over this kind
-    rather than inherited: the ask carries no argument, so two of them are the one
-    case where a duplicate is invisible by inspection — ``(ask, ask)`` is a pair of
-    equal values, and a validator keyed on anything but ``kind`` would let it
-    through. "One ask is one search" is what the refusal protects.
-    """
-    ask = ReadAsk(kind=ReadKind.WEB_SEARCH)
-
-    with pytest.raises(ValidationError, match="at most one ask of each kind"):
-        ReadRequest(asks=(ask, ask))
-
-
-def test_a_request_may_carry_one_ask_of_every_kind_the_enumeration_admits() -> None:
-    """The widest emission the envelope now admits: one ask of every kind.
-
-    ADR-0231 §1 and ADR-0240 §1 each make their kind *additive* rather than exclusive
-    — neither "adds a second request object, a second servicing site, a second budget
-    or a second audit" — so a plan may ask for a search and a structured read beside
-    the three reads that were there before. This is the arm that fails on a validator
-    reading a later member as an alternative to the others rather than as one more.
-
-    **Asserted against ``set(ReadKind)`` rather than against a written-out list**, so
-    the next additive member fails here until its own arm is written: an enumeration
-    that grew without this emission growing with it is exactly the case §1's
-    additive-entry licence is about.
-    """
-    request = ReadRequest(
-        asks=(
-            _query(),
-            _hop("M1"),
-            ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1"),
-            ReadAsk(kind=ReadKind.WEB_SEARCH),
-            ReadAsk(kind=ReadKind.FORECAST_READ),
-            ReadAsk(
-                kind=ReadKind.STRUCTURED_READ,
-                structure=StructuredAsk(window=TimeWindow(start=_WHEN)),
-            ),
-        )
-    )
-
-    assert {ask.kind for ask in request.asks} == set(ReadKind)
-
-
-@pytest.mark.parametrize(
-    ("model", "payload"),
-    [
-        pytest.param(ReadAsk, {"kind": "citation_hop", "labels": ["M1"], "extra": "x"}, id="ask"),
-        pytest.param(
-            ReadRequest,
-            {"asks": [{"kind": "citation_hop", "labels": ["M1"]}], "extra": "x"},
-            id="request",
-        ),
-    ],
-)
-def test_both_models_refuse_an_unknown_field(
-    model: type[BaseModel], payload: dict[str, Any]
-) -> None:
-    """``extra="forbid"`` on both, for the reason every boundary model here has it.
-
-    A member the contract does not name is a member no reader can be relied on to
-    carry, and on a document that outlives the code that wrote it — an
-    ``ActionPlan`` reaches ``PlanExport`` — a tolerated extra is a shape change
-    nothing announced.
-    """
-    with pytest.raises(ValidationError, match=r"extra_forbidden|Extra inputs"):
-        model.model_validate(payload)
-
-
-@pytest.mark.parametrize(
-    ("target", "field", "value"),
-    [
-        pytest.param("ask", "labels", ("M9",), id="ask-labels"),
-        pytest.param("ask", "kind", ReadKind.SIGHTED_QUERY, id="ask-kind"),
-        pytest.param("request", "asks", (), id="request-asks"),
-    ],
-)
-def test_both_models_refuse_mutation_after_construction(
-    target: str, field: str, value: object
-) -> None:
-    """A plan is an audit record all the way down (ADR-0014 §2, ADR-0068).
-
-    ``frozen=True`` is why the emission cannot be edited after the plan records it:
-    a frozen plan holding a mutable request would let a later stage rewrite what the
-    planner asked for, after the decision the plan is a record of.
-    """
-    ask = _hop("M1")
-    subject: object = ask if target == "ask" else ReadRequest(asks=(ask,))
-
-    with pytest.raises(ValidationError):
-        setattr(subject, field, value)
-
-
-def test_a_label_that_resolves_to_nothing_is_still_constructible() -> None:
-    """ADR-0226 §3's discard is the loop's, so the models must admit its inputs.
-
-    "A string that does not match the form, an *n* below 1 or beyond the sequence's
-    length, and a label whose record is no longer live all resolve to nothing … each
-    is discarded silently — **not an error**, not a park, not a degradation of the
-    turn — and recorded in §9's audit as dropped." A form check here would turn
-    exactly that population into a construction failure at the emitting seam, and
-    would empty the audit field that exists to count it.
-    """
-    for label in ("M0", "M999", "banana", "9d2f7a10-8c44-4f2b-9a1e-1c0b5d6e7f80"):
-        assert _hop(label).labels == (label,)
-
-
-def test_the_kind_vocabulary_is_the_six_the_decisions_admit() -> None:
-    """ADR-0226 §1: a closed enumeration, and §4: added to and never renamed.
-
-    Pinned by value as well as by name, because the serialised spelling is what a
-    ``PlanExport`` carries and what a later reader matches on — renaming a member
-    would silently invalidate every document already written.
-
-    **Six since ADR-0260 §2**, which admits ``FORECAST_READ`` as an *additive entry*
-    under ADR-0226 §1's own licence, exactly as ADR-0240 §1 admitted
-    ``STRUCTURED_READ``, ADR-0231 §1 ``WEB_SEARCH`` and ADR-0230 §1 ``LOCAL_FILE``: it
-    adds no second request object, no second servicing site, no second budget and no
-    second audit. The closure is unchanged — a seventh still needs the ADR that decides
-    it — and so is the no-rename rule, which is why the five older values are still
-    asserted here one by one.
-
-    **The set assertion is what closes it**, and it is the half that fails on a
-    member added without a decision: an implementation growing a seventh spelling
-    passes every value assertion below and fails the equality above.
-    """
-    assert {member.value for member in ReadKind} == {
-        "sighted_query",
-        "citation_hop",
-        "local_file",
-        "web_search",
-        "structured_read",
-        "forecast_read",
-    }
-    assert ReadKind.SIGHTED_QUERY.value == "sighted_query"
-    assert ReadKind.CITATION_HOP.value == "citation_hop"
-    assert ReadKind.LOCAL_FILE.value == "local_file"
-    assert ReadKind.WEB_SEARCH.value == "web_search"
-    assert ReadKind.STRUCTURED_READ.value == "structured_read"
-    assert ReadKind.FORECAST_READ.value == "forecast_read"
+        _FrozenJsonHolder(output="\ud800")
 
 
 # --- PlanExport ---------------------------------------------------------
@@ -1372,7 +320,7 @@ def test_the_kind_vocabulary_is_the_six_the_decisions_admit() -> None:
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
     assert export.schema_version == 18
-    assert export.goals == ()
+    assert export.activation_effects == ()
 
 
 def test_export_pins_the_schema_version_to_exactly_eighteen() -> None:
@@ -1431,837 +379,3 @@ def test_export_carries_stopped_activations_once_each() -> None:
         PlanExport(exported_at=_WHEN, stopped_activations=("act-1", "act-1"))
     with pytest.raises(ValidationError):
         PlanExport(exported_at=_WHEN, stopped_activations=("  ",))
-
-
-def test_export_rejects_a_plan_whose_goal_is_missing() -> None:
-    """A dangling reference is a plan whose purpose was lost in transit."""
-    orphan = ActionPlan(id="p1", goal_id="gone", steps=(), created_at=_WHEN)
-    with pytest.raises(ValidationError, match="goal is missing"):
-        PlanExport(exported_at=_WHEN, plans=(orphan,))
-
-
-def test_export_rejects_a_plan_whose_superseded_plan_is_missing() -> None:
-    """ADR-0228 §5: the reference closure covers ``supersedes``.
-
-    ADR-0014 §5 rules that an export is "complete and internally consistent: every
-    ``goal_id``/``plan_id`` referenced by an included record resolves within the same
-    export", and ``supersedes`` is a ``plan_id`` referenced by an included record. So
-    a document whose ``supersedes`` names a plan the document does not carry does not
-    validate as a ``PlanExport`` at all.
-
-    Beside the dangling-``goal_id`` arm rather than in place of it: the two references
-    are independent, and a plan can be orphaned by either. What §5 supplies is the
-    *statement* that the new reference is inside ADR-0014 §5's promise, "so that the
-    existing validator's silence is not read as an exemption".
-    """
-    orphan = ActionPlan(
-        id="p2", goal_id="g1", steps=(), created_at=_WHEN, supersedes="a-plan-not-carried"
-    )
-    with pytest.raises(ValidationError, match="superseded plan is missing"):
-        PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(orphan,))
-
-
-def test_export_carries_a_whole_supersession_chain() -> None:
-    """The positive half: both plans of a revising turn, and the link between them.
-
-    A turn that revised persists two plans under one ``goal_id`` (ADR-0228 §5), and an
-    export of that store carries both — so the chain is legible to whoever reads the
-    document back, which is the whole reason the reference has to resolve.
-    """
-    first = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_WHEN)
-    revision = ActionPlan(id="p2", goal_id="g1", steps=(), created_at=_WHEN, supersedes="p1")
-
-    export = PlanExport(
-        exported_at=_WHEN, goals=(_goal(),), plans=(first, revision), evidence=_histories("g1")
-    )
-
-    assert export.schema_version == 18
-    assert [plan.supersedes for plan in export.plans] == [None, "p1"]
-
-
-def test_export_rejects_an_execution_whose_plan_is_missing() -> None:
-    execution = ExecutionState(id="e1", plan_id="gone", steps=(), updated_at=_WHEN)
-    with pytest.raises(ValidationError, match="plan is missing"):
-        PlanExport(exported_at=_WHEN, executions=(execution,))
-
-
-def test_export_rejects_duplicate_ids() -> None:
-    with pytest.raises(ValidationError, match="duplicate goal ids"):
-        PlanExport(exported_at=_WHEN, goals=(_goal(), _goal()))
-
-
-def test_export_rejects_an_execution_that_does_not_match_its_plan() -> None:
-    """A misaligned export is unsafe to resume — steps are positional."""
-    plan = ActionPlan(
-        id="p1",
-        goal_id="g1",
-        steps=(
-            PlanStep(id="s1", intent="a", capability="c"),
-            PlanStep(id="s2", intent="b", capability="c"),
-        ),
-        created_at=_WHEN,
-    )
-    execution = ExecutionState(
-        id="e1",
-        plan_id="p1",
-        steps=(_step(step_id="s2"), _step(step_id="ghost")),
-        updated_at=_WHEN,
-    )
-    with pytest.raises(ValidationError, match="does not line up"):
-        PlanExport(
-            exported_at=_WHEN,
-            goals=(_goal(),),
-            plans=(plan,),
-            executions=(execution,),
-            evidence=_histories("g1"),
-        )
-
-
-def test_a_step_cannot_finish_before_it_started() -> None:
-    """A clock that steps backwards would otherwise write an impossible history."""
-    with pytest.raises(ValidationError, match="cannot finish before it started"):
-        _claimed(
-            StepStatus.FAILED,
-            started_at=datetime(2026, 2, 1, tzinfo=UTC),
-            finished_at=datetime(2026, 1, 1, tzinfo=UTC),
-        )
-
-
-def test_export_round_trips_through_json() -> None:
-    """A v3 export with a failed step and a read request survives a round-trip.
-
-    Carrying both is the point, because each is why a version moved: ``StepFailure``
-    was new to the exported shape at 2 (ADR-0039 §10), and ``ActionPlan``'s
-    ``read_request`` is new to it at 3 (ADR-0226 §4). A document carrying either but
-    labelled with the other version does not validate at all, which is the whole of
-    what the label is for.
-    """
-    plan = ActionPlan(
-        id="p1",
-        goal_id="g1",
-        steps=(PlanStep(id="s1", intent="mail", capability="send_email"),),
-        created_at=_WHEN,
-        read_request=ReadRequest(
-            asks=(
-                ReadAsk(kind=ReadKind.SIGHTED_QUERY, query="which lender did you recommend?"),
-                ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M2", "M5")),
-            )
-        ),
-    )
-    execution = ExecutionState(
-        id="e1",
-        plan_id="p1",
-        steps=(
-            _claimed(
-                StepStatus.FAILED,
-                failure=StepFailure(kind=ToolFailureKind.UNAVAILABLE, message="down"),
-            ),
-        ),
-        updated_at=_WHEN,
-    )
-    export = PlanExport(
-        exported_at=_WHEN,
-        goals=(_goal(),),
-        plans=(plan,),
-        executions=(execution,),
-        evidence=_histories("g1"),
-    )
-    restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
-    assert restored == export
-    assert restored.schema_version == 18
-    request = restored.plans[0].read_request
-    assert request is not None
-    assert {ask.kind for ask in request.asks} == {ReadKind.SIGHTED_QUERY, ReadKind.CITATION_HOP}
-    step = restored.executions[0].steps[0]
-    assert step.failure is not None
-    assert step.failure.kind is ToolFailureKind.UNAVAILABLE
-    assert step.failure.message == "down"
-
-
-def test_an_export_round_trips_one_ask_of_every_kind_the_enumeration_admits() -> None:
-    """A document carrying every admitted ``ReadKind`` survives JSON and comes back equal.
-
-    ``schema_version`` moved for each of the three kinds added since ADR-0226 —
-    ``LOCAL_FILE`` (ADR-0230 §1), ``WEB_SEARCH`` (ADR-0231 §1) and ``STRUCTURED_READ``
-    (ADR-0240 §1) — but the case above round-trips only the two the envelope opened
-    with, so a serialisation regression specific to ``"web_search"`` or to a
-    ``StructuredAsk``'s window and label axes passed every assertion this module made
-    (#2105). The *construction* half of the widest emission is pinned by
-    ``test_a_request_may_carry_one_ask_of_every_kind_the_enumeration_admits``; this is
-    the persistence half, which is the one a document outliving the code that wrote it
-    depends on.
-
-    **The kind strings are read off the parsed document rather than off the restored
-    model**, because the serialised spelling is what a later reader matches on — the
-    ground the pinning of ``ReadKind``'s values already rests on — and a producer
-    emitting ``"WEB_SEARCH"`` where ``ReadKind`` spells ``"web_search"`` would still
-    validate against a reader permissive about either. Asserted against ``ReadKind``
-    rather than a written-out list, so a sixth member fails here until an export
-    carries it.
-    """
-    window = TimeWindow(start=_WHEN, end=datetime(2026, 4, 1, tzinfo=UTC))
-    structure = StructuredAsk(window=window, participants=("alex",), topics=("home maintenance",))
-    plan = ActionPlan(
-        id="p1",
-        goal_id="g1",
-        steps=(PlanStep(id="s1", intent="mail", capability="send_email"),),
-        created_at=_WHEN,
-        read_request=ReadRequest(
-            asks=(
-                _query(),
-                _hop("M2", "M5"),
-                ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1"),
-                ReadAsk(kind=ReadKind.WEB_SEARCH),
-                ReadAsk(kind=ReadKind.FORECAST_READ),
-                ReadAsk(kind=ReadKind.STRUCTURED_READ, structure=structure, query="the lease"),
-            )
-        ),
-    )
-    export = PlanExport(
-        exported_at=_WHEN, goals=(_goal(),), plans=(plan,), evidence=_histories("g1")
-    )
-
-    document = export.model_dump_json()
-    restored = TypeAdapter(PlanExport).validate_json(document)
-
-    assert restored == export
-    assert restored.model_dump_json() == document
-    written = json.loads(document)["plans"][0]["read_request"]["asks"]
-    assert {ask["kind"] for ask in written} == {member.value for member in ReadKind}
-
-    request = restored.plans[0].read_request
-    assert request is not None
-    by_kind = {ask.kind: ask for ask in request.asks}
-    assert by_kind[ReadKind.SIGHTED_QUERY].query == "which lender did you recommend?"
-    assert by_kind[ReadKind.CITATION_HOP].labels == ("M2", "M5")
-    assert by_kind[ReadKind.LOCAL_FILE].entry == "F1"
-    bare = by_kind[ReadKind.WEB_SEARCH]
-    assert (bare.query, bare.labels, bare.entry, bare.structure) == (None, (), None, None)
-    forecast = by_kind[ReadKind.FORECAST_READ]
-    assert (forecast.query, forecast.labels, forecast.entry, forecast.structure) == (
-        None,
-        (),
-        None,
-        None,
-    )
-    structured = by_kind[ReadKind.STRUCTURED_READ]
-    assert structured.query == "the lease"
-    assert structured.structure is not None
-    assert structured.structure.window == window
-    assert structured.structure.applied() == ("window", "participants", "topics")
-
-
-# --- ADR-0068: the planning record graph is frozen all the way down -----
-
-
-def test_goal_is_frozen_including_its_provenance() -> None:
-    """A ``Goal`` and the values it carries reject post-construction edits.
-
-    ``statement`` is no longer a field to assign to at all (ADR-0249 §1) — it is a
-    read-only projection of the current interpretation's ``outcome`` — so the edit
-    that used to be refused by ``frozen=True`` is now refused by there being no
-    setter. Both refusals are asserted, because what the arm is about is that no
-    route rewrites a stored objective.
-    """
-    goal = _goal()
-    with pytest.raises((ValidationError, AttributeError)):
-        goal.statement = "tampered"  # type: ignore[misc]
-    with pytest.raises(ValidationError):
-        goal.interpretation[0].outcome = "tampered"  # the nested revision is frozen
-    with pytest.raises(ValidationError):
-        goal.provenance.confidence = 0.1  # the nested model is frozen too
-
-
-def test_step_execution_is_frozen() -> None:
-    step = _step()
-    with pytest.raises(ValidationError):
-        step.status = StepStatus.SUCCEEDED
-
-
-def test_execution_state_is_frozen_including_its_step_elements() -> None:
-    execution = _execution(_step())
-    with pytest.raises(ValidationError):
-        execution.version = 99
-    with pytest.raises(ValidationError):
-        execution.steps[0].status = StepStatus.SUCCEEDED  # the nested element is frozen
-
-
-def test_plan_export_is_deeply_immutable() -> None:
-    """Issue #41's cited scenario: a caller cannot rewrite a goal inside an export.
-
-    ``PlanExport`` was already ``frozen=True`` around a mutable ``Goal``, so
-    ``export.goals[0].statement = ...`` used to succeed and silently break the
-    export's referential integrity. ADR-0068 freezes ``Goal``, so it now raises —
-    the wrapper needed no change of its own.
-    """
-    export = PlanExport(exported_at=_WHEN, goals=(_goal(),), evidence=_histories("g1"))
-    with pytest.raises(ValidationError):
-        export.goals[0].interpretation[0].outcome = "tampered"
-
-
-# --- StructuredAsk (ADR-0240 §2) ------------------------------------------
-
-
-def _window() -> TimeWindow:
-    """The one window every arm below reuses — March 2026, half-open."""
-    return TimeWindow(start=_WHEN, end=datetime(2026, 4, 1, tzinfo=UTC))
-
-
-def test_a_structured_ask_carries_the_four_axes_adr_0237_put_on_the_store() -> None:
-    """ADR-0240 §2: one value object, four axes, each defaulting to ``None``.
-
-    "The axes this model carries reach ``MemoryStore`` unchanged — ``None`` for
-    ``None``, and the values given otherwise — so no implementation translates between
-    an ask's convention and the store's." What is asserted here is the shape that makes
-    that true: the field names are ADR-0237 §1's own, and an axis nobody applied is
-    ``None`` rather than ``()``.
-    """
-    ask = StructuredAsk(
-        window=_window(),
-        participants=("alex",),
-        topics=("home maintenance",),
-        about_person=("marta",),
-    )
-
-    assert ask.window == _window()
-    assert ask.participants == ("alex",)
-    assert ask.topics == ("home maintenance",)
-    assert ask.about_person == ("marta",)
-    assert ask.applied() == ("window", "participants", "topics", "about_person")
-    assert StructuredAsk(window=_window()).applied() == ("window",)
-
-
-def test_a_structured_ask_applying_no_axis_is_refused() -> None:
-    """ADR-0240 §2: "a ``StructuredAsk`` applies at least one of its four axes".
-
-    ADR-0237 §4 makes the same requirement of ``select`` for the same reason — no
-    value of any axis means "everything" — and "a query alone is a ``SIGHTED_QUERY``
-    and not this kind", which is what keeps the two distinct at the type rather than
-    by convention.
-    """
-    with pytest.raises(ValidationError, match="at least one of its four axes"):
-        StructuredAsk()
-
-
-@pytest.mark.parametrize("axis", ["participants", "topics", "about_person"])
-def test_an_empty_sequence_is_refused_on_every_sequence_axis(axis: str) -> None:
-    """ADR-0240 §2: ``None`` is the one spelling of "not applied" on this path.
-
-    The asymmetry with ADR-0237's store surface is deliberate and is the one §2 draws
-    for the window: an ``()`` on the store means *select nothing*, "which is a coherent
-    thing for a caller to compute and an incoherent thing for a planner to ask for" —
-    an ask occupying the one slot its kind has while asking for a result that is empty
-    by construction. Refusing it here also removes the convention mismatch outright.
-    """
-    with pytest.raises(ValidationError, match="never empty"):
-        StructuredAsk(**{axis: ()})  # type: ignore[arg-type]  # the refusal is the subject
-
-
-def test_a_structured_asks_window_inherits_adr_0237s_two_refusals() -> None:
-    """ADR-0240 §2: ``TimeWindow`` "is used exactly as ADR-0237 §2 defines it".
-
-    The half-open reading, the unset ends, the refusal of a window with both ends
-    unset and the refusal of one whose ``end`` is not after its ``start`` are that
-    ADR's and are inherited whole — reached here through this ask, so the inheritance
-    is asserted at the seam that uses it rather than only where the type is defined.
-    """
-    with pytest.raises(ValidationError):
-        StructuredAsk(window=TimeWindow())
-    with pytest.raises(ValidationError):
-        StructuredAsk(window=TimeWindow(start=datetime(2026, 4, 1, tzinfo=UTC), end=_WHEN))
-
-    # ADR-0237 §2's unbounded side, both ways round, reaching this seam intact.
-    assert StructuredAsk(window=TimeWindow(start=_WHEN)).window is not None
-    assert StructuredAsk(window=TimeWindow(end=_WHEN)).window is not None
-
-
-def test_a_structured_ask_refuses_an_unknown_field_and_refuses_mutation() -> None:
-    """ADR-0240 §2: "it refuses unknown fields and refuses mutation"."""
-    with pytest.raises(ValidationError):
-        StructuredAsk(window=_window(), kinds=("episodic",))  # type: ignore[call-arg]
-    ask = StructuredAsk(window=_window())
-    with pytest.raises(ValidationError):
-        ask.window = None
-
-
-def test_a_structured_read_ask_carries_a_structure_and_may_carry_a_query() -> None:
-    """ADR-0240 §2's validator arm, in the two shapes it admits.
-
-    "A ``STRUCTURED_READ`` ask carries a non-``None`` ``structure``, no ``labels`` and
-    no ``entry``, and **may** carry a non-blank ``query``" — and the presence of the
-    query "is what §4 makes the difference between the two store members".
-    """
-    structure = StructuredAsk(window=_window())
-
-    without = ReadAsk(kind=ReadKind.STRUCTURED_READ, structure=structure)
-    assert without.query is None
-    with_text = ReadAsk(kind=ReadKind.STRUCTURED_READ, structure=structure, query="the lease")
-    assert with_text.query == "the lease"
-
-
-@pytest.mark.parametrize(
-    ("payload", "message"),
-    [
-        pytest.param({}, "must carry a structure", id="no_structure"),
-        pytest.param(
-            {"structure": StructuredAsk(window=_window()), "labels": ("M1",)},
-            "must not carry labels",
-            id="labels",
-        ),
-        pytest.param(
-            {"structure": StructuredAsk(window=_window()), "entry": "F1"},
-            "must not carry an entry",
-            id="entry",
-        ),
-    ],
-)
-def test_a_structured_read_ask_refuses_the_other_kinds_arguments(
-    payload: dict[str, object], message: str
-) -> None:
-    """ADR-0240 §2's arm, refusal by refusal.
-
-    Each condition is "enforced by the model rather than by its callers, exactly as
-    ADR-0226 §4 requires of the arms already there", and each is refused separately
-    because each is a different mistake with a different fix.
-    """
-    with pytest.raises(ValidationError, match=message):
-        ReadAsk(kind=ReadKind.STRUCTURED_READ, **payload)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize(
-    ("kind", "extra"),
-    [
-        pytest.param(ReadKind.SIGHTED_QUERY, {"query": "the lease"}, id="sighted_query"),
-        pytest.param(ReadKind.CITATION_HOP, {"labels": ("M1",)}, id="citation_hop"),
-        pytest.param(ReadKind.LOCAL_FILE, {"entry": "F1"}, id="local_file"),
-        pytest.param(ReadKind.WEB_SEARCH, {}, id="web_search"),
-    ],
-)
-def test_every_other_kind_refuses_a_structure(kind: ReadKind, extra: dict[str, object]) -> None:
-    """ADR-0240 §2: "every other kind carries no ``structure``".
-
-    Written out per kind rather than left to a fall-through, on the reasoning the
-    validator's own fourth arm already carries: a member added without an arm would be
-    refused with a message about the wrong kind.
-    """
-    with pytest.raises(ValidationError, match="must not carry a structure"):
-        ReadAsk(kind=kind, structure=StructuredAsk(window=_window()), **extra)  # type: ignore[arg-type]
-
-
-# --- ADR-0249 §9, §10: the two projections that cross the planning seam --------
-
-
-def test_a_brief_carries_no_field_a_ground_reference_could_sit_in() -> None:
-    """ADR-0249 §16 item 4(a), structural and over the projection alone.
-
-    "``GoalBrief`` and ``EvidenceDigest`` carry **no field in which a ground reference
-    could sit** — no ``evidence_id``, no record id, no evidence row id, no span —
-    asserted over the two types' declared field sets." That is the whole of the
-    structural claim, and it is deliberately **not** a claim about a prompt: the
-    ``utterance`` and the ``memories`` are also inputs to this seam, so a double that
-    rendered every input would print values ADR-0226 §3 already governs.
-
-    ``goal_id`` is the one identifier and is not a record identifier in ADR-0228 §8's
-    sense (§9): it names the *subject* of the call rather than a record in the labelled
-    supply, and it is rendered nowhere.
-
-    **``actions`` joins the enumeration under ADR-0265 §4**, which partially supersedes
-    §9's field enumeration, and it is inside the structural claim rather than an
-    exception to it: a :class:`BriefAction` carries "no ``IntendedAction.id``, no
-    effect, no execution, no step, no outcome and no indication of whether the action
-    has already been performed", and its ``serves`` carries the brief's own labels,
-    which are minted per call and persisted nowhere.
-
-    ``EvidenceDigest``, the other projection the quoted item names, left ``core``
-    with the ``Planner`` seam it was handed across (ADR-0309 §5), so the brief's
-    field sets are what this pins now.
-    """
-    forbidden = {"evidence_id", "span", "record_id", "memory_id", "evidence_row_id", "address"}
-
-    assert set(GoalBrief.model_fields) & forbidden == set()
-    assert set(BriefElement.model_fields) == {"text", "ground"}
-    assert set(BriefAction.model_fields) & forbidden == set()
-    assert set(BriefAction.model_fields) == {"intent", "serves"}
-    assert set(GoalBrief.model_fields) == {
-        "goal_id",
-        "outcome",
-        "outcome_ground",
-        "constraints",
-        "criteria",
-        "conditions",
-        "actions",
-        "status",
-        "deadline",
-        "open_questions",
-    }
-
-
-def test_an_element_free_brief_is_well_formed() -> None:
-    """ADR-0249 §16 item 13: a goal at revision 1 projects a brief with no elements.
-
-    "That is a well-formed brief rather than a degraded one. No implementation treats
-    an element-free brief as an error, a failure to understand, or a reason to ask a
-    question" (§9).
-    """
-    brief = GoalBrief.of(_goal())
-
-    assert (brief.constraints, brief.criteria, brief.conditions) == ((), (), ())
-    assert brief.open_questions == (), "ADR-0249's own lanes build no question"
-    assert brief.outcome == "relocate to Lisbon in September"
-    assert brief.outcome_ground is Ground.USER_STATED
-
-
-def test_a_stated_goal_and_an_inferred_one_never_project_alike() -> None:
-    """ADR-0249 §16 item 25's first half, on a goal carrying no elements at all.
-
-    ADR-0014 §1 requires that "a goal the system **inferred** must never be
-    indistinguishable from one the user **stated**", and §3 is why the *outcome's* own
-    ground carries it: "a goal may carry no elements at all — every goal does at
-    revision 1 — so a distinction carried only by element grounds would be no
-    distinction on exactly the goals where it matters most".
-    """
-    stated = GoalBrief.of(_goal())
-    inferred = GoalBrief.of(
-        _goal(
-            interpretation=(
-                GoalInterpretation(
-                    revision=1,
-                    outcome="relocate to Lisbon in September",
-                    outcome_ground=Ground.INFERRED,
-                    recorded_at=_WHEN,
-                    raised_by="t-1",
-                ),
-            )
-        )
-    )
-
-    assert stated.outcome == inferred.outcome
-    assert stated != inferred, "the same words, and never the same brief"
-
-
-def test_a_brief_is_projected_from_the_current_revision_alone() -> None:
-    """§9: never from an elided revision, a superseded one, or a union of several."""
-    goal = _goal(
-        interpretation=(
-            GoalInterpretation(
-                revision=1,
-                outcome="the superseded reading",
-                outcome_ground=Ground.USER_STATED,
-                outcome_span="the superseded reading",
-                recorded_at=_WHEN,
-                raised_by="t-1",
-                constraints=(GoalElement(text="under a hundred", ground=Ground.INFERRED),),
-            ),
-            GoalInterpretation(
-                revision=2,
-                outcome="the current reading",
-                outcome_ground=Ground.INFERRED,
-                recorded_at=_WHEN,
-                raised_by="t-2",
-                criteria=(GoalElement(text="a booking exists", ground=Ground.INFERRED),),
-            ),
-        )
-    )
-
-    brief = GoalBrief.of(goal)
-
-    assert brief.outcome == "the current reading"
-    assert brief.outcome_ground is Ground.INFERRED
-    assert brief.constraints == (), "the superseded revision's element is not projected"
-    assert [one.text for one in brief.criteria] == ["a booking exists"]
-
-
-# --- ADR-0249 §1, §7: the ground and the argument travel together -------------
-
-
-@pytest.mark.parametrize(
-    "shape",
-    [
-        pytest.param({"ground": Ground.FROM_EVIDENCE}, id="from-evidence-bare"),
-        pytest.param({"ground": Ground.FROM_EVIDENCE, "span": "a span"}, id="from-evidence-span"),
-        pytest.param({"ground": Ground.USER_STATED}, id="user-stated-bare"),
-        pytest.param({"ground": Ground.USER_STATED, "evidence_id": "m1"}, id="user-stated-id"),
-        pytest.param({"ground": Ground.INFERRED, "evidence_id": "m1"}, id="inferred-id"),
-        pytest.param({"ground": Ground.INFERRED, "span": "a span"}, id="inferred-span"),
-    ],
-)
-def test_a_goal_element_admits_exactly_three_shapes(shape: dict[str, object]) -> None:
-    """ADR-0249 §1: "a model validator refuses every shape but three".
-
-    "The type is what expresses the correspondence rather than a rule to remember,
-    which is the move ADR-0244 §2 makes for ``ParkedRead``'s content fields."
-    """
-    with pytest.raises(ValidationError, match="ADR-0249 §1"):
-        GoalElement(text="under a hundred", **shape)  # type: ignore[arg-type]
-
-
-def test_the_three_shapes_a_goal_element_admits_construct() -> None:
-    assert GoalElement(text="a", ground=Ground.FROM_EVIDENCE, evidence_id="m1").evidence_id == "m1"
-    assert GoalElement(text="a", ground=Ground.USER_STATED, span="a").span == "a"
-    assert GoalElement(text="a", ground=Ground.INFERRED).evidence_id is None
-
-
-def test_an_interpretation_admits_one_further_shape_than_an_element() -> None:
-    """§1: ``USER_STATED`` with neither argument, whose one origin is §12's migration.
-
-    A ``GoalElement`` does not admit it, and the difference is the whole of what §1's
-    "but for one further admitted shape" says: a migration converts a row that holds no
-    span of the request its statement came from, and §7's retention then carries that
-    absence forward.
-    """
-    migrated = GoalInterpretation(
-        revision=1,
-        outcome="relocate to Lisbon",
-        outcome_ground=Ground.USER_STATED,
-        recorded_at=_WHEN,
-    )
-    assert migrated.outcome_span is None
-    assert migrated.raised_by is None, "and a migrated revision names no turn (§3)"
-
-    with pytest.raises(ValidationError, match="ADR-0249 §1"):
-        GoalElement(text="relocate to Lisbon", ground=Ground.USER_STATED)
-
-
-# --- ADR-0249 §5, §6: the attempt ---------------------------------------------
-
-
-def test_an_attempt_carries_its_result_exactly_on_a_terminal_state() -> None:
-    """§5: "a model validator refuses every ``GoalAttempt`` but two shapes"."""
-    live = GoalAttempt(id="a1", goal_id="g1", opened_at=_WHEN)
-    assert (live.phase, live.state) == (AttemptPhase.UNDERSTAND, AttemptState.RUNNING)
-    assert live.effort.planner_calls == 0
-
-    ended = GoalAttempt(
-        id="a1",
-        goal_id="g1",
-        opened_at=_WHEN,
-        state=AttemptState.ENDED,
-        outcome=AttemptOutcome.ANSWERED,
-        ended_at=_WHEN,
-    )
-    assert ended.outcome is AttemptOutcome.ANSWERED
-
-    with pytest.raises(ValidationError, match="ADR-0249 §5"):
-        GoalAttempt(id="a1", goal_id="g1", opened_at=_WHEN, state=AttemptState.ENDED)
-    with pytest.raises(ValidationError, match="ADR-0249 §5"):
-        GoalAttempt(
-            id="a1", goal_id="g1", opened_at=_WHEN, outcome=AttemptOutcome.ANSWERED, ended_at=_WHEN
-        )
-
-
-def test_the_attempt_vocabularies_are_closed_at_what_the_decision_fixes() -> None:
-    """§5, §6: six phases in order, seven states with two terminal, seven outcomes.
-
-    **The seventh outcome is ADR-0261 §3's ``CANCELLED``**, admitted by ADR-0249 §5's
-    own *"the vocabulary is added to and never renamed"* and owed because that
-    section's validator makes an outcome compulsory on a terminal state: an attempt a
-    user ended before it produced anything is none of the six.
-    """
-    assert [one.value for one in AttemptPhase] == [
-        "understand",
-        "investigate",
-        "plan",
-        "authorize",
-        "execute",
-        "verify",
-    ]
-    assert len(AttemptState) == 7
-    assert {AttemptState.CANCELLED, AttemptState.ENDED} == TERMINAL_ATTEMPT_STATES
-    assert len(AttemptOutcome) == 7
-    assert AttemptOutcome.CANCELLED.value == "cancelled"
-    assert len(Ground) == 3
-    assert len(EvidenceStanding) == 3
-
-
-def test_an_attempt_carries_no_interpretation_and_no_element() -> None:
-    """§5: "the objective and its disposition are the goal's"."""
-    forbidden = {"outcome_ground", "interpretation", "constraints", "criteria", "conditions"}
-    assert set(GoalAttempt.model_fields) & forbidden == set()
-
-
-def test_the_export_refuses_two_evidence_rows_under_one_id() -> None:
-    """ADR-0014 §5's uniqueness, over the record ADR-0252 §13 adds.
-
-    "Ids must also be unique, since a duplicate makes a reference ambiguous" — and two
-    references name an evidence row: ADR-0252 §10's ``GoalElement.evidence_row_id`` and
-    §8's ``superseded_by``. A document holding two rows under one id answers neither.
-    Checked across the whole document rather than within one history, because a
-    reference carries no goal.
-
-    **A row's ``attempt_id`` is deliberately not closed over**, which is the other half
-    of this arm. §13 states the closure over ``goal_id`` alone, and §12 rules that
-    ``record_evidence`` "refuses only for the three reasons §12 lists" — so no conforming
-    store may refuse a row whose ``attempt_id`` resolves to nothing, and a document
-    demanding it would refuse what every writer is obliged to accept.
-    """
-    goal = _goal()
-    attempt = GoalAttempt(id="a1", goal_id="g1", opened_at=_WHEN)
-    row = _evidence_row(attempt_id="a1")
-
-    document = PlanExport(
-        exported_at=_WHEN,
-        goals=(goal,),
-        attempts=(attempt,),
-        evidence=(EvidenceHistory(goal_id="g1", rows=(row,)),),
-    )
-    assert document.evidence[0].rows[0].attempt_id == "a1"
-
-    dangling = PlanExport(
-        exported_at=_WHEN,
-        goals=(goal,),
-        evidence=(EvidenceHistory(goal_id="g1", rows=(_evidence_row(attempt_id="ghost"),)),),
-    )
-    assert dangling.evidence[0].rows[0].attempt_id == "ghost", "no attempt closure"
-
-    with pytest.raises(ValidationError, match="duplicate evidence row ids"):
-        PlanExport(
-            exported_at=_WHEN,
-            goals=(goal,),
-            attempts=(attempt,),
-            evidence=(EvidenceHistory(goal_id="g1", rows=(row, row)),),
-        )
-
-
-def test_the_export_closure_reaches_an_interpreted_outputs_execution() -> None:
-    """ADR-0253 §8, §14 arm 14's sibling: §5's closure rule **extended**, not changed.
-
-    "An export carrying a row whose ``interpreted_output`` names an execution it does
-    not carry does not validate", on the same terms ADR-0249 §12 extended §5 to
-    ``attempt_id`` and ADR-0250 to ``question_id``. ``PlanExport`` already carries
-    ``tuple[ExecutionState, ...]`` and gains **no member** for it.
-
-    **Both identifiers of the reference resolve, because resolving one is §8's own
-    lookup and not only its first step**: "``get_execution(execution_id)`` returns the
-    state, its ``steps`` carry the ``step_id``, and that step's ``output`` is the input
-    the verdict was formed over". A row naming a step its execution does not carry
-    states a warrant it cannot show — the defect ADR-0252 §1 refuses a minted record
-    for. It costs no conforming document anything, because this validator already
-    requires every execution's steps to line up with its plan's.
-
-    **It is closed over where a row's ``attempt_id`` is not**, and the asymmetry is the
-    point: a row's ``attempt_id`` is one no conforming store may refuse at the write
-    (ADR-0252 §12), where an ``interpreted_output`` names an execution the plan store
-    holds and ``delete_goal`` cascades over — "a reference that resolves for exactly as
-    long as the row does", which is the property §8 mints the type for.
-
-    **The ``field`` is not closed over, and neither is the producer's status**: a key is
-    not an identifier, and "the producing step is not ``SUCCEEDED``", "its ``verifies``
-    does not hold" and "the value at that key is JSON ``null``" are three of ADR-0253
-    §6's **six unresolvable cases**, every one of which that section disposes of **at
-    dispatch** by §2's rule. Deciding them here would be resolving a reference and
-    evaluating a verification, which §12 rules "no lane of this decision" does — and it
-    would make an export of the user's own data (ADR-0004 §6) fail on a step's later
-    history rather than on the document's own closure. The fixture below therefore uses
-    a genuinely resolved producer, so that what the arm asserts about the closure is not
-    read as a claim about a warrant it does not check.
-    """
-    goal = _goal()
-    plan = ActionPlan(
-        id="p1",
-        goal_id="g1",
-        steps=(PlanStep(id="s1", intent="refresh", capability="refresh_forecast"),),
-        created_at=_WHEN,
-    )
-    execution = ExecutionState(
-        id="x1",
-        plan_id="p1",
-        steps=(
-            StepExecution(
-                step_id="s1",
-                status=StepStatus.SUCCEEDED,
-                bound_tool="forecast",
-                approval_ref="perm-1",
-                attempts=1,
-                output={"summary": "clear all weekend"},
-                started_at=_WHEN,
-                finished_at=_WHEN,
-            ),
-        ),
-        updated_at=_WHEN,
-    )
-    row = _evidence_row().model_copy(
-        update={
-            "basis": EvidenceBasis.INTERPRETATION,
-            "read_kind": None,
-            "declaration": "e1",
-            "records": (),
-            "returned": 0,
-            "admitted": 0,
-            "verdict": InterpretationVerdict.QUALIFIES.value,
-            "interpreted_output": InterpretedOutput(
-                execution_id="x1", step_id="s1", field="summary"
-            ),
-        }
-    )
-
-    document = PlanExport(
-        exported_at=_WHEN,
-        goals=(goal,),
-        plans=(plan,),
-        executions=(execution,),
-        evidence=(EvidenceHistory(goal_id="g1", rows=(row,)),),
-    )
-    assert document.evidence[0].rows[0].interpreted_output == row.interpreted_output
-
-    with pytest.raises(ValidationError, match="interpreted step output is missing"):
-        PlanExport(
-            exported_at=_WHEN,
-            goals=(goal,),
-            evidence=(EvidenceHistory(goal_id="g1", rows=(row,)),),
-        )
-
-    unnamed_step = row.model_copy(
-        update={"interpreted_output": InterpretedOutput(execution_id="x1", step_id="sX")}
-    )
-    with pytest.raises(ValidationError, match="interpreted step output is missing"):
-        PlanExport(
-            exported_at=_WHEN,
-            goals=(goal,),
-            plans=(plan,),
-            executions=(execution,),
-            evidence=(EvidenceHistory(goal_id="g1", rows=(unnamed_step,)),),
-        )
-
-    no_field = row.model_copy(
-        update={"interpreted_output": InterpretedOutput(execution_id="x1", step_id="s1")}
-    )
-    assert (
-        PlanExport(
-            exported_at=_WHEN,
-            goals=(goal,),
-            plans=(plan,),
-            executions=(execution,),
-            evidence=(EvidenceHistory(goal_id="g1", rows=(no_field,)),),
-        )
-        .evidence[0]
-        .rows[0]
-        .interpreted_output
-        == no_field.interpreted_output
-    )
-
-
-def test_the_export_closure_reaches_an_attempt() -> None:
-    """ADR-0249 §11, §16 item 11: a dangling attempt reference does not validate."""
-    goal = _goal()
-    attempt = GoalAttempt(id="a1", goal_id="gone", opened_at=_WHEN)
-    with pytest.raises(ValidationError, match="attempts whose goal is missing"):
-        PlanExport(exported_at=_WHEN, goals=(goal,), attempts=(attempt,))
-
-    with pytest.raises(ValidationError, match="attempts whose plan is missing"):
-        PlanExport(
-            exported_at=_WHEN,
-            goals=(goal,),
-            attempts=(GoalAttempt(id="a1", goal_id="g1", opened_at=_WHEN, plan_ids=("gone",)),),
-        )
-
-    assert (
-        PlanExport(
-            exported_at=_WHEN,
-            goals=(goal,),
-            attempts=(GoalAttempt(id="a1", goal_id="g1", opened_at=_WHEN),),
-            evidence=_histories("g1"),
-        )
-        .attempts[0]
-        .id
-        == "a1"
-    )

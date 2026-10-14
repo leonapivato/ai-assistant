@@ -1,7 +1,7 @@
-"""ADR-0181 §3's field on the three models it names, and what each refuses.
+"""ADR-0181 §3's field on the models it names, and what each refuses.
 
-§10's first clause states four cases in terms and this module is them: that a
-``CarriedProvenance``, an ``EgressBinding`` and a ``ConfirmationEgress`` each refuse
+§10's first clause states its cases in terms and this module is the ones over the
+models that remain: that a ``CarriedProvenance`` and an ``EgressBinding`` each refuse
 construction with the field **omitted**, and that
 ``PermissionDecision.authorises`` answers ``False`` for two bindings identical but
 for it. The last is the one that bites: it fails an implementation that exempted
@@ -33,7 +33,6 @@ from ai_assistant.core.types import (
     CapabilityEffect,
     CapabilityResult,
     CarriedProvenance,
-    ConfirmationEgress,
     CostBasis,
     DataTier,
     DiscloserProvenance,
@@ -133,14 +132,6 @@ def test_a_binding_refuses_construction_with_the_field_omitted() -> None:
         )
 
 
-def test_a_confirmation_egress_refuses_construction_with_the_field_omitted() -> None:
-    """ADR-0181 §3's third clause: required, with no default."""
-    with pytest.raises(ValidationError, match=r"planned_with_external_content"):
-        ConfirmationEgress(  # type: ignore[call-arg]  # the omission under test
-            account_identity=_ACCOUNT.identity, spans=(_SPAN,), coverage=SpanCoverage.NOT_COVERED
-        )
-
-
 @pytest.mark.parametrize("stated", [True, False])
 def test_each_model_keeps_the_value_it_was_given(stated: bool) -> None:
     """Both states are constructible, and neither is normalised on the way in.
@@ -154,16 +145,9 @@ def test_each_model_keeps_the_value_it_was_given(stated: bool) -> None:
         spans={}, planned_with_external_content=stated, coverage=SpanCoverage.NOT_COVERED
     )
     binding = _binding(planned_with_external_content=stated)
-    reduced = ConfirmationEgress(
-        account_identity=_ACCOUNT.identity,
-        spans=(_SPAN,),
-        planned_with_external_content=stated,
-        coverage=SpanCoverage.NOT_COVERED,
-    )
 
     assert carrier.planned_with_external_content is stated
     assert binding.planned_with_external_content is stated
-    assert reduced.planned_with_external_content is stated
 
 
 def test_the_carrier_holds_the_five_facts_it_carries_and_no_sixth() -> None:
