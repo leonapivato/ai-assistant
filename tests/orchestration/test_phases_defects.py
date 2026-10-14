@@ -2,7 +2,7 @@
 
 An activation that cannot finish is answered the same whatever ended it: an event
 returns *couldn't finish* (ADR-0313 §4:5), and a conversation is written the fixed
-message (ADR-0293 §9:1). So a ``ValueError`` from a bug reads to its caller exactly as a
+message (ADR-0317 §3:3). So a ``ValueError`` from a bug reads to its caller exactly as a
 model's failure does. What tells them apart is the log: a defect is logged under the
 line its failure always was, at error level, naming the stage, the activation and the
 exception's class, with its frames and without its message (ADR-0314 §3:2); an

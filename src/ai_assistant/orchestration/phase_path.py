@@ -19,7 +19,8 @@ written nowhere, authorizing is handed no message to check and no place, and the
 cannot message the user. Its rounds' text is kept with the episode's rounds, and nothing
 is written for it, the *couldn't finish* message included. Having written nothing is not
 how an event fails to finish, since it never writes: only the round limit, a stage's
-failure or its deadline is, and the engine reads which from the state.
+failure or its deadline is, the loop guard counting as a stage's failure (ADR-0317
+§3:3), and the engine reads which from the state.
 
 **What one round is** (ADR-0307 §2, ADR-0309 §3). Planning asks the model once and
 records the round; authorizing checks every call by rule and the message by its place;
@@ -51,14 +52,18 @@ which holds nothing back.
 input's place through the chat's writer, claimed first under an
 :class:`~ai_assistant.core.types.ActivationEffect` and finished with the position the
 medium returns, beside the round's calls. An empty text writes nothing; where the place
-takes no message the text is kept with the round and written nowhere. When the round
-limit or a deadline ends the activation, or a stage fails, the fixed *couldn't finish*
-message is written, whatever earlier rounds wrote (ADR-0307 §3:7, ADR-0293 §9:1, §10:2);
-a stop writes nothing (ADR-0295 §3:3). Wherever it is written the activation did not
-finish, so its episode freezes ``failed`` and the conversation's current state reads
-*couldn't finish* beside the message (ADR-0293 §8:3): a stage's failure classifies as it
-is, and an activation that returned on the round limit or having written nothing is
-``failed / processing_failed`` (ADR-0275 §5:3). The activation's messages, joined by a
+takes no message the text is kept with the round and written nowhere. **An activation
+whose last round made no call but a tidy-up has finished**, whatever its rounds wrote:
+one that wrote nothing chose silence, ends done and writes nothing (ADR-0317 §2). The
+fixed *couldn't finish* message is written where the round limit, the loop guard, a
+stage's failure or a deadline ended the activation, whatever earlier rounds wrote, and
+where its last message was refused by authorizing or its write did not come back done,
+with none recorded after it (ADR-0317 §3); a stop, a cancellation and a restart write
+nothing (§3:6). Wherever it is written the activation did not finish, so its episode
+freezes ``failed`` and the conversation's current state reads *couldn't finish* beside
+the message (ADR-0293 §8:3): a stage's failure classifies as it is, and an activation
+that returned on the round limit, the loop guard or an undelivered last message is
+``failed / processing_failed`` (ADR-0317 §3:5). The activation's messages, joined by a
 blank line, are the episode's ``outcome`` at the freeze (ADR-0307 §10).
 
 **What wrote each message** (ADR-0303 §7:1, ADR-0306 §5:3). The chat's reader links an
@@ -1047,12 +1052,14 @@ class _Round:
         acted: Acting's decision, once it has run.
         looking_for: What each allowed call is looking for, by its decision's id.
         step: The step running the round's calls, once it has begun.
+        written: Whether its message was recorded in the conversation (ADR-0317 §3:4).
     """
 
     planned: PlannedRound
     authorization: RoundAuthorization | None = None
     acted: ActedRound | None = None
     looking_for: dict[str, str] = field(default_factory=dict)
+    written: bool = False
     step: _Step | None = None
 
 
@@ -1236,6 +1243,21 @@ class PhaseWorking:
         """Hold a round planning decided, and the labels it assigned."""
         self.labels.add(planned.labels)
         self._rounds.append(_Round(planned=planned))
+
+    @property
+    def undelivered(self) -> bool:
+        """The activation's last message was refused or lost, none recorded after it.
+
+        ADR-0317 §3:4: the latest round that had a message to write did not have it
+        recorded in the conversation, because authorizing refused it or its write did
+        not come back done (ADR-0306 §5). A message recorded by a later round excuses an
+        earlier one that was not, and an activation that had no message to write has
+        none undelivered.
+        """
+        for one in reversed(self._rounds):
+            if one.planned.message is not None:
+                return not one.written
+        return False
 
     def step(self, at: datetime, wait: timedelta) -> _Step:
         """The latest round's step, begun at ``at`` and waited on for ``wait`` at most.
@@ -1598,6 +1620,25 @@ def _listed(capability: str, outcome: ToolOutcome) -> str:
 def _stopped(state: ActivationState | None) -> bool:
     """Whether the pass ended on a stop, which writes nothing (ADR-0295 §3:3)."""
     return state is not None and _ended_by(state, ControllerRule.STOPPED)
+
+
+def _unfinished(working: PhaseWorking, state: ActivationState | None) -> bool:
+    """Whether a pass that returned did not finish, so *couldn't finish* is owed.
+
+    ADR-0317 §3:2-§3:4: the round limit or the loop guard ended it, whatever earlier
+    rounds wrote, or its last message was refused or lost with none recorded after it.
+    Any other pass that returned has finished, a silent one included (§2), and a stop
+    owes nothing (§3:6). A place that takes no message is never written to, so there
+    only the round limit and the loop guard, which counts as a stage's failure (§3:3),
+    leave the activation unfinished (ADR-0313 §4:5).
+    """
+    if _stopped(state):
+        return False
+    ended = state is not None and (
+        _ended_by(state, ControllerRule.ROUND_LIMIT_REACHED)
+        or _ended_by(state, ControllerRule.STAGE_REPEATED)
+    )
+    return ended or (working.place.takes_message and working.undelivered)
 
 
 def failing_stage(state: ActivationState | None) -> ControllerStage | None:
@@ -2123,16 +2164,18 @@ class PhasePath:
     ) -> None:
         """Run the pass, then write what its end owes and carry what the episode keeps.
 
-        Where the round limit ends the activation, or a stage fails or times out, the
-        fixed *couldn't finish* message is written into the input's place, whatever
-        earlier rounds wrote (ADR-0307 §3:7, ADR-0293 §9:1, §10:2), and so it is where
-        the activation ends having written nothing; a stop and a cancellation write
-        nothing (ADR-0295 §3:3, ADR-0293 §9:2). Where a pass that returned owes it, the
-        state is marked unfinished, so the episode freezes ``failed`` and the current
-        state reads *couldn't finish*, not done (ADR-0293 §8:3). Where the place takes
-        no message, an event's, nothing is written, and only the round limit marks a
-        pass that returned unfinished: having written nothing is how such a pass always
-        ends (ADR-0307 §3:8, ADR-0313 §4:5). However it ended,
+        A pass that returned having finished ends done, and one whose rounds all wrote
+        nothing writes nothing: planning chose silence (ADR-0317 §2). The fixed
+        *couldn't finish* message is written into the input's place, whatever earlier
+        rounds wrote, where a stage fails or times out, which this re-raises, and where a
+        pass that returned was ended by the round limit or the loop guard, or its last
+        message was refused or lost with none recorded after it (ADR-0317 §3:2-§3:4); a
+        stop and a cancellation write nothing (§3:6). Where a pass that returned owes it,
+        the state is marked unfinished, so the episode freezes ``failed`` and the
+        current state reads *couldn't finish*, not done (ADR-0317 §3:5). Where the place
+        takes no message, an event's, nothing is written, and only the round limit and
+        the loop guard mark a pass that returned unfinished: having written nothing is
+        how such a pass always ends (ADR-0307 §3:8, ADR-0313 §4:5). However it ended,
         the activation's messages become the episode's ``outcome``, and the facts the
         freeze derives are set (ADR-0286 §4:2): among them ADR-0204 §2's value, taken
         here once over everything the activation was given or obtained in every round
@@ -2152,16 +2195,10 @@ class PhasePath:
                 await self._couldnt_finish(working)
             raise
         else:
-            # Ending on the round limit, or ending with nothing written (an empty round,
-            # or every message refused or gone), owes the fixed message (ADR-0293 §9:1).
-            # A place that takes no message is never written to, so there only the
-            # round limit leaves the activation unfinished (ADR-0313 §4:5).
-            limited = state is not None and _ended_by(state, ControllerRule.ROUND_LIMIT_REACHED)
-            unwritten = working.place.takes_message and not working.messages
-            if (limited or unwritten) and not _stopped(state):
+            if _unfinished(working, state):
                 if state is not None:
                     # Unfinished, so the episode and the state say *couldn't finish*
-                    # beside the message, not done (ADR-0293 §8:3).
+                    # beside the message, not done (ADR-0317 §3:5).
                     state.unfinished = True
                 await self._couldnt_finish(working)
         finally:
@@ -2191,10 +2228,11 @@ class PhasePath:
     ) -> None:
         """Write *couldn't finish* for a conversation's activation that failed before :meth:`run`.
 
-        What the reader marked is consumed, so an activation that failed after marking
-        writes the fixed message (ADR-0293 §9:1, §10:2) — one that failed before its
-        run began too, such as a marking that failed part way, where :meth:`run` never
-        wrote it. It is written as :meth:`run` writes it, claimed under the activation
+        What the reader marked is consumed, so an activation that failed after taking in
+        any of the conversation's waiting messages and before its first stage ran writes
+        the fixed message (ADR-0317 §3:3, ADR-0293 §10:2) — one that failed before its
+        run began, such as a marking that failed part way, where :meth:`run` never wrote
+        it. It is written as :meth:`run` writes it, claimed under the activation
         and listing the effects its records hold, and it becomes the episode's
         ``outcome``. A stop writes nothing (ADR-0295 §3:3), and a cancellation is not a
         failure and never reaches here (ADR-0293 §9:2). It never raises but for a
@@ -2718,7 +2756,9 @@ class PhasePath:
         verdict = None if decided is None else decided.message
         if verdict is None or not verdict.allowed or verdict.effect_id is None or text is None:
             return
-        await self._write(
+        # Whether it was recorded decides whether the activation's last message was
+        # delivered (ADR-0317 §3:4).
+        latest.written = await self._write(
             working, text, effect_id=verdict.effect_id, round_id=latest.planned.round.id
         )
 
@@ -2858,12 +2898,14 @@ class PhasePath:
     async def _couldnt_finish(self, working: PhaseWorking) -> None:
         """Write the fixed *couldn't finish* message, listing the effects that happened.
 
-        The effects are read from the activation's durable effect records, each call
-        done whose record says so, so a call that finished is listed whatever became of
-        the step it ran in (ADR-0293 §9:1). Claimed under a record naming no round
-        (ADR-0307 §10). It never raises but for a cancellation: a pass that failed is
-        already ending on its own error. Where the place takes no message, an event's,
-        nothing is written and nothing read (ADR-0307 §3:8, ADR-0309 §5:6).
+        Written only where ADR-0317 §3:2-§3:4 name a case, which :meth:`run` and
+        :meth:`unbegun` decide. The effects are read from the activation's durable
+        effect records, each call done whose record says so, so a call that finished is
+        listed whatever became of the step it ran in (ADR-0317 §3:1). Claimed under a
+        record naming no round (ADR-0307 §10). It never raises but for a cancellation:
+        a pass that failed is already ending on its own error. Where the place takes no
+        message, an event's, nothing is written and nothing read (ADR-0307 §3:8,
+        ADR-0309 §5:6).
         """
         if working.conversation_id is None:
             return
@@ -2886,7 +2928,7 @@ class PhasePath:
         """The calls that happened, and those whose outcome is unknown, as listed.
 
         Read from the durable effect records; where they cannot be read, from what
-        acting decided on this pass, which is what is known (ADR-0293 §9:1). An unknown
+        acting decided on this pass, which is what is known (ADR-0317 §3:1). An unknown
         outcome is listed as unknown, never as done (ADR-0307 §3:4-§3:5, ADR-0306 §5).
         """
         try:
