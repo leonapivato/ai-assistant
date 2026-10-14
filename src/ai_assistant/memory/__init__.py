@@ -6,9 +6,8 @@ conversations and projects. The persistent backend is local-first SQLite with
 ``sqlite-vec`` for embedding search (:class:`SqliteMemoryStore`);
 :class:`InMemoryMemoryStore` is a dependency-free lexical store for tests.
 
-Also home to three stores whose contracts are their own Protocols rather than
-extensions of ``MemoryStore`` — the conversation index (ADR-0074), the
-deferred-question queue (:class:`SqliteDeferralStore`, ADR-0078) and the held
+Also home to stores whose contracts are their own Protocols rather than
+extensions of ``MemoryStore`` — the conversation index (ADR-0074) and the held
 notifications (:class:`SqliteNotificationStore`, ADR-0130) — which share this
 package because the architecture map names no subsystem for any of them and
 inventing one is an ADR's decision, not an implementation lane's. Every
@@ -29,14 +28,13 @@ Since ADR-0289 it also holds the **story store** (:class:`SqliteStoryStore`), wh
 contract is likewise its own Protocol and which reads no other store (§1).
 
 Implements: ``MemoryStore``, ``MemoryPolicy``, ``MemoryWriter``,
-``ConversationStore``, ``DeferralStore``, ``NotificationStore``,
+``ConversationStore``, ``NotificationStore``,
 ``NotificationPolicy`` and ``StoryStore``.
 """
 
 from __future__ import annotations
 
 from ai_assistant.memory._reconciler import ModelBackedReconciler
-from ai_assistant.memory.deferral_store import SqliteDeferralStore
 from ai_assistant.memory.ingest import MemoryIngestor
 from ai_assistant.memory.notification_outbox import SqliteNotificationOutbox
 from ai_assistant.memory.notification_policy import DefaultNotificationPolicy
@@ -52,7 +50,6 @@ __all__ = [
     "InMemoryMemoryStore",
     "MemoryIngestor",
     "ModelBackedReconciler",
-    "SqliteDeferralStore",
     "SqliteMemoryStore",
     "SqliteNotificationOutbox",
     "SqliteNotificationStore",

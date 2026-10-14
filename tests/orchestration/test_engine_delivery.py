@@ -142,7 +142,6 @@ def _wired(  # noqa: PLR0913 — one parameter per knob a case here varies, whic
         spend=harness.trail,
         reads=harness.reads,
         memory=harness.memory,
-        deferrals=harness.deferrals,
         traces=harness.traces,
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,

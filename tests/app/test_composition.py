@@ -42,7 +42,6 @@ from ai_assistant.core.errors import (
     AssistantError,
     ConfigurationError,
     ConnectionStoreError,
-    DeferralStoreError,
     ModelError,
     ReaderError,
     RecipientGrantError,
@@ -84,10 +83,8 @@ from ai_assistant.memory import (
     DefaultMemoryPolicy,
     DefaultNotificationPolicy,
     MemoryIngestor,
-    SqliteDeferralStore,
     SqliteMemoryStore,
 )
-from ai_assistant.memory import deferral_store as deferral_store_module
 from ai_assistant.models import BoundedEmbedder, HashingEmbedder
 from ai_assistant.orchestration import Engine
 from ai_assistant.orchestration.upcoming import (
@@ -1110,129 +1107,6 @@ async def test_closing_the_engine_closes_the_recipient_grant_store(
         await grants.standing()
 
 
-async def test_build_engine_opens_the_deferral_queue_under_the_data_dir(
-    tmp_path: Path,
-) -> None:
-    """The deferred-question queue is a fourth Tier 1 store, wired here (ADR-0078 §10).
-
-    Opened under the same data directory and with the same owner-only file mode as
-    the others, because what it holds is the user's own words waiting on an answer
-    (ADR-0004 §4). An unwired store would be dead code and a question would still
-    have nowhere to wait — the gap ADR-0078 exists to close.
-    """
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    try:
-        path = tmp_path / "deferrals.db"
-        assert path.exists()
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    finally:
-        await engine.aclose()
-
-
-def _spy_on_deferrals(monkeypatch: pytest.MonkeyPatch) -> list[SqliteDeferralStore]:
-    """Record every deferral store the builder constructs, still building real ones.
-
-    A recording subclass rather than a stub, so the engine it is wired into is the
-    real one and this assertion is about the *built* store rather than about a
-    double standing where it would have been.
-    """
-    built: list[SqliteDeferralStore] = []
-
-    class _Recorded(SqliteDeferralStore):
-        def __init__(self, **kwargs: object) -> None:
-            super().__init__(**kwargs)  # type: ignore[arg-type]  # the root's own keywords
-            built.append(self)
-
-    monkeypatch.setattr(composition_module, "SqliteDeferralStore", _Recorded)
-    return built
-
-
-async def test_build_engine_leaves_the_deferral_stores_token_source_at_its_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The composition-root assertion ADR-0078 §10 item 4 owes.
-
-    "Unpredictable" is a property of the *source*, and injection alone would let this
-    layer wire a counter and satisfy every word of "fresh" — while ``interrupted``
-    publishes every claimed question's id to any caller, so a guessable token is one
-    a reader can spend on someone else's claim. No type expresses that the default
-    was kept, so this test does (the shape ADR-0028 §4 established for the same class
-    of hazard).
-    """
-    built = _spy_on_deferrals(monkeypatch)
-
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    try:
-        assert len(built) == 1
-        assert built[0]._new_claim_id is deferral_store_module._secret_claim_id
-    finally:
-        await engine.aclose()
-
-
-async def test_build_engine_gives_the_deferral_queue_the_configured_tuning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Both tunings are the user's configuration and both reach the constructor (§10).
-
-    Read **once**, there, and stamped onto each question at admission — which is what
-    keeps a later change to the setting from reaching back and shortening a question
-    already asked (ADR-0078 §2).
-    """
-    built = _spy_on_deferrals(monkeypatch)
-    settings = Settings(
-        embedder=EmbedderKind.HASHING,
-        deferral_ttl=timedelta(days=3),
-        deferral_queue_limit=7,
-    )
-
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        assert built[0]._retention == timedelta(days=3)
-        assert built[0]._queue_limit == 7
-    finally:
-        await engine.aclose()
-
-
-async def test_the_deferral_queue_joins_the_ordered_shutdown(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A store this layer opens is a resource this layer owns (ADR-0042 §2).
-
-    One left out of the façade's shutdown path is a connection leaked on every
-    session. Asserted by using the store after ``aclose``: a closed ``sqlite3``
-    connection refuses, and this seam reports that as its own error.
-    """
-    built = _spy_on_deferrals(monkeypatch)
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-
-    await engine.aclose()
-
-    with pytest.raises(DeferralStoreError):
-        await built[0].export()
-
-
-async def test_build_engine_gives_the_write_stage_and_the_sweep_one_queue(
-    tmp_path: Path,
-) -> None:
-    """ADR-0078 §3's **first** composition-root obligation, enforced rather than asked.
-
-    The ``DeferralStore`` the write stage enqueues into is the **same instance** the
-    engine's retention sweep purges (ADR-0078 §10 item 8). No type expresses it — a
-    ``DeferralStore`` exposes no identity and the two are wired independently — so
-    identity here is the only way to check it, exactly as ADR-0028 §4's writer/store
-    rule is checked. The write stage is reached through consolidation, the producer
-    that writes through it.
-    """
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    try:
-        assert engine._consolidation is not None
-        writes = engine._consolidation._writes
-        assert writes._deferrals is engine._deferrals
-        assert isinstance(writes._deferrals, SqliteDeferralStore)
-    finally:
-        await engine.aclose()
-
-
 def _one_event_calendar(directory: Path) -> Path:
     """A minimal ``.ics`` with one event an hour from now, and its path.
 
@@ -1378,7 +1252,8 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
     the eleventh, on the same terms; ADR-0193 §1's recipient-grant store is
     the twelfth on the same terms again; and ADR-0197 §9's routing trail was the
     thirteenth until the old path that wrote it was deleted (ADR-0309 §5), so the root
-    opens it no more. ADR-0238 §1's destination-trust store is the
+    opens it no more. ADR-0078's deferred-question queue left the same way (ADR-0309
+    §5), and ``deferrals.db`` with it. ADR-0238 §1's destination-trust store is the
     **fifteenth**, and §1 states the residency clause explicitly for ADR-0185
     §9's reason — "local and durable and … never written to a remote service".
     ADR-0244 §3's parked-read store joined them on the same terms until the old path
@@ -1406,7 +1281,6 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # personal data.
             "connections.db",
             "conversations.db",
-            "deferrals.db",
             # ADR-0238 §1's destination-trust store, the fifteenth and the
             # fourteenth that is Tier 1: a record names destinations of the user's
             # and the instant they chose them. **A separate file from
@@ -1873,9 +1747,9 @@ def test_an_unusable_notification_retention_fails_before_disk_is_touched(
 def _spy_on_traces(monkeypatch: pytest.MonkeyPatch) -> list[SqliteTraceStore]:
     """Record every trace store the builder constructs, still building real ones.
 
-    A recording subclass rather than a stub, for ``_spy_on_deferrals``' reason: the
-    engine it is wired into is the real one, so the assertion is about the *built*
-    store rather than about a double standing where it would have been.
+    A recording subclass rather than a stub: the engine it is wired into is the
+    real one, so the assertion is about the *built* store rather than about a double
+    standing where it would have been.
     """
     built: list[SqliteTraceStore] = []
 
@@ -2435,9 +2309,9 @@ def test_the_sweep_guard_still_catches_a_sweeper_added_somewhere_else(tmp_path: 
         "class Engine:\n"
         "    async def _purge_expired(self):\n"
         "        await self._memory.purge_expired()\n"
-        "        await self._deferrals.purge()\n"
+        "        await self._notifications.purge()\n"
         "    async def _tick(self):\n"
-        "        await self._deferrals.purge()\n",  # a second sweeper, same module
+        "        await self._notifications.purge()\n",  # a second sweeper, same module
         encoding="utf-8",
     )
     (tmp_path / "timer.py").write_text(
@@ -2486,7 +2360,7 @@ def test_the_sweep_guard_accepts_only_the_permitted_home(tmp_path: Path) -> None
         "class Engine:\n"
         "    async def _purge_expired(self):\n"
         "        await self._memory.purge_expired()\n"
-        "        await self._deferrals.purge()\n"
+        "        await self._notifications.purge()\n"
         "        await self._traces.purge_before(self._clock())\n"
     )
     (tmp_path / "orchestration" / "engine.py").write_text(permitted, encoding="utf-8")

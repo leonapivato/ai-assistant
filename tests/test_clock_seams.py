@@ -111,7 +111,6 @@ from ai_assistant.learning import RuleBasedFeedbackProcessor
 from ai_assistant.memory import (
     InMemoryMemoryStore,
     MemoryIngestor,
-    SqliteDeferralStore,
     SqliteMemoryStore,
     SqliteNotificationOutbox,
     SqliteNotificationStore,
@@ -673,7 +672,6 @@ async def _engine(now: Clock) -> None:
     """
     memory = FakeMemoryStore(now=lambda: _AWARE)
     conversations = FakeConversationStore(now=lambda: _AWARE)
-    deferrals = FakeDeferralStore(now=lambda: _AWARE)
     plans = FakePlanStore(now=lambda: _AWARE)
     await Engine(
         chat_reader=False,
@@ -682,7 +680,6 @@ async def _engine(now: Clock) -> None:
         spend=FakeAuditTrail(),
         reads=FakeSourceReadTrail(),
         memory=memory,
-        deferrals=deferrals,
         traces=FakeTraceRetention(),
         trace_sink=FakeTraceSink(),
         trace_retention=timedelta(days=365),
@@ -728,7 +725,6 @@ def _writes(memory: FakeMemoryStore) -> MemoryWriteStage:
     """The write stage every memory-writing stage takes, on a conforming clock."""
     return MemoryWriteStage(
         writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: _AWARE),
-        deferrals=FakeDeferralStore(now=lambda: _AWARE),
     )
 
 
@@ -900,16 +896,6 @@ async def _sqlite_conversation_store(now: Clock) -> None:
         store = SqliteConversationStore(path=Path(directory) / "conversations.db", now=now)
         try:
             await store.start()
-        finally:
-            store.close()
-
-
-async def _sqlite_deferral_store(now: Clock) -> None:
-    """The retention purge reads the clock to place its horizon."""
-    with tempfile.TemporaryDirectory() as directory:
-        store = SqliteDeferralStore(path=Path(directory) / "deferrals.db", now=now)
-        try:
-            await store.purge()
         finally:
             store.close()
 
@@ -1133,7 +1119,6 @@ SEAMS = [
     Seam("RuleBasedFeedbackProcessor", _rule_based_processor, ClockReadingError),
     Seam("SqliteAuditTrail", _sqlite_audit_trail, AuditError),
     Seam("SqliteConversationStore", _sqlite_conversation_store, ConversationStoreError),
-    Seam("SqliteDeferralStore", _sqlite_deferral_store, DeferralStoreError),
     Seam("FakeStoryStore", _fake_story_store, StoryStoreError),
     Seam("SqliteStoryStore", _sqlite_story_store, StoryStoreError),
     Seam("SqliteNotificationOutbox", _sqlite_notification_outbox, NotificationOutboxError),

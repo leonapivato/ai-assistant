@@ -14,8 +14,7 @@ it in terms — "The end-to-end test above runs against ``DefaultMemoryPolicy``"
 and it has to be the real one: the ceiling under test *is* that policy's ruling and
 its ``reason``, so a scripted double would be a second copy of the rule it is meant
 to check, which is exactly what ``FakeMemoryPolicy``'s docstring says a double is
-not for. ``tests/orchestration/test_deferred_questions.py`` makes the same crossing
-for the same reason.
+not for.
 
 The taint-computation cases use a **capturing write stage** rather than the policy,
 because what they assert is what reaches the gate — ADR-0106 §3's obligation is on
@@ -40,6 +39,8 @@ from ai_assistant.core.types import (
     MAX_TOPICS_PER_RECORD,
     Attestation,
     BeliefBand,
+    DeferralAdmission,
+    DeferralAdmissionOutcome,
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
@@ -62,9 +63,9 @@ from ai_assistant.orchestration.consolidation import (
     ConsolidationStage,
     _render,
 )
+from ai_assistant.orchestration.writes import DEFERRED_EVENT, WriteOutcome
 from ai_assistant.service.scheduler import Job, Scheduler
 from ai_assistant.testing import (
-    FakeDeferralStore,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -77,7 +78,6 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import MemoryStore
     from ai_assistant.core.types import MemoryRecord
-    from ai_assistant.orchestration.writes import WriteOutcome
 
 #: The content the ADR-0116 §8 cases seed and propose, so the writer's lexical
 #: conflict detection surfaces the cited records and the fold has a target.
@@ -208,11 +208,34 @@ class _CapturingWrites:
     def __init__(self, inner: MemoryWriteStage) -> None:
         self._inner = inner
         self.proposals: list[MemoryUpdateProposal] = []
+        self.outcomes: list[WriteOutcome] = []
 
     async def write(self, proposal: MemoryUpdateProposal) -> WriteOutcome:
-        """Record the proposal as the gate received it, then delegate."""
+        """Record the proposal as the gate received it, delegate, and record the ruling."""
         self.proposals.append(proposal)
-        return await self._inner.write(proposal)
+        outcome = await self._inner.write(proposal)
+        self.outcomes.append(outcome)
+        return outcome
+
+
+class _RefusingWrites(_CapturingWrites):
+    """The real gate, with an ``ASK_USER`` ruling reported as a refused question.
+
+    The deferred-question queue returned that admission at its cap, and it retired
+    (ADR-0309 §5): a real write stage no longer reports one. The consolidation
+    stage still halts on it until its own lane removes that arm, so the halt is
+    driven here through the outcome the stage reads.
+    """
+
+    async def write(self, proposal: MemoryUpdateProposal) -> WriteOutcome:
+        """Delegate, then report a deferral as the queue at its cap reported it."""
+        outcome = await super().write(proposal)
+        if outcome.result.decision.kind is not MemoryDecisionKind.ASK_USER:
+            return outcome
+        return WriteOutcome(
+            result=outcome.result,
+            admission=DeferralAdmission(outcome=DeferralAdmissionOutcome.REFUSED),
+        )
 
 
 def _stage(
@@ -236,9 +259,7 @@ def _stage(
     )
 
 
-def _gated(
-    store: FakeMemoryStore, *, deferrals: FakeDeferralStore | None = None
-) -> tuple[_CapturingWrites, FakeDeferralStore]:
+def _gated(store: FakeMemoryStore) -> _CapturingWrites:
     """Wire the real gate — ``DefaultMemoryPolicy`` — over ``store``.
 
     The same store the stage walks, which is the composition-root obligation
@@ -247,9 +268,14 @@ def _gated(
     write path cannot resolve, and every one would be refused for unresolved
     evidence rather than judged.
     """
-    queue = deferrals if deferrals is not None else FakeDeferralStore(now=_now)
     writer = FakeMemoryWriter(store=store, policy=DefaultMemoryPolicy(), now=_now)
-    return _CapturingWrites(MemoryWriteStage(writer=writer, deferrals=queue)), queue
+    return _CapturingWrites(MemoryWriteStage(writer=writer))
+
+
+def _refusing(store: FakeMemoryStore) -> _RefusingWrites:
+    """The real gate over ``store``, reporting every deferral as refused."""
+    writer = FakeMemoryWriter(store=store, policy=DefaultMemoryPolicy(), now=_now)
+    return _RefusingWrites(MemoryWriteStage(writer=writer))
 
 
 async def _seeded(records: Sequence[MemoryRecord]) -> FakeMemoryStore:
@@ -275,7 +301,7 @@ async def test_an_attested_input_taints_the_proposal_though_the_producer_omitted
             _record("r2"),
         ]
     )
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     await _stage(store=store, writes=writes).run()
 
@@ -292,6 +318,9 @@ async def test_the_gate_never_commits_a_tainted_unconfirmed_consolidation() -> N
     ADR-0098 §4's fourth clause given its enforcement point: a model-authored
     proposal whose externality is recoverable at the ruling point is never
     auto-accepted into durable memory.
+
+    An ``ASK_USER`` ruling writes nothing and parks nothing (ADR-0309 §5): it is
+    logged once, by the proposal's id.
     """
     store = await _seeded(
         [
@@ -299,13 +328,16 @@ async def test_the_gate_never_commits_a_tainted_unconfirmed_consolidation() -> N
             _record("r2"),
         ]
     )
-    writes, queue = _gated(store)
+    writes = _gated(store)
 
-    report = await _stage(store=store, writes=writes).run()
+    with structlog.testing.capture_logs() as logs:
+        report = await _stage(store=store, writes=writes).run()
 
     assert report.committed == 0
     assert report.deferred == 1
-    assert len(await queue.pending()) == 1
+    assert await store.get(writes.proposals[0].proposed.id) is None, "nothing is written"
+    deferred = [entry for entry in logs if entry["event"] == DEFERRED_EVENT]
+    assert [entry["proposal_id"] for entry in deferred] == [writes.proposals[0].proposed.id]
 
 
 # --- ADR-0106 §10, case 3: taint inherits through a DERIVED input ------------
@@ -325,7 +357,7 @@ async def test_a_derived_input_carrying_the_marker_taints_the_proposal() -> None
             _record("r2"),
         ]
     )
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     await _stage(store=store, writes=writes).run()
 
@@ -345,7 +377,7 @@ async def test_an_untainted_input_set_yields_false_though_the_producer_claimed_t
     producer's value passes every other case here and fails this one.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     report = await _stage(store=store, writes=writes, reply=_ONE_BELIEF_CLAIMING_TAINT).run()
 
@@ -372,7 +404,7 @@ async def test_a_tainted_proposal_citing_no_evidence_is_rejected_rather_than_que
     unreachable through it.
     """
     store = await _seeded([_record("r1", source=MemorySource.EXTERNAL), _record("r2")])
-    writes, queue = _gated(store)
+    writes = _gated(store)
     stage = _stage(store=store, writes=writes)
     bare = SemanticMemory(
         id="bare",
@@ -382,10 +414,11 @@ async def test_a_tainted_proposal_citing_no_evidence_is_rejected_rather_than_que
     )
     proposal = stage._marked(_proposal(bare), tainted=True, placement=Placement())
 
-    outcome = await writes.write(proposal)
+    with structlog.testing.capture_logs() as logs:
+        outcome = await writes.write(proposal)
 
     assert outcome.result.decision.kind is MemoryDecisionKind.REJECT
-    assert await queue.pending() == []
+    assert [entry for entry in logs if entry["event"] == DEFERRED_EVENT] == []
 
 
 # --- ADR-0106 §10, case 6: the question says *why* ---------------------------
@@ -404,17 +437,22 @@ async def test_the_question_reaching_the_user_says_the_warrant_is_external() -> 
     suite, because no test can distinguish a sentence that conveys externality from
     one that claims to, and #40 tracks the Protocol statement that would be needed.
 
-    Read off the queued deferral's ruling, which is where the question's ``reason``
-    comes from: the question surface that rendered it retired (ADR-0309 §5).
+    Read off the ``ASK_USER`` ruling the write stage returned, which is where a
+    question's ``reason`` comes from: the question surface that rendered it and the
+    queue that held it both retired (ADR-0309 §5).
     """
     store = await _seeded([_record("r1", source=MemorySource.EXTERNAL), _record("r2")])
-    writes, queue = _gated(store)
+    writes = _gated(store)
 
     await _stage(store=store, writes=writes).run()
-    asked = await queue.pending()
+    asked = [
+        outcome.result.decision
+        for outcome in writes.outcomes
+        if outcome.result.decision.kind is MemoryDecisionKind.ASK_USER
+    ]
 
     assert len(asked) == 1
-    reason = asked[0].decision.reason.lower()
+    reason = asked[0].reason.lower()
     assert "external" in reason, (
         "the question must say why it was raised: `Question.band` reads DERIVED for a "
         "tainted consolidation, which is correct as what it documents and misleading "
@@ -428,8 +466,9 @@ async def test_the_question_reaching_the_user_says_the_warrant_is_external() -> 
 async def test_a_refused_question_leaves_the_chunk_unrecorded_and_re_proposes_it() -> None:
     """§6, §10 case 8, and ADR-0111 §5: retained, not consumed.
 
-    Run against a **deterministically full** queue — a cap of one, already
-    occupied — because a run with spare capacity cannot fail on this. A
+    Run against a write stage that reports every deferral as refused (the queue at
+    its cap, as it was before it retired), because a run with spare capacity cannot
+    fail on this. A
     consolidator that emitted more tainted proposals than the cap admits would
     otherwise rule correctly, persist nothing and move on: the black hole ADR-0106
     §6's routing clause exists to close, arriving by the one door that clause left
@@ -439,13 +478,7 @@ async def test_a_refused_question_leaves_the_chunk_unrecorded_and_re_proposes_it
     recorded as done, so the very same records come back on the next run.
     """
     store = await _seeded([_record("r1", source=MemorySource.EXTERNAL), _record("r2")])
-    queue = FakeDeferralStore(now=_now, queue_limit=1)
-    writes, _ = _gated(store, deferrals=queue)
-    occupied, _ = _gated(store, deferrals=queue)
-    # Fill the one slot with an unrelated question, so the consolidation's own is
-    # refused rather than admitted.
-    await occupied.write(_question_raising("filler", cites=["r1", "r2"]))
-    assert len(await queue.pending()) == 1
+    writes = _refusing(store)
 
     report = await _stage(store=store, writes=writes).run()
 
@@ -460,31 +493,6 @@ def _proposal(record: MemoryRecord) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(proposed=record, rationale="a proposal this test needs to exist")
 
 
-def _question_raising(record_id: str, *, cites: Sequence[str]) -> MemoryUpdateProposal:
-    """A proposal ``DefaultMemoryPolicy`` defers, for filling the queue to its cap.
-
-    Tainted, derived, unconfirmed and citing resolvable evidence — which is exactly
-    the shape §6's ceiling defers and §6's floor does not reject. An **attested**
-    proposal will not do: ADR-0106 §6's first boundary is that one may still earn a
-    committing ruling, so it occupies no slot and a cap filled with one is not full.
-    """
-    return MemoryUpdateProposal(
-        proposed=SemanticMemory(
-            id=record_id,
-            content="a belief the queue must hold",
-            fact="a belief the queue must hold",
-            provenance=Provenance(
-                source=MemorySource.INFERRED,
-                confidence=0.4,
-                last_updated=_AT,
-                derived_from_external=True,
-                evidence=tuple(cites),
-            ),
-        ),
-        rationale="a question this test needs parked",
-    )
-
-
 # --- ADR-0111's own run mechanics --------------------------------------------
 
 
@@ -497,7 +505,7 @@ async def test_the_cursor_never_leads_its_effects() -> None:
     no clause of ADR-0114.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     stage = _stage(store=store, writes=_ExplodingWrites(writes))
 
     with pytest.raises(MemoryStoreError):
@@ -516,7 +524,7 @@ async def test_a_run_stops_at_its_budget_and_resumes_where_it_stopped() -> None:
     start or at the end.
     """
     store = await _seeded([_record(f"r{index}") for index in range(1, 5)])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     stage = ConsolidationStage(
         memory=store,
         writes=writes,  # type: ignore[arg-type] # a capturing wrapper around the real stage
@@ -554,7 +562,7 @@ async def test_a_civil_clock_moved_backwards_does_not_extend_the_run() -> None:
     exhausts rather than failing an assertion — which is why the store is small.
     """
     store = await _seeded([_record(f"r{index}") for index in range(1, 5)])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     receding = iter([_AT - timedelta(minutes=index) for index in range(60)])
     stage = ConsolidationStage(
         memory=store,
@@ -583,7 +591,7 @@ async def test_a_run_over_an_unusable_cursor_restarts_rather_than_faulting() -> 
     """
     store = await _seeded([_record("r1"), _record("r2")])
     store._walks[CONSOLIDATION_WALK] = "written-by-a-build-that-is-not-this-one"
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     report = await _stage(store=store, writes=writes, reply='{"beliefs": []}').run()
 
@@ -600,7 +608,7 @@ async def test_an_exhausted_walk_reports_success_and_spends_no_model_call() -> N
     would spend an egress to be told nothing.
     """
     store = FakeMemoryStore(now=_now)
-    writes, _ = _gated(store)
+    writes = _gated(store)
     model = FakeModelProvider(_ONE_BELIEF)
     stage = ConsolidationStage(
         memory=store,
@@ -632,7 +640,7 @@ async def test_the_walk_never_reaches_an_expired_or_retired_record() -> None:
             _record("live-b"),
         ]
     )
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     report = await _stage(store=store, writes=writes, reply='{"beliefs": []}').run()
 
@@ -648,7 +656,7 @@ async def test_a_chunk_that_justifies_nothing_still_records_itself_as_done() -> 
     chunk would never reach the material beyond it.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     report = await _stage(store=store, writes=writes, reply='{"beliefs": []}').run()
 
@@ -667,7 +675,7 @@ async def test_a_malformed_reply_is_counted_rather_than_raised() -> None:
     honestly proposed nothing — the one confusion this counting exists to remove.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     report = await _stage(store=store, writes=writes, reply="I cannot help with that.").run()
 
@@ -683,7 +691,7 @@ async def test_the_producer_may_not_propose_an_episode() -> None:
     rather than reaching the write path at all.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     reply = (
         '{"beliefs": [{"kind": "episodic", "step": "observed", "content": "a thing happened",'
         ' "evidence": ["R1", "R2"], "rationale": "it did"}]}'
@@ -703,7 +711,7 @@ async def test_a_belief_citing_one_record_is_discarded_as_no_consolidation() -> 
     not a consolidation.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     reply = (
         '{"beliefs": [{"kind": "semantic", "step": "observed", "content": "one thing",'
         ' "evidence": ["R1"], "rationale": "just the one"}]}'
@@ -728,7 +736,7 @@ async def test_a_consolidation_never_leaves_the_derived_band() -> None:
             _record("r2", source=MemorySource.EXTERNAL),
         ]
     )
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     await _stage(store=store, writes=writes).run()
 
@@ -748,7 +756,7 @@ async def test_the_citations_are_ours_and_an_invented_label_is_dropped() -> None
     is not evidence.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     reply = (
         '{"beliefs": [{"kind": "semantic", "step": "observed", "content": "a claim",'
         ' "evidence": ["R1", "R99", "not-a-label"], "rationale": "citing a ghost"}]}'
@@ -763,7 +771,7 @@ async def test_the_citations_are_ours_and_an_invented_label_is_dropped() -> None
 async def test_the_prompt_carries_labels_the_model_cites_rather_than_record_ids() -> None:
     """The labels are ours, so a record's own content cannot name a record."""
     store = await _seeded([_record("r1", "alpha"), _record("r2", "bravo")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     model = FakeModelProvider(_ONE_BELIEF)
     stage = ConsolidationStage(
         memory=store,
@@ -801,10 +809,7 @@ async def test_two_runs_over_a_full_queue_re_propose_the_same_material() -> None
     job walking a cursor is the one producer for which holding is not automatic.
     """
     store = await _seeded([_record("r1", source=MemorySource.EXTERNAL), _record("r2")])
-    queue = FakeDeferralStore(now=_now, queue_limit=1)
-    writes, _ = _gated(store, deferrals=queue)
-    filler, _ = _gated(store, deferrals=queue)
-    await filler.write(_question_raising("filler", cites=["r1", "r2"]))
+    writes = _refusing(store)
 
     first = await _stage(store=store, writes=writes).run()
     second = await _stage(store=store, writes=writes).run()
@@ -822,9 +827,8 @@ async def test_the_stage_uses_the_fake_policy_only_where_the_ruling_is_not_the_s
     exactly that.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    queue = FakeDeferralStore(now=_now)
     writer = FakeMemoryWriter(store=store, policy=FakeMemoryPolicy(), now=_now)
-    writes = _CapturingWrites(MemoryWriteStage(writer=writer, deferrals=queue))
+    writes = _CapturingWrites(MemoryWriteStage(writer=writer))
 
     report = await _stage(store=store, writes=writes).run()
 
@@ -850,7 +854,7 @@ async def test_the_marker_is_recomputed_per_chunk_not_carried_across_them() -> N
             _record("r4"),
         ]
     )
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     await _stage(store=store, writes=writes, chunk_size=2).run()
 
@@ -877,7 +881,7 @@ async def test_usable_beliefs_dropped_on_the_cap_are_counted_not_silently_lost()
     facts — nothing was wrong with these beliefs.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     beliefs = ", ".join(_belief(index) for index in range(4))
     counter = iter(f"consolidated-{index}" for index in range(1, 100))
     stage = ConsolidationStage(
@@ -905,7 +909,7 @@ async def test_the_cap_is_applied_to_the_survivors_not_to_the_raw_entries() -> N
     different counts depending on where it happened to sit in the reply.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     reply = f'{{"beliefs": [{_belief(0)}, {{"kind": "nonsense"}}, {_belief(1)}]}}'
     counter = iter(f"consolidated-{index}" for index in range(1, 100))
     stage = ConsolidationStage(
@@ -939,7 +943,7 @@ async def test_a_run_does_not_consolidate_what_it_has_just_produced() -> None:
     makes the fold onto a cited record reachable rather than incidental.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     reply = f'{{"beliefs": [{_belief(0)}, {_belief(1)}]}}'
     counter = iter(f"consolidated-{index}" for index in range(1, 100))
     stage = ConsolidationStage(
@@ -980,11 +984,10 @@ async def test_a_fold_onto_a_cited_record_is_counted_and_the_run_carries_on() ->
     cited record.
     """
     store = await _seeded([_record("r1", _BELIEF_TEXT), _record("r2", _BELIEF_TEXT)])
-    queue = FakeDeferralStore(now=_now)
     writer = FakeMemoryWriter(
         store=store, policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE), now=_now
     )
-    writes = _CapturingWrites(MemoryWriteStage(writer=writer, deferrals=queue))
+    writes = _CapturingWrites(MemoryWriteStage(writer=writer))
 
     report = await _stage(store=store, writes=writes).run()
 
@@ -1003,11 +1006,10 @@ async def test_a_second_run_does_not_re_derive_the_same_refusal() -> None:
     permanent failure wearing a handler.
     """
     store = await _seeded([_record("r1", _BELIEF_TEXT), _record("r2", _BELIEF_TEXT)])
-    queue = FakeDeferralStore(now=_now)
     writer = FakeMemoryWriter(
         store=store, policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE), now=_now
     )
-    writes = _CapturingWrites(MemoryWriteStage(writer=writer, deferrals=queue))
+    writes = _CapturingWrites(MemoryWriteStage(writer=writer))
 
     first = await _stage(store=store, writes=writes).run()
     second = await _stage(store=store, writes=writes).run()
@@ -1032,7 +1034,7 @@ async def test_a_proposal_citing_the_stages_own_minted_id_ends_the_run() -> None
     evidence are not independent.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     stage = ConsolidationStage(
         memory=store,
         writes=writes,  # type: ignore[arg-type] # a capturing wrapper around the real stage
@@ -1077,7 +1079,7 @@ async def test_an_inadmissible_proposal_bound_is_refused_at_construction(
     second place for the two to disagree.
     """
     store = FakeMemoryStore(now=_now)
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     with pytest.raises(expected):
         ConsolidationStage(
@@ -1105,10 +1107,7 @@ async def test_a_halted_run_is_recorded_distinguishably_from_an_exhausted_one() 
     implementation that told nobody.
     """
     store = await _seeded([_record("r1", source=MemorySource.EXTERNAL), _record("r2")])
-    queue = FakeDeferralStore(now=_now, queue_limit=1)
-    writes, _ = _gated(store, deferrals=queue)
-    filler, _ = _gated(store, deferrals=queue)
-    await filler.write(_question_raising("filler", cites=["r1", "r2"]))
+    writes = _refusing(store)
 
     with structlog.testing.capture_logs() as logs:
         report = await _stage(store=store, writes=writes).run()
@@ -1126,7 +1125,7 @@ async def test_a_halted_run_is_recorded_distinguishably_from_an_exhausted_one() 
 async def test_an_exhausted_run_records_a_different_disposition() -> None:
     """The other half of the distinction: without it, ``halted`` says nothing."""
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     with structlog.testing.capture_logs() as logs:
         await _stage(store=store, writes=writes, reply='{"beliefs": []}').run()
@@ -1163,7 +1162,7 @@ async def test_an_inadmissible_run_budget_is_refused_at_construction(
     ``core/config.py`` spends ``allow_inf_nan=False`` to prevent one field over.
     """
     store = FakeMemoryStore(now=_now)
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     with pytest.raises(expected):
         ConsolidationStage(
@@ -1191,10 +1190,7 @@ async def test_a_halted_run_reaches_the_scheduler_as_a_completion_not_a_failure(
     and neither says failure — which this case asserts rather than argues.
     """
     store = await _seeded([_record("r1", source=MemorySource.EXTERNAL), _record("r2")])
-    queue = FakeDeferralStore(now=_now, queue_limit=1)
-    writes, _ = _gated(store, deferrals=queue)
-    filler, _ = _gated(store, deferrals=queue)
-    await filler.write(_question_raising("filler", cites=["r1", "r2"]))
+    writes = _refusing(store)
     stage = _stage(store=store, writes=writes)
     scheduler = Scheduler([Job(name="consolidation", interval=timedelta(hours=1), run=stage.run)])
 
@@ -1244,7 +1240,7 @@ async def test_a_record_cannot_forge_this_renderers_own_container_syntax() -> No
             _record("r2", "an ordinary belief"),
         ]
     )
-    writes, _ = _gated(store)
+    writes = _gated(store)
     model = FakeModelProvider(_ONE_BELIEF)
     stage = ConsolidationStage(
         memory=store,
@@ -1288,7 +1284,7 @@ async def test_origin_is_marked_from_provenance_and_not_from_the_text() -> None:
             _record("r2", "third-party reported this, honestly"),
         ]
     )
-    writes, _ = _gated(store)
+    writes = _gated(store)
     model = FakeModelProvider(_ONE_BELIEF)
     stage = ConsolidationStage(
         memory=store,
@@ -1381,7 +1377,7 @@ async def test_an_oversized_reply_is_refused_before_it_is_decoded() -> None:
     about the counting changes.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     flood = ", ".join(_belief(index) for index in range(4_000))
 
     report = await _stage(store=store, writes=writes, reply=f'{{"beliefs": [{flood}]}}').run()
@@ -1426,7 +1422,7 @@ async def test_a_reply_that_breaks_the_decoder_is_counted_rather_than_raised(rep
     asserts the third extractor does too.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     report = await _stage(store=store, writes=writes, reply=reply).run()
 
@@ -1449,7 +1445,7 @@ async def test_a_decoy_object_before_the_envelope_does_not_lose_the_beliefs() ->
     now matches.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     reply = f'Here is some context {{"note": "thinking out loud"}}\n{_ONE_BELIEF}'
 
     report = await _stage(store=store, writes=writes, reply=reply).run()
@@ -1469,7 +1465,7 @@ async def test_a_reply_with_no_envelope_at_all_is_still_one_unusable_entry() -> 
     decision.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     report = await _stage(store=store, writes=writes, reply='{"note": "no envelope here"}').run()
 
@@ -1491,7 +1487,7 @@ async def test_an_envelope_behind_exactly_the_miss_budget_is_still_found() -> No
     the two comparisons apart.
     """
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     reply = "{" * _MAX_EXTRACTION_MISSES + _ONE_BELIEF
 
     report = await _stage(store=store, writes=writes, reply=reply).run()
@@ -1512,7 +1508,7 @@ async def test_a_narrowed_input_narrows_the_proposal_though_the_producer_omitted
     material a channel of unbounded audience may not be told.
     """
     store = await _seeded([_record("r1", placement=_DERIVED), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     await _stage(store=store, writes=writes).run()
 
@@ -1523,7 +1519,7 @@ async def test_a_narrowed_input_narrows_the_proposal_though_the_producer_omitted
 async def test_a_chunk_holding_nothing_narrowed_leaves_the_proposal_unnarrowed() -> None:
     """The negative control: the meet is over the chunk, not a constant."""
     store = await _seeded([_record("r1"), _record("r2")])
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     await _stage(store=store, writes=writes).run()
 
@@ -1548,7 +1544,7 @@ async def test_a_derivation_meets_every_supplied_placement_proposed_included() -
     in one act what a model proposed (§7's ``unguard``, which §11 orders later).
     """
     store = await _seeded([_record("r1", placement=_UNGUARDED), _record("r2", placement=_PROPOSED)])
-    writes, _ = _gated(store)
+    writes = _gated(store)
 
     await _stage(store=store, writes=writes).run()
 
@@ -1632,7 +1628,7 @@ async def test_the_chunk_being_prompted_is_in_its_own_vocabulary() -> None:
             _record("r4", topics=("sleep",)),
         ]
     )
-    writes, _ = _gated(store)
+    writes = _gated(store)
     stage, provider = _vocabulary_stage(store, writes)
 
     await stage.run()
@@ -1650,7 +1646,7 @@ async def test_a_one_chunk_run_is_supplied_its_own_chunks_labels() -> None:
     claim would be false for it rather than weak.
     """
     store = await _seeded([_record("r1", topics=("health",)), _record("r2", topics=("sleep",))])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     stage, provider = _vocabulary_stage(store, writes, chunk_size=50)
 
     with _loop_time_after_one_chunk():
@@ -1684,7 +1680,7 @@ async def test_the_vocabulary_is_ordered_and_the_accumulator_itself_is_capped() 
             _record("r5", topics=("zzz met after the cap",)),
         ]
     )
-    writes, _ = _gated(store)
+    writes = _gated(store)
     stage, provider = _vocabulary_stage(store, writes)
 
     await stage.run()
@@ -1717,7 +1713,7 @@ async def test_two_consecutive_runs_over_disjoint_chunks_supply_disjoint_vocabul
             _record("r4", topics=("sleep",)),
         ]
     )
-    writes, _ = _gated(store)
+    writes = _gated(store)
     stage, provider = _vocabulary_stage(store, writes)
 
     with _loop_time_after_one_chunk():
@@ -1743,7 +1739,7 @@ async def test_the_accumulation_leaves_nothing_durable_behind() -> None:
     outcomes = []
     for records in (labelled, plain):
         store = await _seeded(records)
-        writes, _ = _gated(store)
+        writes = _gated(store)
         stage, _provider = _vocabulary_stage(store, writes)
         await stage.run()
         exported = sorted(
@@ -1781,7 +1777,7 @@ async def test_a_record_that_left_the_live_set_leaves_the_vocabulary_with_it() -
             _record("expired", topics=("expired subject",), expires_at=_AT - timedelta(days=1)),
         ]
     )
-    writes, _ = _gated(store)
+    writes = _gated(store)
     stage, provider = _vocabulary_stage(store, writes, chunk_size=50)
 
     await stage.run()
@@ -1799,7 +1795,7 @@ async def test_a_record_over_the_bound_does_not_unbound_the_chunk() -> None:
     """
     over_bound = tuple(_TOPIC[: MAX_TOPICS_PER_RECORD + 1])
     store = await _seeded([_record("imported", topics=over_bound)])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     stage, provider = _vocabulary_stage(store, writes, chunk_size=50)
 
     report = await stage.run()
@@ -1822,7 +1818,7 @@ async def test_the_consolidation_prompt_states_the_form_and_carries_the_vocabula
     coupling the origin-marking cases above assert for their own term.
     """
     store = await _seeded([_record("r1", topics=("health",))])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     stage, provider = _vocabulary_stage(store, writes, chunk_size=50)
 
     await stage.run()
@@ -1849,7 +1845,7 @@ async def test_a_supplied_label_is_a_hint_and_not_a_constraint() -> None:
       "rationale": "both records show it"}]}
     """
     store = await _seeded([_record("r1", topics=("health",)), _record("r2", topics=("health",))])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     stage, _provider = _vocabulary_stage(store, writes, reply=reply, chunk_size=50)
 
     await stage.run()
@@ -1860,7 +1856,7 @@ async def test_a_supplied_label_is_a_hint_and_not_a_constraint() -> None:
 async def test_a_producer_that_proposes_no_topics_is_not_made_to() -> None:
     """§12.14's second direction, without which the case above passes a rule that invents."""
     store = await _seeded([_record("r1", topics=("health",)), _record("r2", topics=("health",))])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     stage, _provider = _vocabulary_stage(store, writes, reply=_ONE_BELIEF, chunk_size=50)
 
     await stage.run()
@@ -1896,7 +1892,7 @@ async def test_consolidations_own_bad_topics_entry_is_ignored_rather_than_counte
       "rationale": "both records show it"}}]}}
     """
     store = await _seeded([_record("r1", topics=("health",)), _record("r2", topics=("health",))])
-    writes, _ = _gated(store)
+    writes = _gated(store)
     stage, _provider = _vocabulary_stage(store, writes, reply=reply, chunk_size=50)
 
     report = await stage.run()

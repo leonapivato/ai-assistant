@@ -659,91 +659,27 @@ def test_the_observation_settings_are_removed(monkeypatch: pytest.MonkeyPatch) -
         assert not hasattr(settings, name)
 
 
-# --- deferred questions: the lifetime and the cap (ADR-0078 §6, §7) ---------
+#: The two settings the deferred-question queue was built with, retired with it
+#: (ADR-0309 §5).
+_RETIRED_DEFERRAL_SETTINGS: Final = ("deferral_ttl", "deferral_queue_limit")
 
 
-def test_deferral_ttl_defaults_to_thirty_days() -> None:
-    # The value ADR-0078 §6 argues for, and the one no invalid-value test can
-    # assert. "Finite" alone admits a one-microsecond default that expires every
-    # question before a user can list it and a decades-long one that keeps
-    # unanswered Tier 1 content for a working lifetime — both conforming, neither
-    # intended. Thirty days was `episode_retention`'s own horizon, deliberately: a
-    # deferred question is about a belief, and for an observed one the evidence is
-    # episodes on that clock, so a question outliving them would ask the user to
-    # adjudicate something the system can no longer explain. ADR-0287 §1 moved that
-    # default to `None` and left this one where it was, so a question now lapses
-    # before the episodes it is about, never after them.
-    assert Settings().deferral_ttl == timedelta(days=30)
+def test_the_deferral_settings_are_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-0309 §5: the deferral store retires, and its two tunings leave ``Settings``.
 
+    Settings are read with ``extra="ignore"``, so a hub environment that still sets
+    ``ASSISTANT_DEFERRAL_TTL`` or ``ASSISTANT_DEFERRAL_QUEUE_LIMIT`` starts without an
+    error and the variable configures nothing. Pinned with a value each field would
+    have **refused** at load, so a field revived under its old name fails here.
+    """
+    monkeypatch.setenv("ASSISTANT_DEFERRAL_TTL", "PT0S")
+    monkeypatch.setenv("ASSISTANT_DEFERRAL_QUEUE_LIMIT", "0")
 
-def test_deferral_ttl_accepts_an_explicit_none_as_ask_me_forever() -> None:
-    # `None` is a real value with stated behaviour, not a gap: the question never
-    # lapses and its record is never purged (ADR-0078 §6). It is the user's
-    # deliberate choice, in the same words `episode_retention` already uses.
-    assert Settings(deferral_ttl=None).deferral_ttl is None
+    settings = load_settings()
 
-
-def test_deferral_ttl_is_disabled_from_the_environment_by_the_sentinel(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The default is finite, so omitting the variable can never reach `None` and no
-    # duration literal spells it: without the sentinel "ask me forever" would be
-    # unreachable from a deployment.
-    monkeypatch.setenv("ASSISTANT_DEFERRAL_TTL", "none")
-    assert load_settings().deferral_ttl is None
-
-
-def test_deferral_ttl_parses_an_iso_duration_from_the_environment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("ASSISTANT_DEFERRAL_TTL", "P7D")
-    assert load_settings().deferral_ttl == timedelta(days=7)
-
-
-@pytest.mark.parametrize("value", [timedelta(0), timedelta(seconds=-1)])
-def test_a_non_positive_deferral_ttl_is_rejected(value: timedelta) -> None:
-    # A zero or negative lifetime lapses every question the instant it is admitted:
-    # never answerable, immediately purgeable, its content dropped in silence.
-    with pytest.raises(ValidationError):
-        Settings(deferral_ttl=value)
-
-
-@pytest.mark.parametrize("value", ["PT0S", "-PT1H"])
-def test_load_settings_rejects_a_non_positive_deferral_ttl(
-    monkeypatch: pytest.MonkeyPatch, value: str
-) -> None:
-    monkeypatch.setenv("ASSISTANT_DEFERRAL_TTL", value)
-    with pytest.raises(ConfigurationError, match="invalid configuration"):
-        load_settings()
-
-
-def test_the_deferral_queue_limit_defaults_to_a_page() -> None:
-    # It matches `DeferralStore.pending`'s bounded default, so the whole answerable
-    # queue fits one page and ADR-0078 §7's "the cap is legible from the first page"
-    # is true in the strongest sense. The ambient `ASSISTANT_DEFERRAL_QUEUE_LIMIT` is
-    # swept by `hermetic_assistant_env`, which is autouse over the whole suite and is
-    # the whole of how that guard is applied (issues #1058, #1395, #1989).
-    assert Settings().deferral_queue_limit == 50
-
-
-@pytest.mark.parametrize("value", [0, -1])
-def test_a_non_positive_deferral_queue_limit_is_rejected(value: int) -> None:
-    # A cap of 0 is at capacity before its first admission, so every `ASK_USER`
-    # proposal is refused and the drop ADR-0078 exists to end returns in full, by
-    # configuration, while the system reports health. Exactly the class of value
-    # ADR-0022 §4a refuses at construction. There is no "unlimited" spelling either:
-    # an uncapped queue is what §7 exists to prevent.
-    with pytest.raises(ValidationError):
-        Settings(deferral_queue_limit=value)
-
-
-@pytest.mark.parametrize("value", ["0", "-1"])
-def test_load_settings_rejects_a_non_positive_deferral_queue_limit(
-    monkeypatch: pytest.MonkeyPatch, value: str
-) -> None:
-    monkeypatch.setenv("ASSISTANT_DEFERRAL_QUEUE_LIMIT", value)
-    with pytest.raises(ConfigurationError, match="invalid configuration"):
-        load_settings()
+    for name in _RETIRED_DEFERRAL_SETTINGS:
+        assert name not in Settings.model_fields
+        assert not hasattr(settings, name)
 
 
 # --- ADR-0193 §1's ceiling on outstanding standing recipient grants ----------
@@ -859,12 +795,10 @@ def test_every_integer_setting_is_discovered() -> None:
     """
     assert set(_INTEGER_FIELDS) == {
         "model_max_attempts",
-        "deferral_queue_limit",
         # ADR-0130 §7's cap on actionable held notifications, acknowledged here
-        # for `deferral_queue_limit`'s reason and with the same `bool` argument:
-        # `notification_queue_limit=True` is a store at capacity after its first
-        # admission, which drops every later candidate while the system reports
-        # health.
+        # with the `bool` argument: `notification_queue_limit=True` is a store at
+        # capacity after its first admission, which drops every later candidate
+        # while the system reports health.
         "notification_queue_limit",
         # ADR-0084 §3's transport figures. Acknowledged here rather than exempted:
         # each is refused at load unless strictly positive, and joining this tuple
@@ -1034,7 +968,7 @@ def test_every_integer_setting_is_discovered() -> None:
 @pytest.mark.parametrize("name", _INTEGER_FIELDS)
 @pytest.mark.parametrize("value", [True, False])
 def test_every_integer_setting_refuses_a_bool(name: str, value: bool) -> None:
-    """``Settings(deferral_queue_limit=True)`` is a mistake, not a queue of one.
+    """``Settings(notification_queue_limit=True)`` is a mistake, not a cap of one.
 
     Pydantic's non-strict ``int`` coercion accepts ``True`` as ``1`` because
     ``bool`` is an ``int`` subclass, and ``1`` satisfies every bound these fields
@@ -1109,7 +1043,7 @@ def test_a_value_that_cannot_describe_itself_is_still_a_validation_error() -> No
             raise RuntimeError(msg)
 
     with pytest.raises(ValidationError, match="expected an integer"):
-        _settings_with("deferral_queue_limit", Unprintable())
+        _settings_with("notification_queue_limit", Unprintable())
 
 
 @pytest.mark.parametrize("name", _INTEGER_FIELDS)
@@ -1127,7 +1061,7 @@ def test_every_integer_setting_still_parses_from_the_environment(
     """The operator-facing path is untouched, and this is what keeps it so.
 
     #471 is reachable only from untyped code constructing ``Settings`` directly —
-    ``ASSISTANT_DEFERRAL_QUEUE_LIMIT=True`` already fails int parsing at load.
+    ``ASSISTANT_NOTIFICATION_QUEUE_LIMIT=True`` already fails int parsing at load.
     So the guard accepts a ``str`` alongside an exact ``int``: an environment
     variable and a ``.env`` entry both arrive as one, and a guard that demanded an
     exact ``int`` and nothing else would break *every* integer setting in every
@@ -1266,7 +1200,6 @@ def test_every_duration_setting_is_discovered() -> None:
         "hub_max_notification_budget",
         "episode_retention",
         "conversation_tombstone_grace",
-        "deferral_ttl",
         # ADR-0083 §4's phase-A budget. Acknowledged here rather than exempted:
         # §7 requires *every* duration the hub adds to be refused at load unless
         # finite and strictly positive, and joining this tuple is what subjects
@@ -1300,9 +1233,9 @@ def test_every_duration_setting_is_discovered() -> None:
         # minutes rather than hours and why a `bool` here is the difference
         # between "re-rule every five minutes" and "re-rule every second".
         "notification_reconsider_interval",
-        # ADR-0130 §7's retention for a held notification, on `deferral_ttl`'s
-        # convention: finite by default, with `None` the user's deliberate "keep
-        # them" and the one escape the cap axis does not offer.
+        # ADR-0130 §7's retention for a held notification: finite by default,
+        # with `None` the user's deliberate "keep them" and the one escape the cap
+        # axis does not offer.
         "notification_retention",
         # ADR-0111 §4's run budget. It does **not** follow §7's nullable convention,
         # for ``hub_read_timeout``'s reason one clause on: a chunked run with no

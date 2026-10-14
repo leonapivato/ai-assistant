@@ -79,7 +79,6 @@ from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeConversationStore,
-    FakeDeferralStore,
     FakeDestinationTrustStore,
     FakeMemoryStore,
     FakePlanStore,
@@ -204,7 +203,6 @@ def _engine(
     plans = FakePlanStore(now=lambda: AT)
     trail = FakeAuditTrail()
     memory = FakeMemoryStore(now=lambda: AT) if memory is None else memory
-    deferrals = FakeDeferralStore(now=lambda: AT)
     conversations = FakeConversationStore(now=lambda: AT)
     return Engine(
         chat_reader=False,
@@ -221,7 +219,6 @@ def _engine(
         # and the read pair's consumer lane is its own (ADR-0186 §11).
         reads=FakeSourceReadTrail(),
         memory=memory,
-        deferrals=deferrals,
         # The narrow deletion seam and its horizon (ADR-0119 §7, §10). Required on
         # the façade, and nothing in this module sweeps: an adapter test is about
         # what the CLI renders, not about the maintenance operation.
@@ -2229,7 +2226,6 @@ def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
     plans = FakePlanStore(now=lambda: AT)
     trail = FakeAuditTrail()
     memory = FakeMemoryStore(now=lambda: AT)
-    deferrals = FakeDeferralStore(now=lambda: AT)
     conversations = FakeConversationStore(now=lambda: AT)
     engine = Engine(
         chat_reader=False,
@@ -2243,7 +2239,6 @@ def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
         # ADR-0186 §10's read trail, on the sibling builder's terms above.
         reads=FakeSourceReadTrail(),
         memory=memory,
-        deferrals=deferrals,
         # The narrow deletion seam and its horizon (ADR-0119 §7, §10). Required on
         # the façade, and nothing in this module sweeps: an adapter test is about
         # what the CLI renders, not about the maintenance operation.

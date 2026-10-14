@@ -37,7 +37,6 @@ from ai_assistant.memory import (
     DefaultNotificationPolicy,
     MemoryIngestor,
     ModelBackedReconciler,
-    SqliteDeferralStore,
     SqliteMemoryStore,
     SqliteNotificationOutbox,
     SqliteNotificationStore,
@@ -731,12 +730,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
       ``ToolRegistry`` and the acting ``ToolInvoker`` (ADR-0029 §8), and is handed
       the ``InvocationLedger`` face of the one :class:`SqliteAuditTrail` — never
       the trail itself (ADR-0192 §9);
-    * the deferred-question queue (ADR-0078) is opened here, under the same data
-      directory and owner-only file mode as the other Tier 1 stores, and joined to
-      the façade's ordered shutdown — with its claim-token source left at its
-      ``secrets``-backed **default**, which is the guarantee rather than a detail;
-    * **one** :class:`MemoryWriteStage` over that writer and that queue is shared by
-      every producer's stage (ADR-0078 §3);
+    * **one** :class:`MemoryWriteStage` over that writer is shared by every
+      producer's stage;
     * one :class:`SqlitePlanStore` and one :class:`SqliteAuditTrail` are shared by
       the phases and the façade — the façade reads the trail (query-only) for the
       decision and invocation listings (ADR-0052 §1);
@@ -1123,30 +1118,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             tombstone_grace=settings.conversation_tombstone_grace,
         )
         opened.append(conversations.close)
-        # The deferred-question queue (ADR-0078 §2). A **fourth** connection-owning
-        # Tier 1 store, under the same data directory and the same owner-only file
-        # mode, because what it holds is the user's own words waiting on an answer.
-        #
-        # Both tunings are the *user's* configuration and both reach the
-        # constructor, where they are validated once and read once: the lifetime is
-        # stamped onto each question at admission, so a later change to the setting
-        # cannot reach back and shorten a question already asked (§2), and the cap is
-        # strictly positive because a cap of zero would refuse every question while
-        # the system reported health (§7, ADR-0022 §4a).
-        #
-        # **The claim-token source is deliberately not passed.** Its default is a
-        # ``secrets``-backed draw, and that default is the guarantee: ``interrupted``
-        # publishes every claimed question's id to any caller, so a predictable token
-        # is one a reader can guess and spend. Wiring anything here — even something
-        # that looks random — is how "unpredictable" becomes a word in an ADR
-        # (§2, §10 item 4), which is why a test asserts the built store carries the
-        # default rather than trusting this comment.
-        deferrals = SqliteDeferralStore(
-            path=directory / "deferrals.db",
-            retention=settings.deferral_ttl,
-            queue_limit=settings.deferral_queue_limit,
-        )
-        opened.append(deferrals.close)
         # The **sixth** connection-owning Tier 1 store (ADR-0102 §7), under the same
         # data directory and the same owner-only file mode as the other five
         # Tier 1 stores,
@@ -1215,8 +1186,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # admission (§7, ADR-0022 §4a). The cap counts the **actionable** set, so
         # what it bounds is the list a person reads rather than the storage.
         #
-        # **The id source is deliberately not passed**, and for the opposite
-        # reason the deferral queue's claim-token source is not: a notification id
+        # **The id source is deliberately not passed**: a notification id
         # authorises nothing — every read that names one hands back the record
         # beside it — so it is an identity rather than a capability, and the
         # default is a plain UUID rather than a ``secrets`` draw.
@@ -1654,10 +1624,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 max_conflicts=settings.reconciler_max_conflicts,
             ),
         )
-        # **One** write stage, over that writer and that deferral queue, shared by
-        # every producer's stage (ADR-0078 §3): the queue it enqueues into is the
-        # same instance the engine's retention sweep purges.
-        writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
+        # **One** write stage, over that writer, shared by every producer's stage.
+        # An `ASK_USER` ruling writes nothing and is logged (ADR-0309 §5).
+        writes = MemoryWriteStage(writer=writer)
         # ADR-0300 §5's tidy-up, **one operation** for planning's tidy-up call (ADR-0300 §10:4), so
         # at most one run is on a story at a time (§5:10). Its lookalike search keeps what recall
         # would, at recall's threshold for the embedder wired (ADR-0303 §5:7). It runs on
@@ -1800,12 +1769,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # the inspection surface lists the beliefs the assistant actually uses
             # and ``forget`` destroys what the user was shown (ADR-0073 §7).
             memory=memory,
-            # The very queue `writes` enqueues into, so the retention sweep
-            # (ADR-0083 §7) reclaims the rows the write stage parked. A second queue
-            # here would report a cap kept over rows nobody can see (ADR-0078 §1,
-            # §10 item 8).
-            deferrals=deferrals,
-            # The seventh database's **deletion seam**, and the third store the one
+            # The seventh database's **deletion seam**, and a store the one
             # maintenance operation sweeps (ADR-0119 §10). The very object opened
             # above, narrowed by the parameter's own annotation to
             # ``TraceRetention``: the engine may sweep the trace store and may not
@@ -2071,24 +2035,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 _as_async(stories.close),
                 _as_async(plans.close),
                 _as_async(conversations.close),
-                # The deferral queue joins the façade's ordered shutdown (ADR-0042
-                # §2, ADR-0078 §10 item 5).
-                #
-                # **Its `purge` is wired exactly where `purge_expired` is, and at
-                # the same time** (ADR-0078 §10 item 8): "it does not get a new
-                # one… this store's purge is wired wherever `purge_expired` is
-                # wired and inherits the same fate. Inventing a second sweeping
-                # mechanism for one store would be the thing that has to be undone
-                # at leg 5." Leg 5 is here: both are called by `Engine.purge_expired`
-                # as **one** operation, run by the hub's scheduler on one interval
-                # (ADR-0083 §7, §8). Nothing in this file schedules anything —
-                # cadence is a property of a deployment, not of the wiring, which is
-                # why the scheduler is a peer above this layer and not inside it.
-                #
-                # Correctness never depended on either sweep running; ADR-0078 §1's
-                # exposure cap did, and that is what has now been bought.
-                _as_async(deferrals.close),
-                # The grant store joins the same ordered shutdown as the other five
+                # The grant store joins the same ordered shutdown as the other
                 # Tier 1 stores (ADR-0083 ruling 4, ADR-0102 §7).
                 _as_async(grants.close),
                 # And the read trail immediately after it, which is the one ordering

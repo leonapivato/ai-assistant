@@ -76,7 +76,6 @@ def _wired(
         spend=harness.trail,
         reads=harness.reads,
         memory=harness.memory,
-        deferrals=harness.deferrals,
         traces=harness.traces,
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
@@ -436,9 +435,9 @@ async def test_a_reconsideration_sweep_rules_inside_a_bound_correlation() -> Non
 async def test_the_sweep_reports_the_notifications_it_reclaimed() -> None:
     """ADR-0130 §7: the purge job ADR-0083 §7 already runs calls this store's purge.
 
-    A fourth call behind the one operation ADR-0083 §11 permits, rather than a
-    second sweeping mechanism — the instruction ADR-0078 §10 item 8 gave for the
-    deferral queue and ADR-0119 §10 repeated for the trace store.
+    Another call behind the one operation ADR-0083 §11 permits, rather than a
+    second sweeping mechanism — the instruction ADR-0119 §10 applied to the trace
+    store.
     """
     now = AT
     store = FakeNotificationStore(now=lambda: now, retention=timedelta(seconds=1))

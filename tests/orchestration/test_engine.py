@@ -21,7 +21,6 @@ import pytest
 from pydantic import SecretStr
 
 from ai_assistant.core.errors import (
-    DeferralStoreError,
     MemoryStoreError,
     OversizedValueError,
     TraceStoreError,
@@ -83,7 +82,6 @@ from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeConversationStore,
-    FakeDeferralStore,
     FakeDestinationTrustStore,
     FakeMemoryStore,
     FakePlanStore,
@@ -149,7 +147,7 @@ def _grant_ids() -> Callable[[], str]:
 def _grant_operations(sources: Sequence[HeldSource] = ()) -> GrantOperations:
     """The grant collaborator every ``Engine`` needs (ADR-0102 §7).
 
-    Required rather than optional on the façade, like ``questions``: the four grant
+    Required rather than optional on the façade: the four grant
     methods are on the Protocol, so an engine that could be built without them is one
     whose surface is conditionally present. Empty
     ``sources`` is the ordinary deployment — a reader ships disabled, so nothing is
@@ -312,7 +310,6 @@ class Harness:
         conversation_store: FakeConversationStore | None = None,
         destination_trust: FakeDestinationTrustStore | None = None,
         closers: Sequence[object] = (),
-        queue_limit: int = 50,
         drain_timeout: timedelta | None = None,
         traces: FakeTraceRetention | None = None,
         trace_sink: FakeTraceSink | None = None,
@@ -423,9 +420,6 @@ class Harness:
             now=lambda: AT,
         )
         self.ids = iter(f"d-{n}" for n in range(1, 100))
-        # The deferral queue the engine's retention sweep purges (ADR-0078 §10 item
-        # 8), kept on the harness so a case can count what the sweep reached.
-        self.deferrals = FakeDeferralStore(now=lambda: AT, queue_limit=queue_limit)
         # ADR-0185 §5's trail, whole, as the composition root hands it to the façade
         # (ADR-0186 §10). A knob for ``trail``'s reason, one store over: the read
         # surface's own cases need a **durable** trail, because the order
@@ -472,7 +466,6 @@ class Harness:
             spend=self.trail,
             reads=self.reads,
             memory=self.memory,
-            deferrals=self.deferrals,
             traces=self.traces,
             trace_sink=self.trace_sink,
             trace_retention=trace_retention,
@@ -584,61 +577,38 @@ async def test_the_drain_records_which_phase_it_ended_in() -> None:
 # --- the maintenance surface (ADR-0083 §8) -----------------------------
 
 
-def _counting_purges(harness: Harness, *, records: int, questions: int) -> dict[str, int]:
-    """Replace both stores' sweeps with counters, on the very instances wired in.
+def _counting_purges(harness: Harness, *, records: int) -> dict[str, int]:
+    """Replace the memory store's sweep with a counter, on the very instance wired in.
 
-    The *semantics* of each sweep — which rows are past their deadline, and the two
-    anchors ADR-0078 §2 gives the deferral queue — belong to the stores and are held
-    to their Protocols by the shared conformance suites. What is unproven anywhere
-    else, and is the whole of ADR-0078 §10 item 8, is that **one** façade operation
-    reaches **both** of them and reports each count as its own. Distinct return
-    values are what make the second half checkable: equal ones would pass for an
-    implementation that swept one store twice.
+    The *semantics* of the sweep — which rows are past their deadline — belong to the
+    store and are held to its Protocol by the shared conformance suite. What is
+    unproven anywhere else is that the façade operation reaches it and reports its
+    count as its own.
     """
-    calls = {"records": 0, "questions": 0}
+    calls = {"records": 0}
 
     async def purge_memory() -> int:
         calls["records"] += 1
         return records
 
-    async def purge_questions() -> int:
-        calls["questions"] += 1
-        return questions
-
     harness.memory.purge_expired = purge_memory  # type: ignore[method-assign]
-    harness.deferrals.purge = purge_questions  # type: ignore[method-assign]
     return calls
 
 
-async def test_the_purge_sweeps_both_tier_one_stores_and_reports_each_count() -> None:
-    """ADR-0083 §8's maintenance surface, and ADR-0078 §10 item 8 taken literally.
+async def test_the_purge_sweeps_the_memory_store_and_reports_its_count() -> None:
+    """ADR-0083 §8's maintenance surface reaches the memory store's sweep once.
 
-    One façade operation over **two** stores, because the deferral queue's purge "is
-    wired wherever ``purge_expired`` is wired and inherits the same fate", and
-    "inventing a second sweeping mechanism for one store would be the thing that has
-    to be undone at leg 5". A version that swept only memory would satisfy the name
-    and leave ADR-0078 §1's exposure cap unkept for exactly the rows that hold the
-    user's own words.
+    The report carries no ``questions`` count: the deferred-question queue retired
+    (ADR-0309 §5), so the operation no longer sweeps it.
     """
     harness = Harness()
-    calls = _counting_purges(harness, records=3, questions=2)
+    calls = _counting_purges(harness, records=3)
 
     report = await harness.engine.purge_expired()
 
-    assert (report.records, report.questions) == (3, 2)
-    assert calls == {"records": 1, "questions": 1}
-
-
-async def test_the_purge_reaches_the_deferral_queue_it_was_wired_with() -> None:
-    """One queue, or the sweep reclaims rows nobody can see (ADR-0078 §1, §3).
-
-    A composition-root single-instance obligation no type can state, of the same
-    shape as ``plans`` and ``trail``. Wired to a second queue, ``purge_expired``
-    would report a cap kept while the rows the write stage parked kept growing.
-    """
-    harness = Harness()
-
-    assert harness.engine._deferrals is harness.deferrals
+    assert report.records == 3
+    assert calls == {"records": 1}
+    assert not hasattr(report, "questions")
 
 
 async def test_the_purge_is_drained_before_shutdown_closes_resources() -> None:
@@ -707,15 +677,16 @@ async def test_the_purge_is_refused_once_shutdown_has_begun() -> None:
     assert str(raised.value) == ENGINE_SHUTTING_DOWN
 
 
-async def test_a_failing_memory_sweep_does_not_reach_the_deferral_sweep() -> None:
-    """Nothing sequences the two, so a half-done sweep must not report success.
+async def test_a_failing_memory_sweep_does_not_reach_the_trace_sweep() -> None:
+    """Nothing sequences the sweeps, so a half-done sweep must not report success.
 
-    The next tick simply re-runs both — a missed sweep is never a correctness bug
-    (ADR-0007 §2) — and swallowing the first failure to reach the second would claim
-    a sweep that half happened. The scheduler logs the failure and retries (§7).
+    The next tick simply re-runs them all — a missed sweep is never a correctness bug
+    (ADR-0007 §2) — and swallowing the first failure to reach the next would claim a
+    sweep that half happened. The scheduler logs the failure and retries (§7).
     """
-    harness = Harness()
-    calls = _counting_purges(harness, records=0, questions=0)
+    traces = FakeTraceRetention()
+    traces.hold(_aged(400))
+    harness = Harness(traces=traces)
 
     async def refuses() -> int:
         msg = "the memory store is unreadable"
@@ -726,7 +697,7 @@ async def test_a_failing_memory_sweep_does_not_reach_the_deferral_sweep() -> Non
     with pytest.raises(MemoryStoreError):
         await harness.engine.purge_expired()
 
-    assert calls["questions"] == 0
+    assert len(traces.recorded) == 1
 
 
 # --- the trace horizon, swept by that same operation (ADR-0119 §10) -----
@@ -836,7 +807,6 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
         spend=harness.trail,
         reads=harness.reads,
         memory=harness.memory,
-        deferrals=harness.deferrals,
         traces=harness.traces,
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
@@ -848,30 +818,6 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
 
     assert report.traces == 0
     assert traces.recorded == (ancient,)
-
-
-async def test_a_failing_deferral_sweep_does_not_reach_the_trace_sweep() -> None:
-    """The third call inherits the second's fate, for the second's own reason.
-
-    Nothing sequences the three, so the next tick re-runs all of them; swallowing a
-    Tier 1 failure to reach the trace store would report a sweep that half happened,
-    and would do it in the direction that matters least — the trace horizon is a
-    disk-space policy, where the deferral queue's is ADR-0078 §1's exposure cap.
-    """
-    traces = FakeTraceRetention()
-    traces.hold(_aged(400))
-    harness = Harness(traces=traces)
-
-    async def refuses() -> int:
-        msg = "the deferral queue is unreadable"
-        raise DeferralStoreError(msg)
-
-    harness.deferrals.purge = refuses  # type: ignore[method-assign]
-
-    with pytest.raises(DeferralStoreError):
-        await harness.engine.purge_expired()
-
-    assert len(traces.recorded) == 1
 
 
 async def test_a_failing_trace_sweep_reaches_the_caller() -> None:
@@ -886,13 +832,13 @@ async def test_a_failing_trace_sweep_reaches_the_caller() -> None:
     traces = FakeTraceRetention()
     traces.fail_purge()
     harness = Harness(traces=traces)
-    calls = _counting_purges(harness, records=1, questions=1)
+    calls = _counting_purges(harness, records=1)
 
     with pytest.raises(TraceStoreError):
         await harness.engine.purge_expired()
 
-    # The two Tier 1 sweeps ran and are not undone: the next tick re-runs all three.
-    assert calls == {"records": 1, "questions": 1}
+    # The memory sweep ran and is not undone: the next tick re-runs them all.
+    assert calls == {"records": 1}
 
 
 def test_the_engine_never_reads_a_trace_back() -> None:
@@ -2223,7 +2169,7 @@ def test_each_seam_label_is_the_literal_name_of_its_own_method() -> None:
     assert mislabelled == {}, "each _tracked call passes its own method's name"
 
 
-async def test_the_maintenance_operation_carries_its_three_counts() -> None:
+async def test_the_maintenance_operation_carries_its_counts() -> None:
     """§5's one-crossing rule: the sweep's detail rides on the sweep's own trace.
 
     "A job with detail the envelope cannot see returns it in the operation's own
@@ -2238,7 +2184,7 @@ async def test_the_maintenance_operation_carries_its_three_counts() -> None:
 
     (trace,) = harness.trace_sink.recorded
     assert trace.seam == "purge_expired"
-    assert dict(trace.metrics) == {"records": 0, "questions": 0, "traces": 1}
+    assert dict(trace.metrics) == {"records": 0, "traces": 1}
 
 
 async def test_a_sweep_that_did_not_run_omits_its_key_rather_than_reporting_zero() -> None:
@@ -2256,7 +2202,7 @@ async def test_a_sweep_that_did_not_run_omits_its_key_rather_than_reporting_zero
 
     (trace,) = harness.trace_sink.recorded
     assert "traces" not in trace.metrics
-    assert dict(trace.metrics) == {"records": 0, "questions": 0}
+    assert dict(trace.metrics) == {"records": 0}
 
 
 def test_a_halted_consolidation_reads_as_incomplete() -> None:

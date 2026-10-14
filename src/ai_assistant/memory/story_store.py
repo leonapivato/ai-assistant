@@ -9,7 +9,7 @@ in the data directory. Beside each story it keeps the story's notes and summary
 puts the store in ``memory/`` and makes ``StoryStore`` its own Protocol, not a
 corner of ``MemoryStore``: the store is a graph with its own log, and it reads no
 other store. Nothing here imports the memory store, and nothing in the memory store
-imports this — the placement ``deferral_store.py`` already has, for the same reason.
+imports this.
 
 **Two records, one transaction.** The clean view (``members``) and the change log
 (``log``) are written in one ``BEGIN IMMEDIATE`` transaction per operation, so
@@ -369,10 +369,11 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     and runs the SQL in a worker thread, which cannot be interrupted. Cancelling the
     awaiting coroutine outright would release the lock while the worker still used
     the connection (ADR-0054, ADR-0060), so a cancellation is absorbed until the
-    worker finishes and then re-raised. Deliberately duplicated from
-    :mod:`ai_assistant.memory.deferral_store` rather than shared, for the reason that
-    module gives; the completion wait is submitted at most once (#697), and every
-    failure the worker sees is relayed, ``BaseException`` included (#680).
+    worker finishes and then re-raised. Deliberately duplicated in each store rather
+    than shared: ADR-0060 refuses a common home for this helper, so that subsystems
+    depend on the obligation and not on one way of meeting it. The completion wait is
+    submitted at most once (#697), and every failure the worker sees is relayed,
+    ``BaseException`` included (#680).
     """
     done = threading.Event()
     outcome: list[T] = []
@@ -726,8 +727,9 @@ class SqliteStoryStore:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
 
         A missing sidecar is the ordinary case and a symlinked one is skipped rather
-        than followed, as :class:`~ai_assistant.memory.deferral_store.
-        SqliteDeferralStore` does and for its reasons. A no-op in memory.
+        than followed: ``chmod`` follows links, so restricting one would narrow a file
+        that holds none of this store's data, and SQLite does not follow such a link
+        either, so skipping it strands nothing. A no-op in memory.
         """
         if self._path == ":memory:":
             return
