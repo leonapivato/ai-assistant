@@ -63,14 +63,13 @@ repository ships to anyone who installs it.
 superseding ADR-0175 §6's first clause and its figure of five; ADR-0285 §6 took
 ``observe`` out of it, ADR-0293 §11 retires ``converse_streaming``, and ADR-0309
 §5:4 and ADR-0313 §3:4 retire ``converse`` and ``converse_spoken`` with the Ask panel
-and push-to-talk; this gateway serves none of the three). Among those served here:
-``recent_conversations``, ``conversation`` and ``forget_conversation``, together
-with the grant surface — ``grantable_sources``, ``grant``, ``revoke``,
+and push-to-talk; this gateway serves none of the three; and ADR-0309 §5 retires the
+deferred-question, goal and authorization operations with their panels). Among those
+served here: ``recent_conversations``, ``conversation`` and ``forget_conversation``,
+together with the grant surface — ``grantable_sources``, ``grant``, ``revoke``,
 ``recent_grants``, ``standing_grants`` — the belief surface — ``beliefs``,
-``belief``, ``forget`` — the deferred-question surface — ``questions``,
-``interrupted_questions``, ``answer``, ``forget_question`` — the
-notification *review* surface — ``notifications``, ``dismiss_notification``,
-``forget_notification``, ``notification_preferences``,
+``belief``, ``forget`` — the notification *review* surface — ``notifications``,
+``dismiss_notification``, ``forget_notification``, ``notification_preferences``,
 ``set_notification_preferences`` — and the connection surface —
 ``connect_account``, ``reprovision_account``, ``disconnect_account``,
 ``connected_accounts``, ``recent_connection_acts``. ADR-0296's record on ADR-0177
@@ -160,7 +159,6 @@ from ai_assistant.core.types import (
     CHAT_DEVICES_MAX,
     DEFAULT_PAGE_SIZE,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
-    AnswerOutcome,
     Attestation,
     AuthorizationProjection,
     AuthorizationView,
@@ -196,7 +194,6 @@ from ai_assistant.core.types import (
     FrozenJson,
     GoalDisambiguation,
     GoalEngagement,
-    GoalSummary,
     GrantableSource,
     GrantScope,
     HeldNotification,
@@ -382,8 +379,9 @@ _CHAT_FOLLOW_PATH: Final = "/chat/follow"
 #: shape). ADR-0297 §6:4 rules that "the command line and the gateway's stop control
 #: land last", and its Consequences give the interfaces lane "the gateway's stop control
 #: beside 'working…', built on the current state's id" — so the route follows the
-#: governing decision, as :data:`_CANCEL_READ_PATH` and :data:`_AUTHORIZATIONS_PATH`
-#: did, and the reciprocal header record on ADR-0177 is ADR-0297's to make.
+#: governing decision, as :data:`_CANCEL_READ_PATH` did (and the authorizations
+#: routes did, before ADR-0309 §5 retired them with their panel), and the reciprocal
+#: header record on ADR-0177 is ADR-0297's to make.
 #:
 #: **Not under** ``/chat/``: the act names an activation, not a conversation, and the
 #: answer says nothing about any conversation — a conversation's devices learn how it
@@ -415,24 +413,14 @@ _BELIEFS_PATH: Final = "/beliefs"
 _BELIEF_PATH: Final = "/belief"
 _FORGET_BELIEF_PATH: Final = "/belief/forget"
 
-#: ADR-0078 §8's four façade methods, reached as ADR-0177 §1 admits them. The two
-#: listings are separate paths because they answer different questions — one is
-#: what is waiting for an answer, the other is what was begun and never recorded
-#: (ADR-0078 §9) — and no single read of one question exists (#495), which is what
-#: §5's ``forget_question`` ceremony is met with instead.
-_QUESTIONS_PATH: Final = "/questions"
-_INTERRUPTED_PATH: Final = "/questions/interrupted"
-_ANSWER_PATH: Final = "/question/answer"
-_FORGET_QUESTION_PATH: Final = "/question/forget"
-
 #: ADR-0177 §8's CONFIRM pair, unblocked by ADR-0178's merge and no sooner: §8's
 #: precondition is "discharged rather than replaced, on its own stated firing
 #: condition" (ADR-0178 §8), and what the surface owes once it is unblocked is §8's
 #: other clauses plus ADR-0178 §7's floor.
 #:
 #: **Two paths, and the listing is a path of its own rather than an empty answer of
-#: the other**, for the reason the question surface states one panel over: a recovery
-#: read and an act on one recovered park answer different questions, and a door that
+#: the other**: a recovery read and an act on one recovered park answer different
+#: questions, and a door that
 #: classifies "from its method and path alone" (ADR-0168 §6) must not have a body that
 #: failed to parse read as a listing.
 #:
@@ -456,52 +444,6 @@ _RESUME_PATH: Final = "/confirmation/resume"
 #: cancellation reached by guessing. The verb comes last for :data:`_RESUME_PATH`'s own
 #: reason — the path names the thing acted on and then the act.
 _CANCEL_READ_PATH: Final = "/confirmation/cancel-read"
-
-#: ADR-0250 §15's goal surface. **Three paths for the three operations that decision
-#: promotes** — ``goals``, ``withdraw_clarification`` and ``abandon_goal`` — which
-#: ADR-0177 §1's closed enumeration gains in that ADR's own ``- Status:`` line, the
-#: route §1's third clause fixes and ADR-0200's precedent for taking it.
-#:
-#: **Answering a clarification is not a fourth path**, and that is ADR-0250 §11's own
-#: construction rather than an economy here: "answering is a turn and not an operation
-#: of its own, and that is the whole reason ``converse`` gains a keyword rather than the
-#: surface gaining a fifth verb". That turn was the Ask route's, which ADR-0309 §5:4
-#: retires with the Ask panel, so no browser carries one any more.
-#:
-#: **The verb comes last for** :data:`_CANCEL_READ_PATH`'s **reason**: the path names
-#: the thing acted on and then the act, so a later act on the same record kind cannot be
-#: reached by guessing this one. And the listing is its own path rather than an empty
-#: answer of either act, because the door classifies "from its method and path alone"
-#: (ADR-0168 §6).
-_GOALS_PATH: Final = "/goals"
-_WITHDRAW_CLARIFICATION_PATH: Final = "/clarification/withdraw"
-_ABANDON_GOAL_PATH: Final = "/goal/abandon"
-
-#: ADR-0254 §11's goal-authorization surface. **Two paths for the two operations that
-#: decision promotes** — a listing and a revocation — which is the whole of its §16
-#: roster on ``AssistantEngine``.
-#:
-#: **ADR-0177 §1's closed enumeration is widened by this and ADR-0254's own
-#: ``- Status:`` line does not yet record it** (issue #2274 is the same shape, one
-#: decision earlier). ADR-0254 §11 owes *"a listing and a revocation"* on **the
-#: surfaces**, and §20 assigns *"the interface adapters that render them"* to this
-#: lane — so the routes follow the governing decision, exactly as ADR-0244 §13's
-#: ``cancel_read`` route did, and the reciprocal header record on ADR-0177 is ADR-0254's
-#: to make rather than this lane's. That record is filed rather than written here
-#: because an ADR text change is outside this lane's fence.
-#:
-#: **The listing is per goal and there is no goal-free path**, which is §11's decision
-#: rather than an omission here: a cross-goal read would have to choose between a
-#: truncated answer and an unbounded one, and *"a truncated answer to 'what do I
-#: authorise' is a false answer rather than a partial one"*. §19 books the cross-goal
-#: listing with what fires it.
-#:
-#: **The verb comes last** for :data:`_CANCEL_READ_PATH`'s reason — the path names the
-#: thing acted on and then the act — and the listing is its own path rather than an
-#: empty answer of the act, because the door classifies "from its method and path
-#: alone" (ADR-0168 §6).
-_AUTHORIZATIONS_PATH: Final = "/authorizations"
-_REVOKE_AUTHORIZATION_PATH: Final = "/authorization/revoke"
 
 #: ADR-0177 §10's notification review surface. Five paths for five operations, and
 #: **none of them is** :data:`_DELIVERIES_PATH`: what these operate on is the
@@ -569,18 +511,9 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _BELIEFS_PATH): "beliefs",
     ("POST", _BELIEF_PATH): "belief",
     ("POST", _FORGET_BELIEF_PATH): "forget",
-    ("POST", _QUESTIONS_PATH): "questions",
-    ("POST", _INTERRUPTED_PATH): "interrupted_questions",
-    ("POST", _ANSWER_PATH): "answer",
-    ("POST", _FORGET_QUESTION_PATH): "forget_question",
     ("POST", _CONFIRMATIONS_PATH): "pending_confirmations",
     ("POST", _RESUME_PATH): "resume",
     ("POST", _CANCEL_READ_PATH): "cancel_read",
-    ("POST", _GOALS_PATH): "goals",
-    ("POST", _WITHDRAW_CLARIFICATION_PATH): "withdraw_clarification",
-    ("POST", _ABANDON_GOAL_PATH): "abandon_goal",
-    ("POST", _AUTHORIZATIONS_PATH): "standing_authorizations",
-    ("POST", _REVOKE_AUTHORIZATION_PATH): "revoke_authorization",
     ("POST", _NOTIFICATIONS_PATH): "notifications",
     ("POST", _DISMISS_NOTIFICATION_PATH): "dismiss_notification",
     ("POST", _FORGET_NOTIFICATION_PATH): "forget_notification",
@@ -1396,18 +1329,9 @@ class Gateway:
             _BELIEFS_PATH: self._beliefs,
             _BELIEF_PATH: self._belief,
             _FORGET_BELIEF_PATH: self._forget_belief,
-            _QUESTIONS_PATH: self._questions,
-            _INTERRUPTED_PATH: self._interrupted_questions,
-            _ANSWER_PATH: self._answer,
-            _FORGET_QUESTION_PATH: self._forget_question,
             _CONFIRMATIONS_PATH: self._pending_confirmations,
             _RESUME_PATH: self._resume,
             _CANCEL_READ_PATH: self._cancel_read,
-            _GOALS_PATH: self._goals,
-            _WITHDRAW_CLARIFICATION_PATH: self._withdraw_clarification,
-            _ABANDON_GOAL_PATH: self._abandon_goal,
-            _AUTHORIZATIONS_PATH: self._authorizations,
-            _REVOKE_AUTHORIZATION_PATH: self._revoke_authorization,
             _NOTIFICATIONS_PATH: self._notifications,
             _DISMISS_NOTIFICATION_PATH: self._dismiss_notification,
             _FORGET_NOTIFICATION_PATH: self._forget_notification,
@@ -3316,90 +3240,6 @@ class Gateway:
         destroyed = await self._relayed(partial(self._engine.forget, named))
         return _rendered({"destroyed": destroyed})
 
-    # --- ADR-0078 §8: the deferred-question surface -----------------------
-
-    async def _questions(self, request: Request) -> Response:
-        """List the questions waiting for an answer.
-
-        Args:
-            request: The admitted request, carrying optional ``limit`` and ``offset``.
-
-        Returns:
-            The answerable questions, each with what accepting would retire.
-        """
-        payload = _payload(request)
-        waiting = await self._relayed(
-            partial(
-                self._engine.questions,
-                limit=_page(payload, "limit", DEFAULT_PAGE_SIZE),
-                offset=_page(payload, "offset", 0),
-            )
-        )
-        return _rendered({"questions": [_question_view(one) for one in waiting]})
-
-    async def _interrupted_questions(self, request: Request) -> Response:
-        """List the questions whose answer was begun and whose outcome is unrecorded.
-
-        A **second** listing rather than a filter on the first, because it answers a
-        different question: "not 'failed' and not 'retryable': the system does **not**
-        know whether the memory write landed" (ADR-0078 §9).
-
-        Args:
-            request: The admitted request, carrying optional ``limit`` and ``offset``.
-
-        Returns:
-            The interrupted questions.
-        """
-        payload = _payload(request)
-        begun = await self._relayed(
-            partial(
-                self._engine.interrupted_questions,
-                limit=_page(payload, "limit", DEFAULT_PAGE_SIZE),
-                offset=_page(payload, "offset", 0),
-            )
-        )
-        return _rendered({"questions": [_question_view(one) for one in begun]})
-
-    async def _answer(self, request: Request) -> Response:
-        """Answer one deferred question, and render what the answer did (ADR-0078 §5).
-
-        ``accept`` is required and is read as a boolean and nothing else: a missing or
-        mistyped member is refused rather than defaulted, because a default would be
-        this adapter deciding whether the user believes something.
-
-        Args:
-            request: The admitted request, carrying ``question_id`` and ``accept``.
-
-        Returns:
-            Which of the five outcomes happened, and what it left behind.
-        """
-        payload = _payload(request)
-        outcome = await self._relayed(
-            partial(
-                self._engine.answer,
-                _required_string(payload, "question_id"),
-                accept=_flag(payload, "accept"),
-            )
-        )
-        return _rendered({"answered": _answer_view(outcome)})
-
-    async def _forget_question(self, request: Request) -> Response:
-        """Destroy one deferred question, so its subject can be asked again.
-
-        The ceremony ADR-0177 §5 gives this verb at *this* surface is the front end's,
-        and it is met with the two listings rather than with a single-question read
-        that ADR-0078 §8 does not have (#495, cited and not absorbed).
-
-        Args:
-            request: The admitted request, carrying ``question_id``.
-
-        Returns:
-            Whether a question was destroyed.
-        """
-        named = _required_string(_payload(request), "question_id")
-        destroyed = await self._relayed(partial(self._engine.forget_question, named))
-        return _rendered({"destroyed": destroyed})
-
     # --- ADR-0177 §8, ADR-0178 §7: the CONFIRM prompt ---------------------
     #
     # ADR-0177 §8 blocked this surface "before a ratified decision supplies what
@@ -3487,154 +3327,6 @@ class Gateway:
             partial(self._engine.cancel_read, _token(_payload(request)))
         )
         return _rendered({"cancellation": cancelled.value})
-
-    # --- ADR-0250 §15: the goal surface -----------------------------------
-    #
-    # **Relay and render, and nothing more** (golden rule 3, ADR-0042 §6). ADR-0250 §15
-    # is explicit at this seam: "no adapter reads a store, joins a row, computes a
-    # member or composes a reply … ``interfaces/`` gains no read of a ``Goal``, a
-    # ``GoalAttempt``, a ``GoalQuestion``, a ``GoalCandidates`` or a ``PlanStore``".
-    # ``paused`` in particular is computed by the **engine**, "so that two surfaces
-    # cannot render it differently", and nothing below derives it.
-    #
-    # **Neither act rules on anything**, on :meth:`_cancel_read`'s clause: a withdrawal
-    # "records no answer, revises no interpretation and engages no goal", and an
-    # abandonment "does not move the attempt's state, does not write an
-    # ``AttemptOutcome``, does not end an execution and does not cancel anything in
-    # flight". Each answers one member of a closed vocabulary, and the page renders one
-    # fixed statement for it.
-
-    async def _goals(self, request: Request) -> Response:
-        """List what the user has outstanding, most recently engaged first.
-
-        ADR-0250 §15's listing, "from which a user learns what is outstanding and
-        obtains the references §11 and §13 take". Paged on ADR-0085 §3's convention and
-        **answering no total count**, on ADR-0074 §2's ground — so nothing here counts,
-        and a front end asks for the next page to find out whether there is more.
-
-        Args:
-            request: The admitted request, carrying optional ``limit`` and ``offset``.
-
-        Returns:
-            The page, each summary with the open question where one stands.
-        """
-        payload = _payload(request)
-        listed = await self._relayed(
-            partial(
-                self._engine.goals,
-                limit=_page(payload, "limit", DEFAULT_PAGE_SIZE),
-                offset=_page(payload, "offset", 0),
-            )
-        )
-        return _rendered({"goals": [_goal_summary_view(one) for one in listed]})
-
-    async def _withdraw_clarification(self, request: Request) -> Response:
-        """Take one clarification back without answering it (ADR-0250 §12).
-
-        **The browser supplies the question's id and nothing else**: §12 gives the
-        operation "no reason, no free text and no deadline", and this gateway adds none
-        of the three.
-
-        **This is not an answer and this adapter does not present it as one.** A
-        withdrawal "records no answer, revises no interpretation and engages no goal",
-        on ADR-0244 §11's distinction between a denial and a cancellation, and the page
-        renders one fixed statement for the member that comes back.
-
-        Args:
-            request: The admitted request, carrying ``question_id``.
-
-        Returns:
-            Which of :class:`~ai_assistant.core.types.ClarificationWithdrawal`'s two
-            states the act reached, as its own value. An unknown id is
-            ``NOTHING_TO_WITHDRAW`` and never a raise.
-        """
-        withdrawn = await self._relayed(
-            partial(
-                self._engine.withdraw_clarification,
-                _required_string(_payload(request), "question_id"),
-            )
-        )
-        return _rendered({"withdrawal": withdrawn.value})
-
-    async def _abandon_goal(self, request: Request) -> Response:
-        """Give one goal up, so nothing more is planned for it (ADR-0250 §12).
-
-        The one operation in this system that writes
-        :attr:`~ai_assistant.core.types.GoalStatus.ABANDONED`, and this adapter is a
-        conveyor of that act rather than a second producer of it: no expiry, no
-        silence, no timeout and no inference of the gateway's writes it either.
-
-        Args:
-            request: The admitted request, carrying ``goal_id``.
-
-        Returns:
-            Which of :class:`~ai_assistant.core.types.GoalAbandonment`'s **four**
-            states the act reached, as its own value — ADR-0261 §6 closed the
-            vocabulary at four with ``ABANDONED_EFFECT_IN_FLIGHT``. An unknown id is
-            ``NO_SUCH_GOAL`` and never a raise.
-        """
-        abandoned = await self._relayed(
-            partial(self._engine.abandon_goal, _required_string(_payload(request), "goal_id"))
-        )
-        return _rendered({"abandonment": abandoned.value})
-
-    # --- ADR-0254 §11: the goal-authorization surface ---------------------
-
-    async def _authorizations(self, request: Request) -> Response:
-        """What one goal's recorded acts still authorise (ADR-0254 §11).
-
-        **Unpaged and unlimited, deliberately.** The operation takes no ``limit``,
-        because a truncated answer to *"what do I authorise"* is a false answer rather
-        than a partial one — so a listing too large for the frame is refused whole.
-
-        **This adapter computes no liveness and reads no store.** ``live`` on each view
-        is the engine's own single clock reading (§16, ADR-0193 §9); a gateway that
-        compared instants of its own could disagree with the ruling about what stands,
-        and ADR-0042 §6 gives it no clock to compare with in any case.
-
-        Args:
-            request: The admitted request, carrying ``goal_id``.
-
-        Returns:
-            One view per ``ESTABLISHED`` row of that goal, live and lapsed. A goal this
-            system holds no record of is an empty listing and never a raise.
-        """
-        listed = await self._relayed(
-            partial(
-                self._engine.standing_authorizations,
-                _required_string(_payload(request), "goal_id"),
-            )
-        )
-        return _rendered({"authorizations": [_authorization_view(one) for one in listed]})
-
-    async def _revoke_authorization(self, request: Request) -> Response:
-        """Withdraw one standing authorization (ADR-0254 §11).
-
-        **The browser supplies the row's id and nothing else.** There is no narrowing,
-        no re-scoping and no partial withdrawal to express, so the operation takes no
-        second argument and this gateway adds none.
-
-        **The store's four-member vocabulary crosses unmapped** (§16), as its own
-        value: a second three-valued spelling for one fact is the second carrier
-        ADR-0150 is named after, and the page renders prose from the member.
-        ``would_duplicate`` is unreachable here — it is reachable only on a settlement
-        to ``ESTABLISHED`` — and this adapter neither filters it out nor translates it.
-
-        Args:
-            request: The admitted request, carrying ``authorization_id``.
-
-        Returns:
-            Which of :class:`~ai_assistant.core.types.AuthorizationSettlement`'s four
-            states the act reached, as its own value. An unknown id is
-            ``no_such_authorization`` and never a raise.
-        """
-        settlement = await self._relayed(
-            partial(
-                self._engine.revoke_authorization,
-                _required_string(_payload(request), "authorization_id"),
-            )
-        )
-        return _rendered({"settlement": settlement.value})
 
     # --- ADR-0177 §10: the notification review surface --------------------
     #
@@ -5226,54 +4918,6 @@ def _disambiguation_view(disambiguation: GoalDisambiguation) -> dict[str, Any]:
     }
 
 
-def _goal_summary_view(summary: GoalSummary) -> dict[str, Any]:
-    """Translate one goal as the listing shows it (ADR-0250 §15).
-
-    **``paused`` is carried and never derived.** It is "computed and never stored", by
-    ADR-0249 §5's definition, and "the engine computes it, so that two surfaces cannot
-    render it differently — and no adapter derives it". So this copies the boolean it
-    was handed and compares no status against any attempt state.
-
-    **``effect_in_flight`` is carried on exactly that ground** (ADR-0261 §6), which
-    names ``paused`` as its own precedent — "ADR-0250 §15's own clause for ``paused``,
-    one fact over". It is true "where any step of any execution any attempt of that goal
-    opened stands ``INDETERMINATE`` or ``RUNNING``", computed per read and never stored,
-    and the engine takes one ``PlanStore.has_outstanding_effect`` call per listed goal.
-    So this copies the boolean and walks nothing.
-
-    **It is goal-wide and not per-attempt** (§6): a goal reopened after a cancellation
-    that left an ``INDETERMINATE`` step carries that uncertainty on an **older** attempt,
-    and a per-attempt answer would report an outstanding effect beside an act that said
-    there was none.
-
-    **The id crosses because the resume act takes it** (§13): the cross-conversation
-    resumption is "a ``TurnReference`` carrying a ``goal_id``, performed from a surface
-    listing the user was shown (§15)", and there is no other route to one.
-
-    **It carries no attempt id, no revision number, no element, no ground, no evidence
-    reference and no plan** — the type carries none, so there is none to drop.
-    """
-    return {
-        "id": summary.id,
-        "outcome": summary.outcome,
-        "status": summary.status.value,
-        "paused": summary.paused,
-        # ADR-0261 §6's field, carried on `paused`'s own ground: "the engine computes
-        # it, so that two surfaces cannot render it differently, and no adapter derives
-        # it" — ADR-0250 §15's clause for `paused`, one fact over. So this copies the
-        # boolean it was handed and walks no attempt, execution or step. It is goal-wide
-        # and not per-attempt (§6), and it is a **query** rather than a stored record:
-        # "computed per read and never stored", which is why nothing here caches it.
-        "effect_in_flight": summary.effect_in_flight,
-        "last_engaged_at": (
-            None if summary.last_engaged_at is None else summary.last_engaged_at.isoformat()
-        ),
-        "clarification": (
-            None if summary.clarification is None else _clarification_view(summary.clarification)
-        ),
-    }
-
-
 def _step_view(step: StepOutcome | None) -> dict[str, Any] | None:
     """Translate the step this pass drove, keeping the gate's verdict apart from the outcome.
 
@@ -6458,24 +6102,6 @@ def _routed_records(operation: RoutableOperation, listing: RoutedListing) -> lis
     """
     view = _ROUTED_ARM_VIEWS[routed_listing_arm(operation)]
     return [view(one) for one in listing]
-
-
-def _answer_view(outcome: AnswerOutcome) -> dict[str, Any]:
-    """What one answer did, as one of five outcomes (ADR-0078 §5, §9).
-
-    ``successor_refused`` and ``disposed`` travel **beside** the outcome and never in
-    place of it: a re-deferral that could queue no follow-up at all is not the same
-    as one that did, and a question destroyed while its answer was being applied is a
-    true statement about the bookkeeping rather than about the answer.
-    """
-    return {
-        "kind": outcome.kind.value,
-        "question_id": outcome.question_id,
-        "record_id": outcome.record_id,
-        "successor": _successor_view(outcome.successor),
-        "successor_refused": outcome.successor_refused,
-        "disposed": outcome.disposed,
-    }
 
 
 def _notification_view(record: HeldNotification, *, now: datetime) -> dict[str, Any]:
