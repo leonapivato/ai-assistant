@@ -2,12 +2,12 @@
 
 A message written into a conversation is recorded and answered *received* by the act
 that wrote it; the chat's reader then takes it in as a push, the activation it starts
-runs as a typed turn over the conversation's recent transcript, and the adapter writes
-what the compose stage produced as one assistant message into the conversation the
-input came from — or the fixed *couldn't finish* message where the pass ended without a
-reply. One activation runs per conversation at a time: what is written meanwhile waits
-and is taken in together, as one input, when it ends. A restart takes in what was never
-taken in, never what an interrupted activation took in, and writes nothing.
+runs as a typed turn over the conversation's recent transcript, and the phases write
+its messages into the conversation the input came from — or the fixed *couldn't finish*
+message where the pass could not finish. One activation runs per conversation at a time:
+what is written meanwhile waits and is taken in together, as one input, when it ends. A
+restart takes in what was never taken in, never what an interrupted activation took in,
+and writes nothing.
 """
 
 from __future__ import annotations
@@ -23,30 +23,23 @@ from understanding_support import STATED_PROPOSAL, understanding_stage
 
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
-    TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEnding,
     ChatDevice,
     DeviceAccess,
-    Disposition,
     EpisodicMemory,
-    ExecutionState,
     MessageAuthor,
     NewMessage,
     ProcessingStatus,
     RecordedChannelTrigger,
     RecordedTextInput,
     RoundResponse,
-    StepOutcome,
     TranscriptMessage,
-    TurnOutcome,
     UserMessage,
 )
 from ai_assistant.orchestration.chat import (
     COULDNT_FINISH,
     ChatInput,
     ChatReader,
-    chat_effects,
-    chat_reply,
     couldnt_finish,
 )
 from ai_assistant.orchestration.conversations import fitted_message
@@ -184,18 +177,11 @@ def _input_of(episode: EpisodicMemory) -> str:
     return trigger.payload.text
 
 
-def _replied(text: str, *, degraded: bool = False) -> TurnOutcome:
-    """An outcome carrying a composed reply; the adapter reads nothing else of it."""
-    return TurnOutcome.model_construct(
-        turn=None, step=None, reply=text, reply_degraded=degraded, routed=None
-    )
-
-
 async def _episodes(memory: FakeMemoryStore) -> list[EpisodicMemory]:
     return [one for one in await memory.export() if isinstance(one, EpisodicMemory)]
 
 
-# --- the reader, the writer and the adapter (§6, §10) ---------------------------------
+# --- the reader and the writer (§6, §10) ---------------------------------------------
 
 
 async def test_a_written_message_is_answered_by_an_assistant_message() -> None:
@@ -403,28 +389,11 @@ async def test_the_state_is_working_until_the_reply_is_written_then_done() -> No
     assert ended.state.last_ended is ActivationEnding.DONE
 
 
-def test_the_adapter_writes_the_reply_and_cuts_one_past_the_bound() -> None:
-    """§10:1, §5:2: one assistant message; a reply past the bound is cut and says so."""
-    outcome = _replied("x" * (TRANSCRIPT_MESSAGE_MAX_CHARS + 5))
-    written = chat_reply(outcome)
-    assert written.author is MessageAuthor.ASSISTANT
-    assert len(written.text) == TRANSCRIPT_MESSAGE_MAX_CHARS
-    assert written.cut_off
-    assert not chat_reply(_replied("ok")).cut_off
-    assert chat_reply(_replied("half", degraded=True)).cut_off
-    assert chat_reply(None) == couldnt_finish()
-
-
 def test_couldnt_finish_lists_the_effects_that_did_happen() -> None:
     """§9:1: the fixed text, then each effect that happened."""
-    state = ExecutionState(id="e-1", plan_id="p-1", steps=(), updated_at=AT)
-    ran = StepOutcome(
-        disposition=Disposition.EXECUTED, state=state, step_id="s-1", tool_id="calendar.book"
-    )
-    refused = StepOutcome(disposition=Disposition.DENIED, state=state, step_id="s-1")
-    assert chat_effects(None, step=ran) == ("the tool calendar.book ran",)
-    assert chat_effects(None, step=refused) == ()
-    written = chat_reply(None, effects=chat_effects(None, step=ran))
+    assert couldnt_finish() == NewMessage(author=MessageAuthor.ASSISTANT, text=COULDNT_FINISH)
+    written = couldnt_finish(("the tool calendar.book ran",))
+    assert written.author is MessageAuthor.ASSISTANT
     assert (
         written.text
         == f"{COULDNT_FINISH} Before it stopped, this happened:\n- the tool calendar.book ran"
