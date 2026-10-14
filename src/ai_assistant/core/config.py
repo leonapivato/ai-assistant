@@ -214,13 +214,12 @@ def _exactly_an_integer(value: object) -> object:
     nothing downstream can tell the difference.
 
     The code **below** settings already refuses this, on the stated ground that a
-    flag is not a count: ``_check_tuning`` in ``orchestration/loop.py`` and
-    ``Engine.__init__`` each exclude ``bool`` before their range check. Because
-    :class:`Settings` hands them an *already coerced* integer, those guards can
-    never fire on the settings path; they only ever protect the constructor seam a
-    test or a second composition root reaches directly. This validator makes the
-    configuration layer state the same rule the layers under it already state,
-    rather than leaving it the one layer that does not (issue #471).
+    flag is not a count: ``_check_tuning`` in ``memory/ingest.py`` excludes ``bool``
+    before its range check. Because :class:`Settings` hands it an *already coerced*
+    integer, that guard can never fire on the settings path; it only ever protects
+    the constructor seam a test or a second composition root reaches directly. This
+    validator makes the configuration layer state the same rule the layers under it
+    already state, rather than leaving it the one layer that does not (issue #471).
 
     An **allowlist of the two forms an integer setting is ever supplied in**, not
     a denylist of ``bool``, and that is load-bearing: ``bool`` is not the only type
@@ -580,8 +579,7 @@ _OptionalDaySetting = Annotated[date | None, BeforeValidator(_only_a_calendar_da
 
 #: An **optional** money amount read from configuration, in ADR-0267 §4's own domain.
 #: Applied to the simulated booking provider's configured price and charge (ADR-0273
-#: §5), whose values are read back by ``quote_read`` and ``charge_read``, each of which
-#: *"raises nothing"* — so a bad configuration has no other place to be caught.
+#: §5), so a bad configuration is refused when the settings load.
 _OptionalDecimalAmount = Annotated[
     Decimal | None, BeforeValidator(_only_a_decimal_amount_or_absent)
 ]
@@ -2789,8 +2787,7 @@ class Settings(BaseSettings):
     # **The path is the source, and no field here arms a scheduled read of it into
     # memory** (ADR-0294 §1). `calendar_reader_interval`, which armed scheduled
     # ingestion, is retired with the job; the path configures the source that the
-    # request-path facet reads and the upcoming-event producer reads on its own
-    # interval below.
+    # upcoming-event producer reads on its own interval below.
     calendar_reader_path: Path | None = Field(
         default=None,
         description=(
@@ -3370,9 +3367,9 @@ class Settings(BaseSettings):
     # along, refused half-set for the same stated reason.
     #
     # **The `web_search_` prefix and not `search_`, deliberately** (§1). The four
-    # `search_*` bounds are what the composer, the searcher and the transport
-    # enforce; this is the connected account's commercial fact, in the same class
-    # as which account and which origin.
+    # `search_*` bounds are what the searcher and the transport enforce; this is the
+    # connected account's commercial fact, in the same class as which account and which
+    # origin.
     #
     # **They reach a `ToolCost` at exactly one place in production**
     # (`ai_assistant.tools.builtin.build_web_search_integration`, §1): the
@@ -4057,9 +4054,7 @@ class Settings(BaseSettings):
         ``Decimal`` **accepts**.
 
         **Ordered: finiteness before the sign**, because ``Decimal("sNaN") < 0``
-        **raises** rather than answering — the same order
-        :func:`~ai_assistant.orchestration.charges.charge_read` and
-        :class:`~ai_assistant.core.types.ValueBound` take for the same pair.
+        **raises** rather than answering.
 
         **No countability rule is imposed here**, unlike a spend ceiling's: ADR-0267
         §4's reading admits any finite non-negative ``Decimal``, and a narrower

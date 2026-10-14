@@ -392,8 +392,7 @@ class MemoryStoreConflictError(MemoryStoreError):
     MemoryStoreError`` still catches it (the writer boundary documents
     ``MemoryStoreError`` as the only error that crosses the seam, ADR-0028 §5),
     while the applier catches the narrower conflict to distinguish "id collided,
-    mint again" from "the store is broken, abort" — mirroring
-    :class:`StaleExecutionError` under :class:`PlanningError`.
+    mint again" from "the store is broken, abort".
     """
 
 
@@ -648,12 +647,11 @@ class StoryStoreError(AssistantError):
 class NotificationStoreError(AssistantError):
     """Reading from or writing to the notification store failed (ADR-0130 §9).
 
-    Its own class in the :class:`AssistantError` hierarchy for the reason
-    :class:`DeferralStoreError` is one: a held notification is none of the things
-    the existing errors name. It is a *proposal to volunteer something*, ruled by
-    a deterministic policy and held in a store of its own, and a caller that
-    wanted to catch a notification fault without also catching a memory one has
-    no other way to say so.
+    Its own class in the :class:`AssistantError` hierarchy: a held notification
+    is none of the things the existing errors name. It is a *proposal to volunteer
+    something*, ruled by a deterministic policy and held in a store of its own, and a
+    caller that wanted to catch a notification fault without also catching a memory one
+    has no other way to say so.
 
     It covers a store fault and nothing else. A malformed *argument* is not this
     error: a paging value out of range is a ``ValueError``, inherited from
@@ -671,8 +669,8 @@ class NotificationStoreError(AssistantError):
 class NotificationOutboxError(AssistantError):
     """The delivery outbox could not commit what it was asked to (ADR-0131 §3b).
 
-    Its own class in the shape :class:`MemoryStoreError`, :class:`DeferralStoreError`
-    and :class:`TraceStoreError` already take, and for the reason §3b gives: the
+    Its own class in the shape :class:`MemoryStoreError` and
+    :class:`TraceStoreError` already take, and for the reason §3b gives: the
     four members of :class:`~ai_assistant.core.types.NotificationEnqueue` are
     outcomes an offer *reached*, and a store that could not reach one at all is a
     fault rather than a fifth outcome. Without this type a disk-full or a
@@ -778,9 +776,7 @@ class ReaderError(AssistantError):
     **One class and not a family.** A missing file, a permission denial and a
     malformed document are the *same* fact to both consumers — the source could
     not be read — and they differ only in what an operator should do, which is what
-    the cause and the log line carry. :class:`ContextError` is deliberately not
-    reused: it is reserved for programmer/wiring bugs the assembler should not
-    paper over (ADR-0008 §4), and a calendar file that is absent is neither.
+    the cause and the log line carry.
 
     **A cancellation is never converted into one** (ADR-0093 §8). A cancelled read
     has, in plain English, "not completed", and a reader wrapping everything it
@@ -1081,8 +1077,8 @@ class SpendError(AssistantError):
 
     **The refusal is an exit before the callable is entered**, so it falls in the
     window ADR-0034 §1 governs and qualifies on that section's second ground: the
-    executor commits ``RUNNING -> FAILED`` and never retries, on the window and
-    not on a list of classes.
+    call is not done and is never retried, on the window and not on a list of
+    classes.
 
     **No :class:`BaseException` that is not an ``Exception`` is ever translated
     into this hierarchy** (ADR-0194 §4). A ``CancelledError`` delivered from
@@ -1405,16 +1401,17 @@ class UntrustableDestinationError(AssistantError):
     and where more than one fails the first in that order is the one named, so the
     refusal is deterministic across implementations.
 
-    **A new class and not** :class:`UngrantableActError` **reused** (ADR-0242 §1).
-    That class's ratified meaning is ADR-0235 §3's ordered seven, and a caller
-    catching it means *the recipient-grant act was unavailable*. The two acts have
+    **A new class and not** ``UngrantableActError`` **reused** (ADR-0242 §1), a class
+    that has since left with the old path's errors (ADR-0309 §5). Its ratified meaning
+    was ADR-0235 §3's ordered seven, and a caller catching it meant *the
+    recipient-grant act was unavailable*. The two acts have
     different recourses, and ADR-0235 §7's two-vocabulary rule refuses one noun over
     two records that cannot substitute for each other: "One noun over two records
     that cannot substitute for each other is how a user comes to believe that
     revoking one revoked the other."
 
     **An** :class:`AssistantError` **and not a bare** ``ValueError``, for
-    :class:`UngrantableActError`'s own stated reason: a ``ValueError`` escapes a
+    ``UngrantableActError``'s own stated reason: a ``ValueError`` escapes a
     command's ``except (AssistantError, TransportError)`` boundary as an uncaught
     traceback with no controlled exit code, which ADR-0042 §7 forbids.
 
@@ -1444,15 +1441,10 @@ class SourceNotGrantedError(AssistantError):
     filesystem for a fault that lives in the grant store.
 
     **Not** :class:`PermissionDeniedError`, whose docstring scopes it to an action
-    blocked by the permission/policy layer and which ``orchestration/runner.py``
-    raises when a confirmation was refused. ADR-0097 §7's whole content is that a
+    blocked by the permission/policy layer. ADR-0097 §7's whole content is that a
     source refusal and an action refusal are different subjects, and a caller that
     cannot tell them apart is one that will report "you declined to send that
     email" when the calendar was never granted.
-
-    The facet path raises nothing: a facet whose source has no live ``FACET``
-    grant is simply **absent**, as every optional-source fault is, and
-    ``CurrentContext`` says nothing about why (ADR-0097 §5, ADR-0096 §4).
     """
 
 
@@ -1504,7 +1496,7 @@ class ReadTrailError(AssistantError):
     :class:`DuplicateDecisionError` and :class:`InvalidResolutionError`, and unlike
     :class:`GrantError`/:class:`InvalidGrantError`. ADR-0185 §5 makes the driver's
     recourse identical however the write failed: **discard the reading** — nothing
-    is proposed, no facet is contributed, no candidate is concluded. A caller that
+    is proposed, no candidate is concluded. A caller that
     could tell a broken store from a duplicate id would do nothing different with
     the answer, so a family would be two names for one response. ADR-0185 §14 defers
     the split with the condition that fires it: the first consumer that retries one
@@ -1524,10 +1516,9 @@ class ReadTrailError(AssistantError):
     **Nothing durable records that the recorder itself failed**, and ADR-0185 §5
     says so plainly: the only durable place such a note could be written is the
     store that just refused the write. An operator learns of it through the driver's
-    own failure posture — a logged fault under ADR-0083 §7 for a scheduled read, an
-    absent facet under ADR-0008 §4 — which is a signal rather than a record and is
-    not offered as one. ADR-0185 §14 defers the second, independent sink that would
-    close it.
+    own failure posture — a logged fault under ADR-0083 §7 for a scheduled read —
+    which is a signal rather than a record and is not offered as one. ADR-0185 §14
+    defers the second, independent sink that would close it.
     """
 
 
@@ -1540,23 +1531,17 @@ class PlanningError(AssistantError):
 
 
 class ClaimStopped(PlanningError):  # noqa: N818 — ADR-0297 §2 names the class, and the name says what happened rather than that something is broken
-    """A ``→ RUNNING`` claim was refused because its activation was stopped (ADR-0297 §2).
+    """An effect claim was refused because its activation was stopped (ADR-0297 §2).
 
-    Raised by **one conjunct and by nothing else**: ``PlanStore.commit_transition``
-    refuses a claim whose ``activation_id`` names an activation the store holds a stop
-    record for, decided in the same indivisible step as the write. Nothing is
-    committed, and the step keeps its entry status and stored version.
+    Raised by **one conjunct and by nothing else**:
+    ``PlanStore.claim_activation_effect`` refuses a claim whose ``activation_id`` names
+    an activation the store holds a stop record for, decided in the same indivisible
+    step as the write. Nothing is written (ADR-0306 §5:2).
 
-    **Not a** :class:`StaleExecutionError`, because no re-read makes the claim land: a
-    stop is never withdrawn. **Not a** :class:`ClaimRefused`, because ADR-0261 §7:3 has
-    that class raised by exactly two liveness conjuncts and makes catching it mean the
-    goal's state can be read and reported; a stop changes no goal state, so that read
-    would establish nothing.
-
-    It carries a message and **no structured state**, and it propagates out of the walk
-    as every exception but ``ClaimRefused`` does (ADR-0261 §7:2); no lane composes a
-    reply about it. Where a stop record and another claim condition would both refuse
-    one claim, which class the store raises is not fixed, and no caller depends on it.
+    It carries a message and **no structured state**: the call it would have claimed
+    is not done, and no lane composes a reply about it. Where a stop record and another
+    claim condition would both refuse one claim, which class the store raises is not
+    fixed, and no caller depends on it.
 
     **It is not among what ADR-0297 §6:3 has cross the wire.** A pass a stop reaches
     ends as stopped whatever the stage that met this refusal did, and a turn call
@@ -1569,17 +1554,10 @@ class ClaimStopped(PlanningError):  # noqa: N818 — ADR-0297 §2 names the clas
 class ActivationStoppedError(AssistantError):
     """The pass a turn call was awaiting was stopped by the user (ADR-0297 §4).
 
-    Raised **in place of** what the pass would otherwise have returned or raised: a
-    turn's outcome is assembled by the composing stage the stop keeps from running,
-    and what the stopped activation finished the user reads in the conversation's
-    current state (ADR-0295 §3:5). A cancellation of the caller's own task still
-    propagates as itself.
-
-    **Never raised by** ``resume``, which is not a turn call: a resume whose control
-    activation was stopped returns its outcome with ``TurnOutcome.stopped`` set
-    wherever its answer was recorded (ADR-0297 §4, ADR-0235 §6:10), and one that
-    raised before any answer was recorded raises as it would have, its outward
-    exception intact (ADR-0275 §5:6).
+    Raised **in place of** what the pass would otherwise have returned or raised:
+    what the stopped activation finished the user reads in the conversation's current
+    state (ADR-0295 §3:5). A cancellation of the caller's own task still propagates as
+    itself.
 
     It carries a message and **no structured state**. It crosses the wire
     (ADR-0297 §6:3), reconstructed by name on the far side like every other
@@ -1779,7 +1757,7 @@ class SecretStoreUnavailableError(SecretStoreError):
     keyring that is absent or locked is a deployment condition a human clears, so
     retrying is futile and the operator has to be told; a write the backend
     rejected may be transient. It subclasses rather than sits beside, as
-    :class:`MemoryStoreConflictError` and :class:`DeferralIdConflictError` do, so
+    :class:`MemoryStoreConflictError` does, so
     a caller that only wants "the secret is not available" writes one handler.
 
     **``get`` never returns ``None`` for this condition**, and that clause is the
@@ -1870,10 +1848,9 @@ class ConnectionStoreError(AssistantError):
 
     The per-store class this corpus writes for every durable store —
     :class:`MemoryStoreError`, :class:`ConversationStoreError`,
-    :class:`DeferralStoreError`, :class:`NotificationStoreError`,
-    :class:`TraceStoreError`, :class:`GrantError` — arriving for the seventh
-    (ADR-0149 §3). Declared by all five connection operations, because all five
-    read or write the store.
+    :class:`NotificationStoreError`, :class:`TraceStoreError`, :class:`GrantError` —
+    arriving for one more (ADR-0149 §3). Declared by all five connection operations,
+    because all five read or write the store.
 
     **Raised by a provisioning act it leaves the act's outcome *not known*.**
     ADR-0151 §7 classifies by two facts the act knows, and this is the class for a
@@ -2114,9 +2091,9 @@ class EgressBindingError(AssistantError):
     **A :class:`ConnectionStoreError` is never translated into this class**
     (ADR-0152 §9). A store that could not be read asserts nothing about the call:
     it may be perfectly bindable a second later, and the remedy is not a different
-    call. It propagates out of the runner stage unconverted, as
+    call. It propagates to the caller unconverted, as
     :class:`AuditError` and :class:`PlanningError` already do for an
-    infrastructure fault rather than a step outcome. So does a ``RecursionError``
+    infrastructure fault rather than a call's outcome. So does a ``RecursionError``
     raised while an argument is revalidated (ADR-0152 §12, issue #1107): this
     class is promised for a chained ``ValidationError`` and for nothing else.
     """

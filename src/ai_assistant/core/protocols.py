@@ -2299,8 +2299,8 @@ class Reader(Protocol):
         a grant "keys on nothing else" (ADR-0097 §1).
 
         It is **Tier 2 / operational** (ADR-0004 §1) and must stay that way, and
-        the obligation is stricter here than :attr:`ContextSource.name`'s rather
-        than merely inherited, because a reader's identity has a second consumer.
+        the obligation is stricter here than for a name used only in logs, because a
+        reader's identity has a second consumer.
         It is never derived from the source's location or contents — a path,
         filename, address or account identifier may not be used as one, or as any
         part of one — because the identity is what lands on the reading, on
@@ -2356,10 +2356,8 @@ class Reader(Protocol):
         configuration cannot move under a read, which is the property this clause
         exists to pin.
 
-        A property rather than a constructor argument, for
-        :attr:`ContextSource.name`'s reason: the assembler and the ingestion stage
-        both log it, and a seam that cannot be asked its own name forces every
-        caller to carry one beside it.
+        A property rather than a constructor argument: a seam that cannot be asked
+        its own name forces every caller to carry one beside it.
         """
         ...
 
@@ -2487,9 +2485,7 @@ class Fetcher(Protocol):
     **No token and no handle is rendered to any model, written to any log, put in
     any audit record, or carried on any record a fetch mints** (§4). Either in a
     prompt would be a capability offered to a model, which is the whole of what §2
-    exists to prevent. The planner-facing projection of an entry is
-    :class:`~ai_assistant.core.types.ShownFile`, which carries no capability at
-    all, so a planner has none to leak.
+    exists to prevent.
 
     **A ``Fetcher`` holds no store, no writer, no policy, no engine and no
     model.** It reads its own configured source and returns what it read. It may
@@ -2692,11 +2688,9 @@ class WebSearcher(Protocol):
     :class:`~ai_assistant.core.types.MemoryRecord`, not a :class:`MemoryStore`,
     not an :class:`ActionPolicy`, not an :class:`AuditTrail`, not a
     :class:`RecipientGrants` — and **no later lane adds one that does**
-    (ADR-0231 §17). What :meth:`request` is handed is one composed query and
-    nothing else, which is ADR-0231 §11's tenth clause at the second seam: the
-    string it receives is byte-identical to the one that servicing's
-    :class:`~ai_assistant.core.types.QueryOutcome` carried, and a caller holding a
-    record's content has no parameter to put it in.
+    (ADR-0231 §17). What :meth:`request` is handed is one query and nothing
+    else, which is ADR-0231 §11's tenth clause at the second seam: a caller holding
+    a record's content has no parameter to put it in.
 
     **A ``WebSearcher`` holds the credential and this contract never carries
     one.** ADR-0231 §5 puts the ``Secrets`` read at ``SecretScope.INTEGRATION``
@@ -2778,19 +2772,15 @@ class WebSearcher(Protocol):
         question the policy has not been asked.
 
         Args:
-            query: The query one composition wrote for this turn, carried byte for
-                byte from that servicing's
-                :attr:`~ai_assistant.core.types.QueryOutcome.query` (ADR-0231
-                §11). Non-blank and UTF-8-encodable. It is the whole of what an
-                implementation is given.
+            query: The query to search for (ADR-0231 §11). Non-blank and
+                UTF-8-encodable. It is the whole of what an implementation is given.
 
         Returns:
             The request to rule on — carrying this searcher's own declaration as
             :attr:`~ai_assistant.core.types.ActionRequest.tool`, exactly the origin
             and the query as
             :attr:`~ai_assistant.core.types.ActionRequest.parameters`, and ``None``
-            for ``step_id``, ``execution_id`` and ``egress_binding`` (ADR-0231 §17;
-            a ``WEB_SEARCH`` decision has no plan step and no execution, §6). Or
+            for ``egress_binding`` (ADR-0231 §17). Or
             ``None`` where the deployment has connected no search account, which is
             a configuration fact and never a failure.
 
@@ -3045,15 +3035,10 @@ class Forecaster(Protocol):
         Returns:
             The request to rule on — carrying this forecaster's own declaration as
             :attr:`~ai_assistant.core.types.ActionRequest.tool`, the arguments its
-            own registered schema declares, and ``None`` for ``step_id``,
-            ``execution_id`` and ``egress_binding`` (a forecast decision has no plan
-            step and no execution, §6, and the binding is derived by
-            :class:`EgressBinder` and accepted from nobody). Or ``None`` where the
-            deployment has configured no forecast provider, **which is a
-            configuration fact and never a failure** — it is what the servicing
-            records as ``NOT_CONFIGURED`` and what
-            :attr:`~ai_assistant.core.types.CarriedProvenance.forecast_reach` is
-            computed from.
+            own registered schema declares, and ``None`` for ``egress_binding``
+            (the binding is derived by :class:`EgressBinder` and accepted from
+            nobody). Or ``None`` where the deployment has configured no forecast
+            provider, **which is a configuration fact and never a failure**.
 
         Raises:
             CancelledError: Re-raised unchanged when the call is cancelled from
@@ -3158,8 +3143,8 @@ class Forecaster(Protocol):
                 definition unequal to this forecaster's registered original, or is
                 not authorised by its decision (ADR-0029 §2, ADR-0260 §6). **No
                 credential is read and no channel is opened for any of them**, and
-                none carries a ``ForecastRefusal``: the servicing records
-                ``BINDING_FAILED``, which establishes no contact. ADR-0148 §6's own
+                none carries a ``ForecastRefusal``: a binding failure establishes
+                no contact. ADR-0148 §6's own
                 pre-transmit refusals are different and are **returned**, as
                 :attr:`~ai_assistant.core.types.ForecastRefusal.PROVIDER_REFUSED` —
                 one fault classified two ways at two seams is what ADR-0264 §13's
@@ -3333,23 +3318,7 @@ class PlanStore(Protocol):
     async def export(self) -> PlanExport:
         """Return a portable snapshot of all planning state (ADR-0004 §6).
 
-        The document carries the store's attempts as well as its goals, plans and
-        executions (ADR-0249 §11), and its **questions** beside them (ADR-0250 §9).
-        ADR-0014 §5's closure rule reaches all of them: an export naming an attempt's
-        goal, plan or execution, or a question's goal or attempt, that it does not
-        carry does not validate as a
-        :class:`~ai_assistant.core.types.PlanExport` at all. **A settled question
-        exports with its content already absent**, which is the retention rule
-        (ADR-0250 §8) and not an omission from the export.
-
-        **And it carries the store's effect rows** (ADR-0259 §9), with ADR-0014 §5's
-        closure rule extended to them and stated over **one holder rather than three
-        ids**: an included row's ``execution_id`` resolves to an execution in the
-        document, its ``step_id`` names a step **of that execution**, and that
-        execution's plan carries the row's ``goal_id``. The same closure is owed of a
-        satisfied step's pair.
-
-        **And it carries the store's stop records** (ADR-0297 §1), as the tuple of
+        **It carries the store's stop records** (ADR-0297 §1), as the tuple of
         activation ids :meth:`record_stop` recorded, each once.
 
         **And its activation effect records** (ADR-0306 §6), finished or not, in the
@@ -3408,7 +3377,7 @@ class ToolRegistry(Protocol):
 
         An unsatisfied capability returns an empty list rather than raising: a
         plan naming a capability nothing implements is a legitimate, detectable
-        outcome, and ADR-0014 reserved ``SkipReason.NO_CAPABLE_TOOL`` for it.
+        outcome.
         """
         ...
 
@@ -3484,8 +3453,7 @@ class ToolInvoker(Protocol):
         write can leave ``parameters`` holding a value ``FrozenJson`` would never
         have accepted, and ``authorises`` compares a digest that canonicalises
         that mapping to JSON — so running it first raises a raw serialisation
-        error out of a method whose contract is that it answers a question,
-        after the executor has already committed its ``→ RUNNING`` claim.
+        error out of a method whose contract is that it answers a question.
 
         **A fourth check follows those three, and then the claim** (ADR-0192 §1).
         An implementation that pairs a call with a callable shape — an *egress*
@@ -3534,8 +3502,8 @@ class ToolInvoker(Protocol):
         ``side_effecting`` or its ``idempotency`` is ``NATURAL``, ``INDETERMINATE``
         otherwise — because ``invoke`` was entered and nothing states which await it
         expired in (ADR-0034 §1). It is **not** the pre-callable exit a spend
-        refusal is; that one qualifies on ADR-0034 §1's second ground and commits
-        ``RUNNING → FAILED``.
+        refusal is; that one qualifies on ADR-0034 §1's second ground, and the
+        call is not done.
 
         **The claim is the consume, and it sits immediately before the callable.**
         ``invoke`` appends it through the :class:`InvocationLedger` it holds,
@@ -3648,11 +3616,10 @@ class ToolInvoker(Protocol):
                 a configured ceiling would be crossed (ADR-0194 §4). A
                 **pre-callable** exit: no callable is created, no claim and no
                 completion are appended, and it qualifies on ADR-0034 §1's second
-                ground, so the executor commits ``RUNNING → FAILED`` and never
-                retries. Propagated as the **instance** the gate raised, unchanged
-                and unannotated, and never translated to ``PermissionDeniedError``
-                — the recorded ruling *is* an ``ALLOW``, and what refused is
-                arithmetic over a period.
+                ground, so the call is not done and is never retried. Propagated as the
+                **instance** the gate raised, unchanged and unannotated, and never
+                translated to ``PermissionDeniedError`` — the recorded ruling *is* an
+                ``ALLOW``, and what refused is arithmetic over a period.
             SpendUndeterminedError: If the spend the admission needed could not be
                 reduced to a number (ADR-0194 §4) — the declared amount is not
                 countable, the declared cost has no number at all, the clock
@@ -3673,14 +3640,13 @@ class ToolInvoker(Protocol):
                 call, which is not a cancellation of this call and does not leave as
                 one (ADR-0192 §1, ADR-0031 §2). Every exit from the claim append is
                 a **pre-callable** one, so it qualifies on ADR-0034 §1's second
-                ground and the executor commits ``RUNNING → FAILED`` on the window
-                rather than on a list of causes. A failure of the **completion**
-                append is absorbed instead and reaches the operator as the
-                diagnostic above.
+                ground, on the window rather than on a list of causes. A failure of the
+                **completion** append is absorbed instead and reaches the operator as
+                the diagnostic above.
             CancelledError: If the invoking task is cancelled from outside. The
                 seam does not convert it to a result — there is no return path
-                from a task being torn down — so committing the step by the same
-                rule the timeout uses, and then re-raising, is the executor's
+                from a task being torn down — so recording the call's outcome by
+                the same rule the timeout uses, and then re-raising, is the caller's
                 obligation (ADR-0029 §4). It is delivered onward **whatever an
                 append did**: where one failed while a cancellation was pending, the
                 cancellation is what leaves and the append's failure is attached as
@@ -3767,12 +3733,12 @@ class EgressBinder(Protocol):
     **The seam assumes nothing about what a caller checked before reaching it.**
     On the ordinary path it is reached after ADR-0145's schema check, which
     ADR-0144 §7's eligibility filter performs during selection — but that is an
-    ordering of the runner stage and not a precondition: every shape a clause
+    ordering of the caller and not a precondition: every shape a clause
     depends on is re-established here from the ``tool`` and the ``parameters``
     handed over, because a request built by a bypass reaches the seam (ADR-0029
     §2, ADR-0145 §3). **A conformance suite therefore exercises every refusal
-    directly**, against a subject handed inputs no runner would produce, and an
-    implementation that refuses only what the runner would already have refused
+    directly**, against a subject handed inputs no caller would produce, and an
+    implementation that refuses only what its caller would already have refused
     does not satisfy this contract (ADR-0152 §10).
 
     **The declaration this seam reads rides in the tool's ``parameters_schema``,
@@ -3971,13 +3937,11 @@ class EgressBinder(Protocol):
                 and ``None`` is never returned to signal a failure.
             ConnectionStoreError: If the connection record could not be read at
                 all (ADR-0151 §2a). **Never** translated into an
-                ``EgressBindingError`` or into
-                :attr:`~ai_assistant.core.types.Disposition.EGRESS_UNBINDABLE`: a
+                ``EgressBindingError``: a
                 store that could not be read asserts nothing about the call, which
-                may be bindable a second later. It propagates out of the runner
-                stage, which has committed nothing — no ruling requested, no audit
-                record written, no claim made, the step still ``PENDING`` at its
-                stored version. No implementation suppresses it, retries it inside
+                may be bindable a second later. It propagates to the caller, which
+                has committed nothing — no ruling requested, no audit record written,
+                no claim made. No implementation suppresses it, retries it inside
                 the seam, or falls back to a cached connectability, a cached
                 identity or a previous read.
             CancelledError: If the calling task is cancelled from outside.
@@ -4278,13 +4242,13 @@ class InvocationCompleter(Protocol):
     """The narrow face over the trail's invocation rows: completions only (ADR-0192 §2).
 
     **A capability distinction, and the narrow face is what makes it a type rather
-    than a promise.** ``orchestration``'s recovery scan completes open claims and
-    **must not** claim (ADR-0192 §3), so it is handed this and nothing more — a
-    dependency that cannot express the call. That is ADR-0029 §1's rule read where
-    it points, and the corpus has paid for the narrow face three times on the
-    identical argument: ADR-0125 §1 for ``Secrets`` beside :class:`SecretStore`,
-    ADR-0149 §1 refusing a tool the power to provision itself, and ADR-0153 §2 for
-    ``ConnectionPurger`` beside ``ConnectionProvisioner``.
+    than a promise.** ``orchestration``'s recovery scan, retired at the cutover
+    (ADR-0309 §5), completed open claims and **must not** claim (ADR-0192 §3), so it
+    was handed this and nothing more — a dependency that cannot express the call. That
+    is ADR-0029 §1's rule read where it points, and the corpus has paid for the narrow
+    face three times on the identical argument: ADR-0125 §1 for ``Secrets`` beside
+    :class:`SecretStore`, ADR-0149 §1 refusing a tool the power to provision itself, and
+    ADR-0153 §2 for ``ConnectionPurger`` beside ``ConnectionProvisioner``.
 
     **One object satisfies this, :class:`InvocationLedger` and
     :class:`AuditTrail`**, over one store, and the composition root hands each
@@ -4564,36 +4528,19 @@ class AuditTrail(Protocol):
         **Enforces the resolution invariant**, because this is the only place
         both records are in hand. A decision whose ``resolves`` is set is
         refused unless the referenced id is present, its ruling was ``CONFIRM``,
-        no other recorded decision already resolves it, its ``tool``,
-        ``parameters_digest``, ``step_id`` **and ``execution_id``** match the
-        incoming decision's exactly (the ``execution_id`` conjunct is ADR-0044
-        §2a: two executions of one plan parked on the same step produce two
-        ``CONFIRM``s identical but for their execution, and without it B's answer
-        could name A's confirmation), and it was not decided *after* the
-        resolution answering it (equal timestamps are fine — a fast confirmation
-        at a coarse clock resolution is real). The authorisation pointer is
-        checked here too: a resolving ``ALLOW`` must carry ``authorised_by``
-        equal to its ``resolves``, and a resolving ``DENY`` must leave it unset.
-        Without that pair, a resolving ``ALLOW`` could name any confirmation it
-        liked — or a string naming nothing — while satisfying every other check,
-        and the disclosure floor would be satisfiable by fabrication.
+        no other recorded decision already resolves it, its ``tool`` and
+        ``parameters_digest`` match the incoming decision's exactly, and it was not
+        decided *after* the resolution answering it (equal timestamps are fine — a fast
+        confirmation at a coarse clock resolution is real). The authorisation pointer is
+        checked here too: a resolving ``ALLOW`` must carry ``authorised_by`` equal to
+        its ``resolves``, and a resolving ``DENY`` must leave it unset. Without that
+        pair, a resolving ``ALLOW`` could name any confirmation it liked — or a string
+        naming nothing — while satisfying every other check, and the disclosure floor
+        would be satisfiable by fabrication.
 
-        **A concrete binding resolves once** (ADR-0044 §2b). *On top of* the
-        per-*confirmation* rule above — which stops the *same* ``CONFIRM`` being
-        resolved twice and is unchanged (ADR-0036 §2) — a further rule fires
-        **only when the confirmation's ``execution_id`` and ``step_id`` are both
-        present**: once *any* ``CONFIRM`` for that ``(execution_id, step_id)``
-        binding is resolved, the binding is decided, and no second resolution —
-        of that confirmation *or a sibling* under the same binding — may be
-        recorded. ADR-0037 §2 accepts several unresolved ``CONFIRM``s under one
-        binding (a ``run`` that lost the ``PENDING → AWAITING_APPROVAL`` compare-
-        and-swap still leaves its ``CONFIRM`` recorded), and those are the *same
-        action* — one step of one execution — so they must share one *fate*:
-        without this, a step whose ``CONFIRM`` was answered ``DENY`` could still
-        have a sibling orphan answered ``ALLOW`` and execute the very action the
-        user refused (the #257 window). When the binding is not concrete, only
-        the per-confirmation rule applies, so two independent *direct*
-        confirmations (each ``(None, None)``) never become mutually exclusive.
+        **ADR-0044 §2b's per-binding rule left with the step and the execution a
+        decision no longer carries** (ADR-0318 §6:1), so only the per-confirmation rule
+        above applies (ADR-0036 §2).
 
         This bounds **resolutions, not executions**, and the difference is worth
         being precise about: ``authorises()`` is a pure comparison, so the same
@@ -4814,8 +4761,8 @@ class AuditTrail(Protocol):
         restarted process asking the trail for the record it can no longer name by
         id. It goes here and never on :class:`InvocationLedger`, because the ledger
         is what ``tools/`` holds and a by-decision query over past claims is a
-        history read. ``orchestration``'s recovery scan is its only consumer, and
-        it reaches this through the trail it already holds.
+        history read. ``orchestration``'s recovery scan was its only consumer, and
+        retired at the cutover (ADR-0309 §5).
 
         **It reserves every claim id it returns.** The store hands each to the same
         identifier factory the ledger mints from, and that factory returns none of
@@ -4831,8 +4778,7 @@ class AuditTrail(Protocol):
         misdirect nothing.
 
         Args:
-            decision_id: The authorisation whose open claims are wanted — a step's
-                ``approval_ref`` at the recovery seam.
+            decision_id: The authorisation whose open claims are wanted.
 
         Returns:
             The open claims, in append order, detached. Empty where none is open,
@@ -5134,17 +5080,15 @@ class SourceGrants(Protocol):
     """Answers what a source may be read for, and can create nothing (ADR-0097 §3).
 
     The query half of the grant seam. **Anything that drives a reader holds this
-    and only this** — `orchestration`'s ingestion stage for
-    :attr:`~ai_assistant.core.types.GrantScope.INGEST`, `context`'s reader adapter
-    for :attr:`~ai_assistant.core.types.GrantScope.FACET`, and `orchestration`'s
-    upcoming-event producer for
-    :attr:`~ai_assistant.core.types.GrantScope.NOTIFY` — as a **required
-    constructor argument with no default**, so a composition that omits the gate
-    does not type-check (ADR-0097 §5, ADR-0132 §2, ADR-0133 §5). The three are the
-    drivers that exist rather than a closed set: ADR-0133 §2 fixes the axis at one
-    scope per *consumer* of a reading, so a fourth arrives with a fourth consumer
+    and only this** — `orchestration`'s upcoming-event producer for
+    :attr:`~ai_assistant.core.types.GrantScope.NOTIFY`, the one driver left since
+    the ingestion stage (ADR-0294) and the facet adapter (ADR-0318) retired — as a
+    **required constructor argument with no default**, so a composition that omits
+    the gate does not type-check (ADR-0097 §5, ADR-0132 §2, ADR-0133 §5). The
+    drivers that exist are not a closed set: ADR-0133 §2 fixes the axis at one
+    scope per *consumer* of a reading, so another arrives with another consumer
     and with its own decision. The obligation stated in prose and honoured
-    by review is the shape ``IngestionStage``'s own docstring already calls "a
+    by review is the shape the retired ``IngestionStage``'s docstring called "a
     composition-root obligation no type can express"; this one *can* be expressed,
     so it is.
 
@@ -5196,7 +5140,7 @@ class SourceGrants(Protocol):
         **The answer is a detached snapshot**, which matters more here than on any
         other read in this file. This is the *only* member of the narrow seam and
         the one answer ADR-0097 §5's gate rests on, and ``frozen=True`` does not
-        close the bypass: a caller granted ``FACET`` alone could mutate ``scope``
+        close the bypass: a caller granted ``NOTIFY`` alone could mutate ``scope``
         on the returned object through ``__dict__`` to include ``INGEST``, and the
         driver's next check would authorise ingestion the user never granted —
         the gate defeated through its own answer.
@@ -5241,8 +5185,8 @@ class SourceGrantStore(Protocol):
     """The append-only record of what the user granted and withdrew (ADR-0097 §4).
 
     The writing half of the grant seam, and the wider of the two. **Nothing but
-    the hub's grant operations holds one** — no scheduler job, no pipeline stage,
-    no ``context`` source and no reader driver (ADR-0097 §3, §9). It satisfies
+    the hub's grant operations holds one** — no scheduler job, no pipeline stage
+    and no reader driver (ADR-0097 §3, §9). It satisfies
     :class:`SourceGrants` structurally, so one implementation serves both seams
     and a composition root may pass one object to each.
 
@@ -6214,12 +6158,9 @@ class SourceReadRecorder(Protocol):
     """Records that a source was read, and can answer nothing (ADR-0185 §4).
 
     The **write** half of the read seam. Anything that drives a reader holds this
-    and only this — `orchestration`'s ingestion stage for
-    :attr:`~ai_assistant.core.types.GrantScope.INGEST`, `context`'s reader adapter
-    for :attr:`~ai_assistant.core.types.GrantScope.FACET`, and `orchestration`'s
-    upcoming-event producer for
-    :attr:`~ai_assistant.core.types.GrantScope.NOTIFY` — as a **required
-    constructor argument with no default**, so a composition that omits the
+    and only this — `orchestration`'s upcoming-event producer for
+    :attr:`~ai_assistant.core.types.GrantScope.NOTIFY`, the one driver left — as a
+    **required constructor argument with no default**, so a composition that omits the
     recorder does not type-check (ADR-0185 §5), on ADR-0097 §5's pattern for the
     gate itself.
 
@@ -8365,10 +8306,9 @@ class NotificationStore(Protocol):
     **The store produces every record; a caller hands none in.** ``id``,
     ``admitted_at``, ``ruled_at`` and ``retention`` are the store's own — the
     first two from its injected clock, the last from the retention it was
-    constructed with — for :class:`~ai_assistant.core.types.DeferredProposal`'s
-    reason: each decides something a caller would otherwise be deciding for
-    itself, and a validator that only checks the fields agree with each other
-    cannot catch it.
+    constructed with — because each decides something a caller would otherwise
+    be deciding for itself, and a validator that only checks the fields agree with each
+    other cannot catch it.
 
     **An id it mints is fresh, and a collision is a fault rather than an
     overwrite.** Because ids are this store's own, a repeat is its own defect and
@@ -8948,7 +8888,7 @@ class TraceStore(TraceSink, TraceRetention, Protocol):
     specialisation because there is one more capability.
 
     **No component of the request pipeline holds a seam carrying the walk** —
-    `orchestration`, `memory`, `context`, `planning`, `readers`, `learning`,
+    `orchestration`, `memory`, `planning`, `readers`, `learning`,
     `tools`, `permissions` — and none reads a trace back (§7). An instrument whose
     readings change behaviour is measuring a system that includes the instrument,
     and leg 8's exit test would be circular in a way that is nearly impossible to
@@ -9242,11 +9182,11 @@ class AssistantEngine(Protocol):
         context reaches processing separately from stored history and acquires
         no authority.
 
-        Events make one bounded model call and create no conversation, goal or
-        episode. ChannelProcessingError reports unusable/model-failed completion;
-        ChannelProcessingTimeoutError reports expiry. Cancellation propagates
-        after cleanup. A result returns only on this call; errors are never
-        success receipts. Public wrapper fields count against the payload limit.
+        An event runs through the phases as one activation, and one that cannot
+        finish or is stopped returns its result rather than raising (ADR-0313
+        §4:3-§4:5). Cancellation propagates after cleanup. A result returns only on this
+        call; errors are never success receipts. Public wrapper fields count against the
+        payload limit.
         """
         ...
 
@@ -9263,8 +9203,7 @@ class AssistantEngine(Protocol):
         already sent finishes and records its outcome (§4). The stopped pass then ends
         with the stop's end entry, writes nothing into its conversation, and a turn
         call awaiting it raises
-        :class:`~ai_assistant.core.errors.ActivationStoppedError`; a stopped resume
-        returns its outcome with ``TurnOutcome.stopped`` set.
+        :class:`~ai_assistant.core.errors.ActivationStoppedError`.
 
         **It checks no device role itself** (§5:7): it is reached only as a command,
         and which devices may send one is decided where every command's sender is
@@ -9725,9 +9664,8 @@ class AssistantEngine(Protocol):
         ``OWNER``, setter ``DERIVED`` — and a surface reads the returned reach and
         setter to say why nothing moved. ADR-0204 §5's closing prohibition is not
         lifted by an act, and a raise was rejected for two reasons: it would make an
-        act this system declines on ratified grounds indistinguishable, on
-        ADR-0197's routed path, from an operation that *failed*
-        (``RouteOutcome.FAILED``), and it would make an idempotent act a failure
+        act this system declines on ratified grounds indistinguishable from an
+        operation that *failed*, and it would make an idempotent act a failure
         too. The two routes that remain open for such a record are a supersession
         and a class ruling under ADR-0199 §6; neither is this method's.
 
@@ -9836,7 +9774,7 @@ class AssistantEngine(Protocol):
     async def forget_notification(self, notification_id: Identifier) -> bool:
         """Destroy one notification, so its subject can be proposed again (§9).
 
-        ADR-0004 §6's delete right, in the shape :meth:`forget_question` takes.
+        ADR-0004 §6's delete right, in the shape :meth:`forget` takes.
         Beside :meth:`dismiss_notification` deliberately: a dismissal ends
         actionability and leaves the record readable, so this is the surface the
         delete right reaches and that one is not.
@@ -9999,7 +9937,7 @@ class AssistantEngine(Protocol):
         not exist yet — and no implementation reads the placement as reaching a
         tier, a class or a producer it did not name. The decision is made from those
         three recorded fields and from **nothing else**: not from ``summary``,
-        ``detail``, ``references``, ``goal_id`` or ``confidence``, not by keyword,
+        ``detail``, ``references`` or ``confidence``, not by keyword,
         pattern or classifier, and not by asking a model (ADR-0199 §2).
 
         **A withheld notification arrives unspoken and nothing audible marks it**
@@ -10526,8 +10464,8 @@ class AssistantEngine(Protocol):
         live-grant check, the revocation invariants and the append, so a lost race
         is a typed refusal and never a second live grant.
 
-        **A new grant names a non-empty subset of** ``FACET`` **and** ``NOTIFY``
-        (ADR-0294 §4). A ``scope`` naming
+        **A new grant names** ``NOTIFY`` **alone** (ADR-0294 §4, ADR-0318 §6:2). A
+        ``scope`` naming
         :attr:`~ai_assistant.core.types.GrantScope.INGEST` is refused with
         ``ValueError``, locally and before any I/O, exactly as an empty one is, and
         nothing is recorded: nothing reads a source under that use any more, so a
@@ -10590,7 +10528,7 @@ class AssistantEngine(Protocol):
         :class:`~ai_assistant.core.types.GrantScope` **and taking the first answer**
         (ADR-0102 §5), which is total because a grant's scope is non-empty. Querying
         one member is the wrong version that passes every test that exists: an
-        implementation checking only ``FACET`` would leave an ``INGEST``-only grant
+        implementation checking only ``NOTIFY`` would leave an ``INGEST``-only grant
         unrevokable while reporting success by returning ``None``. The revoking
         record transcribes the revoked grant's ``source`` and ``scope`` verbatim.
 
@@ -10929,10 +10867,10 @@ class AssistantEngine(Protocol):
     # **Three operations and not five**, and the two ADR-0235 has that are absent
     # here are absent for a reason rather than by omission (ADR-0242 §2). There is no
     # ``trustable_decisions`` read, because the availability set ADR-0242 §1 fixes is
-    # **three** conditions wide and :meth:`grantable_decisions`' own rows already
-    # satisfy every one of them a user is looking at — that listing exists, and
-    # ADR-0242 §5 makes it name both acts. And there is no history read beside the
-    # standing one, because the reason ADR-0235 §7 needed
+    # **three** conditions wide and ``grantable_decisions``' rows satisfied every one
+    # of them a user was looking at — ADR-0242 §5 made that listing name both acts,
+    # and it has since left the surface (ADR-0313 §5:1). And there is no history read
+    # beside the standing one, because the reason ADR-0235 §7 needed
     # :meth:`recent_recipient_grants` does not arise: that member exists because a
     # user at the ceiling could hold an *expired* grant occupying a slot, see it in no
     # listing and have no id to revoke, and a trust record has **no ceiling and no
@@ -11011,14 +10949,13 @@ class AssistantEngine(Protocol):
 
         **Three and not ADR-0235 §3's seven**, and the four that are absent are absent
         for one reason. The decision's **ruling**, whether the trail holds a decision
-        **resolving** it, its ``step_id`` and ``execution_id``, and its ``expires_at``
-        are **not** conditions of this act, and no lane adds them: ADR-0235 §3's
-        conditions over those fields exist because that act *seeks a ruling from*
-        ``ActionPolicy.resolve`` *and records an answer*, and this act seeks no ruling,
-        records no answer, sends nothing, resumes nothing and services nothing. **A
-        user may record trust from a decision they answered a month ago**, and that is
-        the point: it is what keeps the act reachable after the grant act has taken the
-        row out of :meth:`grantable_decisions`.
+        **resolving** it, its ``step_id`` and ``execution_id`` (fields a decision no
+        longer carries, ADR-0318 §6:1), and its ``expires_at`` are **not** conditions
+        of this act, and no lane adds them: ADR-0235 §3's conditions over those fields
+        exist because that act *seeks a ruling from* ``ActionPolicy.resolve`` *and
+        records an answer*, and this act seeks no ruling, records no answer, sends
+        nothing, resumes nothing and services nothing. **A user may record trust from a
+        decision they answered a month ago**, and that is the point.
 
         **The third condition is kept for a reason narrower and sharper than ADR-0235
         §3's.** Trust is precisely what closes ADR-0238 §5's loop and lets a later
@@ -11053,7 +10990,7 @@ class AssistantEngine(Protocol):
 
         Args:
             decision_id: The recorded decision this act rides, from
-                :meth:`grantable_decisions` or :meth:`recent_decisions`. A
+                :meth:`recent_decisions`. A
                 :data:`~ai_assistant.core.types.DurableIdentifier` and not a ``str``,
                 because it names a ``PermissionDecision.id`` which is one on the record
                 itself, so a client cannot make ``" id "`` and ``"id"`` disagree at the
@@ -11113,7 +11050,7 @@ class AssistantEngine(Protocol):
         ``revoke`` as taking a record ``id`` and the instant of the user's act and
         declares no return — so a member returning a record would either author one,
         which the engine may not do, or add a store member, which that section's
-        exact-surface clause forbids. :meth:`forget`, :meth:`forget_question` and
+        exact-surface clause forbids. :meth:`forget` and
         :meth:`dismiss_notification` are the shape on this Protocol.
 
         **A concurrent revocation is lost gracefully, and the store's own idempotence
@@ -11522,9 +11459,10 @@ class AssistantEngine(Protocol):
     # **Both are served on both listeners** (ADR-0186 §5). Neither is a connection
     # method and neither is withheld from ADR-0124's remote listener: a
     # ``PermissionDecision`` carries no credential and no payload, and every class of
-    # fact in one already crosses that hop inside a ``Confirmation``'s
-    # ``ConfirmationEgress``. Neither is one of ADR-0177 §1's thirty browser
-    # operations, and no browser request resolves to either (ADR-0186 §6).
+    # fact in one already crossed that hop inside a ``Confirmation``'s
+    # ``ConfirmationEgress`` until those left with the old path (ADR-0309 §5). Neither
+    # is one of ADR-0177 §1's thirty browser operations, and no browser request resolves
+    # to either (ADR-0186 §6).
 
     async def recent_decisions(
         self, *, limit: int = DEFAULT_PAGE_SIZE

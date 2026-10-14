@@ -384,9 +384,9 @@ and a later relaxation of the stricter rule cannot silently reopen the gap.
 def _non_blank(value: str) -> str:
     """Reject a blank identifier, returning it stripped.
 
-    An empty ``approval_ref`` or ``bound_tool`` is worse than a missing one: it
-    satisfies "a reference is present" while identifying nothing, so a step
-    could look authorised and audited while being neither.
+    An empty identifier is worse than a missing one: it satisfies "a reference
+    is present" while identifying nothing, so a call could look authorised and
+    audited while being neither.
     """
     stripped = value.strip()
     if not stripped:
@@ -1010,9 +1010,9 @@ def band_of(source: MemorySource) -> BeliefBand:
 
     Classification is keyed on ``source`` and never on ``confidence``, so no
     producer can promote a belief into the asserted band by claiming certainty
-    (ADR-0072 §4). It applies wherever :class:`Provenance` does — including
-    :class:`Goal` — but ADR-0072 §3's obligations on derived beliefs do **not**
-    generalise with it; they are scoped to memory proposals.
+    (ADR-0072 §4). It applies wherever :class:`Provenance` does, but ADR-0072
+    §3's obligations on derived beliefs do **not** generalise with it; they are
+    scoped to memory proposals.
 
     Args:
         source: The provenance source of the belief being classified.
@@ -1112,10 +1112,7 @@ see and did not cause.
 **It is enforced at the ``MemoryWriter`` seam and nowhere on this type** — see
 :attr:`Provenance.evidence` for why a ``max_length`` here would be the wrong
 mechanism, and :meth:`~ai_assistant.core.protocols.MemoryWriter.ingest` for the
-obligation itself. The scope is a ``MemoryRecord`` *install*: :class:`Goal`
-carries a :class:`Provenance` too and is not reached, because nothing accumulates
-on the goal write path and ADR-0077 §11 already assigns that seam to the lane
-that adds an inferred-goal producer.
+obligation itself. The scope is a ``MemoryRecord`` *install*.
 
 64 was set comfortably above the observation batch's default of 20, a setting
 ADR-0285 §5 has since removed — more than three whole batches, so accumulation
@@ -1553,9 +1550,9 @@ class Provenance(BaseModel):
     neither stale nor fresh.** It is the state of a record whose confirming instant
     the store does not hold: every record written before ADR-0109 (the field is
     additive with a default, so nothing migrates and nothing fabricates a decline
-    that was never measured), every episode — an episode cites nothing, nothing
-    retires one, and "is this still true?" is not a question about it — and every
-    :class:`Goal`, which is not a belief whose currency lapses. No surface,
+    that was never measured), and every episode — an episode cites nothing,
+    nothing retires one, and "is this still true?" is not a question about it. No
+    surface,
     consumer or writer renders, treats or ranks an unknown as a confirmed one, and
     none reads it as stale either.
 
@@ -1720,8 +1717,8 @@ class Provenance(BaseModel):
 
         Enforcing it here rather than at the ``MemoryPolicy`` gate is what closes
         the confidence half of #432: the gate is not the only path a
-        :class:`Provenance` takes — :class:`Goal` carries one and reaches no
-        propose/dispose gate at all — and a validator on the value needs no gate.
+        :class:`Provenance` takes — the retired ``Goal`` carried one and reached
+        no propose/dispose gate at all — and a validator on the value needs no gate.
         The *evidence* obligation #432 also describes stays open, and cannot be a
         validator: an assertion legitimately cites nothing.
         """
@@ -1739,10 +1736,11 @@ class Provenance(BaseModel):
 
         The third band-keyed validator on this class, and it is here for the reason
         the two above it are: the gate is not the only path a :class:`Provenance`
-        takes — :class:`Goal` carries one and reaches no propose/dispose gate at
-        all — and a validator on the value needs no gate. An attested ``Goal`` would
-        owe the same disclosure as an attested belief, and only a validator reaches
-        it (:meth:`_derived_is_never_certain` states that argument in full).
+        takes — the retired ``Goal`` carried one and reached no propose/dispose gate
+        at all — and a validator on the value needs no gate. An attested ``Goal``
+        would have owed the same disclosure as an attested belief, and only a
+        validator reached it (:meth:`_derived_is_never_certain` states that argument
+        in full).
 
         **Admissible on ADR-0086 §3's own test**, which is "not 'is it a validator on
         a ``core`` type' but 'does it refuse something that already worked'". Nothing
@@ -3238,8 +3236,8 @@ class StoryMember(BaseModel):
 class UnderstandingGround(StrEnum):
     """How an element of an activation's understanding came to be known (ADR-0276 §2).
 
-    A **closed** enumeration, **added to and never renamed** on :class:`Ground`'s
-    own rule (ADR-0249 §1): no later ADR removes a member, renames one, gives one a
+    A **closed** enumeration, **added to and never renamed** on the rule ADR-0249
+    §1 gave the retired ``Ground``: no later ADR removes a member, renames one, gives one a
     second spelling, or replaces this enum with a differently named one for the
     same question.
     """
@@ -4647,10 +4645,9 @@ class MemoryWrite(BaseModel):
     fold does — would carry :attr:`MemoryBase.revision`'s default of ``0`` and
     silently expect "never rewritten", a fail-open expectation on the exact path
     this mode guards. A separate field a validator requires makes that unreachable,
-    and it is the ratified shape:
-    :class:`~ai_assistant.core.types.ExecutionState` carries ``version`` and
-    :class:`~ai_assistant.core.types.StepTransition` carries ``expected_version``
-    for this reason.
+    and it is the ratified shape: the plan store's ``ExecutionState`` carried
+    ``version`` and its ``StepTransition`` ``expected_version`` for this reason,
+    before both retired.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -4800,8 +4797,8 @@ _FINGERPRINT_EXCLUDED_RECORD_FIELDS: frozenset[str] = frozenset({"id", "score", 
 #: ``self.proposed.model_dump``. That method is an ordinary attribute: a subclass
 #: can override it and an instance can shadow it through ``__dict__``, and either
 #: can return a valid-but-false mapping for the record it is asked about.
-#: ``ai_assistant.orchestration.executor``, ``ai_assistant.permissions._detachment``
-#: and :meth:`RecipientGrant._digest_projection` state that rule about that method
+#: ``ai_assistant.permissions._detachment`` and
+#: :meth:`RecipientGrant._digest_projection` state that rule about that method
 #: on a single class, resolving its ``__pydantic_serializer__``; a discriminated
 #: union has no class to resolve it on, and this adapter is what stands in its
 #: place — the union's own serializer, which reads the instance's field values and
@@ -4904,9 +4901,9 @@ class MemoryUpdateProposal(BaseModel):
 
         A confirmation exists only because a question was queued, claimed and
         answered — and a secret-tier proposal is **never queued**: ADR-0004 §3 puts
-        Tier 0 content in the OS keyring and forbids it a committed file, so
-        :class:`DeferredProposal` refuses one and the write stage never offers it
-        one. There is therefore no deferral for such a proposal, no claim over it,
+        Tier 0 content in the OS keyring and forbids it a committed file, so the
+        write stage never offers it one. There is therefore no deferral for such a
+        proposal, no claim over it,
         and no answer to it. The pairing is a *contradiction*, not a case the
         applier should be left to rule on, so it is unconstructable rather than
         merely refused downstream — the one half of ADR-0078's belt-and-braces
@@ -5000,8 +4997,7 @@ class MemoryUpdateProposal(BaseModel):
         has already been asked about.
 
         A property, not a field, so the question's identity is a function of the
-        proposal that holds it and the two cannot disagree — which is why
-        :class:`DeferredProposal` carries no key of its own.
+        proposal that holds it and the two cannot disagree.
         """
         payload = {
             "proposal_fingerprint": self.proposal_fingerprint,
@@ -5204,19 +5200,18 @@ class MemoryIngestResult(BaseModel):
 
 
 # --- context facets: a source's situational "right now" (ADR-0096) -----------
-# Declared here, ahead of `SourceReading`, because a reading *carries* one (§5)
-# and `CurrentContext` *receives* one (§1) — the two consumers of one read, at
-# their own cadences (ADR-0093 §3). A facet is a third party's report read at an
-# instant, so it carries its own provenance rather than being rendered beside
-# `is_weekend` as a bare value: the temporal core is bare because a clock reading
-# has no provenance to lose, and a facet has.
+# Declared here, ahead of `SourceReading`, because a reading *carries* one (§5).
+# `CurrentContext`, which *received* one (§1), retired at the cutover. A facet is a
+# third party's report read at an instant, so it carries its own provenance rather
+# than being rendered as a bare value: a clock reading has no provenance to lose,
+# and a facet has.
 
 
 class ContextFacet(BaseModel):
     """One source's situational contribution, stamped with who said it and when.
 
-    The base every non-temporal :class:`CurrentContext` facet extends (ADR-0096
-    §1). It carries the source's identity and the two instants that say when its
+    The base every facet extends (ADR-0096 §1). It carries the source's
+    identity and the two instants that say when its
     content was true, so a facet reaching a prompt can never be rendered as a bare
     fact of the system's own — which is the laundering ADR-0072 §6 refuses: "a
     wrong record laundered into a fact by flat prose, restated back to the user
@@ -5234,8 +5229,8 @@ class ContextFacet(BaseModel):
     *declared* annotation and says nothing when that loses data: a field annotated
     with this base but holding a :class:`CalendarFacet` dumps the three fields
     below and drops the payload, with no warning emitted at all. Every field
-    carrying a facet — on :class:`CurrentContext`, on :class:`SourceReading`, or
-    anywhere else — is annotated with concrete facet types.
+    carrying a facet — on :class:`SourceReading` or anywhere else — is annotated
+    with concrete facet types.
 
     **``source``, ``read_at`` and ``as_of`` are reserved on every subclass.** Flat
     fields share one namespace with a subclass's payload, so a future facet whose
@@ -5281,14 +5276,12 @@ class ContextFacet(BaseModel):
     is not a description but a switch, and the first consumer to find it would use
     it to drop the facet, which is the one outcome the owner's ruling
     ("present-but-stale, understood from its source") forbids. A consumer computes
-    two different figures: :attr:`CurrentContext.now` minus ``read_at`` is *how
-    long ago we looked*, and ``now`` minus ``as_of`` — where the source declares
+    two different figures: its own ``now`` minus ``read_at`` is *how long ago we
+    looked*, and ``now`` minus ``as_of`` — where the source declares
     one — is *how old the source says its picture is*.
 
-    **Those two instants are captured independently within one concurrent
-    assembly**, so their difference is bounded by that assembly's duration and
-    **may be of either sign**: ``AssemblingContextProvider`` runs its sources as
-    concurrent tasks, so a clock source stamps ``now`` when it runs while a reader
+    **Those two instants are captured independently**, so their difference **may
+    be of either sign**: a consumer stamps ``now`` when it runs, while a reader
     stamps ``read_at`` at byte acquisition (ADR-0093 §7b). No consumer may present
     a negative age, and none may read the sign as information.
     """
@@ -5362,9 +5355,9 @@ class CalendarFacet(ContextFacet):
             an absence and no surface may present it as one — which is what
             :attr:`covers_until` is carried to make interpretable.
         covers_until: The **exclusive** upper edge of the window this reading
-            covered. It travels with the value because a consumer of
-            :class:`CurrentContext` does not read ``Settings``, so the horizon has
-            to be here or not exist at all.
+            covered. It travels with the value because a facet's consumer does
+            not read ``Settings``, so the horizon has to be here or not exist at
+            all.
 
             The backward edge is deliberately not carried: nothing a consumer
             reads is bounded by it, since ``entries_in_progress`` is anchored at
@@ -5398,8 +5391,8 @@ class EmailFacet(ContextFacet):
 
     Two scalars, and **no span of any message** — no sender, address, display
     name, subject, body, identifier or per-message instant. That rule is stronger
-    here than ADR-0096 §6 needed it to be for the calendar. ``CurrentContext``
-    reaches every prompt, and a subject line is not merely disclosing: it is
+    here than ADR-0096 §6 needed it to be for the calendar. ``CurrentContext``,
+    retired since, reached every prompt, and a subject line is not merely disclosing: it is
     *attacker-chosen text* on the advisory path, where a failure is silent and
     where ADR-0098 §2's escaping obligation falls on an assembler that does not
     yet exist (#672). Two scalars need no content budget, no truncation rule and
@@ -5434,8 +5427,8 @@ class EmailFacet(ContextFacet):
             :attr:`CalendarFacet.covers_until`'s mirror, carried for the
             identical reason (ADR-0096 §6): a count of zero means nothing to a
             consumer who does not know how long an interval it counted over, and
-            a consumer of :class:`CurrentContext` does not read ``Settings``, so
-            the horizon has to travel with the value or not exist. Only the one
+            a facet's consumer does not read ``Settings``, so the horizon has to
+            travel with the value or not exist. Only the one
             edge is carried, because a mailbox has no future and the window's
             upper edge is ``read_at`` itself (ADR-0140 §3). Saturated under §3, so
             it is always a representable instant.
@@ -5492,8 +5485,8 @@ extracts its tag from the input *before* it selects a member, so the field's
 default never runs. Nothing persists or wire-carries one of these types today —
 both are in-process values passed from a reader to ``orchestration`` and to the
 ingest — so there is no legacy payload to invalidate. A lane that gives
-:class:`SourceReading` or :class:`CurrentContext` a persisted or wire-carried
-form owes the compatibility step with it, in a shape that cannot mask a genuinely
+:class:`SourceReading` a persisted or wire-carried form owes the compatibility
+step with it, in a shape that cannot mask a genuinely
 invalid payload (ADR-0140 §6).
 """
 
@@ -5717,8 +5710,9 @@ class SourceReading(BaseModel):
             a record's operational window in order to obtain a demotion, and no
             implementation may make a belief's presence on the read path depend on
             when it was last read.
-        facet: The situational half of this reading — the other consumer's
-            (ADR-0093 §3, ADR-0096 §5). ``None`` is valid and means this reader's
+        facet: The situational half of this reading — the half the retired
+            ``CurrentContext`` consumed (ADR-0093 §3, ADR-0096 §5). ``None`` is
+            valid and means this reader's
             source has no situational reading to contribute.
 
             **Annotated with the concrete facet types a reader may produce**, and
@@ -5790,9 +5784,9 @@ class SourceReading(BaseModel):
         **The duplication is intentional, which this validator can make look
         accidental.** If the facet's stamp must always equal the reading's, it
         looks redundant *on the reading* — and it is, for as long as the two travel
-        together. They do not: the ``context/`` adapter lifts the facet out and
-        puts it in :class:`CurrentContext`, where the reading is gone and the stamp
-        is the only thing left saying who produced the value and when. This
+        together. They need not: a consumer that lifts the facet out leaves the
+        reading behind, and the stamp is then the only thing left saying who
+        produced the value and when. This
         validator's job is to keep the copy faithful, not to argue it away.
 
         **On the type rather than in the ``Reader`` conformance suite**, on two
@@ -5966,9 +5960,10 @@ class FeedbackEvent(BaseModel):
 #: An ISO-4217 alphabetic code is exactly this long.
 #:
 #: **Declared here rather than beside** :class:`ToolCost`, which is where it used to
-#: sit, on the ground :data:`Identifier`'s own comment states: ADR-0267 §1 gives it a
-#: second consumer in :func:`_iso_4217_shaped`, which :class:`ActionQuote` is built on
-#: and which is declared far above that position. Nothing about it changed.
+#: sit, on the ground :data:`Identifier`'s own comment states: ADR-0267 §1 gave it a
+#: second consumer in ``_iso_4217_shaped``, which ``ActionQuote`` was built on and
+#: which was declared far above that position; both have since retired. Nothing
+#: about it changed.
 _CURRENCY_CODE_LENGTH = 3
 
 
@@ -6537,8 +6532,8 @@ class SearchOutcome(BaseModel):
 # --- tools: what one forecast read produced (ADR-0260 §4, §5) ----------------
 # The `Forecaster` seam's return value and its refusal vocabulary, and the
 # user-facing fold of the servicing's disposition. `core`'s because all three cross
-# that seam (ADR-0260 §8); `ForecastDisposition` — the servicer's own account — is
-# `orchestration`'s and lives there.
+# that seam (ADR-0260 §8); `ForecastDisposition` — the servicer's own account — was
+# `orchestration`'s, and retired with the old path's reads.
 
 
 class ForecastRefusal(StrEnum):
@@ -6561,8 +6556,8 @@ class ForecastRefusal(StrEnum):
     **There is no member for a spend refusal, and that is deliberate** (§4, §6).
     This vocabulary names what a *read* produced; the stages the seam never sees —
     no registration, no budget, no derivable binding, no ``ALLOW``, no admission —
-    are the servicing's own account, which ADR-0260 §8 puts in
-    ``ai_assistant.orchestration.reads``.
+    are the servicing's own account, which ADR-0260 §8 put in
+    ``ai_assistant.orchestration.reads``, since retired.
 
     **A refusal names a class and carries nothing else** — no place, no coordinate,
     no origin, no provider message, no day, no exception type. The whole value is
@@ -6639,7 +6634,8 @@ class ForecastRefusal(StrEnum):
     unreadable; and a day the response names more than once, dropped in every one
     of its rows — all end here where they take the last day with them.
 
-    **It maps to no ``ForecastDisposition``** (§8): a read that reached the provider
+    **It mapped to no ``ForecastDisposition``** while that account stood (§8): a
+    read that reached the provider
     and was answered is a completed servicing whose returned count is zero, which
     ADR-0226 §9 already records."""
 
@@ -6845,11 +6841,12 @@ class ForecastOutcome(BaseModel):
 # --- egress identity, ahead of the planning types (ADR-0259 §1) -------------
 # The visible-text refinements and the three egress declarations an effect key is
 # built from, declared **here** rather than beside the egress binding where
-# ADR-0150's own lane put them. ADR-0259 §1 builds :class:`EffectKey` out of a
-# tool id, a parameters digest, a :class:`BoundAccount`, a transport endpoint and
-# a tuple of :class:`CanonicalDestination`, and that key is a field of
-# :class:`StepTransition` and — through :class:`EffectRecord` — of
-# :class:`PlanExport`, both declared far above the old positions. That is the case
+# ADR-0150's own lane put them. ADR-0259 §1 built ``EffectKey`` out of a tool
+# id, a parameters digest, a :class:`BoundAccount`, a transport endpoint and a
+# tuple of :class:`CanonicalDestination`, and that key was a field of
+# ``StepTransition`` and — through ``EffectRecord`` — of :class:`PlanExport`, both
+# declared far above the old positions. The key and its carriers have retired; the
+# primitives stayed here. That is the case
 # the comment above :data:`Identifier` already rules on and the ADR-0252 evidence
 # block already took one level up from a scalar: "a forward reference plus
 # ``model_rebuild`` would have kept the old positions at the cost of making two
@@ -7123,17 +7120,17 @@ class CanonicalDestination(BaseModel):
 
 
 # --- tools: why an invocation did not succeed (ADR-0029 §3) ------------------
-# Declared here, mid-planning, on purpose: `StepFailure` and `StepExecution`
-# just below record the tool's own classification rather than a planning-owned
-# mirror of it (ADR-0039 §3, ADR-0031 §1). `ToolFailure`, at the end of the
-# module, is the seam-facing form the executor reads it from.
+# Declared here, mid-planning: the retired `StepFailure` and `StepExecution`
+# recorded the tool's own classification rather than a planning-owned mirror of it
+# (ADR-0039 §3, ADR-0031 §1). `ToolFailure`, at the end of the module, is the
+# seam-facing form the executor reads it from.
 
 
 class ToolFailureKind(StrEnum):
     """Why an invocation did not succeed (ADR-0029 §3).
 
-    Defined here, above the planning types, because :class:`StepFailure` and
-    :class:`StepExecution` record it: a finished step keeps the tool's own
+    Defined here, above the planning types, because the retired ``StepFailure``
+    and ``StepExecution`` recorded it: a finished step kept the tool's own
     classification of how its call failed, not a planning-owned mirror of it
     (ADR-0039 §3, ADR-0031 §1). Shared with :class:`ToolFailure` below, which is
     the seam-facing form the executor reads it from.
@@ -7316,17 +7313,6 @@ class PlanExport(BaseModel):
         return self
 
 
-# --- a spoken answer's delivery: what a device reports having played --------
-# ADR-0205's three values. Declared **here**, above the conversation block,
-# rather than in the speech block at the foot of this module: §3 put the fact on
-# the turn index's row, so the type it is spelled with had to exist by the time
-# that model was built, and ADR-0283 §6's delivery rows keep the placement. The
-# three depend on nothing but `timedelta`, `StrEnum` and
-# `Identifier`, so nothing about the speech block's own ordering rule is weakened
-# by the split — what is below stays below because `SpokenAudio` and `SpokenTurn`
-# depend on `TurnOutcome`, and none of these three does.
-
-
 # --- speech: the recording and the rendering (ADR-0200 §9) -------------------
 # The one shape audio takes on a boundary-crossing type, and the one place the
 # base64 convention is written down. Nothing here knows what a codec is:
@@ -7337,9 +7323,8 @@ class PlanExport(BaseModel):
 # to sit last, "because nothing above it depends on it", and something above it now
 # does: §6 gives `NotificationDelivery` a `SpokenAudio | None`, so the type that
 # member is spelled with has to exist by the time that model is built. This is
-# ADR-0205's split repeated one block up — these six declarations depend on nothing
-# but `NonBlankEncodableText`, and what stays at the foot stays there because
-# `SpokenTurn` depends on `TurnOutcome` and these do not.
+# ADR-0205's split repeated one block up — these declarations depend on nothing
+# but `NonBlankEncodableText`.
 
 
 #: The base64 alphabet RFC 4648 §4 fixes, without its padding character — which
@@ -9458,9 +9443,6 @@ def _system_supplied(value: tuple[str, ...]) -> tuple[str, ...]:
 # States facts and draws no conclusions — `permissions` does that (ADR-0016
 # §3). Every field a decision depends on is required, because a default is a
 # claim, and the natural default for a reach tuple is a false one.
-#
-# :class:`BoundKind` is declared here rather than beside :class:`ValueBound`: it
-# had a second consumer on the declaration, which left with ADR-0313 §5:4.
 
 
 class CapabilityEffect(StrEnum):
@@ -9514,8 +9496,8 @@ class ToolDefinition(BaseModel):
     invocation is gated, the definition states facts, and ``permissions`` draws
     conclusions (ADR-0016 §3).
 
-    Frozen for the same reason :class:`ActionPlan` is: a permission decision is
-    recorded against the definition in force, and one that can be edited
+    Frozen because a permission decision is recorded against the definition in
+    force, and one that can be edited
     afterwards makes the audit trail a description of the present.
     """
 
@@ -9810,7 +9792,6 @@ class ToolDefinition(BaseModel):
         the method as easily as it reaches the field, and a nominated dump would
         walk an unstorable declaration into a :class:`PermissionDecision` —
         issue #156's failure, through the one re-check that exists to stop it.
-        ``ai_assistant.orchestration.executor``,
         ``ai_assistant.permissions._detachment``,
         :meth:`RecipientGrant._digest_projection` and
         :data:`_MEMORY_RECORD_PROJECTION` state the same rule about the same
@@ -9935,8 +9916,8 @@ class ToolDefinition(BaseModel):
         cancellation — and two of them are in subsystems that cannot import each
         other, so a second copy could only be one free to disagree.
 
-        **Read it from the registry's declaration for the committed
-        ``bound_tool``, never from ``call.request.tool``.** The seam's binding
+        **Read it from the registry's declaration for the tool the call is bound
+        to, never from ``call.request.tool``.** The seam's binding
         checks all ran *before* the callable started, so a declaration mutated
         mid-flight is re-examined by nothing: a side-effecting, non-``NATURAL``
         call whose definition were flipped to read-only would then classify as
@@ -10013,8 +9994,9 @@ it ran on an already-validated :data:`Identifier`, and stripping cannot turn
 encodable text unencodable. It is gone rather than left as a dead branch.
 
 **The name is kept, and the guarantee is unchanged or stronger.** ADR-0044 §1
-annotates :attr:`PermissionDecision.execution_id` and :attr:`~.step_id` with this
-spelling, and it still says at the field which fields ADR-0021 §4 singles out.
+annotated ``PermissionDecision``'s ``execution_id`` and ``step_id``, both retired
+since, with this spelling, and it still says at each field it annotates which
+fields ADR-0021 §4 singles out.
 Every value this type accepted before, it accepts now; every value it refused, it
 still refuses.
 """
@@ -10137,10 +10119,9 @@ def canonical_json_bytes(value: FrozenJson) -> bytes:
 #
 # `_rejecting_invisible`, `_VisibleUnchangedText`, `DestinationProtocol`,
 # `BoundAccount` and `CanonicalDestination` are declared **ahead of the planning
-# types** rather than here, because :class:`EffectKey` is built from three of them
-# and is reached by :class:`StepTransition` and :class:`PlanExport` (ADR-0259 §1);
-# the block above :class:`StepStatus` carries the reason. Nothing about them
-# changed in the move.
+# types** rather than here, because ADR-0259 §1's ``EffectKey``, since retired, was
+# built from three of them; the egress-identity block above them carries the
+# reason. Nothing about them changed in the move.
 
 
 class DiscloserProvenance(StrEnum):
@@ -10868,11 +10849,7 @@ class CoverageUnrecordedBinding(_OriginRecordedBindingBase):
     **Unconstructable from any live path.** :attr:`ActionRequest.egress_binding`
     stays ``EgressBinding | None`` and :meth:`PermissionDecision.from_request`
     transcribes the binding from the request, so no builder can mint this shape and
-    no request can carry one (ADR-0184 §2, §4). No lane composes a
-    :class:`ConfirmationEgress` from one either — that model's ``coverage`` is
-    required with no default, so composing one would demand the fabrication this
-    representation exists to avoid, at the surface where a user is being asked to
-    approve something (ADR-0233 §14).
+    no request can carry one (ADR-0184 §2, §4).
 
     **The origin guard does not catch this epoch, which is why every refusal for it
     is stated rather than inherited.** Such a row **has**
@@ -10944,11 +10921,7 @@ class OriginUnrecordedBinding(_EgressBindingBase):
     **Unconstructable from any live path.** :attr:`ActionRequest.egress_binding`
     stays ``EgressBinding | None`` and :meth:`PermissionDecision.from_request`
     transcribes the binding from the request, so no builder can mint this shape and
-    no request can carry one (ADR-0184 §2, §4). No lane composes a
-    ``ConfirmationEgress`` from one — that model's
-    ``planned_with_external_content`` is required with no default, so composing one
-    would demand the fabrication this whole representation exists to avoid, at the
-    surface where a user is being asked to approve something (ADR-0184 §8).
+    no request can carry one (ADR-0184 §2, §4).
 
     **A consumer tells the three apart with** ``isinstance`` **and nothing else.**
     No tag, no version key, no ``Literal`` member and no ``Field(discriminator=...)``
@@ -11550,7 +11523,7 @@ class ActionRequest(BaseModel):
         downstream of it is either a ruling on those arguments or an execution of
         them. Four things happen between the request and the call, and each spends
         something a later check cannot take back — the user is asked, the
-        append-only Tier 1 trail is written, the step is claimed ``RUNNING``, and
+        append-only Tier 1 trail is written, the call is claimed, and
         :attr:`PermissionDecision.parameters_digest` binds the payload as given. A
         request that was never built cannot be ruled on, recorded, claimed or
         digested, so checking at construction reaches all four *without anything
@@ -11934,9 +11907,8 @@ class PermissionDecision(BaseModel):
                 *recorder* like ``decided_at`` and ``resolves``, not transcribed
                 from the request, because the deadline is the recorder's concern
                 (its deployment lifetime), not a fact the policy authored. The
-                recorder derives it — ``decided_at + confirmation_ttl`` under
-                bounded arithmetic, resolving an unrepresentable sum to ``None``
-                — before calling this; no deadline is computed here. ``None`` for
+                recorder derives it before calling this; no deadline is computed
+                here. ``None`` for
                 a decision with no lifetime. Permitted only on a ``CONFIRM`` and
                 only strictly after ``decided_at`` (both checked at construction).
             effect: The id of the ``ActivationEffect`` a phases call is claimed
@@ -12172,8 +12144,7 @@ class PermissionDecision(BaseModel):
 
         And a deadline at or before the ask instant would expire the question the
         moment it is recorded, so ``expires_at`` must fall *strictly after*
-        ``decided_at`` — the same shape as ``confirmation_ttl``'s strictly-positive
-        check. Both comparands are :data:`UtcInstant`, already normalised to UTC,
+        ``decided_at``. Both comparands are :data:`UtcInstant`, already normalised to UTC,
         so the comparison is by instant.
 
         ``None`` — no lifetime — is always permitted; there is deliberately no
@@ -12726,9 +12697,9 @@ class RecipientGrant(BaseModel):
         has ``AuditTrail.record`` *recompute* on the grant the resolution seam
         returns, so a record whose dump described a different grant would let a
         route-(b) row rest on a subject the record does not carry — the one check
-        that comparison exists to be. ``ai_assistant.orchestration.executor`` and
-        the trail's own ``field_state`` state the same reasoning about the same
-        method; the serializer is resolved on the class, reads the instance's field
+        that comparison exists to be. The trail's own ``field_state`` states the
+        same reasoning about the same method; the serializer is resolved on the
+        class, reads the instance's field
         values, and consults no instance attribute.
 
         ``RecipientGrant``'s serializer and not ``type(self)``'s, which is the
@@ -13098,7 +13069,7 @@ class ReadOutcome(StrEnum):
     use itself — not that the use ran, and not that the reading reached it. ADR-0185
     §5 requires the row to be written *before* the use runs, so an outcome defined
     by the handoff could not be known when the row is written; what the use then did
-    is ``MemoryPolicy``'s subject or the facet adapter's, and their own records
+    is ``MemoryPolicy``'s subject or its other consumer's, and their own records
     answer it.
     """
 
@@ -13195,9 +13166,9 @@ class SourceReadRecord(BaseModel):
     ADR-0008 §1's additive pattern: a required addition would make every stored row
     fail validation, which is the failure ADR-0184 records and repairs.
 
-    **A member of** :class:`ReadOutcomeKind` **is refused for** :attr:`outcome`
-    **rather than converted** (#2320). That vocabulary is the planner's, about an ask
-    a planner composed, and it shares the values ``refused`` and ``failed`` with this
+    **A member of another vocabulary is refused for** :attr:`outcome` **rather than
+    converted** (#2320). The case it was written for, the retired planner's
+    ``ReadOutcomeKind``, shared the values ``refused`` and ``failed`` with this
     one; see :meth:`_outcome_is_this_vocabularys_member` for why a conversion here
     would be a fabricated authorisation fact rather than a mislabelled one. A bare
     ``str`` of a member's value is still accepted, so decoding a stored row is
@@ -13292,9 +13263,10 @@ class SourceReadRecord(BaseModel):
     @field_validator("outcome", mode="before")
     @classmethod
     def _outcome_is_this_vocabularys_member(cls, value: object) -> object:
-        """Refuse :class:`ReadOutcomeKind`'s member here — #2320's reciprocal seam.
+        """Refuse another vocabulary's member here — #2320's reciprocal seam.
 
-        The same overlap, read the other way. ``ReadOutcomeKind.REFUSED`` says *the
+        The same overlap, read the other way, as the retired planner's
+        ``ReadOutcomeKind`` posed it. ``ReadOutcomeKind.REFUSED`` said *the
         source decided not to answer, on a ground it owns* (ADR-0251 §2); accepted
         here it would become :attr:`ReadOutcome.REFUSED`, whose meaning is *the first
         grant check answered ``None``, so the source is not resolved, not opened and
@@ -13308,7 +13280,7 @@ class SourceReadRecord(BaseModel):
         (:attr:`source`), so this direction is the costlier of the two.
 
         Only the two shared values could ever arrive; the remaining five members of the
-        planner's vocabulary carry no value of these six and were refused already.
+        planner's vocabulary carried no value of these six and were refused already.
         """
         return _own_vocabularys_member(value, ReadOutcome, cited="ADR-0185 §1")
 
@@ -13362,11 +13334,8 @@ class SourceReadRecord(BaseModel):
 class ToolOutcome(StrEnum):
     """How an invocation finished (ADR-0029 §3).
 
-    Three members, one for each :class:`StepStatus` a finished invocation can
-    produce, so an executor's mapping is total and needs no default branch. A
-    separate enum rather than reusing :class:`StepStatus` because that type also
-    spells ``RUNNING`` and ``AWAITING_APPROVAL``, which a *result* must not be
-    able to say.
+    Three members, one for each way a finished invocation can end, so an
+    executor's mapping is total and needs no default branch.
     """
 
     SUCCEEDED = "succeeded"
@@ -13497,8 +13466,8 @@ class ToolFailure(BaseModel):
     """Why an invocation failed, in a form an executor can record (ADR-0029 §3).
 
     :attr:`message` is **operator-facing Tier 2 text and must not carry Tier 0 or
-    Tier 1 data**. It is bound for a log and for ``StepFailure.message`` on a
-    finished step (ADR-0039), and ADR-0004 §5 forbids Tier 1 data in both. There
+    Tier 1 data**. It is bound for a log, and ADR-0004 §5 forbids Tier 1 data
+    there. There
     is no safety net under it:
     ``core/logging.py`` redacts by *key*, and its own docstring names
     ``error=str(exc)`` — "where the provider quoted the user's prompt" — as the
@@ -13537,9 +13506,9 @@ class ToolResult(BaseModel):
     catching something would be one ``except Exception:`` away from recording a
     completed action as failed.
 
-    :attr:`output` is :data:`FrozenJsonValue`, matching ``StepExecution.output``
-    exactly, so a result is recordable without translation and a tool cannot
-    return a live object that mutates after the step recorded it.
+    :attr:`output` is :data:`FrozenJsonValue`, so a result is recordable without
+    translation and a tool cannot return a live object that mutates after it was
+    recorded.
 
     :attr:`incurred_cost` is ADR-0192 §5's, and it partially supersedes ADR-0029
     §3's "``ToolResult`` carries no cost". That section's reason — billing is
@@ -13582,9 +13551,8 @@ class ToolResult(BaseModel):
         """Refuse a result that half-says two things.
 
         Every combination refused here has a wrong state that reads as
-        plausible. A ``FAILED`` result with no failure leaves the executor
-        writing ``StepExecution.failure`` — required when ``FAILED`` (ADR-0014
-        §3, ADR-0039) — with nothing to write. A ``SUCCEEDED`` result carrying one is a
+        plausible. A ``FAILED`` result with no failure leaves whoever records it
+        with nothing to say about why. A ``SUCCEEDED`` result carrying one is a
         contradiction a caller reads whichever half it looks at first. And a
         non-``SUCCEEDED`` result carrying an output is a *partial* result an
         executor could record as a whole one, which is worse than an absent one.
@@ -13618,7 +13586,7 @@ class ReportedOutput(BaseModel):
     :attr:`ToolResult.incurred_cost`.
 
     **The envelope is unwrapped at that seam and travels no further.** No
-    ``ToolResult``, ``StepExecution``, audit row, wire message or consumer of
+    ``ToolResult``, audit row, wire message or consumer of
     ``ToolInvoker`` ever holds one, so ADR-0087's encoding is untouched.
 
     :attr:`incurred_cost` is **required**. A tool with nothing to report returns
@@ -13722,9 +13690,8 @@ class ToolCall(BaseModel):
         deliberately no attempt counter in it. It is **distinct for a distinct
         intent**, because asking to send the same message again produces a new
         request and a new decision. And it is **recoverable across a restart**,
-        which is the property that makes it worth anything: a restarted executor
-        reads ``StepExecution.approval_ref``, loads the decision from the durable
-        trail, and derives the identical key.
+        which is the property that makes it worth anything: a restart that loads
+        the decision from the durable trail derives the identical key.
 
         Read from the *decision's* copy of the declaration rather than the
         request's. The two are equal — ``authorises`` compares them — so this
@@ -13736,7 +13703,6 @@ class ToolCall(BaseModel):
         return self.decision.id
 
 
-# --- what a call spent, and what it did (ADR-0192 §§1-2) ---------------------
 # --- the promoted engine surface (ADR-0084 §4, ADR-0085) ---------------------
 # The types :class:`~ai_assistant.core.protocols.AssistantEngine`'s methods name,
 # and the complete transitive closure of what their fields reach (ADR-0085 §5).
@@ -13834,7 +13800,7 @@ class ToolInvocation(BaseModel):
     row still being written — ADR-0184's third state, one store over.
 
     **It restates nothing its decision already fixes.** No ``ToolDefinition``, no
-    ``parameters_digest``, no ``step_id``, no ``execution_id``, no account, no
+    ``parameters_digest``, no account, no
     transport endpoint and no destination: what a call transmitted to is the
     decision's own ``EgressBinding.canonical_destination_set``, reached through
     :attr:`decision_id`, and copying it here would be the second shape that must
@@ -14122,9 +14088,9 @@ class SpendAdmissionHandle(BaseModel):
     A model and not a bare ``str`` because it crosses a subsystem boundary —
     ``tools/`` holds it, ``permissions/`` mints and resolves it — and because
     :data:`Identifier` refuses the blank string that would satisfy "a handle is
-    present" while naming nothing. :class:`ContinuationToken` is the same shape for
-    the same reasons one seam over, and this copies it rather than inventing a
-    second convention.
+    present" while naming nothing. The retired ``ContinuationToken`` had the same
+    shape for the same reasons one seam over, and this copied it rather than
+    inventing a second convention.
 
     **Distinctness is tested on the validated value, not on what a factory
     returned** (ADR-0194 §3). :data:`Identifier` strips, so ``"h"`` and ``" h "``
@@ -14452,8 +14418,7 @@ class BeliefSummary(BaseModel):
             :func:`rests_on_recorded_external_content` (ADR-0106 §2) applied to the
             record's :class:`Provenance`, computed by the engine at projection time.
             Never recomputed by a surface from ``band``, and never read off
-            :attr:`Provenance.derived_from_external` in its place. See
-            :class:`Warrant` for what the value does and does not claim.
+            :attr:`Provenance.derived_from_external` in its place.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -14602,8 +14567,7 @@ class Belief(BaseModel):
             belief, and what #746 exists for: a structured marker a client can
             style, filter and order on, where before it could only pass through a
             sentence. Never recomputed by a surface from ``band``, and never read
-            off :attr:`Provenance.derived_from_external` in its place — see
-            :class:`Warrant` for what the value does and does not claim.
+            off :attr:`Provenance.derived_from_external` in its place.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -14748,32 +14712,6 @@ class ConversationDigest(BaseModel):
         max_length=CHAT_DEVICES_MAX,
         description="Its devices, device_id ascending (ADR-0293 §3:3).",
     )
-
-
-"""The arms a routed listing may take (ADR-0197 §8).
-
-Homogeneous tuples of types the promoted surface **already carries**, and this alias
-mints no payload type of its own. That is what keeps a widening under
-:class:`RoutableOperation`'s own rule cheap: a new read-only member adds an enum
-member and, at most, one arm — not a wrapper model, a schema and a renderer — and a
-client rendering a routed ``recent_reads`` uses the renderer it already has for
-``recent_reads``.
-
-**:class:`RoutableOperation` is the discriminator, never pydantic's structural union
-resolution.** A lane reads the arm off ``operation``; an implementation that infers
-it from the value's shape does not conform, because an **empty** tuple is a legal
-value of every arm and the shape therefore decides nothing on exactly the case a
-listing is most likely to take. :func:`routed_listing_arm` is that mapping, and the
-validators below are what make the claim checkable rather than asserted.
-
-**A wrapper model per operation was weighed and declined** (ADR-0197, Alternatives):
-eight wrapper models now and one per widening later, each with a schema, a docstring
-and a test, to carry a discriminator :attr:`RoutedOperation.operation` already
-carries.
-"""
-
-
-# --- what a turn did instead of driving, when a store refused its claim (ADR-0261 §7)
 
 
 class GrantableSource(BaseModel):
@@ -15151,6 +15089,10 @@ class TraceOutcome(StrEnum):
     scheduler's log record to, so the two records about one event cannot
     disagree. ``INCOMPLETE`` is ADR-0111 §9's third clause given a value: a run
     that halted without exhausting its work is neither a success nor a failure.
+
+    **Nothing produces ``INCOMPLETE`` any more**: its one producer was a halted
+    consolidation run, and consolidation's halt went (#3025, ADR-0319 §5). The
+    member stays, because this is a closed enumeration that stored traces name.
     """
 
     OK = "ok"
@@ -16042,7 +15984,7 @@ class NotificationCandidate(BaseModel):
     shown rather than a copy of a record.
 
     **Two refusals live on the type rather than in a store's care**, both in the
-    shape :class:`DeferredProposal`'s coherence validator takes:
+    shape the retired ``DeferredProposal``'s coherence validator took:
 
     * a ``DataTier.SECRET`` candidate is refused outright rather than gated, so
       Tier 0 never reaches the notification store **in any disposition and under
@@ -16376,7 +16318,7 @@ class HeldNotification(BaseModel):
     makes it yield again, to the *suppressing* set this time.
 
     **The duration rides on the record and is never consulted from the setting
-    afterwards** (§7), which is :class:`DeferredProposal`'s arrangement and for
+    afterwards** (§7), the arrangement the retired ``DeferredProposal`` took, for
     its reason: live configuration governs records admitted from now on and never
     reaches back.
     """
@@ -16562,12 +16504,12 @@ class HeldNotification(BaseModel):
         second cannot move at all — and a ``DROP`` removes the second disjunct
         rather than extending it.
 
-        **It is the same predicate as**
-        :meth:`DeferredProposal.speaks_for_its_key_at`, and takes its name for
-        that reason: a ``REJECTED`` deferral goes on refusing a re-ask for the
-        whole of its retention on exactly this reasoning, ADR-0130 §8 borrowed the
+        **It was the same predicate as** the retired
+        ``DeferredProposal.speaks_for_its_key_at``, and takes its name for that
+        reason: a ``REJECTED`` deferral went on refusing a re-ask for the whole of
+        its retention on exactly this reasoning, ADR-0130 §8 borrowed the
         deduplication from it and left that half behind, and two names for one
-        predicate is how the two stores would drift.
+        predicate was how the two stores would have drifted.
 
         Args:
             moment: The instant to judge at, tz-aware.
@@ -16666,8 +16608,8 @@ class HeldNotification(BaseModel):
         absent cessation is a complete answer rather than an undefined expression.
 
         Raising instead is not a local defect: ADR-0083 §7's retention job is
-        **shared**, sweeping ``MemoryStore`` and ``DeferralStore`` in the same
-        operation, so one such record would stop every store's retention being
+        **shared**, sweeping more than one store in the same operation, so one
+        such record would stop every store's retention being
         enforced while the scheduler logged a failure and retried forever — and
         ADR-0078 §1's exposure cap is measured by exactly that job running.
 
@@ -17931,8 +17873,8 @@ def story_members(members: object) -> tuple[StoryMember, ...]:
 #: The longest text a note may carry, and the longest any line of a summary may
 #: carry, in characters (ADR-0300 §3:1, §3:17). Chosen from the episode excerpt the
 #: prompts that render an episode already bound it by, 2,000 characters
-#: (``UNDERSTANDING_EXCERPT_CHARS`` at the composition root, and the planner's and
-#: composer's own excerpts): a note can say as much as an excerpt of an episode, and a
+#: (``UNDERSTANDING_EXCERPT_CHARS`` at the composition root): a note can say as
+#: much as an excerpt of an episode, and a
 #: line is bounded the same.
 STORY_NOTE_MAX_CHARS: Final[int] = 2_000
 
