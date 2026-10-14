@@ -7,8 +7,7 @@ import io
 import logging
 import subprocess
 import sys
-from collections import ChainMap, UserDict, UserList, deque
-from collections.abc import Sequence
+from collections import ChainMap, UserDict, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -871,18 +870,13 @@ def test_a_host_that_formats_exceptions_upstream_has_the_rendering_masked(
 #
 # Records from the ``logging`` module — a third-party library's, asyncio's — never
 # pass through structlog's chain. The rule is F7's: a record that carries an
-# exception prints its logger's name, its level, a fixed marker, and each exception's
-# class and frames, never its message or its arguments. Every assertion is over what
-# a handler writes.
+# exception is replaced by a fresh one that prints its logger's name, its level, a
+# fixed marker, and each exception's class and frames, never its message, its
+# arguments or its extras. "Carries" is shallow: ``exc_info``, or an exception passed
+# directly as the message, an argument or an extra. Every assertion is over what a
+# handler writes.
 
 _WITHHELD = "[message withheld: the record carries an exception]"
-
-
-@dataclass
-class _Outcome:
-    """A result a call site logs whole, its repr printing the exception it holds."""
-
-    error: BaseException
 
 
 @pytest.fixture(autouse=True)
@@ -961,14 +955,16 @@ def _record(msg: str, args: tuple[object, ...], failure: BaseException) -> loggi
 
 
 def test_a_stdlib_exception_line_carries_the_class_and_frames_and_never_the_words() -> None:
-    # The marker is in the exception's message, an argument, the format string and a
-    # raising frame's local.
+    # The marker is in the exception's message, an argument, the format string, an
+    # extra and a raising frame's local.
     stream = _configured_on_a_bare_root()
 
     try:
         _raise_with_content()
     except _ReadFailedError:
-        logging.getLogger("thirdparty").exception(f"read failed ({_CHAINED}): %s", _LOCAL)
+        logging.getLogger("thirdparty").exception(
+            f"read failed ({_CHAINED}): %s", _LOCAL, extra={"detail": _MESSAGE}
+        )
 
     out = stream.getvalue()
     _assert_no_content(out)
@@ -978,36 +974,39 @@ def test_a_stdlib_exception_line_carries_the_class_and_frames_and_never_the_word
     assert "in _raise_with_content" in out
 
 
-def test_a_hosts_format_keeps_the_logger_and_level_and_masks_each_extra() -> None:
-    stream = _configured_under_a_hosts_handler("%(levelname)s %(name)s %(message)s|%(detail)s")
+def test_a_hosts_format_keeps_the_logger_and_level() -> None:
+    stream = _configured_under_a_hosts_handler("%(levelname)s %(name)s %(funcName)s %(message)s")
     failure = _caught(_raise_with_content)
 
-    logging.getLogger("thirdparty").error(
-        "read failed", exc_info=failure, extra={"detail": f"because {failure}"}
-    )
+    logging.getLogger("thirdparty").error("read failed", exc_info=failure)
 
     out = stream.getvalue()
     _assert_no_content(out)
-    assert out.startswith(f"ERROR thirdparty {_WITHHELD}\n")
-    assert out.endswith(f"_ReadFailedError|{REDACTED}\n")
+    where = "test_a_hosts_format_keeps_the_logger_and_level"
+    assert out.startswith(f"ERROR thirdparty {where} {_WITHHELD}\n")
+    assert out.endswith("_ReadFailedError\n")
 
 
-def test_a_numeric_extra_is_kept_so_a_hosts_numeric_format_still_prints() -> None:
-    # Adversarial review, round 3 under this holder: a number masked as a string
-    # failed ``%(elapsed).3f`` and the record was lost.
-    stream = _configured_under_a_hosts_handler("%(elapsed).3f %(count)d %(message)s|%(detail)s")
-    failure = _caught(_raise_with_content)
+def test_no_extra_rides_a_replaced_record_so_a_host_format_naming_one_fails_without_content(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Adversarial review, round 4 under the second holder: an extra kept because it
+    # was a number printed an SSN. No extra is copied — none masked, none kept — so a
+    # host format naming one fails in the host's own handler, and the stdlib's report
+    # of that failure prints the fixed message and ``()`` alone.
+    stream = _configured_under_a_hosts_handler("%(ssn)09d %(message)s")
 
     logging.getLogger("thirdparty").error(
-        "read failed",
-        exc_info=failure,
-        extra={"elapsed": 1.25, "count": 3, "detail": str(failure)},
+        "lookup failed", exc_info=ValueError(123456789), extra={"ssn": 123456789}
     )
 
-    out = stream.getvalue()
+    err = capsys.readouterr().err
+    out = stream.getvalue() + err
+    assert "123456789" not in out
     _assert_no_content(out)
-    assert out.startswith(f"1.250 3 {_WITHHELD}\n")
-    assert out.endswith(f"|{REDACTED}\n")
+    assert "--- Logging error ---" in err, "the host's handler reports its own failure"
+    assert f"Message: {_WITHHELD + chr(10) + 'ValueError'!r}" in err
+    assert "Arguments: ()" in err
 
 
 @pytest.mark.parametrize(
@@ -1020,21 +1019,6 @@ def test_a_numeric_extra_is_kept_so_a_hosts_numeric_format_still_prints() -> Non
             id="f-string",
         ),
         pytest.param(lambda log, failure: log.error(failure), id="message"),
-        pytest.param(lambda log, failure: log.error("%s", [failure]), id="list"),
-        pytest.param(lambda log, failure: log.error("%s", {"read": (failure,)}), id="nested"),
-        pytest.param(lambda log, failure: log.error("%s", {failure}), id="set"),
-        pytest.param(lambda log, failure: log.error("%s", deque([failure])), id="deque"),
-        pytest.param(lambda log, failure: log.error("%s", UserList([failure])), id="UserList"),
-        pytest.param(
-            lambda log, failure: log.error("%s", ChainMap({"read": "ok"}, {"read": failure})),
-            id="ChainMap shadowed",
-        ),
-        pytest.param(
-            lambda log, failure: log.error("%s", MappingProxyType({"read": failure})),
-            id="mapping proxy",
-        ),
-        pytest.param(lambda log, failure: log.error("%s", {failure: 1}), id="mapping key"),
-        pytest.param(lambda log, failure: log.error("%s", _Outcome(failure)), id="dataclass"),
         pytest.param(
             lambda log, failure: log.error("read %(what)s", {"what": failure}),
             id="sole mapping argument",
@@ -1042,13 +1026,9 @@ def test_a_numeric_extra_is_kept_so_a_hosts_numeric_format_still_prints() -> Non
         pytest.param(
             lambda log, failure: log.error("read failed", extra={"failure": failure}), id="extra"
         ),
-        pytest.param(
-            lambda log, failure: log.error("read failed", extra={"failure": [{"at": failure}]}),
-            id="nested extra",
-        ),
     ],
 )
-def test_a_record_carrying_an_exception_anywhere_prints_neither_message_nor_arguments(
+def test_a_record_carrying_an_exception_directly_prints_neither_message_nor_arguments(
     logged: Callable[[logging.Logger, BaseException], None],
 ) -> None:
     stream = _configured_on_a_bare_root()
@@ -1080,77 +1060,42 @@ def test_words_rebuilt_from_an_exception_are_not_printed() -> None:
     assert out.count(_WITHHELD) == len(("rebuilt", "overlapping"))
 
 
-def test_a_record_carrying_no_exception_prints_as_it_did() -> None:
-    # Content a call site puts into an ordinary message is the call site's
-    # convention (ADR-0004 §5), not this net's.
-    stream = _configured_on_a_bare_root()
+def test_a_record_carrying_no_exception_prints_byte_for_byte_as_it_did() -> None:
+    # Content a call site puts into a record with no exception is the call site's
+    # convention (ADR-0004 §5), not this net's. Compared with the same host format
+    # on a handler the net never reached.
+    fmt = "%(levelname)s %(name)s %(message)s|%(detail)s %(elapsed).3f"
+    stream = _configured_under_a_hosts_handler(fmt)
+    bare = io.StringIO()
+    unscrubbed = logging.StreamHandler(bare)
+    unscrubbed.setFormatter(logging.Formatter(fmt))
+    logging.getLogger().addHandler(unscrubbed)
 
     logging.getLogger("thirdparty").error(
-        "header %r, read %s of %s", b"raw", {"count": 2}, PurePath("/data/x")
+        "header %r, read %s of %s",
+        b"raw",
+        {"count": 2},
+        PurePath("/data/x"),
+        extra={"detail": "the call site's", "elapsed": 1.25},
     )
 
-    assert stream.getvalue() == "header b'raw', read {'count': 2} of /data/x\n"
+    expected = (
+        "ERROR thirdparty header b'raw', read {'count': 2} of /data/x|the call site's 1.250\n"
+    )
+    assert bare.getvalue() == expected
+    assert stream.getvalue() == expected
 
 
-def test_a_record_holding_more_than_the_net_checks_is_withheld() -> None:
-    # Fail closed: an exception past the walk's limit would not be found. A value
-    # met again counts, so repeating one cannot hide what follows it.
+def test_an_exception_nested_one_level_down_is_left_to_the_call_site_by_the_shallow_rule() -> None:
+    # The shallow rule, pinned: "carries" is an exception passed directly. One held
+    # inside a container is the call site's to keep out of a log (ADR-0004 §5), and
+    # the record prints as it was logged.
     stream = _configured_on_a_bare_root()
+    failure = ValueError("held inside")
 
-    logging.getLogger("thirdparty").error("ids: %s", ["same"] * 20_000 + [ValueError(_MESSAGE)])
+    logging.getLogger("thirdparty").error("failures: %s", [failure])
 
-    out = stream.getvalue()
-    _assert_no_content(out)
-    assert out == "[message withheld: the record holds more than this net checks]\n"
-
-
-def test_the_walk_reads_no_more_than_its_limit_however_the_input_branches() -> None:
-    # Adversarial review, round 2 under this holder: each of two hundred sibling
-    # sequences was read to its own limit, nearly two million reads in all.
-    reads = 0
-
-    class Counted(Sequence[int]):
-        def __len__(self) -> int:
-            return 10_000
-
-        def __getitem__(self, index: Any) -> Any:
-            raise NotImplementedError
-
-        def __iter__(self) -> Iterator[int]:
-            nonlocal reads
-            for number in range(10_000):
-                reads += 1
-                yield number
-
-    stream = _configured_on_a_bare_root()
-
-    logging.getLogger("thirdparty").error("rows: %s", [Counted() for _ in range(200)])
-
-    assert reads <= 10_000
-    assert stream.getvalue().startswith("[message withheld: the record holds more")
-
-
-def test_a_lazy_containers_fresh_values_are_each_looked_inside() -> None:
-    # A value a lazy container makes and drops frees its id; the next one made can
-    # take it, and must not be mistaken for the one already looked inside.
-    class Fresh(Sequence[list[object]]):
-        def __len__(self) -> int:
-            return 2
-
-        def __getitem__(self, index: Any) -> Any:
-            raise NotImplementedError
-
-        def __iter__(self) -> Iterator[list[object]]:
-            yield []
-            yield [ValueError(_MESSAGE)]
-
-    stream = _configured_on_a_bare_root()
-
-    logging.getLogger("thirdparty").error("rows: %s", Fresh())
-
-    out = stream.getvalue()
-    _assert_no_content(out)
-    assert out == f"{_WITHHELD}\nValueError\n"
+    assert stream.getvalue() == "failures: [ValueError('held inside')]\n"
 
 
 def test_an_exception_passed_twice_is_shown_once() -> None:
@@ -1197,29 +1142,18 @@ def test_groups_sharing_members_are_logged_at_a_bounded_length() -> None:
         shared = ExceptionGroup(_CHAINED, [shared, shared])
 
     logging.getLogger("thirdparty").error("pass failed: %s", shared, exc_info=shared)
-    logging.getLogger("thirdparty").error("pass failed: %r", [shared])
+    logging.getLogger("thirdparty").error("pass failed: %r", shared)
 
     out = stream.getvalue()
     _assert_no_content(out)
     assert len(out) < 10_000
 
 
-def test_an_argument_holding_itself_ends_the_walk() -> None:
-    stream = _configured_on_a_bare_root()
-    held: list[object] = [ValueError(_MESSAGE)]
-    held.append(held)
-
-    logging.getLogger("thirdparty").error("failures: %s", held)
-
-    out = stream.getvalue()
-    _assert_no_content(out)
-    assert out == f"{_WITHHELD}\nValueError\n"
-
-
-def test_a_field_a_hosts_record_factory_adds_is_masked_like_an_extra() -> None:
-    # The standard fields are read off a record built directly, never through
-    # ``makeLogRecord``, which calls the factory a host installed before importing
-    # this package.
+def test_a_field_a_hosts_record_factory_adds_is_not_carried_over() -> None:
+    # The standard fields are read off a record built directly, and the fresh record
+    # is built by the ``LogRecord`` class, never through the factory a host installed
+    # before importing this package. The host's format names the field, so the host's
+    # handler reports its own failure, with the fixed message and ``()`` alone.
     script = (
         "import io, logging\n"
         "made = logging.getLogRecordFactory()\n"
@@ -1240,8 +1174,11 @@ def test_a_field_a_hosts_record_factory_adds_is_masked_like_an_extra() -> None:
         [sys.executable, "-c", script], capture_output=True, text=True, check=True
     )
 
-    assert _MESSAGE not in result.stdout
-    assert result.stdout == f"{_WITHHELD}\nValueError|{REDACTED}\n\n"
+    _assert_no_content(result.stdout + result.stderr)
+    assert result.stdout == "\n", "the host's handler wrote nothing"
+    assert "--- Logging error ---" in result.stderr
+    assert f"Message: {_WITHHELD + chr(10) + 'ValueError'!r}" in result.stderr
+    assert "Arguments: ()" in result.stderr
 
 
 def test_a_message_another_handler_cached_is_not_handed_on() -> None:
@@ -1410,43 +1347,34 @@ def test_a_foreign_record_formatted_by_a_hosts_processor_formatter_keeps_its_cla
     assert "in _raise_with_content" in out, "and the frames"
 
 
-def test_a_wrapped_structlog_events_factory_field_is_masked_when_it_carries_one() -> None:
-    # Adversarial review, round 1 under this holder: a host record factory's field
-    # rode a wrapped structlog event untouched.
+def test_a_wrapped_structlog_event_carrying_an_exception_is_handed_on_with_no_extra() -> None:
+    # Adversarial review, rounds 1 and 2 under the second holder: a host record
+    # factory's field — an exception, or an exception's text — rode a wrapped
+    # structlog event. An event that carries an exception is handed on as a fresh
+    # record holding only ``ProcessorFormatter``'s plumbing. (A host formatter that
+    # calls the host's factory again is the host's own: brief F8c, rule 2.)
     made = logging.getLogRecordFactory()
 
     def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
         record = made(*args, **kwargs)
         record.failure = ValueError(_MESSAGE)
-        return record
-
-    logging.setLogRecordFactory(factory)
-    try:
-        stream = _hosted_by_processor_formatter("%(message)s|%(failure)s")
-        structlog.get_logger("host").warning("read_failed")
-        logging.getLogger("thirdparty").error("foreign failed")
-    finally:
-        logging.setLogRecordFactory(made)
-
-    out = stream.getvalue()
-    _assert_no_content(out)
-    assert out.count(f"|{REDACTED}") == len(("structlog event", "foreign record"))
-    assert "read_failed" in out
-
-
-def test_a_wrapped_structlog_events_factory_text_is_masked_when_the_event_carries_one() -> None:
-    # Adversarial review, round 2 under this holder: the event's exception was already
-    # rendered in its dict, and a factory put the exception's text in a field.
-    made = logging.getLogRecordFactory()
-
-    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
-        record = made(*args, **kwargs)
         record.detail = str(sys.exc_info()[1])
         return record
 
+    _hosted_by_processor_formatter()
+    root = logging.getLogger()
+    (host,) = root.handlers
+    root.removeHandler(host)
+    logged: list[logging.LogRecord] = []
+
+    class Keep(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            logged.append(record)
+
+    root.addHandler(Keep())
     logging.setLogRecordFactory(factory)
     try:
-        stream = _hosted_by_processor_formatter("%(message)s|%(detail)s")
+        structlog.get_logger("host").warning("plain")
         try:
             _raise_with_content()
         except _ReadFailedError as failure:
@@ -1454,10 +1382,19 @@ def test_a_wrapped_structlog_events_factory_text_is_masked_when_the_event_carrie
     finally:
         logging.setLogRecordFactory(made)
 
-    out = stream.getvalue()
+    handed = [host.filter(one) for one in logged]
+    for one in handed:
+        assert isinstance(one, logging.LogRecord)
+        assert not hasattr(one, "failure"), "no extra is carried over"
+        assert not hasattr(one, "detail")
+        assert hasattr(one, "_logger"), "ProcessorFormatter's plumbing is"
+    formatter = host.formatter
+    assert formatter is not None
+    out = "\n".join(formatter.format(one) for one in handed if isinstance(one, logging.LogRecord))
     _assert_no_content(out)
-    assert out.rstrip().endswith(f"|{REDACTED}")
+    assert "plain" in out
     assert "read_failed" in out
+    assert "_ReadFailedError" in out
 
 
 def test_the_last_resort_handler_is_scrubbed_too() -> None:
