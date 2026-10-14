@@ -68,10 +68,8 @@ from ai_assistant.core.types import (
     MemorySearchResult,
     MemorySource,
     MemoryWriteMode,
-    NonBlankEncodableText,
     ProcessingStatus,
     RecordChunk,
-    TopicLabel,
     TraceKind,
     TraceRecordSet,
     band_of,
@@ -108,7 +106,6 @@ if TYPE_CHECKING:
         BeliefBand,
         MemoryKind,
         MemoryWrite,
-        TimeWindow,
         WalkPosition,
     )
 
@@ -323,9 +320,12 @@ def _to_micros(instant: datetime) -> int:
 type _PreparedWrite = tuple[MemoryRecord, MemoryWriteMode, int | None, Embedding | None]
 
 
-#: The three label axes ADR-0237 §1 adds that are matched by an equality, and the
+#: The three label axes ADR-0237 §1 added that are matched by an equality, and the
 #: ``axis`` value each is stored under in ``record_labels``. Named here so the
-#: writer, the migration and the two reads cannot spell one of them differently.
+#: writer and the migration cannot spell one of them differently. No read queries
+#: the index since ``select`` and ``search``'s structured axes left (ADR-0309 §5:1);
+#: it is still written, and carried by ``memory/reembed.py``, until a change of its
+#: own retires it.
 _TOPIC_AXIS = "topic"
 _PARTICIPANT_AXIS = "participant"
 _SUBJECT_AXIS = "subject"
@@ -361,199 +361,15 @@ def _labels_of(record: MemoryRecord) -> list[tuple[str, str]]:
     return rows
 
 
-#: The refusal ADR-0237 §2 attributes to the type, made whatever a caller passes.
-#: A Protocol signature is not a validated model — an ``Annotated`` alias in a
-#: method's annotations runs no validator at a normal call — so the type is asked
-#: explicitly, and it is *this* type rather than a hand-written check so the form a
-#: filter value must take cannot drift from the form a stored label must take
-#: (ADR-0213 §3).
-_TOPIC_LABEL: Final = TypeAdapter[str](TopicLabel)
-
-
-def _topic_keys(values: Sequence[str]) -> frozenset[str]:
-    """The ``topics`` filter as a comparison set, refusing a non-canonical label.
-
-    ADR-0237 §2: "a ``topics`` value not already in ``TopicLabel``'s canonical form
-    is refused by the type". Refused rather than allowed to match nothing, and that
-    is not a nicety: an unrefused ``"Health"`` returns an **empty result**, which is
-    the one answer ADR-0237 §7 spends four clauses insisting a caller must never
-    read as "nothing happened". A caller's typo would be indistinguishable from a
-    true absence, on the read whose whole contract is about what an absence means.
-
-    Matching is equality of the stored characters (ADR-0213 §3), so the values need
-    no fold — unlike the two person axes — and duplicates collapse into the set.
-
-    Args:
-        values: The labels the call named.
-
-    Returns:
-        Them, as a set.
-
-    Raises:
-        ValueError: If any value is not already in ``TopicLabel``'s canonical form —
-            not equal to its own ``str.casefold()``, empty, over-long, carrying
-            whitespace other than ``U+0020``, leading or trailing a space, or
-            carrying a run of two. Pydantic's ``ValidationError`` is a ``ValueError``,
-            which is the class §2 names for the sibling refusal on this parameter.
-    """
-    return frozenset(_TOPIC_LABEL.validate_python(value) for value in values)
-
-
-#: The refusal ADR-0237 §2 puts on the two person axes, asked of the declared type
-#: rather than hand-written. ``NonBlankEncodableText`` carries **both** halves — it
-#: refuses a blank *and* a string with no UTF-8 encoding — and asking the type is
-#: what keeps the two from drifting apart: a hand-written blank check let
-#: ``"\\ud800"`` through, where the in-memory stores matched nothing and the SQL one
-#: raised a raw ``UnicodeEncodeError`` out of its parameter binding, past the
-#: ``MemoryStoreError`` boundary the store documents. ADR-0087 §7 rules that "the
-#: place a non-encodable value is refused is the type, not the frame", and issue
-#: #565 is the same value doing the same thing one seam over.
-_PERSON_LABEL: Final = TypeAdapter[str](NonBlankEncodableText)
-
-
-def _person_keys(argument: str, values: Sequence[str]) -> frozenset[str]:
-    """Fold one person-axis filter to ADR-0101 §2's comparison keys, refusing a bad value.
-
-    Duplicated across the two stores and the canonical fake rather than shared,
-    exactly as ``_check_page_bounds`` is: ``ai_assistant.testing`` may not import a
-    subsystem (golden rule 1). The **fold** is not duplicated — it is
-    :func:`~ai_assistant.core.types.caseless_key` in ``core``, because a fold that
-    drifted between three implementations would make one call answer differently
-    per backend, which is the divergence ADR-0237 §3 borrows an external standard
-    to prevent. Neither is the *refusal*: the declared type makes it.
-
-    Duplicates collapse into the set, which is the set semantics ADR-0237 §2 gives
-    every sequence axis, and the caller's sequence is read exactly once.
-
-    **The refusal is re-raised naming the parameter**, which is the one thing the
-    type cannot say: :func:`~ai_assistant.core.types._rejecting_non_blank`
-    deliberately names no field, because three unrelated ones reach it. Here the
-    caller needs to know *which* argument it passed badly, and there are two.
-
-    Args:
-        argument: The parameter's name, for the refusal message.
-        values: The labels the call named.
-
-    Returns:
-        Their canonical caseless keys.
-
-    Raises:
-        ValueError: If any value is blank or whitespace-only (ADR-0237 §2), or has
-            no UTF-8 encoding. A blank is never read as "unstated" and never
-            matches a record, so it is refused rather than quietly ignored; an
-            unencodable one is refused because the parameter's declared type
-            refuses it and because a value that reaches no backend intact must
-            fail the same way on every one of them.
-    """
-    keys: set[str] = set()
-    for value in values:
-        try:
-            checked = _PERSON_LABEL.validate_python(value)
-        except ValidationError as exc:
-            msg = f"a {argument} value must be non-blank text with a UTF-8 encoding: {exc}"
-            raise ValueError(msg) from exc
-        keys.add(caseless_key(checked))
-    return frozenset(keys)
-
-
 def _selects_nothing(*axes: frozenset[object] | None) -> bool:
     """Whether any applied sequence axis is **empty**, and so selects nothing.
 
-    ADR-0113 §3's convention, restated by ADR-0237 §2 for the axes it adds. A read
-    this returns ``True`` for matches nothing by construction, so its result is
+    ADR-0113 §3's convention. A read this returns ``True`` for matches nothing by
+    construction, so its result is
     empty and its ``capped`` is ``False`` and never ``True`` (ADR-0128 §2) — and it
     is taken before the embedder is paid for a query whose answer is already known.
     """
     return any(axis is not None and not axis for axis in axes)
-
-
-def _refuse_an_axis_less_select(axes: tuple[object | None, ...]) -> None:
-    """Refuse a ``select`` that applies no axis at all (ADR-0237 §4).
-
-    No value of any axis means "everything", so a call naming no criterion is a
-    caller that reached for one and gave none. Refusing it is what keeps ``select``
-    from quietly becoming a second ``list_beliefs``.
-
-    Raises:
-        ValueError: If every axis is ``None``.
-    """
-    if all(axis is None for axis in axes):
-        msg = "select applies at least one axis; a call naming none is refused (ADR-0237 §4)"
-        raise ValueError(msg)
-
-
-def _window_micros(window: TimeWindow | None) -> tuple[int | None, int | None] | None:
-    """``window``'s ends as exact microsecond epochs, for the column comparison.
-
-    ``None`` where the axis is not applied. The conversion is
-    :func:`_to_micros`, the same one every stored instant goes through, so the
-    half-open comparison ``start <= occurred_at < end`` is exact integer arithmetic
-    against the value the column holds rather than a text comparison over ISO
-    spellings of variable precision.
-    """
-    if window is None:
-        return None
-    start = None if window.start is None else _to_micros(window.start)
-    end = None if window.end is None else _to_micros(window.end)
-    return (start, end)
-
-
-def _structured_restriction(  # noqa: PLR0913 — one parameter per axis it appends
-    eligible: list[str],
-    restriction: list[object],
-    *,
-    window: tuple[int | None, int | None] | None,
-    participants: frozenset[str] | None,
-    topics: frozenset[str] | None,
-    subjects: frozenset[str] | None,
-) -> None:
-    """Append ADR-0237 §1's four axes to a SQL restriction over ``records``.
-
-    Shared by :meth:`SqliteMemoryStore._search_sync` and
-    :meth:`SqliteMemoryStore._select_sync` so the two reads cannot come to apply
-    the same axis differently — the drift ADR-0237 §4 refuses one paragraph after
-    deciding to put the axes on two members.
-
-    Every applied label axis is non-empty by the time this runs: both callers
-    short-circuit an empty selection before reaching here, which is what lets the
-    ``IN`` lists always carry a placeholder. Only *placeholder counts* are
-    interpolated; every value is bound, so the assembled text carries no caller
-    data.
-
-    Args:
-        eligible: The predicate fragments, extended in place.
-        restriction: The bound values, extended in place and in the same order.
-        window: ``occurred_at``'s half-open bounds as µs epochs, or ``None``.
-        participants: Caseless keys, or ``None`` where the axis is not applied.
-        topics: Exact labels, or ``None``.
-        subjects: Caseless keys for ``about_person``, or ``None``.
-    """
-    if window is not None:
-        start, end = window
-        # ``IS NOT NULL`` first and unconditionally: a record of a kind carrying no
-        # ``occurred_at`` is reached by no window (ADR-0237 §6), and a bare
-        # ``occurred_at < ?`` would admit every one of them, since SQL's ``NULL``
-        # comparison is unknown rather than false only inside the ``WHERE``.
-        eligible.append("occurred_at IS NOT NULL")
-        if start is not None:
-            eligible.append("occurred_at >= ?")
-            restriction.append(start)
-        if end is not None:
-            eligible.append("occurred_at < ?")
-            restriction.append(end)
-    for axis, values in (
-        (_PARTICIPANT_AXIS, participants),
-        (_TOPIC_AXIS, topics),
-        (_SUBJECT_AXIS, subjects),
-    ):
-        if values is None:
-            continue
-        eligible.append(
-            f"rowid IN (SELECT record_rowid FROM record_labels "  # noqa: S608 — bound below
-            f"WHERE axis = ? AND value IN ({', '.join('?' * len(values))}))"
-        )
-        restriction.append(axis)
-        restriction.extend(sorted(values))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1976,17 +1792,13 @@ class SqliteMemoryStore:
                 )
         return rows
 
-    async def search(  # noqa: PLR0913 — ADR-0237 §1's signature, one keyword per axis
+    async def search(
         self,
         query: str,
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-        occurred_within: TimeWindow | None = None,
-        participants: Sequence[str] | None = None,
-        topics: Sequence[TopicLabel] | None = None,
-        about_person: Sequence[str] | None = None,
     ) -> MemorySearchResult:
         """Return the records most relevant to ``query`` by vector similarity.
 
@@ -2011,35 +1823,6 @@ class SqliteMemoryStore:
                 *before* the vector search, like every other eligibility axis.
             bands: If given, restrict results to these belief bands; ``None`` is
                 every band and ``()`` none, conjunctive with ``kinds``.
-            occurred_within: If given, the half-open ``[start, end)`` window a
-                record's ``occurred_at`` must fall inside — bound as an exact
-                microsecond epoch against the column, *before* the vector search.
-                A record carrying no ``occurred_at`` is reached by no window.
-            participants: If given, the person labels a record must name one of,
-                compared by ADR-0101 §2's canonical caseless fold through the
-                label index; ``None`` is every record and ``()`` none.
-            topics: If given, the labels a record must carry one of, compared by
-                exact stored characters; ``None`` is every record and ``()`` none.
-            about_person: If given, the subject labels a record's own must fold
-                equal to; a record stating no subject is matched by none of them.
-
-        **The four structured axes bind before the KNN cut too** (ADR-0237 §1).
-        ``occurred_at`` is a column on ``records``, and the three label axes are a
-        ``rowid`` restriction over the ``record_labels`` index, so both join the
-        same ``v.rowid IN (SELECT ...)`` the other five axes already ride — no
-        ineligible row enters the candidate set and none spends a candidate slot.
-        The skew here is worse than the band's and structurally so: a window over
-        "last week" excludes every record ever written outside it, so a post-cut
-        filter would return nothing at all on any store with a few weeks of
-        history.
-
-        **The trace's metric keys do not change** (ADR-0119 §8). That clause
-        enumerates the per-predicate exclusion counts a ``RETRIEVAL`` trace
-        carries — retention, validity window, kind and band — and ADR-0237
-        supersedes and amends nothing; the new axes bind before the cut, so their
-        counts would be structural zeros like the four already here, and adding
-        keys would put every trace before this change and every trace after it in
-        different populations (ADR-0120 §7).
 
         **One ``RETRIEVAL`` trace per call, emitted here because nowhere else can
         see the numbers** (ADR-0119 §8). The per-predicate exclusion counts exist
@@ -2068,11 +1851,6 @@ class SqliteMemoryStore:
                 answering.
             MemoryStoreError: If the embedder fails or returns a wrong-sized
                 query vector, or a stored record is corrupt.
-            ValueError: If a ``participants`` or ``about_person`` value is blank or
-                has no UTF-8 encoding, or a ``topics`` value is not in
-                ``TopicLabel``'s canonical form (ADR-0237 §2). The refusal is taken
-                inside the traced region, so it emits its ``RETRIEVAL`` trace like
-                any other fault (ADR-0119 §8).
 
         Note:
             ``kinds`` and ``bands`` are materialised on the coroutine's **first
@@ -2087,20 +1865,6 @@ class SqliteMemoryStore:
             its own trace disagree about what was asked for.
         """
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
-        # **Copied on the first executed lines, folded to keys inside the traced
-        # region.** The copy is ADR-0065 §3's second discharge, taken with ``kinds``
-        # and ``bands`` and for their reason — before the embedder's await and the
-        # lock's, so a caller mutating the sequence it passed cannot change what
-        # this read applies. The *refusal* a malformed value earns is deliberately
-        # not taken here: ADR-0119 §8 requires one ``RETRIEVAL`` trace per
-        # ``search`` and says in terms that "a faulting operation still emits its
-        # trace", so a refusal raised before :meth:`_traces.observing` starts would
-        # emit none and a ``search`` that raised would be indistinguishable from
-        # one that was never called — on the read whose telemetry #824 watches.
-        # :meth:`_searched` folds them on *its* first executed lines instead.
-        named_people = None if participants is None else tuple(participants)
-        named_topics = None if topics is None else tuple(topics)
-        named_subjects = None if about_person is None else tuple(about_person)
         # **One read of the caller's sequence, and both derivations off the copy.**
         # ``_sources_in(bands)`` followed by ``frozenset(bands)`` would be two reads
         # of a caller-owned mutable container. No ``await`` separates them, so on one
@@ -2121,52 +1885,25 @@ class SqliteMemoryStore:
             entry[traces.BANDS] = selected_bands
         retrieved = await self._traces.observing(
             traces.SEAM_SEARCH,
-            self._searched(
-                query,
-                limit,
-                wanted,
-                wanted_sources,
-                _window_micros(occurred_within),
-                named_people,
-                named_topics,
-                named_subjects,
-            ),
+            self._searched(query, limit, wanted, wanted_sources),
             _retrieval_reading,
             entry=entry,
         )
         return MemorySearchResult(records=tuple(retrieved.records), capped=retrieved.capped)
 
-    async def _searched(  # noqa: PLR0913 — one parameter per already-materialised axis
+    async def _searched(
         self,
         query: str,
         limit: int,
         wanted: frozenset[str] | None,
         wanted_sources: frozenset[str] | None,
-        window: tuple[int | None, int | None] | None,
-        named_people: tuple[str, ...] | None,
-        named_topics: tuple[str, ...] | None,
-        named_subjects: tuple[str, ...] | None,
     ) -> _Retrieved:
         """The read itself, returning its records **and** what only it can count.
 
-        Split out of :meth:`search` so the whole read — the label refusals, the
-        short circuits, the embedding, the filtered pass and the decode — sits
-        inside the traced region. Decoding in particular: a corrupt row raises
-        ``MemoryStoreError`` there, and a decode left outside would have that read
-        recorded as ``OK``.
-
-        **The three label axes are folded to their comparison keys here, on this
-        coroutine's first executed lines, because that is inside the traced
-        region.** ADR-0119 §8 requires one ``RETRIEVAL`` trace per ``search`` and
-        rules that "a faulting operation still emits its trace"; a value the
-        declared type refuses (ADR-0237 §2) is one more way for the read to fault,
-        and folding in :meth:`search` would raise before
-        :meth:`_traces.observing` was ever entered — leaving a raising ``search``
-        with no trace at all. The fold precedes the short circuits deliberately:
-        the refusal ADR-0237 §2 states is unconditional, so a blank query or a
-        non-positive ``limit`` may not swallow it. What the trace records is
-        unchanged either way — its ``limit``, its elapsed time, its ``FAULT``
-        outcome and its fault class, and no label contents (ADR-0119 §2).
+        Split out of :meth:`search` so the whole read — the short circuits, the
+        embedding, the filtered pass and the decode — sits inside the traced
+        region. Decoding in particular: a corrupt row raises ``MemoryStoreError``
+        there, and a decode left outside would have that read recorded as ``OK``.
 
         Args:
             query: The search text.
@@ -2174,14 +1911,6 @@ class SqliteMemoryStore:
             wanted: The kind restriction, already materialised.
             wanted_sources: The band restriction as source names, already
                 materialised; ``None`` for every band.
-            window: ``occurred_at``'s half-open bounds as microsecond epochs,
-                already converted; ``None`` where the axis is not applied.
-            named_people: The ``participants`` restriction as the caller named it,
-                already copied; ``None`` where not applied.
-            named_topics: The ``topics`` restriction as the caller named it,
-                already copied; ``None`` where not applied.
-            named_subjects: The ``about_person`` restriction as the caller named
-                it, already copied; ``None`` where not applied.
 
         Returns:
             The records, whether the ceiling bound them, and the counts ADR-0119 §8
@@ -2189,24 +1918,13 @@ class SqliteMemoryStore:
             which is the honest answer: the read never fetched a candidate, and §3
             forbids a zero standing in. It reports ``capped=False`` — a read that
             matches nothing by construction is not a capped one (ADR-0128 §2).
-
-        Raises:
-            ValueError: If a ``participants`` or ``about_person`` value is blank or
-                has no UTF-8 encoding, or a ``topics`` value is not in
-                ``TopicLabel``'s canonical form (ADR-0237 §2). Raised inside the
-                traced region on purpose — see above.
         """
-        wanted_people = None if named_people is None else _person_keys("participants", named_people)
-        wanted_topics = None if named_topics is None else _topic_keys(named_topics)
-        wanted_subjects = (
-            None if named_subjects is None else _person_keys("about_person", named_subjects)
-        )
         if limit <= 0 or not query.strip():
             return _Retrieved(records=[], capped=False, observed={})
         # An empty ``bands`` selects nothing (ADR-0113 §3), and so does a selection
         # no source maps into — the same answer by the same reasoning, and taken
         # before the embedder is paid for a query whose result is already known.
-        if _selects_nothing(wanted_sources, wanted_people, wanted_topics, wanted_subjects):
+        if _selects_nothing(wanted_sources):
             return _Retrieved(records=[], capped=False, observed={})
         vector = await self._embed_one(query)
         async with self._lock:
@@ -2216,10 +1934,6 @@ class SqliteMemoryStore:
                 limit,
                 wanted,
                 wanted_sources,
-                window,
-                wanted_people,
-                wanted_topics,
-                wanted_subjects,
                 self._now_micros(),
             )
         return _Retrieved(
@@ -2231,16 +1945,12 @@ class SqliteMemoryStore:
             observed=observed,
         )
 
-    def _search_sync(  # noqa: PLR0913 — one parameter per already-materialised axis
+    def _search_sync(
         self,
         vector: Embedding,
         limit: int,
         wanted: frozenset[str] | None,
         wanted_sources: frozenset[str] | None,
-        window: tuple[int | None, int | None] | None,
-        wanted_people: frozenset[str] | None,
-        wanted_topics: frozenset[str] | None,
-        wanted_subjects: frozenset[str] | None,
         now: int,
     ) -> tuple[list[tuple[str, int, float]], bool, dict[str, int]]:
         """Run the KNN with every eligibility predicate bound into it.
@@ -2351,17 +2061,6 @@ class SqliteMemoryStore:
                 f"IN ({', '.join('?' * len(wanted_sources))})"
             )
             restriction.extend(sorted(wanted_sources))
-        # ADR-0237 §1's four axes join the same restriction, through the shared
-        # builder ``_select_sync`` also uses — two spellings of one axis set is the
-        # drift ADR-0237 §4 refuses.
-        _structured_restriction(
-            eligible,
-            restriction,
-            window=window,
-            participants=wanted_people,
-            topics=wanted_topics,
-            subjects=wanted_subjects,
-        )
         sql = (
             "SELECT r.data, r.revision, v.distance FROM vec_records v "  # noqa: S608 — bound above
             "JOIN records r ON r.rowid = v.rowid "
@@ -2453,177 +2152,6 @@ class SqliteMemoryStore:
                 traces.EXCLUDED_BAND: 0,
             },
         )
-
-    async def select(  # noqa: PLR0913 — ADR-0237 §1's signature, one keyword per axis
-        self,
-        *,
-        limit: int = 10,
-        kinds: Sequence[MemoryKind] | None = None,
-        bands: Sequence[BeliefBand] | None = None,
-        occurred_within: TimeWindow | None = None,
-        participants: Sequence[str] | None = None,
-        topics: Sequence[TopicLabel] | None = None,
-        about_person: Sequence[str] | None = None,
-    ) -> MemorySearchResult:
-        """Return the records the criteria select, newest write first (ADR-0237 §4).
-
-        The structured read: six axes, a ``limit`` and no query. **Nothing is
-        applied after the cut** — the axes and both read-time axes are applied to
-        the whole candidate set, the set is ordered, and only then is ``[:limit]``
-        taken (ADR-0237 §1) — which is ``list_beliefs``' shape and for its reason.
-
-        **Where each predicate runs, and why it is not all SQL.** ``kind``,
-        ``expires_at``, ``valid_until`` and ``occurred_at`` are exact integer
-        columns, and the three label axes are a ``rowid`` restriction over
-        ``record_labels``, so all six are pre-filtered in SQL. The band and the
-        ``valid_from`` end of the window live only inside each record's JSON blob,
-        whose stored form is ISO text of *variable precision*, so a SQL comparison
-        over them would order a sub-second instant before a whole-second one at the
-        same second; those two are decided on the decoded record — still before the
-        cut, which is what the contract requires. That is exactly ``list_beliefs``'
-        division and not a new one.
-
-        **This read has no candidate ceiling, so ``capped`` is always ``False``**
-        (ADR-0237 §7). There is no KNN here: the SQL fetches every row the column
-        predicates admit, and nothing but ``limit`` shortens the result — so a
-        short result is always the whole eligible set and is certified as such. The
-        fetch is bounded by the filters rather than by a page, which is why §4
-        refuses a call that names no criterion: an axis-less ``select`` would be
-        exactly the unbounded read ADR-0021 §4 declines to offer.
-
-        The clock is read **inside** the lock and that one reading drives both the
-        SQL pre-filter and every ``live_at`` check, so one read is judged against
-        one instant — matching :meth:`get` and :meth:`list_beliefs`.
-
-        Every ``Sequence`` filter is materialised on the coroutine's **first
-        executed lines**, before the lock await, and only the copies are read
-        thereafter: ADR-0065 §3's second discharge, as :meth:`search` and
-        :meth:`list_beliefs` take it.
-
-        Args:
-            limit: Maximum number of records to return; ``<= 0`` matches nothing
-                and is **not** refused — ``list_beliefs``' refusal of an
-                out-of-range value is not borrowed here (ADR-0237 §4), and a
-                ``limit`` this store cannot represent is one that returns records
-                rather than one that raises, because it never reaches a bind
-                parameter.
-            kinds: Memory kinds to include; ``None`` is every kind, ``()`` none.
-            bands: Belief bands to include; ``None`` is every band, ``()`` none.
-            occurred_within: The half-open ``[start, end)`` window a record's
-                ``occurred_at`` must fall inside, compared as exact microsecond
-                epochs; a record carrying none is reached by no window.
-            participants: Person labels compared by ADR-0101 §2's canonical
-                caseless fold through the label index; ``()`` selects nothing.
-            topics: Labels compared by exact stored characters; ``()`` selects
-                nothing.
-            about_person: Subject labels compared by the same fold; a record
-                stating no subject is matched by none. ``()`` selects nothing.
-
-        Returns:
-            A :class:`~ai_assistant.core.types.MemorySearchResult` holding the
-            eligible records ordered by ``provenance.last_updated`` descending,
-            ties by ``id`` ascending, cut to ``limit``, each a detached snapshot
-            with ``score`` cleared to ``None`` — and ``capped=False``.
-
-        Raises:
-            ValueError: If the call applies no axis at all, or a ``participants``
-                or ``about_person`` value is blank (ADR-0237 §§2, 4).
-            MemoryStoreError: If the store cannot be read, a stored record is
-                corrupt, or the injected clock's reading is not conforming.
-        """
-        wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
-        wanted_bands = None if bands is None else frozenset(bands)
-        wanted_people = None if participants is None else _person_keys("participants", participants)
-        wanted_topics = None if topics is None else _topic_keys(topics)
-        wanted_subjects = (
-            None if about_person is None else _person_keys("about_person", about_person)
-        )
-        window = _window_micros(occurred_within)
-        _refuse_an_axis_less_select(
-            (
-                kinds,
-                bands,
-                occurred_within,
-                participants,
-                topics,
-                about_person,
-            )
-        )
-        if limit <= 0 or _selects_nothing(
-            wanted_kinds, wanted_bands, wanted_people, wanted_topics, wanted_subjects
-        ):
-            return MemorySearchResult(records=())
-
-        async with self._lock:
-            now = self._now()
-            rows = await _run_to_completion(
-                self._select_sync,
-                wanted_kinds,
-                window,
-                wanted_people,
-                wanted_topics,
-                wanted_subjects,
-                _to_micros(now),
-            )
-        matched = [
-            record
-            for record in (self._decoded_at(data, revision) for data, revision in rows)
-            if record.validity.live_at(now)
-            and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
-        ]
-        page = _newest_revision_first(matched)[:limit]
-        # Cleared, not merely absent: a record re-added after a search carries that
-        # query's relevance, and nothing was ranked here (ADR-0237 §5).
-        return MemorySearchResult(
-            records=tuple(record.model_copy(update={"score": None}) for record in page)
-        )
-
-    def _select_sync(  # noqa: PLR0913 — one parameter per already-materialised axis
-        self,
-        kinds: frozenset[str] | None,
-        window: tuple[int | None, int | None] | None,
-        participants: frozenset[str] | None,
-        topics: frozenset[str] | None,
-        subjects: frozenset[str] | None,
-        now: int,
-    ) -> list[tuple[str, int]]:
-        """Read every candidate row for one ``select``: the column predicates, uncut.
-
-        Every applied filter is non-empty when it is not ``None`` — the caller
-        short-circuits an empty selection — so each ``IN`` list always has at least
-        one placeholder. Only the *placeholders* are interpolated; every value is
-        bound, so the assembled text carries no caller data, which is the
-        construction :meth:`_list_beliefs_sync` and :meth:`_search_sync` use and
-        the reason the ``S608`` heuristic is suppressed rather than satisfied.
-
-        The four structured axes go through the same builder :meth:`_search_sync`
-        uses, so the two reads cannot come to apply one axis differently.
-        """
-        eligible = [
-            # An open episode is never selected (ADR-0286 §6:1).
-            "is_open = 0",
-            "(expires_at IS NULL OR expires_at > ?)",
-            "(valid_until IS NULL OR valid_until > ?)",
-        ]
-        params: list[object] = [now, now]
-        if kinds is not None:
-            eligible.append(f"kind IN ({', '.join('?' * len(kinds))})")
-            params.extend(sorted(kinds))
-        _structured_restriction(
-            eligible,
-            params,
-            window=window,
-            participants=participants,
-            topics=topics,
-            subjects=subjects,
-        )
-        sql = f"SELECT data, revision FROM records WHERE {' AND '.join(eligible)}"  # noqa: S608
-        try:
-            rows = self._conn.execute(sql, params).fetchall()
-        except sqlite3.Error as exc:
-            msg = f"failed to select records: {exc}"
-            raise MemoryStoreError(msg) from exc
-        return [(str(row[0]), int(row[1])) for row in rows]
 
     async def episodes(
         self,
