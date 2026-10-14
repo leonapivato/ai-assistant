@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 
 import pytest
 from structlog.testing import capture_logs
@@ -34,6 +33,7 @@ from ai_assistant.core.types import (
     ProcessingReason,
     ProcessingStatus,
     RecordedChannelTrigger,
+    RecordedResumeTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
     SpeechChannelPayload,
@@ -50,15 +50,12 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.activation_state import (
     CURRENT_ACTIVATION,
     ActivationScope,
+    ActivationState,
     active_state,
     admit_channel,
-    admit_resume,
     canonical_activation_id,
     terminal_status,
 )
-
-if TYPE_CHECKING:
-    from ai_assistant.orchestration.activation_state import ActivationState
 
 _AT = datetime(2026, 9, 20, tzinfo=UTC)
 _ID = "60f3c223-6a54-4b06-aab8-4fc397c3d43b"
@@ -76,6 +73,16 @@ def _admitted() -> ActivationState:
         WholeTextReply(),
         clock=lambda: _AT,
         id_factory=lambda: _ID,
+    )
+
+
+def _resumed() -> ActivationState:
+    """A resume's state, whose record arms leave with ``RecordedResumeTrigger`` (ADR-0309 §5)."""
+    return ActivationState(
+        trigger=RecordedResumeTrigger(channel=None, approved=True, remember_recipients_until=None),
+        activation_id=_ID,
+        started_at=_AT,
+        conversation_id=None,
     )
 
 
@@ -112,8 +119,7 @@ def test_the_rounds_labels_and_digests_recorded_reach_the_open_and_the_frozen_re
         assert record.digests == (digest,)
 
 
-@pytest.mark.parametrize("transcript", [None, "", "  \n", "  exact transcript\n"])
-def test_speech_snapshot_contains_transcript_but_never_audio(transcript: str | None) -> None:
+def test_speech_snapshot_never_contains_audio() -> None:
     state = admit_channel(
         ChannelInput(
             target=NewConversation(),
@@ -125,22 +131,15 @@ def test_speech_snapshot_contains_transcript_but_never_audio(transcript: str | N
         clock=lambda: _AT,
         id_factory=lambda: _ID,
     )
-    state.transcription(transcript)
     record = state.processing(_AT, None)
     assert isinstance(record.trigger, RecordedChannelTrigger)
     assert isinstance(record.trigger.payload, RecordedSpeechInput)
-    assert record.trigger.payload.transcript == transcript
+    assert record.trigger.payload.transcript is None
     assert "YXVkaW8=" not in record.model_dump_json()
-    assert record.reason is (
-        ProcessingReason.NO_CONTENT
-        if transcript is not None and not transcript.strip()
-        else ProcessingReason.RETURNED
-    )
 
 
-def test_actual_cancellation_takes_precedence_over_composition_timeout_and_no_words() -> None:
+def test_actual_cancellation_takes_precedence_over_no_words() -> None:
     state = _admitted()
-    state.composition_timed_out = True
     state.no_words = True
     assert terminal_status(state, asyncio.CancelledError()) == (
         ProcessingStatus.INTERRUPTED,
@@ -302,9 +301,7 @@ def test_a_recorded_version_outranks_a_later_failure() -> None:
 
 
 def test_a_resume_records_no_input() -> None:
-    state = admit_resume(
-        approved=True, remember_recipients_until=None, clock=lambda: _AT, id_factory=lambda: _ID
-    )
+    state = _resumed()
     assert state.processing(_AT, None).understanding_omitted is UnderstandingOmission.NO_INPUT
 
 
@@ -324,9 +321,7 @@ def test_a_resume_that_continued_no_stage_records_the_end_entry_alone(
     failure: BaseException | None, rule: ControllerRule
 ) -> None:
     """ADR-0284 §5:4: one end entry, last, due the rule that ended the resume."""
-    state = admit_resume(
-        approved=True, remember_recipients_until=None, clock=lambda: _AT, id_factory=lambda: _ID
-    )
+    state = _resumed()
     record = state.processing(_AT, failure)
     assert [(entry.stage, entry.due) for entry in record.stages] == [(ControllerStage.END, rule)]
     assert record.stages_elided == 0
@@ -361,23 +356,6 @@ def test_an_end_entry_the_controller_appended_is_the_one_written() -> None:
     state.stages.end(ControllerRule.NOTHING_DUE, _AT)
     record = state.processing(_AT + timedelta(seconds=1), asyncio.CancelledError())
     assert [entry.due for entry in record.stages] == [ControllerRule.NOTHING_DUE]
-
-
-@pytest.mark.parametrize("transcript", [None, "", " \n"])
-def test_speech_without_words_records_no_text(transcript: str | None) -> None:
-    state = admit_channel(
-        ChannelInput(
-            target=NewConversation(),
-            payload=SpeechChannelPayload(
-                audio=SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
-            ),
-        ),
-        SpokenReply(plays=(SpokenAudioFormat.MP4,)),
-        clock=lambda: _AT,
-        id_factory=lambda: _ID,
-    )
-    state.transcription(transcript)
-    assert state.processing(_AT, None).understanding_omitted is UnderstandingOmission.NO_TEXT
 
 
 def test_an_understanding_error_is_its_own_terminal_reason_and_carries_no_text() -> None:
@@ -521,9 +499,7 @@ def test_a_marked_pass_that_never_entered_the_controller_ends_with_the_stops_ent
 @pytest.mark.parametrize("failure", [None, ModelTimeoutError("late"), PlanningError("x")])
 def test_a_marked_resume_ends_with_the_stops_entry(failure: BaseException | None) -> None:
     """§4:6: a resume, which the controller does not run, ends with the stop's entry."""
-    state = admit_resume(
-        approved=True, remember_recipients_until=None, clock=lambda: _AT, id_factory=lambda: _ID
-    )
+    state = _resumed()
     state.stop()
     record = state.processing(_AT, failure)
     assert [(entry.stage, entry.due) for entry in record.stages] == [
