@@ -44,7 +44,7 @@ from dataclasses import fields, is_dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
-from pathlib import PosixPath, PurePosixPath, PureWindowsPath, WindowsPath
+from pathlib import PosixPath, PurePath, PurePosixPath, PureWindowsPath, WindowsPath
 from typing import TYPE_CHECKING, Any, Final, Self, TextIO, cast
 from uuid import UUID
 
@@ -482,7 +482,20 @@ class _ClassName(str):
 
 #: The attributes every ``LogRecord`` has, and those a formatter adds. Any other
 #: attribute was set by a call site's ``extra``, which a host's format may print.
-_RECORD_FIELDS: Final = frozenset(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
+#: Read off a record built directly, never through ``makeLogRecord``: that calls the
+#: process's record factory, and a field a host's factory adds is not a standard one.
+_RECORD_FIELDS: Final = frozenset(
+    vars(logging.LogRecord("", logging.NOTSET, "", 0, "", (), None))
+) | {"message", "asctime"}
+
+#: The standard fields whose text a host or a library chooses: a thread's, a
+#: process's or a task's name. Cleared like an extra; the rest are the logging
+#: module's own (a level, a path, a function's name).
+_NAMED_FIELDS: Final = ("threadName", "processName", "taskName")
+
+#: How many values an exception's arguments may hold, at any depth, before its
+#: ``str`` and ``repr`` are not built here (:func:`_affordable`).
+_AFFORDABLE_PARTS: Final = 10_000
 
 #: The sequences walked inside a record's arguments and extras. Every mapping is
 #: walked; a sequence or set of any other type is masked, as an unknown object is:
@@ -566,14 +579,53 @@ def _held(carried: Sequence[BaseException]) -> list[BaseException]:
     return found
 
 
-def _plainly_built(failure: BaseException) -> bool:
-    """Whether ``failure``'s arguments are plain values, so its repr costs no more than they do.
+def _affordable(failure: BaseException) -> bool:
+    """Whether ``failure``'s ``str`` and ``repr`` cost no more than its arguments' size.
 
-    A group's arguments hold its members, and a group sharing members has a repr
-    exponential in its nesting; an argument of any other type can be as costly. Those
-    reprs are never built here, and :class:`_Unsaid` masks one where it appears.
+    A repr is linear in a tree of values and can be exponential in a graph that
+    shares them: ``[shared, shared]`` nested sixteen times is seventeen lists and a
+    repr of 65,536 leaves, as is a group holding the group before it twice. So the
+    arguments are walked first — into a held exception's own arguments too — and an
+    exception whose arguments share an object, or hold more than
+    :data:`_AFFORDABLE_PARTS` values, has neither built. :class:`_Unsaid` still
+    clears its text arguments and notes, and masks its repr where one appears.
     """
-    return all(type(arg) is str or type(arg) in _SAFE_EXACT_TYPES for arg in failure.args)
+    pending = list(failure.args)
+    seen: set[int] = set()
+    parts = 0
+    while pending:
+        one = pending.pop()
+        parts += 1
+        if parts > _AFFORDABLE_PARTS:
+            return False
+        if isinstance(one, str) or type(one) in _SAFE_EXACT_TYPES:
+            continue
+        if id(one) in seen:
+            return False
+        seen.add(id(one))
+        inside = one.args if isinstance(one, BaseException) else _walked(one)
+        if inside is not None:
+            pending.extend(inside)
+    return True
+
+
+def _renderings(text: str) -> list[str]:
+    """``text`` as a formatter commonly prints it: as is, and escaped by ``repr`` or ``ascii``.
+
+    Each with and without its quotes, and each line on its own, as is and escaped: a
+    line of a multi-line text is printed between the escapes of the lines around it.
+    """
+    lines = text.splitlines()
+    return [
+        text,
+        repr(text),
+        repr(text)[1:-1],
+        ascii(text),
+        ascii(text)[1:-1],
+        *lines,
+        *(repr(line)[1:-1] for line in lines),
+        *(ascii(line)[1:-1] for line in lines),
+    ]
 
 
 def _replaced(text: str, words: Mapping[str, str]) -> str:
@@ -607,11 +659,11 @@ def _replaced(text: str, words: Mapping[str, str]) -> str:
 class _Unsaid:
     """What takes the words of a record's exceptions out of a string.
 
-    Each exception's text is replaced by its class wherever it appears, as are the
-    forms a formatter commonly turns it into: its ``repr`` and ``ascii`` (``%r``,
-    ``%a``, ``!r``, a container's repr), each of its lines on its own, and the
-    exception's own repr where that is plainly built. That leaves a rendering this
-    module could not reproduce — asyncio's debug mode prints a callback's arguments
+    Each exception's text, each of its text arguments and each of its notes is
+    replaced by its class wherever it appears, as are the forms a formatter commonly
+    turns one into (:func:`_renderings`), and the exception's own repr. Its text and
+    repr are built only where that is affordable (:func:`_affordable`). That leaves
+    a rendering this module could not reproduce — asyncio's debug mode prints a callback's arguments
     through ``reprlib``, which cuts a long repr to ``ValueError('P…_END')`` — so a
     line still holding a carried exception's class followed by ``(`` is cut there,
     and what followed is masked.
@@ -627,14 +679,18 @@ class _Unsaid:
         words: dict[str, str] = {}
         for failure in failures:
             name = _class_name(failure)
-            text = str(failure)
-            said = [text, repr(text), ascii(text), *text.splitlines()]
             # Each text argument and note on its own: a group's ``str`` adds a count
             # of its members to its message, and a call site can print either alone.
-            said.extend(arg for arg in failure.args if isinstance(arg, str))
-            said.extend(note for note in getattr(failure, "__notes__", ()) if isinstance(note, str))
-            if _plainly_built(failure):
+            texts = [arg for arg in failure.args if isinstance(arg, str)]
+            texts.extend(
+                note for note in getattr(failure, "__notes__", ()) if isinstance(note, str)
+            )
+            said: list[str] = []
+            if _affordable(failure):
+                texts.append(str(failure))
                 said.append(repr(failure))
+            for text in texts:
+                said.extend(_renderings(text))
             for one in said:
                 if one.strip():
                     words.setdefault(one, name)
@@ -669,14 +725,17 @@ class _Unsaid:
         return "".join(lines)
 
 
-def _plain_leaf(value: object) -> object:
+def _plain_leaf(value: object, unsaid: _Unsaid) -> object:
     """A value that is neither a string, an exception nor a walked container, made plain.
 
-    A plain value is kept and an enum is named by its member, as the redactor names
-    one; anything else is masked. Bytes are masked too: they are raw data — a
-    library reporting a malformed document quotes its bytes — and never words this
-    net can match.
+    A path is text, so it is cleared as a string is, and becomes one. Any other
+    plain value — a number, a time, a UUID — has no text of its own and is kept, and
+    an enum is named by its member, as the redactor names one; anything else is
+    masked. Bytes are masked too: they are raw data — a library reporting a
+    malformed document quotes its bytes — and never words this net can match.
     """
+    if isinstance(value, PurePath):
+        return unsaid(str(value))
     if type(value) in _SAFE_EXACT_TYPES:
         return value
     if isinstance(value, Enum):
@@ -693,7 +752,7 @@ def _hashable(key: object) -> object:
     return key
 
 
-def _plain(value: object, unsaid: _Unsaid, done: dict[int, object]) -> object:
+def _plain(value: object, unsaid: _Unsaid, done: set[int]) -> object:
     """``value`` as plain values a formatter can print without an exception's words.
 
     An exception stands as its class (:class:`_ClassName`) and a string loses the
@@ -701,9 +760,9 @@ def _plain(value: object, unsaid: _Unsaid, done: dict[int, object]) -> object:
     member, and a mapping or walked sequence is rebuilt from its parts (a ``dict``, a
     ``tuple``, or a ``list``). Anything else is masked, as the redactor masks it:
     its repr is whatever it holds, which can be an exception this net never saw — a
-    finished task's repr carries its exception's. A container met again is given
-    what it became the first time; one met again while it is still being rebuilt —
-    a cycle — is masked.
+    finished task's repr carries its exception's. A container met again — shared,
+    or a cycle — is masked rather than printed again: a graph that shares its parts
+    prints exponentially in its depth.
     """
     if isinstance(value, BaseException):
         return _ClassName(value)
@@ -711,10 +770,10 @@ def _plain(value: object, unsaid: _Unsaid, done: dict[int, object]) -> object:
         return unsaid(value)
     inside = _walked(value)
     if inside is None:
-        return _plain_leaf(value)
+        return _plain_leaf(value, unsaid)
     if id(value) in done:
-        return done[id(value)]
-    done[id(value)] = REDACTED
+        return REDACTED
+    done.add(id(value))
     result: object
     if isinstance(value, Mapping):
         result = {
@@ -724,7 +783,6 @@ def _plain(value: object, unsaid: _Unsaid, done: dict[int, object]) -> object:
     else:
         items = [_plain(item, unsaid, done) for item in inside]
         result = tuple(items) if isinstance(value, tuple) else items
-    done[id(value)] = result
     return result
 
 
@@ -779,11 +837,15 @@ def _scrubbed_record(record: logging.LogRecord) -> logging.LogRecord:
     arguments = list(args.values()) if isinstance(args, Mapping) else list(args or ())
     message: list[object] = [] if wrapped else [record.msg]
     unsaid = _Unsaid(_held(_carried([raised, *message, *arguments, *extras.values()])))
-    done: dict[int, object] = {}
+    done: set[int] = set()
 
     safe = copy.copy(record)
     for key, value in extras.items():
         setattr(safe, key, _plain(value, unsaid, done))
+    for field in _NAMED_FIELDS:
+        named_by = getattr(record, field, None)
+        if isinstance(named_by, str):
+            setattr(safe, field, unsaid(named_by))
     if wrapped:
         safe.msg = _scrubbed_event(record)
     else:
