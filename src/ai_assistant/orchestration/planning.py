@@ -82,6 +82,21 @@ carries ids in place of labels, and its *looking for* and *deliberate repeat* ar
 taken out of its arguments (ADR-0306 §2:10). Whether a note a move names is still held
 is the story store's half, in the lane that builds planning's story calls.
 
+**Asking** (ADR-0321 §2). A call that came back needing the user's yes is shown with a
+reference, and planning decides whether a later round's message asks about it, naming
+it by that reference in the response's ``asks``. A name that resolves to no such call is
+dropped, and so is every name where the place takes no message (§7:3). For each call the
+message asks about, code appends one exact line, written by :func:`exact_line` for every
+capability alike, and records the call in the round's ``asked``, its part the line's
+number. The exact lines are the message's last lines, so a cut that loses any of them
+loses the end of the message.
+
+**Approved actions** (§4:2). The actions the activation's yes approved are shown under A
+labels and proposed through :data:`APPROVED_ACTION_TOOL` by label alone. The judge fills
+in the values recorded with the question and names the part in
+:attr:`PlannedCall.approved_part`, so nothing planning sends beside the label changes
+them.
+
 **It logs stage and code-owned reason only**, never inputs, model output or arguments
 (ADR-0275 §8).
 """
@@ -104,6 +119,7 @@ from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.diagnostics import returned_written, write_diagnostic, write_failure
 from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.types import (
+    AskedCall,
     BeliefBand,
     CapabilityResult,
     DiagnosticKind,
@@ -133,15 +149,17 @@ from ai_assistant.orchestration.story_calls import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Collection, Sequence
 
     from ai_assistant.core.protocols import DiagnosticSink, ToolCallingCompleter
     from ai_assistant.core.types import (
+        ActionRequest,
         ActivationUnderstanding,
         EpisodeProjection,
         FrozenJsonValue,
         ProjectedRound,
         ProjectedText,
+        QuestionPart,
         RoundResponse,
         SemanticMemory,
         StoryNote,
@@ -154,9 +172,12 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.story_links import ShortView
 
 __all__ = [
+    "APPROVED_ACTION_ARGUMENT",
+    "APPROVED_ACTION_TOOL",
     "DELIBERATE_REPEAT",
     "LOOKING_FOR",
     "OLDER_NOTES_PAGE_ARGUMENT",
+    "ApprovedAction",
     "CallOutcome",
     "CallOutcomeKind",
     "DigestItem",
@@ -172,6 +193,7 @@ __all__ = [
     "PlanningStory",
     "RefusedCall",
     "RoundRecorder",
+    "exact_line",
     "offered_tools",
 ]
 
@@ -210,6 +232,18 @@ _DELIBERATE_REPEAT_SCHEMA: Final[dict[str, Any]] = {
     ),
 }
 
+#: ADR-0321 §4:2: the tool an approved action is proposed through, by its A label alone.
+#: Offered only where the activation has an approved action, and never a capability.
+APPROVED_ACTION_TOOL: Final = "run_approved_action"
+
+#: The approved-action tool's one argument of its own: the action's A label.
+APPROVED_ACTION_ARGUMENT: Final = "action"
+
+#: The arguments an exact line leaves out wherever a call carries them (ADR-0321 §2:5):
+#: the *looking for* and the *deliberate repeat* mark. The declaration's
+#: ``system_supplied`` are the third kind, read per capability.
+_NEVER_SHOWN: Final = frozenset({LOOKING_FOR, DELIBERATE_REPEAT})
+
 #: The top-level schema keywords the hub keeps true when it adds or removes an argument.
 _TRANSFORMABLE: Final = frozenset(
     {
@@ -240,6 +274,7 @@ _THINGS: Final = {
     LabelKind.NOTE: ("a note", "notes"),
     LabelKind.MEMORY: ("a memory", "memories"),
     LabelKind.RESULT: ("a result", "results"),
+    LabelKind.APPROVED_ACTION: ("an approved action", "approved actions"),
 }
 
 
@@ -300,10 +335,12 @@ class CallOutcomeKind(StrEnum):
     NOT_DONE = "not_done"
     UNKNOWN = "unknown"
     NEEDS_YOU = "needs_you"
-    """Authorizing sent it to the user: it cannot be done yet (ADR-0306 §4:8, §9:4)."""
+    """Authorizing ruled that it needs the user (ADR-0306 §4:8): it runs on their yes to a
+    question that showed it (ADR-0321 §2, §4)."""
 
     REFUSED = "refused"
-    """Refused before it ran, by planning's own check or by authorizing's rules."""
+    """Refused before it ran, by planning's own check or by authorizing's rules, a deny
+    among them: no yes lets it run, so it is never asked about (ADR-0321 §2:10)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,11 +370,24 @@ class CallOutcome:
             digest, and ``digested`` says so.
         story: For a story read planning made (§6:6), the story's full view as it was
             read; ``None`` for any other call.
+        request: For a call that needs the user, the request as authorizing ruled on
+            it, with the values the hub filled in and its binding (ADR-0321 §2:8): what
+            a question about it shows and records. ``None`` on every other outcome, and
+            where none was handed on, in which case the call cannot be asked about.
+        deliberate_repeat: Whether planning marked that call a deliberate repeat, as
+            the asked call records it.
+        already_asked: For a call identical to one still waiting on the user, the part
+            of the question that asked about it (ADR-0321 §4:11): it is not asked about
+            again.
+        replaces: For a remember that needs the user, the assertions its question shows
+            the new statement replacing (ADR-0321 §5:5), which the asked call records
+            by id.
 
     Raises:
         ValueError: If it carries a result, or says one was digested, without the
             result's id, or carries a raw result beside a digested one or a looked-up
-            one.
+            one; or if anything but a call that needs the user carries what a question
+            about it would show, or it names replaced assertions without its request.
     """
 
     round_id: str
@@ -349,9 +399,25 @@ class CallOutcome:
     digested: bool = False
     records: tuple[SemanticMemory, ...] | None = None
     story: PlanningStory | None = None
+    request: ActionRequest | None = None
+    deliberate_repeat: bool = False
+    already_asked: QuestionPart | None = None
+    replaces: tuple[SemanticMemory, ...] = ()
 
     def __post_init__(self) -> None:
         """A result is shown under its label, so it carries the id the label names."""
+        asking = (
+            self.request is not None
+            or self.deliberate_repeat
+            or self.already_asked is not None
+            or bool(self.replaces)
+        )
+        if asking and self.kind is not CallOutcomeKind.NEEDS_YOU:
+            msg = "only a call that needs the user carries what a question about it shows"
+            raise ValueError(msg)
+        if self.replaces and self.request is None:
+            msg = "the assertions a question shows replaced ride the request it shows"
+            raise ValueError(msg)
         looked_up = self.records is not None or self.story is not None
         if (self.result is not None or self.digested or looked_up) and self.result_id is None:
             msg = "a call's result carries the id acting minted for it (ADR-0308 §6:1)"
@@ -482,6 +548,33 @@ class PlanningStories:
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovedAction:
+    """One action the activation's yes approved, as planning is shown it (ADR-0321 §4:2).
+
+    Planning's own shape, filled by the lane that wires the phases from understanding's
+    answer pointer and the asking round's asked calls. Planning shows it under an A
+    label and proposes it by that label alone.
+
+    Attributes:
+        part: The part of the question the yes approved: the asking round and the
+            number of the call's exact line.
+        call: The call that part asked about, as the asking round recorded it.
+
+    Raises:
+        ValueError: If the call is not the one recorded under that part's number.
+    """
+
+    part: QuestionPart
+    call: AskedCall
+
+    def __post_init__(self) -> None:
+        """The call is the one the part names: its exact line carried that number."""
+        if self.call.part != self.part.part:
+            msg = "an approved action's call is the one recorded under its part"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
 class PlanningInputs:
     """Everything one round is given (ADR-0307 §6, ADR-0312 §4).
 
@@ -510,6 +603,9 @@ class PlanningInputs:
             outside content (ADR-0306 §4:5), before this round's inputs.
         stories: The story views (§6:1), or ``None`` where no story store is wired,
             which shows no stories section.
+        approved: The actions this activation's yes approved (ADR-0321 §4:2), each
+            shown under an A label and proposed by it; none where its input approved
+            nothing.
     """
 
     activation_id: str
@@ -528,6 +624,7 @@ class PlanningInputs:
     evidence: tuple[DigestedEvidence, ...] = ()
     outside_content_read: bool = False
     stories: PlanningStories | None = None
+    approved: tuple[ApprovedAction, ...] = ()
 
 
 # --- the round's decision ----------------------------------------------------------------
@@ -541,12 +638,18 @@ class PlannedCall:
         call: The call with ids in place of labels, and without its *looking for* or
             *deliberate repeat* (ADR-0306 §2:10).
         looking_for: What planning said it is looking for, where the capability asks.
-        deliberate_repeat: Whether planning marked it a deliberate repeat.
+        deliberate_repeat: Whether planning marked it a deliberate repeat; for an
+            approved action, whether the asked call was so marked.
+        approved_part: For an approved action planning proposed by its label
+            (ADR-0321 §4:2), the part of the question its yes approved; its call then
+            carries the values recorded with the question, those the hub fills apart.
+            ``None`` for every other call.
     """
 
     call: ProposedCall
     looking_for: str | None = None
     deliberate_repeat: bool = False
+    approved_part: QuestionPart | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -801,14 +904,60 @@ _WHOLE_MESSAGE: Final = (
     "\n"
 )
 
-#: #2853: nothing parks and nothing resumes (ADR-0306 §4:8), so no answer from the user
-#: can let a call that needs them run, and the message invites none (§9:4).
-_NEEDS_YOU: Final = (
-    "A call that came back needing the user cannot be done yet, and nothing the user says "
-    "or does can change that: there is no way yet for them to approve it, and a yes, more "
-    "details or asking again would not let it run. Say plainly that you can't do it yet. "
-    "Never ask them to confirm, approve or say go ahead, never suggest that anything they "
-    "say or do would let it run, and never describe a way to approve it. "
+#: ADR-0321 §2:9-§2:10, which retire #2853's "no answer can let it run" (#2862): how
+#: approval works here, said on every pass, with the line of care (§2:11) beside it. A
+#: deny is never asked about and is said plainly (§8:7).
+_APPROVAL: Final = (
+    "How approval works here: some actions need the user's yes before they run. When one "
+    "does, you ask them, and the system shows them the action's exact details. Their yes "
+    "in reply lets that exact action run, once. You never approve anything on the user's "
+    "behalf, and there is no other route: no confirmation emails, no links or codes, and "
+    "no steps on the user's end. A refused call is never asked about, since no yes lets it "
+    "run; where it was refused because the user's settings do not allow it, tell them "
+    "plainly that it is not allowed.\n"
+    "\n"
+    "Check with the user first when you are unsure what they meant, or when a mistake "
+    "would be costly, even where their authority already covers the action. Checking is "
+    "care: it grants nothing and withholds nothing.\n"
+    "\n"
+)
+
+#: ADR-0321 §2:1-§2:6, §2:12 and planning's side of §3:5, §3:8-§3:9: how a round asks,
+#: where its message reaches the user.
+_ASKING: Final = (
+    "When a call comes back needing the user's yes, decide whether this round's message "
+    "asks them about it: a call no message asks about is dropped, and nothing waits on "
+    "them. To ask, explain the action in your own words, with the details that matter to "
+    "them, and name the call in asks by the reference shown with its outcome, after the "
+    "message, as you keep notes. The system adds the exact details below your message, one "
+    "line for each call you name, numbered where there are several. The question is an "
+    "ordinary message, with no buttons and no options. A call already asked about and "
+    "still waiting on the user is not asked about again.\n"
+    "\n"
+    "Understanding tells you whether the input answers an earlier question. Where the user "
+    "seems to say yes but it cannot be connected to one question, or could answer more "
+    "than one, ask which they mean, and never guess. Where they change what they want, or "
+    "their reply is unclear, nothing is approved: ask again, with the new values where "
+    "they changed them.\n"
+    "\n"
+)
+
+#: ADR-0321 §7:3: where the place takes no message, a call that needs the user is never
+#: asked about and does not run.
+_UNASKABLE: Final = (
+    "This activation cannot message the user, so a call that needs them is not asked "
+    "about and will not run.\n"
+    "\n"
+)
+
+#: ADR-0321 §4:2: where the activation's yes approved actions, how planning proposes them.
+_APPROVED: Final = (
+    "The actions the user approved with their yes are shown to you under A labels, A1, A2 "
+    f"and so on. To carry one out, propose {APPROVED_ACTION_TOOL} naming its label: the "
+    "system fills in exactly the values the user approved, and nothing else you send "
+    "changes them. Propose each once, by its label alone, and never propose its capability "
+    "directly in its place. A labels, like the others, never appear in a message.\n"
+    "\n"
 )
 
 #: #2864: a call that brings no result brings no later round, so a round that acts on the
@@ -834,10 +983,9 @@ _MESSAGE: Final = (
     "done, found, sent or booked. When the user will want to hear how a call went, report "
     "it in the round that follows, from the outcomes shown to you, claiming no more than "
     "they show. Always report a call that was not done or whose outcome is unknown, "
-    "and report an unknown outcome as unknown. "
-    + _NEEDS_YOU
-    + "A question to the user is an ordinary message.\n"
-    "\n" + _REPLY
+    "and report an unknown outcome as unknown. A question to the user is an ordinary "
+    "message.\n"
+    "\n" + _REPLY + _APPROVAL + _ASKING
 )
 
 #: §3:8: where the place takes no message, planning is told so up front.
@@ -845,7 +993,7 @@ _NO_MESSAGE: Final = (
     "This input came from a place that takes no message. Your text is kept with the "
     "episode and written nowhere: no one reads it now. It still never says how its own "
     "calls went.\n"
-    "\n"
+    "\n" + _APPROVAL + _UNASKABLE
 )
 
 #: ADR-0315 §2, §4: every round with a call other than a tidy-up brings another once its
@@ -910,17 +1058,24 @@ _OLDER_NOTES: Final = (
 
 
 def _instruction(
-    *, takes_message: bool, story_calls: bool = False, story_reads: bool = False
+    *,
+    takes_message: bool,
+    story_calls: bool = False,
+    story_reads: bool = False,
+    approved: bool = False,
 ) -> str:
     """The system message, with §3:8's paragraph where the place takes no message.
 
     The story calls' paragraph is there only where a story call is offered, and says
-    a story read shows a story's older notes where a story read is offered too.
+    a story read shows a story's older notes where a story read is offered too. The
+    approved actions' paragraph is there only where the approved-action tool is offered
+    (ADR-0321 §4:2).
     """
     return (
         _ROLE
         + _LABELS
         + _CALLS
+        + (_APPROVED if approved else "")
         + (_STORY_CALLS + (_OLDER_NOTES if story_reads else "") + "\n\n" if story_calls else "")
         + (_MESSAGE if takes_message else _NO_MESSAGE)
         + _NOTES_AND_ROUNDS
@@ -1017,11 +1172,38 @@ _OUTCOME_TEXT: Final = {
     CallOutcomeKind.UNKNOWN: (
         "unknown: it may or may not have happened, and it is reported as unknown"
     ),
-    CallOutcomeKind.NEEDS_YOU: (
-        "needs the user: it cannot be done yet, and no answer from the user can let it run"
+    CallOutcomeKind.REFUSED: (
+        "refused before it ran, so nothing in it ran, and no yes lets it run: never ask the "
+        "user about it"
     ),
-    CallOutcomeKind.REFUSED: "refused before it ran, so nothing in it ran",
 }
+
+#: ADR-0321 §2:10: which case of a call needing the user applies, each said with its
+#: outcome. These replace the needs-you outcome text.
+_NEEDS_YES: Final = (
+    "needs the user's yes: ask them about it if you judge it right, explaining it in your "
+    "own words, and name it in asks by its ask_as reference; the exact details will be "
+    "filled in below your message"
+)
+#: §7:3: where the place takes no message.
+_NO_ONE_TO_ASK: Final = (
+    "needs the user, and this activation cannot message them, so it will not run and is "
+    "not asked about"
+)
+#: §4:11, and a call an earlier round of this activation already asked about.
+_ALREADY_ASKED: Final = (
+    "already asked about and waiting on the user's answer, so it is not asked about again"
+)
+#: A call that needs the user but whose request was not handed on cannot be shown exactly,
+#: so it is never asked about (§2:5).
+_UNSHOWABLE: Final = "needs the user, and it cannot be asked about, so it will not run"
+#: §5:5: a replaced assertion resting on outside content, whose fact planning is not shown.
+_REPLACED_OUTSIDE: Final = (
+    "a remembered fact resting on outside content, not shown to you; the exact details "
+    "show it to the user"
+)
+#: §4:2: how an approved action came to be approved.
+_APPROVED_BY: Final = "by the user's yes in this input, to the question that showed it"
 
 
 @dataclass
@@ -1057,6 +1239,13 @@ class _Request:
         self._now = now
         self._zone = zone
         self.shown = _Shown()
+        # The calls this round may ask about, by the reference each is shown with
+        # (ADR-0321 §2:3), filled as the earlier rounds are rendered.
+        self.askable: dict[str, CallOutcome] = {}
+        # The calls this activation's earlier rounds asked about, by their round's number.
+        self._asked_before: tuple[tuple[int, AskedCall], ...] = tuple(
+            (number, asked) for number, one in enumerate(inputs.rounds, 1) for asked in one.asked
+        )
         # Whether a story read is offered this round, set as the request is rendered.
         self._reads_stories = False
         # The episodes rendered whole so far, so one shown again is named by its label.
@@ -1082,6 +1271,10 @@ class _Request:
             "time_zone": self._zone.key,
             "place": self._place(),
             "understanding": self._understanding(),
+        }
+        if inputs.approved:
+            document["approved_actions"] = [self._approved(one) for one in inputs.approved]
+        document |= {
             "place_window": [self._item(item) for item in inputs.place.items],
             "episode_window": self._episodes(),
             "recalled": self._recalled(),
@@ -1493,7 +1686,10 @@ class _Request:
             where = "written into the place" if self._inputs.place.takes_message else "kept"
             shown["text"] = one.text
             shown["text_was"] = where
-        shown["calls"] = [self._call(call, outcomes.get(call.call_id)) for call in one.calls]
+        shown["calls"] = [
+            self._call(call, outcomes.get(call.call_id), reference=f"{number}.{index}")
+            for index, call in enumerate(one.calls, 1)
+        ]
         if one.notes is not None:
             shown["notes"] = one.notes
             if one.notes_marked:
@@ -1501,7 +1697,9 @@ class _Request:
                 self.shown.marked = True
         return shown
 
-    def _call(self, call: ProposedCall, outcome: CallOutcome | None) -> dict[str, object]:
+    def _call(
+        self, call: ProposedCall, outcome: CallOutcome | None, *, reference: str
+    ) -> dict[str, object]:
         shown: dict[str, object] = {
             "capability": call.name,
             "arguments": call.model_dump()["arguments"],
@@ -1513,6 +1711,8 @@ class _Request:
                 _TIDY_STARTED if call.name == TIDY_STORY_CAPABILITY else "no outcome recorded"
             )
             return shown
+        if outcome.kind is CallOutcomeKind.NEEDS_YOU:
+            return shown | self._needs_you(outcome, reference)
         text = _OUTCOME_TEXT[outcome.kind]
         if outcome.reason is not None:
             text = f"{text}: {outcome.reason}"
@@ -1530,6 +1730,64 @@ class _Request:
             result["value"] = _DIGESTED_RESULT if outcome.digested else _thawed(outcome.result)
         shown["result"] = result
         return shown
+
+    def _needs_you(self, outcome: CallOutcome, reference: str) -> dict[str, object]:
+        """Which case of needing the user applies to a call (ADR-0321 §2:10).
+
+        A call is offered for asking, under ``reference``, only where the place takes a
+        message, its request was handed on, and it is not already asked about: by an
+        earlier question still waiting on the user (§4:11) or by an earlier round of
+        this activation.
+        """
+        shown: dict[str, object] = {}
+        request = outcome.request
+        earlier = None if request is None else self._asked_earlier(request)
+        if not self._inputs.place.takes_message:
+            shown["outcome"] = _NO_ONE_TO_ASK
+        elif outcome.already_asked is not None:
+            shown["outcome"] = _ALREADY_ASKED
+        elif earlier is not None:
+            shown["outcome"] = _ALREADY_ASKED
+            number, asked = earlier
+            shown["asked_in"] = f"round {number}'s message, part {asked.part}"
+        elif request is None:
+            shown["outcome"] = _UNSHOWABLE
+        else:
+            shown["outcome"] = _NEEDS_YES
+            shown["ask_as"] = reference
+            self.askable[reference] = outcome
+            if outcome.replaces:
+                shown["replacing"] = [self._replaced(record) for record in outcome.replaces]
+        if outcome.reason is not None:
+            shown["because"] = outcome.reason
+        return shown
+
+    def _asked_earlier(self, request: ActionRequest) -> tuple[int, AskedCall] | None:
+        """The earlier round of this activation that asked about this call, if one did."""
+        for number, asked in self._asked_before:
+            if _same_call(asked, request):
+                return number, asked
+        return None
+
+    def _replaced(self, record: SemanticMemory) -> dict[str, object]:
+        """An assertion a remember's question shows replaced, as planning may be shown it.
+
+        Its fact is shown only where its source is not outside, as a found record's is
+        (ADR-0307 §9:2); the exact details show the user every one.
+        """
+        if rests_on_recorded_external_content(record.provenance):
+            return {"item": _REPLACED_OUTSIDE}
+        return self._memory(record)
+
+    def _approved(self, one: ApprovedAction) -> dict[str, object]:
+        """An approved action under its A label, with the details its question showed."""
+        call = one.call
+        return {
+            "label": self._book.label(LabelKind.APPROVED_ACTION, _approved_id(one.part)),
+            "capability": str(call.tool.capability),
+            "details": exact_line(call, filled=_filled(self._inputs.capabilities, call)),
+            "approved": _APPROVED_BY,
+        }
 
     def _searched(self, outcome: CallOutcome) -> dict[str, object]:
         """A memory search's result: its records not outside, and where the rest went.
@@ -1690,6 +1948,205 @@ def _thawed(value: object) -> object:
     return value
 
 
+# --- asking (ADR-0321 §2) ----------------------------------------------------------------------
+
+
+def exact_line(
+    call: AskedCall,
+    *,
+    filled: Collection[str] = (),
+    numbered: bool = False,
+    replacing: Sequence[str] = (),
+) -> str:
+    """The exact line a question shows for one call (ADR-0321 §2:5-§2:6, §5:5).
+
+    One renderer for every capability. It names the capability and lists every argument
+    the call sends, in the order the call carries them, each value as its JSON text, so
+    a string is quoted whole and a line break in it stays on the line. It leaves out the
+    arguments the hub fills in, ``filled`` (the declaration's ``system_supplied``), and,
+    wherever the call carries them, the *looking for* argument and the *deliberate
+    repeat* mark. Where the message asks about several calls the line starts with its
+    number, which is the call's part.
+
+    Args:
+        call: The call asked about, as the round records it.
+        filled: The arguments the hub fills in for its capability.
+        numbered: Whether the line carries its part's number.
+        replacing: For a remember, the statements its question shows it replacing, each
+            shown after the arguments as "replacing".
+
+    Returns:
+        The line, with no line break in it.
+    """
+    left_out = _NEVER_SHOWN | frozenset(filled)
+    arguments = [
+        f"{name}: {_json_text(value)}"
+        for name, value in call.values.items()
+        if name not in left_out
+    ]
+    if replacing:
+        arguments.append("replacing: " + ", ".join(_json_text(one) for one in replacing))
+    line = str(call.tool.capability)
+    if arguments:
+        line = f"{line} — " + "; ".join(arguments)
+    return f"{call.part}. {line}" if numbered else line
+
+
+def _json_text(value: object) -> str:
+    """A value as its JSON text, on one line, with its characters as written."""
+    return json.dumps(_thawed(value), ensure_ascii=False)
+
+
+def _filled(capabilities: Sequence[ToolDefinition], call: AskedCall) -> frozenset[str]:
+    """The arguments the hub fills in for an asked call's capability (ADR-0306 §2:10).
+
+    Those its offered declaration names, the first by id as :func:`offered_tools`
+    describes the capability, and those the selected declaration itself names. Never
+    more: an argument left out of an exact line is one the user is not shown.
+    """
+    capability = str(call.tool.capability)
+    offered = next(
+        (
+            tool
+            for tool in sorted(capabilities, key=lambda one: str(one.id))
+            if str(tool.capability) == capability
+        ),
+        None,
+    )
+    supplied = set(call.tool.system_supplied)
+    if offered is not None:
+        supplied.update(offered.system_supplied)
+    return frozenset(supplied)
+
+
+def _same_call(asked: AskedCall, request: ActionRequest) -> bool:
+    """Whether a request is the call an asked call records: tool, values and binding."""
+    return _same_request(asked.request, request)
+
+
+def _same_request(one: ActionRequest, other: ActionRequest) -> bool:
+    """Whether two requests are one call: the same tool, values and binding (§4:4)."""
+    return (
+        one.tool == other.tool
+        and one.parameters == other.parameters
+        and one.egress_binding == other.egress_binding
+    )
+
+
+def _approved_id(part: QuestionPart) -> str:
+    """What an approved action's A label names: the question's part, by round and number."""
+    return f"{part.round}#{part.part}"
+
+
+@dataclass(frozen=True, slots=True)
+class _Asked:
+    """One call a round's message asks about, and the assertions its question replaces."""
+
+    call: AskedCall
+    replacing: tuple[str, ...] = ()
+
+
+def _asked_calls(names: Sequence[str], askable: Mapping[str, CallOutcome]) -> tuple[_Asked, ...]:
+    """The calls a round's message asks about, from the names its response gave.
+
+    In the order named, each part its place in that order (§2:6). A name that resolves
+    to no call this round may ask about is dropped (§2:3), and so is one naming the same
+    call, by tool, values and binding, as a name before it: the question shows a call
+    once. A call whose values and binding make no request its declaration admits cannot
+    be recorded as asked about (§2:8), and is dropped as well. A remember's replaced
+    assertions are recorded by id and shown by statement, exactly the same ones (§5:5).
+    """
+    chosen: list[tuple[ActionRequest, CallOutcome]] = []
+    for name in names:
+        outcome = askable.get(name.strip())
+        request = None if outcome is None else outcome.request
+        if outcome is None or request is None:
+            _log.info("planning_ask_dropped", stage="planning", reason="names_nothing")
+            continue
+        if any(_same_request(earlier, request) for earlier, _ in chosen):
+            _log.info("planning_ask_dropped", stage="planning", reason="named_twice")
+            continue
+        chosen.append((request, outcome))
+    asked: list[_Asked] = []
+    for request, outcome in chosen:
+        replaced = {record.id: record.fact for record in outcome.replaces}
+        try:
+            call = AskedCall(
+                part=len(asked) + 1,
+                tool=request.tool,
+                values=request.parameters,
+                binding=request.egress_binding,
+                deliberate_repeat=outcome.deliberate_repeat,
+                replaces=tuple(replaced),
+            )
+        except ValueError:
+            _log.info("planning_ask_dropped", stage="planning", reason="unrecordable")
+            continue
+        asked.append(_Asked(call, tuple(replaced.values())))
+    return tuple(asked)
+
+
+def _with_questions(
+    text: str, asked: Sequence[_Asked], capabilities: Sequence[ToolDefinition]
+) -> str:
+    """The round's message with an exact line for each call it asks about (§2:5-§2:6).
+
+    The lines come last, after a blank line, so a message cut to fit loses them first.
+    """
+    if not asked:
+        return text
+    lines = "\n".join(
+        exact_line(
+            one.call,
+            filled=_filled(capabilities, one.call),
+            numbered=len(asked) > 1,
+            replacing=one.replacing,
+        )
+        for one in asked
+    )
+    return f"{text.rstrip()}\n\n{lines}" if text.strip() else lines
+
+
+def _approved_tool(
+    approved: Mapping[str, ApprovedAction], offered: Sequence[OfferedTool]
+) -> OfferedTool | None:
+    """The tool an approved action is proposed through, where one is approved (§4:2).
+
+    Its one argument names the action by its A label; a *looking for* is offered beside
+    it where an approved call's result may carry outside text. Not offered where a
+    capability already takes its name.
+    """
+    if not approved:
+        return None
+    if any(tool.name == APPROVED_ACTION_TOOL for tool in offered):
+        _log.info("planning_approved_not_offered", stage="planning", reason="name_taken")
+        return None
+    properties: dict[str, Any] = {
+        APPROVED_ACTION_ARGUMENT: {
+            "type": "string",
+            "enum": list(approved),
+            "description": "The approved action, by the A label you were shown it under.",
+        }
+    }
+    if any(
+        one.call.tool.result is CapabilityResult.MAY_CARRY_OUTSIDE_TEXT for one in approved.values()
+    ):
+        properties[LOOKING_FOR] = dict(_LOOKING_FOR_SCHEMA)
+    return OfferedTool(
+        name=APPROVED_ACTION_TOOL,
+        description=(
+            "Carry out an action the user approved with their yes, by its A label alone. "
+            "Its values are the ones the user approved, filled in for you."
+        ),
+        parameters={
+            "type": "object",
+            "properties": properties,
+            "required": [APPROVED_ACTION_ARGUMENT],
+            "additionalProperties": False,
+        },
+    )
+
+
 # --- judging the round's calls -------------------------------------------------------------
 
 
@@ -1700,8 +2157,17 @@ class _Judge:
     offered: Mapping[str, ToolDefinition]
     label_arguments: Mapping[str, Mapping[str, LabelKind]]
     book: _LabelBook
+    approved: Mapping[str, ApprovedAction] = field(default_factory=dict)
+    """The approved actions, by the id their A label names, where the tool was offered."""
+    capabilities: Sequence[ToolDefinition] = ()
 
     def __call__(self, call: ProposedCall) -> PlannedCall | RefusedCall:
+        if call.name == APPROVED_ACTION_TOOL and self.approved:
+            return self._approved(call)
+        return self._capability(call)
+
+    def _capability(self, call: ProposedCall) -> PlannedCall | RefusedCall:
+        """A call to an offered capability, its labels replaced by ids (§5:3-§5:4)."""
         tool = self.offered.get(call.name)
         if tool is None:
             return RefusedCall(call, "no capability of that name was offered")
@@ -1729,6 +2195,49 @@ class _Judge:
             arguments[argument] = mapped[0]
         planned = ProposedCall(call_id=call.call_id, name=call.name, arguments=arguments)
         return PlannedCall(planned, looking_for=looking_for, deliberate_repeat=deliberate)
+
+    def _approved(self, call: ProposedCall) -> PlannedCall | RefusedCall:
+        """An approved action, proposed by its A label, as the call its question showed.
+
+        ADR-0321 §4:2: the call carries the values recorded with the question, those the
+        hub fills apart, and names the part the yes approved; its deliberate-repeat mark
+        is the one recorded. Nothing planning sends beside the label is taken as a
+        value: anything but the label and a *looking for* refuses the call whole.
+        """
+        arguments: dict[str, Any] = dict(call.model_dump()["arguments"])
+        label = arguments.pop(APPROVED_ACTION_ARGUMENT, None)
+        if not isinstance(label, str):
+            return RefusedCall(
+                call, f"{APPROVED_ACTION_ARGUMENT!r} names the action by its A label"
+            )
+        resolved = self._id(label, LabelKind.APPROVED_ACTION)
+        if isinstance(resolved, _Refusal):
+            return RefusedCall(call, resolved.reason)
+        action = self.approved.get(resolved)
+        if action is None:
+            return RefusedCall(
+                call, f"{label[:_QUOTED_LABEL_CHARS]!r} names no action approved now"
+            )
+        looking_for = arguments.pop(LOOKING_FOR, None)
+        if arguments:
+            return RefusedCall(call, _APPROVED_LABEL_ALONE)
+        asked = action.call
+        if asked.tool.result is CapabilityResult.MAY_CARRY_OUTSIDE_TEXT:
+            if not isinstance(looking_for, str) or not looking_for.strip():
+                return RefusedCall(call, f"{LOOKING_FOR!r} must say what you are looking for")
+        else:
+            looking_for = None
+        filled = _filled(self.capabilities, asked)
+        values = {name: value for name, value in asked.values.items() if name not in filled}
+        planned = ProposedCall(
+            call_id=call.call_id, name=str(asked.tool.capability), arguments=values
+        )
+        return PlannedCall(
+            planned,
+            looking_for=looking_for,
+            deliberate_repeat=asked.deliberate_repeat,
+            approved_part=action.part,
+        )
 
     def _mapped(self, value: object, kind: LabelKind) -> tuple[object] | str:
         """A label argument with its labels replaced by ids, or why it is refused."""
@@ -1765,6 +2274,13 @@ class _Judge:
 @dataclass(frozen=True, slots=True)
 class _Refusal:
     reason: str
+
+
+#: ADR-0321 §4:2: an approved action is proposed by its label, and its values are the
+#: recorded ones.
+_APPROVED_LABEL_ALONE: Final = (
+    "an approved action is proposed by its label alone: its values are the ones the user approved"
+)
 
 
 # --- the stage -------------------------------------------------------------------------------
@@ -1843,10 +2359,18 @@ class PlanningStage:
         """
         book = _LabelBook(inputs.labels)
         offered = offered_tools(inputs.capabilities)
+        # ADR-0321 §4:2: each approved action holds its A label from before the request
+        # is rendered, so the tool proposing them can name every one.
+        approved = {
+            book.label(LabelKind.APPROVED_ACTION, _approved_id(one.part)): one
+            for one in inputs.approved
+        }
+        approved_tool = _approved_tool(approved, offered)
+        offered_here = offered if approved_tool is None else (*offered, approved_tool)
         request = _Request(
             inputs, book, excerpt_chars=self._excerpt_chars, now=self._now(), zone=self._zone
         )
-        rendered = request.rendered(offered)
+        rendered = request.rendered(offered_here)
         messages = (
             Message(
                 role=Role.SYSTEM,
@@ -1854,29 +2378,45 @@ class PlanningStage:
                     takes_message=inputs.place.takes_message,
                     story_calls=any(tool.name in STORY_CALL_CAPABILITIES for tool in offered),
                     story_reads=_offers_story_reads(offered),
+                    approved=approved_tool is not None,
                 ),
             ),
             Message(role=Role.USER, content=rendered),
         )
-        response = await self._responded(messages, offered)
+        response = await self._responded(messages, offered_here)
         read_outside = (
             inputs.outside_content_read
             or inputs.trigger_origin is InputOrigin.OUTSIDE
             or request.shown.marked
         )
+        # ADR-0321 §2:3, §2:5-§2:8: the calls the message asks about, each with its exact
+        # line appended to the message and recorded with the round. Where the place
+        # takes no message nothing is askable, so every name is dropped (§7:3).
+        asked = _asked_calls(response.asks, request.askable)
         planning_round = PlanningRound(
             id=self._new_id(),
             follows=inputs.rounds[-1].id if inputs.rounds else None,
             recorded_at=self._now(),
-            text=response.text,
+            text=_with_questions(response.text, asked, inputs.capabilities),
             calls=response.calls,
             notes=response.notes,
             notes_marked=response.notes is not None and read_outside,
+            asked=tuple(one.call for one in asked),
         )
         labels = tuple(book.minted)
         recorded = await self._record(planning_round, labels)
         declarations = _offered_declarations(inputs.capabilities, offered)
-        judge = _Judge(offered=declarations, label_arguments=inputs.label_arguments, book=book)
+        judge = _Judge(
+            offered=declarations,
+            label_arguments=inputs.label_arguments,
+            book=book,
+            approved=(
+                {}
+                if approved_tool is None
+                else {_approved_id(one.part): one for one in approved.values()}
+            ),
+            capabilities=inputs.capabilities,
+        )
         judged = [judge(call) for call in response.calls]
         refused = tuple(one for one in judged if isinstance(one, RefusedCall))
         for _ in refused:

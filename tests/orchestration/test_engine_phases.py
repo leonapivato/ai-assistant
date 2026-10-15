@@ -748,10 +748,12 @@ async def test_a_booking_that_needs_you_is_answered_cannot_be_done_yet() -> None
             "I can't book that yet: it needs you, and that isn't possible yet.",
         ),
     ]
-    # The second round was shown the call as needing the user.
+    # The second round was shown the call as needing the user. Until the glue hands
+    # planning the request authorizing ruled on, it cannot be asked about (ADR-0321
+    # §2:10).
     shown = json.loads(completer.calls[1].messages[1].content)
     (call,) = shown["rounds"][0]["calls"]
-    assert call["outcome"].startswith("needs the user: it cannot be done yet")
+    assert call["outcome"].startswith("needs the user")
     # Nothing ran: no effect record for the booking, and the invoker was not reached.
     effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
     assert all(one.capability is None for one in effects)
@@ -3371,11 +3373,17 @@ async def test_an_event_remembers_starts_a_story_and_notes_it() -> None:
     assert record is not None
     activation = record.activation_id
     shown = json.loads(completer.calls[1].messages[1].content)["rounds"][0]["calls"]
+    # An event's activation writes no message, so the remember is not asked about and
+    # will not run (ADR-0321 §7:3).
     assert [(one["capability"], one["outcome"].split(":")[0]) for one in shown] == [
-        ("remember", "needs the user"),
+        (
+            "remember",
+            "needs the user, and this activation cannot message them, so it will not run "
+            "and is not asked about",
+        ),
         ("start_story", "done"),
     ]
-    assert "the memory policy asks the user" in shown[0]["outcome"]
+    assert "the memory policy asks the user" in shown[0]["because"]
     effects = await harness.plans.activation_effects([activation])
     assert [(one.capability, one.outcome) for one in effects] == [
         ("start_story", ToolOutcome.SUCCEEDED)
