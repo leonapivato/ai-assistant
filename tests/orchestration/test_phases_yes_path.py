@@ -11,9 +11,10 @@ question rather than in a call that runs.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
@@ -26,11 +27,15 @@ from understanding_support import recall_stage
 from ai_assistant.core.errors import ClassifiedToolError, OversizedValueError
 from ai_assistant.core.types import (
     TRANSCRIPT_MESSAGE_MAX_CHARS,
+    ActivationEffect,
+    ActivationUnderstanding,
+    AnsweredQuestion,
     AskedCall,
     CapabilityEffect,
     CapabilityResult,
     ChannelIdentity,
     ChannelInput,
+    ControllerStage,
     CostBasis,
     DataTier,
     Idempotency,
@@ -47,6 +52,7 @@ from ai_assistant.core.types import (
     RiskLevel,
     RoundResponse,
     SemanticMemory,
+    StageOutcome,
     StoryActor,
     StoryMember,
     StoryMemberKind,
@@ -56,14 +62,17 @@ from ai_assistant.core.types import (
     ToolFailure,
     ToolFailureKind,
     TranscriptMessage,
+    UnderstandingGround,
+    UnderstandingProducer,
 )
 from ai_assistant.memory import DefaultMemoryPolicy
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import ChatWriter
+from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
-from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools
+from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, PhaseWorking
 from ai_assistant.orchestration.planning import APPROVED_ACTION_TOOL
 from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls
 from ai_assistant.orchestration.understanding import (
@@ -76,6 +85,7 @@ from ai_assistant.testing import (
     FakeMemoryStore,
     FakeMemoryWriter,
     FakeModelProvider,
+    FakePlanStore,
     FakeStoryStore,
     FakeToolCallingCompleter,
     FakeToolImplementation,
@@ -94,6 +104,10 @@ if TYPE_CHECKING:
         OfferedTool,
         PermissionDecision,
     )
+    from ai_assistant.orchestration.disclosure import TurnSupply
+    from ai_assistant.orchestration.recall import Recalled
+    from ai_assistant.orchestration.story_links import Candidates
+    from ai_assistant.orchestration.understanding import Fetched, Windows
 
 
 def _tool(name: str, properties: Mapping[str, FrozenJson]) -> ToolDefinition:
@@ -315,7 +329,13 @@ class _Hub:
     runner reads the memory store for what a write-time conflict would replace.
     """
 
-    def __init__(self, *, recall: bool = False, aged_out: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        recall: bool = False,
+        aged_out: bool = False,
+        plans: FakePlanStore | None = None,
+    ) -> None:
         self.planner = _Planner()
         self.reader = _Reader()
         self.world = _World()
@@ -325,6 +345,7 @@ class _Hub:
         self.memory = FakeMemoryStore(now=lambda: AT)
         self.harness = Harness(
             memory=self.memory,
+            plans=plans,
             understanding=UnderstandingStage(model=self.reader.model, excerpt_chars=2000),
             recall=recall_stage(self.memory) if recall else None,
             # A question asked long enough ago has left the episode window, and is
@@ -975,3 +996,71 @@ def test_a_round_in_a_place_that_takes_no_message_asks_about_nothing() -> None:
     )
 
     assert path.shown_whole(working, _asking_round("Shall I?")).asked == ()
+
+
+# --- the yes's records are read inside the deadline (ADR-0280 §5) -------------------------
+
+
+class _Stalled(FakePlanStore):
+    """A plan store whose read of an activation's effect records never returns."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.entered = asyncio.Event()
+
+    async def activation_effects(
+        self, activation_ids: Sequence[str], /
+    ) -> tuple[ActivationEffect, ...]:
+        self.entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError  # pragma: no cover - the wait above never returns
+
+
+@dataclass(frozen=True)
+class _Given:
+    """A pass's working set as a phase stage reads it (``PhasePass``)."""
+
+    deadline: float
+    phases: PhaseWorking
+    understanding: ActivationUnderstanding | None = None
+    understanding_fetch: Fetched | None = None
+    supply: TurnSupply = field(
+        default_factory=lambda: BoundedAudienceSupply(speakable_attested_sources=frozenset())
+    )
+    windows: Windows | None = None
+    recalled: Recalled | None = None
+    story_candidates: Candidates | None = None
+
+
+async def test_a_stalled_read_of_the_yes_records_times_the_round_out() -> None:
+    """Planning's round ends ``timed_out`` at the deadline, never waiting on the store."""
+    plans = _Stalled()
+    hub = _Hub(plans=plans)
+    path = hub.phases(hub.harness)
+    working = path.begin(
+        activation_id="a-2",
+        window=_window(_from(MessageAuthor.USER)),
+        conversation_id=CONVERSATION.instance_id,
+        trigger_origin=InputOrigin.USER,
+        owner_records=True,
+    )
+    understanding = ActivationUnderstanding(
+        version=1,
+        recorded_at=AT,
+        producer=UnderstandingProducer.INTERPRETATION,
+        meaning="the user says yes",
+        meaning_ground=UnderstandingGround.STATED,
+        answers=AnsweredQuestion(activation_id="a-1", round="round:1"),
+    )
+    given = _Given(
+        deadline=asyncio.get_running_loop().time() + 0.2,
+        phases=working,
+        understanding=understanding,
+    )
+    (planning,) = [one for one in path.stages() if one.name is ControllerStage.PLANNING]
+
+    result = await asyncio.wait_for(planning.run(given), timeout=5)
+
+    assert plans.entered.is_set()
+    assert result.outcome is StageOutcome.TIMED_OUT
+    assert hub.planner.calls == []
