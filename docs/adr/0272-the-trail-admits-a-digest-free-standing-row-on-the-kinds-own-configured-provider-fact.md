@@ -1,6 +1,6 @@
 # 272. The trail admits a digest-free standing row on the kind's own configured-provider fact
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0321 (§3:7: the recipient-grant seam it counts retires)
 - Date: 2026-09-16
 - **Partially supersedes**
   [ADR-0247](0247-the-configured-web-search-provider-is-the-destination-the-owner-chose-and-the-recipient-they-granted-and-the-call-budget-is-removed.md)
@@ -37,6 +37,7 @@
   `PROTOCOL_VERSION`**: `CarriedProvenance` and `EgressBinding` already carry both booleans
   (ADR-0260 §11, landed by that ADR's L1), nothing a client decodes changes, no `Settings`
   value reaches the trail, and no stored row is revalidated, rewritten or re-derived.
+- Partially superseded: 2026-10-15 by ADR-0321 — §3:7 whole: the recipient-grant seam its arms count retires (ADR-0321 §7:1). Every other clause stands. This replacement takes effect on ratification of ADR-0321. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
