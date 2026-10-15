@@ -381,8 +381,10 @@ class SqlitePlanStore:
         :data:`_SCHEMA_VERSION` is refused with ``PlanningError`` *before any record
         table is created, read, or written* (ADR-0049 §1). A **newer** label is a file
         a later build wrote. An **older** one is a store written before the cutover,
-        which ADR-0309 §6 leaves without a migration or a reader, so it is refused
-        rather than opened over tables this code would neither export nor clear. An
+        which ADR-0309 §6 leaves without a migration or a reader, or before an effect
+        record carried its question part, which ADR-0321 §9:2 leaves the same way, so
+        it is refused rather than opened over tables this code would neither export
+        nor clear or columns it would not find. An
         unlabelled database is one this code is creating now, and it is stamped.
 
         The marker is read through :meth:`_read_meta`, so a store holding conflicting
@@ -409,7 +411,8 @@ class SqlitePlanStore:
         msg = (
             f"the plan store at {self._path!r} has schema_version={held}, but this code "
             f"reads version {_SCHEMA_VERSION} only; refusing to open it rather than read it "
-            f"blindly (a store written before the cutover has no reader, ADR-0309 §6)"
+            f"blindly (a store written before the cutover, or before the question part, has "
+            f"no reader: ADR-0309 §6, ADR-0321 §9:2)"
         )
         raise PlanningError(msg)
 
@@ -418,7 +421,7 @@ class SqlitePlanStore:
 
         The version marker is what tells a store written before the cutover from this
         one, but a marker is one row: deleted, a pre-cutover file reads as a database
-        this code is creating and is stamped, and rewritten to 11, it reads as current.
+        this code is creating and is stamped, and rewritten to 12, it reads as current.
         Either way its ``goals``, ``plans`` or ``executions`` would stay in the file and
         outside :meth:`SqlitePlanStore.export` and :meth:`SqlitePlanStore.clear`,
         which is ADR-0004 §6 failing in silence. So the tables are read first: a file

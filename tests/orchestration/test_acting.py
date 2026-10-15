@@ -19,6 +19,10 @@ from ai_assistant.core.types import (
     ActionRequest,
     ActivationEffect,
     ActivationEffectClaim,
+    Approval,
+    ApprovalEnd,
+    ApprovalGiven,
+    ApprovalGiver,
     CapabilityEffect,
     CapabilityResult,
     CostBasis,
@@ -27,6 +31,7 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    QuestionPart,
     Reversibility,
     RiskLevel,
     ToolCall,
@@ -36,6 +41,7 @@ from ai_assistant.core.types import (
     ToolFailureKind,
     ToolOutcome,
     ToolResult,
+    YesToQuestion,
 )
 from ai_assistant.orchestration.acting import (
     ActedOutcome,
@@ -884,3 +890,126 @@ def test_the_deadline_must_be_positive() -> None:
             own_records=_OwnRecords(),
             timeout=timedelta(0),
         )
+
+
+# --- ADR-0321 §4:9, §4:10, §6:2: a call that runs under an approval spends it -------
+
+
+def _approval(*parts: int, yes: str = "act-1") -> Approval:
+    """The approval a yes in activation ``yes`` made to the question round ``q1`` asked."""
+    return Approval(
+        who=ApprovalGiver.USER_THROUGH_HUB_CHAT,
+        how=YesToQuestion(activation_id="act-0", round="q1"),
+        covers=tuple(QuestionPart(round="q1", part=part) for part in parts or (1,)),
+        given=ApprovalGiven(activation_id=yes, at=_AT),
+        ends=ApprovalEnd.WHEN_USED,
+    )
+
+
+def _approved(
+    name: str,
+    *,
+    decision: str = "d1",
+    effect: str | None = "e1",
+    part: int = 1,
+    deliberate_repeat: bool = False,
+    **overrides: Any,
+) -> AuthorizedCall:
+    """One call allowed under an approval, its decision naming the approval and its part."""
+    tool = _tool(name, **overrides)
+    request = ActionRequest(tool=tool, parameters={"date": "2026-11-01"})
+    ruling = PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="allowed")
+    allowed = PermissionDecision.from_request(
+        request,
+        ruling,
+        id=decision,
+        decided_at=_AT,
+        effect=effect,
+        approval=_approval(part),
+        approved_part=QuestionPart(round="q1", part=part),
+    )
+    return AuthorizedCall(
+        ToolCall(request=request, decision=allowed), deliberate_repeat=deliberate_repeat
+    )
+
+
+async def test_a_call_under_an_approval_is_claimed_with_its_part_key() -> None:
+    """§4:9: the record carries the asking round's id and the part number."""
+    plans = FakePlanStore(now=_now)
+
+    acted = await _stage(plans).act(held=HeldResults(), authorized=_round(_approved("book")))
+
+    assert acted.calls[0].outcome is ActedOutcome.DONE
+    (record,) = await plans.part_effects([QuestionPart(round="q1", part=1)])
+    assert (record.id, record.decision_id) == ("e1", "d1")
+    assert record.part == QuestionPart(round="q1", part=1)
+    assert record.outcome is ToolOutcome.SUCCEEDED
+
+
+async def test_every_call_under_an_approval_gets_a_record_whatever_its_capability() -> None:
+    """§4:10: a read safe to repeat, which gets no record of its own, gets one here."""
+    plans = FakePlanStore(now=_now)
+    assert not gets_effect_record(_tool("lookup"))
+
+    acted = await _stage(plans).act(held=HeldResults(), authorized=_round(_approved("lookup")))
+
+    assert acted.calls[0].effect_id == "e1"
+    (record,) = await plans.activation_effects(["act-1"])
+    assert record.part == QuestionPart(round="q1", part=1)
+
+
+def test_a_call_under_an_approval_naming_no_record_is_refused() -> None:
+    """§4:10: an approval's decision names the record its call is claimed under."""
+    with pytest.raises(ValueError, match="effect"):
+        _approved("lookup", effect=None)
+
+
+async def test_a_second_yes_to_one_part_does_not_run_it_again() -> None:
+    """§4:9, §8:1: a part is spent once, and its second claim comes back not done."""
+    plans = FakePlanStore(now=_now)
+    invoker = _Invoker()
+    await _stage(plans, invoker).act(held=HeldResults(), authorized=_round(_approved("book")))
+
+    again = await _stage(plans, invoker).act(
+        held=HeldResults(),
+        authorized=AuthorizedRound(
+            activation_id="act-2",
+            round_id="r2",
+            calls=(_approved("book", decision="d2", effect="e2"),),
+        ),
+    )
+
+    assert again.calls[0].outcome is ActedOutcome.NOT_DONE
+    assert again.calls[0].reason is not None
+    assert again.calls[0].reason.startswith("already used")
+    assert len(invoker.calls) == 1
+    assert await plans.activation_effects(["act-2"]) == ()
+
+
+async def test_a_deliberate_retry_under_an_approval_passes_an_unknown_outcome() -> None:
+    """§6:2: the retry the user said yes to runs; the same retry with no yes does not."""
+    plans = FakePlanStore(now=_now)
+    failure = ToolFailure(kind=ToolFailureKind.TIMED_OUT, message="deadline")
+    unknown = _Invoker(lambda _: ToolResult(outcome=ToolOutcome.INDETERMINATE, failure=failure))
+    earlier = AuthorizedRound(
+        activation_id="act-0", round_id="r0", calls=(_authorized("book", effect="e0"),)
+    )
+    await _stage(plans, unknown).act(held=HeldResults(), authorized=earlier)
+
+    unapproved = await _stage(plans).act(
+        held=HeldResults(),
+        authorized=_round(
+            _authorized("book", decision="d1", effect="e1", deliberate_repeat=True),
+            stories=("act-0",),
+        ),
+    )
+    approved = await _stage(plans).act(
+        held=HeldResults(),
+        authorized=_round(
+            _approved("book", decision="d2", effect="e2", deliberate_repeat=True),
+            stories=("act-0",),
+        ),
+    )
+
+    assert unapproved.calls[0].outcome is ActedOutcome.NOT_DONE
+    assert approved.calls[0].outcome is ActedOutcome.DONE

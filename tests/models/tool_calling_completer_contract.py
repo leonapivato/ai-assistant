@@ -11,9 +11,10 @@ implementation stands up a programmable pydantic-ai model.
 
 The suite asserts what is universal to the seam: which requests are refused before
 any model is contacted (ADR-0066 §1, ADR-0307 §2:6), that a round comes back in its
-three parts with nothing lost or invented (ADR-0315 §3:1), that the notes are a part
-of the response and never a call (ADR-0315 §3:2, §3:3), and that the offered tools and
-the rendered request reach the model as given.
+parts with nothing lost or invented (ADR-0315 §3:1), that the notes and the naming of
+the calls the message asks about are parts of the response and never calls (ADR-0315
+§3:2, §3:3, ADR-0321 §2:3), and that the offered tools and the rendered request reach
+the model as given.
 
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
@@ -186,11 +187,23 @@ class ToolCallingCompleterContract:
         assert response.calls == ()
         assert response.notes == "nothing to do yet"
 
+    async def test_the_naming_comes_back_as_given_and_is_never_a_call(self) -> None:
+        """ADR-0321 §2:3: the calls the message asks about, named, beside the round."""
+        asking = RoundResponse(
+            text="Shall I book the 7pm table for two?",
+            notes="asked about the booking",
+            asks=("R2", "R1"),
+        )
+        response = await self.world(asking).completer.respond(_request(), [_search_tool()])
+        assert response == asking
+        assert response.calls == ()
+
     async def test_a_round_of_text_alone_carries_no_calls_or_notes(self) -> None:
         response = await self.world(RoundResponse(text="It is sunny.")).completer.respond(
             _request(), [_search_tool()]
         )
         assert response == RoundResponse(text="It is sunny.")
+        assert response.asks == ()
 
     async def test_a_round_of_calls_alone_has_empty_text(self) -> None:
         calls_only = RoundResponse(

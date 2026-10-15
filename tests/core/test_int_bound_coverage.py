@@ -137,9 +137,19 @@ def _declares_a_lower_bound(metadata: Iterable[object]) -> bool:
     Only presence is asked, never the bound's value: ``core`` floors things that
     are not integers at all — ``Settings`` carries ``timedelta`` bounds — and a
     check that read the number would have to decide what to do with them.
+
+    An entry that is itself a ``Field(...)`` is read through its own ``metadata``,
+    duck-typed for the same reason: ``tuple[Annotated[int, Field(ge=1)], ...]`` carries
+    its floor on a ``FieldInfo`` inside the annotation, where pydantic enforces it on
+    every element, and a check blind to that would report a bounded field unbounded.
     """
     return any(
-        getattr(item, "ge", None) is not None or getattr(item, "gt", None) is not None
+        getattr(item, "ge", None) is not None
+        or getattr(item, "gt", None) is not None
+        or (
+            isinstance(nested := getattr(item, "metadata", None), list)
+            and _declares_a_lower_bound(nested)
+        )
         for item in metadata
     )
 

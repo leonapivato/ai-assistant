@@ -54,6 +54,10 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    Approval,
+    ApprovalEnd,
+    ApprovalGiven,
+    ApprovalGiver,
     BoundAccount,
     CostBasis,
     CoverageUnrecordedBinding,
@@ -62,11 +66,13 @@ from ai_assistant.core.types import (
     OriginUnrecordedBinding,
     PermissionDecision,
     PermissionOutcome,
+    QuestionPart,
     RiskLevel,
     SpanCoverage,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
+    YesToQuestion,
 )
 from ai_assistant.testing.cancellation import settle
 from ai_assistant.testing.recipient_grants import (
@@ -350,6 +356,21 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _RecentOp,
     _ExportOp,
 )
+
+
+#: The part of the question an approved call in this suite runs under (ADR-0321 §4:9).
+_APPROVED_PART = QuestionPart(round="q-round", part=1)
+
+
+def _approval() -> Approval:
+    """The approval a yes made to part 1 of the question round ``q-round`` asked."""
+    return Approval(
+        who=ApprovalGiver.USER_THROUGH_HUB_CHAT,
+        how=YesToQuestion(activation_id="act-asked", round="q-round"),
+        covers=(_APPROVED_PART,),
+        given=ApprovalGiven(activation_id="act-yes", at=AT),
+        ends=ApprovalEnd.WHEN_USED,
+    )
 
 
 def _allowing(decision_id: str = "d-allow") -> PermissionDecision:
@@ -1358,6 +1379,60 @@ class AuditTrailContract:
         assert consistent.subject_digest == granted.subject_digest
 
     # --- append-only ------------------------------------------------------
+
+    # --- ADR-0321 §4:7, §4:8: a decision names the approval its call runs under -----
+
+    async def test_a_decision_naming_an_approval_is_kept_and_read_back(
+        self, trail: AuditTrail
+    ) -> None:
+        """§4:8: recorded and read back before anything runs, the approval with it."""
+        allowed = PermissionDecision.from_request(
+            action(),
+            ruling(PermissionOutcome.ALLOW),
+            id="d-approved",
+            decided_at=AT,
+            effect="e-1",
+            approval=_approval(),
+            approved_part=_APPROVED_PART,
+        )
+
+        await trail.record(allowed)
+
+        read = await trail.get("d-approved")
+        assert read == allowed
+        assert read is not None
+        assert (read.approval, read.approved_part) == (_approval(), _APPROVED_PART)
+
+    async def test_route_a_records_the_fresh_confirm_and_its_resolution_under_one_approval(
+        self, trail: AuditTrail
+    ) -> None:
+        """§4:7: the confirm ruled fresh in the yes's activation, and the resolving
+        decision naming it, each name the approval and are kept whole."""
+        confirmed = PermissionDecision.from_request(
+            action(),
+            ruling(PermissionOutcome.CONFIRM),
+            id="d-confirm",
+            decided_at=AT,
+            effect="e-1",
+            approval=_approval(),
+            approved_part=_APPROVED_PART,
+        )
+        resolved = PermissionDecision.from_request(
+            action(),
+            ruling(PermissionOutcome.ALLOW, authorised_by="d-confirm"),
+            id="d-resolve",
+            decided_at=AT,
+            resolves="d-confirm",
+            effect="e-1",
+            approval=_approval(),
+            approved_part=_APPROVED_PART,
+        )
+
+        await trail.record(confirmed)
+        await trail.record(resolved)
+
+        assert await trail.get("d-confirm") == confirmed
+        assert await trail.get("d-resolve") == resolved
 
     async def test_a_recorded_decision_is_retrievable(self, trail: AuditTrail) -> None:
         recorded = decision("d-1")

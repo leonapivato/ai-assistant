@@ -25,6 +25,7 @@ each is its own place the resource could be handed over early (#397).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
@@ -43,8 +44,6 @@ from ai_assistant.core.types import (
 from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from ai_assistant.core.clock import Clock
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
@@ -125,10 +124,13 @@ def _named_parts(parts: object) -> tuple[QuestionPart, ...]:
     """Return ``parts`` as the detached question parts a read names, or refuse them.
 
     Raises:
-        PlanningError: If ``parts`` is not a list or tuple of ``QuestionPart`` values.
+        PlanningError: If ``parts`` is a string, or not a sequence of ``QuestionPart``
+            values.
     """
-    if not isinstance(parts, (list, tuple)) or not all(
-        isinstance(one, QuestionPart) for one in parts
+    if (
+        not isinstance(parts, Sequence)
+        or isinstance(parts, (str, bytes))
+        or not all(isinstance(one, QuestionPart) for one in parts)
     ):
         msg = "part_effects reads a sequence of QuestionPart values (ADR-0321 §4:9)"
         raise PlanningError(msg)

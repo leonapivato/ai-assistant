@@ -7451,7 +7451,12 @@ _RETRYABLE_BY_KIND: Mapping[ToolFailureKind, bool] = {
 class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
-    **``schema_version`` is 19 because the document lost the old path's members**
+    **``schema_version`` is 20 because the document's effect records gained ``part``**
+    (ADR-0321 §4:9): the question part a call that ran under an approval spent. A
+    reader of 19 refuses the field as extra, and no reader for 19 is written: the
+    deploy starts from a fresh data directory (ADR-0321 §9:2).
+
+    **It was 19 because the document lost the old path's members**
     (ADR-0309 §5): ``goals``, ``plans``, ``executions``, ``attempts``, ``questions``,
     ``evidence`` and ``effects`` retired with the goal, plan, attempt, question,
     evidence and goal-scoped effect families they carried. What is left is the
@@ -7486,12 +7491,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[19] = Field(
-        default=19,
+    schema_version: Literal[20] = Field(
+        default=20,
         description=(
-            "Shape of this export, pinned to exactly 19 (ADR-0039 §10, ADR-0309 §5): an "
+            "Shape of this export, pinned to exactly 20 (ADR-0039 §10, ADR-0321 §4:9): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[19]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[20]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -11957,27 +11962,21 @@ class AskedCall(BaseModel):
         return self
 
 
-# The round names `AskedCall` forward (see the section comment above). Rebuilt here, in
-# containment order, so that every model holding a round is whole when this module
-# finishes importing rather than on its first validation; `tests/core/test_asked_call.py`
+# The round names `AskedCall` forward (see the section comment above). Every model
+# declared so far that is not yet whole is rebuilt here, the round and every model that
+# holds one among them, so that each is whole when this module finishes importing
+# rather than on its first validation. A model still waiting on a later declaration,
+# as three were before this one, stays as it was. `tests/core/test_yes_path_types.py`
 # holds that no model of this module is left incomplete by it.
-for _holds_a_round in (
-    PlanningRound,
-    EpisodeProcessingRecord,
-    EpisodicMemory,
-    ChannelEpisode,
-    ChannelEpisodePage,
-    MemorySearchResult,
-    MemoryWrite,
-    RecordChunk,
-    MemoryUpdateProposal,
-    SourceReading,
-    FetchOutcome,
-    SearchOutcome,
-    ForecastOutcome,
-):
-    _holds_a_round.model_rebuild()
-del _holds_a_round
+for _declared in tuple(globals().values()):
+    if (
+        isinstance(_declared, type)
+        and issubclass(_declared, BaseModel)
+        and _declared.__module__ == __name__
+        and not _declared.__pydantic_complete__
+    ):
+        _declared.model_rebuild(raise_errors=False)
+del _declared
 
 
 class PermissionRuling(BaseModel):

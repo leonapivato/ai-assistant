@@ -29,6 +29,7 @@ from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
+    QuestionPart,
     ToolOutcome,
 )
 from ai_assistant.testing.cancellation import settle
@@ -68,6 +69,24 @@ def _effect(
         decision_id=f"d-{effect_id}",
         claimed_at=_WHEN,
     )
+
+
+def _spending(
+    effect_id: str,
+    *,
+    activation: str = "act-2",
+    part: QuestionPart | None = None,
+    capability: str = "book_stay",
+    values: str = "a" * 64,
+) -> ActivationEffect:
+    """A call that runs under an approval, claimed with its part key (ADR-0321 §4:9).
+
+    It is made in the yes's activation, ``act-2`` by default, and spends part 1 of the
+    question round ``q-round`` asked unless another part is named.
+    """
+    return _effect(
+        effect_id, activation=activation, capability=capability, values=values
+    ).model_copy(update={"part": part or QuestionPart(round="q-round", part=1)})
 
 
 def _message(effect_id: str, *, activation: str = "act-1") -> ActivationEffect:
@@ -172,6 +191,20 @@ class _ReadOp:
         read = await store.activation_effects(["act-1", "act-2"])
         assert [one.id for one in read] == ["eA", "eB"]
         assert (await store.export()).stopped_activations == ("act-3",)
+
+
+class _PartEffectsOp(_ReadOp):
+    """``part_effects`` — the read by question part, its own lock site (ADR-0321 §4:9)."""
+
+    name = "part_effects"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read by part — the call that is cancelled."""
+        return store.part_effects([QuestionPart(round="q-round", part=1)])
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read by part again concurrently."""
+        return store.part_effects([QuestionPart(round="q-round", part=1)])
 
 
 class _ExportOp(_ReadOp):
@@ -287,6 +320,8 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _ClaimActivationEffectOp,
     _FinishActivationEffectOp,
     _ActivationEffectsOp,
+    # ADR-0321 §4:9's read by question part: one more read that acquires the resource.
+    _PartEffectsOp,
 )
 
 
@@ -372,7 +407,7 @@ class PlanStoreContract:
         await store.record_stop("act-1")
 
         export = await store.export()
-        assert export.schema_version == 19
+        assert export.schema_version == 20
         # ADR-0309 §5: the old path's sections left the document.
         assert set(export.model_dump()) == {
             "schema_version",
@@ -563,6 +598,174 @@ class PlanStoreContract:
         )
         assert len(await store.activation_effects(["act-1"])) == 1
 
+    # --- ADR-0321 §4:9, §6:2: the spend, its read and the retry's admission ---------
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [None, ToolOutcome.SUCCEEDED, ToolOutcome.FAILED, ToolOutcome.INDETERMINATE],
+        ids=["unwritten", "done", "not-done", "unknown"],
+    )
+    async def test_a_part_already_carried_is_already_used_whatever_its_outcome(
+        self, store: PlanStore, outcome: ToolOutcome | None
+    ) -> None:
+        """§4:9: where a record carries the part key, the claim answers and writes nothing.
+
+        Two yeses to one part cannot both run, so the key is spent by the first claim
+        whatever came of it: a part is answered once.
+        """
+        await store.claim_activation_effect(_spending("e1"), match=None)
+        if outcome is not None:
+            await store.finish_activation_effect("e1", outcome)
+
+        answer = await store.claim_activation_effect(
+            _spending("e2", activation="act-3", values="b" * 64), match=None
+        )
+
+        assert answer is ActivationEffectClaim.ALREADY_USED
+        assert await store.activation_effects(["act-3"]) == ()
+        assert [one.id for one in (await store.export()).activation_effects] == ["e1"]
+
+    async def test_the_spend_reads_every_activation_and_ignores_match(
+        self, store: PlanStore
+    ) -> None:
+        """§4:9: the key is spent across activations; ``match`` narrows only the backstop."""
+        await store.claim_activation_effect(_spending("e1", activation="act-9"), match=None)
+
+        answer = await store.claim_activation_effect(
+            _spending("e2", activation="act-2"), match=("act-2",)
+        )
+
+        assert answer is ActivationEffectClaim.ALREADY_USED
+
+    async def test_another_part_of_the_same_question_is_not_spent(self, store: PlanStore) -> None:
+        """§4:9: the key is the round *and* the part; each part is spent on its own."""
+        await store.claim_activation_effect(_spending("e1"), match=None)
+
+        for effect in (
+            _spending("e2", part=QuestionPart(round="q-round", part=2), values="b" * 64),
+            _spending("e3", part=QuestionPart(round="q-other", part=1), values="c" * 64),
+        ):
+            assert await store.claim_activation_effect(effect, match=None) is (
+                ActivationEffectClaim.CLAIMED
+            )
+
+    async def test_a_call_with_no_part_spends_nothing(self, store: PlanStore) -> None:
+        """§4:9: only a call under an approval carries a key, so no other claim spends one."""
+        await store.claim_activation_effect(_effect("e1"), match=None)
+
+        assert await store.claim_activation_effect(_spending("e2"), match=None) is (
+            ActivationEffectClaim.CLAIMED
+        )
+
+    async def test_two_yeses_to_one_part_at_once_admit_one(self, store: PlanStore) -> None:
+        """§4:9: the spend is decided in the claim's one indivisible step."""
+        answers = await asyncio.gather(
+            store.claim_activation_effect(_spending("e1", activation="act-2"), match=None),
+            store.claim_activation_effect(_spending("e2", activation="act-3"), match=None),
+        )
+
+        assert sorted(answers) == sorted(
+            [ActivationEffectClaim.CLAIMED, ActivationEffectClaim.ALREADY_USED]
+        )
+        assert len(await store.part_effects([QuestionPart(round="q-round", part=1)])) == 1
+
+    @pytest.mark.parametrize(
+        ("outcome", "deliberate", "under_approval", "expected"),
+        [
+            (None, True, True, ActivationEffectClaim.CLAIMED),
+            (ToolOutcome.INDETERMINATE, True, True, ActivationEffectClaim.CLAIMED),
+            (ToolOutcome.SUCCEEDED, True, True, ActivationEffectClaim.CLAIMED),
+            (None, False, True, ActivationEffectClaim.ALREADY_DONE),
+            (ToolOutcome.INDETERMINATE, False, True, ActivationEffectClaim.ALREADY_DONE),
+            (ToolOutcome.SUCCEEDED, False, True, ActivationEffectClaim.ALREADY_DONE),
+            (None, True, False, ActivationEffectClaim.ALREADY_DONE),
+            (ToolOutcome.INDETERMINATE, True, False, ActivationEffectClaim.ALREADY_DONE),
+        ],
+        ids=[
+            "unwritten-deliberate-approved",
+            "unknown-deliberate-approved",
+            "done-deliberate-approved",
+            "unwritten-approved-not-deliberate",
+            "unknown-approved-not-deliberate",
+            "done-approved-not-deliberate",
+            "unwritten-deliberate-not-approved",
+            "unknown-deliberate-not-approved",
+        ],
+    )
+    async def test_a_deliberate_repeat_under_an_approval_passes_an_unknown_outcome(
+        self,
+        store: PlanStore,
+        outcome: ToolOutcome | None,
+        deliberate: bool,
+        under_approval: bool,
+        expected: ActivationEffectClaim,
+    ) -> None:
+        """§6:2: the claim of a deliberate repeat that runs under an approval passes a
+        matching effect whose outcome is unknown or not yet written; every other claim
+        matches as ADR-0306 §5:9-§5:11 decide."""
+        await store.claim_activation_effect(_effect("e1"), match=None)
+        if outcome is not None:
+            await store.finish_activation_effect("e1", outcome)
+        retry = _spending("e2") if under_approval else _effect("e2", activation="act-2")
+
+        answer = await store.claim_activation_effect(
+            retry, match=("act-2", "act-1"), deliberate_repeat=deliberate
+        )
+
+        assert answer is expected
+
+    async def test_the_records_are_read_by_part_across_activations_in_claim_order(
+        self, store: PlanStore
+    ) -> None:
+        """§4:4, §4:11: whether a part's key is carried, read across every activation."""
+        first = QuestionPart(round="q-round", part=1)
+        second = QuestionPart(round="q-round", part=2)
+        other = QuestionPart(round="q-other", part=1)
+        await store.claim_activation_effect(
+            _spending("e2", activation="act-7", part=second), match=None
+        )
+        await store.claim_activation_effect(_effect("e0"), match=None)
+        await store.claim_activation_effect(_message("m0"), match=None)
+        await store.claim_activation_effect(
+            _spending("e1", activation="act-8", part=first, values="b" * 64), match=None
+        )
+        await store.claim_activation_effect(
+            _spending("e3", part=other, values="c" * 64), match=None
+        )
+        await store.finish_activation_effect("e1", ToolOutcome.INDETERMINATE)
+
+        read = await store.part_effects([first, second])
+
+        assert [one.id for one in read] == ["e2", "e1"]
+        assert read[1].outcome is ToolOutcome.INDETERMINATE
+        assert read[1].part == first
+        assert await store.part_effects([]) == ()
+        assert await store.part_effects([QuestionPart(round="q-none", part=1)]) == ()
+        assert [one.id for one in await store.part_effects((first, first))] == ["e1"]
+
+    @pytest.mark.parametrize(
+        "given",
+        [
+            pytest.param("q-round", id="a-bare-string"),
+            pytest.param([("q-round", 1)], id="a-tuple-not-a-part"),
+            pytest.param([{"round": "q-round", "part": 1}], id="a-mapping-not-a-part"),
+        ],
+    )
+    async def test_the_read_by_part_takes_question_parts_alone(
+        self, store: PlanStore, given: object
+    ) -> None:
+        """A read handed anything but ``QuestionPart`` values is refused, not guessed at."""
+        with pytest.raises(PlanningError):
+            await store.part_effects(given)  # type: ignore[arg-type]  # refused input
+
+    async def test_the_export_carries_the_part_a_record_spent(self, store: PlanStore) -> None:
+        """§4:9: the part key is a field of the record, so the export carries it."""
+        await store.claim_activation_effect(_spending("e1"), match=None)
+
+        (exported,) = (await store.export()).activation_effects
+
+        assert exported.part == QuestionPart(round="q-round", part=1)
+
     async def test_a_finish_writes_the_outcome_once(self, store: PlanStore) -> None:
         """§6:4: the outcome and the reason where not done are written once."""
         await store.claim_activation_effect(_effect("e1"), match=None)
@@ -643,7 +846,7 @@ class PlanStoreContract:
         await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
 
         export = await store.export()
-        assert export.schema_version == 19
+        assert export.schema_version == 20
         assert [one.id for one in export.activation_effects] == ["e1", "m1"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
