@@ -522,6 +522,50 @@ async def test_a_booking_is_asked_with_its_exact_line_and_a_yes_runs_it_once() -
     assert ran.resolves is not None, "the confirm ruled fresh is resolved on route (a)"
 
 
+async def test_a_prose_question_in_the_proposing_round_asks_nothing() -> None:
+    """#3071: only a message that showed the exact line asks, so the next round asks.
+
+    The proposing round writes "Shall I?" and names a reference it guessed: no call has
+    come back yet, so the name is dropped and nothing is recorded as asked. The next
+    round is shown the call as needing a yes and not yet asked, and its question carries
+    the line. A yes to the prose runs nothing; a yes to the question runs it once.
+    """
+    hub = _Hub()
+    hub.reader.nothing()
+    prose = "Friday is free. Shall I book it? Please confirm the details below."
+    proposing = RoundResponse(
+        text=prose, calls=(_call("c1", "book", date="Friday"),), asks=("1.1",)
+    )
+    hub.planner.then(proposing, _ask())
+    conversation, asking = await hub.turn("Book a table for Friday.")
+
+    assert _asked_calls(asking)[0] == ()
+    shown = hub.planner.shown(1)
+    assert "needs the user's yes, and is not yet asked" in shown
+    assert "already asked" not in shown
+    assert [one.text for one in await hub.said(conversation)] == [
+        prose,
+        f"{_ASKING}\n\n{_FRIDAY_LINE}",
+    ]
+
+    async def link() -> None:
+        await hub.linked(_activation(asking))
+
+    hub.reader.yes(prose)
+    hub.planner.then(
+        _Hooked(link, _book()), RoundResponse(text="I'm waiting on your answer above.")
+    )
+    await hub.turn("Yes.", conversation=conversation, message_id="m-2")
+    assert "approved_actions" not in hub.planner.shown(2)
+    assert "already asked about" in hub.planner.shown(3)
+    assert hub.world.of("book") == []
+
+    hub.reader.yes()
+    hub.planner.then(_run_approved(), _DONE)
+    await hub.turn("Yes, that one.", conversation=conversation, message_id="m-3")
+    assert hub.world.of("book") == [{"date": "Friday"}]
+
+
 async def test_a_second_yes_does_not_run_it_again() -> None:
     hub = _Hub()
     conversation, _ = await _asked(hub)
@@ -555,7 +599,9 @@ async def test_proposing_it_again_while_it_waits_is_already_asked() -> None:
         "And dinner on Friday, then?", conversation=conversation, message_id="m-2"
     )
 
-    assert "already asked about and waiting" in hub.planner.shown(3)
+    assert "already asked about, in a question that showed its exact details" in (
+        hub.planner.shown(3)
+    )
     # It is not asked about again: the second round's message carries no exact line.
     assert _asked_calls(again) == [(), ()]
     said = await hub.said(conversation)

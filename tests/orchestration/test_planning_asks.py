@@ -159,6 +159,72 @@ async def test_the_instruction_says_how_to_ask_and_how_answers_go() -> None:
     assert "ask again, with the new values where they changed them" in instruction
 
 
+async def test_the_round_that_proposes_a_call_is_told_not_to_ask_about_it() -> None:
+    """#3071: a call needs the user only once it comes back, a round after it was proposed."""
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs())
+    assert (
+        "Whether a call needs the user's yes is known only once it comes back, in the round "
+        "after the one that proposed it. So the round that proposes an action does not ask "
+        "about it: it does not ask them to confirm, does not say details will follow, and "
+        'names nothing in asks. It may say what you are doing, such as "Let me book that", '
+        "or nothing."
+    ) in _instruction(completer)
+
+
+async def test_a_call_that_needs_a_yes_is_always_asked_and_only_the_exact_line_asks() -> None:
+    """#3071: §2:1-§2:2's only reason not to ask; §4:11's "asked" is a shown exact line."""
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs())
+    instruction = _instruction(completer)
+    assert (
+        "When a call comes back needing the user's yes, this round's message asks them about "
+        "it, unless they no longer want it"
+    ) in instruction
+    assert "decide whether this round's message asks" not in instruction
+    assert (
+        "Only a message that showed a call's exact details asked about it, so a call that "
+        "needs a yes is new to the user and not yet asked, even where an earlier message "
+        "mentioned it or asked about it in words."
+    ) in instruction
+    # Neither "nothing new" rule silences it.
+    assert "A call that came back needing their yes is always new." in instruction
+    assert "a call that came back needing their yes, and always a call that was not" in (
+        instruction
+    )
+
+
+async def test_a_question_always_carries_the_explanation() -> None:
+    """§2:4, #3072: the exact line never goes out as the whole question."""
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs())
+    assert "Always write the explanation: the exact details never go out alone." in (
+        _instruction(completer)
+    )
+
+
+async def test_a_call_waiting_on_the_user_is_never_said_to_be_going_through() -> None:
+    """#3072: already asked is waiting, not approved."""
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs())
+    assert (
+        "A call shown as already asked about is waiting on the user's answer to a question "
+        "that showed its exact details, and is not asked about again. It is not approved "
+        "unless it is shown to you as an approved action, so never say it is going through "
+        "or being done: say you are waiting on their answer to that question, and where "
+        "they seem to have said yes, ask which question they meant."
+    ) in _instruction(completer)
+
+
+async def test_a_place_that_takes_no_message_is_not_told_how_to_ask() -> None:
+    """§7:3: the asking rules ride only where a message goes."""
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(place=PlaceWindow(takes_message=False)))
+    instruction = _instruction(completer)
+    assert "the round that proposes an action does not ask" not in instruction
+    assert "A call shown as already asked about" not in instruction
+
+
 async def test_a_deny_is_never_asked_about_and_is_said_plainly() -> None:
     """§2:10, §8:7: the instruction and the refused outcome both say so."""
     earlier = _proposed(_SLOT)
@@ -204,9 +270,11 @@ async def test_a_call_needing_a_yes_is_shown_with_its_reference_and_reason() -> 
         "capability": "book",
         "arguments": {"slot": _SLOT},
         "outcome": (
-            "needs the user's yes: ask them about it if you judge it right, explaining it in "
-            "your own words, and name it in asks by its ask_as reference; the exact details "
-            "will be filled in below your message"
+            "needs the user's yes, and is not yet asked, even where an earlier message "
+            "mentioned it: ask them about it in this round's message, explaining it in your "
+            "own words, and name it in asks by its ask_as reference, so the exact details are "
+            "filled in below your message. Leave it unasked only where the user no longer "
+            "wants it"
         ),
         "ask_as": "1.1",
         "because": "the permission policy asks the user about this call",
@@ -242,7 +310,9 @@ async def test_a_call_already_waiting_on_the_user_is_not_asked_again() -> None:
     planned, completer = await _asked(asks=("1.1",), outcomes=(waiting,), rounds=(earlier,))
     shown = _sent(completer)["rounds"][0]["calls"][0]
     assert shown["outcome"] == (
-        "already asked about and waiting on the user's answer, so it is not asked about again"
+        "already asked about, in a question that showed its exact details, and waiting on the "
+        "user's answer, so it is not asked about again. It is not approved: never say it is "
+        "going through or being done"
     )
     assert "ask_as" not in shown
     assert planned.round.asked == ()
