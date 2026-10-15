@@ -2021,9 +2021,23 @@ def _name_text(name: str) -> str:
     return name if _BARE_NAME.fullmatch(name) else _json_text(name)
 
 
+#: Every character :meth:`str.splitlines` breaks a line at, each as its JSON escape. JSON
+#: escapes those below U+0020 itself; the rest it would write as they are.
+_LINE_BREAKS: Final = str.maketrans(
+    {
+        chr(code): f"\\u{code:04x}"
+        for code in (0x0A, 0x0D, 0x0B, 0x0C, 0x1C, 0x1D, 0x1E, 0x85, 0x2028, 0x2029)
+    }
+)
+
+
 def _json_text(value: object) -> str:
-    """A value as its JSON text, on one line, with its characters as written."""
-    return json.dumps(_thawed(value), ensure_ascii=False)
+    """A value as its JSON text, on one line, with its characters as written.
+
+    A character that would break the line is written as its JSON escape, so the text
+    still decodes to the value whole.
+    """
+    return json.dumps(_thawed(value), ensure_ascii=False).translate(_LINE_BREAKS)
 
 
 def _canonical(value: object) -> str:
