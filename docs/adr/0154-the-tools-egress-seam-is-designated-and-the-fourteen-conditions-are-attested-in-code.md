@@ -2,6 +2,40 @@
 
 - Status: Partially superseded by ADR-0193 (§4's standing-authorisation floor, item (ii)'s first clause, in the single respect that a user-established recipient grant may cover an egress call at this seam) and ADR-0231 (§2's second clause, only as it reaches a `WEB_SEARCH` servicing's send, and only in the limb restating the single route through `ToolInvoker.invoke`: that send leaves by the route that decision's §6 states, while the clause's other limbs, §1's designation of this module and no other, §2's remaining clauses, §4's fourteen attestations including its actuator clause, §6's residues and residency clause and §7's `DestinationProtocol` reservation all stand entire)
 - Date: 2026-08-14
+- **Note (2026-10-15): §4's condition 3 is re-attested, and holds by the first limb
+  of ADR-0017 §3's disjunct alone again.** ADR-0321 §7:1 retires recipient grants
+  fully — the store, its commands, routes and engine members, and the policy's
+  recipient-grant route — and §7:8 assigns this re-attestation to the lane that
+  retires them, under §4's own rule that a later change which falsifies a
+  subsection's stated property "either restores the property in the same change or
+  opens an ADR reconsidering the designation". The 2026-08-26 note below recorded
+  the second limb becoming available; this one records it leaving.
+
+  **The condition itself is unfalsified**, so no ADR reconsidering designation is
+  owed. ADR-0017 §3's condition 3 offers a user decision **or** a standing user
+  policy established by a recorded act of the user; with no recipient grant left in
+  the tree, recipient authorisation at this seam traces to the first: a recorded
+  user decision resolving a `CONFIRM` about *this* request, ADR-0148 §3's route (a).
+  ADR-0321 §4 is how that decision is now reached — your yes to a question that
+  showed the call — and it resolves the confirm on route (a) through
+  `ActionPolicy.resolve`, `PermissionDecision.authorises` and `AuditTrail.record`'s
+  resolution checks, each unchanged (ADR-0321 §4:7, §9). Nothing was added to
+  ADR-0017 §3's list, nothing was relaxed, and no limb was widened.
+
+  **What holds in code at the tree this note is written against.**
+  `ThresholdActionPolicy` is constructed with no recipient-grant seam and consults
+  none, as condition 3's code paragraph said before 2026-08-26.
+  `PermissionRuling.authorised_subject` stays and nothing sets it (ADR-0321 §7:7),
+  and `AuditTrail.record` refuses a non-resolving `ALLOW` that carries one, as it
+  already refused a resolving one — so no row can claim a grant's authority. The
+  configured-provider route ADR-0247 §2 and ADR-0260 §6 decided stays as those
+  decisions state it (ADR-0321 §7:2), told apart on the row by that field's absence
+  as before; this note re-reads nothing about it.
+
+  **Nothing else in this ADR changes**: §1's designation, §2's clauses, the other
+  thirteen attestations and their verdicts, §5's transition and §7's limits all
+  hold as written. Appended dated note per ADR-0070 §1; no ratified text is
+  rewritten. Refs #3058.
 - **Note (2026-08-26): §4's condition 3 is re-attested, and now holds by both
   limbs of ADR-0017 §3's disjunct rather than by the first alone.** ADR-0193's
   implementing lane has landed, so the condition-3 subsection's stated limit —
