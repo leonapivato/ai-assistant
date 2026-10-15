@@ -45,6 +45,9 @@ from ai_assistant.core.types import (
     NewMessage,
     PermissionOutcome,
     PermissionRuling,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     PlanningRound,
     ProposedCall,
     Provenance,
@@ -790,25 +793,7 @@ async def test_a_conflict_at_write_time_asks_replacing_and_a_yes_retires_what_wa
     hub = _Hub()
     statement = "drinks coffee every morning"
     old = f"never {statement}"
-    await hub.memory.add(
-        SemanticMemory(
-            id="assertion:1",
-            content=old,
-            fact=old,
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED,
-                confidence=1.0,
-                evidence=("episode:earlier",),
-                last_updated=AT,
-            ),
-        )
-    )
-    hub.reader.nothing()
-    hub.planner.then(
-        RoundResponse(calls=(_call("c1", "remember", statement=statement),)),
-        _ask("You told me otherwise before. Shall I replace it?"),
-    )
-    conversation, asking = await hub.turn("Remember that I drink coffee every morning.")
+    conversation, asking = await _replacing(hub, statement, old)
 
     (asked,) = _asked_calls(asking)[1]
     assert asked.replaces == ("assertion:1",)
@@ -822,6 +807,56 @@ async def test_a_conflict_at_write_time_asks_replacing_and_a_yes_retires_what_wa
 
     assert await _beliefs(hub.memory, old) == []
     assert await _beliefs(hub.memory, statement)
+
+
+async def _replacing(
+    hub: _Hub, statement: str, old: str, *, placement: Placement | None = None
+) -> tuple[str, EpisodicMemory]:
+    """The user's earlier assertion ``old``, and a remember of ``statement`` asked about."""
+    asserted = SemanticMemory(
+        id="assertion:1",
+        content=old,
+        fact=old,
+        provenance=Provenance(
+            source=MemorySource.USER_ASSERTED,
+            confidence=1.0,
+            evidence=("episode:earlier",),
+            last_updated=AT,
+        ),
+    )
+    if placement is not None:
+        asserted = asserted.model_copy(update={"placement": placement})
+    await hub.memory.add(asserted)
+    hub.reader.nothing()
+    hub.planner.then(
+        RoundResponse(calls=(_call("c1", "remember", statement=statement),)),
+        _ask("You told me otherwise before. Shall I replace it?"),
+    )
+    return await hub.turn("Remember that I drink coffee every morning.")
+
+
+async def test_owner_only_records_a_question_rests_on_place_what_follows_them() -> None:
+    """ADR-0309 §5:10: the assertions a question shows replaced, and the asking episode a
+    yes reads, are obtained, so the episodes and the belief they lead to are placed by
+    them.
+
+    The episode window is empty, so the yes's activation obtains the asking episode
+    only through the records its yes leads to.
+    """
+    hub = _Hub(aged_out=True)
+    statement = "drinks coffee every morning"
+    owner = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=AT)
+    conversation, asking = await _replacing(hub, statement, f"never {statement}", placement=owner)
+
+    assert asking.placement.reach is PlacementReach.OWNER
+
+    hub.reader.yes("Shall I replace it?")
+    hub.planner.then(_run_approved(), RoundResponse(text="Updated."))
+    _, yes = await hub.turn("Yes, replace it.", conversation=conversation, message_id="m-2")
+
+    assert yes.placement.reach is PlacementReach.OWNER
+    (saved,) = await _beliefs(hub.memory, statement)
+    assert saved.placement.reach is PlacementReach.OWNER
 
 
 # --- a retry after an unknown outcome (§8:6, §6) ------------------------------------------
