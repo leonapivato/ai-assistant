@@ -165,11 +165,34 @@ async def test_the_round_that_proposes_a_call_is_told_not_to_ask_about_it() -> N
     await stage.plan(_inputs())
     assert (
         "Whether a call needs the user's yes is known only once it comes back, in the round "
-        "after the one that proposed it. So the round that proposes an action does not ask "
-        "about it: it does not ask them to confirm, does not say details will follow, and "
-        'names nothing in asks. It may say what you are doing, such as "Let me book that", '
-        "or nothing."
+        "after the one that proposed it. So a round does not ask about an action it proposes "
+        "itself: it does not ask them to confirm it, does not say details will follow, and "
+        'does not name it in asks. It may say what you are doing, such as "Let me book '
+        'that", or nothing. The same round still asks about an earlier call that came back '
+        "needing a yes."
     ) in _instruction(completer)
+
+
+async def test_a_round_that_proposes_a_call_still_asks_about_an_earlier_one() -> None:
+    """#3071: the proposing round's rule is about its own calls, never an earlier outcome."""
+    earlier = _proposed(_SLOT)
+    stage, _, _ = _stage(
+        RoundResponse(
+            text="I can book the table for 7pm. Shall I? Meanwhile I'll look up parking.",
+            calls=(_call("c1", "web_search", query="parking"),),
+            asks=("1.1",),
+        )
+    )
+    planned = await stage.plan(
+        _inputs(
+            capabilities=_TOOLS,
+            rounds=(earlier,),
+            outcomes=(_needs_you(earlier.id, "c1", _booking()),),
+        )
+    )
+    (asked,) = planned.round.asked
+    assert (asked.part, asked.tool) == (1, _BOOK)
+    assert planned.round.text.endswith(f'book — slot: "{_SLOT}"')
 
 
 async def test_a_call_that_needs_a_yes_is_always_asked_and_only_the_exact_line_asks() -> None:
@@ -221,7 +244,7 @@ async def test_a_place_that_takes_no_message_is_not_told_how_to_ask() -> None:
     stage, completer, _ = _stage()
     await stage.plan(_inputs(place=PlaceWindow(takes_message=False)))
     instruction = _instruction(completer)
-    assert "the round that proposes an action does not ask" not in instruction
+    assert "does not ask about an action it proposes" not in instruction
     assert "A call shown as already asked about" not in instruction
 
 

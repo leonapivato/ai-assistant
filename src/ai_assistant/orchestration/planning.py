@@ -931,10 +931,11 @@ _APPROVAL: Final = (
 #: and a question always carries planning's explanation (§2:4).
 _ASKING: Final = (
     "Whether a call needs the user's yes is known only once it comes back, in the round "
-    "after the one that proposed it. So the round that proposes an action does not ask "
-    "about it: it does not ask them to confirm, does not say details will follow, and names "
-    'nothing in asks. It may say what you are doing, such as "Let me book that", or '
-    "nothing.\n"
+    "after the one that proposed it. So a round does not ask about an action it proposes "
+    "itself: it does not ask them to confirm it, does not say details will follow, and does "
+    'not name it in asks. It may say what you are doing, such as "Let me book that", or '
+    "nothing. The same round still asks about an earlier call that came back needing a "
+    "yes.\n"
     "\n"
     "When a call comes back needing the user's yes, this round's message asks them about "
     "it, unless they no longer want it: a call no message asks about is dropped, and "
