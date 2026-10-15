@@ -477,7 +477,8 @@ async def test_the_instruction_says_a_round_with_a_call_brings_another_and_names
     ) in instruction
     assert (
         "writes what is new and the user will want to hear: a result or a confirmation they "
-        "asked for, and always a call that was not done or whose outcome is unknown."
+        "asked for, a call that came back needing their yes, and always a call that was not "
+        "done or whose outcome is unknown."
     ) in instruction
     assert (
         "A call that did just what an earlier message said you would do is not new to them."

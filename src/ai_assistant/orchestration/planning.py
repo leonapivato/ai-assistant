@@ -924,16 +924,35 @@ _APPROVAL: Final = (
 )
 
 #: ADR-0321 §2:1-§2:6, §2:12 and planning's side of §3:5, §3:8-§3:9: how a round asks,
-#: where its message reaches the user.
+#: where its message reaches the user. #3071: a call needs the user only once it comes
+#: back, so the round that proposes it does not ask, the round after always does unless
+#: the user no longer wants it (§2:1-§2:2), and only a message that showed the exact line
+#: asked (§4:11). #3072: a call waiting on the user is never said to be going through,
+#: and a question always carries planning's explanation (§2:4).
 _ASKING: Final = (
-    "When a call comes back needing the user's yes, decide whether this round's message "
-    "asks them about it: a call no message asks about is dropped, and nothing waits on "
-    "them. To ask, explain the action in your own words, with the details that matter to "
-    "them, and name the call in asks by the reference shown with its outcome, after the "
-    "message, as you keep notes. The system adds the exact details below your message, one "
-    "line for each call you name, numbered where there are several. The question is an "
-    "ordinary message, with no buttons and no options. A call already asked about and "
-    "still waiting on the user is not asked about again.\n"
+    "Whether a call needs the user's yes is known only once it comes back, in the round "
+    "after the one that proposed it. So the round that proposes an action does not ask "
+    "about it: it does not ask them to confirm, does not say details will follow, and names "
+    'nothing in asks. It may say what you are doing, such as "Let me book that", or '
+    "nothing.\n"
+    "\n"
+    "When a call comes back needing the user's yes, this round's message asks them about "
+    "it, unless they no longer want it: a call no message asks about is dropped, and "
+    "nothing waits on them. To ask, explain the action in your own words, with the details "
+    "that matter to them, and name the call in asks by the reference shown with its "
+    "outcome, after the message, as you keep notes. The system adds the exact details "
+    "below your message, one line for each call you name, numbered where there are "
+    "several. Always write the explanation: the exact details never go out alone. Only a "
+    "message that showed a call's exact details asked about it, so a call that needs a yes "
+    "is new to the user and not yet asked, even where an earlier message mentioned it or "
+    "asked about it in words. The question is an ordinary message, with no buttons and no "
+    "options.\n"
+    "\n"
+    "A call shown as already asked about is waiting on the user's answer to a question "
+    "that showed its exact details, and is not asked about again. It is not approved "
+    "unless it is shown to you as an approved action, so never say it is going through or "
+    "being done: say you are waiting on their answer to that question, and where they "
+    "seem to have said yes, ask which question they meant.\n"
     "\n"
     "Understanding tells you whether the input answers an earlier question. Where the user "
     "seems to say yes but it cannot be connected to one question, or could answer more "
@@ -972,7 +991,7 @@ _REPLY: Final = (
     "get, and it still never says how the calls went. Empty text writes no message, so "
     "leave the text empty only where the user asked nothing of this round, or where an "
     "earlier round of this activation already told them what you are doing and there is "
-    "nothing new.\n"
+    "nothing new. A call that came back needing their yes is always new.\n"
     "\n"
 )
 
@@ -1007,7 +1026,8 @@ _ROUNDS: Final = (
     "that round, and you need not ask for it. A round with no calls, or whose only calls "
     "are tidy-ups, ends the work after its message. A round that follows your calls "
     "writes what is new and the user will want to hear: a result or a confirmation they "
-    "asked for, and always a call that was not done or whose outcome is unknown. A call "
+    "asked for, a call that came back needing their yes, and always a call that was not "
+    "done or whose outcome is unknown. A call "
     "that did just what an earlier message said you would do is not new to them. Where "
     "there is nothing new for them, because an earlier message already said what you are "
     "doing and nothing came of the calls that they will want to hear, write no text: "
@@ -1182,18 +1202,22 @@ _OUTCOME_TEXT: Final = {
 #: ADR-0321 §2:10: which case of a call needing the user applies, each said with its
 #: outcome. These replace the needs-you outcome text.
 _NEEDS_YES: Final = (
-    "needs the user's yes: ask them about it if you judge it right, explaining it in your "
-    "own words, and name it in asks by its ask_as reference; the exact details will be "
-    "filled in below your message"
+    "needs the user's yes, and is not yet asked, even where an earlier message mentioned "
+    "it: ask them about it in this round's message, explaining it in your own words, and "
+    "name it in asks by its ask_as reference, so the exact details are filled in below "
+    "your message. Leave it unasked only where the user no longer wants it"
 )
 #: §7:3: where the place takes no message.
 _NO_ONE_TO_ASK: Final = (
     "needs the user, and this activation cannot message them, so it will not run and is "
     "not asked about"
 )
-#: §4:11, and a call an earlier round of this activation already asked about.
+#: §4:11, and a call an earlier round of this activation already asked about: either
+#: way a question that showed its exact line (#3071). #3072: waiting is not approved.
 _ALREADY_ASKED: Final = (
-    "already asked about and waiting on the user's answer, so it is not asked about again"
+    "already asked about, in a question that showed its exact details, and waiting on the "
+    "user's answer, so it is not asked about again. It is not approved: never say it is "
+    "going through or being done"
 )
 #: A call that needs the user but whose request was not handed on cannot be shown exactly,
 #: so it is never asked about (§2:5).
