@@ -49,8 +49,9 @@ holds the direction (owner, 2026-09-27 and 2026-10-05).
   whose act is live although nothing reads it.
 
 **Why now.** [#2862](https://github.com/leonapivato/ai-assistant/issues/2862) showed the cost of
-an instruction that says no route exists: planning invented approval steps ("check your email
-to confirm"), and a user's yes made it propose the call again, which needed them again.
+an instruction that says no route exists: planning invented approval steps ("it comes back
+needing your authorization through the booking system itself — that's a step that happens on
+your side"), and a user's yes made it propose the call again, which needed them again.
 
 **The frame.** A human assistant acts on what the boss asked for, a yes to something the
 assistant proposed included, or on a standing mandate, and on nothing else. Where a human relies
