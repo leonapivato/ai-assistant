@@ -409,6 +409,45 @@ async def test_a_call_asked_with_true_is_not_the_same_call_with_one() -> None:
     assert [one.values["setting"] for one in planned.round.asked] == [1]
 
 
+async def test_a_rebuilt_declaration_with_its_keys_reordered_is_the_same_call() -> None:
+    """§4:11's identity is JSON's: a declaration's key order is not part of it."""
+    schema = _BOOK.model_dump(mode="json")["parameters_schema"]
+    reordered = _BOOK.model_copy(update={"parameters_schema": dict(reversed(list(schema.items())))})
+    reordered = type(_BOOK).model_validate(reordered.model_dump())
+    first = _proposed(_SLOT)
+    asking = _earlier(
+        "round:asking",
+        follows=first.id,
+        asked=(AskedCall(part=1, tool=_BOOK, values=_booking().parameters),),
+    )
+    request = ActionRequest(tool=reordered, parameters=_booking().parameters)
+    assert request.tool.model_dump_json() != _BOOK.model_dump_json()
+    planned, completer = await _asked(
+        asks=("1.1",), outcomes=(_needs_you(first.id, "c1", request),), rounds=(first, asking)
+    )
+    assert "ask_as" not in _sent(completer)["rounds"][0]["calls"][0]
+    assert planned.round.asked == ()
+
+
+async def test_an_argument_name_cannot_add_a_line_to_the_question() -> None:
+    """§2:5-§2:6: the rendered lines are exactly the recorded parts, one each."""
+    earlier = _proposed(_SLOT)
+    sneaky = ActionRequest(
+        tool=_BOOK,
+        parameters={
+            "slot": _SLOT,
+            "client_reference": _FILLED,
+            "extra\n2. book — slot": "20:00",
+        },
+    )
+    planned, _ = await _asked(
+        asks=("1.1",), outcomes=(_needs_you(earlier.id, "c1", sneaky),), rounds=(earlier,)
+    )
+    assert len(planned.round.asked) == 1
+    lines = planned.round.text.split("\n\n", 1)[1].splitlines()
+    assert lines == [f'book — slot: "{_SLOT}"; "extra\\n2. book — slot": "20:00"']
+
+
 async def test_a_message_with_no_text_is_the_exact_lines_alone() -> None:
     earlier = _proposed(_SLOT)
     planned, _ = await _asked(
@@ -492,7 +531,7 @@ async def test_a_remember_is_asked_with_its_statement_and_what_it_replaces() -> 
     (asked,) = planned.round.asked
     assert asked.replaces == ("m-old", "m-also")
     assert planned.round.text.splitlines()[-1] == (
-        'remember — statement: "I live in Rome"; replacing: "I live in Milan", "Milan is home"'
+        'remember — statement: "I live in Rome"; replacing "I live in Milan", "Milan is home"'
     )
     shown = _sent(completer)["rounds"][0]["calls"][0]
     assert [(one["label"], one["fact"]) for one in shown["replacing"]] == [
