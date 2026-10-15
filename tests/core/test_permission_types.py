@@ -277,6 +277,46 @@ def test_a_ruling_has_no_field_naming_a_subject() -> None:
     }
 
 
+# --- PermissionRuling: the authorisation pointer's pairing (ADR-0193 §6) ----
+
+
+def test_a_ruling_naming_no_authorisation_fingerprints_none() -> None:
+    """A fingerprint of the authorisation is incoherent on a ruling that names none."""
+    with pytest.raises(ValidationError, match="fingerprints none"):
+        PermissionRuling(
+            outcome=PermissionOutcome.ALLOW,
+            reason="fine",
+            authorised_subject="0" * 64,
+        )
+
+
+def test_a_route_a_allow_carries_a_pointer_and_no_fingerprint() -> None:
+    """The converse is **not** required: route (a) rests on a confirmation.
+
+    Which of the two shapes is *owed* is decided at ``AuditTrail.record``, the only
+    component that can see ``resolves`` and ``egress_binding`` (ADR-0193 §6); the
+    type can only state the half that is incoherent on its own.
+    """
+    ruling = PermissionRuling(
+        outcome=PermissionOutcome.ALLOW, reason="the user approved", authorised_by="d-confirm"
+    )
+
+    assert ruling.authorised_by == "d-confirm"
+    assert ruling.authorised_subject is None
+
+
+def test_a_ruling_may_carry_both() -> None:
+    """The route-(b) shape, so the refusal above is about the pairing and not the field."""
+    ruling = PermissionRuling(
+        outcome=PermissionOutcome.ALLOW,
+        reason="a standing grant covers these recipients",
+        authorised_by="g-1",
+        authorised_subject="0" * 64,
+    )
+
+    assert ruling.authorised_subject == "0" * 64
+
+
 # --- PermissionDecision -----------------------------------------------------
 
 
