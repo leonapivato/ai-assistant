@@ -448,6 +448,36 @@ async def test_an_argument_name_cannot_add_a_line_to_the_question() -> None:
     assert lines == [f'book — slot: "{_SLOT}"; "extra\\n2. book — slot": "20:00"']
 
 
+_BREAKS: Final = ("\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+
+
+@pytest.mark.parametrize("brk", _BREAKS, ids=[f"U+{ord(one):04X}" for one in _BREAKS])
+@pytest.mark.parametrize("where", ["name", "value", "replaced"])
+async def test_no_character_breaks_an_exact_line(brk: str, where: str) -> None:
+    """§2:5-§2:6: one line per recorded part, whatever a name, value or statement holds.
+
+    Each text still decodes, from the line, to exactly what the call carries.
+    """
+    text = f"extra{brk}2. book — slot"
+    earlier = _earlier(calls=(_call("c1", "remember", statement="x"),))
+    replaces: tuple[SemanticMemory, ...] = ()
+    if where == "name":
+        values = {"slot": _SLOT, "client_reference": _FILLED, text: "20:00"}
+        request = ActionRequest(tool=_BOOK, parameters=values)
+    elif where == "value":
+        request = ActionRequest(tool=_BOOK, parameters={"slot": text, "client_reference": _FILLED})
+    else:
+        request = _remember_request("I live in Rome")
+        replaces = (_remembered("m-old", MemorySource.USER_ASSERTED, text),)
+    outcome = _needs_you(earlier.id, "c1", request, replaces=replaces)
+    planned, _ = await _asked(asks=("1.1",), outcomes=(outcome,), rounds=(earlier,))
+    assert len(planned.round.asked) == 1
+    (line,) = planned.round.text.split("\n\n", 1)[1].splitlines()
+    assert brk not in line
+    quoted = line[line.index('"extra') : line.index('slot"') + len('slot"')]
+    assert json.loads(quoted) == text
+
+
 async def test_a_message_with_no_text_is_the_exact_lines_alone() -> None:
     earlier = _proposed(_SLOT)
     planned, _ = await _asked(
