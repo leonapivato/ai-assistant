@@ -1,332 +1,352 @@
-# Authority: your yes, for the cutover
+# Authority: your yes, for the deploy
 
-**The question.** When authorizing says a call needs you, how does the assistant ask, how does
-your answer become permission, and how is the call checked and run? What is the smallest version
-of this the cutover can wait for, and where does authority go after it?
+**The question.** When authorizing says a call needs you, how does the assistant ask, how does your
+answer become permission, and how is the call checked and run? What is the smallest version of this
+the deploy can wait for, and what does it leave to later designs?
 
 ## The baseline
 
-The wiki at [84f20c8](https://github.com/leonapivato/ai-assistant/wiki) has the direction for this
-milestone on
-[Authorizing](https://github.com/leonapivato/ai-assistant/wiki/Authorizing) (owner, 2026-09-27 and
-2026-10-05). Related pages are
+The wiki at [84f20c8](https://github.com/leonapivato/ai-assistant/wiki) holds the direction for this
+milestone on [Authorizing](https://github.com/leonapivato/ai-assistant/wiki/Authorizing) (owner,
+2026-09-27 and 2026-10-05). Related pages:
 [Permission and approval](https://github.com/leonapivato/ai-assistant/wiki/Permission-and-approval),
-[Permission decision](https://github.com/leonapivato/ai-assistant/wiki/Permission-decision),
 [Confirmation](https://github.com/leonapivato/ai-assistant/wiki/Confirmation),
 [Outside-content lineage](https://github.com/leonapivato/ai-assistant/wiki/Outside-content-lineage),
 [Planning](https://github.com/leonapivato/ai-assistant/wiki/Planning) and
 [Stories](https://github.com/leonapivato/ai-assistant/wiki/Stories).
 
-**Built at `12d492a3`.** The phases' thin path is built behind its test-hub opt-in: ADR-0306 to
-ADR-0309, as ADR-0312 corrects them.
+**On `main` at `2ff6298c`** (PROTOCOL 105), the phases are the only path. ADR-0306 to ADR-0309 decided
+them, ADR-0312 to ADR-0320 corrected and completed them, and the cutover deleted the old turn loop.
+Nothing is deployed yet: the deploy waits for this milestone's acceptance run (ADR-0309 §6).
+
+**How the build handles a call that needs you today:**
 - **Authorizing checks every call by rule** (ADR-0306 §4): the policy, then the outside-content
-  stand-in, then, for the message, its place.
-- **"Confirm" means *needs you*.** It parks nothing, and planning answers it plainly: it cannot be
-  done yet (ADR-0307 §9).
-- **The old answer path retires at the cutover** (ADR-0309 §5): parks and `resume`, goal
-  authorizations, quotes, stated bounds, charges, the deferred memory questions, and the
-  `authorizations` and `revoke-authorization` commands with their gateway panels.
-- **The cutover deploy waits for this milestone** (ADR-0309 §6).
+  stand-in, then `MemoryPolicy` for remembering. The round's message is checked by its place.
+- **"Confirm" means *needs you*.** The call runs nothing, parks nothing, and nothing resumes it
+  (ADR-0306 §4:8).
+- **Planning answers it** with "it cannot be done yet" (ADR-0307 §9:4). Planning's instructions add
+  that nothing the user says can let it run (`_NEEDS_YOU`, #2853).
+- **The old answer path is deleted:** parks, `resume`, goal authorizations and quotes, the deferred
+  memory questions, the recipient grant's establishing act, and the confirmation surfaces (ADR-0313,
+  ADR-0318 to ADR-0320). Where a retired clause's subject was authority, this milestone redoes it
+  (ADR-0319 §3:4, ADR-0320 §7:4).
 
-**What this design reuses:**
-- the policy, `ThresholdActionPolicy`;
-- the recorded, read-back decision (ADR-0021, ADR-0037 §2–§3);
-- the exact-call match, `PermissionDecision.authorises`;
-- what an egress question must show (ADR-0148 §8), and the binder's `rebind`;
-- the rule that an authorisation is spent by its act (ADR-0192);
-- acting's effect records and duplicate backstop (ADR-0306 §5);
-- `MemoryPolicy` with its `UserConfirmation`, which loses its producer when ADR-0078's questions
-  retire.
+**What survives with no caller, kept for this milestone (#3048):**
+- `ActionPolicy.resolve`;
+- `PermissionDecision.authorises` and `from_confirmation`;
+- `EgressBinder.rebind`;
+- `UserConfirmation`, which `MemoryPolicy` still honours and which no lane may produce until this
+  milestone decides how (ADR-0319 §6:1);
+- the recipient-grant store with its listing and revoke (ADR-0313 §5:2);
+- destination trust, whose act is live although nothing reads it.
 
-Every ruling below is the owner's, from the walk of 2026-10-12.
+Every ruling below is the owner's, from the walks of 2026-10-12 and 2026-10-15.
 
 ## 0. The frame
 
-**Think like a human assistant.** A human assistant has three sources of permission:
+**Like a human assistant.** A human assistant has three sources of permission:
 1. what the boss asked for, including a yes to something the assistant proposed;
-2. a standing mandate that grows with trust;
-3. nothing else. Other people never give permission.
+2. a standing mandate;
+3. nothing else.
 
-Every detail that matters is either **settled** by the boss (said now, "the usual", the boss's own
-past choices and preferences) or **left open** by the boss within bounds ("somewhere nice", "under
-$100"). Anything else, the assistant asks about.
+**Where the assistant differs:** wherever a human relies on an instinct the AI lacks, the AI gets a
+rule.
 
-**Where the assistant differs from a human:** where a human relies on an instinct the AI lacks, the
-AI gets a rule instead.
-- Text it reads can steer it, so outside content never grants permission, and that is a rule, not
-  judgment.
-- It can confidently invent a detail, so a detail counts as yours only where it can be traced to
-  you.
-- It cannot recognize you, so only the channel's proof of who you are counts.
-- It never promotes itself. A one-time yes never becomes a habit.
-- It works at machine speed, so one approval allows one act.
+**Permission is not care.** Authority answers *am I allowed to do this?*. Whether the assistant got it
+right is care, which is planning's judgment. Planning may always check with you before acting.
 
-Where it can do better than a human is a perfect record and predictable rules.
+**Two stages.**
+- **At the deploy,** you authorize an action that needs you by saying yes to a question that showed
+  it.
+- **Later,** a direct instruction or a standing delegation also authorizes. That stage rests on a
+  separate design (§8).
 
-**Permission is not care.** Authority answers *am I allowed to do this?*. Whether the assistant got
-it right ("fifty, right?", "Luigi's okay?") is care, and care is planning's judgment. Planning may
-always check with you before it acts, even when it is allowed to act. This is the wiki's existing
-rule that judgment can take authority away but never add it.
+## 1. Asking
 
-## 1. Staging
+1. **When a call comes back *needs you*,** planning decides whether to ask about it in its next round.
+   A call it does not ask about is dropped. **Nothing is waiting on you that you were not clearly asked
+   about, in a message you could see.**
+2. **How it reads.** Planning explains the action in its own words, told to explain the arguments that
+   matter. Code then appends **one exact line** listing every argument the call sends, except those the
+   hub fills in itself, which are also left out of the comparison in §3:
+   > I found a room at the Watchman for the 14th, $289 for one night, with free cancellation until the
+   > 12th. Want me to book it?
+   > *Exact request: book_stay · The Watchman (Springdale, UT) · 2026-11-14 · 1 night · 1 guest*
 
-| | At the cutover | After the cutover |
-| --- | --- | --- |
-| **How you authorize** | A yes to a question that showed the exact calls | Also a direct instruction, with details settled or left open by you (§9) |
-| **What is matched** | The call against the call the question showed, value for value | The call against your words, your past choices and your preferences, each value traced to you |
-| **Standing mandates** | None, beyond the search and forecast providers you configured | Given explicitly, never grown by the assistant |
+   - One generic renderer writes the line for every capability.
+   - A test checks that it includes every argument the call sends.
+   - Where a question carries several actions, each line is numbered, so "just the first" is easy to
+     read.
+3. **What is kept.** The round records the exact calls its question asks about, with their values and
+   bindings. The decision trail keeps only a parameters digest, so the round must keep the values.
+4. **What planning is told.**
+   - **How approval works here,** in its standing instructions:
+     - some actions need the user's yes;
+     - when one does, ask, and the system shows the exact details;
+     - the user's yes in reply lets that exact action run, once;
+     - the assistant never approves on the user's behalf;
+     - there is no other route: no confirmation emails, no steps "on their end".
+   - **What happened to each call,** in that call's outcome:
+     - *needs the user's yes: ask, and the details will be filled in*;
+     - *not allowed by the user's settings: do not ask, say so*;
+     - *needs the user, but this activation cannot message them: it will not run*.
 
-The cutover needs only the first column. A yes needs no translation from words to values. The
-question is rendered from the call's own values, you see them, and the yes approves exactly that
-call. The cost is that, until §9 lands, every action the policy wants confirmed asks once, even when
-you named every detail. At the cutover the only capabilities that act in the world are the simulated
-booking on the test hub and sending email, if it is carried onto the new path, so the cost is small.
+   These replace `_NEEDS_YOU` and its outcome text, which today say the opposite.
+5. **No buttons.** Questions are ordinary messages (ADR-0307 §3:6). Voice is retired until #2889.
 
-```mermaid
-flowchart LR
-    P1["Planning<br/>proposes a call"] --> Z1["Authorizing<br/>policy: confirm"]
-    Z1 -->|"needs you"| P2["Planning<br/>asks: the call rendered by code"]
-    P2 --> M["Your conversation"]
-    M -->|"you: yes"| U["Understanding<br/>which question, which parts"]
-    U --> P3["Planning<br/>'do approved action Q1.1'"]
-    P3 --> Z2["Authorizing<br/>policy fresh, then three facts"]
-    Z2 -->|"allowed"| X["Acting<br/>spends the approval"]
-```
+## 2. The answer
 
-## 2. Asking
-
-1. **When it asks.** When authorizing returns *needs you*, planning's next round asks. This replaces
-   "it cannot be done yet".
-2. **What it shows.** Code renders each action from the call's actual values, and planning writes
-   the message around that. The rendered part is what you approve.
-   - The question shows **every value the call carries**, except the values the hub fills in
-     itself. Those are also left out of the comparison in §4.
-   - For a call that leaves the hub, this includes at least what ADR-0148 §8 requires: the
-     account's identity, the destinations in both forms, and the payload.
-   - A booking shows the place, time, party size and price. A remember shows the statement.
-3. **Several at once.** One question may show several actions, numbered, so "just the first" is easy
-   to read.
-4. **What is kept.** The round records the exact calls its question asks about, bindings included,
-   beside its message. ADR-0307's round has no place for this, so this design adds one.
-5. **No buttons.** Questions are ordinary messages (ADR-0307 §3). By voice, the same text is read
-   aloud.
-
-## 3. The answer
-
-1. **An answer is an activation like any other.** There is no special answer command. Understanding
-   reads whether the input answers a question, which question, and which parts.
-2. **Who can answer.** Only input that carries your authority (ADR-0292 §5): at the cutover, a
-   message you sent through the hub chat. An email that says "yes, go ahead" approves nothing,
-   however it is read.
-3. **Which question.** Understanding is shown your unanswered questions, from this conversation and
-   from the stories it links to. The story bounds what it looks at, not a clock.
+1. **An answer is an activation like any other.** Understanding reads whether your input answers a
+   question, which one, and which parts. It records a pointer: *your input answers the question in
+   message E3, part 1*. The pointer is a reading and grants nothing by itself.
+2. **Understanding sees the question as an ordinary message.**
+   - In the place window, each item carries the label of the activation that wrote it (ADR-0303 §7:1).
+   - An older question, or one asked in another conversation, comes back through recall and the story
+     with its labels.
+   - Nothing else is shown: there is no separate list of unanswered questions.
+3. **Who can answer.** Only input that carries your authority (ADR-0292 §5): at the deploy, a message you
+   sent through the hub chat. An email or an event that says "yes" approves nothing.
+4. **Which question is understanding's judgment, inside the rules of §3.**
    - A reply to the question's message is a strong hint.
-   - When it is unclear which question a yes answers, the assistant asks "yes to which?" and never
-     guesses.
-   - Whether a question was changed, superseded, has gone stale, or was already dealt with is
-     understanding's reading of the story.
-4. **What a reply can be.**
-   - **Yes** approves every part shown. **A partial yes** approves only those parts.
-   - **No** approves nothing. A later "actually, yes" still works. Planning does not ask again about
-     something you refused in the same task; that is its own care.
-   - **A change** ("make it 8", "only up to $100") approves nothing. Planning asks again with the new
-     values.
-   - **Unclear** approves nothing, and the assistant asks again.
-   - **A yes with a condition** ("if it's still sunny Saturday") counts as a change at the cutover,
-     because there are no timers to act later and no checking of conditions yet.
-5. **A mixed message** ("yes, and also email Bob") has its yes recorded, and the rest is handled as a
+   - A bare "yes" that could fit more than one question gets "yes to which?", never a guess.
+5. **What a reply can be:**
+   - **yes** approves every part shown;
+   - a **partial yes** approves only those parts;
+   - **no** approves nothing, and a later "actually, yes" still works;
+   - a **change** ("make it 8") approves nothing, and planning asks again with the new values;
+   - an **unclear** reply approves nothing, and the assistant asks again;
+   - a **conditional yes** counts as a change, because there are no timers to act later.
+6. **A question does not expire,** and nothing opens or closes it. Whether it has been changed, has
+   gone stale or was already dealt with is understanding's reading of the story.
+7. **A mixed message** ("yes, and also email Bob") has its yes recorded, and the rest is handled as a
    normal request.
-6. **What understanding records** is a pointer: *yes to question Q, parts N*. It cannot create an
-   approval for anything you were not shown. The worst a misreading can do is approve the wrong one
-   of the questions you were actually shown, and that is why an unclear answer gets "which?".
 
-## 4. After a yes: how the call is checked and run
+## 3. After a yes: how the call is checked and run
 
-1. **Your yes's activation runs it.** Planning is shown each approved action under a label and
-   proposes "do approved action Q1.1". Code fills in the exact values and reuses the original
-   binding (ADR-0307 §5's labels). Planning cannot make a copying mistake, and the binding is not
-   worked out again.
-2. **Step 1: the policy, fresh.**
-   - A deny refuses, and nothing overrides it, not even your yes or the spend ceiling (ADR-0194).
-   - An allow runs.
-   - A confirm goes to step 2.
-3. **Step 2: three facts, checked by rule against the story's records.**
+1. **Your yes's activation runs it.** Planning is shown each approved action under a label and proposes
+   "do approved action 1". Code fills in the exact values from the record and reuses the original
+   binding. The approval is used only by that activation.
+2. **The policy, fresh.** A deny refuses, and neither your yes nor the spend ceiling (ADR-0194) is
+   overridden. An allow runs. A confirm goes on to the three facts.
+3. **Three facts, checked by rule against the records:**
 
-   | Fact | Read from | What it stops |
-   | --- | --- | --- |
-   | **Shown to you.** The question's message reached one of your conversations, as its effect record shows (ADR-0306 §5). | The message's effect record | Understanding pointing at something you never saw |
-   | **Exactly the call shown.** The same tool, every value the same apart from those the hub fills in, and the same binding. | The call against the call recorded with the question | Anything changing the call after you saw it |
-   | **Not already run.** That part of that question has not been spent. | The record of what has run | One yes running twice, including two quick yeses |
+   | Fact | Read from |
+   | --- | --- |
+   | **Shown to you:** the question's message reached one of your conversations | The message's delivery record (ADR-0306 §5) |
+   | **Exactly the call shown:** the same tool, every value except the hub's own, and the same binding | The call against the call recorded with the question |
+   | **Not already run:** that part of that question has not been used | The effect records |
 
-   Whether you meant it, whether the question still applies, and what has happened since are
-   readings, and they belong to understanding (§3). What actually ran is a fact. A model reading
-   the story could be wrong about it, or be misled: an email saying "your booking didn't go through"
-   could make it book twice. The record cannot be misled.
-4. **The outcome.**
-   - **All three hold:** the call is allowed. It is recorded as allowed by your yes to Q at its time,
-     and read back before anything runs (ADR-0037 §2–§3).
-   - **Any fact fails:** the call needs you again, and planning asks a fresh question.
-   - **A deny stays not done**, and nothing is asked.
-5. **Spending is tied to the question's part,** not to the activation or the decision. Two yeses to
-   the same part cannot both run.
-6. **A yes overrides every confirm, never a deny.** That includes the outside-content stand-in's
-   confirm, because the values were shown to you.
-7. **If the world changed** (the slot is gone, the price differs), the call runs as approved, and a
-   failure or a different charge is reported. Anything else becomes a new question. Nothing is
-   substituted.
-8. **"Why did you do that?"** is answered from the decision: your words, the question, and when.
+4. **The approval** is assembled by code from these records, in a general shape that later kinds of
+   approval extend:
 
-## 5. Memory asks
+   | Slot | At the deploy |
+   | --- | --- |
+   | **Who** | you, through the hub chat |
+   | **How** | a yes to a question |
+   | **Covers** | exactly the calls shown |
+   | **Given** | in your yes message |
+   | **Ends** | when used |
 
-1. **A remember that `MemoryPolicy` asks about needs you.** Planning asks with the exact statement:
-   "Should I remember: 'Your dentist is Dr. Lee on 5th St'?"
-2. **Your yes writes exactly that statement as something you stated,** citing the question and your
-   yes. This is the owner's 2026-09-01 rule: you assent to text you were shown, never to an
-   interpretation. The yes also becomes `UserConfirmation`'s producer again.
-3. **Other answers.** No means it is not remembered. A change brings a new question with the
-   corrected statement. If you never answer, the question stays answerable.
-   - That unanswered question *is* the hold the learning design wanted: nothing is written before
-     your yes, and nothing is lost while you have not answered.
-   - This resolves the three-way difference between the learning pass, ADR-0306 §4:3 and the built
-     code.
-4. **A conflict found only at write time**
-   ([#2845](https://github.com/leonapivato/ai-assistant/issues/2845)) becomes *needs you*, not
-   *not done*. The question shows both statements: "Remember 'Your dentist is Dr. Li', replacing
-   'Dr. Lee'?" A yes writes the new statement and retires the old one.
-5. **What is asked about** stays the built `MemoryPolicy` until learning revisits it. Learning
-   decides what to ask; authority decides how. Every remember after the activation has read outside
-   content asks, because the built policy says so.
+   It is recorded in the decision ("allowed by your yes at 2:15 to the question in that message,
+   part 1"), and read back before anything runs (ADR-0037 §2–§3).
+5. **Spending is keyed by the question's part.** Acting marks the part used in the same plan-store step
+   that claims the call, so two yeses to one part cannot both run.
+6. **A repeat is caught.** A proposed call identical to one still waiting on you gets "already asked,
+   waiting on you", not a second question.
+7. **A yes overrides every confirm,** the outside-content stand-in's included, because the values were
+   shown. **It never overrides a deny.**
+8. **If the world changed** (the slot is gone, the price differs), the call runs as approved, and a
+   failure or a different charge is reported. Nothing is substituted.
+9. **Every failure ends in another question.** Each piece of the approval has a writer, and if any
+   piece is missing the check fails toward asking again, never toward running something you did not
+   approve:
+   - the recorded calls: code, when the round is saved;
+   - delivery: code, when the message is sent;
+   - the spend: code, in the claim, which no call can skip;
+   - the pointer: understanding.
 
-## 6. Retrying after an unknown outcome
+   A misread pointer can only land on another question you were shown.
 
-A retry is an action like any other
-([#2839](https://github.com/leonapivato/ai-assistant/issues/2839)). A deliberate repeat that
-matches an effect whose outcome is unknown, or not yet written, needs you instead of being refused.
-A yes to an ordinary question showing the call lets it run. Saying "this might book twice" is
-planning's care, not an authority rule. Nothing is ever retried without your yes.
+## 4. Memory asks
 
-## 7. What retires and what stays
+1. **A remember that `MemoryPolicy` asks about needs you.** Planning asks with the exact statement.
+2. **Your yes saves it as confirmed by you, and its source is kept on the record.** This is
+   `UserConfirmation`'s producer, the one ADR-0319 §6:1 leaves to this milestone. It is your assent to
+   text you were shown, not a model's paraphrase claiming your standing (ADR-0098 §4). How much weight a
+   confirmed memory carries is the learning milestone's call.
+3. **Other answers.**
+   - **No:** it is not saved.
+   - **A change:** a new question with the corrected statement.
+   - **No answer:** the question stays answerable.
+4. **A conflict found only at write time** (#2845) becomes *needs you*, not *not done*. The question
+   shows both statements ("replacing …"), and a yes writes the new one and retires the old.
+5. **What is asked about** stays the built `MemoryPolicy` until learning revisits it.
+   - **Interim:** while the outside-content mark spreads (#2856), nearly every remember after a web
+     search asks. Your yes saves it.
+   - The fix belongs to the separate design (§8).
 
-- **Whose input counts:** only input the channel establishes as yours, sent as an instruction
-  (ADR-0292 §5). At the cutover that is the hub chat.
-  - An author who is only claimed never authorizes, nor does a voice that is not established
-    ([#2819](https://github.com/leonapivato/ai-assistant/issues/2819),
-    [#2582](https://github.com/leonapivato/ai-assistant/issues/2582)).
-  - The decision records the channel that established you
-    ([#113](https://github.com/leonapivato/ai-assistant/issues/113)).
-- **Standing grants:** none at the cutover beyond the configured search and forecast providers
-  (ADR-0247, ADR-0260).
-  - **Recipient grants retire** (ADR-0193, ADR-0235). After the cutover nothing creates one, and none
-    can cover a phases call, because every phases binding is model-covered.
-  - **Destination trust retires** (ADR-0238, ADR-0242). Its only reader is the old search
-    composer, and ADR-0309 §5 does not list it.
-- **Seeing what is waiting on you:** your unanswered questions, seen where they were asked.
-  "What are you waiting on me for?" works because planning is given them too. No new screen; the
-  retired commands and panels stay retired.
-- **Tasks started by a timer or an event** cannot write a message yet (ADR-0307 §3), so a call that
-  needs you there does not run, and stays in the episode. This lasts until planning can write to a
-  place other than the input's, which is planned. The same question path then applies.
+## 5. Retrying after an unknown outcome
 
-## 8. Changes to ratified decisions
+A retry is an action like any other (#2839). A deliberate repeat that matches an effect whose outcome
+is unknown, or not yet written, needs you instead of being refused. A yes to an ordinary question
+showing the call lets it run. Mentioning the risk of a double is planning's care. Nothing is retried
+without your yes.
+
+## 6. What retires and what stays
+
+- **Recipient grants retire fully:** the store, the listing and revoke commands, and the policy's
+  recipient-grant route. ADR-0313 and ADR-0319 said this milestone "redoes the act". Instead the act is
+  **replaced by scoped delegations** (§8). The deploy starts from a fresh data directory, so nothing is
+  lost.
+- **Destination trust retires fully:** the act, its commands and routes, the store and the code.
+  - Its only reader, the old search composer, is gone.
+  - Which destination may be told what comes back with the separate design (§8).
+  - Web search is unaffected: the configured provider has its own setting (ADR-0247), which stays.
+- **Whose input counts:** only input the channel establishes as yours, sent as an instruction. At the
+  deploy, that means the hub chat.
+- **Activations started by a timer or an event** cannot write a message (ADR-0307 §3). A call that
+  needs you there does not run, and the text stays in the episode. This lasts until planning can write
+  to a place other than the input's, when the same question path applies.
+- **No new screen.** What is waiting on you is the questions in your conversations.
+  `assistant decisions`'s "asked (a question put to you)" becomes true (#3056).
+- **The deploy configures email sending,** so email is the live hub's first action in the world. Booking
+  stays the simulator, on the test hub.
+
+## 7. Acceptance before the deploy
+
+*T* is the test hub; *L* is the live hub after the deploy.
+
+1. **A booking (T).** It is asked, showing planning's explanation and the exact line. A yes runs it
+   once, and a second yes does not run it again. Proposing it again while it waits gets "already
+   asked".
+2. **The other answers (T).**
+   - "No" runs nothing, and a later "actually yes" works.
+   - A change brings a new question.
+   - An unclear reply runs nothing and asks again.
+3. **Only you approve (T).** An email or event saying "yes" approves nothing.
+4. **A yes from elsewhere (T).**
+   - A yes in another conversation, or days later, works through recall and the story.
+   - A bare "yes" with nothing to connect it to gets "yes to what?".
+5. **Memory (T).** After a web search, "remember …" asks, and a yes saves it as confirmed by you, with
+   its source kept.
+6. **A retry (T)** after an unknown outcome runs only on a yes.
+7. **A deny (T)** is never asked about, and planning says plainly that it is not allowed.
+8. **#2862 (T).** The original scenario and variants, run 10 to 20 times each. No invented approval
+   steps, and the booking runs once after the yes. These runs decide whether the held layer (§9) is
+   needed.
+9. **Email (L).** "Email Sam that I'm running late" shows the full text in the exact line, and a yes
+   sends it once.
+10. **The exact line (test suite)** includes every argument the call sends, for every capability.
+11. **The retired commands are gone:** recipient grants and destination trust.
+
+## 8. What a later design supplies, and the interim
+
+The outside-content and provenance design is a separate walk
+([#2856](https://github.com/leonapivato/ai-assistant/issues/2856) and its handoff). Its direction, not
+ruled here:
+- track **who contributed** to each value and fact, rather than marking whole activations;
+- **compartments**: narrow model calls whose inputs code controls, so their outputs' sources are known;
+- a **clean writer** for outgoing text;
+- **scoped delegations**, with an instruction as a temporary one;
+- outside content decides only within what you handed over, and only from the party you handed it to;
+- **credibility** is for belief only, never authority.
+
+This proposal relies on that design as follows:
+
+| The deploy would want | Supplied later by | Interim at the deploy |
+| --- | --- | --- |
+| Saving what you say without asking, after a web search | Per-fact provenance (the quote check, then extraction) | `MemoryPolicy` asks, and your yes saves it |
+| A confirmed memory keeping its source precisely | Source labels per fact | The outside-content mark plus the `UserConfirmation` record |
+| Standing permission ("my brother may add family events") | Scoped delegations | None: every action in the world asks |
+| Outgoing text that outside content cannot shape | The clean writer | Every send shows its full text and asks |
+| One web search not marking every later activation | Retiring the activation-level mark | The mark stays, failing in the safe direction |
+| A direct instruction approving without a question | The instruction path, built on the above | Every action the policy confirms asks once |
+
+Nothing in the deploy slice reads the activation-level mark. The approval's general shape (§3:4) is
+what later kinds of approval extend.
+
+## 9. Held
+
+**Code-written sentences for the cases with no route:** "your settings don't allow this", and "this
+needs you, but I can't ask from here". They are held until the repeated runs (§7:8) show planning's own
+wording is not enough.
+
+## 10. Changes to ratified decisions
 
 | Decision | Change |
 | --- | --- |
-| ADR-0306 §4 | *Needs you* gets an answer. A yes to a question showing the call overrides any confirm, the stand-in's included, never a deny. "Nothing resumes it" stands: the answer is a new activation. |
-| ADR-0306 §4:3 | Memory that `MemoryPolicy` asks about is written on your yes, as something you stated. |
-| ADR-0306 §5 | A deliberate repeat that matches an unknown or unwritten effect needs you, instead of never passing. "An unknown outcome is never retried" applies to retrying on the assistant's own initiative. |
-| ADR-0307 §2 | The round records the exact calls its question asks about. |
-| ADR-0307 §5, §6 | Approved actions are shown to planning under labels. Planning is given your unanswered questions. |
-| ADR-0307 §9 | A call that needs you is asked about, not answered "cannot be done yet". Planning's instruction gains the care line. |
-| ADR-0276 | Understanding records the answer pointer. The record still grants nothing by itself. Authorizing reads the pointer only as a pointer and checks it by rule. |
-| ADR-0192 | An approval from a yes is spent per question part. |
-| ADR-0148 §8 | The CONFIRM's park is replaced by the question. A yes is an ordinary message, not an interface answer. What is shown stays, and is extended to every value the call carries. |
-| ADR-0193, ADR-0235, ADR-0238, ADR-0242 | Retire at the cutover. |
-| ADR-0309 §5 | Adds destination trust to what retires, and turns the recipient grant's rework into retirement. |
-
-## 9. After the cutover: the instruction path
-
-This is direction, recorded so that the cutover build does not close it off. It is not proposed for
-the cutover.
-
-- **A direct instruction approves the action it names.** Every detail that matters is settled by
-  you or left open by you within bounds. Anything else is shown to you first. Capabilities declare
-  which of their arguments matter: what, where, to whom, how much, when.
-- **A detail is yours when it traces back to you:** your words now, a choice you made before (an
-  earlier instruction or yes), or something about you that comes from you. A detail is never yours
-  when it traces to outside content or to the assistant's guess. Understanding records each
-  detail's source, and authorizing checks the source by rule.
-- **Exact values.** A concrete value counts as yours only when that exact value traces to you. A new
-  value, such as a restaurant found in a search, is shown to you once. After that it is your past
-  choice, and "the usual" works. Resolving names without asking (contacts, judging which "Luigi's"
-  you meant) waits until this friction shows.
-- **Per-value tracing then replaces the coarse stand-in.** Outside content cannot choose who, what
-  or where, because every value that matters must trace to you. The sticky marks
-  ([#2798](https://github.com/leonapivato/ai-assistant/issues/2798)) and
-  [#2846](https://github.com/leonapivato/ai-assistant/issues/2846) are settled there.
-- **Mandates** are given by you explicitly, may let outside content choose the recipient where the
-  mandate says so, and are never grown by the assistant.
-- **Conditions** are checked when the action runs, by rule for values or by a cited model judgment
-  that authorizing confirms. They arrive with timers.
-- **Approvals used later** ("book it Friday") are found through the story. They last until spent,
-  withdrawn or narrowed, never widened, and at least until a time they name.
+| ADR-0306 §4:8 | *Needs you* gets an answer: a yes to a question that showed the call. "Nothing resumes it" stands, because the answer is a new activation. |
+| ADR-0306 §4:3 | Memory that `MemoryPolicy` asks about is written on your yes, as confirmed by you, with its source kept. |
+| ADR-0306 §5:11, §5:13 | A deliberate repeat matching an unknown or unwritten effect needs you, instead of never passing. "Never retried" applies to the assistant's own initiative. |
+| ADR-0307 §2, ADR-0315 §3:1 | The round's record also keeps the exact calls its question asks about. |
+| ADR-0307 §3:6 | Stands: an answer names no question. Understanding infers which question it answers, and records that as its pointer. |
+| ADR-0307 §9:4 | A call that needs you is asked about, not answered "cannot be done yet". Planning is told how approval works, and each call's outcome says which case applies. |
+| ADR-0276 | Understanding's record gains the answer pointer. The record still grants nothing by itself. |
+| ADR-0192 | An approval from a yes is spent per question part, marked in the claim. |
+| ADR-0148 §8 (§8:4 already superseded by ADR-0319) | What a question shows is re-enacted: planning's explanation plus the exact line of every argument. |
+| ADR-0154 §4:1 (Condition 12, per ADR-0320 §8) | The decision names the approval, and the effect record carries the claim and the outcome. Together they keep the attempt identifier and the explicit outcome. |
+| ADR-0313 §5:2, and the ADR-0193 and ADR-0235 rows of ADR-0313 §8 and ADR-0319 §8 | Recipient grants retire. The establishing act is replaced by scoped delegations, not redone. |
+| ADR-0238, ADR-0242 | Destination trust retires. |
+| ADR-0319 §6:1 | The memory yes is `UserConfirmation`'s producer. |
 
 ## Options considered
 
-- **Reading money back when you have stated it.** Rejected: money should not be an exception.
-- **A stakes dial,** where high-stakes actions are always read back. Rejected: it mixes permission
-  with care. Double-checking is planning's judgment.
-- **Only a yes ever approves.** Kept for the cutover, but not as the destination.
-- **A model judging whether "Sam" matches a number.** Rejected: it is not a rule, and it is how a
-  "Sam's new number" email would get through.
-- **The controller running approved actions directly, skipping planning.** Rejected: it would be a
-  second path, and planning is still needed for a mixed message and for the report.
-- **One unanswered question per conversation,** where a new question closes the old one. Rejected:
-  it silently drops questions you had not got to.
-- **Questions that open and close, with a one-day expiry.** Rejected: "answered" is covered by
-  spending, and "replaced" and "stale" are readings of the story, not rules.
-- **A special question for retrying after an unknown outcome.** Rejected: a retry is an ordinary
-  action.
-- **Keeping approvals beyond the answering activation at the cutover.** Not needed. Spending
-  per part and the story carry the facts that matter, and approvals used later arrive with timers.
+- **Code renders the whole question.** Rejected for the deploy: planning explains better. The exact
+  line keeps the guarantee that what you see is what runs.
+- **The model writes the question with no exact line.** Rejected: a mistake or a steered description
+  would get your yes for something other than what runs.
+- **Showing every value in custom displays, with tiers.** Rejected as over-built for now.
+- **Code guaranteeing that every needs-you call is asked about.** Rejected: the QA failures came from
+  an instruction saying no route existed. Asking is planning's call, and an unasked call is dropped.
+- **A list of unanswered questions shown to understanding and planning.** Rejected: the window, recall
+  and the story already show them, and messages link to their activations.
+- **Questions that open and close, or expire after a day.** Rejected: spending covers reuse, and
+  staleness is a reading of the story.
+- **A stored approvals table at the deploy.** Not needed: an approval is used only by its yes's
+  activation. Stored approvals come with delegations.
+- **Reading money back, or a stakes dial.** Rejected: money is not an exception, and double-checking is
+  care, not permission.
+- **A model judging whether "Sam" matches an address.** Rejected for authority: it is not a rule.
+- **Recipient grants redone now.** Rejected: delegations replace them.
 
 ## What it leaves open
 
-- **A price that comes back as a result** is not checked against what was shown. At the cutover only
-  the simulated booking charges, so reporting it afterwards is enough. A real paid capability will
-  need the shown price to bind the call, as a maximum argument or a fresh quote checked before
-  acting, which is ADR-0267's shape.
-- **The recheck after the lock** belongs to the concurrency milestone
-  ([#2586](https://github.com/leonapivato/ai-assistant/issues/2586)).
-- **Unattended limits** ([#2583](https://github.com/leonapivato/ai-assistant/issues/2583)) and
-  volume caps arrive with timers.
-- **Other channels and voice identity**
-  ([#2819](https://github.com/leonapivato/ai-assistant/issues/2819)).
-- **Coverage for arguments mapped from labels**
-  ([#2847](https://github.com/leonapivato/ai-assistant/issues/2847)), beyond reusing an approved
-  call's binding.
-- **The numbers** ([#2589](https://github.com/leonapivato/ai-assistant/issues/2589)). The yes path
-  as proposed needs none.
+- **The outside-content and provenance design** (§8), with #2856, #2798, #2846, #2847 and #2590.
+- **A price that comes back as a result** is not checked against what was shown. At the deploy only the
+  simulated booking charges, so reporting it afterwards is enough. A real paid capability needs the
+  shown price to bind the call: a maximum argument, or a fresh quote checked before acting (the shape
+  ADR-0267 used).
+- **The recheck after the lock** belongs to the concurrency milestone (#2586).
+- **Unattended limits** (#2583) and volume caps arrive with timers.
+- **Other channels and voice identity** (#2819, #2582, #113).
+- **The numbers** (#2589) for the phases. The yes path itself needs none.
+- **Crash recovery of a claimed call** (#2584).
 
 ## Delivery, roughly
 
-One ADR converts this proposal. The lanes after it are a sketch for the dispatcher:
-1. **The types:**
-   - the round's asked-about calls;
+One ADR converts this proposal. Its number is the next free one, 0321 or higher, taken after a scan at
+conversion. The lanes after it are a sketch:
+
+1. **Types:**
+   - the round's asked calls;
    - understanding's answer pointer;
+   - the approval's general shape;
    - the label kind for approved actions;
+   - the part key on the effect record;
    - a `PROTOCOL_VERSION` bump.
 2. **Authorizing:**
    - the three facts;
-   - spending per part;
-   - reusing the binding;
+   - assembling and recording the approval;
+   - the repeat check;
    - the backstop change.
-3. **Planning:**
-   - asking in place of "cannot be done yet";
-   - being given unanswered questions and approved actions;
-   - the care line.
-4. **Understanding:** reading answers.
-5. **Memory:**
-   - the yes writing what you stated;
-   - #2845.
-
-The retirements in §7 ride the cutover's deletion lanes.
+3. **Acting:** spending per part, in the claim.
+4. **Planning:**
+   - asking;
+   - the exact line;
+   - how approval works;
+   - the per-call outcome notes;
+   - approved actions by label.
+5. **Understanding:** reading answers into the pointer.
+6. **Memory:** the yes as `UserConfirmation`'s producer, and #2845.
+7. **The retirements:** recipient grants, and destination trust.
+8. **The acceptance runs** (§7).
