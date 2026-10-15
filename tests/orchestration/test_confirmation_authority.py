@@ -1,15 +1,18 @@
 """ADR-0078 §3's third composition-root obligation, held structurally.
 
-*The answer path is the only producer of a* ``UserConfirmation``, *and it produces
-one only from a deferral it has claimed.*
+*The yes path is the only producer of a* ``UserConfirmation`` (ADR-0321 §5:2, as
+ADR-0321 §10 amends ADR-0319 §6:2's second limb).
 
-**The answer path retired with ``orchestration/questions.py`` (ADR-0309 §5)**, so
-the true state now is that no production module constructs a ``UserConfirmation``
-at all — while ``memory/policy.py`` still honours one as the user's own authority
-(ADR-0078 §5). The guard therefore pins **none**, not "at most one": a single new
-producer, claimed or not, is a new holder of that authority. **Any new producer is
-an authority change**: it belongs to the owner's authority work, and it has to
-change this test deliberately rather than pass it on its first appearance.
+**The answer path retired with ``orchestration/questions.py`` (ADR-0309 §5)**, and
+for a while no production module constructed a ``UserConfirmation`` at all, while
+``memory/policy.py`` still honoured one as the user's own authority (ADR-0078 §5).
+The authority milestone gave it one producer: code in ``orchestration/remembering.py``
+builds it from the approval a yes to a remember's question made and the asked call
+that question showed, so it retires only the assertions the user was shown. The
+guard pins **exactly that one**, not "at least one" and not "at most one": a second
+producer, or the one moved elsewhere, is a new holder of that authority. **Any
+change of producer is an authority change**, and it has to change this test
+deliberately rather than pass it on its first appearance.
 
 ADR-0078 §10 item 3 is why the check is structural: "Nothing in the writer's six
 checks looks for a claim, so a helper that assembled a confirmation from a pending
@@ -97,20 +100,27 @@ def _production_constructions() -> list[_Construction]:
     return found
 
 
-def test_no_production_module_constructs_a_user_confirmation() -> None:
+#: The one production producer (ADR-0321 §5:2): the remember runner's confirmation,
+#: built from a yes's approval and the asked call its question showed.
+_THE_YES_PATH: Final = _Construction(module="orchestration/remembering.py", function="_confirmed")
+
+
+def test_the_yes_path_is_the_only_production_producer_of_a_user_confirmation() -> None:
     """A producer is a holder of the one authority that has never been delegable.
 
-    ``memory/policy.py`` still honours a ``UserConfirmation`` as the user's own act,
-    so whoever may construct one may retire a user's assertion. ADR-0078 §3 made
-    that one claimed producer; that producer retired (ADR-0309 §5), and a new one
-    is the owner's authority work, made by changing this assertion on purpose.
+    ``memory/policy.py`` honours a ``UserConfirmation`` as the user's own act, so
+    whoever may construct one may retire a user's assertion. ADR-0078 §3 made one
+    claimed producer, which retired (ADR-0309 §5); ADR-0321 §5:2 made the yes path
+    the one producer now, built from a yes to a question that showed the statement.
+    Any other is an authority change, made by changing this assertion on purpose.
     """
     found = _production_constructions()
 
-    assert found == [], (
+    assert found == [_THE_YES_PATH], (
         f"{[(one.module, one.function) for one in found]} constructs a {_AUTHORITY}. "
-        f"No production producer stands since the answer path retired (ADR-0309 §5); "
-        f"a new one is an authority change and has to change this test deliberately."
+        f"The yes path ({_THE_YES_PATH.module}'s {_THE_YES_PATH.function}) is its only "
+        f"production producer (ADR-0321 §5:2); another is an authority change and has "
+        f"to change this test deliberately."
     )
 
 

@@ -31,6 +31,21 @@ was given to another activation is not done either, before anything is claimed: 
 yes's activation alone uses its approval (§4:1). A deliberate repeat under an approval
 is claimed with both marks, which is how the store admits §6:2's retry.
 
+**A call that comes back needing you** (ADR-0321 §5:5, #2845). A runner on the
+own-records seam may answer :class:`~ai_assistant.orchestration.remembering.NeedsYou`:
+nothing was written, and what the call would write needs the user's yes first, as a
+remember's does where the memory writer's own policy asks at write time. Acting
+finishes its record not done, with a code-owned reason, and reports it as
+``needs_you``, carrying the assertions its question will show it replacing
+(:attr:`ActedCall.replaces`).
+
+**A call that runs under a yes reaches its runner with the asked call** (ADR-0321
+§4:2, §5:2). Where the call was rebuilt from a question's asked call
+(:attr:`AuthorizedCall.asked`) and the own-records seam takes one
+(:class:`ApprovedOwnRecordsCalls`), the runner is handed it beside the call, so a
+remember bounds what the yes retires by what the question showed. A seam that takes
+none runs the call as any other.
+
 **Two routes to run** (§3:3, §5:7). A call whose effect is the assistant's own records
 runs directly against the store it reaches, through :class:`OwnRecordsCalls`, and is
 awaited to its end: no deadline and no cancellation cuts it short. Every other call goes
@@ -79,7 +94,7 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 from uuid import uuid4
 
 import structlog
@@ -95,9 +110,11 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
+    AskedCall,
     CapabilityEffect,
     CapabilityResult,
     EgressBinding,
+    SemanticMemory,
     ToolCall,
     ToolFailure,
     ToolFailureKind,
@@ -107,6 +124,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.activation_cleanup import drain_registered
 from ai_assistant.orchestration.held_results import HeldResult
+from ai_assistant.orchestration.remembering import NeedsYou
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -124,6 +142,7 @@ __all__ = [
     "ActedOutcome",
     "ActedRound",
     "ActingStage",
+    "ApprovedOwnRecordsCalls",
     "AuthorizedCall",
     "AuthorizedRound",
     "HeldByIds",
@@ -149,6 +168,8 @@ class ActedOutcome(StrEnum):
     DONE = "done"
     NOT_DONE = "not_done"
     UNKNOWN = "unknown"
+    NEEDS_YOU = "needs_you"
+    """Nothing ran or was written, and the call needs the user's yes (ADR-0321 §5:5)."""
 
 
 class ResultRoute(StrEnum):
@@ -176,6 +197,7 @@ _ANOTHER_ACTIVATIONS: Final = (
     "not run: the yes that approved this call was given to another activation"
 )
 _REFUSED: Final = "refused before the call was made"
+_NEEDS_YOU: Final = "needs you: nothing was written, and this needs your yes first"
 
 
 def gets_effect_record(tool: ToolDefinition) -> bool:
@@ -260,9 +282,10 @@ class NamedResult:
     result_id: str
 
 
-#: What a runner on the own-records seam answers: the store's answer as a result, or,
-#: for a read routed record by record or a follow-up, what acting holds or offers again.
-type OwnRecordsAnswer = ToolResult | HeldByIds | NamedResult
+#: What a runner on the own-records seam answers: the store's answer as a result; for a
+#: read routed record by record or a follow-up, what acting holds or offers again; or,
+#: where nothing was written because it needs the user's yes first, :class:`NeedsYou`.
+type OwnRecordsAnswer = ToolResult | HeldByIds | NamedResult | NeedsYou
 
 
 class OwnRecordsCalls(Protocol):
@@ -329,6 +352,48 @@ class OwnRecordsByCapability:
             )
         return await runner.run(call)
 
+    async def run_approved(self, call: ToolCall, asked: AskedCall) -> OwnRecordsAnswer:
+        """Run a call under a yes through its runner, with the asked call where it takes one.
+
+        A runner that takes no asked call runs ``call`` as any other.
+
+        Args:
+            call: The authorized call, rebuilt from ``asked``.
+            asked: The asked call the yes approved.
+
+        Returns:
+            The runner's answer, or ``failed`` where no runner is held for the
+            call's capability.
+        """
+        runner: object = self._runners.get(str(call.request.tool.capability))
+        if isinstance(runner, ApprovedOwnRecordsCalls):
+            return await runner.run_approved(call, asked)
+        return await self.run(call)
+
+
+@runtime_checkable
+class ApprovedOwnRecordsCalls(Protocol):
+    """An own-records runner that takes the asked call a yes approved (ADR-0321 §5:2).
+
+    Orchestration-local, beside :class:`OwnRecordsCalls`. A call that runs under a yes
+    was rebuilt from the question's asked call (§4:2), and a runner whose write the
+    question bounds, as a remember's retirements are bounded by the assertions its
+    question showed (§5:5), reads that asked call here. Acting hands it only the asked
+    call :attr:`AuthorizedCall.asked` names.
+    """
+
+    async def run_approved(self, call: ToolCall, asked: AskedCall) -> OwnRecordsAnswer:
+        """Run ``call``, approved by a yes to ``asked``, and say what the store answered.
+
+        Args:
+            call: The authorized call, its decision naming the approval.
+            asked: The asked call the yes approved, which ``call`` was rebuilt from.
+
+        Returns:
+            What :meth:`OwnRecordsCalls.run` answers.
+        """
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class AuthorizedCall:
@@ -342,15 +407,22 @@ class AuthorizedCall:
             one: where its capability's calls get one, and wherever the decision names
             an approval (ADR-0321 §4:10).
         deliberate_repeat: Whether planning marked the call a deliberate repeat.
+        asked: The asked call an approved call was rebuilt from (ADR-0321 §4:2), as
+            the round that asked recorded it; ``None`` for a call that does not run
+            under a yes. A remember reads from it the assertions its question showed
+            replaced (§5:2, §5:5).
 
     Raises:
         ValueError: If the decision's ``effect`` is set on a call that gets no record
-            or missing on one that does, or a call to a capability safe to repeat is
-            marked a deliberate repeat, which §2:9 offers only where it is not.
+            or missing on one that does; a call to a capability safe to repeat is
+            marked a deliberate repeat, which §2:9 offers only where it is not; or an
+            asked call rides on a call whose decision names no approved part, or
+            another part than the asked call's.
     """
 
     call: ToolCall
     deliberate_repeat: bool = False
+    asked: AskedCall | None = None
 
     def __post_init__(self) -> None:
         """Check the call against its declaration and its approval."""
@@ -366,6 +438,14 @@ class AuthorizedCall:
         if self.deliberate_repeat and tool.safe_to_repeat:
             msg = "only a call to a capability not safe to repeat is a deliberate repeat"
             raise ValueError(msg)
+        if self.asked is not None:
+            part = decision.approved_part
+            if part is None or part.part != self.asked.part:
+                msg = (
+                    "an asked call rides only on the call its yes approved: the decision's "
+                    "approved part is the asked call's (ADR-0321 §4:2, §4:9)"
+                )
+                raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,8 +488,9 @@ class ActedCall:
 
     Attributes:
         call: The call.
-        outcome: Done, not done or unknown.
-        reason: Why it was not done, in code-owned words; ``None`` otherwise.
+        outcome: Done, not done, unknown, or needs you.
+        reason: Why it was not done, or why it needs you, in code-owned words; ``None``
+            otherwise.
         output: What a done call returned for planning: its whole result, where it goes
             to planning whole, or what goes to planning of a read of the assistant's own
             records routed record by record (:class:`HeldByIds`); ``None`` otherwise.
@@ -421,6 +502,12 @@ class ActedCall:
             names, or, for a follow-up, the id of the result it named; ``None`` where
             there is none.
         effect_id: The effect record the call was claimed under, where it was.
+        replaces: For a call that needs you, the assertions its question shows it
+            replacing, as stored (ADR-0321 §5:5); empty otherwise.
+
+    Raises:
+        ValueError: If ``replaces`` names an assertion on a call that does not need
+            you.
     """
 
     call: AuthorizedCall
@@ -430,6 +517,13 @@ class ActedCall:
     route: ResultRoute | None = None
     result_id: str | None = None
     effect_id: str | None = None
+    replaces: tuple[SemanticMemory, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Only a call that needs you shows what it replaces (ADR-0321 §5:5)."""
+        if self.replaces and self.outcome is not ActedOutcome.NEEDS_YOU:
+            msg = "only a call that needs you carries the assertions it would replace"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -604,8 +698,16 @@ class ActingStage:
     async def _on_own_records(
         self, one: AuthorizedCall, effect_id: str | None, round_id: str, held: HeldResults
     ) -> ActedCall:
-        """Run a call against the assistant's own records, then finish its record."""
-        answer = await self._own_records.run(one.call)
+        """Run a call against the assistant's own records, then finish its record.
+
+        A call rebuilt from an asked call reaches a seam that takes one with it.
+        """
+        if one.asked is not None and isinstance(self._own_records, ApprovedOwnRecordsCalls):
+            answer = await self._own_records.run_approved(one.call, one.asked)
+        else:
+            answer = await self._own_records.run(one.call)
+        if isinstance(answer, NeedsYou):
+            return await self._needs_you(one, answer, effect_id)
         if isinstance(answer, NamedResult):
             return await self._followed_up(one, answer, effect_id, round_id, held)
         if isinstance(answer, HeldByIds):
@@ -661,6 +763,30 @@ class ActingStage:
             route=route,
             result_id=result_id,
             effect_id=effect_id,
+        )
+
+    async def _needs_you(
+        self, one: AuthorizedCall, answer: NeedsYou, effect_id: str | None
+    ) -> ActedCall:
+        """A call that wrote nothing because it needs the user's yes (ADR-0321 §5:5).
+
+        Its record is finished not done, since nothing happened, and the call is
+        reported as needing you, with the assertions its question will show replaced.
+        """
+        replaces = tuple(
+            SemanticMemory.model_validate(record.model_dump()) for record in answer.replaces
+        )
+        _log.info("acting_call_needs_you", stage="acting", reason="needs_you")
+        if effect_id is not None:
+            await self._plans.finish_activation_effect(
+                effect_id, ToolOutcome.FAILED, reason=_NEEDS_YOU
+            )
+        return ActedCall(
+            one,
+            ActedOutcome.NEEDS_YOU,
+            reason=_NEEDS_YOU,
+            effect_id=effect_id,
+            replaces=replaces,
         )
 
     async def _followed_up(
@@ -796,7 +922,8 @@ def _snapshot(one: AuthorizedCall) -> AuthorizedCall:
     """
     try:
         call = ToolCall.model_validate(one.call.model_dump())
-        return AuthorizedCall(call, deliberate_repeat=bool(one.deliberate_repeat))
+        asked = None if one.asked is None else AskedCall.model_validate(one.asked.model_dump())
+        return AuthorizedCall(call, deliberate_repeat=bool(one.deliberate_repeat), asked=asked)
     except (ValidationError, ValueError) as exc:
         msg = "the call did not survive revalidation, so it is not the call that was authorised"
         raise ToolBindingError(msg) from exc
