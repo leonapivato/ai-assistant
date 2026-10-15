@@ -21,6 +21,14 @@ authorized; for every other claim, ``None``. A stopped activation's claim raises
 ``ClaimStopped`` and the call is not done; an ``already_done`` answer refuses it the
 same way, and nothing runs.
 
+**A call that runs under an approval spends it** (ADR-0321 §4:9, §4:10). Acting knows
+one by its decision's ``approval``. It gets an effect record whatever its capability,
+and the record carries the decision's ``approved_part``, the asking round's id and the
+part number, so the claim spends the part in the same indivisible step. A part some
+record already carries comes back ``already_used``, and the call is not done, with the
+reason, and never run: two yeses to one part cannot both run. A deliberate repeat under
+an approval is claimed with both marks, which is how the store admits §6:2's retry.
+
 **Two routes to run** (§3:3, §5:7). A call whose effect is the assistant's own records
 runs directly against the store it reaches, through :class:`OwnRecordsCalls`, and is
 awaited to its end: no deadline and no cancellation cuts it short. Every other call goes
@@ -161,6 +169,7 @@ _OUTCOMES: Final = {
 _STOPPED: Final = "the activation was stopped before this call was claimed"
 _NOTHING_HELD: Final = "nothing is held under the result it names in this activation"
 _ALREADY_DONE: Final = "already done: an equal call was made in this matter"
+_ALREADY_USED: Final = "already used: the yes that approved this call has let it run once"
 _REFUSED: Final = "refused before the call was made"
 
 
@@ -168,7 +177,9 @@ def gets_effect_record(tool: ToolDefinition) -> bool:
     """Whether a call under ``tool`` gets an effect record (ADR-0306 §5:3).
 
     A call in the world, and a call to a capability that is not safe to repeat. A
-    message gets one too, but is not a tool call.
+    message gets one too, but is not a tool call. A call that runs under an approval
+    gets one whatever its capability (ADR-0321 §4:10), which :class:`AuthorizedCall`
+    reads off its decision.
 
     Args:
         tool: The declaration the call was ruled on.
@@ -323,7 +334,8 @@ class AuthorizedCall:
             argument and the *deliberate repeat* mark removed (§2:10), and the
             ``ALLOW`` decision that authorises it. The decision's ``effect`` names the
             record the call is claimed under, and is set exactly where the call gets
-            one.
+            one: where its capability's calls get one, and wherever the decision names
+            an approval (ADR-0321 §4:10).
         deliberate_repeat: Whether planning marked the call a deliberate repeat.
 
     Raises:
@@ -336,12 +348,14 @@ class AuthorizedCall:
     deliberate_repeat: bool = False
 
     def __post_init__(self) -> None:
-        """Check the call against its declaration."""
+        """Check the call against its declaration and its approval."""
         tool = self.call.request.tool
-        if gets_effect_record(tool) != (self.call.decision.effect is not None):
+        decision = self.call.decision
+        gets_one = gets_effect_record(tool) or decision.approval is not None
+        if gets_one != (decision.effect is not None):
             msg = (
                 "a call's decision names an effect record exactly where the call gets "
-                "one (ADR-0306 §5:3, §5:8)"
+                "one (ADR-0306 §5:3, §5:8, ADR-0321 §4:10)"
             )
             raise ValueError(msg)
         if self.deliberate_repeat and tool.safe_to_repeat:
@@ -550,6 +564,7 @@ class ActingStage:
                 values_digest=values_digest(call),
                 decision_id=call.decision.id,
                 claimed_at=self._now(),
+                part=call.decision.approved_part,
             )
             try:
                 answer = await self._plans.claim_activation_effect(
@@ -560,6 +575,9 @@ class ActingStage:
             except ClaimStopped:
                 _log.info("acting_call_not_done", stage="acting", reason="stopped")
                 return ActedCall(one, ActedOutcome.NOT_DONE, reason=_STOPPED)
+            if answer is ActivationEffectClaim.ALREADY_USED:
+                _log.info("acting_call_not_done", stage="acting", reason="already_used")
+                return ActedCall(one, ActedOutcome.NOT_DONE, reason=_ALREADY_USED)
             if answer is ActivationEffectClaim.ALREADY_DONE:
                 _log.info("acting_call_not_done", stage="acting", reason="already_done")
                 return ActedCall(one, ActedOutcome.NOT_DONE, reason=_ALREADY_DONE)

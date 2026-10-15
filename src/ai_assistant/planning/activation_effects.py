@@ -24,6 +24,7 @@ from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
     Identifier,
+    QuestionPart,
     ToolOutcome,
 )
 
@@ -128,12 +129,39 @@ def requested_activations(activation_ids: Sequence[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(activation_ids))
 
 
+def requested_parts(parts: object) -> tuple[QuestionPart, ...]:
+    """Return the question parts a read names, each once and detached, or refuse them.
+
+    Args:
+        parts: What the caller passed.
+
+    Returns:
+        The parts, each once, in the order given.
+
+    Raises:
+        PlanningError: If ``parts`` is not a list or tuple of ``QuestionPart`` values.
+    """
+    if not isinstance(parts, (list, tuple)) or not all(
+        isinstance(one, QuestionPart) for one in parts
+    ):
+        msg = "part_effects reads a sequence of QuestionPart values (ADR-0321 §4:9)"
+        raise PlanningError(msg)
+    try:
+        detached = [QuestionPart.model_validate(one.model_dump()) for one in parts]
+    except ValidationError as exc:
+        msg = f"a question part to read does not validate: {exc}"
+        raise PlanningError(msg) from exc
+    return tuple(dict.fromkeys(detached))
+
+
 def _counts_against(held: ActivationEffect, effect: ActivationEffect, *, deliberate: bool) -> bool:
     """Whether one held record refuses ``effect`` as already done (ADR-0306 §5:9, §5:11).
 
     Only a call matches a call, on its capability and its values digest. An unknown
     outcome counts as done, and so does an outcome not yet written; an effect not done
-    does not count. A deliberate repeat passes a matching effect only where it is done.
+    does not count. A deliberate repeat passes a matching effect where it is done, and a
+    deliberate repeat that runs under an approval, carrying a part key, passes one whose
+    outcome is unknown or not yet written too (ADR-0321 §6:2).
     """
     if not (held.is_call and effect.is_call):
         return False
@@ -143,10 +171,10 @@ def _counts_against(held: ActivationEffect, effect: ActivationEffect, *, deliber
         return False
     if held.outcome is ToolOutcome.SUCCEEDED:
         return not deliberate
-    return True
+    return not (deliberate and effect.part is not None)
 
 
-def decide_activation_claim(  # noqa: PLR0913 — the claim's three inputs and the three facts the store reads inside its step
+def decide_activation_claim(  # noqa: PLR0913 — the claim's three inputs and the four facts the store reads inside its step
     effect: ActivationEffect,
     *,
     match: tuple[str, ...] | None,
@@ -154,6 +182,7 @@ def decide_activation_claim(  # noqa: PLR0913 — the claim's three inputs and t
     stopped: bool,
     held_ids: Container[str],
     matched: Iterable[ActivationEffect],
+    spent: bool,
 ) -> ActivationEffectClaim:
     """Decide one claim, inside the store's indivisible step (ADR-0306 §6:2).
 
@@ -165,10 +194,12 @@ def decide_activation_claim(  # noqa: PLR0913 — the claim's three inputs and t
         held_ids: The record ids the store holds.
         matched: The held records of the activations ``match`` names; read only where
             ``match`` is a tuple.
+        spent: Whether a held record of any activation carries ``effect.part``; read
+            only where the record carries one (ADR-0321 §4:9).
 
     Returns:
-        ``CLAIMED`` where the store should write the record, ``ALREADY_DONE`` where
-        it should write nothing.
+        ``CLAIMED`` where the store should write the record; ``ALREADY_USED`` or
+        ``ALREADY_DONE`` where it should write nothing.
 
     Raises:
         ClaimStopped: If the activation was stopped.
@@ -183,6 +214,8 @@ def decide_activation_claim(  # noqa: PLR0913 — the claim's three inputs and t
     if effect.id in held_ids:
         msg = f"the plan store already holds activation effect {effect.id} (ADR-0306 §6:2)"
         raise PlanningError(msg)
+    if effect.part is not None and spent:
+        return ActivationEffectClaim.ALREADY_USED
     if match is not None and any(
         _counts_against(held, effect, deliberate=deliberate_repeat) for held in matched
     ):

@@ -15,6 +15,13 @@ in one response, and the notes are joined in order. Nothing it carries asks for 
 the controller's rule alone decides whether one runs (§2, §3:4). An offered capability
 may not take its name.
 
+**The round's naming of the calls its message asks about rides the same tool**
+(ADR-0321 §2:3, which leaves the native shape to this module as ADR-0315 §3:3 does). It
+is the tool's ``asks``, an array of strings, read back into ``RoundResponse.asks``: each
+name once, in the order the model first gave it across every call of the tool, and a
+blank name dropped as blank notes are. This module reads nothing of a name; what each
+refers to is planning's, which tells the model what to give.
+
 **Each round is asked afresh** (§2:6). The request is the rendered ``Message`` history,
 translated exactly as :class:`~ai_assistant.models.provider.PydanticAIProvider`
 translates it, so a ``Role.TOOL`` turn is refused there and no earlier tool exchange is
@@ -124,7 +131,8 @@ _MESSAGE_TOKENS: Final = 4096
 _ROUND_TOOL_DESCRIPTION: Final = (
     "Not a capability: calling it runs nothing and goes to no one. Call it to keep "
     "episode notes on this activation: free text for your own later rounds and later "
-    "activations to read."
+    "activations to read; and to name, in asks, each call that needs the user that this "
+    "round's message asks them about."
 )
 
 _ROUND_TOOL_SCHEMA: Final[dict[str, Any]] = {
@@ -133,6 +141,14 @@ _ROUND_TOOL_SCHEMA: Final[dict[str, Any]] = {
         "notes": {
             "type": "string",
             "description": "Episode notes to keep with this round.",
+        },
+        "asks": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Each call that needs the user that this round's message asks them "
+                "about, named as your instructions say."
+            ),
         },
     },
     "additionalProperties": False,
@@ -533,6 +549,7 @@ def _round(response: ModelResponse) -> RoundResponse:
         raise ModelResponseError(msg)
     calls: list[ProposedCall] = []
     notes: list[str] = []
+    asks: dict[str, None] = {}
     try:
         for part in response.parts:
             if not isinstance(part, ToolCallPart):
@@ -548,10 +565,12 @@ def _round(response: ModelResponse) -> RoundResponse:
             written = _round_notes(arguments)
             if written is not None and written.strip():
                 notes.append(written)
+            asks.update(dict.fromkeys(name for name in _round_asks(arguments) if name.strip()))
         return RoundResponse(
             text=response.text or "",
             calls=tuple(calls),
             notes="\n\n".join(notes) if notes else None,
+            asks=tuple(asks),
         )
     except (ValidationError, ValueError) as exc:
         msg = "the model's response could not be read as a planning round"
@@ -575,14 +594,29 @@ def _round_notes(arguments: dict[str, object]) -> str | None:
     """The notes one call of the reserved tool carries.
 
     Raises:
-        ValueError: If they are present and not text, or anything else is present,
-            the retired mark included (ADR-0315 §3:4).
+        ValueError: If they are present and not text, or anything but the notes and the
+            naming is present, the retired mark included (ADR-0315 §3:4).
     """
-    if set(arguments) - {"notes"}:
-        msg = "the round's tool takes notes alone"
+    if set(arguments) - {"notes", "asks"}:
+        msg = "the round's tool takes notes and the calls its message asks about alone"
         raise ValueError(msg)
     notes = arguments.get("notes")
     if notes is not None and not isinstance(notes, str):
         msg = "the round's notes are text"
         raise ValueError(msg)
     return notes
+
+
+def _round_asks(arguments: dict[str, object]) -> list[str]:
+    """The names one call of the reserved tool gives the calls its message asks about.
+
+    Raises:
+        ValueError: If they are present and not an array of text (ADR-0321 §2:3).
+    """
+    asks = arguments.get("asks")
+    if asks is None:
+        return []
+    if not isinstance(asks, list) or not all(isinstance(name, str) for name in asks):
+        msg = "the calls a round's message asks about are named by text"
+        raise ValueError(msg)
+    return asks

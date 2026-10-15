@@ -66,6 +66,7 @@ from ai_assistant.core.types import (
     PreferenceMemory,
     ProceduralMemory,
     Provenance,
+    QuestionPart,
     SemanticMemory,
     UserConfirmation,
     band_of,
@@ -237,7 +238,7 @@ def _proposal(
         sensitivity=proposal.sensitivity,
         conflicts=proposal.conflicts,
         confirmation=UserConfirmation(
-            deferral_id="deferral-1",
+            question=QuestionPart(round="deferral-1", part=1),
             question_key=proposal.question_key,
             confirmed_at=_WHEN,
             retires=tuple(c.id for c in conflicts),

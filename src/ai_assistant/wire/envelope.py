@@ -2609,7 +2609,15 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     with the old path (ADR-0309 §5); the wire rebuilds an error by its name there.
 #:     A peer at 104 sends fields a hub at 105 refuses, and may name an error class a
 #:     peer at 105 no longer has (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 105
+#: 106: ADR-0321 §9:2 advances the version once for the yes path's contracts, on these
+#:     grounds: the wire-carried ``EpisodicMemory.processing_record`` gains
+#:     ``PlanningRound.asked`` (``AskedCall``), ``ActivationUnderstanding.answers``
+#:     (``AnsweredQuestion``) and ``LabelKind``'s ``approved_action`` member on its
+#:     ``labels``; and ``PermissionDecision`` gains ``approval`` (``Approval``) and
+#:     ``approved_part`` (``QuestionPart``), carried by ``recent_decisions`` and
+#:     ``export_decisions``. A peer at 105 refuses each new field as extra and the new
+#:     member as unknown (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 106
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

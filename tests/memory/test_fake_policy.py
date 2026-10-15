@@ -26,6 +26,7 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
+    QuestionPart,
     SemanticMemory,
     UserConfirmation,
     band_of,
@@ -157,7 +158,9 @@ async def test_a_confirmed_tainted_proposal_returns_the_configured_kind() -> Non
         proposed=tainted,
         rationale="because",
         confirmation=UserConfirmation(
-            deferral_id="q-1", question_key=proposal.question_key, confirmed_at=_WHEN
+            question=QuestionPart(round="q-1", part=1),
+            question_key=proposal.question_key,
+            confirmed_at=_WHEN,
         ),
     )
 

@@ -576,10 +576,9 @@ class EgressBindingSeam:
             was.coverage,
             # ADR-0247 §7's first clause: **transcribed** from ``approved`` as well,
             # "exactly as it takes ``provenance``, ``planned_with_external_content``
-            # and ``coverage``" — the fourth and last thing this member reads out of
-            # the approved binding. ADR-0152 §7's transcription count, moved to two by
-            # ADR-0181 §3 and to three by ADR-0233 §4, becomes **four** here and stops:
-            # no fifth fact is transcribed without the ADR that decides it.
+            # and ``coverage``" — the fourth thing this member reads out of the
+            # approved binding. ADR-0152 §7's transcription count, moved to two by
+            # ADR-0181 §3 and to three by ADR-0233 §4, became **four** here.
             #
             # ADR-0238 §5's non-transcription clause is **superseded**, premise and
             # all. It rested on a ``CONFIRM`` on a ``WEB_SEARCH`` decision resolving in
@@ -591,13 +590,14 @@ class EgressBindingSeam:
             # could ever answer, which is #2232. The field's ``False`` **default** is
             # untouched and still decodes a binding nothing wrote one on.
             was.closed_loop,
-            # **ADR-0260 §11 transcribes nothing new here, and says so in terms**: it
-            # mints **no park** for a forecast read — ADR-0244's park is a `CONFIRM` on
-            # a *search* — so no forecast binding is ever rebound, and the field's
-            # restrictive `False` default is the correct value on this path.
-            # ADR-0152 §7's and ADR-0247 §7's closed transcription count is therefore
-            # untouched and ADR-0260 supersedes neither.
-            False,
+            # ADR-0321 §4:16: ``forecast_reach`` is **transcribed** from ``approved``
+            # "as it takes ``closed_loop``", the fifth transcription ADR-0260 §11:7
+            # left to the decision that rebinds a forecast binding. The yes path
+            # rebinds an approved forecast read, and a re-derived ``False`` would
+            # compare unequal to the binding that was shown and refuse the call the
+            # user approved. A binding nothing wrote the fact on carries the field's
+            # restrictive ``False`` default, and rebinds to it.
+            was.forecast_reach,
         )
         if binding != was:
             msg = (

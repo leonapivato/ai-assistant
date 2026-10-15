@@ -649,20 +649,17 @@ class FakeEgressBinder:
             was.coverage,
             # ADR-0247 §7's first clause: transcribed too, "exactly as it takes
             # ``provenance``, ``planned_with_external_content`` and ``coverage``", which
-            # makes ADR-0152 §7's count **four** and stops there. ADR-0238 §5's
+            # made ADR-0152 §7's count **four**. ADR-0238 §5's
             # non-transcription clause is superseded with its premise: ADR-0244 made a
             # ``CONFIRM`` on a ``WEB_SEARCH`` decision a durable park that can be
             # answered, and the ``False`` this line used to pass refused every park whose
             # recorded binding carried ``True`` at every answer (#2232). The field's
             # ``False`` default is untouched.
             was.closed_loop,
-            # **ADR-0260 §11 transcribes nothing new here, and says so in terms**: it
-            # mints **no park** for a forecast read — ADR-0244's park is a ``CONFIRM``
-            # on a *search* — so no forecast binding is ever rebound, and the field's
-            # restrictive ``False`` default is the correct value on this path. ADR-0152
-            # §7's and ADR-0247 §7's closed transcription count is therefore untouched
-            # and ADR-0260 supersedes neither.
-            False,
+            # ADR-0321 §4:16: ``forecast_reach`` transcribed from ``approved`` as
+            # ``closed_loop`` is, the fifth thing ADR-0152 §7's count admits, so an
+            # approved forecast read rebinds equal to the binding that was shown.
+            was.forecast_reach,
         )
         if binding != was:
             msg = (

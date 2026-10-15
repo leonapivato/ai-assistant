@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
+    QuestionPart,
     SemanticMemory,
     UserConfirmation,
     band_of,
@@ -828,7 +829,7 @@ def _confirmed(
     return proposal.model_copy(
         update={
             "confirmation": UserConfirmation(
-                deferral_id="q-1",
+                question=QuestionPart(round="q-1", part=1),
                 question_key=proposal.question_key,
                 confirmed_at=_WHEN,
                 retires=retires,
@@ -994,7 +995,7 @@ async def test_a_secret_tier_proposal_cannot_carry_a_confirmation_at_all() -> No
             rationale="because",
             sensitivity=DataTier.SECRET,
             confirmation=UserConfirmation(
-                deferral_id="q-1",
+                question=QuestionPart(round="q-1", part=1),
                 question_key="0" * 64,
                 confirmed_at=_WHEN,
                 retires=("prior",),

@@ -3306,6 +3306,193 @@ class UnresolvedMatter(BaseModel):
     why_it_matters: NonBlankEncodableText
 
 
+# --- a question, its answer, and the approval a yes makes (ADR-0321) -----------
+#
+# A question is an ordinary message a planning round writes (ADR-0307 §3:6), and each
+# call it asks about is one of its parts (ADR-0321 §2:6). An answer is an activation
+# like any other, whose understanding may record a pointer naming the question and the
+# parts it approves (§3:1). Where authorizing's three facts hold, code assembles an
+# approval from those records (§4:6), and each part is spent once (§4:9).
+#
+# Declared here, ahead of :class:`ProposedActivationUnderstanding`, which carries the
+# proposed pointer, and of :class:`UserConfirmation`, which names the part it answers;
+# the rule above :data:`Identifier` decides the placement. The asked call itself is
+# declared beside :class:`ActionRequest`, whose declaration it carries.
+
+#: The ceiling on a question's part number, as on every other stored count here.
+QUESTION_PART_MAX: Final[int] = 2**31 - 1
+
+
+def _distinct_parts(parts: Sequence[int], *, ordered: bool) -> None:
+    """Refuse a part named twice, or, where ``ordered``, parts not in ascending order.
+
+    Raises:
+        ValueError: If the parts are not distinct, or not ascending where required.
+    """
+    if len(set(parts)) != len(parts):
+        msg = "a question's parts are named once each"
+        raise ValueError(msg)
+    if ordered and list(parts) != sorted(parts):
+        msg = "a recorded question's parts are named in ascending order"
+        raise ValueError(msg)
+
+
+class QuestionPart(BaseModel):
+    """One part of a question: the key an approval is spent by (ADR-0321 §2:6, §4:9).
+
+    ``round`` is the id of the planning round whose message asked the question, which
+    names that message, since a round writes at most one (ADR-0307 §3:1); ``part`` is
+    the number of the call's exact line in it, ``1`` where the message asks about one
+    call. Two parts are one part exactly when both fields are equal.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    round: Identifier
+    part: int = Field(strict=True, ge=1, le=QUESTION_PART_MAX)
+
+
+class ProposedAnswer(BaseModel):
+    """What understanding proposes an input approves (ADR-0321 §3:1).
+
+    ``question`` names the question as understanding was shown it: a label of
+    ADR-0276 §3's scheme, meaningful only within the call that rendered it. ``parts``
+    are the parts the input approves; empty means every part the question showed
+    (§3:6). Like every proposed field it is a reading, and the stage resolves or drops
+    it, so a label naming nothing is not refused here.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    question: NonBlankEncodableText
+    parts: tuple[Annotated[int, Field(strict=True, ge=1, le=QUESTION_PART_MAX)], ...] = ()
+
+
+class AnsweredQuestion(BaseModel):
+    """The recorded answer pointer: the question an input approves, by ids (ADR-0321 §3:1).
+
+    The resolved form of :class:`ProposedAnswer`, carrying no label (ADR-0276 §2:4). It
+    names the question's message by the records its writer and its delivery keep:
+    ``activation_id`` is the activation that asked, and the message is then named by
+    the round that wrote it, by its place and position in that place, or by both.
+    Either names exactly one message, because a round writes at most one and a place
+    holds one message at a position, and either reaches the message's delivery record,
+    an :class:`ActivationEffect` of that activation carrying the round, the place and
+    the position (ADR-0306 §5:5), and through its round the asked calls the round
+    recorded (§2:8).
+
+    ``parts`` are the parts approved, ascending; empty means every part the question
+    showed (§3:6). The pointer is a reading and grants nothing by itself (ADR-0276
+    §7:7): authorizing checks it against the records (ADR-0321 §4:4).
+
+    Raises:
+        ValueError: If it names neither the round nor the place and position, names a
+            place without a position or a position without a place, or names a part
+            twice or out of order.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    activation_id: Identifier
+    round: Identifier | None = None
+    place: Identifier | None = None
+    position: int | None = Field(default=None, strict=True, ge=0, lt=2**63)
+    parts: tuple[Annotated[int, Field(strict=True, ge=1, le=QUESTION_PART_MAX)], ...] = ()
+
+    @model_validator(mode="after")
+    def _names_one_message(self) -> Self:
+        if (self.place is None) != (self.position is None):
+            msg = "a question's message is named by its place and its position together"
+            raise ValueError(msg)
+        if self.round is None and self.position is None:
+            msg = "a question's message is named by its round, its place and position, or both"
+            raise ValueError(msg)
+        _distinct_parts(self.parts, ordered=True)
+        return self
+
+
+class ApprovalGiver(StrEnum):
+    """Who gave an approval: §4:6's *who* (ADR-0321 §4:6).
+
+    Closed, **added to and never renamed**: a later kind of approval adds a member
+    rather than reshaping this one.
+    """
+
+    USER_THROUGH_HUB_CHAT = "user_through_hub_chat"
+    """The user, by a message sent through the hub chat (§3:3)."""
+
+
+class ApprovalEnd(StrEnum):
+    """When an approval stops covering anything: §4:6's *ends* (ADR-0321 §4:6).
+
+    Closed, **added to and never renamed**.
+    """
+
+    WHEN_USED = "when_used"
+    """Each part covers its call once: the claim that runs it spends it (§4:9)."""
+
+
+class YesToQuestion(BaseModel):
+    """How an approval was given, as a yes to a question: §4:6's *how* (ADR-0321 §4:6).
+
+    ``activation_id`` is the activation that asked, and ``round`` the round whose
+    message is the question. ``kind`` tells this form from any later one: a later kind
+    of approval adds a form beside it rather than reshaping it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["yes_to_a_question"] = "yes_to_a_question"
+    activation_id: Identifier
+    round: Identifier
+
+
+class ApprovalGiven(BaseModel):
+    """Where and when an approval was given: §4:6's *given* (ADR-0321 §4:6).
+
+    ``activation_id`` is the yes's own activation, the one whose input carried it and
+    the only one that uses it (§4:1); ``at`` is when the input was given, as the
+    decision renders it ("your yes at 2:15", §4:8).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    activation_id: Identifier
+    at: UtcInstant
+
+
+class Approval(BaseModel):
+    """The approval a yes makes, in one general shape with five slots (ADR-0321 §4:6).
+
+    **who**, the user through the hub chat; **how**, a yes to a question; **covers**,
+    exactly the calls of the approved parts, each by its :class:`QuestionPart`;
+    **given**, in the yes's input; and **ends**, when used. Code assembles it from the
+    records where authorizing's three facts hold (§4:4, §4:6), and nothing stores it but
+    the decisions that name it (§4:8): it is used only by its yes's activation (§4:1).
+    A later kind of approval extends this shape, by a member or a form, rather than
+    replacing it.
+
+    Raises:
+        ValueError: If it covers a part twice, covers a part of another question than
+            the one its yes answered, or was given in the activation that asked.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    who: ApprovalGiver
+    how: YesToQuestion
+    covers: tuple[QuestionPart, ...] = Field(min_length=1)
+    given: ApprovalGiven
+    ends: ApprovalEnd
+
+    @model_validator(mode="after")
+    def _one_question(self) -> Self:
+        if len(set(self.covers)) != len(self.covers):
+            msg = "an approval covers each part once"
+            raise ValueError(msg)
+        if any(part.round != self.how.round for part in self.covers):
+            msg = "an approval covers parts of the question its yes answered, and no other"
+            raise ValueError(msg)
+        if self.given.activation_id == self.how.activation_id:
+            msg = "an answer is an activation of its own, never the one that asked (§3:1)"
+            raise ValueError(msg)
+        return self
+
+
 class ProposedActivationUnderstanding(BaseModel):
     """What the model produces, and the whole of what it produces (ADR-0276 §2).
 
@@ -3319,6 +3506,11 @@ class ProposedActivationUnderstanding(BaseModel):
     earlier episodes, that the input belongs with as one matter. A label naming
     nothing a story link can be made from is a label defect the stage repairs and
     then drops (§6:8), so this type validates nothing about them either.
+
+    ``answers`` (ADR-0321 §3:1) is the proposed answer pointer: the question the input
+    approves, named as understanding was shown it, and the parts it approves. ``None``
+    where the input approves no question, a bare yes that could fit more than one
+    included (§3:5). It is a reading and grants nothing.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3329,6 +3521,7 @@ class ProposedActivationUnderstanding(BaseModel):
     relationships: tuple[ProposedRelationship, ...] = ()
     unresolved: tuple[UnresolvedMatter, ...] = ()
     story_labels: tuple[EncodableText, ...] = ()
+    answers: ProposedAnswer | None = None
 
 
 #: ADR-0276 §2: an excerpt is a bounded prefix of the referent's rendered text.
@@ -3394,6 +3587,11 @@ class ActivationUnderstanding(BaseModel):
     to that matter and nothing more; the story-links stage records it in the story
     store (§6:12), and a record written before the field validates unchanged
     (§12:1).
+
+    ``answers`` (ADR-0321 §3:1) is the recorded answer pointer, resolved to ids with no
+    label (ADR-0276 §2:4), or ``None`` where the input approves no question. Like every
+    other field here it grants no authority: authorizing checks it against the records
+    (ADR-0321 §4:4). A record written before the field validates unchanged.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3408,6 +3606,7 @@ class ActivationUnderstanding(BaseModel):
     unresolved: tuple[UnresolvedMatter, ...] = ()
     grounding_dropped: int = Field(default=0, strict=True, ge=0, lt=2**31)
     story_links: tuple[StoryMember, ...] = ()
+    answers: AnsweredQuestion | None = None
 
     @model_validator(mode="after")
     def _no_story_link_twice(self) -> Self:
@@ -3752,22 +3951,34 @@ def _distinct_call_ids(calls: tuple[ProposedCall, ...]) -> None:
 
 
 class RoundResponse(BaseModel):
-    """One model response of a planning round, in its three parts (ADR-0315 §3:1).
+    """One model response of a planning round, in its parts (ADR-0315 §3:1).
 
     ``text`` is the round's message, possibly empty; ``calls`` the calls it proposes;
     and ``notes`` its episode notes, or ``None`` where it wrote none. The notes are a
     part of the response and never a call (§3:2, §3:3). No part asks for a round: the
     controller's rule alone decides whether one runs (§2, §3:4).
+
+    ``asks`` (ADR-0321 §2:3) names the calls that came back needing the user that the
+    round's message asks about, each once and in the order the model named them. The
+    naming is a part of the response and never a call, and how the provider's native
+    shape carries it is the implementation's, as for the notes. Each name is a
+    reference in whatever scheme planning's instructions give the model, such as the
+    label of an earlier round's call shown with its outcome: this type reads none of
+    them, and planning resolves them or drops them.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     text: EncodableText = Field(default="", validate_default=True)
     calls: tuple[ProposedCall, ...] = ()
     notes: NonBlankEncodableText | None = None
+    asks: tuple[NonBlankEncodableText, ...] = ()
 
     @model_validator(mode="after")
     def _calls_distinct(self) -> Self:
         _distinct_call_ids(self.calls)
+        if len(set(self.asks)) != len(self.asks):
+            msg = "a round names each call its message asks about once"
+            raise ValueError(msg)
         return self
 
 
@@ -3782,18 +3993,23 @@ class LabelKind(StrEnum):
     NOTE = "note"
     MEMORY = "memory"
     RESULT = "result"
+    APPROVED_ACTION = "approved_action"
+    """An action the activation's yes approved, which planning proposes by this label and
+    whose values code fills in (ADR-0321 §4:2)."""
 
 
-#: Each kind's label prefix (ADR-0307 §5:1): S1…, E1…, N1…, M1… and R1….
+#: Each kind's label prefix (ADR-0307 §5:1, ADR-0321 §4:2): S1…, E1…, N1…, M1…, R1…
+#: and A1….
 _LABEL_PREFIXES: Final[dict[LabelKind, str]] = {
     LabelKind.STORY: "S",
     LabelKind.EPISODE: "E",
     LabelKind.NOTE: "N",
     LabelKind.MEMORY: "M",
     LabelKind.RESULT: "R",
+    LabelKind.APPROVED_ACTION: "A",
 }
 
-_LABEL_SHAPE: Final = re.compile(r"[SENMR][1-9][0-9]{0,8}")
+_LABEL_SHAPE: Final = re.compile(r"[SENMRA][1-9][0-9]{0,8}")
 
 
 def label_prefix(kind: LabelKind) -> str:
@@ -3803,7 +4019,7 @@ def label_prefix(kind: LabelKind) -> str:
         kind: What the label names.
 
     Returns:
-        ``S``, ``E``, ``N``, ``M`` or ``R``.
+        ``S``, ``E``, ``N``, ``M``, ``R`` or ``A``.
     """
     return _LABEL_PREFIXES[kind]
 
@@ -3847,9 +4063,17 @@ class PlanningRound(BaseModel):
     activation had read outside content when the notes were written (ADR-0307 §4:3,
     ADR-0303 §3:1), never from the model's output. A round is never edited.
 
+    ``asked`` (ADR-0321 §2:8) are the calls the round's message asks about, recorded by
+    code when the round is recorded, each with its part, the tool selection picked, the
+    values it sends, its binding and its deliberate-repeat mark. The decision trail keeps
+    only a parameters digest, so the round keeps the values. Their parts are ``1`` to
+    the number asked about, in that order (§2:6). A round written before the field
+    validates unchanged.
+
     Raises:
-        ValueError: If it follows itself, marks notes it does not carry, or carries
-            two calls under one id.
+        ValueError: If it follows itself, marks notes it does not carry, carries two
+            calls under one id, or its asked calls are not parts ``1`` to ``n`` in
+            order.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3860,6 +4084,9 @@ class PlanningRound(BaseModel):
     calls: tuple[ProposedCall, ...] = ()
     notes: NonBlankEncodableText | None = None
     notes_marked: bool = False
+    # A forward reference, resolved by the `model_rebuild` beside `AskedCall`, which
+    # says why this one type reaches forward.
+    asked: tuple[AskedCall, ...] = ()
 
     @model_validator(mode="after")
     def _well_formed(self) -> Self:
@@ -3870,6 +4097,9 @@ class PlanningRound(BaseModel):
             msg = "only a round carrying notes marks them"
             raise ValueError(msg)
         _distinct_call_ids(self.calls)
+        if [one.part for one in self.asked] != list(range(1, len(self.asked) + 1)):
+            msg = "a round's asked calls are its question's parts 1 to n, in order (§2:6)"
+            raise ValueError(msg)
         return self
 
 
@@ -4840,16 +5070,20 @@ class UserConfirmation(BaseModel):
     binds to what was asked rather than to a minted id, which a caller invents and
     which is unique only once stored.
 
-    **The answer path is its only legitimate producer**, and only from a deferral
-    it has claimed (ADR-0078 §3). No type expresses that; it is a
-    composition-root obligation with a structural test behind it, and it is the
-    obligation this value's whole bound rests on.
+    **The yes path is its only legitimate producer** (ADR-0321 §5:2): code builds it
+    from the approval a yes to the remember's question made, and ``question`` names that
+    question's message and part (§9). No type expresses that; it is a composition-root
+    obligation with a structural test behind it, and it is the obligation this value's
+    whole bound rests on.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    deferral_id: Identifier = Field(
-        description="The deferred question this answer is for (ADR-0078 §2)."
+    question: QuestionPart = Field(
+        description=(
+            "The question this answer is for: the round whose message asked it, and the "
+            "part that showed the remember (ADR-0321 §2:6, §9)."
+        )
     )
     question_key: Sha256Hex = Field(
         description=(
@@ -11651,6 +11885,101 @@ class ActionRequest(BaseModel):
         return self
 
 
+# --- the asked call: what a question's part shows and binds (ADR-0321 §2:8) ------
+#
+# Declared here rather than beside :class:`PlanningRound`, which records it, because
+# it carries the declaration and the binding by value, and those two types and their
+# closure sit some eight thousand lines below the round. The rule above
+# :data:`Identifier` moves a type up rather than reach forward, and it would move
+# that whole closure here, so this one record is the exception: the round names it
+# by a forward reference, and the rebuild below resolves it while this module is
+# still importing, before any other module can reach either type.
+
+
+class AskedCall(BaseModel):
+    """One call a round's message asks about, as the round records it (ADR-0321 §2:8).
+
+    ``part`` is its part of the question (§2:6); ``tool`` the declaration tool
+    selection picked, by value; ``values`` every argument the call sends, those the
+    hub filled in included, after the *looking for* argument and the *deliberate
+    repeat* mark were removed (ADR-0306 §2:10); ``binding`` the egress binding it was
+    ruled on with, or ``None`` for a call that does not leave the hub; and
+    ``deliberate_repeat`` whether planning marked it a deliberate repeat. They are the
+    call the user was shown, and what a later call's *exactly the call shown* is
+    checked against (§4:4), and the approved call is rebuilt from them (§4:2).
+
+    ``replaces`` (§5:5) are the ids of the assertions a remember's question shows the
+    new statement replacing. The confirmation a yes makes retires exactly these, and
+    nothing it did not show.
+
+    The record **is** a request's content, and :attr:`request` is that request: the
+    values are checked against the declaration's schema and the binding against the
+    values here, as :class:`ActionRequest` checks them, so a call that could not be
+    ruled on cannot be recorded as asked about.
+
+    Raises:
+        ValueError: If the values or the binding would not make an
+            :class:`ActionRequest`, a call to a capability safe to repeat is marked a
+            deliberate repeat, or an assertion is named twice in ``replaces``.
+    """
+
+    # The values are the user's Tier 1 arguments, which ActionRequest keeps out of its
+    # validation errors (ADR-0145 §8); this record keeps them out of its own too.
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    part: int = Field(strict=True, ge=1, le=QUESTION_PART_MAX)
+    tool: Annotated[ToolDefinition, AfterValidator(_detached_tool)]
+    values: FrozenJsonMapping
+    binding: Annotated[EgressBinding | None, AfterValidator(_detached_binding)] = None
+    deliberate_repeat: bool = False
+    replaces: tuple[NonBlankEncodableText, ...] = ()
+
+    @property
+    def request(self) -> ActionRequest:
+        """The call as a request: its declaration, values and binding (ADR-0021 §3)."""
+        return ActionRequest(tool=self.tool, parameters=self.values, egress_binding=self.binding)
+
+    @model_validator(mode="after")
+    def _a_call_that_could_be_ruled_on(self) -> Self:
+        try:
+            self.request  # noqa: B018 — constructed for ActionRequest's own checks
+        except ValueError:
+            # Pydantic's validation error is a ValueError; its text renders the values,
+            # so it is dropped rather than chained (ADR-0145 §7).
+            msg = "an asked call's values and binding make a request its declaration admits"
+            raise ValueError(msg) from None
+        if self.deliberate_repeat and self.tool.safe_to_repeat:
+            msg = "only a call to a capability not safe to repeat is a deliberate repeat"
+            raise ValueError(msg)
+        if len(set(self.replaces)) != len(self.replaces):
+            msg = "an asked call names each assertion it replaces once"
+            raise ValueError(msg)
+        return self
+
+
+# The round names `AskedCall` forward (see the section comment above). Rebuilt here, in
+# containment order, so that every model holding a round is whole when this module
+# finishes importing rather than on its first validation; `tests/core/test_asked_call.py`
+# holds that no model of this module is left incomplete by it.
+for _holds_a_round in (
+    PlanningRound,
+    EpisodeProcessingRecord,
+    EpisodicMemory,
+    ChannelEpisode,
+    ChannelEpisodePage,
+    MemorySearchResult,
+    MemoryWrite,
+    RecordChunk,
+    MemoryUpdateProposal,
+    SourceReading,
+    FetchOutcome,
+    SearchOutcome,
+    ForecastOutcome,
+):
+    _holds_a_round.model_rebuild()
+del _holds_a_round
+
+
 class PermissionRuling(BaseModel):
     """What a policy said about an :class:`ActionRequest` (ADR-0021 §3).
 
@@ -11841,9 +12170,26 @@ class PermissionDecision(BaseModel):
             ":meth:`authorises` does not compare it."
         ),
     )
+    approval: Approval | None = Field(
+        default=None,
+        description=(
+            "The approval the call runs under (ADR-0321 §4:6, §4:8), assembled by code "
+            "from the records and supplied by the recorder through :meth:`from_request`; "
+            "``None`` on a decision about a call that does not run under one. "
+            ":meth:`authorises` does not compare it."
+        ),
+    )
+    approved_part: QuestionPart | None = Field(
+        default=None,
+        description=(
+            "The part of the approval's question this call is, the key its spend is "
+            "claimed under (ADR-0321 §4:9): one of ``approval.covers``, and set exactly "
+            "where ``approval`` is."
+        ),
+    )
 
     @classmethod
-    def from_request(  # noqa: PLR0913 — the ADR-0059 §1 signature: recorder-supplied id, decided_at, resolves, expires_at, and ADR-0306 §6's effect
+    def from_request(  # noqa: PLR0913 — the ADR-0059 §1 signature: recorder-supplied id, decided_at, resolves, expires_at, ADR-0306 §6's effect and ADR-0321 §4:8's approval
         cls,
         request: ActionRequest,
         ruling: PermissionRuling,
@@ -11853,6 +12199,8 @@ class PermissionDecision(BaseModel):
         resolves: Identifier | None = None,
         expires_at: datetime | None = None,
         effect: Identifier | None = None,
+        approval: Approval | None = None,
+        approved_part: QuestionPart | None = None,
     ) -> PermissionDecision:
         """Bind a ruling to the request it was made about.
 
@@ -11916,6 +12264,12 @@ class PermissionDecision(BaseModel):
                 the recorder like ``id``, because the record is acting's and not a
                 fact the policy authored. ``None`` for a call that gets no effect
                 record, and for every call of the old path.
+            approval: The approval the call runs under (ADR-0321 §4:6, §4:8),
+                supplied by the recorder like ``effect``: code assembles it from the
+                records, and the policy authors none of it. ``None`` for a call that
+                does not run under one.
+            approved_part: The part of ``approval`` this call is, the key its spend
+                is claimed under (§4:9); set exactly where ``approval`` is.
 
         Returns:
             The decision, ready to record.
@@ -11931,6 +12285,8 @@ class PermissionDecision(BaseModel):
             expires_at=expires_at,
             egress_binding=None if binding is None else binding.model_copy(deep=True),
             effect=effect,
+            approval=None if approval is None else approval.model_copy(deep=True),
+            approved_part=None if approved_part is None else approved_part.model_copy(deep=True),
         )
 
     @classmethod
@@ -12159,6 +12515,38 @@ class PermissionDecision(BaseModel):
             msg = (
                 f"expires_at must fall strictly after decided_at, got "
                 f"expires_at={self.expires_at!r}, decided_at={self.decided_at!r}"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _an_approval_names_its_part_and_lets_the_call_run(self) -> PermissionDecision:
+        """Hold the approval to the decisions about a call that runs under it (ADR-0321).
+
+        ``approval`` and ``approved_part`` are set together, and the part is one the
+        approval covers, so the key the spend is claimed under is always the approval's
+        own (§4:9). A ``DENY`` names no approval: a yes never overrides a deny (§4:3,
+        §4:12), so no call runs under one there. An ``ALLOW`` naming an approval names
+        the effect record its call is claimed under, because every call that runs under
+        an approval gets one, whatever its capability (§4:10). A ``CONFIRM`` may name
+        one: route (a) records the confirm ruled fresh in the yes's activation, and it is
+        a decision about the call that runs (§4:7, §4:8).
+        """
+        if (self.approval is None) != (self.approved_part is None):
+            msg = "a decision names an approval and the part it runs under together"
+            raise ValueError(msg)
+        if self.approval is None or self.approved_part is None:
+            return self
+        if self.approved_part not in self.approval.covers:
+            msg = "a decision's approved part is one its approval covers (ADR-0321 §4:6)"
+            raise ValueError(msg)
+        if self.ruling.outcome is PermissionOutcome.DENY:
+            msg = "a deny names no approval: a yes never overrides a deny (ADR-0321 §4:12)"
+            raise ValueError(msg)
+        if self.ruling.outcome is PermissionOutcome.ALLOW and self.effect is None:
+            msg = (
+                "an allow under an approval names the effect record its call is claimed "
+                "under (ADR-0321 §4:10)"
             )
             raise ValueError(msg)
         return self
@@ -13354,8 +13742,8 @@ class ToolOutcome(StrEnum):
 class ActivationEffectClaim(StrEnum):
     """What a store answered when asked to claim one activation effect (ADR-0306 §6:2).
 
-    **Two members, closed.** A stopped activation is not an answer: the claim raises
-    ``ClaimStopped`` instead.
+    **Closed, added to and never renamed**: ADR-0321 §4:9 added :attr:`ALREADY_USED`.
+    A stopped activation is not an answer: the claim raises ``ClaimStopped`` instead.
     """
 
     CLAIMED = "claimed"
@@ -13364,6 +13752,10 @@ class ActivationEffectClaim(StrEnum):
     ALREADY_DONE = "already_done"
     """A matching effect of a named activation is done, unknown or not yet written,
     so nothing was written and the call does not run (ADR-0306 §5:9 to §5:11)."""
+
+    ALREADY_USED = "already_used"
+    """A record of any activation already carries the claim's part key, so the part's
+    approval is spent, nothing was written and the call does not run (ADR-0321 §4:9)."""
 
 
 class ActivationEffect(BaseModel):
@@ -13395,6 +13787,9 @@ class ActivationEffect(BaseModel):
         outcome: The outcome, once known.
         reason: Why the effect was not done, where it was not.
         claimed_at: When the record was claimed.
+        part: For a call that runs under an approval, the question part it spends:
+            the asking round's id and the part number (ADR-0321 §4:9). ``None`` on
+            every other record, and always on a message.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -13410,6 +13805,7 @@ class ActivationEffect(BaseModel):
     outcome: ToolOutcome | None = None
     reason: NonBlankEncodableText | None = None
     claimed_at: UtcInstant
+    part: QuestionPart | None = None
 
     @property
     def is_call(self) -> bool:
@@ -13423,9 +13819,12 @@ class ActivationEffect(BaseModel):
         Raises:
             ValueError: If a call lacks its values digest or deciding decision, carries a
                 place or a position, or names no round; or a message lacks its place or
-                carries a call's fields.
+                carries a call's fields, its question part included (ADR-0321 §4:9).
         """
         call_fields = (self.capability, self.values_digest, self.decision_id)
+        if self.capability is None and self.part is not None:
+            msg = "a message's effect spends no question part (ADR-0321 §4:9)"
+            raise ValueError(msg)
         if self.capability is not None:
             if None in call_fields:
                 msg = "a call's effect carries its capability, values digest and decision"

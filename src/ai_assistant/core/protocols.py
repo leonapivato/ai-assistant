@@ -184,6 +184,7 @@ if TYPE_CHECKING:
         Placement,
         PlanExport,
         ProcessingStatus,
+        QuestionPart,
         RecipientGrant,
         RecordChunk,
         RecordedInvocation,
@@ -590,10 +591,12 @@ class ToolCallingCompleter(Protocol):
     added to ``ModelProvider`` or ``Message``, this Protocol does not inherit from
     either, and an object may implement both.
 
-    **One response, three parts** (ADR-0315 §3:1): its text, its calls and its episode
-    notes. How the provider's native shape carries the notes is the implementation's
-    (§3:3); at this seam they are a part of :class:`~ai_assistant.core.types.RoundResponse`
-    and never a call. No part asks for another round (§3:4).
+    **One response, in its parts** (ADR-0315 §3:1): its text, its calls and its episode
+    notes, and its naming of the calls that came back needing the user that its message
+    asks about (ADR-0321 §2:3). How the provider's native shape carries the notes and
+    the naming is the implementation's (ADR-0315 §3:3, ADR-0321 §2:3); at this seam each
+    is a part of :class:`~ai_assistant.core.types.RoundResponse` and never a call. No
+    part asks for another round (ADR-0315 §3:4).
 
     **Each round is asked afresh** (§2:6). The conversation handed in is rendered
     text, and no earlier tool exchange is replayed in the provider's native form, so
@@ -628,8 +631,10 @@ class ToolCallingCompleter(Protocol):
         concatenation of the text the model wrote, possibly empty; its ``calls`` are
         every call the model proposed, in the order the provider returned them, each
         with the provider's id, the name the model gave and its arguments as a JSON
-        object; and ``notes`` is ``None`` where the model wrote none. Nothing in the
-        response asks for another round (ADR-0315 §3:4).
+        object; ``notes`` is ``None`` where the model wrote none; and ``asks`` is every
+        name the model gave a call its message asks about, each once, in the order the
+        model first gave it, and empty where it named none (ADR-0321 §2:3). Nothing in
+        the response asks for another round (ADR-0315 §3:4).
 
         Args:
             messages: The round's rendered request, oldest first. Non-empty, not
@@ -646,7 +651,7 @@ class ToolCallingCompleter(Protocol):
             ModelError: If ``messages`` is empty, ends on a ``Role.ASSISTANT`` turn or
                 carries a ``Role.TOOL`` turn, two of ``tools`` share a name, or one of
                 them takes a name the implementation reserves for carrying the notes
-                and the mark (§2:7) — before any model is contacted, and with
+                and the naming (§2:7) — before any model is contacted, and with
                 ADR-0066 §3's disposition:
                 neither ``retryable`` nor ``routable``. Also raised where the
                 exchange with the provider fails or its response cannot be read as a
@@ -3171,12 +3176,13 @@ class PlanStore(Protocol):
     personal data and carries ADR-0004's obligations. Implementations persist
     **locally only**; none may write plan state to a remote service.
 
-    **Six members are what the phases use**, and ADR-0309 §5 retires the rest: the
+    **Seven members are what the phases use**, and ADR-0309 §5 retires the rest: the
     goal, attempt, interpretation, intended-action, quote, question and evidence
     members, the execution members, and ``claim_effect``. :meth:`record_stop` writes
     a stop record, :meth:`claim_activation_effect` and
     :meth:`finish_activation_effect` write an activation's effect records,
-    :meth:`activation_effects` reads them back, and :meth:`export` and :meth:`clear`
+    :meth:`activation_effects` reads them back by activation and :meth:`part_effects`
+    by question part (ADR-0321 §4:4, §4:11), and :meth:`export` and :meth:`clear`
     carry ADR-0004 §6's data rights. Every write is a **command and not a snapshot**,
     on ADR-0014 §5's argument: each names the change it makes, and none takes a
     stored record back in order to write it.
@@ -3240,12 +3246,19 @@ class PlanStore(Protocol):
            writes nothing.
         2. **The id.** Where the store already holds a record under ``effect.id``, it
            raises ``PlanningError`` and writes nothing.
-        3. **The backstop.** Where ``match`` is a tuple, and a record of an
+        3. **The spend.** Where ``effect.part`` is set, the call runs under an
+           approval and the part is its key (ADR-0321 §4:9). Where a record of **any**
+           activation already carries that part, whatever its outcome, it answers
+           ``ALREADY_USED`` and writes nothing, so two yeses to one part cannot both
+           run. ``match`` does not narrow this step.
+        4. **The backstop.** Where ``match`` is a tuple, and a record of an
            activation it names carries the same capability and values digest with an
-           outcome that is unknown, not yet written, or done (done only when
-           ``deliberate_repeat`` is false), it answers ``ALREADY_DONE`` and writes
-           nothing. A record not done never matches, and a message never matches.
-        4. Otherwise it writes ``effect`` and answers ``CLAIMED``.
+           outcome that is unknown, not yet written, or done, it answers
+           ``ALREADY_DONE`` and writes nothing. A record not done never matches, and a
+           message never matches. A deliberate repeat passes a done record; and a
+           deliberate repeat that runs under an approval, ``effect.part`` set, also
+           passes one whose outcome is unknown or not yet written (ADR-0321 §6:2).
+        5. Otherwise it writes ``effect`` and answers ``CLAIMED``.
 
         **The store reads no story** (§6:3). ``orchestration`` supplies ``match``: for a
         call to a capability that is not safe to repeat, this activation's id and the
@@ -3254,15 +3267,18 @@ class PlanStore(Protocol):
 
         Args:
             effect: The record to write. It carries no outcome, no reason and no
-                position.
+                position; its ``part`` is the claim's part key where the call runs
+                under an approval, and ``None`` otherwise.
             match: The activations whose effects this claim is matched against, or
                 ``None``.
             deliberate_repeat: Whether planning marked the call a deliberate repeat,
-                which passes a matching effect only where every one is done.
+                which passes a matching effect that is done, and, where the call runs
+                under an approval, one whose outcome is unknown or not yet written.
 
         Returns:
-            ``CLAIMED`` where the record was written; ``ALREADY_DONE`` where a
-            matching effect refused it.
+            ``CLAIMED`` where the record was written; ``ALREADY_USED`` where a record
+            already carries the part key; ``ALREADY_DONE`` where a matching effect
+            refused it.
 
         Raises:
             ClaimStopped: If the store holds a stop record for the activation.
@@ -3317,6 +3333,31 @@ class PlanStore(Protocol):
 
         Raises:
             PlanningError: If the backend fails.
+        """
+        ...
+
+    async def part_effects(self, parts: Sequence[QuestionPart], /) -> tuple[ActivationEffect, ...]:
+        """Return the effect records that carry any of ``parts``, of any activation.
+
+        The read side of the claim's part key (ADR-0321 §4:9). Authorizing's *not
+        already run* fact asks whether any record carries a part's key (§4:4), and the
+        repeat check whether a part a call was asked about has been used (§4:11). A
+        part may be spent in an activation no story of the reader's reaches, so this
+        reads across every activation, which :meth:`activation_effects` does not.
+
+        Finished or not, in the order they were claimed. A part no record carries
+        contributes nothing, and the store holds at most one record per part, since
+        :meth:`claim_activation_effect` writes none for a part already carried.
+
+        Args:
+            parts: The question parts to look for.
+
+        Returns:
+            The records carrying them, in claim order.
+
+        Raises:
+            PlanningError: If ``parts`` holds anything but a ``QuestionPart``, or the
+                backend fails.
         """
         ...
 
@@ -3969,12 +4010,13 @@ class EgressBinder(Protocol):
         ADR-0148 §1 that request must carry the whole binding before that ruling
         too, and this is where it is obtained.
 
-        **Everything is re-derived except two things, both taken from
+        **Everything is re-derived except five things, all taken from
         ``approved``**: each span's provenance, matched to the derived span by
-        :class:`~ai_assistant.core.types.EgressSpanLocator`, and the binding's
-        ``planned_with_external_content``. Nothing else in ``approved`` is read into
-        the result. Transcribing the provenance is forced: a recorded origin is a
-        fact about an act that happened before the confirmation was parked,
+        :class:`~ai_assistant.core.types.EgressSpanLocator`, the binding's
+        ``planned_with_external_content``, and the three facts the count below names.
+        Nothing else in ``approved`` is read into the result. Transcribing the
+        provenance is forced: a recorded origin is a fact about an act that happened
+        before the confirmation was parked,
         plausibly before a restart, so a member that took a fresh ``provenance``
         argument would receive an empty one, describe every span as
         ``SYSTEM_SELECTED``, and compare unequal to an approved binding whose spans
@@ -3992,6 +4034,13 @@ class EgressBinder(Protocol):
         asked about and approved. It is **not** re-derived, **not** defaulted and
         **not** omitted, and the fix a lane would otherwise reach for is to stop
         comparing.
+
+        **The count is five** (ADR-0152 §7:1 and ADR-0247 §7:1 as ADR-0321 §10 counts
+        them): ``coverage`` (ADR-0233 §4), ``closed_loop`` (ADR-0247 §7) and
+        ``forecast_reach`` (ADR-0321 §4:16) are transcribed from ``approved`` too, for
+        the same reason, each a fact about the composition that was shown and approved
+        that this member receives nothing to recompute. ``forecast_reach`` is what lets
+        an approved forecast read rebind equal to the binding that was shown.
 
         **Re-deriving and comparing uses ADR-0148 §6's determinism clause rather
         than working around it.** That clause forbids a binding being derived

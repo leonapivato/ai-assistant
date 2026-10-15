@@ -39,6 +39,7 @@ from ai_assistant.planning.activation_effects import (
     finished,
     matched_activations,
     requested_activations,
+    requested_parts,
     revalidated_claim,
 )
 from ai_assistant.planning.stops import revalidated_activation_id
@@ -48,7 +49,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import ToolOutcome
+    from ai_assistant.core.types import QuestionPart, ToolOutcome
 
 _OWNER_ONLY = 0o600
 
@@ -77,7 +78,13 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: deploy on a fresh data directory and says no lane writes a migration, a reader or a
 #: shim for a store written before it. ADR-0049 §1's loud refusal of a **newer** label
 #: binds entire, and the same refusal now covers every older one.
-_SCHEMA_VERSION = 11
+#:
+#: **Version 12 is ADR-0321 §4:9's**: an effect record gains the question part it
+#: spends, promoted to ``part_round`` and ``part_number`` so the claim and
+#: :meth:`SqlitePlanStore.part_effects` select on it. A version 11 file has no such
+#: columns, and ADR-0321 §9:2 has the deploy start from a fresh data directory, so it
+#: is refused on the same ground as every older one.
+_SCHEMA_VERSION = 12
 
 # The ``meta`` table is created first and on its own, so the schema version can be
 # read and any other version refused *before* a record table is created (ADR-0049
@@ -99,10 +106,12 @@ _RECORD_SCHEMA = (
     # ADR-0306 §6's effect records. The record is the blob; `activation_id` is a column
     # because the backstop and the read select on it, and `claimed_seq` because they
     # return records in claim order. No foreign key: a record names an activation and a
-    # decision, neither of which this store holds.
+    # decision, neither of which this store holds. `part_round` and `part_number` are the
+    # question part a call under an approval spends (ADR-0321 §4:9), NULL on every other
+    # record, because the claim and `part_effects` select on them across activations.
     "CREATE TABLE IF NOT EXISTS activation_effects("
     "id TEXT PRIMARY KEY, activation_id TEXT NOT NULL, claimed_seq INTEGER NOT NULL, "
-    "data TEXT NOT NULL)",
+    "data TEXT NOT NULL, part_round TEXT, part_number INTEGER)",
 )
 
 #: Each record column's ``(affinity, required NOT NULL)``. ``CREATE TABLE IF NOT
@@ -117,6 +126,10 @@ _RECORD_SCHEMA = (
 #: the schema declares it, never forbidden: ``id`` is a ``TEXT PRIMARY KEY``, which
 #: SQLite does not make implicitly ``NOT NULL``, so a file that hardens it is
 #: compatible and must not be refused.
+#: The columns every read of an effect record selects, in the order
+#: :func:`_checked_activation_effect` reconciles them with the record.
+_EFFECT_COLUMNS = "id, activation_id, data, part_round, part_number"
+
 _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
     "stopped_activations": {
         "activation_id": ("TEXT", False),
@@ -126,6 +139,8 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
         "activation_id": ("TEXT", True),
         "claimed_seq": ("INTEGER", True),
         "data": ("TEXT", True),
+        "part_round": ("TEXT", False),
+        "part_number": ("INTEGER", False),
     },
 }
 
@@ -759,13 +774,20 @@ class SqlitePlanStore:
             held = conn.execute(
                 "SELECT 1 FROM activation_effects WHERE id = ?", (record.id,)
             ).fetchone()
+            spent = record.part is not None and (
+                conn.execute(
+                    "SELECT 1 FROM activation_effects WHERE part_round = ? AND part_number = ?",
+                    (record.part.round, record.part.part),
+                ).fetchone()
+                is not None
+            )
             matched: list[ActivationEffect] = []
             if named:
                 marks = ", ".join("?" for _ in named)
                 matched = [
                     _checked_activation_effect(str(self._path), row)
                     for row in conn.execute(
-                        "SELECT id, activation_id, data FROM activation_effects "  # noqa: S608 — only placeholders are interpolated
+                        "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only placeholders are interpolated
                         f"WHERE activation_id IN ({marks}) ORDER BY claimed_seq ASC",
                         named,
                     ).fetchall()
@@ -777,13 +799,22 @@ class SqlitePlanStore:
                 stopped=_is_stopped(conn, record.activation_id),
                 held_ids=() if held is None else (record.id,),
                 matched=matched,
+                spent=spent,
             )
             if answer is ActivationEffectClaim.CLAIMED:
+                part = record.part
                 conn.execute(
-                    "INSERT INTO activation_effects(id, activation_id, claimed_seq, data) "
+                    "INSERT INTO activation_effects(id, activation_id, claimed_seq, data, "
+                    "part_round, part_number) "
                     "VALUES (?, ?, (SELECT COALESCE(MAX(claimed_seq), 0) + 1 "
-                    "FROM activation_effects), ?)",
-                    (record.id, record.activation_id, record.model_dump_json()),
+                    "FROM activation_effects), ?, ?, ?)",
+                    (
+                        record.id,
+                        record.activation_id,
+                        record.model_dump_json(),
+                        None if part is None else part.round,
+                        None if part is None else part.part,
+                    ),
                 )
         return answer
 
@@ -816,7 +847,7 @@ class SqlitePlanStore:
     ) -> None:
         with self._transaction(f"finish activation effect {effect_id!r}") as conn:
             row = conn.execute(
-                "SELECT id, activation_id, data FROM activation_effects WHERE id = ?",
+                "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects WHERE id = ?",  # noqa: S608 — only a constant is interpolated
                 (effect_id,),
             ).fetchone()
             held = None if row is None else _checked_activation_effect(str(self._path), row)
@@ -847,13 +878,43 @@ class SqlitePlanStore:
             return [
                 tuple(row)
                 for row in self._conn.execute(
-                    "SELECT id, activation_id, data FROM activation_effects "  # noqa: S608 — only placeholders are interpolated
+                    "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only placeholders are interpolated
                     f"WHERE activation_id IN ({marks}) ORDER BY claimed_seq ASC",
                     named,
                 ).fetchall()
             ]
         except sqlite3.Error as exc:
             raise _wrap("read activation effects", "", exc) from exc
+
+    async def part_effects(self, parts: Sequence[QuestionPart], /) -> tuple[ActivationEffect, ...]:
+        """Return the records carrying any of ``parts``, in claim order (ADR-0321 §4:9).
+
+        Raises:
+            PlanningError: If ``parts`` holds anything but a ``QuestionPart``, or the
+                backend fails.
+        """
+        named = requested_parts(parts)
+        if not named:
+            return ()
+        async with self._lock:
+            rows = await _run_to_completion(self._part_effects_sync, named)
+        return tuple(_checked_activation_effect(str(self._path), row) for row in rows)
+
+    def _part_effects_sync(self, named: tuple[QuestionPart, ...]) -> list[tuple[Any, ...]]:
+        keys = ", ".join("(?, ?)" for _ in named)
+        values = [value for one in named for value in (one.round, one.part)]
+        try:
+            return [
+                tuple(row)
+                for row in self._conn.execute(
+                    "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only placeholders are interpolated
+                    f"WHERE (part_round, part_number) IN (VALUES {keys}) "
+                    "ORDER BY claimed_seq ASC",
+                    values,
+                ).fetchall()
+            ]
+        except sqlite3.Error as exc:
+            raise _wrap("read activation effects by question part", "", exc) from exc
 
     # --- data rights (ADR-0004) -------------------------------------------
 
@@ -894,7 +955,7 @@ class SqlitePlanStore:
             acted = [
                 _checked_activation_effect(str(self._path), row)
                 for row in conn.execute(
-                    "SELECT id, activation_id, data FROM activation_effects "
+                    "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only a constant is interpolated
                     "ORDER BY claimed_seq ASC"
                 ).fetchall()
             ]
@@ -942,12 +1003,13 @@ def _wrap(action: str, subject: str, exc: sqlite3.Error) -> PlanningError:
 def _checked_activation_effect(path: str, row: Sequence[Any]) -> ActivationEffect:
     """Decode one effect record and refuse a blob that disagrees with its columns.
 
-    The id and the activation are promoted, and the backstop and the read select on
-    them, so each is reconciled with the record a tampered file could answer with.
+    The id, the activation and the question part are promoted, and the backstop, the
+    spend and the reads select on them, so each is reconciled with the record a
+    tampered file could answer with.
 
     Args:
         path: The store's path, for the message.
-        row: ``(id, activation_id, data)``.
+        row: ``(id, activation_id, data, part_round, part_number)``.
 
     Returns:
         The reconciled record.
@@ -960,11 +1022,18 @@ def _checked_activation_effect(path: str, row: Sequence[Any]) -> ActivationEffec
     except ValidationError as exc:
         msg = f"the plan store holds an activation effect that no longer validates: {exc}"
         raise PlanningError(msg) from exc
-    promoted = (str(row[0]), str(row[1]))
-    if promoted != (record.id, record.activation_id):
+    promoted = (str(row[0]), str(row[1]), row[3], row[4])
+    part = record.part
+    held = (
+        record.id,
+        record.activation_id,
+        None if part is None else part.round,
+        None if part is None else part.part,
+    )
+    if promoted != held:
         msg = (
             f"the plan store at {path!r} holds an activation effect indexed at {promoted} "
-            f"whose record names {(record.id, record.activation_id)}; the store is corrupt"
+            f"whose record names {held}; the store is corrupt"
         )
         raise PlanningError(msg)
     return record
