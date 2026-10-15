@@ -1,6 +1,6 @@
 # 313. Spoken conversation retires at the cutover, an event returns how it ended, and the establishing act leaves the engine
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0321 (§5:2 whole; §8's ADR-0235 row's *the authority milestone redoes the act*)
 - Date: 2026-10-13
 - Scope: the phases after understanding, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): the decision [ADR-0309](0309-the-phases-are-built-beside-the-old-path-and-one-cutover-switches-the-controller-over-deletes-the-old-path-and-goes-live-in-one-deploy.md) §5:11 asks for, on each `AssistantEngine` member that stays and whose signature or result reaches a type its §5 retires, and the owner's ruling that spoken conversation retires at the cutover.
 - Dependency: ADR-0306, ADR-0307, ADR-0308, ADR-0309 and ADR-0312, all Accepted.
@@ -18,6 +18,7 @@
   [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) (§7:8's delivery semantics);
   [ADR-0283](0283-a-channels-history-is-its-episodes-and-the-turn-index-is-retired.md) (§6's delivery members, argument and rows: §6:1's `record_delivery` and `deliveries`, §6:2's `delivery`, §6:3–§6:5, §6:7's delivery rows and §6:8's `record_delivery`);
   [ADR-0309](0309-the-phases-are-built-beside-the-old-path-and-one-cutover-switches-the-controller-over-deletes-the-old-path-and-goes-live-in-one-deploy.md) (§5:1's list, in classing `converse_spoken`, `grantable_decisions` and `establish_recipient_grant` as reworked; §5:11's naming of `converse_spoken`'s `SpokenTurn`).
+- Partially superseded: 2026-10-15 by ADR-0321 — §5:2 whole, since the grant listing and revoke members leave; and §8's ADR-0235 row's *the authority milestone redoes the act*, since the act is replaced by scoped delegations and not redone (ADR-0321 §7:1). Every other clause stands. This replacement takes effect on ratification of ADR-0321. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 315. A round that made a call brings another round, and the mark asking for one retires
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0321 (§3:1 and §5's `RoundResponse`, `PlanningRound` and pydantic-ai completer rows, in the additions alone: the calls a round's message asks about)
 - Date: 2026-10-13
 - Scope: the phases, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): when planning's next round runs. It corrects [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md) §8:1 after planning was measured dropping the later part of its own plan ([#2892](https://github.com/leonapivato/ai-assistant/issues/2892)).
 - Authorization: the owner ruled this decision's content on 2026-10-13. The dispatcher assigned 0315 and authorized ratifying it once its reviews are green.
@@ -10,6 +10,7 @@
   §8:1 whole; §2:1's fourth part, the mark; §2:2's and §2:7's mark; §3:4's *planning marks
   another round*; §5:3's *a refused call brings a round*, for a tidy-up alone; §8:3's
   *whatever its mark*; and §10's `RoundResponse` and `PlanningRound` rows, in the mark alone.
+- Partially superseded: 2026-10-15 by ADR-0321 — §3:1 and §5's `RoundResponse`, `PlanningRound` and pydantic-ai completer rows, in the additions alone: a response also names the calls its message asks about, the round records them, and the completer's reserved tool carries the naming beside the notes (ADR-0321 §2:3, §2:8). Every other clause stands. This replacement takes effect on ratification of ADR-0321. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
