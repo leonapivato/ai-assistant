@@ -63,16 +63,12 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     ActionRequest,
-    CanonicalDestination,
     CapabilityEffect,
     CapabilityResult,
     ChannelIdentity,
     ChannelInput,
     CostBasis,
     DataTier,
-    DestinationProtocol,
-    DestinationTrust,
-    DestinationTrustRecord,
     FeedbackEvent,
     FeedbackKind,
     Idempotency,
@@ -115,11 +111,9 @@ from ai_assistant.orchestration import (
     ConnectionOperations,
     ConsolidationStage,
     ConversationLifecycle,
-    DestinationTrustOperations,
     Engine,
     GrantOperations,
     MemoryWriteStage,
-    RecipientGrantOperations,
     UpcomingEventStage,
 )
 from ai_assistant.orchestration import traces as operation_traces
@@ -148,7 +142,6 @@ from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls
 from ai_assistant.orchestration.traces import OperationTraces
 from ai_assistant.permissions import (
     SqliteAuditTrail,
-    SqliteRecipientGrantStore,
 )
 from ai_assistant.planning import (
     InMemoryPlanStore,
@@ -160,11 +153,9 @@ from ai_assistant.service import configuration
 from ai_assistant.service.configuration import ConfigurationStamp
 from ai_assistant.testing import (
     FakeActionPolicy,
-    FakeAssistantEngine,
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeConversationStore,
-    FakeDestinationTrustStore,
     FakeEmbedder,
     FakeFeedbackProcessor,
     FakeFetcher,
@@ -178,8 +169,6 @@ from ai_assistant.testing import (
     FakeNotificationWriter,
     FakePlanStore,
     FakeReader,
-    FakeRecipientGrants,
-    FakeRecipientGrantStore,
     FakeSourceGrants,
     FakeSourceGrantStore,
     FakeSourceReadRecorder,
@@ -189,7 +178,6 @@ from ai_assistant.testing import (
     FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
-    recipient_grant,
     source_grant,
 )
 from ai_assistant.tools.builtin import CurrentTime
@@ -622,23 +610,6 @@ async def _engine(now: Clock) -> None:
             id_factory=lambda: "grant-1",
             clock=lambda: _AWARE,
         ),
-        # The recipient-grant operations read a clock of their own — the instant a
-        # revoking record carries (ADR-0235 §7) — so this module wires it from the
-        # same seam every other one here comes from.
-        recipient_grant_operations=RecipientGrantOperations(
-            store=FakeRecipientGrantStore(),
-            id_factory=lambda: "recipient-grant-1",
-            clock=lambda: _AWARE,
-        ),
-        # The destination-trust operations read a clock of their own — the instant of
-        # the user's act, stamped on the record and on a revocation (ADR-0242 §2, §4)
-        # — so this module wires it from the same seam every other one here comes from.
-        destination_trust_operations=DestinationTrustOperations(
-            store=FakeDestinationTrustStore(),
-            trail=FakeAuditTrail(),
-            id_factory=lambda: "destination-trust-1",
-            clock=lambda: _AWARE,
-        ),
         # No clock seam of its own: a connection record carries no instant at all
         # (ADR-0149 §3, ADR-0151 §4), which is why this module has nothing to assert
         # about one and why ``recent_connection_acts`` answers in the store's own
@@ -762,16 +733,6 @@ async def _fake_notification_store(now: Clock) -> None:
     await FakeNotificationStore(now=now).purge()
 
 
-async def _fake_recipient_grant_store(now: Clock) -> None:
-    """The standing listing reads the clock to judge which grants are still live."""
-    await FakeRecipientGrantStore(now=now).standing()
-
-
-async def _fake_recipient_grants(now: Clock) -> None:
-    """A cover query reads the clock to judge the grant's expiry."""
-    await FakeRecipientGrants(now=now).covering(_request())
-
-
 async def _rule_based_processor(now: Clock) -> None:
     """Every proposal the rules produce carries a provenance stamped from the clock."""
     await RuleBasedFeedbackProcessor(now=now).process(_feedback())
@@ -863,77 +824,6 @@ async def _sqlite_plan_store(now: Clock) -> None:
             store.close()
 
 
-async def _sqlite_recipient_grant_store(now: Clock) -> None:
-    """The standing listing reads the clock to judge which grants are still live."""
-    with tempfile.TemporaryDirectory() as directory:
-        store = SqliteRecipientGrantStore(
-            path=Path(directory) / "grants.db", max_outstanding=64, now=now
-        )
-        try:
-            await store.standing()
-        finally:
-            store.close()
-
-
-async def _recipient_grant_operations(now: Clock) -> None:
-    """The operations read the clock for the instant a revocation carries (ADR-0235 §7).
-
-    Driven through the **revocation**, the one surface read left that takes a reading
-    since the establishing act and its listing left the surface (ADR-0313 §5:1). The
-    revoking record is stamped after the outstanding read, so the grant seeded here is
-    what makes the reading happen.
-    """
-    await RecipientGrantOperations(
-        store=FakeRecipientGrantStore([recipient_grant(grant_id="g-1")]),
-        id_factory=_goal_ids("g"),
-        clock=now,
-    ).revoke_recipient_grant("g-1")
-
-
-async def _destination_trust_operations(now: Clock) -> None:
-    """The operations read the clock for the instant of the user's act (ADR-0242 §2, §4).
-
-    Driven through the **revocation**, which is the cheapest of the three reads to
-    reach: the act needs a decision on the trail carrying a whole ``EgressBinding``,
-    and the listing reads no clock at all. ADR-0242 §4 has the clock read *after* the
-    live match, so the record seeded here is what makes the reading happen.
-    """
-    await DestinationTrustOperations(
-        store=FakeDestinationTrustStore(
-            [
-                DestinationTrustRecord(
-                    id="t-1",
-                    destinations=(
-                        CanonicalDestination(
-                            protocol=DestinationProtocol.SMTP, canonical="alice@example.com"
-                        ),
-                    ),
-                    trust=DestinationTrust.USER_CHOSEN,
-                    established_at=_AWARE,
-                )
-            ]
-        ),
-        trail=FakeAuditTrail(),
-        id_factory=lambda: "t-2",
-        clock=now,
-    ).revoke_destination_trust("t-1")
-
-
-async def _fake_assistant_engine(now: Clock) -> None:
-    """The canonical fake reads a clock of its own for a revoking record's instant.
-
-    **Guarded at the read rather than at construction**, which is what makes this
-    seam's ``owner`` a run-time expression at all: ``recipient_grant_clock`` is a
-    public lever a test replaces, so a wrapper installed in ``__init__`` would be
-    discarded by the next assignment. The seam is driven through the promoted
-    revocation, as the concrete one above is.
-    """
-    engine = FakeAssistantEngine()
-    engine.recipient_grants = FakeRecipientGrantStore([recipient_grant(grant_id="g-1")])
-    engine.recipient_grant_clock = now
-    await engine.revoke_recipient_grant("g-1")
-
-
 async def _store_health(now: Clock) -> None:
     """The report stamps the instant it was taken; synchronous, as the reader is."""
     with tempfile.TemporaryDirectory() as directory:
@@ -1003,8 +893,6 @@ SEAMS = [
     Seam("FakeFeedbackProcessor", _fake_feedback_processor, ClockReadingError),
     Seam("FakeNotificationOutbox", _fake_notification_outbox, NotificationOutboxError),
     Seam("FakeNotificationStore", _fake_notification_store, NotificationStoreError),
-    Seam("FakeRecipientGrantStore", _fake_recipient_grant_store, ClockReadingError),
-    Seam("FakeRecipientGrants", _fake_recipient_grants, ClockReadingError),
     Seam("RuleBasedFeedbackProcessor", _rule_based_processor, ClockReadingError),
     Seam("SqliteAuditTrail", _sqlite_audit_trail, AuditError),
     Seam("SqliteConversationStore", _sqlite_conversation_store, ConversationStoreError),
@@ -1013,22 +901,6 @@ SEAMS = [
     Seam("SqliteNotificationOutbox", _sqlite_notification_outbox, NotificationOutboxError),
     Seam("SqliteNotificationStore", _sqlite_notification_store, NotificationStoreError),
     Seam("SqlitePlanStore", _sqlite_plan_store, PlanningError),
-    Seam("SqliteRecipientGrantStore", _sqlite_recipient_grant_store, ClockReadingError),
-    # ADR-0235 §3's three clock reads — the listing's one-per-window instant, the
-    # answer's stamp and the revoking record's — behind one guard at the store, and
-    # translated to `orchestration`'s own error: ADR-0026 §4 gives the failure to the
-    # *stage*, because `core/errors.py` defines none for this package.
-    Seam("RecipientGrantOperations", _recipient_grant_operations, PlanningError),
-    # ADR-0242 §2 and §4's two clock reads — the trust record's ``established_at`` and
-    # the instant a revocation carries — behind one guard, and translated to
-    # `orchestration`'s own error for ``RecipientGrantOperations``' reason exactly.
-    Seam("DestinationTrustOperations", _destination_trust_operations, PlanningError),
-    # The canonical fake's own reading of the same act, guarded at the **read**
-    # because `recipient_grant_clock` is a public lever a consumer's test replaces —
-    # so a wrap at construction would be discarded by the next assignment. It
-    # translates as the concrete seam does, because a consumer's test against a
-    # non-conforming clock must not pass here and fail against a hub.
-    Seam("FakeAssistantEngine", _fake_assistant_engine, PlanningError),
     Seam("StoreHealthReader", _store_health, ClockReadingError),
     Seam("UpcomingEventStage", _upcoming, ClockReadingError),
 ]
@@ -1326,12 +1198,9 @@ PROPAGATED: Final[dict[str, str]] = {
     "FakeFeedbackProcessor": (
         "documented at ``testing/learning.py:207``, doubling a `learning` seam that propagates"
     ),
-    "FakeRecipientGrantStore": _UNDECLARED,
-    "FakeRecipientGrants": _UNDECLARED,
     "RuleBasedFeedbackProcessor": (
         "documented at ``learning/processor.py:146``, and `learning` owns no error class"
     ),
-    "SqliteRecipientGrantStore": _UNDECLARED,
     "StoreHealthReader": _UNDECLARED,
     "UpcomingEventStage": _UNDECLARED,
 }

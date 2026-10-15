@@ -1,8 +1,8 @@
 """The one shape a detached, validated snapshot of a record takes in this package.
 
-Two stores here take a snapshot of a caller's record and keep it — the audit
-trail's ``record`` and ``claim_invocation``, and the recipient-grant store's
-``record`` — and both owe the same two things about it. **Read the field state
+The audit trail takes a snapshot of a caller's record and keeps it — in its
+``record`` and its ``claim_invocation`` — and both owe the same two things about
+it. **Read the field state
 through the class**, because ``model_dump`` is an ordinary overridable method and
 an instance can shadow it through ``__dict__``, so a value that describes itself
 falsely would otherwise become the record. And **rebuild recursively**, because a

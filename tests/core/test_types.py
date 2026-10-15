@@ -1372,8 +1372,8 @@ def test_a_record_whose_model_dump_lies_is_fingerprinted_on_its_real_field_state
     """``model_dump`` is an ordinary attribute, and this fingerprint is a key.
 
     An instance can shadow the method through ``__dict__`` — the bypass
-    ``frozen=True`` leaves open, and the one ``permissions/_detachment.py`` and
-    :attr:`RecipientGrant.subject_digest` already close about the same method — so
+    ``frozen=True`` leaves open, and the one ``permissions/_detachment.py``
+    already closes about the same method — so
     a projection built by *calling* it would fingerprint whatever that mapping
     described rather than the record. The
     consequence here is ADR-0078 §7's: the coordinator digests at admission and

@@ -72,12 +72,10 @@ from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.connections import ConnectionOperations
 from ai_assistant.orchestration.consolidation import ConsolidationStage
 from ai_assistant.orchestration.conversations import ConversationLifecycle
-from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
 from ai_assistant.orchestration.grants import GrantOperations
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools
 from ai_assistant.orchestration.recall import RecallStage
-from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
 from ai_assistant.orchestration.understanding import (
     RecentEpisodes,
     UnderstandingStage,
@@ -90,10 +88,8 @@ from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeConversationStore,
-    FakeDestinationTrustStore,
     FakeModelProvider,
     FakePlanStore,
-    FakeRecipientGrantStore,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeStoryStore,
@@ -311,17 +307,6 @@ def build_phases_world(
             store=FakeSourceGrantStore(),
             sources=(),
             id_factory=lambda: "grant-1",
-            clock=lambda: NOW,
-        ),
-        recipient_grant_operations=RecipientGrantOperations(
-            store=FakeRecipientGrantStore(),
-            id_factory=lambda: "recipient-grant-1",
-            clock=lambda: NOW,
-        ),
-        destination_trust_operations=DestinationTrustOperations(
-            store=FakeDestinationTrustStore(),
-            trail=trail,
-            id_factory=lambda: "destination-trust-1",
             clock=lambda: NOW,
         ),
         connection_operations=ConnectionOperations(provisioner=FakeConnectionProvisioner()),

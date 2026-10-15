@@ -89,7 +89,6 @@ from ai_assistant.core.errors import (
     UngrantableSourceError,
     UnknownConnectionError,
     UnresolvedEvidenceError,
-    UntrustableDestinationError,
     UnusableIdentityError,
 )
 from ai_assistant.core.protocols import AssistantEngine
@@ -1131,8 +1130,9 @@ def near_ceiling_limit(candidate: NotificationCandidate) -> int:
 #: ``resume``, ``pending_confirmations``, ``cancel_read``".
 RETIRED_TURN_MEMBERS: Final = ("converse", "resume", "cancel_read", "pending_confirmations")
 
-#: The old path's listing, question and authorization members (ADR-0309 §5:1) and the
-#: recipient grant's establishing act with its listing (ADR-0313 §5:1), which leave
+#: The old path's listing, question and authorization members (ADR-0309 §5:1), the
+#: recipient grant's establishing act with its listing (ADR-0313 §5:1), and the
+#: recipient-grant and destination-trust members (ADR-0321 §7:1, §7:2), which leave
 #: the surface after its turn members.
 RETIRED_MEMBERS: Final = (
     "goals",
@@ -1146,6 +1146,12 @@ RETIRED_MEMBERS: Final = (
     "forget_question",
     "grantable_decisions",
     "establish_recipient_grant",
+    "standing_recipient_grants",
+    "recent_recipient_grants",
+    "revoke_recipient_grant",
+    "establish_destination_trust",
+    "standing_destination_trust",
+    "revoke_destination_trust",
 )
 
 #: The one triple ADR-0206 §3 places as speakable on a channel of unbounded
@@ -1571,12 +1577,12 @@ class AssistantEngineContract(
     def test_the_old_paths_listing_and_grant_members_are_gone(
         self, engine: AssistantEngine, member: str
     ) -> None:
-        """ADR-0309 §5:1 and ADR-0313 §5:1: these leave every implementation too.
+        """ADR-0309 §5:1, ADR-0313 §5:1 and ADR-0321 §7: these leave every implementation.
 
         :meth:`test_the_old_paths_turn_members_are_gone`'s clause over the old path's
-        goal, question and authorization members and the recipient grant's
-        establishing act, on its reason: a member an implementation kept would be a
-        door no contract describes.
+        goal, question and authorization members, the recipient grant's establishing
+        act, and the recipient-grant and destination-trust surfaces, on its reason: a
+        member an implementation kept would be a door no contract describes.
         """
         assert not hasattr(AssistantEngine, member)
         assert not hasattr(engine, member)
@@ -4377,191 +4383,6 @@ class AssistantEngineContract(
     @abstractmethod
     def overfull_spending(self) -> AssistantEngine:
         """A subject whose contract limit the two totals exceed."""
-
-    # --- ADR-0235 §7: the recipient-grant surface's three --------------------
-    #
-    # The clauses that bind **every** implementation over a subject holding nothing,
-    # which is the state every deployment starts in and the one a client meets first.
-    # The establishing act and its listing left the surface (ADR-0313 §5:1). What a
-    # *populated* store does to each — the ceiling, the race — is the concrete
-    # engine's, in `test_recipient_grant_operations.py`.
-
-    async def test_the_recipient_grant_reads_answer_empty_rather_than_refusing(
-        self, engine: AssistantEngine
-    ) -> None:
-        """A store holding nothing is the ordinary state and never an error.
-
-        And every enumeration is a **tuple**, on ADR-0085 §3b's rule: a caller that
-        mutated a returned page has changed nothing about the engine's state and may
-        believe otherwise.
-        """
-        assert await engine.standing_recipient_grants() == ()
-        assert await engine.recent_recipient_grants() == ()
-
-    async def test_revoking_a_grant_no_store_holds_answers_none(
-        self, engine: AssistantEngine
-    ) -> None:
-        """``None`` means the store holds no outstanding record with that id (§7).
-
-        It is the honest answer to a caller arriving after somebody else's
-        revocation as well as to one naming an id nothing ever held, and ADR-0235 §7
-        makes the two one outcome deliberately: what the user asked for is true
-        either way.
-        """
-        assert await engine.revoke_recipient_grant("g-nothing-holds") is None
-
-    async def test_a_blank_recipient_grant_identifier_is_refused_locally(
-        self, engine: AssistantEngine
-    ) -> None:
-        """ADR-0235 §4: the identifier argument undergoes ``Identifier`` validation.
-
-        "Before any I/O", so a wire client refuses the same values without a round
-        trip — the obligation is inherited from ``AssistantEngine``'s own second
-        clause rather than restated by ADR-0235, and this is where it is checked on
-        the argument that decision adds and the surface still carries.
-        """
-        with pytest.raises(ValueError, match=r"\w"):
-            await engine.revoke_recipient_grant("  ")
-
-    @pytest.mark.parametrize("bad", [0, -1, 2**63])
-    async def test_a_non_positive_recipient_grant_limit_is_refused_locally(
-        self, engine: AssistantEngine, bad: int
-    ) -> None:
-        """Strictly positive, on ``recent_grants``' reason and in every implementation.
-
-        ADR-0085 §9 admits a page argument in ``[0, 2**63)`` while the stores behind
-        both reads require a strictly positive limit, so ``limit=0`` is well-formed
-        under the surface rule and refused by the store — and §9 forbids either
-        implementation from being silently more permissive than the other.
-        """
-        with pytest.raises(ValueError, match=r"\w"):
-            await engine.recent_recipient_grants(limit=bad)
-
-    @pytest.mark.parametrize("bad", [1.5, True, "1", None])
-    async def test_a_recipient_grant_limit_that_is_not_an_integer_is_refused_locally(
-        self, engine: AssistantEngine, bad: object
-    ) -> None:
-        """The type, checked before the range and before any I/O."""
-        with pytest.raises(TypeError, match=r"\w"):
-            await engine.recent_recipient_grants(limit=bad)  # type: ignore[arg-type]
-
-    async def test_the_standing_listing_takes_no_page_argument(self) -> None:
-        """ADR-0235 §7: no ``limit``, for ``connected_accounts``' stated reason.
-
-        "A truncated answer to *what do I authorise* is a false answer rather than a
-        partial one." A signature assertion rather than a behavioural one, because
-        the clause is about what the surface *offers*: an implementation that
-        accepted one and ignored it would pass every behavioural case here.
-        """
-        taken = set(inspect.signature(AssistantEngine.standing_recipient_grants).parameters)
-
-        assert taken == {"self"}
-
-    # --- ADR-0242 §2, §4: the destination-trust surface's three --------------
-    #
-    # ADR-0242 §13 obliges this suite arms "for the three new members, beside the five
-    # ADR-0235 §12 added", and the clauses below are the ones that bind **every**
-    # implementation over a subject holding nothing — the state every deployment starts
-    # in and the one a client meets first, since ADR-0238 §14 leaves the store empty
-    # until a user performs the act. What a *populated* store does to each — the three
-    # availability conditions against a real trail, the duplicate-set subclass, the
-    # revocation's instant — is the concrete operations object's, in
-    # `test_destination_trust_operations.py` and the store's own conformance suite,
-    # because those clauses are about a trail and a store a fake engine seeds itself.
-
-    async def test_the_standing_trust_read_answers_empty_rather_than_refusing(
-        self, engine: AssistantEngine
-    ) -> None:
-        """A store holding nothing is the ordinary state and never an error (§4).
-
-        It is `origin/main`'s state and ADR-0242's own last consequence — "``app``'s
-        standing comment stops being true of destination trust once this ADR's lane
-        lands" — so an implementation that refused here would make every fresh
-        deployment's first listing a fault. The answer is a **tuple**, on ADR-0085 §3b's
-        rule: a caller that mutated a returned page has changed nothing about the
-        engine's state and may believe otherwise.
-        """
-        assert await engine.standing_destination_trust() == ()
-
-    async def test_revoking_a_trust_record_no_store_holds_answers_false(
-        self, engine: AssistantEngine
-    ) -> None:
-        """§4: ``False`` where no **live** record carries that id, having written nothing.
-
-        It is the honest answer to a caller arriving after somebody else's revocation as
-        well as to one naming an id nothing ever held, and §4 makes the two one outcome
-        deliberately: "by the time that call completes the store holds no live record
-        with that id, which is exactly what ``False`` means here — and **the user's
-        recourse succeeded**". No implementation retries, revokes twice, or reports the
-        loss as a fault.
-        """
-        assert await engine.revoke_destination_trust("t-nothing-holds") is False
-        assert await engine.standing_destination_trust() == ()
-
-    async def test_a_trust_act_on_a_decision_the_trail_does_not_hold_is_refused(
-        self, engine: AssistantEngine
-    ) -> None:
-        """§1's first availability condition, and the type §1 names for every refusal.
-
-        ``UntrustableDestinationError`` and **not** ``UngrantableActError`` reused: that
-        class's ratified meaning was ADR-0235 §3's ordered seven and a caller catching it
-        meant *the recipient-grant act was unavailable*, until it retired at the
-        cutover. "Two acts with different
-        recourses answering to one handler is what ADR-0235 §7's two-vocabulary rule
-        refuses one noun over."
-
-        And an ``AssistantError`` rather than a bare ``ValueError``, for the reason
-        ``UngrantableActError`` stated: a ``ValueError`` escapes a command's
-        ``except (AssistantError, TransportError)`` boundary as an uncaught traceback
-        with no controlled exit code, which ADR-0042 §7 forbids.
-        """
-        with pytest.raises(UntrustableDestinationError, match=r"\w"):
-            await engine.establish_destination_trust("d-nothing-holds")
-
-        assert await engine.standing_destination_trust() == (), (
-            "§1: the operation writes nothing to any store on any refusal"
-        )
-
-    @pytest.mark.parametrize("call", ["establish_destination_trust", "revoke_destination_trust"])
-    async def test_a_blank_destination_trust_identifier_is_refused_locally(
-        self, engine: AssistantEngine, call: str
-    ) -> None:
-        """§2: both identifier arguments undergo ``Identifier`` validation before any I/O.
-
-        The obligation is **inherited rather than restated** — ``AssistantEngine``'s own
-        second clause already puts it on every identifier argument, and ADR-0242 §2 adds
-        no validation rule of its own and mints no error for a blank id. This is where it
-        is checked on the two arguments that decision adds, so a wire client refuses the
-        same values without a round trip.
-        """
-        with pytest.raises(ValueError, match=r"\w"):
-            await getattr(engine, call)("  ")
-
-    async def test_the_trust_act_takes_one_argument_and_offers_no_substitution(
-        self,
-    ) -> None:
-        """§1, §2: **no** ``trust``, ``destinations``, ``id`` or instant argument.
-
-        "There is no parameter through which a caller could substitute any of them" —
-        ADR-0235 §4's clause read one act over, and ADR-0021 §3's move of removing the
-        capability rather than forbidding it. A signature assertion because the clause is
-        about what the surface *offers*: an implementation accepting a destination set and
-        ignoring it would pass every behavioural case here, and one accepting an expiry
-        would be the ``core/types.py`` change §14 defers.
-        """
-        taken = set(inspect.signature(AssistantEngine.establish_destination_trust).parameters)
-
-        assert taken == {"self", "decision_id"}
-
-    async def test_the_standing_trust_listing_takes_no_page_argument(self) -> None:
-        """§4: no ``limit``, for ``standing_recipient_grants``' stated reason.
-
-        "A truncated answer to *what do I trust* is a false answer rather than a partial
-        one." A signature assertion for that member's reason exactly.
-        """
-        taken = set(inspect.signature(AssistantEngine.standing_destination_trust).parameters)
-
-        assert taken == {"self"}
 
 
 def backwards_clock() -> Callable[[], datetime]:

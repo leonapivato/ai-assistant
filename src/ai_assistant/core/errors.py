@@ -968,34 +968,21 @@ class InvalidResolutionError(AuditError):
 class InvalidAuthorisationError(AuditError):
     """A decision's standing authorisation was not validated (ADR-0193 §6).
 
-    Raised by :meth:`~ai_assistant.core.protocols.AuditTrail.record` on a
-    **route-(b) egress decision** — a non-resolving ``ALLOW`` whose
-    ``egress_binding`` is not ``None`` and whose ``authorised_by`` is set — where
-    any of ADR-0193 §6's eight checks fails: the pointer named no outstanding
-    grant; the grant it named does not cover the decision (a different
-    ``ToolDefinition``, a different ``BoundAccount``, a destination set that does
-    not contain every member of the decision's); the grant was not live as of the
-    decision's own ``decided_at``; the binding is an ``OriginUnrecordedBinding``
-    or carries ``planned_with_external_content``; the ruling's
-    ``authorised_subject`` is unset or does not equal the digest ``record``
-    recomputes from the record the store returned; or the seam could not be read.
-    It is also raised on a **resolving** ``ALLOW`` carrying an
-    ``authorised_subject`` at all, which is a decision claiming an authorisation
-    of a kind it does not have.
+    Raised by :meth:`~ai_assistant.core.protocols.AuditTrail.record` on an
+    ``ALLOW`` whose ruling carries an ``authorised_subject``, resolving or not: no
+    recipient grant is left to fingerprint (ADR-0321 §7:7), so such a decision
+    claims an authorisation of a kind nothing can now establish. It is also raised
+    on a **standing egress decision** — a non-resolving ``ALLOW`` whose
+    ``egress_binding`` is not ``None`` and whose ``authorised_by`` is set — whose
+    binding is an ``OriginUnrecordedBinding``, does not carry exactly one of
+    ``closed_loop`` and ``forecast_reach``, or names an account whose reference is
+    not the pointer (ADR-0247 §2, ADR-0272 §1).
 
     **Its own class beside** :class:`DuplicateDecisionError` **and**
     :class:`InvalidResolutionError`, for their reason: a replayed write, a
     substituted resolution subject and an unvalidated standing pointer are three
     facts an operator must be able to tell apart, and no lane widens
     :class:`InvalidResolutionError`'s stated subject to cover this one
-    (ADR-0193 §6).
-
-    **A store fault from the resolution seam arrives here too, chained.** Where
-    :meth:`~ai_assistant.core.protocols.RecipientGrantResolution.outstanding`
-    raises :class:`RecipientGrantError`, ``record`` refuses with this error raised
-    ``from`` it — so a caller keeps the one :class:`AuditError` handler while an
-    operator keeps the two facts apart, "the pointer named no outstanding grant"
-    and "the seam could not be read", in the message and in ``__cause__``
     (ADR-0193 §6).
     """
 
@@ -1213,212 +1200,6 @@ class InvalidGrantError(GrantError):
     store reads no clock, so a host clock corrected backwards would otherwise make
     a grant permanently unrevokable — the one property this contract exists to
     deliver, defeated by an invariant that was protecting nothing (ADR-0097 §4).
-    """
-
-
-class RecipientGrantError(AssistantError):
-    """A recipient-grant store could not be read or written (ADR-0193 §1).
-
-    The store fault, and the base for the refusal below, so a caller that only
-    wants "the recipient-grant store could not answer" gets one handler.
-
-    **A component that cannot get an answer from this seam fails closed**
-    (ADR-0193 §1's last clause). A
-    :meth:`~ai_assistant.core.protocols.RecipientGrants.covering` that raises this
-    is **not** a grant: no policy proceeds on a stale answer, on an earlier lookup
-    or on an absent one, and none reaches a route-(b) ``ALLOW``. That is
-    :class:`GrantError`'s own clause read one store over, and the direction is the
-    same one ADR-0016 §4's ``UNKNOWN`` cost already rules for the neighbouring
-    case.
-
-    **Deliberately not** :class:`GrantError`, whose stated subject is the
-    *source*-grant store (ADR-0193 §1). One handler catching both would join the
-    two seams ADR-0097 §7 keeps apart — a source grant may never authorise a send
-    and a recipient grant may never authorise a read — and the two fail closed
-    onto different things: a source fault stops a read of the user's files, and
-    this one stops a send.
-    """
-
-
-class InvalidRecipientGrantError(RecipientGrantError):
-    """A recipient-grant store refused the record it was handed (ADR-0193 §1).
-
-    Raised by :meth:`~ai_assistant.core.protocols.RecipientGrantStore.record`: a
-    duplicate id (the store is write-once), a **granting** record duplicating an
-    outstanding grant's ``tool``, ``account`` and ``destinations``, a granting
-    record that would take the count of outstanding granting records above
-    ``Settings.recipient_grant_max_outstanding``, a record that does not satisfy
-    its own model, or a revocation naming a grant that is absent, is itself a
-    revoking record, is already revoked, or transcribes a different field.
-
-    **One class rather than several**, on :class:`InvalidGrantError`'s reasoning
-    and for its reason: the caller's recourse is identical in every refusing case
-    — read the store and construct a different record — so a family would be
-    several names for one response (ADR-0193 §1).
-
-    **The count ceiling refuses rather than truncating**, and a **revoking** record
-    is never refused on that ground whatever the count: a ceiling that could block
-    a revocation would trap a user above it with no way down (ADR-0193 §1).
-
-    A **timestamp is never a ground for this refusal on a revocation**, including
-    one that predates the grant it revokes: ``decided_at`` is caller-supplied and
-    this store reads no clock on the write path, so a host clock corrected
-    backwards would otherwise make a grant permanently unrevokable (ADR-0193 §1).
-
-    **Two of those grounds now have subclasses**, and ADR-0235 §4 partially
-    supersedes the "one class rather than several" limb above to give them names —
-    scoped to exactly the two on which the caller's recourse is *not* identical.
-    :class:`RecipientGrantCeilingError` and :class:`DuplicateRecipientGrantError`
-    are below; every other ground keeps raising this class unchanged, and this
-    class still catches all of them, so a caller wanting one handler keeps it.
-    """
-
-
-class RecipientGrantCeilingError(InvalidRecipientGrantError):
-    """A granting record would take the outstanding count above the ceiling (ADR-0235 §4).
-
-    The first of the two discriminators ADR-0235 §4 adds, and it exists because
-    ADR-0193 §1's own ceiling clause obliges a surface offering the establishing
-    act to refuse it *"with a reason visible to the user, naming that the ceiling
-    was reached"*. A surface names a reason it was **told**, and the type of the
-    refusal is what tells it: no lane parses this class's message, takes a count
-    of its own, or reads :meth:`~ai_assistant.core.protocols.RecipientGrantStore.standing`
-    after the refusal to work out which ground it was (ADR-0235 §11).
-
-    The user's recourse is to **revoke a grant they hold**, which is what makes
-    this ground different from the base class's others: reading the store and
-    constructing a different record — ADR-0193 §1's stated recourse — is exactly
-    what a user at the ceiling should not do.
-
-    **A revoking record is never refused on this ground**, whatever the count: a
-    ceiling that could block a revocation would trap a user above it with no way
-    down (ADR-0193 §1).
-    """
-
-
-class DuplicateRecipientGrantError(InvalidRecipientGrantError):
-    """A granting record duplicates an outstanding grant's subject (ADR-0235 §4).
-
-    The second discriminator: a **granting** record whose ``tool``, ``account``
-    and ``destinations`` all equal those of an **outstanding** granting record
-    (ADR-0193 §1). It is named apart from the base class because the user needs
-    **no act at all** — what they asked for is already true — where the base
-    class's remaining grounds all leave them with a record to rebuild.
-
-    Not the duplicate **id** refusal, which is a different fact about a different
-    field and keeps the base class: an id already recorded is a caller reusing an
-    identifier, not a user asking for something that already stands.
-    """
-
-
-class InvalidDestinationTrustError(AssistantError):
-    """A destination-trust store refused a record, or could not answer (ADR-0238 §1).
-
-    Raised by :meth:`~ai_assistant.core.protocols.DestinationTrustStore.record` — a
-    duplicate id (the store is write-once), an empty destination set, a record
-    duplicating a **live** record's destination set, or a record that does not
-    satisfy its own model — and by
-    :meth:`~ai_assistant.core.protocols.DestinationTrustStore.revoke` for an unknown
-    id. It is the class ADR-0238 §1 names, "beside
-    :class:`InvalidRecipientGrantError`", and it sits beside it here.
-
-    **One class, and ADR-0238 §13 is why there is not a second.** That section closes
-    this decision's ``core/errors.py`` surface at exactly this name, so there is no
-    ``DestinationTrustError`` base for a store fault to take. The class therefore
-    covers both grounds — a refusal, and a read or write this store could not
-    perform on :meth:`~ai_assistant.core.protocols.DestinationTrustStore.record`,
-    :meth:`~ai_assistant.core.protocols.DestinationTrustStore.revoke`,
-    :meth:`~ai_assistant.core.protocols.DestinationTrustStore.live` and
-    :meth:`~ai_assistant.core.protocols.DestinationTrustStore.export` — which is
-    :class:`InvalidRecipientGrantError`'s own stated reason for one class rather than
-    several, read one store over: the caller's recourse is identical in every case,
-    so a family would be several names for one response.
-
-    **:meth:`~ai_assistant.core.protocols.DestinationTrustStore.trust_of` raises
-    nothing, and that is a clause rather than an omission.** ADR-0238 §1 rules the
-    trust of a destination ``UNCHOSEN`` "in every other case, including where no
-    record exists, where a record was revoked, and **where a record cannot be
-    read**". So the one read a policy path depends on fails *closed* by answering
-    rather than by raising, and there is no fault for it to report.
-
-    **A duplicate is refused over the *live* set, and the refusal is atomic with the
-    append** (§1). Two engines over one data directory each reading no live record
-    over a destination set and each appending would leave the store holding two, and
-    the user's revocation of the record they were shown would leave the other
-    standing — so §1's revocation clause would be false of the *store* rather than of
-    any one record. That is
-    :meth:`~ai_assistant.core.protocols.RecipientGrantStore.record`'s own obligation,
-    for the reason that store gives for the same refusal: "revoking one would leave
-    the other standing and the user would have revoked nothing".
-    """
-
-
-class DuplicateDestinationTrustError(InvalidDestinationTrustError):
-    """A record duplicates a **live** record's destination set (ADR-0242 §2).
-
-    ADR-0242 §2 partially supersedes ADR-0238 §1's ``record`` refusal clause **in
-    the type of the refusal alone**: the third of that clause's three grounds gets
-    a subclass, because it is the one ground on which the user's recourse is *no
-    act at all*. The other two — a duplicate ``id`` and an empty destination set —
-    keep raising the base :class:`InvalidDestinationTrustError` unchanged, and so
-    does every read or write the store could not perform.
-
-    **The base class keeps every ground**, so a caller wanting one handler still
-    writes one ``except InvalidDestinationTrustError``. What the subclass buys is
-    the discrimination a surface needs and may not infer: ADR-0242 §2 has the
-    outcome of the act read "from the **type** of the refusal and from nothing
-    else" — no message parsed, no text matched, no
-    :meth:`~ai_assistant.core.protocols.AssistantEngine.standing_destination_trust`
-    read taken afterwards to work out which ground it was, and no count the caller
-    took itself.
-
-    **The argument is** :class:`DuplicateRecipientGrantError`'s **verbatim, one
-    store over** (ADR-0235 §4): "a user whose subject already stands needs **no**
-    act at all, because what they asked for is already true", and reading the store
-    back and constructing a different record "is what would give them a second
-    authorisation they think is one".
-
-    **Not the duplicate-id refusal**, which is a different fact about a different
-    field and keeps the base class: an id already recorded is a caller reusing an
-    identifier, not a user asking for something that already stands.
-    """
-
-
-class UntrustableDestinationError(AssistantError):
-    """The trust act may not ride this decision (ADR-0242 §1).
-
-    One class over every refusal of
-    :meth:`~ai_assistant.core.protocols.AssistantEngine.establish_destination_trust`,
-    and **the operation writes nothing to any store on any of them**. ADR-0242 §1
-    fixes exactly three availability conditions: the trail holds a decision with
-    that id; that decision's ``egress_binding`` is an
-    :class:`~ai_assistant.core.types.EgressBinding` — never ``None``, never an
-    :class:`~ai_assistant.core.types.OriginUnrecordedBinding`, never a
-    :class:`~ai_assistant.core.types.CoverageUnrecordedBinding`; and that binding's
-    ``planned_with_external_content`` is ``False``.
-
-    The message names which condition failed, **no lane branches on the message**,
-    and where more than one fails the first in that order is the one named, so the
-    refusal is deterministic across implementations.
-
-    **A new class and not** ``UngrantableActError`` **reused** (ADR-0242 §1), a class
-    that has since left with the old path's errors (ADR-0309 §5). Its ratified meaning
-    was ADR-0235 §3's ordered seven, and a caller catching it meant *the
-    recipient-grant act was unavailable*. The two acts have
-    different recourses, and ADR-0235 §7's two-vocabulary rule refuses one noun over
-    two records that cannot substitute for each other: "One noun over two records
-    that cannot substitute for each other is how a user comes to believe that
-    revoking one revoked the other."
-
-    **An** :class:`AssistantError` **and not a bare** ``ValueError``, for
-    ``UngrantableActError``'s own stated reason: a ``ValueError`` escapes a
-    command's ``except (AssistantError, TransportError)`` boundary as an uncaught
-    traceback with no controlled exit code, which ADR-0042 §7 forbids.
-
-    **It mints no validation rule of its own.** ``AssistantEngine``'s second
-    obligation already puts ``Identifier`` validation on every identifier argument
-    before any I/O, so a blank id is that rule's ``ValueError`` and never this class
-    (ADR-0242 §2).
     """
 
 

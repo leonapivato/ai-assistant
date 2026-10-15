@@ -1,65 +1,82 @@
-"""Builders shared by the recipient-grant suites and the two enforcement points.
+"""Builders shared by the two enforcement points' egress suites.
 
-ADR-0193's record, the store that holds it, the policy that reads it and the
-trail that validates it are four contracts stated over the same handful of
-values: a transmitting :class:`ToolDefinition`, a :class:`BoundAccount`, an
-:class:`EgressBinding` selecting some recipients, the :class:`ActionRequest`
-wrapping it, and the :class:`PermissionDecision` a ruling becomes. Building those
-in one place keeps the four arranging **identical** subjects, which matters most
-for the fields whose equality coverage turns on — a grant covers nothing if its
-declaration differs from the request's by a reworded description.
+The policy that rules on an egress call and the trail that validates its row are
+two contracts stated over the same handful of values: a transmitting
+:class:`ToolDefinition`, a :class:`BoundAccount`, an :class:`EgressBinding`
+selecting some recipients, the :class:`ActionRequest` wrapping it, and the
+:class:`PermissionDecision` a ruling becomes. Building those in one place keeps the
+two arranging **identical** subjects.
 
-The grant records themselves come from :mod:`ai_assistant.testing.recipient_grants`,
-which is the canonical builder a consumer outside these tests reaches for; this
-module supplies only what is about a *call*, which the shipping fakes have no
-business knowing how to build.
+The recipient-grant suites these builders were written for retired with recipient
+grants (ADR-0321 §7:1); what stays is about a *call*, and about the configured
+provider's route (ADR-0247 §2, ADR-0260 §6).
 
 Not a conformance suite itself: nothing here asserts anything.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 from ai_assistant.core.types import (
     ActionRequest,
     BoundAccount,
     CanonicalDestination,
+    CapabilityEffect,
+    CapabilityResult,
     CostBasis,
+    DataTier,
     DestinationProtocol,
     DiscloserProvenance,
     EgressBinding,
     EgressDestination,
     EgressSpan,
+    Idempotency,
     OriginUnrecordedBinding,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    Reversibility,
+    RiskLevel,
     SpanCoverage,
     ToolCost,
-)
-from ai_assistant.testing.recipient_grants import (
-    RECIPIENT_GRANT_ACCOUNT,
-    RECIPIENT_GRANT_DECIDED_AT,
-    RECIPIENT_GRANT_EXPIRES_AT,
-    RECIPIENT_GRANT_NOW,
-    RECIPIENT_GRANT_TOOL,
+    ToolDefinition,
 )
 
-if TYPE_CHECKING:
-    from ai_assistant.core.types import ToolDefinition
+#: The instants every case here is arranged around.
+AT: Final = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+NOW: Final = AT + timedelta(hours=1)
+EXPIRES: Final = AT + timedelta(days=1)
 
-#: The instants every case here is arranged around, re-exported from the shipping
-#: fakes so a suite and a consumer's own test cannot drift into two timelines.
-AT = RECIPIENT_GRANT_DECIDED_AT
-NOW = RECIPIENT_GRANT_NOW
-EXPIRES = RECIPIENT_GRANT_EXPIRES_AT
+#: The declaration an egress case is about unless it names another. **It
+#: discloses**, because ADR-0148 §8's second clause makes a non-empty ``discloses``
+#: true of every tool registered at the egress seam, **and it trips nothing else**:
+#: ``LOW`` risk, ``REVERSIBLE``, at a known cost, so a case that wants another
+#: ground raises that field on a copy of this.
+TOOL: Final = ToolDefinition(
+    id="send_email",
+    capability="send_email",
+    description="Send an email through the connected account.",
+    risk_level=RiskLevel.LOW,
+    reversibility=Reversibility.REVERSIBLE,
+    side_effecting=True,
+    reads=(),
+    writes=(),
+    discloses=(DataTier.PERSONAL,),
+    cost=ToolCost(basis=CostBasis.FREE),
+    idempotency=Idempotency.NONE,
+    effect=CapabilityEffect.WORLD,
+    leaves_hub=True,
+    result=CapabilityResult.NO_OUTSIDE_TEXT,
+    outcome_can_be_unknown=True,
+    safe_to_repeat=False,
+)
 
-#: The declaration and the account a grant is established about, likewise.
-TOOL: ToolDefinition = RECIPIENT_GRANT_TOOL
-ACCOUNT = RECIPIENT_GRANT_ACCOUNT
+#: The connected account an egress case is bound to. Two facts, as
+#: :class:`~ai_assistant.core.types.BoundAccount` requires.
+ACCOUNT: Final = BoundAccount(identity="work@example.com", reference="conn-0001")
 
 #: A second connectable record holding the **same identity**. ``BoundAccount``'s
 #: own declaration is why this exists: "two connectable records can hold one
@@ -356,16 +373,20 @@ def route_b_decision(  # noqa: PLR0913 — one knob per field a route-(b) case v
     at: datetime | None = None,
     tool: ToolDefinition = TOOL,
 ) -> PermissionDecision:
-    """A **non-resolving** ``ALLOW`` resting on a standing authorisation.
+    """A **non-resolving** ``ALLOW`` claiming a standing recipient grant.
 
-    The shape ADR-0193 §6's invariant is scoped to: ``resolves`` unset,
-    ``egress_binding`` present, ``authorised_by`` naming a grant, and
-    ``authorised_subject`` carrying its digest. Built by substituting the binding
-    afterwards where the case needs an arm no request can carry, which is the only
-    route to an :class:`OriginUnrecordedBinding` at all.
+    The shape route (b) took: ``resolves`` unset, ``egress_binding`` present,
+    ``authorised_by`` naming a grant, and ``authorised_subject`` carrying its
+    digest. Recipient grants retired, and the trail now refuses this row whatever
+    it names (ADR-0321 §7:7); a case builds it to say so. Built by substituting the
+    binding afterwards where the case needs an arm no request can carry.
     """
     carried = binding(ALICE) if bound is None else bound
-    base = request(carried) if isinstance(carried, EgressBinding) else request(binding(ALICE))
+    base = (
+        request(carried, tool=tool)
+        if isinstance(carried, EgressBinding)
+        else request(binding(ALICE), tool=tool)
+    )
     decision = PermissionDecision.from_request(
         base,
         PermissionRuling(

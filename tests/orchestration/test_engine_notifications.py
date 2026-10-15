@@ -22,9 +22,7 @@ from test_engine import (
     AT,
     Harness,
     _connection_operations,
-    _destination_trust_operations,
     _grant_operations,
-    _recipient_grant_operations,
 )
 
 from ai_assistant.core.correlation import current_correlation
@@ -68,8 +66,6 @@ def _wired(
     return Engine(
         chat_reader=False,
         grant_operations=_grant_operations(),
-        recipient_grant_operations=_recipient_grant_operations(),
-        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         plans=harness.plans,
         trail=harness.trail,

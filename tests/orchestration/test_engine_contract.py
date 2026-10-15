@@ -109,11 +109,9 @@ from ai_assistant.orchestration import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     ConnectionOperations,
     ConversationLifecycle,
-    DestinationTrustOperations,
     Engine,
     GrantOperations,
     HeldSource,
-    RecipientGrantOperations,
 )
 
 # The engine's own default confirmation ceiling, read from where it is declared so
@@ -123,12 +121,10 @@ from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeConversationStore,
-    FakeDestinationTrustStore,
     FakeEgressBinder,
     FakeMemoryStore,
     FakeNotificationOutbox,
     FakePlanStore,
-    FakeRecipientGrantStore,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeSpeechSynthesizer,
@@ -444,22 +440,6 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
             sources=sources,
             id_factory=_counter("grant"),
             clock=grant_clock if grant_clock is not None else (lambda: AT),
-        ),
-        # The three recipient-grant operations, over a store of their own (ADR-0235 §7).
-        recipient_grant_operations=RecipientGrantOperations(
-            store=FakeRecipientGrantStore(),
-            id_factory=_counter("recipient-grant"),
-            clock=lambda: AT,
-        ),
-        # The three destination-trust operations, over the **same** trail (ADR-0242
-        # §1): the decision the act rides is read from the trail every other operation
-        # here records to, so the suite cannot trust a row `recent_decisions` cannot
-        # see.
-        destination_trust_operations=DestinationTrustOperations(
-            store=FakeDestinationTrustStore(),
-            trail=audit,
-            id_factory=_counter("destination-trust"),
-            clock=lambda: AT,
         ),
         # The canonical provisioner fake, which performs ADR-0148 §6's three writes
         # rather than short-cutting them — so the suite's provisioning clauses are

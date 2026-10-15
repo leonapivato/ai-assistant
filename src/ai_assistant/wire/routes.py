@@ -77,10 +77,13 @@ class Route(StrEnum):
 #: ``pending_confirmations``, ``goals``, ``withdraw_clarification``, ``abandon_goal``,
 #: ``standing_authorizations``, ``revoke_authorization``, ``answer``, ``questions``,
 #: ``interrupted_questions`` and ``forget_question`` with the old path (ADR-0309 §5:1);
-#: and ``grantable_decisions`` and ``establish_recipient_grant`` with the establishing
-#: act (ADR-0313 §5:1). The legacy-turn row left with ``answer``, its last member, and
-#: ``receive`` is spoke traffic alone: a conversational input is refused at decode,
-#: before any row is read (ADR-0313 §4:1).
+#: ``grantable_decisions`` and ``establish_recipient_grant`` with the establishing
+#: act (ADR-0313 §5:1); and ``standing_recipient_grants``, ``recent_recipient_grants``,
+#: ``revoke_recipient_grant``, ``establish_destination_trust``,
+#: ``standing_destination_trust`` and ``revoke_destination_trust`` with recipient
+#: grants and destination trust (ADR-0321 §7:1, §7:2). The legacy-turn row left with
+#: ``answer``, its last member, and ``receive`` is spoke traffic alone: a
+#: conversational input is refused at decode, before any row is read (ADR-0313 §4:1).
 #:
 #: ADR-0300 §8's four story commands, ``story_summary``, ``story_standing``,
 #: ``add_story_note`` and ``move_story_members``, postdate the table and are placed
@@ -101,7 +104,6 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "dismiss_notification",
             "episode_chunk",
             "episodes",
-            "establish_destination_trust",
             "export_decisions",
             "export_invocations",
             "export_reads",
@@ -121,17 +123,12 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "recent_grants",
             "recent_invocations",
             "recent_reads",
-            "recent_recipient_grants",
             "reprovision_account",
             "revoke",
-            "revoke_destination_trust",
-            "revoke_recipient_grant",
             "set_notification_preferences",
             "spend_totals",
             "split_story",
-            "standing_destination_trust",
             "standing_grants",
-            "standing_recipient_grants",
             "stop_activation",
             "stories",
             "story",

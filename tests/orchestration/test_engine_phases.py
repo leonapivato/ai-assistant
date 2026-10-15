@@ -164,7 +164,6 @@ from ai_assistant.testing import (
     FakeMemoryStore,
     FakeMemoryWriter,
     FakeModelProvider,
-    FakeRecipientGrantStore,
     FakeStoryStore,
     FakeToolCallingCompleter,
     FakeWebSearcher,
@@ -644,9 +643,7 @@ async def _configured_search_run(*, registered: bool) -> tuple[Harness, FakeWebS
     harness = _harness(
         completer,
         searcher=searcher,
-        policy=ThresholdActionPolicy(
-            grants=FakeRecipientGrantStore(now=lambda: AT), configured_search=_CONFIGURED_SEARCH
-        ),
+        policy=ThresholdActionPolicy(configured_search=_CONFIGURED_SEARCH),
         binder=binder,
         registered_search=frozenset({str(proposal.tool.id)}) if registered else frozenset(),
     )
@@ -2255,9 +2252,7 @@ _LOOKUP: Final = ToolDefinition(
 
 def _real_policy() -> ThresholdActionPolicy:
     """The deployment's own policy, as B4b's end-to-end case builds it."""
-    return ThresholdActionPolicy(
-        grants=FakeRecipientGrantStore(now=lambda: AT), configured_search=_CONFIGURED_SEARCH
-    )
+    return ThresholdActionPolicy(configured_search=_CONFIGURED_SEARCH)
 
 
 async def _planned_and_authorized(

@@ -23,9 +23,7 @@ from test_engine import (
     AT,
     Harness,
     _connection_operations,
-    _destination_trust_operations,
     _grant_operations,
-    _recipient_grant_operations,
 )
 
 from ai_assistant.core.errors import (
@@ -134,8 +132,6 @@ def _wired(  # noqa: PLR0913 — one parameter per knob a case here varies, whic
         max_payload_bytes=max_payload_bytes,
         max_spoken_audio_bytes=max_spoken_audio_bytes,
         grant_operations=_grant_operations(),
-        recipient_grant_operations=_recipient_grant_operations(),
-        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         plans=harness.plans,
         trail=harness.trail,

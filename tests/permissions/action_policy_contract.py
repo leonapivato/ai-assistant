@@ -500,6 +500,10 @@ class ActionPolicyContract:
         covered by the invariant ``AuditTrail.record`` enforces rather than taken
         on trust. A resolving ``DENY`` leaves it unset, because a refusal rests
         on no authorisation.
+
+        **And it fingerprints nothing** (ADR-0321 §7:7): ``authorised_subject``
+        stays on the ruling, set by nothing, and the trail refuses a resolving
+        ``ALLOW`` carrying one.
         """
         confirmed = decision("d-confirm")
 
@@ -509,6 +513,7 @@ class ActionPolicyContract:
             assert resolved.authorised_by == confirmed.id
         else:
             assert resolved.authorised_by is None
+        assert resolved.authorised_subject is None
 
     @pytest.mark.parametrize("outcome", [PermissionOutcome.ALLOW, PermissionOutcome.DENY])
     async def test_resolving_a_decision_that_was_never_a_confirmation_grants_nothing(

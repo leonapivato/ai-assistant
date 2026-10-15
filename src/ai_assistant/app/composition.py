@@ -65,13 +65,11 @@ from ai_assistant.orchestration import (
     ConnectionOperations,
     ConsolidationStage,
     ConversationLifecycle,
-    DestinationTrustOperations,
     Engine,
     GrantOperations,
     HeldSource,
     MemoryWriteStage,
     NotificationWriteStage,
-    RecipientGrantOperations,
     UpcomingEventStage,
 )
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
@@ -106,8 +104,6 @@ from ai_assistant.permissions import (
     ConfiguredForecastDestination,
     ConfiguredSearchDestination,
     SqliteAuditTrail,
-    SqliteDestinationTrustStore,
-    SqliteRecipientGrantStore,
     SqliteSourceGrantStore,
     SqliteSourceReadTrail,
     ThresholdActionPolicy,
@@ -153,7 +149,6 @@ if TYPE_CHECKING:
         OutboundTransport,
         PlanStore,
         Reader,
-        RecipientGrants,
         Secrets,
         SpeechSynthesizer,
         SpeechTranscriber,
@@ -462,9 +457,9 @@ def _search_destinations(origin: str | None) -> tuple[CanonicalDestination, ...]
             connected no search account.
 
     Returns:
-        The one-member set, or an empty one. **Empty is not a special case**: ADR-0238
-        §1 answers ``UNCHOSEN`` for an empty sequence, so a deployment with no account
-        composes over the utterance alone and closes no loop — which is also what an
+        The one-member set, or an empty one. **Empty is not a special case**: a
+        deployment with no account composes over the utterance alone and closes no
+        loop — which is also what an
         origin this seam asserts no canonical form for gets, because the searcher's own
         ``bind`` would refuse that call anyway and a composition root that raised here
         would take the whole process down for a search it was never going to make.
@@ -895,58 +890,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             path=directory / "memory.db", embedder=embedder, traces_sink=traces
         )
         opened.append(memory.close)
-        # ADR-0193's standing recipient grants — a Tier 1 store beside the two
-        # below, holding what the user made *standing* about sending where the
-        # source-grant store holds what they authorised about *reading*. The two
-        # may not be joined (ADR-0097 §7, ADR-0193 §13), which is why they are two
-        # files and two objects rather than two tables in one.
-        #
-        # **Built before the trail**, because the trail resolves a route-(b)
-        # ``authorised_by`` against it and takes it as a constructor dependency.
-        #
-        # **One object, passed three times**: as a ``RecipientGrantResolution`` to
-        # the trail, as a ``RecipientGrants`` to the policy, and — **now that a
-        # surface offers the establishing act** (ADR-0235 §9 decides which) — whole
-        # to ``RecipientGrantOperations``, which is what performs it. Structural
-        # typing is what makes that sound, and the narrowing is the *annotation on
-        # each consumer* rather than anything done here: what the trail cannot do is
-        # name ``covering`` or ``record``, what the policy cannot do is name
-        # ``record``, and the operations object is the only holder of the whole
-        # face (ADR-0235 §4).
-        #
-        # The ceiling is the operator's configuration and reaches the constructor
-        # with no default of its own: ``Settings`` carries ADR-0193 §1's shipped 64,
-        # and a second default here would be a figure a deployment could not see it
-        # was getting. Zero is admitted and means the deployment declines route (b).
-        recipient_grants = SqliteRecipientGrantStore(
-            path=directory / "recipient_grants.db",
-            max_outstanding=settings.recipient_grant_max_outstanding,
-        )
-        opened.append(recipient_grants.close)
-        # **ADR-0238 §1's destination-trust store, constructed here and wired
-        # nowhere yet.** §14 makes this root "the only place the concrete store is
-        # constructed", and the servicing site that reads it is the consumer lane's
-        # (ADR-0137 §2's seam cut). It is built rather than deferred so that the file
-        # is created, opened and closed on every start from the first release that
-        # carries the contract — a store whose schema first appears on the day a
-        # consumer needs it is a migration nobody has run.
-        #
-        # **It holds no records on this tree and it is meant not to** (ADR-0238's exit
-        # note). The fact §1 records is set by a **user act**, §14 defers the surface
-        # offering that act to ADR-0177, ADR-0178 and ADR-0186, and until one of those
-        # exists there is nothing to perform the act with. So no destination reads
-        # ``USER_CHOSEN``, no request is closed-loop, and every supersession ADR-0238
-        # makes has no live subject here: the mechanism is legible and inert, exactly
-        # the posture ADR-0231 §9 recorded for the search itself.
-        #
-        # **No ceiling and no clock reach the constructor**, unlike the grant store
-        # above: ADR-0238 §1 gives this record no expiry and no count bound, so
-        # liveness here is "not revoked" rather than an interval and there is nothing
-        # for a deployment to configure.
-        destination_trust = SqliteDestinationTrustStore(
-            path=directory / "destination_trust.db",
-        )
-        opened.append(destination_trust.close)
         # **ADR-0289 §1's story store, on its own file.** It reads no other store and
         # no store reads it. The engine surface writes it as the owner (§4), and since
         # ADR-0300 §6 understanding's candidates read it and the story-links stage
@@ -970,7 +913,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # two registries one seam over.
         trail = SqliteAuditTrail(
             path=directory / "audit.db",
-            recipient_grants=recipient_grants,
             # **The clock is injected here**, which ADR-0194 §5 names alongside the
             # five settings as this root's own obligation. Left to the store's
             # default it would be a clock this layer neither chose nor could
@@ -1546,7 +1488,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 searcher=None if search is None else search.searcher,
                 forecast_configured=forecast is not None,
                 booking_configured=booking is not None,
-                grants=recipient_grants,
                 max_payload_bytes=settings.hub_max_frame_bytes - ENVELOPE_RESERVE_BYTES,
                 diagnostics=diagnostics,
                 tidy_up=tidy_up,
@@ -1835,42 +1776,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 id_factory=_uuid,
                 clock=_utcnow,
             ),
-            # The three recipient-grant operations (ADR-0235 §7), over the **whole**
-            # store face above. This object is its only holder: the trail names one
-            # read of it, the phases' policy names another, and nothing else in the
-            # process can revoke a grant.
-            recipient_grant_operations=RecipientGrantOperations(
-                store=recipient_grants,
-                id_factory=_uuid,
-                clock=_utcnow,
-            ),
-            # The three destination-trust operations (ADR-0242 §2, §4), over the one
-            # store this root constructs.
-            #
-            # **The store's face reaches the engine and nothing else** (ADR-0242 §13,
-            # ADR-0238 §14). It is handed here and to no other subsystem: no
-            # `interfaces` module imports it, and `uv run lint-imports` is what keeps
-            # that true rather than this comment. A surface
-            # is given records by the three operations and reads no store, which is
-            # golden rule 3 — a renderer handed this face would hold `record`, `revoke`
-            # and `export`, and a remote client could not perform the read at all.
-            #
-            # **No policy and no trail write** (ADR-0242 §11). The act records no
-            # `PermissionDecision`, seeks no ruling and emits no audit event: it sends
-            # nothing, so there is no egress to rule on. The trail is passed **read-only
-            # in use** — the decision the act rides is read from it — and the record
-            # itself is the audit.
-            #
-            # **A separate clock from the recipient-grant operations' is not needed
-            # here and a separate object is**: both read `_utcnow`, and what ADR-0242 §4
-            # keeps apart is the two *stores*, so that no operation answers one
-            # vocabulary's question with the other's records.
-            destination_trust_operations=DestinationTrustOperations(
-                store=destination_trust,
-                trail=trail,
-                id_factory=_uuid,
-                clock=_utcnow,
-            ),
             # The five connection operations (ADR-0151 §1, §10), over the one
             # provisioner seam. **The engine reaches the provisioner through the
             # Protocol and never by an injected concrete**, and `orchestration`
@@ -1881,35 +1786,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             closers=[
                 _as_async(memory.close),
                 _as_async(trail.close),
-                # And the standing recipient grants immediately after the trail, which
-                # is the one ordering between the two that is not free: the trail
-                # resolves a decision's route-(b) ``authorised_by`` against this store
-                # on its own write path and holds it as a constructor dependency, and
-                # ADR-0193 §6 makes a store it cannot read a refusal rather than an
-                # absence — "a component that cannot get an answer from this seam fails
-                # closed, and the trail is such a component". Closed the other way
-                # round, the last records of a shutdown would meet a grant store already
-                # gone and fail closed onto an ``InvalidAuthorisationError``.
-                #
-                # It is a Tier 1 store like the rest and joins the same ordered shutdown
-                # (ADR-0083 ruling 4, ADR-0042 §2). It was registered on the
-                # build-failure cleanup list above and not here, so a build that
-                # *failed* closed it and one that *succeeded* never did (#1903).
-                _as_async(recipient_grants.close),
-                # And the destination-trust store beside it: a Tier 1 store like the
-                # rest, joining the same ordered shutdown (ADR-0083 ruling 4, ADR-0042
-                # §2, ADR-0238 §1). Registering it on the build-failure cleanup list
-                # alone would close it when the build *failed* and never when it
-                # succeeded, which is #1903 exactly — and here it would leave a `-wal`
-                # holding the user's recorded destination choices behind.
-                #
-                # **Nothing constrains its position** among the stores: no store reads
-                # it and it reads none. In particular it is *not* the recipient-grant
-                # store's neighbour in any ordering sense — ADR-0238 §1 keeps the two
-                # acts separate and "no component reads the existence, breadth, age or
-                # liveness of a grant as evidence of trust", so neither store's close
-                # can make the other fail closed.
-                _as_async(destination_trust.close),
                 # And the story store: no store reads it and it reads none (ADR-0289
                 # §1), so nothing constrains its position, and the façade drains any
                 # story call in flight before this list is walked.
@@ -2210,7 +2086,6 @@ class _PhaseSeams:
     binder: EgressBinder
     chat: ConversationStore
     searcher: WebSearcher | None
-    grants: RecipientGrants
     max_payload_bytes: int
     forecast_configured: bool
     booking_configured: bool
@@ -2239,10 +2114,10 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
     :class:`LookUps` over the one memory store and the story views' reads. The forecast
     read is kept out of every registry (ADR-0260 §1), so it is not offered.
 
-    **The policy is the deployment's thresholds and standing grants, with no goal
-    authorizations and no goal quotes** (ADR-0306 §4:11, §6): a second
-    ``ThresholdActionPolicy`` built from the same settings and the same grants store,
-    holding neither, so no ruling a phase asks for reads the goal model. Remembering
+    **The policy is the deployment's thresholds and configured providers, with no
+    goal authorizations, no goal quotes and no grant seam** (ADR-0306 §4:11, §6;
+    ADR-0321 §7:1): a ``ThresholdActionPolicy`` built from the settings, so no ruling
+    a phase asks for reads the goal model or a standing grant. Remembering
     also passes ``DefaultMemoryPolicy`` (§4:3).
 
     **Planning** asks through pydantic-ai's native tool calling, on the deployment's
@@ -2265,7 +2140,6 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
         confirm_at_reversibility=settings.confirm_at_reversibility,
         deny_at_risk=settings.deny_at_risk,
         deny_at_reversibility=settings.deny_at_reversibility,
-        grants=seams.grants,
         configured_search=_configured_search(
             settings.web_search_connection, _search_destinations(settings.web_search_origin)
         ),

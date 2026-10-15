@@ -46,9 +46,7 @@ system holding a ``SourceGrantStore`` (ADR-0097 §3, §9) — every driver holds
 narrow ``SourceGrants`` instead — and ``Engine`` delegates its
 ``AssistantEngine`` grant methods to it. It lives here because those must be
 ``AssistantEngine`` methods to be addressable over the socket, and that Protocol is
-provided by this package. ``RecipientGrantOperations`` and
-``DestinationTrustOperations`` are its siblings over the recipient-grant and
-destination-trust stores (ADR-0235 §7, ADR-0242 §4).
+provided by this package.
 
 ``ConnectionOperations`` is the **connection surface** (ADR-0151 §1, §10):
 connecting an account, replacing its credential, disconnecting it, and the two
@@ -95,7 +93,6 @@ from ai_assistant.orchestration.consolidation import (
     ConsolidationStage,
 )
 from ai_assistant.orchestration.conversations import ConversationLifecycle
-from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
 from ai_assistant.orchestration.engine import (
     Engine,
     belief_from_record,
@@ -111,7 +108,6 @@ from ai_assistant.orchestration.payloads import (
     MIN_FRAME_BYTES,
     canonical_payload,
 )
-from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
 from ai_assistant.orchestration.upcoming import UpcomingEventStage
 from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
 
@@ -123,13 +119,11 @@ __all__ = [
     "ConsolidationReport",
     "ConsolidationStage",
     "ConversationLifecycle",
-    "DestinationTrustOperations",
     "Engine",
     "GrantOperations",
     "HeldSource",
     "MemoryWriteStage",
     "NotificationWriteStage",
-    "RecipientGrantOperations",
     "UpcomingEventStage",
     "WriteOutcome",
     "belief_from_record",

@@ -66,11 +66,9 @@ from ai_assistant.interfaces import cli
 from ai_assistant.orchestration import (
     ConnectionOperations,
     ConversationLifecycle,
-    DestinationTrustOperations,
     Engine,
     GrantOperations,
     HeldSource,
-    RecipientGrantOperations,
 )
 from ai_assistant.orchestration.upcoming import NOTIFICATION_CLASS
 from ai_assistant.readers.calendar import CALENDAR_READER_NAME
@@ -79,10 +77,8 @@ from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeConversationStore,
-    FakeDestinationTrustStore,
     FakeMemoryStore,
     FakePlanStore,
-    FakeRecipientGrantStore,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeTraceRetention,
@@ -94,7 +90,6 @@ from ai_assistant.wire.address import sun_path_limit
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
-    from ai_assistant.core.protocols import ActionPolicy, AuditTrail
     from ai_assistant.core.types import SourceGrant
 
 
@@ -119,55 +114,6 @@ def _grant_operations(sources: Sequence[HeldSource] = ()) -> GrantOperations:
     return GrantOperations(
         store=FakeSourceGrantStore(),
         sources=sources,
-        id_factory=_grant_ids(),
-        clock=lambda: AT,
-    )
-
-
-def _trust_ids() -> Callable[[], str]:
-    """Deterministic ids for the trust records an ``Engine`` mints under test."""
-    counter = count(1)
-    return lambda: f"trust-{next(counter)}"
-
-
-def _destination_trust_operations(
-    *,
-    store: FakeDestinationTrustStore | None = None,
-    trail: AuditTrail | None = None,
-) -> DestinationTrustOperations:
-    """The destination-trust collaborator every ``Engine`` needs (ADR-0242 §2).
-
-    Required rather than optional on the façade, on ``_recipient_grant_operations``'
-    reason exactly: the three methods are on the Protocol, so an engine that could be
-    built without them is one whose surface is conditionally present. Both seams
-    default to fresh fakes — an empty trust store and a trail nothing has been
-    recorded to — which is what a case not about the trust act wants.
-    """
-    return DestinationTrustOperations(
-        store=FakeDestinationTrustStore() if store is None else store,
-        trail=FakeAuditTrail() if trail is None else trail,
-        id_factory=_trust_ids(),
-        clock=lambda: AT,
-    )
-
-
-def _recipient_grant_operations(
-    *,
-    store: FakeRecipientGrantStore | None = None,
-    trail: AuditTrail | None = None,
-    policy: ActionPolicy | None = None,
-) -> RecipientGrantOperations:
-    """The recipient-grant collaborator every ``Engine`` needs (ADR-0235 §4).
-
-    Required rather than optional on the façade, on ``_grant_operations``' reason
-    exactly: the five methods are on the Protocol, so an engine that could be built
-    without them is one whose surface is conditionally present. The three seams
-    default to fresh fakes — an empty store, a trail nothing has been recorded to,
-    and a policy that allows — which is what a case not about the establishing act
-    wants.
-    """
-    return RecipientGrantOperations(
-        store=FakeRecipientGrantStore() if store is None else store,
         id_factory=_grant_ids(),
         clock=lambda: AT,
     )
@@ -207,8 +153,6 @@ def _engine(
     return Engine(
         chat_reader=False,
         grant_operations=_grant_operations(),
-        recipient_grant_operations=_recipient_grant_operations(),
-        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         plans=plans,
         trail=trail,
@@ -2230,8 +2174,6 @@ def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
     engine = Engine(
         chat_reader=False,
         grant_operations=_grant_operations(),
-        recipient_grant_operations=_recipient_grant_operations(),
-        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         plans=plans,
         trail=trail,
@@ -2324,7 +2266,8 @@ def test_the_observe_command_is_gone_and_reaches_no_client(
 
 # --- the old path's commands are retired (ADR-0309 §5, ADR-0313 §5:1) -------
 
-#: ADR-0309 §5's CLI list, and ADR-0313 §5:1's ``remember-recipients``.
+#: ADR-0309 §5's CLI list, ADR-0313 §5:1's ``remember-recipients``, and ADR-0321
+#: §7:1's and §7:2's recipient-grant and destination-trust commands.
 _RETIRED_COMMANDS = (
     "ask",
     "resume",
@@ -2338,6 +2281,12 @@ _RETIRED_COMMANDS = (
     "authorizations",
     "revoke-authorization",
     "remember-recipients",
+    "recipient-grants",
+    "recipient-grant-log",
+    "revoke-recipient-grant",
+    "trust-destinations",
+    "destination-trust",
+    "revoke-destination-trust",
 )
 
 
@@ -2345,7 +2294,7 @@ _RETIRED_COMMANDS = (
 def test_a_retired_command_is_gone_and_reaches_no_client(
     name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-0309 §5 and ADR-0313 §5:1 retire these; ``assistant chat`` is how to talk.
+    """ADR-0309 §5, ADR-0313 §5:1 and ADR-0321 §7:1-§7:2 retire these.
 
     Asserted over the registered commands, so a hidden command or an alias that kept
     the name fails here, and by invoking it: an unknown command is a usage error, with
@@ -3639,10 +3588,7 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
         "forget:belief_id": True,
         "forget-conversation:conversation_id": True,
         "forget-notification:notification_id": True,
-        "revoke-destination-trust:record_id": True,
-        "revoke-recipient-grant:grant_id": True,
         "stop:activation_id": True,
-        "trust-destinations:decision_id": True,
     }
 
 

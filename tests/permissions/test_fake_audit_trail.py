@@ -22,7 +22,7 @@ from ai_assistant.testing.cancellation import SuspendedMidWrite
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from ai_assistant.core.protocols import AuditTrail, RecipientGrantResolution
+    from ai_assistant.core.protocols import AuditTrail
     from ai_assistant.core.types import PermissionDecision
 
 
@@ -37,16 +37,6 @@ class TestFakeAuditTrailContract(AuditTrailContract):
     @pytest.fixture
     def trail(self) -> AuditTrail:
         return FakeAuditTrail()
-
-    def trail_over(self, resolution: RecipientGrantResolution) -> AuditTrail:
-        """An empty trail resolving route-(b) pointers against ``resolution``.
-
-        The factory ADR-0193 §15 adds to the suite. The ordinary ``trail`` fixture
-        above deliberately carries **no** seam, so it is a conforming trail that
-        refuses every route-(b) row — which is what a fixture with no such row
-        should be, and why the route-(b) clauses need a factory of their own.
-        """
-        return FakeAuditTrail(recipient_grants=resolution)
 
     async def store_as_history(self, trail: AuditTrail, recorded: PermissionDecision) -> None:
         """Put ``recorded`` straight into the dict this fake holds (ADR-0247 §12 Arm D"').

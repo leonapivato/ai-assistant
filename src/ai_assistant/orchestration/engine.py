@@ -246,8 +246,6 @@ if TYPE_CHECKING:
         ConnectionAct,
         Conversation,
         ConversationDigest,
-        DestinationTrustRecord,
-        DurableIdentifier,
         EncodableText,
         GrantableSource,
         GrantScope,
@@ -260,7 +258,6 @@ if TYPE_CHECKING:
         NotificationDisposition,
         NotificationPreferences,
         PermissionDecision,
-        RecipientGrant,
         RecordedInvocation,
         RequestingDevice,
         SecretValue,
@@ -285,12 +282,10 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.conversations import ConversationLifecycle
     from ai_assistant.orchestration.delivery import DeliveryOutbox
-    from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
     from ai_assistant.orchestration.grants import GrantOperations
     from ai_assistant.orchestration.matters_pass import MattersPass, MattersPassReport
     from ai_assistant.orchestration.phase_path import PhasePath, PhaseWorking
     from ai_assistant.orchestration.recall import RecallStage
-    from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
     from ai_assistant.orchestration.story_links import (
         Candidates,
         StoryCandidates,
@@ -1462,8 +1457,6 @@ class Engine:
         trace_retention: timedelta | None,
         conversations: ConversationLifecycle,
         grant_operations: GrantOperations,
-        recipient_grant_operations: RecipientGrantOperations,
-        destination_trust_operations: DestinationTrustOperations,
         connection_operations: ConnectionOperations,
         upcoming: UpcomingEventStage | None = None,
         consolidation: ConsolidationStage | None = None,
@@ -1627,47 +1620,6 @@ class Engine:
                 in this package, and ADR-0102 §2 records that reusing a word for a
                 different type one constructor over is how two things come to be
                 confused at a glance.
-            recipient_grant_operations: The three recipient-grant operations
-                ADR-0313 §5:1 left on the surface (ADR-0235 §3, §7) — the **only**
-                object in this package holding a
-                :class:`~ai_assistant.core.protocols.RecipientGrantStore`, which is
-                the face ADR-0193 §1 withholds from the policy and from the trail and
-                which ``app/composition.py``'s own comment already anticipated
-                passing *"whole to whatever performs it"*. The façade delegates
-                ``standing_recipient_grants``, ``recent_recipient_grants`` and
-                ``revoke_recipient_grant`` to it.
-
-                **Required, on ``grant_operations``' argument exactly**: these three
-                are ``AssistantEngine`` methods and the shared conformance suite runs
-                against this class, so an engine that could be built without them is
-                one whose surface is conditionally present.
-
-                **A second object rather than members on ``grant_operations``**,
-                because recipient grants and source grants are two vocabularies and
-                never one (ADR-0235 §7): one object over two stores that cannot
-                substitute for each other is the shape that invites a control
-                revoking across both.
-            destination_trust_operations: The three destination-trust operations
-                (ADR-0242 §2, §4) — the **only** object in this package holding a
-                :class:`~ai_assistant.core.protocols.DestinationTrustStore` face
-                beside the one servicing site ADR-0238 §14 wires. The façade
-                delegates ``establish_destination_trust``,
-                ``standing_destination_trust`` and ``revoke_destination_trust`` to
-                it, and no ``interfaces`` adapter holds the store: a surface is given
-                records by these three and reads none.
-
-                **Required, on ``grant_operations``' argument exactly**: these three
-                are ``AssistantEngine`` methods and the shared conformance suite runs
-                against this class, so an engine that could be built without them is
-                one whose surface is conditionally present.
-
-                **A third object and not members on
-                ``recipient_grant_operations``**, because destination trust and
-                recipient grants are two vocabularies and never one (ADR-0242 §4) and
-                the two acts are separate with neither implying the other (ADR-0238
-                §1). One object over both stores is what makes a control revoking
-                across both easy to write and a user's belief that revoking one
-                revoked the other easy to acquire.
             connection_operations: The five connection operations (ADR-0151 §1,
                 §10) — the **only** object in this package holding a
                 :class:`~ai_assistant.core.protocols.ConnectionProvisioner`. The
@@ -1956,8 +1908,6 @@ class Engine:
             payload_limit=max_payload_bytes,
         )
         self._grants = grant_operations
-        self._recipient_grants = recipient_grant_operations
-        self._destination_trust = destination_trust_operations
         self._connections = connection_operations
         self._upcoming = upcoming
         self._consolidation = consolidation
@@ -2376,9 +2326,9 @@ class Engine:
         ADR-0026 §4: ``core`` raises a bare ``ValueError`` because it cannot know
         what its caller will do with the failure, and "each subsystem translates at
         its own boundary". `orchestration` has no error of its own, so a seam here
-        borrows "the error of the stage that read the clock" — a recipient-grant
-        operation raises ``PlanningError``, expiry raises ``MemoryStoreError``, and this
-        reading exists only to place the trace horizon, so it raises
+        borrows "the error of the stage that read the clock" — expiry raises
+        ``MemoryStoreError``, and this reading exists only to place the trace
+        horizon, so it raises
         ``TraceStoreError``. Untranslated, a mis-wired clock would reach the hub's
         scheduler as a raw ``ValueError`` from an operation whose failures are
         otherwise all ``AssistantError``.
@@ -5056,171 +5006,6 @@ class Engine:
         """
         self._reject_if_closing()
         return await self._tracked(self._grants.standing_grants(), "standing_grants", checked=True)
-
-    # --- the recipient-grant surface (ADR-0235 §3, §7) ----------------------
-
-    async def standing_recipient_grants(self) -> tuple[RecipientGrant, ...]:
-        """List every standing recipient grant that is live now (ADR-0235 §7).
-
-        Delegated whole; what this layer adds is the drain tracking and the result
-        measurement. **It takes no ``limit``**, for ``standing_grants``' reason one
-        store over: a truncated answer to "what do I authorise" is a false answer
-        rather than a partial one, so a live set that does not fit the frame is an
-        ``OversizedValueError`` and no set at all.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            RecipientGrantError: If the grant store cannot be read.
-            OversizedValueError: If the live set does not fit the contract limit.
-        """
-        self._reject_if_closing()
-        return await self._tracked(
-            self._recipient_grants.standing_recipient_grants(),
-            "standing_recipient_grants",
-            checked=True,
-        )
-
-    async def recent_recipient_grants(
-        self, *, limit: int = DEFAULT_PAGE_SIZE
-    ) -> tuple[RecipientGrant, ...]:
-        """List the recipient-grant store's own history, newest first (ADR-0235 §7).
-
-        Granting and revoking records alike, and **no liveness**: a record here says
-        an act happened, never that it still stands. ``limit`` is refused when it is
-        not strictly positive, on ``recent_grants``' reason and in every
-        implementation.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            TypeError: If ``limit`` is not an integer, or is a ``bool``.
-            ValueError: If ``limit`` is not in ``[1, 2**63)``.
-            RecipientGrantError: If the grant store cannot be read.
-            OversizedValueError: If the page exceeds the contract limit.
-        """
-        self._reject_if_closing()
-        positive_page_argument(limit, name="limit")
-        check_arguments("recent_recipient_grants", max_bytes=self._max_payload_bytes, limit=limit)
-        return await self._tracked(
-            self._recipient_grants.recent_recipient_grants(limit=limit),
-            "recent_recipient_grants",
-            checked=True,
-        )
-
-    async def revoke_recipient_grant(self, grant_id: DurableIdentifier) -> RecipientGrant | None:
-        """Withdraw one standing recipient grant, or report there was none (ADR-0235 §7).
-
-        **Never refused for the ceiling**, whatever the outstanding count: a ceiling
-        that could block a revocation would trap a user above it with no way down
-        (ADR-0193 §1). It is the recourse the ceiling's own refusal names, so nothing
-        stands between the user and it.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: If ``grant_id`` is blank or unwritable.
-            InvalidRecipientGrantError: If the store refused the revoking record on
-                any ground other than the grant having been revoked in the interval.
-            RecipientGrantError: If the grant store cannot be read or written.
-            PlanningError: If the injected clock's reading is not conforming.
-            OversizedValueError: If the argument or the record exceeds the limit.
-        """
-        self._reject_if_closing()
-        named = identifier(grant_id, name="grant_id")
-        check_arguments("revoke_recipient_grant", max_bytes=self._max_payload_bytes, grant_id=named)
-        return await self._tracked(
-            self._recipient_grants.revoke_recipient_grant(named),
-            "revoke_recipient_grant",
-            checked=True,
-        )
-
-    # --- the destination-trust surface (ADR-0242 §2, §4) --------------------
-
-    async def establish_destination_trust(
-        self, decision_id: DurableIdentifier
-    ) -> DestinationTrustRecord:
-        """Record the user's choice over a recorded decision's destinations (ADR-0242 §1).
-
-        Delegated whole; what this layer adds is the identifier validation, the
-        payload check, the drain tracking and the result measurement. The three
-        availability conditions, the transcription of the destination set and the
-        record's construction are the operations object's, and **no store is written
-        on any refusal**.
-
-        **A second question asked as a second question** (ADR-0238 §1): this was never
-        ``establish_recipient_grant`` with a flag (that act has since left the engine,
-        ADR-0313 §5:1), it records no answer to any confirmation, and it reads no
-        recipient-grant store.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: If ``decision_id`` is blank or unwritable.
-            UntrustableDestinationError: If the act may not ride this decision — any
-                of ADR-0242 §1's three conditions, the first that fails being the one
-                named.
-            DuplicateDestinationTrustError: If a live record already names this
-                destination set (ADR-0242 §2).
-            InvalidDestinationTrustError: If the trust store refused the record on any
-                other ground, or could not be written.
-            AuditError: If the permission trail cannot be read.
-            PlanningError: If the injected clock's reading is not conforming.
-            OversizedValueError: If the argument or the record exceeds the limit.
-        """
-        self._reject_if_closing()
-        named = identifier(decision_id, name="decision_id")
-        check_arguments(
-            "establish_destination_trust", max_bytes=self._max_payload_bytes, decision_id=named
-        )
-        return await self._tracked(
-            self._destination_trust.establish_destination_trust(named),
-            "establish_destination_trust",
-            checked=True,
-        )
-
-    async def standing_destination_trust(self) -> tuple[DestinationTrustRecord, ...]:
-        """List every destination-trust record that is live now (ADR-0242 §4).
-
-        Delegated whole. **It takes no ``limit``**, for ``standing_recipient_grants``'
-        reason one store over: a truncated answer to "what do I trust" is a false
-        answer rather than a partial one, so a live set that does not fit the frame is
-        an ``OversizedValueError`` and no set at all.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            InvalidDestinationTrustError: If the trust store cannot be read.
-            OversizedValueError: If the live set does not fit the contract limit.
-        """
-        self._reject_if_closing()
-        return await self._tracked(
-            self._destination_trust.standing_destination_trust(),
-            "standing_destination_trust",
-            checked=True,
-        )
-
-    async def revoke_destination_trust(self, record_id: DurableIdentifier) -> bool:
-        """Withdraw one destination-trust record, or report there was none (ADR-0242 §4).
-
-        **Never refused** for any count, budget or ceiling, and whole: there is no
-        partial withdrawal and no narrowing. A caller that lost a race to another
-        revocation is answered ``False``, which is the honest answer rather than a
-        swallowed error — the trust they asked to withdraw is withdrawn.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: If ``record_id`` is blank or unwritable.
-            InvalidDestinationTrustError: If the trust store cannot be read or
-                written.
-            PlanningError: If the injected clock's reading is not conforming.
-            OversizedValueError: If the argument exceeds the limit.
-        """
-        self._reject_if_closing()
-        named = identifier(record_id, name="record_id")
-        check_arguments(
-            "revoke_destination_trust", max_bytes=self._max_payload_bytes, record_id=named
-        )
-        return await self._tracked(
-            self._destination_trust.revoke_destination_trust(named),
-            "revoke_destination_trust",
-            checked=True,
-        )
 
     # --- the connection surface (ADR-0151 §1) -------------------------------
 

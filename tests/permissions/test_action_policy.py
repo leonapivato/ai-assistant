@@ -8,16 +8,13 @@ own, and that the thresholds are the user's while the floors are not.
 
 from __future__ import annotations
 
-import asyncio
-from typing import TYPE_CHECKING, Any, final
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from action_policy_contract import ActionPolicyContract
 from permission_builders import action, decision, ruling, tool
 from recipient_builders import (
     ALICE,
-    BOB,
-    ENDPOINT,
     FORECAST_ACCOUNT,
     FORECAST_CANONICAL,
     FORECAST_ORIGIN,
@@ -31,15 +28,11 @@ from recipient_builders import (
     binding,
     forecast_binding,
     forecast_member,
-    member,
     request,
     search_binding,
     search_member,
 )
 
-from ai_assistant.core.config import Settings
-from ai_assistant.core.errors import RecipientGrantError
-from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import (
     CostBasis,
     DataTier,
@@ -56,18 +49,10 @@ from ai_assistant.permissions import (
     ConfiguredSearchDestination,
     ThresholdActionPolicy,
 )
-from ai_assistant.testing import (
-    FakeAuditTrail,
-    FakeRecipientGrantResolution,
-    FakeRecipientGrants,
-    recipient_grant,
-)
+from ai_assistant.testing import FakeAuditTrail
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from ai_assistant.core.protocols import ActionPolicy
-    from ai_assistant.core.types import ActionRequest, RecipientGrant
 
 
 class TestThresholdActionPolicyContract(ActionPolicyContract):
@@ -270,312 +255,6 @@ async def test_only_true_counts_as_consent(truthy: object) -> None:
     assert resolved.authorised_by is None
 
 
-# --- ADR-0193 §3, §7: route (b), where this policy was given a grant seam -----
-#
-# A policy constructed with no ``RecipientGrants`` is unchanged and every case
-# above still binds it. What follows is about the one constructed *with* one, and
-# every case here would pass vacuously against a policy that never consulted the
-# seam — which is why the call counts are asserted beside the outcomes.
-
-
-def _sourced(
-    *records: RecipientGrant, **thresholds: Any
-) -> tuple[ThresholdActionPolicy, FakeRecipientGrants]:
-    """A policy over a seam holding ``records``, and the seam, for its call count.
-
-    The call count is what every case below turns on beside its outcome: a policy
-    that never consulted the seam would pass the outcome half of most of them, and
-    §7's whole discipline is about *when* the read happens rather than about what
-    it returns.
-    """
-    grants = FakeRecipientGrants(records)
-    return ThresholdActionPolicy(grants=grants, **thresholds), grants
-
-
-async def test_a_covering_grant_turns_the_disclosure_floor_into_an_allow() -> None:
-    """The successful handoff, end to end (ADR-0193 §14).
-
-    The one case that pins the production path: the ``ALLOW`` names **that
-    grant's** id and carries **that grant's recomputed** ``subject_digest``, and
-    the decision built from it is then accepted by an ``AuditTrail`` over the
-    matching resolution face. A policy stamping a fixed well-formed digest passes
-    every origin, error and call-count case below while making every ordinary
-    route-(b) decision unrecordable, and every audit-side digest case can be
-    satisfied with hand-built rulings that never exercise a policy at all — so
-    the two halves are only joined here.
-
-    ADR-0021 §5's floor is **satisfied rather than relaxed**: it forbids an
-    ``ALLOW`` with ``authorised_by`` unset for a non-empty ``discloses``, and this
-    one sets it. §5's own text already named this mechanism as the relief valve.
-    """
-    granted = recipient_grant(member(ALICE), grant_id="g-1")
-    policy, grants = _sourced(granted)
-    subject = request(binding(ALICE))
-
-    ruled = await policy.decide(subject)
-
-    assert ruled.outcome is PermissionOutcome.ALLOW
-    assert ruled.authorised_by == "g-1"
-    assert ruled.authorised_subject == granted.subject_digest
-    assert grants.call_count == 1
-
-    trail = FakeAuditTrail(recipient_grants=FakeRecipientGrantResolution([granted]))
-    recorded = PermissionDecision.from_request(subject, ruled, id="d-1", decided_at=NOW)
-
-    assert await trail.record(recorded) == "d-1"
-
-
-async def test_no_grant_covering_the_request_leaves_the_confirmation_standing() -> None:
-    """The seam is consulted, answers ``None``, and the ruling proceeds unchanged."""
-    policy, grants = _sourced(recipient_grant(member(BOB), grant_id="g-1"))
-
-    ruled = await policy.decide(request(binding(ALICE)))
-
-    assert ruled.outcome is PermissionOutcome.CONFIRM
-    assert ruled.authorised_by is None
-    assert ruled.authorised_subject is None
-    assert grants.call_count == 1
-
-
-async def test_a_grant_covers_no_call_planned_over_external_content() -> None:
-    """ADR-0098 §3's last clause, answered **no**, and enforced at the ruling.
-
-    With a live grant covering every member of the canonical destination set in
-    place. A case asserting only that the grant is consulted does not satisfy
-    ADR-0193 §14's clause — and this one asserts the opposite, that the seam is
-    not consulted at all, because §7 puts the lookup after every ground the
-    request alone settles and a call carrying the fact is one of them.
-    """
-    policy, grants = _sourced(recipient_grant(member(ALICE), grant_id="g-1"))
-
-    ruled = await policy.decide(request(binding(ALICE, external=True)))
-
-    assert ruled.outcome is PermissionOutcome.CONFIRM
-    assert ruled.authorised_by is None
-    assert grants.call_count == 0
-
-
-async def test_a_request_carrying_no_binding_reaches_the_seam_zero_times() -> None:
-    """A request with no ``egress_binding`` is not an egress call (ADR-0193 §7).
-
-    Asserted over the recorded count rather than over the outcome, because the
-    outcome is the same either way: what this rules out is an implementation that
-    consults the store first and then rules on the request's own facts, which
-    would let a store failure disturb an answer the request had already given.
-    """
-    policy, grants = _sourced(recipient_grant(member(ALICE), grant_id="g-1"))
-
-    ruled = await policy.decide(action(tool=tool(discloses=(DataTier.PERSONAL,))))
-
-    assert ruled.outcome is PermissionOutcome.CONFIRM
-    assert grants.call_count == 0
-
-
-@pytest.mark.parametrize(
-    ("thresholds", "declared", "expected"),
-    [
-        pytest.param(
-            {},
-            {"cost": ToolCost(basis=CostBasis.UNKNOWN)},
-            PermissionOutcome.CONFIRM,
-            id="an undeclared cost",
-        ),
-        pytest.param(
-            {},
-            {"risk_level": RiskLevel.HIGH},
-            PermissionOutcome.CONFIRM,
-            id="risk at the confirm threshold",
-        ),
-        pytest.param(
-            {"confirm_at_reversibility": Reversibility.RECOVERABLE},
-            {"reversibility": Reversibility.RECOVERABLE},
-            PermissionOutcome.CONFIRM,
-            id="reversibility at the confirm threshold",
-        ),
-        pytest.param(
-            {"deny_at_risk": RiskLevel.LOW},
-            {},
-            PermissionOutcome.DENY,
-            id="a threshold deny",
-        ),
-    ],
-)
-async def test_a_grant_discharges_the_disclosure_floor_and_no_other_ground(
-    thresholds: dict[str, Any], declared: dict[str, Any], expected: PermissionOutcome
-) -> None:
-    """§3's *only-effect* clause as a test, and only these four reach it.
-
-    A grant "never converts a ``DENY`` into anything" and satisfies no floor stated
-    over any fact but recipient authorisation. Each case has a live grant covering
-    every member of the request's canonical destination set in place and still
-    draws the outcome it drew without one, and each asserts **zero** ``covering``
-    calls beside it: §7 puts those grounds on the far side of the seam, so a
-    policy consulting the store first and then ruling on the request's own facts
-    lets a store failure disturb an answer that was already given.
-
-    A policy returning ``ALLOW`` the moment ``covering`` succeeds suppresses all
-    four while passing the handoff, origin and call-count cases above — and the
-    ``ActionPolicy`` suite it also runs does not catch it, because
-    ``test_an_undeclared_cost_is_never_auto_granted`` asserts
-    ``not (ALLOW and authorised_by is None)`` and a route-(b) ``ALLOW`` sets
-    ``authorised_by``.
-    """
-    declaration = TOOL.model_copy(update=declared)
-    granted = recipient_grant(member(ALICE), grant_id="g-1", tool=declaration)
-    policy, grants = _sourced(granted, **thresholds)
-
-    ruled = await policy.decide(request(binding(ALICE), tool=declaration))
-
-    assert ruled.outcome is expected
-    assert ruled.authorised_by is None
-    assert ruled.authorised_subject is None
-    assert grants.call_count == 0
-
-
-async def test_an_unreadable_seam_yields_no_allow_and_no_cached_answer() -> None:
-    """A component that cannot get an answer **fails closed** (ADR-0193 §1).
-
-    An implementation that reused the last successful lookup passes every other
-    policy case here while authorising sends after its authorisation stopped being
-    checkable, so the case is written as a successful ruling followed by a failing
-    one against the same policy.
-    """
-    granted = recipient_grant(member(ALICE), grant_id="g-1")
-    grants = FakeRecipientGrants([granted])
-    policy = ThresholdActionPolicy(grants=grants)
-    subject = request(binding(ALICE))
-    assert (await policy.decide(subject)).outcome is PermissionOutcome.ALLOW
-
-    grants.fail_covering()
-    ruled = await policy.decide(subject)
-
-    assert ruled.outcome is PermissionOutcome.CONFIRM
-    assert ruled.authorised_by is None
-    assert ruled.authorised_subject is None
-
-
-async def test_a_seam_fault_is_logged_without_the_request_it_was_ruling_on(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The fault line names the seam and the class, and carries no Tier 1 value.
-
-    Round 1's adversarial finding, and it is about the *renderer* rather than
-    about the event dict. ``core.logging`` renders through
-    ``structlog.dev.ConsoleRenderer``, whose default exception formatter is
-    ``rich``'s with ``show_locals=True``, so an ``exc_info=True`` on this line
-    writes the ruling frame's locals into the log — and ``request`` carries the
-    recipient addresses, the connected account and the transport endpoint.
-    ``redact_sensitive`` cannot reach any of it: it runs **before** the renderer
-    and over the event dict's keys, and a rendered traceback is neither
-    (ADR-0004 §5).
-
-    Asserted over the **rendered output**, never over
-    ``structlog.testing.capture_logs`` — that fixture replaces the processor
-    chain, so a "does not leak" test written against it passes while the real
-    emission path leaks. ``tests/core/test_logging.py`` pins that trap directly.
-    """
-    configure_logging(Settings())
-    grants = FakeRecipientGrants([recipient_grant(member(ALICE), grant_id="g-1")])
-    policy = ThresholdActionPolicy(grants=grants)
-    grants.fail_covering()
-    capsys.readouterr()
-
-    ruled = await policy.decide(request(binding(ALICE)))
-
-    assert ruled.outcome is PermissionOutcome.CONFIRM
-    out = capsys.readouterr().out
-    assert "recipient_grant_seam_unreadable" in out
-    assert "RecipientGrantError" in out
-    assert ALICE not in out
-    assert ENDPOINT not in out
-
-
-async def test_a_partly_covered_destination_set_draws_one_confirmation_about_all_of_it() -> None:
-    """ADR-0193 §8: ``CONFIRM`` rather than ``DENY``, and about the **whole** call.
-
-    ``DENY`` would make a grant over one of two recipients strictly worse than no
-    grant at all, which is the shape a user would learn to avoid by never
-    granting. And nothing narrows the set: the request the ruling is taken over
-    still names both members, so the confirmation built from it names both — a
-    card asking about the recipients the user has not blessed, for a message going
-    to two, is ADR-0148 §4's silent narrowing arriving at the surface instead of
-    at the transport.
-    """
-    policy, grants = _sourced(recipient_grant(member(ALICE), grant_id="g-1"))
-    subject = request(binding(ALICE, BOB))
-
-    ruled = await policy.decide(subject)
-
-    assert ruled.outcome is PermissionOutcome.CONFIRM
-    assert ruled.authorised_by is None
-    assert grants.call_count == 1
-    assert subject.egress_binding is not None
-    assert subject.egress_binding.canonical_destination_set == (member(ALICE), member(BOB))
-
-
-async def test_a_policy_with_no_seam_is_unchanged_by_any_of_this() -> None:
-    """ADR-0021 §3's requirement of a policy constructed with no authorisation source.
-
-    The condition that bullet already contemplated, and the one ADR-0193 §12's
-    supersession is bounded by: for a policy with none, both purity sentences bind
-    as written and ``decide`` is the function of its argument it always was.
-    """
-    policy = ThresholdActionPolicy()
-
-    ruled = await policy.decide(request(binding(ALICE)))
-
-    assert ruled.outcome is PermissionOutcome.CONFIRM
-    assert ruled.authorised_by is None
-    assert ruled.authorised_subject is None
-
-
-@final
-class _YieldingFaultySeam:
-    """A ``RecipientGrants`` that suspends and *then* refuses.
-
-    ``FakeRecipientGrants.fail_covering`` refuses without ever suspending, so a
-    policy that read the request inside its failure handler passes every case
-    written against it. The interval is the point here: the request is rewritten
-    while this seam is out, and the handler must still fail closed.
-    """
-
-    def __init__(self, rewrite: Callable[[], None]) -> None:
-        """Take the rewrite to perform at the suspension this seam creates."""
-        self._rewrite = rewrite
-
-    async def covering(self, request: ActionRequest) -> RecipientGrant | None:
-        """Suspend, let the caller's request be rewritten, then refuse."""
-        del request
-        await asyncio.sleep(0)
-        self._rewrite()
-        msg = "the recipient-grant store could not be read"
-        raise RecipientGrantError(msg)
-
-
-async def test_a_seam_fault_fails_closed_even_where_the_request_was_rewritten() -> None:
-    """ADR-0065 on the failure branch, which is the one that must not raise.
-
-    A seam fault is answered ``CONFIRM`` (ADR-0193 §1's fail-closed clause), and
-    the handler that answers it composes a log line. Reading ``request.tool.id``
-    there reads the caller's object *after* a suspension — so a caller who
-    replaces ``request.tool`` while the seam is out turns the fail-closed branch
-    into whatever that read raised, out of the very code that exists to keep the
-    ruling safe.
-    """
-    subject = request(binding(ALICE))
-
-    def _rewrite() -> None:
-        subject.__dict__["tool"] = None
-
-    policy = ThresholdActionPolicy(grants=_YieldingFaultySeam(_rewrite))
-
-    ruled = await policy.decide(subject)
-
-    assert ruled.outcome is PermissionOutcome.CONFIRM
-    assert ruled.authorised_by is None
-    assert ruled.authorised_subject is None
-
-
 # --- ADR-0247 §2, §3: route (c), the deployment's own configured search provider ---
 #
 # The ADR writes its primed arm names with a prime and its second C with a
@@ -583,11 +262,9 @@ async def test_a_seam_fault_fails_closed_even_where_the_request_was_rewritten() 
 # because ruff refuses the ambiguous characters in Python source.
 #
 # ADR-0148 §3's enumeration gains a third route, and §12's arms A, B, B', C, C2, C'
-# and C″ are what hold it to its stated extent. Every case here turns on the **seam's
-# call count** beside its outcome, for the route-(b) block's reason above and for one
-# more of its own: §2 puts route (c) *before* the seam is consulted, so a policy that
-# looked first and preferred the configuration afterwards would pass every outcome
-# assertion while making a ruling at the configured provider cite a grant.
+# and C″ are what hold it to its stated extent. The policy holds no grant seam: route
+# (b) retired with recipient grants (ADR-0321 §7:1), so route (c) is the one standing
+# route, and it reads the binding alone.
 #
 # The **binding** is the search-shaped one `recipient_builders` builds — one HTTPS
 # span over the `origin` argument, `closed_loop` `True` — because §1's predicate is
@@ -609,37 +286,31 @@ def _configured(
     )
 
 
-def _at_provider(
-    *records: RecipientGrant, **overrides: Any
-) -> tuple[ThresholdActionPolicy, FakeRecipientGrants]:
-    """A policy configured with the search destination, over a seam holding ``records``.
+def _at_provider(**overrides: Any) -> ThresholdActionPolicy:
+    """A policy configured with the search destination.
 
-    The seam is handed over **so its call count can be asserted at zero**: a policy
-    built with no seam at all would satisfy "the grant seam is consulted zero times"
-    vacuously, and §12's Arm A asks for the assertion "over the seam and not over the
-    ruling".
+    It holds no grant seam, because none is left to hold (ADR-0321 §7:1): route (c)
+    is the only standing route, and it reads the binding alone.
     """
-    grants = FakeRecipientGrants(records)
-    arguments: dict[str, Any] = {"grants": grants, "configured_search": _configured()}
+    arguments: dict[str, Any] = {"configured_search": _configured()}
     arguments.update(overrides)
-    return ThresholdActionPolicy(**arguments), grants
+    return ThresholdActionPolicy(**arguments)
 
 
 async def test_a_search_at_the_configured_provider_is_allowed_with_no_grant_record() -> None:
     """§12's **Arm A**, and the handoff into the trail in one case.
 
     A turn that has read a local file and then searches: the binding carries
-    ``planned_with_external_content``, the grant store is **empty**, and the ruling is
-    an ``ALLOW`` on route (c) whose ``authorised_by`` is the binding's own
-    ``account.reference`` and whose ``authorised_subject`` is unset. **The grant seam
-    is consulted zero times**, asserted over the seam rather than over the ruling.
+    ``planned_with_external_content``, and the ruling is an ``ALLOW`` on route (c)
+    whose ``authorised_by`` is the binding's own ``account.reference`` and whose
+    ``authorised_subject`` is unset.
 
-    The decision built from that ruling is then recorded by an ``AuditTrail`` holding
-    **no** grant at all, which is the join ADR-0247 §2 rests on: the policy's pointer
+    The decision built from that ruling is then recorded by an ``AuditTrail``, which
+    is the join ADR-0247 §2 rests on: the policy's pointer
     is a value the trail re-reads off the binding, so the two halves of route (c)
     agree by construction rather than by two lanes each being right on its own.
     """
-    policy, grants = _at_provider()
+    policy = _at_provider()
     subject = request(search_binding(external=True), tool=SEARCH_TOOL)
 
     ruled = await policy.decide(subject)
@@ -647,16 +318,15 @@ async def test_a_search_at_the_configured_provider_is_allowed_with_no_grant_reco
     assert ruled.outcome is PermissionOutcome.ALLOW
     assert ruled.authorised_by == SEARCH_ACCOUNT.reference
     assert ruled.authorised_subject is None
-    assert grants.call_count == 0
 
-    trail = FakeAuditTrail(recipient_grants=FakeRecipientGrantResolution([]))
+    trail = FakeAuditTrail()
     recorded = PermissionDecision.from_request(subject, ruled, id="d-1", decided_at=NOW)
 
     assert await trail.record(recorded) == "d-1"
 
 
 async def test_a_policy_with_no_grant_seam_at_all_still_reaches_route_c() -> None:
-    """§2: "A policy constructed with no ``RecipientGrants`` reaches route (c)".
+    """§2: a policy constructed with no grant seam reaches route (c).
 
     The one way route (c)'s reachability differs from route (b)'s, and the decision
     rather than an oversight: the authority it cites is the deployment's own
@@ -714,7 +384,7 @@ async def test_both_floors_retire_at_the_configured_provider_and_retire_together
     that retired only the coverage limb would still be stopped on every turn that had
     read anything.
     """
-    policy, grants = _at_provider()
+    policy = _at_provider()
     bound = search_binding(external=external, coverage=coverage)
 
     ruled = await policy.decide(request(bound, tool=SEARCH_TOOL))
@@ -722,7 +392,6 @@ async def test_both_floors_retire_at_the_configured_provider_and_retire_together
     assert ruled.outcome is PermissionOutcome.ALLOW
     assert ruled.authorised_by == SEARCH_ACCOUNT.reference
     assert ruled.authorised_subject is None
-    assert grants.call_count == 0
 
 
 @pytest.mark.parametrize(
@@ -751,21 +420,12 @@ async def test_a_closed_loop_binding_elsewhere_keeps_every_floor(
     form, each on its own, because §1 compares both and either alone would leave the
     other unchecked.
 
-    **With a grant covering the request in the store**, so the case is not passing on
-    the absence of one: the ruling is ``CONFIRM``, the grant seam is consulted
-    **zero** times, and no ``ALLOW`` of any route is reached. That is §2's "reaches
-    route (b) in no case that route (b) does not already admit" — and it holds only
-    because §3's limbs read the derived fact rather than sitting beside route (c),
-    which is what these two arms exist to say.
+    The ruling is ``CONFIRM`` and no ``ALLOW`` is reached — which holds only because
+    §3's limbs read the derived fact rather than sitting beside route (c), which is
+    what these two arms exist to say.
     """
     bound = search_binding(external=external, coverage=coverage, **mismatch)
-    covering = recipient_grant(
-        search_member(canonical=str(bound.spans[0].destination.canonical)),  # type: ignore[union-attr]  # the span this builder writes carries one
-        grant_id="g-1",
-        tool=SEARCH_TOOL,
-        account=bound.account,
-    )
-    policy, grants = _at_provider(covering)
+    policy = _at_provider()
     subject = request(bound, tool=SEARCH_TOOL)
 
     ruled = await policy.decide(subject)
@@ -773,11 +433,6 @@ async def test_a_closed_loop_binding_elsewhere_keeps_every_floor(
     assert ruled.outcome is PermissionOutcome.CONFIRM
     assert ruled.authorised_by is None
     assert ruled.authorised_subject is None
-    assert grants.call_count == 0
-    # The premise, over a second seam so the count above stays this ruling's: the
-    # store really does hold a grant covering this call, so the ``CONFIRM`` is the
-    # floors binding rather than a grant that never matched.
-    assert await FakeRecipientGrants([covering]).covering(subject) is not None
 
 
 async def test_a_policy_with_no_configured_destination_reaches_no_route_c() -> None:
@@ -786,31 +441,12 @@ async def test_a_policy_with_no_configured_destination_reaches_no_route_c() -> N
     The fail-closed direction, and the same shape ADR-0021 §3 gives a policy with no
     authorisation source: an otherwise perfect route-(c) request draws ``CONFIRM``.
     """
-    policy, grants = _at_provider(configured_search=None)
+    policy = _at_provider(configured_search=None)
 
     ruled = await policy.decide(request(search_binding(external=True), tool=SEARCH_TOOL))
 
     assert ruled.outcome is PermissionOutcome.CONFIRM
     assert ruled.authorised_by is None
-    assert grants.call_count == 0
-
-
-async def test_a_route_b_request_on_such_a_policy_rules_exactly_as_it_does_today() -> None:
-    """Arm C''s second half, which keeps the first from passing vacuously.
-
-    "A route-(b) request that never carried ``closed_loop`` rules exactly as it does
-    at ``origin/main``": the covering grant still discharges the disclosure floor, the
-    seam is still read once, and the ``ALLOW`` still names the grant and its digest.
-    """
-    granted = recipient_grant(member(ALICE), grant_id="g-1")
-    policy, grants = _at_provider(granted, configured_search=None)
-
-    ruled = await policy.decide(request(binding(ALICE)))
-
-    assert ruled.outcome is PermissionOutcome.ALLOW
-    assert ruled.authorised_by == "g-1"
-    assert ruled.authorised_subject == granted.subject_digest
-    assert grants.call_count == 1
 
 
 async def test_a_call_of_another_kind_through_the_same_account_confirms_as_today() -> None:
@@ -826,36 +462,13 @@ async def test_a_call_of_another_kind_through_the_same_account_confirms_as_today
     ``orchestration`` writing that ``False`` is lane 3's half of the arm; what is
     asserted here is that the policy rules on the fact rather than on the account.
     """
-    policy, grants = _at_provider()
+    policy = _at_provider()
     bound = search_binding(external=True, closed_loop=False)
 
     ruled = await policy.decide(request(bound, tool=TOOL))
 
     assert ruled.outcome is PermissionOutcome.CONFIRM
     assert ruled.authorised_by is None
-    assert grants.call_count == 0
-
-
-async def test_route_c_answers_before_the_grant_seam_where_both_would_be_reachable() -> None:
-    """§2's ordering clause: "no ruling at the configured provider ever cites a grant".
-
-    With a grant in the store that **does** cover the request, so both routes would
-    answer it: (c) answers first, ``_covering`` is called zero times, and the recorded
-    ``authorised_by`` is the connection reference rather than the grant's id. A policy
-    that consulted the seam first and preferred the configuration afterwards passes
-    every other case in this block and fails this one.
-    """
-    covering = recipient_grant(
-        search_member(), grant_id="g-1", tool=SEARCH_TOOL, account=SEARCH_ACCOUNT
-    )
-    policy, grants = _at_provider(covering)
-
-    ruled = await policy.decide(request(search_binding(), tool=SEARCH_TOOL))
-
-    assert ruled.outcome is PermissionOutcome.ALLOW
-    assert ruled.authorised_by == SEARCH_ACCOUNT.reference
-    assert ruled.authorised_subject is None
-    assert grants.call_count == 0
 
 
 @pytest.mark.parametrize(
@@ -897,14 +510,13 @@ async def test_the_configuration_discharges_the_disclosure_floor_and_no_other_gr
     three while passing every case above.
     """
     declaration = SEARCH_TOOL.model_copy(update=declared)
-    policy, grants = _at_provider(**thresholds)
+    policy = _at_provider(**thresholds)
 
     ruled = await policy.decide(request(search_binding(external=True), tool=declaration))
 
     assert ruled.outcome is expected
     assert ruled.authorised_by is None
     assert ruled.authorised_subject is None
-    assert grants.call_count == 0
 
 
 async def test_the_route_c_reason_names_the_basis_and_quotes_no_identifier() -> None:
@@ -916,7 +528,7 @@ async def test_the_route_c_reason_names_the_basis_and_quotes_no_identifier() -> 
     to the user, and this decision does not move that: the reference is recorded on
     the decision for an auditor and rendered to nobody.
     """
-    policy, _ = _at_provider()
+    policy = _at_provider()
 
     ruled = await policy.decide(request(search_binding(external=True), tool=SEARCH_TOOL))
 
@@ -930,10 +542,8 @@ async def test_the_route_c_reason_names_the_basis_and_quotes_no_identifier() -> 
 # --- ADR-0260 §6, §13: route (c) widened to the configured forecast provider ---
 #
 # §6 widens ADR-0247 §2's route (c) to a **closed two-member set** and adds no fourth
-# route, with each kind compared against **its own** configured pair. Every case below
-# turns on the seam's call count beside its outcome, for the search block's reasons
-# above and for one more of §6's own: a read at the configured forecast provider is
-# `ALLOW` "with no confirmation sought and no grant seam consulted".
+# route, with each kind compared against **its own** configured pair: a read at the
+# configured forecast provider is `ALLOW` "with no confirmation sought".
 #
 # The **binding** is `forecast_binding`, the forecast-shaped one — one HTTPS span over
 # the `origin` argument, `forecast_reach` `True`, `closed_loop` `False` — because §6's
@@ -956,10 +566,8 @@ def _configured_forecast(
     )
 
 
-def _at_both(
-    *records: RecipientGrant, **overrides: Any
-) -> tuple[ThresholdActionPolicy, FakeRecipientGrants]:
-    """A policy configured with **both** pairs, over a seam holding ``records``.
+def _at_both(**overrides: Any) -> ThresholdActionPolicy:
+    """A policy configured with **both** pairs.
 
     Both, because §6's crosswise clause has no subject on a policy that holds only
     one: "a forecast request bound to the search provider's account or origin, or the
@@ -967,14 +575,12 @@ def _at_both(
     two providers, and a policy holding one pair would refuse the crosswise request on
     the missing pair instead of on the mismatch.
     """
-    grants = FakeRecipientGrants(records)
     arguments: dict[str, Any] = {
-        "grants": grants,
         "configured_search": _configured(),
         "configured_forecast": _configured_forecast(),
     }
     arguments.update(overrides)
-    return ThresholdActionPolicy(**arguments), grants
+    return ThresholdActionPolicy(**arguments)
 
 
 async def test_a_forecast_read_at_the_configured_provider_is_allowed_with_no_grant_record() -> None:
@@ -982,12 +588,9 @@ async def test_a_forecast_read_at_the_configured_provider_is_allowed_with_no_gra
 
     A turn that has read a local file and then reads the forecast: the binding carries
     ``planned_with_external_content``, carries ``forecast_reach``, matches the
-    configured forecast pair in both recorded comparisons, and the grant store is
-    **empty**. The ruling is an ``ALLOW`` on route (c) whose ``authorised_by`` is the
-    binding's own ``account.reference`` and whose ``authorised_subject`` is unset, and
-    **the grant seam is consulted zero times** — asserted over the seam rather than
-    over the ruling, because a policy that looked first and preferred the
-    configuration afterwards passes every outcome assertion here.
+    configured forecast pair in both recorded comparisons. The ruling is an ``ALLOW``
+    on route (c) whose ``authorised_by`` is the binding's own ``account.reference``
+    and whose ``authorised_subject`` is unset.
 
     **Nothing is asserted here about the audit trail**, which is the one half of
     ADR-0247 §2 this decision does not carry to this kind: that section's trail check
@@ -999,7 +602,7 @@ async def test_a_forecast_read_at_the_configured_provider_is_allowed_with_no_gra
     what it owes and the trail is not in it, and widening the check would contradict a
     sentence of a ratified ADR.
     """
-    policy, grants = _at_both()
+    policy = _at_both()
     subject = request(forecast_binding(external=True), tool=FORECAST_TOOL)
 
     ruled = await policy.decide(subject)
@@ -1007,7 +610,6 @@ async def test_a_forecast_read_at_the_configured_provider_is_allowed_with_no_gra
     assert ruled.outcome is PermissionOutcome.ALLOW
     assert ruled.authorised_by == FORECAST_ACCOUNT.reference
     assert ruled.authorised_subject is None
-    assert grants.call_count == 0
 
 
 @pytest.mark.parametrize(
@@ -1030,7 +632,7 @@ async def test_both_floors_retire_at_the_configured_forecast_provider_and_retire
     The middle row is the one a lane that restated only the lineage limb fails, and
     the last is its converse.
     """
-    policy, grants = _at_both()
+    policy = _at_both()
     bound = forecast_binding(external=external, coverage=coverage)
 
     ruled = await policy.decide(request(bound, tool=FORECAST_TOOL))
@@ -1038,7 +640,6 @@ async def test_both_floors_retire_at_the_configured_forecast_provider_and_retire
     assert ruled.outcome is PermissionOutcome.ALLOW
     assert ruled.authorised_by == FORECAST_ACCOUNT.reference
     assert ruled.authorised_subject is None
-    assert grants.call_count == 0
 
 
 @pytest.mark.parametrize(
@@ -1075,18 +676,10 @@ async def test_a_forecast_read_failing_any_conjunct_keeps_every_floor(
     granting route (c) where §6 refuses it, and ``False`` "is also the value a
     composition site that never computed the fact leaves behind".
 
-    **With a grant covering the request in the store**, so no row passes on the
-    absence of one: the ruling is ``CONFIRM``, the seam is consulted **zero** times,
-    and no ``ALLOW`` of any route is reached.
+    The ruling is ``CONFIRM`` and no ``ALLOW`` is reached.
     """
     bound = forecast_binding(external=external, coverage=coverage, **mismatch)
-    covering = recipient_grant(
-        forecast_member(canonical=str(bound.spans[0].destination.canonical)),  # type: ignore[union-attr]  # the span this builder writes carries one
-        grant_id="g-f1",
-        tool=FORECAST_TOOL,
-        account=bound.account,
-    )
-    policy, grants = _at_both(covering)
+    policy = _at_both()
     subject = request(bound, tool=FORECAST_TOOL)
 
     ruled = await policy.decide(subject)
@@ -1094,9 +687,6 @@ async def test_a_forecast_read_failing_any_conjunct_keeps_every_floor(
     assert ruled.outcome is PermissionOutcome.CONFIRM
     assert ruled.authorised_by is None
     assert ruled.authorised_subject is None
-    assert grants.call_count == 0
-    # The premise, over a second seam so the count above stays this ruling's.
-    assert await FakeRecipientGrants([covering]).covering(subject) is not None
 
 
 @pytest.mark.parametrize(
@@ -1136,13 +726,12 @@ async def test_neither_kind_is_authorised_by_the_other_kinds_configured_pair(
     implementation comparing against whichever pair happens to match, or against the
     two as one set, passes every arm above and fails both rows here.
     """
-    policy, grants = _at_both()
+    policy = _at_both()
 
     ruled = await policy.decide(request(bound, tool=tool))
 
     assert ruled.outcome is PermissionOutcome.CONFIRM
     assert ruled.authorised_by is None
-    assert grants.call_count == 0
 
 
 async def test_a_binding_asserting_both_kinds_is_at_no_configured_provider() -> None:
@@ -1163,14 +752,13 @@ async def test_a_binding_asserting_both_kinds_is_at_no_configured_provider() -> 
     floor and not a ceiling", and "every normative clause of this decision that an
     implementation can fail is owed an arm".
     """
-    policy, grants = _at_both()
+    policy = _at_both()
     bound = forecast_binding(external=True, closed_loop=True)
 
     ruled = await policy.decide(request(bound, tool=FORECAST_TOOL))
 
     assert ruled.outcome is PermissionOutcome.CONFIRM
     assert ruled.authorised_by is None
-    assert grants.call_count == 0
 
 
 async def test_a_forecast_only_policy_reaches_route_c_with_no_seam_and_no_search_pair() -> None:
@@ -1203,7 +791,7 @@ async def test_a_policy_with_no_configured_forecast_reaches_no_route_c_on_a_fore
     the fact. The **same policy still reaches route (c) on a search**, which is what
     keeps the first half from passing on a policy that had simply stopped working.
     """
-    policy, grants = _at_both(configured_forecast=None)
+    policy = _at_both(configured_forecast=None)
 
     forecast = await policy.decide(request(forecast_binding(external=True), tool=FORECAST_TOOL))
 
@@ -1214,7 +802,6 @@ async def test_a_policy_with_no_configured_forecast_reaches_no_route_c_on_a_fore
 
     assert searched.outcome is PermissionOutcome.ALLOW
     assert searched.authorised_by == SEARCH_ACCOUNT.reference
-    assert grants.call_count == 0
 
 
 async def test_the_forecast_read_asks_nothing_and_the_turns_other_send_is_unaffected() -> None:
@@ -1231,13 +818,7 @@ async def test_the_forecast_read_asks_nothing_and_the_turns_other_send_is_unaffe
     ADR-0260 §6's last normative clause, "nothing rides this that is not a forecast
     read at the configured forecast provider".
     """
-    covering = recipient_grant(
-        search_member(canonical="https://elsewhere.example.com:443"),
-        grant_id="g-f2",
-        tool=SEARCH_TOOL,
-        account=SEARCH_ACCOUNT,
-    )
-    policy, grants = _at_both(covering)
+    policy = _at_both()
 
     forecast = await policy.decide(
         request(
@@ -1249,7 +830,6 @@ async def test_the_forecast_read_asks_nothing_and_the_turns_other_send_is_unaffe
     assert forecast.outcome is PermissionOutcome.ALLOW
     assert forecast.authorised_by == FORECAST_ACCOUNT.reference
     assert forecast.authorised_subject is None
-    assert grants.call_count == 0
 
     elsewhere = await policy.decide(
         request(
@@ -1291,13 +871,12 @@ async def test_the_forecast_configuration_discharges_the_disclosure_floor_and_no
     passing every case above.
     """
     declaration = FORECAST_TOOL.model_copy(update=declared)
-    policy, grants = _at_both(**thresholds)
+    policy = _at_both(**thresholds)
 
     ruled = await policy.decide(request(forecast_binding(external=True), tool=declaration))
 
     assert ruled.outcome is expected
     assert ruled.authorised_by is None
-    assert grants.call_count == 0
 
 
 async def test_the_forecast_route_c_reason_names_the_basis_and_quotes_no_identifier() -> None:
@@ -1308,7 +887,7 @@ async def test_the_forecast_route_c_reason_names_the_basis_and_quotes_no_identif
     forecast read as a search — and it names no origin, no host, no connection
     reference, no coordinate, no credential and no ``Settings`` field.
     """
-    policy, _ = _at_both()
+    policy = _at_both()
 
     ruled = await policy.decide(request(forecast_binding(external=True), tool=FORECAST_TOOL))
 
@@ -1334,7 +913,7 @@ async def test_a_search_at_the_configured_provider_rules_exactly_as_it_did() -> 
     renders, and generalising one sentence over both kinds would have changed it on
     every search this deployment already makes while passing every other arm here.
     """
-    policy, grants = _at_both()
+    policy = _at_both()
 
     ruled = await policy.decide(request(search_binding(external=True), tool=SEARCH_TOOL))
 
@@ -1345,4 +924,3 @@ async def test_a_search_at_the_configured_provider_rules_exactly_as_it_did() -> 
         "this deployment's owner configured this search provider, so searching it is "
         "the destination they chose and the recipient they granted"
     )
-    assert grants.call_count == 0
