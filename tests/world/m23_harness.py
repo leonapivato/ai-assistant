@@ -110,20 +110,16 @@ from ai_assistant.orchestration import Engine
 from ai_assistant.orchestration.connections import ConnectionOperations
 from ai_assistant.orchestration.consolidation import ConsolidationStage
 from ai_assistant.orchestration.conversations import ConversationLifecycle
-from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
 from ai_assistant.orchestration.grants import GrantOperations
-from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
 from ai_assistant.orchestration.writes import MemoryWriteStage
 from ai_assistant.readers import CalendarReader
 from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeConversationStore,
-    FakeDestinationTrustStore,
     FakeModelProvider,
     FakeOutboundTransport,
     FakePlanStore,
-    FakeRecipientGrantStore,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeTraceRetention,
@@ -598,18 +594,6 @@ def build_world(tmp_path: Path, *, plan: str, consolidation: str) -> World:
             store=FakeSourceGrantStore(),
             sources=(),
             id_factory=lambda: "grant-1",
-            clock=lambda: NOW,
-        ),
-        recipient_grant_operations=RecipientGrantOperations(
-            store=FakeRecipientGrantStore(),
-            id_factory=lambda: "recipient-grant-1",
-            clock=lambda: NOW,
-        ),
-        # The three destination-trust operations, over this harness's own trail.
-        destination_trust_operations=DestinationTrustOperations(
-            store=FakeDestinationTrustStore(),
-            trail=trail,
-            id_factory=lambda: "destination-trust-1",
             clock=lambda: NOW,
         ),
         connection_operations=ConnectionOperations(provisioner=FakeConnectionProvisioner()),

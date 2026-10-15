@@ -27,7 +27,6 @@ from ai_assistant.testing.connections import (
     FakeConnectionPurger,
 )
 from ai_assistant.testing.conversations import FakeConversationStore
-from ai_assistant.testing.destination_trust import FakeDestinationTrustStore
 from ai_assistant.testing.diagnostics import (
     FakeDiagnosticRetention,
     FakeDiagnosticSink,
@@ -107,21 +106,6 @@ from ai_assistant.testing.reads import (
     FakeSourceReadRecorder,
     FakeSourceReadTrail,
     source_read_record,
-)
-from ai_assistant.testing.recipient_grants import (
-    RECIPIENT_GRANT_ACCOUNT,
-    RECIPIENT_GRANT_ADDRESS,
-    RECIPIENT_GRANT_DECIDED_AT,
-    RECIPIENT_GRANT_EXPIRES_AT,
-    RECIPIENT_GRANT_NOW,
-    RECIPIENT_GRANT_TOOL,
-    FakeRecipientGrantResolution,
-    FakeRecipientGrants,
-    FakeRecipientGrantStore,
-    account_member,
-    recipient,
-    recipient_grant,
-    recipient_revocation_of,
 )
 from ai_assistant.testing.searching import (
     DEFAULT_MAX_RESULT_CHARS,
@@ -207,12 +191,6 @@ __all__ = [
     "FAKE_WEB_SEARCH_ID",
     "MAX_ROWS_EXCLUSIVE",
     "OTHER_INSTALLATION",
-    "RECIPIENT_GRANT_ACCOUNT",
-    "RECIPIENT_GRANT_ADDRESS",
-    "RECIPIENT_GRANT_DECIDED_AT",
-    "RECIPIENT_GRANT_EXPIRES_AT",
-    "RECIPIENT_GRANT_NOW",
-    "RECIPIENT_GRANT_TOOL",
     "REPORTED_FAILURE",
     "RESERVED_KIND",
     "SLOT_PREFIX",
@@ -229,7 +207,6 @@ __all__ = [
     "FakeConnectionProvisioner",
     "FakeConnectionPurger",
     "FakeConversationStore",
-    "FakeDestinationTrustStore",
     "FakeDiagnosticRetention",
     "FakeDiagnosticSink",
     "FakeEgressBinder",
@@ -252,9 +229,6 @@ __all__ = [
     "FakeOutboundTransport",
     "FakePlanStore",
     "FakeReader",
-    "FakeRecipientGrantResolution",
-    "FakeRecipientGrantStore",
-    "FakeRecipientGrants",
     "FakeSecretStore",
     "FakeSecrets",
     "FakeSourceGrantStore",
@@ -282,7 +256,6 @@ __all__ = [
     "SecretBacking",
     "SecretMethod",
     "TransportAttempt",
-    "account_member",
     "attested_proposal",
     "authorised",
     "diagnostic_entry",
@@ -290,9 +263,6 @@ __all__ = [
     "evaluation_trace",
     "forecast_day",
     "invoker_over",
-    "recipient",
-    "recipient_grant",
-    "recipient_revocation_of",
     "revocation_of",
     "source_grant",
     "source_read_record",

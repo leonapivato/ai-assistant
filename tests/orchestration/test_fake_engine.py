@@ -75,20 +75,15 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
-    ActionRequest,
     ActivationEnding,
     Attestation,
     BeliefBand,
     BeliefSummary,
     BoundAccount,
-    CapabilityEffect,
-    CapabilityResult,
     ChatDevice,
     Conversation,
     ConversationState,
     ConversationSummary,
-    CostBasis,
-    DataTier,
     DestinationProtocol,
     DeviceAccess,
     DiscloserProvenance,
@@ -97,24 +92,16 @@ from ai_assistant.core.types import (
     EgressSpan,
     EpisodicMemory,
     GrantScope,
-    Idempotency,
     MemoryKind,
     MemoryWrite,
     MessageAuthor,
     MessageReceipt,
     NewMessage,
-    PermissionDecision,
-    PermissionOutcome,
-    PermissionRuling,
     Placement,
     PlacementReach,
     PlacementSetter,
     ProcessingStatus,
-    Reversibility,
-    RiskLevel,
     SpanCoverage,
-    ToolCost,
-    ToolDefinition,
     TranscriptMessage,
     UserMessage,
 )
@@ -171,55 +158,6 @@ def _binding() -> EgressBinding:
         transport_endpoint="test://endpoint/one",
         planned_with_external_content=False,
         coverage=SpanCoverage.NOT_COVERED,
-    )
-
-
-#: The instant every recipient-grant case here is arranged at, matching the fake's
-#: own default :attr:`recipient_grant_clock` so nothing has to move it.
-_RECIPIENT_AT = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
-
-
-def _transmitting_tool() -> ToolDefinition:
-    """A declaration a recorded egress ``CONFIRM`` can be about."""
-    return ToolDefinition(
-        id="send_email",
-        capability="send_email",
-        description="Send an email.",
-        risk_level=RiskLevel.LOW,
-        reversibility=Reversibility.IRREVERSIBLE,
-        side_effecting=True,
-        effect=CapabilityEffect.WORLD,
-        leaves_hub=True,
-        result=CapabilityResult.NO_OUTSIDE_TEXT,
-        outcome_can_be_unknown=True,
-        safe_to_repeat=False,
-        reads=(),
-        writes=(),
-        discloses=(DataTier.PERSONAL,),
-        cost=ToolCost(basis=CostBasis.FREE),
-        idempotency=Idempotency.NONE,
-    )
-
-
-_TRANSMITTING_TOOL = _transmitting_tool()
-
-
-def _recorded_confirm(binding: EgressBinding | None) -> PermissionDecision:
-    """A recorded egress ``CONFIRM``, as the trail holds it and a park binds it.
-
-    ``binding`` is ``None`` for the first of ADR-0235 §2's four refused shapes — a
-    confirmation about a call that discloses nothing off-device, which a user may
-    still answer and may not make recipients standing from.
-    """
-    return PermissionDecision.from_request(
-        ActionRequest(
-            tool=_TRANSMITTING_TOOL,
-            parameters={"to": "Alice@Example.ORG", "body": "hello"},
-            egress_binding=binding,
-        ),
-        PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="it discloses off-device"),
-        id="d-confirm",
-        decided_at=_RECIPIENT_AT,
     )
 
 

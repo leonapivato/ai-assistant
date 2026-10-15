@@ -11,7 +11,6 @@ import pytest
 
 from ai_assistant.core.types import CapabilityEffect, CapabilityResult, ToolDefinition
 from ai_assistant.testing.forecasting import FAKE_FORECAST_READ
-from ai_assistant.testing.recipient_grants import RECIPIENT_GRANT_TOOL
 from ai_assistant.testing.searching import FAKE_WEB_SEARCH
 from ai_assistant.tools.booking import BOOKING_ACT, BOOKING_AVAILABILITY
 from ai_assistant.tools.builtin import CURRENT_TIME
@@ -32,7 +31,6 @@ _DECLARED: list[tuple[ToolDefinition, tuple[object, ...]]] = [
     (FORECAST_READ, (_NONE, True, _MAY, True, True)),
     (FAKE_FORECAST_READ, (_NONE, True, _MAY, True, True)),
     (SEND_EMAIL, (_WORLD, True, _NO, True, False)),
-    (RECIPIENT_GRANT_TOOL, (_WORLD, True, _NO, True, False)),
     (BOOKING_AVAILABILITY, (_NONE, True, _NO, False, True)),
     (BOOKING_ACT, (_WORLD, True, _NO, True, False)),
 ]

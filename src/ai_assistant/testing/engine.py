@@ -41,7 +41,6 @@ from typing import TYPE_CHECKING, assert_never
 from uuid import UUID, uuid4
 
 from ai_assistant.core.channel_validation import snapshot
-from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.device_context import current_requesting_device
 from ai_assistant.core.episode_encoding import check_detail, check_list
 from ai_assistant.core.errors import (
@@ -49,15 +48,12 @@ from ai_assistant.core.errors import (
     ConversationStoreError,
     GrantError,
     InvalidGrantError,
-    InvalidRecipientGrantError,
     MemoryStoreError,
     ModelTimeoutError,
     NotificationBudgetError,
     OversizedValueError,
-    PlanningError,
     StoryStoreError,
     UngrantableSourceError,
-    UntrustableDestinationError,
 )
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
@@ -73,9 +69,6 @@ from ai_assistant.core.types import (
     ChannelResult,
     ConversationDigest,
     ConversationSummary,
-    DestinationTrust,
-    DestinationTrustRecord,
-    EgressBinding,
     EpisodeCaptureReport,
     EpisodeChunk,
     EpisodePage,
@@ -93,7 +86,6 @@ from ai_assistant.core.types import (
     PlacementSetter,
     ProcessingStatus,
     Provenance,
-    RecipientGrant,
     RecordedInvocation,
     SendOutcome,
     SourceGrant,
@@ -179,7 +171,6 @@ from ai_assistant.orchestration.story_standing import story_standing as standing
 from ai_assistant.testing.activation import FakeActivation
 from ai_assistant.testing.connections import FakeConnectionProvisioner
 from ai_assistant.testing.conversations import FakeConversationStore
-from ai_assistant.testing.destination_trust import FakeDestinationTrustStore
 from ai_assistant.testing.memory import FakeMemoryStore
 from ai_assistant.testing.notifications import (
     FakeNotificationOutbox,
@@ -188,7 +179,6 @@ from ai_assistant.testing.notifications import (
 )
 from ai_assistant.testing.permissions import FakeAuditTrail
 from ai_assistant.testing.reads import FakeSourceReadTrail
-from ai_assistant.testing.recipient_grants import FakeRecipientGrantStore
 from ai_assistant.testing.stories import FakeStoryStore
 
 if TYPE_CHECKING:
@@ -202,7 +192,6 @@ if TYPE_CHECKING:
         ChatStreamEnd,
         ConnectedAccount,
         ConnectionAct,
-        DurableIdentifier,
         EncodableText,
         HeldNotification,
         Identifier,
@@ -486,48 +475,6 @@ class FakeAssistantEngine:
         #: contract a suite can hold the surface to. Replaceable, so a case can
         #: substitute a conforming trail that logs its reads or fails on demand.
         self.reads: SourceReadTrail = FakeSourceReadTrail()
-        #: The recipient-grant store ADR-0235 §7's two listings and its revocation
-        #: relay, public and replaceable for :attr:`trail`'s reason: the states that
-        #: matter here — a store at its ceiling, one already holding this subject,
-        #: one that cannot be written — are facts about the **store**, and a fake
-        #: engine holding a list of grants could only hand back what a test had
-        #: already assembled. Seed it with ``hold`` or ``fail_writes``, or replace it
-        #: with one built at a smaller ``max_outstanding``.
-        #:
-        #: **A whole ``RecipientGrantStore`` and never a ``RecipientGrants``**
-        #: (ADR-0193 §1, ADR-0235 §4): the establishing act needs ``record``, and a
-        #: fake offering the policy's narrow face would let a consumer's test
-        #: authorise a send through an adapter.
-        self.recipient_grants = FakeRecipientGrantStore()
-        #: What stamps ``decided_at`` on a revoking record this engine appends.
-        #: Scriptable on :attr:`grant_clock`'s reason and **separate from it**,
-        #: because recipient grants and source grants are two vocabularies and never
-        #: one (ADR-0235 §7) — one clock over two stores is the shape that invites a
-        #: test to reason about one from the other.
-        self.recipient_grant_clock: Callable[[], datetime] = lambda: _AT
-        #: What the user recorded about destinations (ADR-0238 §1), for ADR-0242 §2's
-        #: three operations. A **whole** ``DestinationTrustStore`` for
-        #: :attr:`recipient_grants`' reason one store over: the act needs ``record``,
-        #: the listing needs ``live`` and revocation needs ``revoke``, and the states a
-        #: consumer's test wants — a set already live, a store that cannot be written —
-        #: are facts about the store. Seed it with ``hold`` or arm it with
-        #: ``fail_writes``.
-        self.destination_trust = FakeDestinationTrustStore()
-        #: What stamps ``established_at`` on a trust record this engine mints, and the
-        #: instant a revocation carries. **Separate from**
-        #: :attr:`recipient_grant_clock` for ADR-0242 §4's two-vocabulary reason: one
-        #: clock over two stores is the shape that invites a test to reason about one
-        #: from the other.
-        self.destination_trust_clock: Callable[[], datetime] = lambda: _AT
-        #: Mints each trust record's id. **A fresh one per act**, as the production
-        #: operations do: ADR-0238 §1 makes the store write-once, so an id derived from
-        #: the *decision* would make a second act on one decision raise the duplicate-id
-        #: refusal — and after a revocation that act is one ADR-0242 §1 admits, because
-        #: the act is indifferent to a decision's ruling and resolution. A fake refusing
-        #: it would be stricter than every conforming engine, and it would raise the
-        #: **base** class where §2 fixes the subclass for a live duplicate, making the
-        #: *already chosen* rendering unreachable in a consumer's test.
-        self._trust_ids = count(1)
         #: Every call, in order, as ``(method, arguments)`` — so a test can assert
         #: what reached the engine without reaching into its state.
         #:
@@ -719,33 +666,6 @@ class FakeAssistantEngine:
                 "last_turn_at": _AT,
             }
         )
-
-    def _recipient_now(self) -> datetime:
-        """The guarded reading of :attr:`recipient_grant_clock` (ADR-0026 §2, §4).
-
-        **Guarded at the read and not at construction, which is this attribute's
-        own shape rather than an exception to the rule.**
-        :func:`~ai_assistant.core.clock.checked_clock` says to wrap "where the clock
-        is stored", and on this class the clock is stored where a *test* replaces it
-        — it is a public lever, so a wrapper installed in ``__init__`` would be
-        thrown away by the next assignment and the guard would be there or not
-        depending on whether a case used the lever.
-
-        The translation is
-        :meth:`~ai_assistant.orchestration.recipient_grants.RecipientGrantOperations._now`'s,
-        so the fake refuses what the
-        concrete engine refuses with the type it refuses it with: a consumer's test
-        against a non-conforming clock must not pass here and fail against a hub.
-
-        Raises:
-            PlanningError: If the reading is not a conforming one — naive,
-                indeterminate, or outside the localizable range.
-        """
-        try:
-            return checked_clock(self.recipient_grant_clock, owner="FakeAssistantEngine")()
-        except ClockReadingError as exc:
-            msg = f"the recipient-grant clock returned a non-conforming reading: {exc}"
-            raise PlanningError(msg) from exc
 
     async def stop_activation(self, activation_id: Identifier, /) -> ActivationStop:
         """Stop one running activation, as the engine does (ADR-0297 §3, §5).
@@ -2048,164 +1968,6 @@ class FakeAssistantEngine:
         by_id = sorted(live, key=lambda record: record.id)
         ordered = sorted(by_id, key=lambda record: record.decided_at, reverse=True)
         return self._checked(tuple(ordered), "standing_grants")
-
-    # --- the recipient-grant surface (ADR-0235 §3, §7) ---------------------
-
-    async def standing_recipient_grants(self) -> tuple[RecipientGrant, ...]:
-        """List every standing recipient grant that is live now (ADR-0235 §7).
-
-        Read from :attr:`recipient_grants` and from nothing else, so liveness is the
-        store's and is never re-derived from the history — the substitution ADR-0235
-        §7 forbids at every surface.
-        """
-        self.calls.append(("standing_recipient_grants", {}))
-        return self._checked(
-            tuple(await self.recipient_grants.standing()), "standing_recipient_grants"
-        )
-
-    async def recent_recipient_grants(
-        self, *, limit: int = DEFAULT_PAGE_SIZE
-    ) -> tuple[RecipientGrant, ...]:
-        """List the recipient-grant store's own history, newest first (ADR-0235 §7).
-
-        Granting and revoking records alike, and **no liveness**: a record here says
-        an act happened, never that it still stands.
-        """
-        positive_page_argument(limit, name="limit")
-        check_arguments("recent_recipient_grants", max_bytes=self._max_payload_bytes, limit=limit)
-        self.calls.append(("recent_recipient_grants", {"limit": limit}))
-        return self._checked(
-            tuple(await self.recipient_grants.recent(limit=limit)), "recent_recipient_grants"
-        )
-
-    async def revoke_recipient_grant(self, grant_id: DurableIdentifier) -> RecipientGrant | None:
-        """Withdraw one standing recipient grant, or report there was none (ADR-0235 §7).
-
-        The revoking record transcribes the outstanding record's ``tool``,
-        ``account`` and ``destinations`` verbatim, and a refusal met while the grant
-        is no longer outstanding answers ``None`` — this method's own second branch
-        reached late rather than a third outcome.
-        """
-        named = identifier(grant_id, name="grant_id")
-        check_arguments("revoke_recipient_grant", max_bytes=self._max_payload_bytes, grant_id=named)
-        self.calls.append(("revoke_recipient_grant", {"grant_id": named}))
-        outstanding = await self.recipient_grants.outstanding(named)
-        if outstanding is None:
-            return None
-        record = RecipientGrant(
-            id=f"revocation-{named}",
-            tool=outstanding.tool,
-            account=outstanding.account,
-            destinations=outstanding.destinations,
-            decided_at=self._recipient_now(),
-            expires_at=outstanding.expires_at,
-            revokes=outstanding.id,
-        )
-        try:
-            await self.recipient_grants.record(record)
-        except InvalidRecipientGrantError:
-            if await self.recipient_grants.outstanding(named) is None:
-                return None
-            raise
-        return self._checked(record, "revoke_recipient_grant")
-
-    # --- the destination-trust surface (ADR-0242 §2, §4) --------------------
-
-    async def establish_destination_trust(
-        self, decision_id: DurableIdentifier
-    ) -> DestinationTrustRecord:
-        """Record the user's choice over a recorded decision's destinations (ADR-0242 §1).
-
-        **The real conditions, in ADR-0242 §1's own order**, against
-        :attr:`trail` — not a scripted outcome — so a consumer's test drives the same
-        three refusals the production engine raises and reads each from its type. The
-        destination set is transcribed from the binding's own
-        ``canonical_destination_set`` and never rebuilt here, and **nothing is written
-        on any refusal**.
-
-        Raises:
-            ValueError: If ``decision_id`` is blank or unwritable.
-            UntrustableDestinationError: If any of the three conditions fails.
-            DuplicateDestinationTrustError: If a live record already names this set.
-            InvalidDestinationTrustError: If the store refused or could not be written.
-        """
-        named = identifier(decision_id, name="decision_id")
-        check_arguments(
-            "establish_destination_trust", max_bytes=self._max_payload_bytes, decision_id=named
-        )
-        self.calls.append(("establish_destination_trust", {"decision_id": named}))
-        decision = await self.trail.get(named)
-        if decision is None:
-            msg = (
-                f"no decision {named!r} is recorded, so there is no destination set to "
-                f"transcribe and nothing was recorded (ADR-0242 §1)"
-            )
-            raise UntrustableDestinationError(msg)
-        binding = decision.egress_binding
-        if not isinstance(binding, EgressBinding):
-            msg = (
-                f"decision {named!r} records no whole egress binding, so the destination set "
-                f"this act would be over is not on the row; nothing was recorded (ADR-0242 §1)"
-            )
-            raise UntrustableDestinationError(msg)
-        if binding.planned_with_external_content:
-            msg = (
-                f"decision {named!r} records a call planned over recorded external content, "
-                f"and trust recorded from such a call is the loop closing on itself; nothing "
-                f"was recorded (ADR-0242 §1)"
-            )
-            raise UntrustableDestinationError(msg)
-        record = DestinationTrustRecord(
-            id=f"trust-{next(self._trust_ids)}",
-            destinations=binding.canonical_destination_set,
-            trust=DestinationTrust.USER_CHOSEN,
-            established_at=self._destination_trust_now(),
-        )
-        await self.destination_trust.record(record)
-        return self._checked(record, "establish_destination_trust")
-
-    async def standing_destination_trust(self) -> tuple[DestinationTrustRecord, ...]:
-        """List every destination-trust record that is live now (ADR-0242 §4).
-
-        Read from :attr:`destination_trust` and from nothing else, so liveness is the
-        store's — no surface and no test derives it from a recipient grant, a
-        connection or a search that succeeded.
-        """
-        self.calls.append(("standing_destination_trust", {}))
-        return self._checked(
-            tuple(await self.destination_trust.live()), "standing_destination_trust"
-        )
-
-    async def revoke_destination_trust(self, record_id: DurableIdentifier) -> bool:
-        """Withdraw one destination-trust record, or answer there was none (ADR-0242 §4).
-
-        ``False`` where no live record carries the id, having written nothing, which
-        is also the honest answer to a caller that lost a race to another revocation.
-        """
-        named = identifier(record_id, name="record_id")
-        check_arguments(
-            "revoke_destination_trust", max_bytes=self._max_payload_bytes, record_id=named
-        )
-        self.calls.append(("revoke_destination_trust", {"record_id": named}))
-        if not any(held.id == named for held in await self.destination_trust.live()):
-            return False
-        await self.destination_trust.revoke(named, self._destination_trust_now())
-        return True
-
-    def _destination_trust_now(self) -> datetime:
-        """The guarded reading of :attr:`destination_trust_clock` (ADR-0026 §2, §4).
-
-        Raises:
-            PlanningError: If the reading is not a conforming one.
-        """
-        try:
-            return checked_clock(self.destination_trust_clock, owner="FakeAssistantEngine")()
-        except ClockReadingError as exc:
-            msg = (
-                f"the fake engine's destination-trust clock returned a non-conforming "
-                f"reading: {exc}"
-            )
-            raise PlanningError(msg) from exc
 
     # --- the connection surface (ADR-0151 §1) ------------------------------
 

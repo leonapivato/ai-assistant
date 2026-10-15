@@ -43,7 +43,6 @@ from ai_assistant.core.errors import (
     ConnectionStoreError,
     ModelError,
     ReaderError,
-    RecipientGrantError,
     SourceNotGrantedError,
     TraceStoreError,
 )
@@ -51,8 +50,6 @@ from ai_assistant.core.protocols import (
     AssistantEngine,
     ConnectionPurger,
     InvocationLedger,
-    RecipientGrantResolution,
-    RecipientGrants,
     SpendGate,
     SpendLedger,
 )
@@ -94,7 +91,6 @@ from ai_assistant.orchestration.upcoming import (
 )
 from ai_assistant.permissions import (
     SqliteAuditTrail,
-    SqliteRecipientGrantStore,
     SqliteSourceReadTrail,
     ThresholdActionPolicy,
 )
@@ -611,8 +607,8 @@ def _spy_on_policy(
     deliberately opaque rule table.
 
     **The phases' policy, the root's only one** since the old path's was deleted
-    (ADR-0309 §5): built from the settings and the grants, holding no goal
-    authorizations and no quotes (ADR-0306 §4:11).
+    (ADR-0309 §5): built from the settings, holding no goal authorizations, no quotes
+    (ADR-0306 §4:11) and no grant seam (ADR-0321 §7:1).
     """
     calls: list[dict[str, object]] = []
 
@@ -625,35 +621,27 @@ def _spy_on_policy(
 
 
 def _thresholds(calls: list[dict[str, object]]) -> list[dict[str, object]]:
-    """``calls`` with the grant seam lifted out, leaving the four threshold knobs.
+    """``calls`` with the configured providers lifted out, leaving the four threshold knobs.
 
     The two cases below are about **which settings field maps to which
-    constructor parameter** (#239), and a seam in the dict would make each of
-    them fail whenever an unrelated dependency was added — the brittleness that
-    turns a mapping test into a roster test nobody meant to write.
-    :func:`_policy_grant_seam` is where the seam itself is asserted, once.
-    ``configured_search`` and ``configured_forecast`` are lifted for the same reason
-    and asserted in ``tests/app/test_composition_web_search.py`` and
+    constructor parameter** (#239), and a dependency in the dict would make each of
+    them fail whenever an unrelated one was added — the brittleness that turns a
+    mapping test into a roster test nobody meant to write. ``configured_search`` and
+    ``configured_forecast`` are lifted for that reason and asserted in
+    ``tests/app/test_composition_web_search.py`` and
     ``tests/app/test_composition_forecast.py``, where the value can be compared
     against the registration the seam actually holds rather than against a spy's
     record of what was passed.
     """
-    lifted = {"grants", "configured_search", "configured_forecast"}
+    lifted = {"configured_search", "configured_forecast"}
     return [{name: value for name, value in call.items() if name not in lifted} for call in calls]
-
-
-def _policy_grant_seam(calls: list[dict[str, object]]) -> object:
-    """The one ``grants`` argument the builder constructed the policy with."""
-    assert len(calls) == 1, calls
-    return calls[0]["grants"]
 
 
 def _spy_on_trail(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     """Capture the kwargs ``build_engine`` constructs the audit trail with.
 
     The counterpart of :func:`_spy_on_policy`, and it exists for one assertion:
-    that the ``RecipientGrantResolution`` reaching the trail is the **same
-    object** as the ``RecipientGrants`` reaching the policy (ADR-0193 §1, §6).
+    that no recipient-grant seam reaches the trail (ADR-0321 §7:1).
     """
     calls: list[dict[str, object]] = []
 
@@ -663,12 +651,6 @@ def _spy_on_trail(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
 
     monkeypatch.setattr(composition_module, "SqliteAuditTrail", factory)
     return calls
-
-
-def _trail_grant_seam(calls: list[dict[str, object]]) -> object:
-    """The one ``recipient_grants`` argument the builder constructed the trail with."""
-    assert len(calls) == 1, calls
-    return calls[0]["recipient_grants"]
 
 
 async def test_build_engine_passes_the_configured_thresholds_to_the_policy(
@@ -716,38 +698,23 @@ async def test_build_engine_defaults_the_policy_to_todays_gate(
         await engine.aclose()
 
 
-async def test_build_engine_gives_the_policy_the_recipient_grant_query_face(
+async def test_build_engine_hands_no_grant_seam_to_the_policy_or_the_trail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-0193 §7: route (b) is reachable only because this wiring exists.
+    """ADR-0321 §7:1: recipient grants retire, and with them the seam both took.
 
-    A policy constructed with no ``RecipientGrants`` is a conforming policy that
-    reaches no route-(b) ``ALLOW`` at all, so the whole of ADR-0193's effect on a
-    running system rests on the composition root passing one — and nothing about a
-    policy built without it looks wrong afterwards.
-
-    Asserted as the **same object** the builder wired into the trail, not merely
-    as something of the right shape: two stores over two files would each hold half
-    the state, so a grant the establishing act recorded through one would be
-    invisible to the ``covering`` read of the other, and every route-(b) ``ALLOW``
-    the policy authored would then be refused at ``record`` — a system that
-    prompts, forgets, and prompts again, with nothing failing.
-
-    It is also the only place that hazard can be pinned. ``SqliteAuditTrail``
-    takes its resolution seam with a default — a trail wired with nothing
-    substitutes one holding no grants and refuses every route-(b) row — and a
-    *required* argument would not close this at all, because two different stores
-    satisfy it as readily as one. What closes it is identity, here.
+    The root once passed one grant store to the policy as its query face and to the
+    trail as its resolution face. Neither constructor takes one now, so the spies
+    record every argument the root passes and none of them names a grant seam.
     """
     calls = _spy_on_policy(monkeypatch)
     trail_calls = _spy_on_trail(monkeypatch)
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        seam = _policy_grant_seam(calls)
-        assert isinstance(seam, SqliteRecipientGrantStore)
-        assert isinstance(seam, RecipientGrants)
-        assert isinstance(seam, RecipientGrantResolution)
-        assert _trail_grant_seam(trail_calls) is seam
+        assert len(calls) == 1, calls
+        assert "grants" not in calls[0]
+        assert len(trail_calls) == 1, trail_calls
+        assert "recipient_grants" not in trail_calls[0]
     finally:
         await engine.aclose()
 
@@ -1072,40 +1039,6 @@ def test_build_engine_touches_no_disk_when_config_validation_fails(tmp_path: Pat
     assert not absent.exists()
 
 
-async def test_closing_the_engine_closes_the_recipient_grant_store(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ADR-0193 §1's store is Tier 1, so its connection owes the ordered shutdown.
-
-    It was registered on the build-failure cleanup list and absent from
-    ``Engine(closers=…)``, so a build that *failed* closed it and one that
-    *succeeded* never did — leaving an open connection and, in WAL mode, a ``-wal``
-    beside a database naming recipients of the user's and the declaration they were
-    made standing for (#1903).
-
-    **Closed after the audit trail**, which is the one ordering between the two that
-    is not free: the trail resolves a route-(b) ``authorised_by`` against this store
-    and ADR-0193 §6 makes a store it cannot read a refusal rather than an absence.
-    That order is what the closer list states; what this case states is the
-    connection, asserted through the store's own refusal because a list is a
-    statement about wiring.
-
-    The subject is the **same instance** the builder wired into the trail, taken from
-    the builder's own call rather than found by shape: a second store over the same
-    file would refuse here while the one the trail holds stayed open.
-    """
-    trail_calls = _spy_on_trail(monkeypatch)
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    grants = _trail_grant_seam(trail_calls)
-    assert isinstance(grants, SqliteRecipientGrantStore)
-    assert await grants.standing() == [], "open before, so the refusal below means something"
-
-    await engine.aclose()
-
-    with pytest.raises(RecipientGrantError):
-        await grants.standing()
-
-
 def _one_event_calendar(directory: Path) -> Path:
     """A minimal ``.ics`` with one event an hour from now, and its path.
 
@@ -1212,13 +1145,12 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
     ADR-0130 §9's notification store is the eighth and obeys it for the same
     reason: inside the directory the instance lock already covers, opened by the
     same process, closed in the same ordered shutdown. ADR-0185 §4's read trail is
-    the eleventh, on the same terms; ADR-0193 §1's recipient-grant store is
-    the twelfth on the same terms again; and ADR-0197 §9's routing trail was the
+    the eleventh, on the same terms; and ADR-0197 §9's routing trail was the
     thirteenth until the old path that wrote it was deleted (ADR-0309 §5), so the root
     opens it no more. ADR-0078's deferred-question queue left the same way (ADR-0309
-    §5), and ``deferrals.db`` with it. ADR-0238 §1's destination-trust store is the
-    **fifteenth**, and §1 states the residency clause explicitly for ADR-0185
-    §9's reason — "local and durable and … never written to a remote service".
+    §5), and ``deferrals.db`` with it. ADR-0193 §1's recipient-grant store and
+    ADR-0238 §1's destination-trust store left when recipient grants and destination
+    trust retired (ADR-0321 §7:1, §7:2), so the root opens neither.
     ADR-0244 §3's parked-read store joined them on the same terms until the old path
     that parked a read was deleted (ADR-0309 §5), so the root opens it no more either.
 
@@ -1244,17 +1176,6 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # personal data.
             "connections.db",
             "conversations.db",
-            # ADR-0238 §1's destination-trust store, the fifteenth and the
-            # fourteenth that is Tier 1: a record names destinations of the user's
-            # and the instant they chose them. **A separate file from
-            # ``recipient_grants.db``, and for that store's own reason one axis
-            # over** — §1 keeps the two acts separate ("a grant authorises whether
-            # this system may talk to this party; the record above authorises what
-            # class of payload this system may compose for it"), and "no component
-            # reads the existence, breadth, age or liveness of a grant as evidence
-            # of trust". Joining them in one file would be the first step toward
-            # joining them in one answer.
-            "destination_trust.db",
             "grants.db",
             "memory.db",
             "notifications.db",
@@ -1267,14 +1188,6 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # Tier 1: a row names the source a read was about and the grant it ran
             # under, which is the record of an access to the user's own data.
             "reads.db",
-            # ADR-0193 §1's standing recipient grants, the twelfth and the
-            # eleventh that is Tier 1: a record names recipients of the user's,
-            # and the declaration and connected account they were made standing
-            # for. A separate file from ``grants.db`` because the two seams may
-            # not be joined (ADR-0097 §7, ADR-0193 §13) — one authorises reading
-            # in, the other sending out — and separately erasable because each
-            # store's own wholesale erase is the user's to perform (§9).
-            "recipient_grants.db",
             # ADR-0289 §1's story store: which activations belong to the same matter,
             # held as identities and instants with no free text (§2), on a file of its
             # own because it reads no other store and no store reads it.

@@ -127,8 +127,6 @@ if TYPE_CHECKING:
         ConnectionAct,
         ConversationDigest,
         ConversationSummary,
-        DestinationTrustRecord,
-        DurableIdentifier,
         EncodableText,
         GrantableSource,
         GrantScope,
@@ -141,7 +139,6 @@ if TYPE_CHECKING:
         NotificationPreferences,
         PermissionDecision,
         Placement,
-        RecipientGrant,
         RecordedInvocation,
         SecretValue,
         SourceGrant,
@@ -1058,115 +1055,6 @@ class HubClient:
             carries no meaning.
         """
         return await self._call("standing_grants")  # type: ignore[no-any-return]
-
-    # --- the recipient-grant surface (ADR-0235 §3, §7) ---------------------
-
-    async def standing_recipient_grants(self) -> tuple[RecipientGrant, ...]:
-        """Every standing recipient grant that is live now, read hub-side.
-
-        **No local refusal to add**, because the method takes no argument, exactly
-        as :meth:`standing_grants` takes none. A live set too large for the frame
-        comes back as ``OversizedValueError`` rather than as a truncated set: a
-        truncated answer to "what do I authorise" is a false answer rather than a
-        partial one (ADR-0235 §7).
-
-        Returns:
-            Every live grant.
-        """
-        return await self._call("standing_recipient_grants")  # type: ignore[no-any-return]
-
-    async def recent_recipient_grants(
-        self, *, limit: int = DEFAULT_PAGE_SIZE
-    ) -> tuple[RecipientGrant, ...]:
-        """One page of the recipient-grant store's own history, newest first.
-
-        Granting and revoking records alike, and **no liveness**: a record here says
-        an act happened, never that it still stands (ADR-0235 §7). ``limit`` is
-        refused unless strictly positive, on :meth:`recent_grants`' reason.
-
-        Args:
-            limit: How many records this page holds.
-
-        Returns:
-            The page.
-        """
-        positive_page_argument(limit, name="limit")
-        return await self._call(  # type: ignore[no-any-return]
-            "recent_recipient_grants", limit=limit
-        )
-
-    async def revoke_recipient_grant(self, grant_id: DurableIdentifier) -> RecipientGrant | None:
-        """Withdraw one standing recipient grant, hub-side.
-
-        Args:
-            grant_id: The id either recipient-grant listing renders.
-
-        Returns:
-            The revoking record the hub appended, or ``None`` where the store held
-            no outstanding grant with that id — which is also the honest answer to a
-            caller that lost a race to another revocation (ADR-0235 §7).
-        """
-        named = identifier(grant_id, name="grant_id")
-        return await self._call("revoke_recipient_grant", grant_id=named)  # type: ignore[no-any-return]
-
-    # --- the destination-trust surface (ADR-0242 §2, §4) --------------------
-
-    async def establish_destination_trust(
-        self, decision_id: DurableIdentifier
-    ) -> DestinationTrustRecord:
-        """Record the user's choice over a recorded decision's destinations, hub-side.
-
-        ``decision_id`` undergoes :data:`~ai_assistant.core.types.Identifier`
-        validation locally and before any I/O (ADR-0085 §3c), so this client refuses
-        exactly what the in-process engine refuses and strips the value the hub is then
-        asked about. **Nothing else is refused here**: ADR-0242 §1's three availability
-        conditions are decided against the hub's own trail, and a client that guessed at
-        them would be a second implementation of the rule.
-
-        **No second argument, and that is the decision rather than an omission**
-        (ADR-0242 §2). The method takes no ``trust``, no ``destinations``, no ``id`` and
-        no instant, so there is no parameter through which a remote caller could
-        substitute a subject.
-
-        Args:
-            decision_id: The recorded decision, from **this surface's own**
-                :meth:`recent_decisions` listing.
-
-        Returns:
-            The record the hub's store accepted.
-        """
-        named = identifier(decision_id, name="decision_id")
-        return await self._call(  # type: ignore[no-any-return]
-            "establish_destination_trust", decision_id=named
-        )
-
-    async def standing_destination_trust(self) -> tuple[DestinationTrustRecord, ...]:
-        """Every destination-trust record that is live now, read hub-side.
-
-        **No local refusal to add**, because the method takes no argument, exactly as
-        :meth:`standing_recipient_grants` takes none. A live set too large for the frame
-        comes back as ``OversizedValueError`` rather than as a truncated set: a
-        truncated answer to "what do I trust" is a false answer rather than a partial
-        one (ADR-0242 §4).
-
-        Returns:
-            Every live record, in the store's own order.
-        """
-        return await self._call("standing_destination_trust")  # type: ignore[no-any-return]
-
-    async def revoke_destination_trust(self, record_id: DurableIdentifier) -> bool:
-        """Withdraw one destination-trust record, hub-side.
-
-        Args:
-            record_id: The id the standing listing renders.
-
-        Returns:
-            ``True`` where a live record carried that id and was revoked, ``False``
-            where none did — which is also the honest answer to a caller that lost a
-            race to another revocation (ADR-0242 §4).
-        """
-        named = identifier(record_id, name="record_id")
-        return await self._call("revoke_destination_trust", record_id=named)  # type: ignore[no-any-return]
 
     # --- the wire ----------------------------------------------------------
 

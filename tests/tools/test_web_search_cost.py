@@ -14,9 +14,13 @@ and ``_only_the_disclosure_floor`` therefore required a singleton ``fired`` it c
 never have (#2111). ``tests/orchestration/test_loop_search.py`` had to substitute a
 declaration it constructed itself to reach it, and pinned the gap. Here the
 declaration is the one :func:`~ai_assistant.tools.builtin.build_web_search_integration`
-registers, the policy is the production ``ThresholdActionPolicy`` at its shipped
-thresholds, and the grants seam is the canonical ``RecipientGrants`` holding one
-seeded grant.
+registers and the policy is the production ``ThresholdActionPolicy`` at its shipped
+thresholds.
+
+**Route (b) has retired** (ADR-0321 §7:1): no recipient grant is left to turn the
+disclosure floor into an ``ALLOW``, so what a configured figure buys a search off the
+configured provider is the cost floor no longer firing — the disclosure floor is then
+the whole of what stands, and the search is put to the user on that ground alone.
 
 **Nothing here opens a socket**, for :mod:`web_search_harness`'s reasons: every far
 end is a :class:`~ai_assistant.testing.FakeByteChannel` and every host is
@@ -25,7 +29,7 @@ end is a :class:`~ai_assistant.testing.FakeByteChannel` and every host is
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
 
@@ -50,8 +54,7 @@ from ai_assistant.core.types import (
     SearchRefusal,
 )
 from ai_assistant.permissions import ThresholdActionPolicy
-from ai_assistant.testing import FakeAuditTrail, FakeRecipientGrants
-from ai_assistant.testing.recipient_grants import recipient_grant
+from ai_assistant.testing import FakeAuditTrail
 from ai_assistant.tools.declared_cost import checked_per_call_cost
 from ai_assistant.tools.web_search import WEB_SEARCH
 
@@ -62,61 +65,19 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.anyio
 
-#: The instant every grant here is live at. Fixed, because ADR-0193 §6 refuses an
-#: ``ALLOW`` sourced from a grant that was not live when the ruling was made.
-NOW: Final = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
-
 #: The operator's figure, and the code it is denominated in. Distinctive enough that
 #: an assertion about the declaration is not an assertion about a coincidence.
 FIGURE: Final = Decimal("0.005")
 CODE: Final = "USD"
-
-#: The id the seeded grant carries, so a route-(b) ``ALLOW`` can be asserted to name
-#: **this** grant rather than merely to have set the field.
-GRANT_ID: Final = "g-search"
 
 #: The bound every search here passes (ADR-0241 §1). Nothing in this file is about
 #: the deadline, so it is generous enough that no case reaches it by accident.
 _A_BOUND: Final = timedelta(seconds=30)
 
 
-def _at() -> datetime:
-    return NOW
-
-
-async def _granted(subject: Built, *, declaration: ToolDefinition | None = None) -> Any:
-    """A standing grant covering the search this ``subject`` would make.
-
-    ADR-0193 §3's route-(b) subject, taken over the destination set the **production**
-    ``EgressBinder`` derives rather than a hand-built one: a grant whose declaration,
-    account or canonical set differed from the request's by so much as a reworded
-    description covers nothing, so deriving both from one binding is what keeps the
-    coverage a fact about the mechanism.
-
-    Args:
-        subject: The configured integration.
-        declaration: The declaration to grant over; defaults to the one the builder
-            registered.
-
-    Returns:
-        The grant.
-    """
-    tool = subject.declaration if declaration is None else declaration
-    derived = await bound(subject, tool=tool)
-    return recipient_grant(
-        *derived.binding.canonical_destination_set,
-        grant_id=GRANT_ID,
-        tool=tool,
-        account=derived.binding.account,
-        decided_at=NOW - timedelta(days=1),
-        expires_at=NOW + timedelta(days=30),
-    )
-
-
 async def _ruled(
     subject: Built,
     *,
-    grants: FakeRecipientGrants,
     declaration: ToolDefinition | None = None,
     **thresholds: Any,
 ) -> Any:
@@ -124,7 +85,6 @@ async def _ruled(
 
     Args:
         subject: The configured integration.
-        grants: The seam the policy may consult.
         declaration: The declaration to rule on; defaults to the registered one.
         thresholds: Overrides for ``ThresholdActionPolicy``'s own. **Passing none
             leaves the shipped thresholds**, which is the condition ADR-0236 §4's
@@ -135,7 +95,7 @@ async def _ruled(
     """
     tool = subject.declaration if declaration is None else declaration
     derived = await bound(subject, tool=tool)
-    policy = ThresholdActionPolicy(grants=grants, **thresholds)
+    policy = ThresholdActionPolicy(**thresholds)
     return await policy.decide(
         ActionRequest(
             tool=derived.tool, parameters=dict(derived.parameters), egress_binding=derived.binding
@@ -148,94 +108,85 @@ async def _ruled(
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_configured_figure_reaches_an_allow_over_a_covering_grant() -> None:
-    """§8 item 1, which is ADR-0231 §18's item 1 made reachable.
+async def test_a_configured_figure_leaves_the_disclosure_floor_standing_alone() -> None:
+    """§8 item 1, as ADR-0321 §7:1 leaves it.
 
     "Over ``build_web_search_integration`` with the pair set: the registered
-    declaration's ``cost`` is ``PER_CALL`` with that amount and that code, and
-    ``ThresholdActionPolicy(grants=…).decide`` on a request carrying it, over a
-    covering grant, returns an ``ALLOW`` whose ``reason`` names the standing grant and
-    whose ``authorised_by`` is the grant's id."
+    declaration's ``cost`` is ``PER_CALL`` with that amount and that code" — and the
+    ruling's grounds no longer carry the cost floor. The ``ALLOW`` this item asserted
+    over a covering grant was route (b), which retired with recipient grants: the
+    disclosure floor is now the whole of what stands, and the ruling is the
+    ``CONFIRM`` it draws, naming that ground alone and citing no authorisation.
 
     **The policy is constructed at the shipped thresholds and this says so**: ADR-0236
     §4's condition is that no threshold rule fires, and ``WEB_SEARCH`` is ``LOW``
     against a default ``confirm_at_risk`` of ``MEDIUM`` and ``REVERSIBLE`` against a
-    default ``confirm_at_reversibility`` of ``IRREVERSIBLE``. The companion arm below
-    asserts that condition rather than assuming it.
+    default ``confirm_at_reversibility`` of ``IRREVERSIBLE``. The companion arms below
+    assert that condition rather than assuming it.
     """
     subject = await built(cost_per_call=FIGURE, cost_currency=CODE)
-    grants = FakeRecipientGrants([await _granted(subject)], now=_at)
 
-    ruled = await _ruled(subject, grants=grants)
+    ruled = await _ruled(subject)
 
     assert subject.declaration.cost.basis is CostBasis.PER_CALL
     assert subject.declaration.cost.amount == FIGURE
     assert subject.declaration.cost.currency == CODE
-    assert ruled.outcome is PermissionOutcome.ALLOW
-    assert ruled.authorised_by == GRANT_ID, "route (b) names the grant it was reached by"
-    assert "standing grant" in ruled.reason
-    assert grants.call_count == 1, "the seam was consulted exactly once"
+    assert ruled.outcome is PermissionOutcome.CONFIRM
+    assert "disclose" in ruled.reason, "the disclosure ground"
+    assert "cost is undeclared" not in ruled.reason, "and the cost floor no longer fires"
+    assert "risk" not in ruled.reason, "nor does a threshold, at the shipped ones"
+    assert ruled.authorised_by is None
+    assert ruled.authorised_subject is None
 
 
 async def test_the_shipped_thresholds_are_the_condition_and_not_an_assumption() -> None:
-    """§8 item 1's companion arm: ``confirm_at_risk=LOW`` and the ``ALLOW`` is gone.
+    """§8 item 1's companion arm: ``confirm_at_risk=LOW`` adds a ground of its own.
 
     ADR-0236 §4 states the condition in terms — a deployment that set
     ``confirm_at_risk=LOW`` has ``_risk_rule`` in ``fired`` beside the disclosure
-    floor, so the seam is consulted **zero** times and the search confirms whatever
-    the figure says. "Neither is a defect this ADR fixes and neither is one it may
-    fix": those are the user's own thresholds (ADR-0036 §1).
+    floor. "Neither is a defect this ADR fixes and neither is one it may fix": those
+    are the user's own thresholds (ADR-0036 §1).
     """
     subject = await built(cost_per_call=FIGURE, cost_currency=CODE)
-    grants = FakeRecipientGrants([await _granted(subject)], now=_at)
 
-    ruled = await _ruled(subject, grants=grants, confirm_at_risk=RiskLevel.LOW)
+    ruled = await _ruled(subject, confirm_at_risk=RiskLevel.LOW)
 
     assert ruled.outcome is PermissionOutcome.CONFIRM
+    assert "risk is low" in ruled.reason
     assert ruled.authorised_by is None
-    assert grants.call_count == 0, "a threshold the user set settles it, and asks no seam"
 
 
-async def test_a_reversibility_threshold_the_user_set_defeats_the_lookup_too() -> None:
+async def test_a_reversibility_threshold_the_user_set_adds_its_ground_too() -> None:
     """§4's other half of the same condition, which the risk arm alone would not fail.
 
     A deployment setting ``confirm_at_reversibility=REVERSIBLE`` puts
-    ``_reversibility_rule`` in ``fired``, and ``_only_the_disclosure_floor``'s
-    singleton test fails on that exactly as it does on the risk rule. Asserted
-    separately because an implementation reading only ``risk_level`` would pass the
-    arm above.
+    ``_reversibility_rule`` in ``fired`` exactly as the arm above puts the risk rule.
+    Asserted separately because an implementation reading only ``risk_level`` would
+    pass the arm above.
     """
     subject = await built(cost_per_call=FIGURE, cost_currency=CODE)
-    grants = FakeRecipientGrants([await _granted(subject)], now=_at)
 
-    ruled = await _ruled(subject, grants=grants, confirm_at_reversibility=Reversibility.REVERSIBLE)
+    ruled = await _ruled(subject, confirm_at_reversibility=Reversibility.REVERSIBLE)
 
     assert ruled.outcome is PermissionOutcome.CONFIRM
-    assert grants.call_count == 0
+    assert "effect is reversible" in ruled.reason
 
 
 # --------------------------------------------------------------------------- #
-# §8 item 2: the absence keeps both floors, and the grant is not consulted      #
+# §8 item 2: the absence keeps both floors                                     #
 # --------------------------------------------------------------------------- #
 
 
-async def test_an_unconfigured_deployment_keeps_both_floors_and_consults_no_grant() -> None:
-    """§8 item 2, and ``_only_the_disclosure_floor``'s zero-consultations property.
+async def test_an_unconfigured_deployment_keeps_both_floors() -> None:
+    """§8 item 2.
 
     "The same wiring with neither field set: the declaration's ``cost`` is
-    ``UNKNOWN``, the ruling is ``CONFIRM``, its reason names both grounds, and the
-    ``RecipientGrants`` fake fails the test if ``covering`` is called at all."
-
-    The fake is armed to raise rather than merely counted, so the assertion is that
-    the lookup did not happen rather than that its answer was ignored — an
-    implementation that consulted the seam and then discarded the grant would pass a
-    count-only assertion on a suite that had forgotten to check it.
+    ``UNKNOWN``, the ruling is ``CONFIRM``, its reason names both grounds." The arm
+    about the grant seam's zero consultations retired with the seam (ADR-0321 §7:1).
     """
     subject = await built()
-    grants = FakeRecipientGrants([await _granted(subject)], now=_at)
-    grants.fail_covering(AssertionError("covering was consulted past the cost floor"))
 
-    ruled = await _ruled(subject, grants=grants)
+    ruled = await _ruled(subject)
 
     assert subject.declaration is WEB_SEARCH, "the template is registered unchanged"
     assert subject.declaration.cost.basis is CostBasis.UNKNOWN
@@ -243,7 +194,6 @@ async def test_an_unconfigured_deployment_keeps_both_floors_and_consults_no_gran
     assert "disclose" in ruled.reason, "the disclosure ground"
     assert "cost is undeclared" in ruled.reason, "and the cost ground, beside it"
     assert ruled.authorised_by is None
-    assert grants.call_count == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -255,21 +205,20 @@ async def test_a_zero_figure_is_a_per_call_declaration_and_never_a_free_one() ->
     """§8 item 3's first half, and ADR-0236 §3's whole subject.
 
     "``web_search_cost_per_call = 0`` with a currency yields a ``PER_CALL``
-    declaration and, at the shipped thresholds, an ``ALLOW`` on the covering grant.
-    Its ``basis`` is asserted **not** to be ``FREE``, which fails an implementation
-    that mapped zero onto the other member."
+    declaration." Its ``basis`` is asserted **not** to be ``FREE``, which fails an
+    implementation that mapped zero onto the other member, and the cost floor does
+    not fire on it. The ``ALLOW`` on a covering grant this item also asserted was
+    route (b), which retired (ADR-0321 §7:1).
     """
     subject = await built(cost_per_call=Decimal("0"), cost_currency=CODE)
-    grants = FakeRecipientGrants([await _granted(subject)], now=_at)
 
-    ruled = await _ruled(subject, grants=grants)
+    ruled = await _ruled(subject)
 
     assert subject.declaration.cost.basis is not CostBasis.FREE, "zero is not FREE"
     assert subject.declaration.cost.basis is CostBasis.PER_CALL
     assert subject.declaration.cost.amount == Decimal("0")
     assert subject.declaration.cost.currency == CODE
-    assert ruled.outcome is PermissionOutcome.ALLOW
-    assert ruled.authorised_by == GRANT_ID
+    assert "cost is undeclared" not in ruled.reason
 
 
 @pytest.mark.parametrize(
@@ -537,8 +486,8 @@ async def test_a_configured_registration_leaves_the_module_constant_alone() -> N
 async def test_both_cost_configurations_reach_the_same_confirm_and_so_the_same_record() -> None:
     """§8 item 10's behavioural half, at the ruling the disposition is taken from.
 
-    "A ``CONFIRM`` with the pair unset and one with it set but no covering grant are
-    both recorded ``RULING_CONFIRM``." What decided that was the *ruling*: the
+    "A ``CONFIRM`` with the pair unset and one with it set are both recorded
+    ``RULING_CONFIRM``." What decided that was the *ruling*: the
     servicer mapped a ``CONFIRM`` onto ``SearchDisposition.RULING_CONFIRM`` whatever
     grounds produced it, a mapping ``tests/orchestration/test_loop_search.py`` pinned
     until both retired with the old loop (ADR-0309 §5). So what is asserted here
@@ -551,20 +500,18 @@ async def test_both_cost_configurations_reach_the_same_confirm_and_so_the_same_r
     """
     unconfigured = await built()
     configured = await built(cost_per_call=FIGURE, cost_currency=CODE)
-    empty = FakeRecipientGrants([], now=_at)
 
-    absent = await _ruled(unconfigured, grants=empty)
-    present = await _ruled(configured, grants=FakeRecipientGrants([], now=_at))
+    absent = await _ruled(unconfigured)
+    present = await _ruled(configured)
 
     assert absent.outcome is PermissionOutcome.CONFIRM
     assert present.outcome is PermissionOutcome.CONFIRM
     assert "cost is undeclared" in absent.reason, "the ground the unset pair adds"
     assert "cost is undeclared" not in present.reason, "and does not add once it is set"
-    assert empty.call_count == 0, "the unset pair reaches no seam at all"
 
 
 # --------------------------------------------------------------------------- #
-# §8 item 13: a configured deny threshold denies, and still consults no grant    #
+# §8 item 13: a configured deny threshold denies                               #
 # --------------------------------------------------------------------------- #
 
 
@@ -578,9 +525,9 @@ async def test_a_deny_threshold_denies_the_search_in_either_cost_configuration(
 ) -> None:
     """§8 item 13, which is ADR-0236 §4's second clause asserted.
 
-    "With ``deny_at_risk=LOW`` and a covering grant seeded, in both cost
-    configurations: the ruling is ``DENY``, its reason names the risk ground, and the
-    ``RecipientGrants`` fake fails the test if ``covering`` is called."
+    "With ``deny_at_risk=LOW``, in both cost configurations: the ruling is ``DENY``
+    and its reason names the risk ground." The arm about the grant seam retired with
+    it (ADR-0321 §7:1).
 
     "The ruling is conditional on the thresholds while the zero-lookup guarantee is
     not", and this fails a lane that read §4's "the ruling is ``CONFIRM``" as
@@ -589,15 +536,12 @@ async def test_a_deny_threshold_denies_the_search_in_either_cost_configuration(
     §1's thresholds working.
     """
     subject = await built(cost_per_call=amount, cost_currency=code)
-    grants = FakeRecipientGrants([await _granted(subject)], now=_at)
-    grants.fail_covering(AssertionError("a DENY is not something a grant converts"))
 
-    ruled = await _ruled(subject, grants=grants, deny_at_risk=RiskLevel.LOW)
+    ruled = await _ruled(subject, deny_at_risk=RiskLevel.LOW)
 
     assert ruled.outcome is PermissionOutcome.DENY
     assert "risk is low" in ruled.reason, "the ground the user's own threshold names"
     assert ruled.authorised_by is None
-    assert grants.call_count == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -605,12 +549,14 @@ async def test_a_deny_threshold_denies_the_search_in_either_cost_configuration(
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_figure_in_another_currency_rules_allow_and_is_refused_at_the_gate() -> None:
+async def test_a_figure_in_another_currency_is_ruled_without_its_cost_and_refused_at_the_gate() -> (
+    None
+):
     """§8 item 14, which is ADR-0236 §3's stated residual and §6's consequence.
 
     "``web_search_cost_per_call = 0`` with ``EUR``, ``world_spend_currency = "USD"``,
-    a ceiling set and no allowance: ``Settings`` loads, the policy rules ``ALLOW`` on
-    a covering grant, and the ``SpendGate`` refuses." It fails an implementation that
+    a ceiling set and no allowance: ``Settings`` loads, the policy rules without the
+    cost floor, and the ``SpendGate`` refuses." It fails an implementation that
     coupled the two currencies at load or silently converted between them.
 
     **The policy still sees a ``PER_CALL`` basis and ``_UNKNOWN_COST_FLOOR`` still
@@ -628,16 +574,13 @@ async def test_a_figure_in_another_currency_rules_allow_and_is_refused_at_the_ga
         cost_per_call=Decimal("0"),
         cost_currency="EUR",
     )
-    grants = FakeRecipientGrants([await _granted(subject)], now=_at)
-
-    ruled = await _ruled(subject, grants=grants)
+    ruled = await _ruled(subject)
     call = await authorised_search(
         subject.trail, proposal=await request(subject, tool=subject.declaration)
     )
     outcome = await subject.searcher.search(call, timeout=_A_BOUND)
 
-    assert ruled.outcome is PermissionOutcome.ALLOW, "the policy reads a PER_CALL basis"
-    assert ruled.authorised_by == GRANT_ID
+    assert "cost is undeclared" not in ruled.reason, "the policy reads a PER_CALL basis"
     assert outcome.refusal is SearchRefusal.SPEND_REFUSED, "and the gate refuses it"
     with pytest.raises(SpendUndeterminedError):
         await subject.trail.admit_invocation(estimate=subject.declaration.cost)

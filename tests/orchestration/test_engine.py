@@ -26,10 +26,8 @@ from ai_assistant.core.errors import (
     TraceStoreError,
 )
 from ai_assistant.core.protocols import (
-    ActionPolicy,
     AuditTrail,
     InvocationLedger,
-    RecipientGrantStore,
     SpeechSynthesizer,
     SpeechTranscriber,
     SpendGate,
@@ -62,11 +60,9 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration import (
     ConnectionOperations,
     ConversationLifecycle,
-    DestinationTrustOperations,
     Engine,
     GrantOperations,
     HeldSource,
-    RecipientGrantOperations,
     belief_from_record,
     belief_summary_from_record,
     presented_confidence,
@@ -82,10 +78,8 @@ from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeConversationStore,
-    FakeDestinationTrustStore,
     FakeMemoryStore,
     FakePlanStore,
-    FakeRecipientGrantStore,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeSpeechSynthesizer,
@@ -156,54 +150,6 @@ def _grant_operations(sources: Sequence[HeldSource] = ()) -> GrantOperations:
     return GrantOperations(
         store=FakeSourceGrantStore(),
         sources=sources,
-        id_factory=_grant_ids(),
-        clock=lambda: AT,
-    )
-
-
-def _trust_ids() -> Callable[[], str]:
-    """Deterministic ids for the trust records an ``Engine`` mints under test."""
-    counter = count(1)
-    return lambda: f"trust-{next(counter)}"
-
-
-def _destination_trust_operations(
-    *,
-    store: FakeDestinationTrustStore | None = None,
-    trail: AuditTrail | None = None,
-) -> DestinationTrustOperations:
-    """The destination-trust collaborator every ``Engine`` needs (ADR-0242 §2).
-
-    Required rather than optional on the façade, on ``_recipient_grant_operations``'
-    reason exactly: the three methods are on the Protocol, so an engine that could be
-    built without them is one whose surface is conditionally present. Both seams
-    default to fresh fakes — an empty trust store and a trail nothing has been
-    recorded to — which is what a case not about the trust act wants.
-    """
-    return DestinationTrustOperations(
-        store=FakeDestinationTrustStore() if store is None else store,
-        trail=FakeAuditTrail() if trail is None else trail,
-        id_factory=_trust_ids(),
-        clock=lambda: AT,
-    )
-
-
-def _recipient_grant_operations(
-    *,
-    store: RecipientGrantStore | None = None,
-    trail: AuditTrail | None = None,
-    policy: ActionPolicy | None = None,
-) -> RecipientGrantOperations:
-    """The recipient-grant collaborator every ``Engine`` needs (ADR-0235 §4).
-
-    Required rather than optional on the façade, on ``grant_operations``' argument:
-    the five methods are on the Protocol, so an engine that could be built without
-    them is one whose surface is conditionally present. The three seams default to
-    fresh fakes, which is the shape almost every case here wants — a store with
-    nothing in it, a trail nothing has been recorded to, and a policy that allows.
-    """
-    return RecipientGrantOperations(
-        store=FakeRecipientGrantStore() if store is None else store,
         id_factory=_grant_ids(),
         clock=lambda: AT,
     )
@@ -305,10 +251,8 @@ class Harness:
         self,
         *,
         tools: tuple[ToolDefinition, ...] = (),
-        recipient_grants: RecipientGrantStore | None = None,
         memory: FakeMemoryStore | None = None,
         conversation_store: FakeConversationStore | None = None,
-        destination_trust: FakeDestinationTrustStore | None = None,
         closers: Sequence[object] = (),
         drain_timeout: timedelta | None = None,
         traces: FakeTraceRetention | None = None,
@@ -408,11 +352,6 @@ class Harness:
             if conversation_store is None
             else conversation_store
         )
-        #: ADR-0238 §14's store, and ADR-0242 §4's: **the caller's where one was given**,
-        #: so the engine's three trust operations hold the *same* object a case seeded.
-        self.destination_trust = (
-            FakeDestinationTrustStore() if destination_trust is None else destination_trust
-        )
         self.conversations = ConversationLifecycle(
             conversations=self.conversation_store,
             memory=self.memory,
@@ -439,27 +378,8 @@ class Harness:
         # case assert a reach the engine does not have.
         self.trace_sink = trace_sink if trace_sink is not None else FakeTraceSink()
         self.trace_retention = trace_retention
-        #: The recipient-grant store the three ADR-0235 §7 operations read and write,
-        #: held here so a case can seed it or make its writes fail.
-        self.recipient_grants: RecipientGrantStore = (
-            FakeRecipientGrantStore() if recipient_grants is None else recipient_grants
-        )
         self.engine = Engine(
             grant_operations=_grant_operations(),
-            recipient_grant_operations=RecipientGrantOperations(
-                store=self.recipient_grants,
-                id_factory=lambda: next(self.ids),
-                clock=self.clock,
-            ),
-            # The harness's own trail (ADR-0242 §1): the trust act reads the decision it
-            # rides from the trail every other operation here records to, so a case
-            # cannot trust a decision `recent_decisions` cannot see.
-            destination_trust_operations=DestinationTrustOperations(
-                store=self.destination_trust,
-                trail=self.trail,
-                id_factory=_trust_ids(),
-                clock=lambda: AT,
-            ),
             connection_operations=_connection_operations(),
             plans=self.plans,
             trail=self.trail,
@@ -799,8 +719,6 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
     facade = Engine(
         chat_reader=False,
         grant_operations=_grant_operations(),
-        recipient_grant_operations=_recipient_grant_operations(),
-        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         plans=harness.plans,
         trail=harness.trail,

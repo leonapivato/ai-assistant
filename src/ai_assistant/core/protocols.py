@@ -123,7 +123,6 @@ if TYPE_CHECKING:
         BeliefBand,
         BeliefSummary,
         BoundEgressCall,
-        CanonicalDestination,
         CarriedProvenance,
         ChannelEpisode,
         ChannelEpisodeId,
@@ -142,8 +141,6 @@ if TYPE_CHECKING:
         ConversationDigest,
         ConversationExport,
         ConversationSummary,
-        DestinationTrust,
-        DestinationTrustRecord,
         DeviceChanges,
         DeviceConversation,
         DiagnosticEntry,
@@ -185,7 +182,6 @@ if TYPE_CHECKING:
         PlanExport,
         ProcessingStatus,
         QuestionPart,
-        RecipientGrant,
         RecordChunk,
         RecordedInvocation,
         RoundResponse,
@@ -2696,11 +2692,10 @@ class WebSearcher(Protocol):
 
     **No member takes a store, a supply or a policy.** Not a
     :class:`~ai_assistant.core.types.MemoryRecord`, not a :class:`MemoryStore`,
-    not an :class:`ActionPolicy`, not an :class:`AuditTrail`, not a
-    :class:`RecipientGrants` — and **no later lane adds one that does**
-    (ADR-0231 §17). What :meth:`request` is handed is one query and nothing
-    else, which is ADR-0231 §11's tenth clause at the second seam: a caller holding
-    a record's content has no parameter to put it in.
+    not an :class:`ActionPolicy`, not an :class:`AuditTrail` — and **no later
+    lane adds one that does** (ADR-0231 §17). What :meth:`request` is handed is
+    one query and nothing else, which is ADR-0231 §11's tenth clause at the second
+    seam: a caller holding a record's content has no parameter to put it in.
 
     **A ``WebSearcher`` holds the credential and this contract never carries
     one.** ADR-0231 §5 puts the ``Secrets`` read at ``SecretScope.INTEGRATION``
@@ -2852,8 +2847,7 @@ class WebSearcher(Protocol):
         (ADR-0241 §1): not a deadline instant, not a clock, not a budget object,
         not a policy and not a carrier for a second value. ADR-0231 §17's clause
         that no member of this Protocol takes a ``MemoryRecord``, a supply, a
-        ``MemoryStore``, an ``ActionPolicy``, an ``AuditTrail`` or a
-        ``RecipientGrants`` binds verbatim.
+        ``MemoryStore``, an ``ActionPolicy`` or an ``AuditTrail`` binds verbatim.
 
         Args:
             call: The authorised call, whose ``request`` carries this searcher's
@@ -2953,8 +2947,8 @@ class Forecaster(Protocol):
 
     **No member takes a store, a supply, a policy, a trail or a record** (§4). Not a
     :class:`~ai_assistant.core.types.MemoryRecord`, not a :class:`MemoryStore`, not
-    an :class:`ActionPolicy`, not an :class:`AuditTrail`, not a
-    :class:`RecipientGrants` — and **no later lane adds one that does**.
+    an :class:`ActionPolicy`, not an :class:`AuditTrail` — and **no later lane
+    adds one that does**.
 
     **A ``Forecaster`` holds the credential and this contract never carries one**
     (§4). Any ``Secrets`` read is at ``SecretScope.INTEGRATION`` *inside*
@@ -4158,11 +4152,8 @@ class ActionPolicy(Protocol):
     is still put to the user, with the fact in front of them (ADR-0181 §6), which is
     the containment #668 asks for. And no implementation acquires a trail read, a
     store handle or a grant seam **in order to discharge it** — ADR-0097 §7 forbids
-    consulting either *source*-grant seam outright, and the
-    :class:`RecipientGrants` a policy may hold under ADR-0193 §7 is not an
-    exception to this sentence: ``covering`` does not read
-    ``planned_with_external_content`` at all, so this obligation is discharged from
-    the request and never from that seam.
+    consulting either *source*-grant seam outright, so this obligation is
+    discharged from the request.
 
     Within those floors an implementation may be arbitrarily permissive: a
     policy returning ``CONFIRM`` for everything and one returning ``ALLOW`` for
@@ -4176,16 +4167,12 @@ class ActionPolicy(Protocol):
     async def decide(self, request: ActionRequest) -> PermissionRuling:
         """Rule on ``request``.
 
-        Must return ``authorised_by is None`` — and ``authorised_subject is
-        None`` with it — from a policy constructed with **no** authorisation
-        source, so no such implementation can invent an authorisation while
-        ruling on a fresh request. A policy constructed **with** a
-        :class:`RecipientGrants` may set both, and only to the ``id`` and the
-        recomputed ``subject_digest`` of a grant it read from that seam and found
-        covering under ADR-0193 §3; that is the condition ADR-0021 §3's own
-        bullet contemplates, and ADR-0193 §7 fixes what such a policy may do with
-        the seam — one read per ruling, after every ground the request alone
-        settles, failing closed on a fault and caching nothing between rulings.
+        Must return ``authorised_by is None`` from a policy constructed with
+        **no** authorisation source, so no such implementation can invent an
+        authorisation while ruling on a fresh request. **Must return
+        ``authorised_subject is None`` from every policy** (ADR-0321 §7:7): the
+        field fingerprinted a standing recipient grant, recipient grants retired
+        (§7:1), and no policy has a grant seam to read one from.
 
         **It returns no ``ALLOW`` at all on a request whose ``egress_binding``
         carries ``planned_with_external_content``** (ADR-0181 §5's third clause).
@@ -4626,62 +4613,20 @@ class AuditTrail(Protocol):
         they were written when that shape *was* the current shape, which is the
         whole point of representing them rather than accepting new ones.
 
-        **Validates a route-(b) standing authorisation, against records this
-        component cannot write** (ADR-0193 §6). Implementations are constructed
-        with a :class:`RecipientGrantResolution` — one member wide, so the trail
-        can validate a grant and can never author one — and ``record`` refuses a
-        **non-resolving ``ALLOW``** whose ``egress_binding`` is not ``None``,
-        whose ``authorised_by`` is set **and whose ``authorised_subject`` is set**
-        unless **all eight** hold:
-        ``outstanding(authorised_by)`` returns a record (which is the existence,
-        the kind and the unrevoked check at once); that record's ``decided_at`` is
-        **at or before** the decision's; its ``expires_at`` is **strictly after**
-        the decision's ``decided_at``; its ``ToolDefinition`` equals the decision's
-        ``tool`` by value; its ``BoundAccount`` equals the decision's binding's
-        ``account`` by value, both facts and not one; its canonical destination set
-        contains **every** member of the decision's; the binding is an
-        :class:`~ai_assistant.core.types.EgressBinding` whose
-        ``planned_with_external_content`` is ``False``; and the ruling's
-        ``authorised_subject`` is set and equals that record's ``subject_digest``,
-        **recomputed by ``record``** over the record the store returned. It also
-        refuses a **resolving** ``ALLOW`` carrying an ``authorised_subject`` at
-        all: route (a) rests on a confirmation, which is not a grant and has no
-        subject digest.
+        **Refuses an ``ALLOW`` whose ruling carries an ``authorised_subject``,
+        resolving or not** (ADR-0321 §7:7). The field fingerprinted the standing
+        recipient grant a route-(b) ``ALLOW`` rested on, and recipient grants
+        retired (§7:1): with no grant left to read, a decision carrying a digest
+        claims an authorisation nothing can now establish, and no implementation is
+        constructed with a grant seam to resolve one against. A **resolving**
+        ``ALLOW`` carrying one was already refused — route (a) rests on a
+        confirmation, which is not a grant and has no subject digest — and the
+        refusal is now the same on both sides. ``record`` takes it from the
+        decision alone, with no store read and no clock.
 
-        Before this, a non-resolving ``ALLOW`` carrying an ``authorised_by`` was
-        written with **no check of any kind** — the hole ADR-0021 §3 named when it
-        called that field "a pointer this contract does not verify". The standard
-        the check meets is that section's own: *nothing is taken on trust*.
-
-        **The guarantee is stated over the resolution read and not over the
-        append.** Those are two awaits and no linearisation point is built across
-        the two stores, so what is guaranteed is that **at the instant the pointer
-        was resolved, it named an outstanding grant covering this decision**. A
-        revocation or a ``clear`` landing before that read refuses the write; one
-        landing between the read and the append does not, and ADR-0193 §9 states
-        that residual window rather than rounding it to zero. Expiry is decided
-        against the decision's own ``decided_at`` and **never against a clock**, so
-        a grant that expires between the ruling and the write does not retract an
-        honest ``ALLOW``; revocation is decided at the read, because it is a fact
-        about two records.
-
-        **The invariant is scoped to route-(b) egress decisions and to nothing
-        else.** A decision with no ``egress_binding`` is not an egress call and no
-        rule here reaches it, so ADR-0021 §6's standing grants for *other* actions
-        stay deferred and unnarrowed — such a decision falls outside this scope
-        rather than needing an exception inside it. Route-(b) **egress**
-        authorisation is reserved to the recipient-grant store: on a decision in
-        scope, ``authorised_by`` names a
-        :class:`~ai_assistant.core.types.RecipientGrant` and there is no second
-        reading, and a later ADR wanting a different standing source for egress is
-        making a contract change to how a row in this scope is read rather than
-        inheriting an "add your own arm" permission.
-
-        **``record`` checks existence, kind, unrevokedness, liveness as of the
-        ruling, and subject match, and nothing else.** It does not re-rule, does
-        not consult a clock, does not call ``covering``, does not rank grants, and
-        returns no outcome. ADR-0021 §3's division is unchanged: the policy rules,
-        the caller records, the trail validates what it holds both halves of.
+        **The route-(a) checks are unchanged** (ADR-0321 §4:7, §9): the resolution
+        invariant above and the authorisation pointer's pairing hold exactly as
+        before, and the yes path rests on them.
 
         **Validates a route-(c) standing row against the binding on the row, and
         reads nothing else for it** (ADR-0247 §2, ADR-0272 §1). A non-resolving
@@ -4691,11 +4636,10 @@ class AuditTrail(Protocol):
         ``authorised_by`` equals that binding's ``account.reference``; failing
         either, it is refused with the ``InvalidAuthorisationError`` the ``Raises:``
         section below names. Both facts are read **from the decision** — no store
-        read, no ``Settings`` read and no clock — which is what keeps a revoked or
-        cleared grant from changing a recorded decision's meaning (ADR-0193 §9), and
-        the trail holds no configuration and is given none: the comparison of the
-        binding's account and origin against what the owner configured is the
-        policy's, taken where the configured values live.
+        read, no ``Settings`` read and no clock — and the trail holds no
+        configuration and is given none: the comparison of the binding's account
+        and origin against what the owner configured is the policy's, taken where
+        the configured values live.
 
         **Exactly one, because the eligibility fact is the kind's own** (ADR-0272
         §1). Each kind route (c) covers carries its own — ``closed_loop`` for a
@@ -4703,9 +4647,9 @@ class AuditTrail(Protocol):
         binding carrying **neither** is of no kind this route covers, and one
         carrying **both** asserts a kind route (c)'s closed two-member set does not
         contain; admitting either would let one kind's authority be read off the
-        other's. The digest remains the *discriminator* and neither fact does its
-        work: **which** rows are route (c) is unchanged, and what this states is
-        what makes a route-(c) row **eligible**.
+        other's. The digest's **absence** remains the *discriminator* and neither
+        fact does its work: **which** rows are route (c) is unchanged, and what this
+        states is what makes a route-(c) row **eligible**.
 
         Raises:
             AuditError: If the decision is not a valid record, which includes one
@@ -4715,15 +4659,11 @@ class AuditTrail(Protocol):
                 recorded.
             InvalidResolutionError: If ``resolves`` is set and the invariant
                 above does not hold.
-            InvalidAuthorisationError: If a route-(b) egress decision fails any of
-                the eight checks above, if a route-(c) one carries a binding that
-                does not carry exactly one of ``closed_loop`` and ``forecast_reach``
-                or a pointer that is not that binding's ``account.reference``, if a
-                resolving ``ALLOW`` carries an ``authorised_subject``, or if the
-                resolution seam could not be read — the last chained from the
-                ``RecipientGrantError`` it came from, so a caller keeps one handler
-                while an operator keeps "the pointer named no outstanding grant"
-                and "the seam could not be read" apart.
+            InvalidAuthorisationError: If an ``ALLOW``, resolving or not, carries
+                an ``authorised_subject``; or if a route-(c) decision carries a
+                binding that records no origin, that does not carry exactly one of
+                ``closed_loop`` and ``forecast_reach``, or a pointer that is not
+                that binding's ``account.reference``.
         """
         ...
 
@@ -5470,740 +5410,6 @@ class SourceGrantStore(Protocol):
 
         Raises:
             GrantError: If the store cannot be written.
-        """
-        ...
-
-
-@runtime_checkable
-class RecipientGrants(Protocol):
-    """Answers whether a standing grant covers an egress request (ADR-0193 §1, §7).
-
-    The **policy's** query face, and the narrow one. An ``ActionPolicy``
-    implementation is given this and never
-    :class:`RecipientGrantStore`: a component handed the whole store is one
-    ``record`` call away from authorising the send it is ruling on, and nothing
-    about the resulting record would look wrong afterwards. That is ADR-0097 §3's
-    argument transferred without modification, and it is a **static** guarantee —
-    a concrete store satisfies this Protocol structurally, so a composition root
-    may pass one object to each seam; what a policy cannot do is *name* ``record``,
-    because ``mypy --strict`` runs over ``src`` and ``tests``.
-
-    **:meth:`covering` is the only member and no lane adds a second.** A policy
-    asks about the one request it is ruling on; a policy that could enumerate the
-    store is one that could log or leak the user's recipient set, which is
-    ADR-0097 §3's argument for keeping :class:`SourceGrants` at one member.
-    ``standing`` and ``recent`` are on the wider face, for the surface that shows
-    the user what they have granted. **There is no read-by-id member here and no
-    lane adds one**: the member that resolves an id is
-    :meth:`RecipientGrantResolution.outstanding`, held by the trail alone, which
-    is what keeps ADR-0021 §3's rebinding hazard closed inside the very subsystem
-    meant to close it.
-
-    **A recipient grant is not a source authorisation, in either direction.**
-    ADR-0097 §7 stands verbatim beside this seam: a
-    :class:`~ai_assistant.core.types.SourceGrant` may never be cited as
-    :attr:`~ai_assistant.core.types.PermissionRuling.authorised_by`, and no
-    ``ActionPolicy`` may consult a :class:`SourceGrants` or a
-    :class:`SourceGrantStore`. Nothing here relaxes that: this is a different seam
-    holding different records, and a policy holding one holds neither of those.
-
-    **A component that cannot get an answer here fails closed.** A
-    :class:`~ai_assistant.core.errors.RecipientGrantError` is not a grant, and no
-    policy proceeds on a stale answer, an earlier lookup or an absent one
-    (ADR-0193 §1).
-
-    Cancelling :meth:`covering` is governed by this module's cancellation clause
-    (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous** here: the
-    one argument is an :class:`~ai_assistant.core.types.ActionRequest`, which is
-    immutable all the way down, so there is no caller-owned container for a result
-    to be torn across.
-    """
-
-    async def covering(self, request: ActionRequest) -> RecipientGrant | None:
-        """The live grant covering ``request``'s recipients, or ``None``.
-
-        **Returns the record rather than a boolean**, so the caller can name what
-        authorised the ``ALLOW`` it is about to author — both the grant's ``id``
-        and its :attr:`~ai_assistant.core.types.RecipientGrant.subject_digest`
-        (ADR-0193 §6).
-
-        **It takes the whole request and resolves no id.** ADR-0021 §3 makes the
-        request self-contained so that a policy never consults a registry, "a
-        policy that resolved an id would be reintroducing the rebinding hazard
-        inside the very subsystem meant to close it"; this member takes the value
-        and returns a record, so the hazard the purity framing was written against
-        stays closed here rather than merely left alone.
-
-        **Four of ADR-0193 §3's five comparisons, and the fifth is the policy's.**
-        A grant is returned when it is **live**; the request's ``tool`` equals the
-        grant's :class:`~ai_assistant.core.types.ToolDefinition` **by value**; the
-        request's binding's ``account`` equals the grant's
-        :class:`~ai_assistant.core.types.BoundAccount` by value, both facts and
-        never one; and **every** member of the request's canonical destination set
-        is a member of the grant's, compared as
-        :class:`~ai_assistant.core.types.CanonicalDestination` compares — every
-        field, never across protocols.
-
-        **It does not read ``planned_with_external_content``**, and ADR-0193 §4's
-        bar is not stated on this seam. That clause is an obligation of the
-        :class:`ActionPolicy` contract, so the policy applies it to this answer
-        and §3's coverage is the conjunction of the two. A safety rule stated in
-        both places would be two statements to keep in step, and the one that
-        drifted would be the one nobody was reading.
-
-        **Coverage is a comparison of recorded values and is never an inference.**
-        No implementation widens a grant by folding case, by matching a domain, by
-        treating an account member as covering a recipient member or the reverse,
-        by treating a grant's larger set as covering a request's under any
-        relation other than membership, or by re-canonicalising either side. The
-        canonicaliser is ADR-0148 §2's, at the seam, and there is not a second one
-        here.
-
-        **Where several live grants match, the answer is the one with the greatest
-        ``decided_at``, ties broken by the least ``id`` under code-point order.**
-        Overlapping grants are permitted — a grant over ``{Alice}`` and one over
-        ``{Alice, Bob}`` are two things a user may reasonably have said — so the
-        selection must be **total**, or two conforming stores record different
-        ``authorised_by`` values for one state and one request. Latest-decided is
-        the user's most recent expression of the same intent; the ``id`` tie-break
-        makes the order total rather than mostly determined.
-
-        **Liveness is evaluated here**, so the store reads the clock and the
-        policy does not (ADR-0021 §3, ADR-0007 §2's read-time enforcement). A
-        grant is live while it is **outstanding** — no revoking record names it —
-        and the instant read from the clock is at or after its ``decided_at`` and
-        **strictly before** its ``expires_at``. Bounded below as well as above:
-        without that half a future-dated grant would be handed to the policy and
-        ``AuditTrail.record`` would then refuse the ``ALLOW`` it sourced. The clock
-        is read **exactly once** per call and every record considered is evaluated
-        against that one instant.
-
-        **The answer is a detached snapshot** — the record and everything mutable
-        it reaches — on ADR-0018 §3's rule. ``frozen=True`` does not close the
-        bypass: a caller could rewrite ``destinations`` or ``expires_at`` through
-        ``__dict__`` on a shared object, which is a widening of what the user
-        authorised, reached through the gate's own answer.
-
-        Args:
-            request: The action being ruled on, carrying its binding by value.
-
-        Returns:
-            A detached snapshot of the covering grant, or ``None`` where none
-            covers it — which includes a request whose ``egress_binding`` is
-            ``None``. ``None`` means exactly that and **never** that the store
-            could not be read.
-
-        Raises:
-            RecipientGrantError: If the store cannot be read. Never returned as
-                ``None``: a fault and a withdrawn grant are different facts, and a
-                policy that cannot tell them apart is one that proceeds on
-                silence.
-        """
-        ...
-
-
-@runtime_checkable
-class RecipientGrantResolution(Protocol):
-    """Resolves a recorded ``authorised_by`` against the grant records (ADR-0193 §1, §6).
-
-    The **trail's** face, and it carries one member. An
-    :class:`AuditTrail` implementation is constructed with one of these and never
-    with a :class:`RecipientGrantStore`, so the trail holds a read and nothing
-    else: it cannot append a grant, revoke one, enumerate the user's recipients or
-    erase the store. A trail that could append a grant would be one ``record``
-    call away from authorising the row it is about to validate, which is the
-    capability ADR-0097 §3 removes by splitting and which ADR-0193 §1 has already
-    removed from the policy.
-
-    **Given to** :class:`AuditTrail` **implementations and to nothing else.** No
-    ``ActionPolicy``, no surface, no :class:`EgressBinder` and no ``interfaces/``
-    adapter holds one. The query face carries no ``outstanding`` and this face
-    carries no ``covering``, so neither component can ask the other's question,
-    and :meth:`AuditTrail.record` is the only place a recorded ``authorised_by``
-    is ever resolved against this store — never at render time and never at any
-    later read (ADR-0193 §6, §11).
-
-    **A narrow Protocol rather than a second implementation.** One concrete store
-    satisfies all three faces structurally, exactly as one concrete store
-    satisfies :class:`SourceGrants` and :class:`SourceGrantStore` today; what this
-    exists for is that what an ``AuditTrail`` *names* is a read it cannot widen.
-
-    Cancelling :meth:`outstanding` is governed by this module's cancellation
-    clause (ADR-0060); its input-observation clause (ADR-0065) is **vacuous**, the
-    one argument being a ``str``.
-    """
-
-    async def outstanding(self, grant_id: str) -> RecipientGrant | None:
-        """The **granting** record with ``grant_id``, if it is unrevoked.
-
-        One question, and it is the existence, the kind and the unrevoked check at
-        once: it answers with the record where the store holds it, it is a
-        granting record rather than a revoking one, and no revoking record names
-        it; and with ``None`` otherwise (ADR-0193 §1).
-
-        **It reads no clock.** Outstanding is a fact about two records, so an
-        **expired but unrevoked** grant is returned by this member rather than
-        withheld — expiry is not this member's question, and
-        :meth:`AuditTrail.record` decides it against the decision's own
-        ``decided_at`` (ADR-0193 §6). It evaluates no coverage, ranks nothing, and
-        returns a detached snapshot as every other query on this seam does.
-
-        Args:
-            grant_id: The id a decision's ``authorised_by`` carries.
-
-        Returns:
-            A detached snapshot of the outstanding granting record, or ``None``
-            where the store holds none such. ``None`` means exactly that and
-            **never** that the store could not be read.
-
-        Raises:
-            RecipientGrantError: If the store cannot be read. The trail refuses
-                the write rather than proceeding, chaining this as ``__cause__``
-                of an
-                :class:`~ai_assistant.core.errors.InvalidAuthorisationError`
-                (ADR-0193 §6).
-        """
-        ...
-
-
-@runtime_checkable
-class RecipientGrantStore(Protocol):
-    """The append-only record of the recipients the user made standing (ADR-0193 §1).
-
-    The durable face, and the widest of the three. It satisfies
-    :class:`RecipientGrants` and :class:`RecipientGrantResolution` structurally,
-    so one implementation serves all three seams and a composition root may pass
-    one object to each. **Nothing but the hub's grant operations holds one** — no
-    ``ActionPolicy``, no ``AuditTrail``, no surface, no :class:`EgressBinder`.
-
-    A **Tier 1 local store** (ADR-0004 §7): a canonical destination is a recipient
-    of the user's, and this store is durable, ordered and rendered to them. So
-    ADR-0004 §2's residency clause governs it — implementations persist locally
-    only, under ``Settings.data_dir`` and owner-only, and none of this may be
-    written to a remote service.
-
-    **Append-only, and a revocation is a record rather than a mutation.** A grant
-    is never edited, narrowed, re-scoped or extended in place; changing what a
-    user has authorised is a revocation followed by a new grant, and both records
-    are kept (ADR-0097 §2's shape, read one store over). Ids, instants and
-    ``established_by`` are supplied by the caller that records, as
-    :attr:`~ai_assistant.core.types.PermissionDecision.id` and
-    :attr:`~ai_assistant.core.types.SourceGrant.id` are: a store mints no id and
-    reads no clock on the write path (ADR-0021 §3). The only source of a
-    ``revokes`` value is the ``id`` of a record the store already holds.
-
-    **There is no ``get(id)`` and no ``delete(id)``.** A selective delete is the
-    page torn out of the book, and its reason here is narrower than the trail's
-    and is stated on its own: an ``authorised_by`` in the trail points into this
-    store, so deleting the record it points at would make a recorded ``ALLOW``
-    unexplainable while leaving it looking complete. Revocation is the act a user
-    wants and it is available; erasure is a data right and it is available
-    **wholesale** (ADR-0193 §9). A read-by-id exists as
-    :meth:`outstanding`, which answers a narrower question than a ``get`` would.
-
-    **Nothing mints a grant from what is already configured.** Not a prior call,
-    not a recipient that has appeared before, not a credential's scope or
-    audience, not a configured base URL or host, not an account the user
-    connected, not an allowlist the system assembled, not a ``Settings`` value,
-    not a first run, not an upgrade or a migration (ADR-0193 §2). The one thing
-    that creates a grant is a user answering a recorded ``CONFIRM`` about an
-    egress call and asking, in the same act, that that call's recipients be
-    remembered — through
-    :meth:`~ai_assistant.core.types.RecipientGrant.established_from`, the one
-    construction path.
-
-    **A deployment configures a ceiling** on how many **outstanding granting
-    records** this store holds — ``Settings.recipient_grant_max_outstanding``,
-    supplied to an implementation at construction — and :meth:`record` refuses a
-    granting record that would take the count above it. The ceiling governs
-    **admission and never eviction**: lowering it deletes nothing, expires
-    nothing, hides nothing, and omits nothing from :meth:`standing`,
-    :meth:`recent` or :meth:`export`. A store holding records a newly lowered
-    ceiling would not admit is a **legal** state (ADR-0193 §1).
-
-    Cancelling any method here is governed by this module's cancellation clause
-    (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous**, as it is
-    for :class:`SourceGrantStore` and for the same reason: the one caller-owned
-    argument is a :class:`~ai_assistant.core.types.RecipientGrant`, which is
-    immutable all the way down. What a caller *can* still do is write past the
-    frozen model through ``__dict__``, which is what :meth:`record`'s detachment
-    obligation closes.
-    """
-
-    async def record(self, grant: RecipientGrant) -> str:
-        """Append ``grant`` to the store and return its id.
-
-        **Write-once**: re-recording an id already present raises rather than
-        overwriting, for :meth:`AuditTrail.record`'s reason — a store that upserts
-        is one where history can be rewritten by replaying a write.
-
-        **Atomic**: the duplicate-id check, the duplicate-**subject** refusal, the
-        **ceiling count**, the revocation invariants and the append are **one**
-        operation, not a read followed by a write. The ceiling is named explicitly
-        because a count read outside the operation is the one that fails the way a
-        duplicate-id check does not: two writers of **different** subjects at one
-        below the ceiling both see room, both append, and the store ends one over
-        — a race the duplicate-subject refusal cannot catch, because the two
-        subjects differ.
-
-        **Stores a detached, validated snapshot**, recursively over reachable
-        state, and never retains the caller's object. Both halves matter and the
-        write-side one is easy to drop: ``frozen=True`` refuses
-        ``grant.destinations = …`` and does not refuse
-        ``grant.__dict__["destinations"] = …``, so a store keeping the caller's
-        object would let a grant be **widened after it was appended**, through a
-        store whose entire premise is that its records are not rewritten
-        (ADR-0018 §4, ADR-0021 §4).
-
-        **It reads no clock**, so every rule it applies is a fact about two
-        records. In particular the duplicate refusal is stated over
-        **outstanding** rather than over live: a refusal over "already live"
-        obliges this member to read one, and a refusal that substituted the
-        caller's ``decided_at`` is breakable by clock skew in both directions at
-        once — a forward-skewed instant admits a second grant that is live
-        immediately, and a backward-skewed one refuses a renewal after the first
-        has genuinely expired.
-
-        **The duplicate-subject refusal.** A **granting** record whose ``tool``,
-        ``account`` and ``destinations`` all equal those of an **outstanding**
-        granting record is refused. Overlapping grants over *different*
-        destination sets stay permitted and are what :meth:`covering`'s precedence
-        is for; what is refused is a second grant that **is** the first, because
-        revoking one would leave the other standing and the user would have
-        revoked nothing. Re-granting a triple whose grant has expired is a
-        revocation followed by a new grant, both appended and both kept.
-
-        **The ceiling.** A granting record that would take the count of
-        outstanding granting records above the configured maximum is refused. The
-        refusal is not a truncation, an eviction or a silent no-op: nothing
-        already recorded is removed, narrowed or expired to make room, and no
-        looser grant is minted in its place. A **revoking** record is **never**
-        refused on this ground, whatever the count — a ceiling that could block a
-        revocation would trap a user above it with no way down.
-
-        **The revocation invariants**, checked here because this is the only place
-        both records are in hand. A revoking record transcribes verbatim every
-        field of the grant it revokes except ``id``, ``decided_at``,
-        ``established_by`` and ``revokes``, and is refused unless the named grant
-        is present, is itself a granting record, is not already revoked, and
-        matches every transcribed field.
-
-        **A revocation is never refused for its timestamp**, including one that
-        predates the grant it revokes, for :meth:`SourceGrantStore.record`'s
-        reason: ``decided_at`` is caller-supplied and this store reads no clock on
-        the write path, so a host clock corrected backwards would otherwise make a
-        grant permanently unrevokable.
-
-        Args:
-            grant: The record to append — a grant, or the revocation of one.
-
-        Returns:
-            The recorded id.
-
-        Raises:
-            InvalidRecipientGrantError: If the id is already recorded, if a
-                granting record duplicates an outstanding grant's ``tool``,
-                ``account`` and ``destinations``, if a granting record would take
-                the outstanding count above the configured ceiling, if the record
-                does not satisfy its own model, or if ``revokes`` fails any
-                invariant above.
-            RecipientGrantError: If the store cannot be written.
-        """
-        ...
-
-    async def covering(self, request: ActionRequest) -> RecipientGrant | None:
-        """The live grant covering ``request``'s recipients, or ``None``.
-
-        Exactly :meth:`RecipientGrants.covering`'s semantics — the same member, on
-        the wider seam: four of ADR-0193 §3's five comparisons, liveness evaluated
-        against one clock read, latest-decided with an ``id`` tie-break where
-        several match, and a detached snapshot.
-
-        Raises:
-            RecipientGrantError: If the store cannot be read.
-        """
-        ...
-
-    async def outstanding(self, grant_id: str) -> RecipientGrant | None:
-        """The **granting** record with ``grant_id``, if it is unrevoked.
-
-        Exactly :meth:`RecipientGrantResolution.outstanding`'s semantics — the same
-        member, on the wider seam. It reads no clock, so an expired but unrevoked
-        grant is returned rather than withheld.
-
-        Raises:
-            RecipientGrantError: If the store cannot be read.
-        """
-        ...
-
-    async def standing(self) -> list[RecipientGrant]:
-        """Every **live** grant in the store.
-
-        :meth:`covering`'s enumeration, and a *separate* member rather than a
-        widening of anything: :class:`RecipientGrants` stays at one member,
-        because a policy asks about the one request it is ruling on and a policy
-        that could enumerate the store is one that could log or leak the user's
-        recipient set (ADR-0097 §3, ADR-0193 §1).
-
-        **Liveness, on one clock read.** Live is outstanding **and** the instant
-        read from the clock at or after ``decided_at`` and strictly before
-        ``expires_at``. The clock is read **exactly once** and every record is
-        evaluated against that instant: a ``standing`` reading an advancing clock
-        per row could return one of two grants sharing an ``expires_at`` and omit
-        the other, which is a set true at no real instant. A **future-dated**
-        grant — one whose ``decided_at`` is after that instant — is absent, for the
-        reason :meth:`covering` states.
-
-        **Complete or nothing**, and no implementation truncates, samples or
-        elides: a page of what the user authorises reads as complete while
-        omitting an authorisation. In particular a **lowered ceiling hides
-        nothing**: a store holding records the current setting would not admit is
-        legal, and a query that hid them to make the setting look satisfied would
-        be lying to the user about their own standing policy (ADR-0193 §1).
-
-        Returns:
-            A detached snapshot of every live grant. An empty list means the store
-            holds none, never that it could not be read.
-
-        Raises:
-            RecipientGrantError: If the store cannot be read, or holds a record
-                that no longer validates.
-        """
-        ...
-
-    async def recent(self, *, limit: int = 50) -> list[RecipientGrant]:
-        """Return the most recent records, newest first.
-
-        Ordered by ``decided_at`` **descending**, ties broken by ``id``
-        ascending, for :meth:`AuditTrail.recent`'s reason: "newest first" is
-        ambiguous between insertion order and decision time, which disagree
-        whenever records are appended out of order, and an ``id`` tie-break makes
-        the order total rather than merely mostly determined.
-
-        Revoked grants and revoking records alike are returned: a revoking record
-        appears here and in :meth:`export` as the record of an act, which is what
-        it is. This member evaluates **no liveness** and reads no clock.
-
-        Args:
-            limit: Maximum number of records to return; must be strictly
-                positive. Every strictly positive integer is admissible.
-
-        Raises:
-            ValueError: If ``limit`` is not strictly positive. Raised rather than
-                clamped or passed through, for :meth:`AuditTrail.recent`'s reason
-                — a store issuing ``LIMIT ?`` against SQLite turns ``limit=-1``
-                into an unbounded read of a Tier 1 store.
-            RecipientGrantError: If the store cannot be read.
-        """
-        ...
-
-    async def export(self) -> list[RecipientGrant]:
-        """Return **every** record, in :meth:`recent`'s order (ADR-0004 §6).
-
-        The user's export right, on :meth:`AuditTrail.export`'s shape, and what
-        discharges ADR-0004 §6's portability obligation for this store — so it may
-        omit **nothing**. Live grants, expired grants, revoked grants and the
-        revoking records that revoked them all appear, each exactly once; an
-        implementation that delegated this to :meth:`standing` would silently drop
-        three of those four kinds (ADR-0193 §1).
-
-        **It is bounded by nothing, and that is stated rather than repaired.**
-        :meth:`recent` is bounded by its ``limit``; revoked grants and revoking
-        records accumulate *outside* the outstanding count, and truncating them is
-        not available, because a portable snapshot that omits records is not one.
-        A store the user never clears grows there, and the recourse is
-        :meth:`clear`, which is theirs.
-
-        Raises:
-            RecipientGrantError: If the store cannot be read.
-        """
-        ...
-
-    async def clear(self) -> int:
-        """Delete every record, returning the number removed.
-
-        Wholesale erasure only, for :meth:`AuditTrail.clear`'s reason, and the
-        count is of **every** record removed rather than of the live ones.
-
-        **It retains nothing**: no record, no id, no tombstone, no derived value.
-        An id this store held before a ``clear`` may be recorded again afterwards,
-        and what that can and cannot do is stated exactly (ADR-0193 §1). It cannot
-        mislead a **reader**, because nothing ever re-resolves an already-recorded
-        ``authorised_by``. It cannot widen what a row **authorised**, because
-        :meth:`AuditTrail.record` compared the resolved grant's tool, account and
-        destination set against that decision's own before appending. What it
-        **can** do is leave a row naming an id that later resolves to a different
-        grant — and what that cannot do is make the row say something false,
-        because the row carries the
-        :attr:`~ai_assistant.core.types.RecipientGrant.subject_digest` of the
-        grant it was validated against.
-
-        **It retracts, invalidates and re-opens nothing.** A recorded ``ALLOW``
-        stays recorded, stays true about the moment it was made, and still names
-        the grant it rested on. What is lost is the grant's own text — its other
-        members, its expiry, its establishment act — and the user's ability to
-        see, revoke or renew it (ADR-0193 §9).
-
-        **No lane makes this conditional on, coordinated with, or transactional
-        against the audit trail's ``clear``.** Cross-tier erasure is ADR-0007 §4's
-        deferred coordinator; what is decided is that each store's own wholesale
-        erase is the user's to perform.
-
-        Raises:
-            RecipientGrantError: If the store cannot be written.
-        """
-        ...
-
-
-@runtime_checkable
-class DestinationTrustStore(Protocol):
-    """What the user said about the destinations they picked by name (ADR-0238 §1).
-
-    The **mirror** of the source side. #2096 keeps one fact per *source* — who may
-    write here — and this is the same rule read on the other axis: **who the user
-    picked to be told about**. One rule covers two milestones, so milestone 31's
-    provider and milestone 32's returned site are two values of it rather than two
-    boundaries.
-
-    **The fact it records is set by a recorded act of the user and by nothing else**
-    (§1). No configuration sets it, no connected account sets it, no operator
-    setting sets it, no tool declaration sets it, no :class:`RecipientGrant` sets it,
-    and **no model output ever sets it, raises it, or is consulted about it**. A
-    model may not propose a destination's trust, may not be shown a destination in
-    order to judge it, and no component infers the fact by inspecting a destination,
-    a host, a response, or any content whatever. That is ADR-0217 §3's precedence
-    read on the destination axis — the owner's act is final and a model may only
-    narrow — with the narrowing arm not granted here at all.
-
-    **Absence reads** :attr:`~ai_assistant.core.types.DestinationTrust.UNCHOSEN`, and
-    so does a revoked record and a record that cannot be read (§1). That is the
-    fail-closed direction, stated as ADR-0146 §2 states its own — "a span for which
-    no origin was recorded is **system-selected**" — for the same reason: the
-    permissive default is what makes an unimplemented path work and is therefore
-    precisely the state in which the rule would be false.
-
-    **Exactly five members and no more** (§1). No member is added, no argument
-    widened and no return changed by any later lane without the ADR that decides it.
-
-    **This store is not a field on a** :class:`RecipientGrant`, **and the two acts
-    are separate** (§1). A grant authorises *whether this system may talk to this
-    party*; a record here authorises *what class of payload this system may compose
-    for it*. A destination nobody chose has no grant to carry a field — milestone
-    32's subject is a site a provider returned — and ADR-0193 §5 is correct and is
-    left standing: "a grant states nothing about the payload and authorises no
-    content". So a grant established before this decision, or after it without the
-    second act, leaves its destination reading ``UNCHOSEN``, and **no component reads
-    the existence, breadth, age or liveness of a grant as evidence of trust**.
-
-    A **Tier 1 local store** (ADR-0004 §7): it holds facts about the user's own
-    recipients. So ADR-0004 §2's residency clause governs it — implementations
-    persist locally only, under ``Settings.data_dir`` and owner-only, and **none of
-    this is ever written to a remote service** (§1).
-
-    **Append-only, and a revocation is prospective** (§1, on ADR-0193 §9's shape). A
-    revocation takes effect for every later read and **rewrites no recorded
-    decision**; a destination whose record is revoked reads ``UNCHOSEN`` from that
-    moment. Ids and instants are supplied by the caller that records, as
-    :attr:`~ai_assistant.core.types.RecipientGrant.id` is: the record is a complete
-    value before it reaches any store, so the duplicate refusal is a comparison
-    rather than an allocation.
-
-    Cancelling any method here is governed by this module's cancellation clause
-    (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous on the write
-    path** — as it is for :class:`RecipientGrantStore` and for the same reason: the
-    caller-owned arguments there are a
-    :class:`~ai_assistant.core.types.DestinationTrustRecord` and a ``str``, immutable
-    all the way down. What a caller *can* still do is write past the frozen model
-    through ``__dict__``, which is what :meth:`record`'s detachment obligation closes.
-
-    **It is not vacuous on** :meth:`trust_of`, **which is the one member here that
-    takes a mutable argument.** A ``Sequence`` the caller still holds can change while
-    this call is suspended, and reading it twice is not merely untidy: the emptiness
-    check would pass on the sequence handed over and the coverage check would then run
-    over **no members**, which is vacuously true — so an emptied query would answer
-    ``USER_CHOSEN`` for any store holding a live record, the exact answer §1 refuses
-    for an empty sequence. **An implementation therefore snapshots the sequence before
-    its first await and reads only the snapshot afterwards**, so that one call sees one
-    argument.
-    """
-
-    async def record(self, record: DestinationTrustRecord) -> str:
-        """Append ``record`` and return its id (ADR-0238 §1).
-
-        **Write-once**: re-recording an id already present raises rather than
-        overwriting, for :meth:`AuditTrail.record`'s reason — a store that upserts is
-        one where history can be rewritten by replaying a write.
-
-        **Atomic, and this is the clause that fails silently without it.** The
-        duplicate-``id`` check, the empty-set refusal, the duplicate-**live-set**
-        refusal and the append are **one operation, with no interleaving point
-        between them** — not a read followed by a write. Two engines over one data
-        directory each reading no live record over a destination set and each
-        appending would leave the store holding two, and the user's revocation of the
-        record they were shown would leave the other standing: §1's revocation clause
-        would then be false of the *store* rather than of any one record, and a
-        destination the user withdrew would keep reading ``USER_CHOSEN``. This is
-        :meth:`RecipientGrantStore.record`'s own obligation, read one store over, for
-        the reason that store gives for the same refusal — "revoking one would leave
-        the other standing and the user would have revoked nothing". **No caller-side
-        lock discharges it**, for the reason ADR-0074 §9 gives: the engine already
-        contemplates another engine over the same durable stores, so two engines hold
-        two locks and serialise nothing.
-
-        **The duplicate refusal is over the *live* set**, and the canonical ordering
-        of :attr:`~ai_assistant.core.types.DestinationTrustRecord.destinations` is
-        what makes it a comparison of *sets* rather than of tuples: ``(Alice, Bob)``
-        and ``(Bob, Alice)`` are unequal tuples over one logical set, and admitting
-        both is exactly the failure this refusal exists to prevent. The record's own
-        validator pins the spelling at construction, so this member compares and does
-        not re-canonicalise.
-
-        **Stores a detached, validated snapshot**, recursively over reachable state,
-        and never retains the caller's object. ``frozen=True`` refuses
-        ``record.destinations = …`` and does *not* refuse
-        ``record.__dict__["destinations"] = …``, so a store keeping the caller's
-        object would let a recorded act be **widened after it was appended**
-        (ADR-0018 §4, ADR-0021 §4).
-
-        **It reads no clock.** ``established_at`` is the caller's, as
-        :attr:`~ai_assistant.core.types.RecipientGrant.decided_at` is, and every rule
-        this member applies is a fact about two records.
-
-        Args:
-            record: The act to append. A record whose ``trust`` is ``UNCHOSEN`` is
-                unconstructable, so this member never meets one.
-
-        Returns:
-            The recorded id.
-
-        Raises:
-            InvalidDestinationTrustError: If the id is already recorded, if the
-                destination set is empty, if the destinations duplicate those of a
-                **live** record, if the record does not satisfy its own model, or if
-                the store cannot be written. Pydantic's ``ValidationError`` is
-                deliberately not allowed to escape.
-        """
-        ...
-
-    async def trust_of(self, destinations: Sequence[CanonicalDestination]) -> DestinationTrust:
-        """The recorded trust of ``destinations``, as one value (ADR-0238 §1).
-
-        **``USER_CHOSEN`` only where every member of the sequence is a member of some
-        one live record's** ``destinations``, and ``UNCHOSEN`` otherwise — including
-        for an **empty sequence**, for a partial match, and for a match spanning two
-        records.
-
-        **Coverage is a comparison of recorded values and is never an inference**
-        (§1). No implementation folds case, matches a domain, treats an account member
-        as covering a recipient member or the reverse, relates the two sets by
-        anything but membership, or re-canonicalises either side. A
-        :class:`~ai_assistant.core.types.CanonicalDestination` compares as it
-        compares — **every field, never across protocols**. That is ADR-0193 §3's
-        second clause restated over this store because the hazard is identical and
-        the store is a different one.
-
-        **The rule here is membership rather than order**, so no clause
-        re-canonicalises a caller's query sequence: the canonical ordering pinned on
-        the *record* is what :meth:`record`'s duplicate refusal needs, and it does
-        not reach this member.
-
-        **This member raises for no reason at all, and that is a clause** (§1). The
-        trust of a destination is ``UNCHOSEN`` "in every other case, including … where
-        a record cannot be read", so an implementation that cannot read answers
-        ``UNCHOSEN`` — the fail-closed direction — rather than raising into a policy
-        path. Reading a total function over a partial store is **not inference** in
-        ADR-0098 §1's sense: inference is deciding a fact by inspecting content, and
-        nothing here inspects anything.
-
-        Args:
-            destinations: The canonical destination set to ask about, as a request's
-                binding derived it. Order is immaterial; membership is the rule.
-                **Observed once** (ADR-0065): an implementation snapshots it before its
-                first await, so a caller mutating the sequence it passed cannot make
-                one call answer over two different arguments — see the class docstring
-                for what that would otherwise cost.
-
-        Returns:
-            :attr:`~ai_assistant.core.types.DestinationTrust.USER_CHOSEN` or
-            :attr:`~ai_assistant.core.types.DestinationTrust.UNCHOSEN`.
-        """
-        ...
-
-    async def revoke(self, record_id: str, revoked_at: datetime) -> None:
-        """Withdraw the record with ``record_id``, prospectively (ADR-0238 §1).
-
-        **Prospective and idempotent**: it takes effect for every later read,
-        **rewrites no recorded decision**, and revoking an already-revoked record is a
-        no-op that leaves the first instant standing rather than restamping it. From
-        that moment the destinations it named read ``UNCHOSEN``, unless another live
-        record covers them.
-
-        **The boundary is the read and it is not the send**, which is ADR-0193 §9's
-        boundary arrived at for ADR-0193 §9's reason (ADR-0238 §5). ``UNCHOSEN``
-        "from that moment" governs every read that *begins* after the revocation is
-        recorded; it is **not** a claim about work already past its read, and no
-        clause here says a revocation stops a request that has already read.
-
-        **The instant is the caller's and this member reads no clock**, as
-        :meth:`RecipientGrantStore.record` does not on its write path. A revocation is
-        never refused for its timestamp, including one that predates
-        ``established_at``: a host clock corrected backwards would otherwise make a
-        record permanently unrevokable.
-
-        Args:
-            record_id: The record to withdraw.
-            revoked_at: The instant of the user's act; timezone-aware.
-
-        Raises:
-            InvalidDestinationTrustError: If ``record_id`` names no record the store
-                holds, if ``revoked_at`` is not a usable instant, or if the store
-                cannot be written.
-        """
-        ...
-
-    async def live(self) -> list[DestinationTrustRecord]:
-        """Every record that is not revoked, in a stable order (ADR-0238 §1).
-
-        **The operating read, and the one a surface renders**: it is what lets a user
-        see and revoke what they granted. Ordered by ``established_at`` descending
-        with ``id`` ascending as the tie-break, for :meth:`AuditTrail.recent`'s
-        reason — "newest first" is ambiguous between insertion order and act time,
-        which disagree whenever records are appended out of order, and an ``id``
-        tie-break makes the order total rather than merely mostly determined.
-
-        **Complete or nothing**, and no implementation truncates, samples or elides: a
-        page of what the user authorised that read as complete while omitting an
-        authorisation would be lying to them about their own standing policy.
-
-        Returns:
-            A detached snapshot of every unrevoked record. An empty list means the
-            store holds none, **never** that it could not be read.
-
-        Raises:
-            InvalidDestinationTrustError: If the store cannot be read, or holds a
-                record that no longer validates.
-        """
-        ...
-
-    async def export(self) -> list[DestinationTrustRecord]:
-        """**Every** record, revoked ones included, in :meth:`live`'s order (§1).
-
-        **This member exists because the data right does.** ADR-0004 §6 gives the
-        owner their data, and ADR-0193 §1 already applies that to authorisation
-        records, live and revoked alike: a revoked record is the evidence that the
-        user once permitted a destination and then withdrew it, which is exactly what
-        an audit of one's own decisions is for. :meth:`live` is the operating read
-        and this is the right; **neither stands in for the other**, and an
-        implementation that delegated this to :meth:`live` would silently drop every
-        revoked record. The user-facing *layout* of an export stays the surface
-        lanes' (§14).
-
-        Returns:
-            A detached snapshot of every stored record.
-
-        Raises:
-            InvalidDestinationTrustError: If the store cannot be read, or holds a
-                record that no longer validates.
         """
         ...
 
@@ -10743,407 +9949,6 @@ class AssistantEngine(Protocol):
         Raises:
             GrantError: If the grant store could not be read, or holds two live
                 grants for one source.
-        """
-        ...
-
-    # --- the recipient-grant surface (ADR-0235 §3, §7) -----------------------
-    #
-    # Three operations, and each is here because a surface cannot obtain it
-    # otherwise (ADR-0235 §4); the establishing act and its listing left the surface
-    # (ADR-0313 §5:1). Without :meth:`standing_recipient_grants` there is no
-    # surface showing the user what they currently authorise, and ADR-0193 §9's
-    # revocation right has nowhere to sit. Without :meth:`recent_recipient_grants`
-    # an expired grant occupies a slot against the ceiling and appears in no
-    # listing, so ADR-0193 §1's stated recourse names an act the user cannot
-    # perform. Without
-    # :meth:`revoke_recipient_grant` the only exit from a grant is ``clear`` on a
-    # store no surface holds.
-    #
-    # **Recipient grants and source grants are two vocabularies and never one**
-    # (ADR-0235 §7). No operation, command, route, view or listing answers one with
-    # the other, presents a recipient grant among source grants or the reverse,
-    # offers a control that revokes across both, or names a combined total.
-    # :meth:`grant`, :meth:`revoke`, :meth:`recent_grants`, :meth:`standing_grants`
-    # and :meth:`grantable_sources` stay ``SourceGrant`` operations and gain
-    # nothing. The two authorisations are things the corpus keeps apart at every
-    # other seam — ADR-0097 §7 forbids a source grant from ever being cited as
-    # ``PermissionRuling.authorised_by``, and ADR-0186 §10 makes the same move for
-    # the two trails — and their *acts* differ too: a source grant is established
-    # from a list of sources and has no expiry, and a recipient grant can be
-    # established only from a confirmation about a real call and must carry one.
-    #
-    # **The names qualify with ``recipient`` deliberately.** On this Protocol
-    # "grant" already has a referent and it is ``SourceGrant``, so ADR-0186 §1's
-    # naming rule — the shorter name is right only where the word has one referent
-    # on the surface — comes out the other way here (ADR-0235 §7).
-    #
-    # **No ``interfaces`` adapter holds a store behind any of them** (ADR-0235 §4).
-    # A surface is given records by these operations and reads no
-    # :class:`RecipientGrantStore`, :class:`RecipientGrants` or
-    # :class:`RecipientGrantResolution`: a renderer given the store face would hold
-    # ``record`` and ``clear``, and a remote client could not perform the read at
-    # all.
-    #
-    # **Every one is cancellable under this module's cancellation clause
-    # (ADR-0060), observes no caller-owned container (ADR-0065), and returns a
-    # detached snapshot** — the tuple, the records in it, and everything mutable
-    # those reach (ADR-0018 §3), as every neighbouring promoted read does.
-
-    async def standing_recipient_grants(self) -> tuple[RecipientGrant, ...]:
-        """List every **live** standing recipient grant (ADR-0235 §7).
-
-        What the user currently authorises, read from
-        :meth:`RecipientGrantStore.standing` — every live grant, evaluated by the
-        store against one clock read (ADR-0193 §1, §9). It composes, filters,
-        projects, enriches and summarises nothing, and reads no other store.
-
-        **It takes no ``limit``**, for :meth:`connected_accounts`' stated reason: a
-        truncated answer to "what do I authorise" is a false answer rather than a
-        partial one.
-
-        **This is what states liveness, and no surface derives it from
-        :meth:`recent_recipient_grants` or from an audit row** (ADR-0235 §7). A
-        record in that listing says an **act happened**, never that it still stands;
-        a revoking record in it is the record of a withdrawal and never a live
-        grant. A view that has not read this says the state is unread.
-
-        **It never answers a source-grant question and is never answered by one.**
-        No surface presents a recipient grant among source grants or the reverse,
-        and no control revokes across both.
-
-        Returns:
-            A detached snapshot of every live grant. Empty means none is live, never
-            that the store could not be read.
-
-        Raises:
-            RecipientGrantError: If the grant store could not be read.
-        """
-        ...
-
-    async def recent_recipient_grants(
-        self, *, limit: int = DEFAULT_PAGE_SIZE
-    ) -> tuple[RecipientGrant, ...]:
-        """List the recipient-grant store's own history, newest first (ADR-0235 §7).
-
-        Granting and revoking records alike, in the store's own order — ``decided_at``
-        descending, ties broken by ``id`` ascending — read from
-        :meth:`RecipientGrantStore.recent`. It evaluates no liveness and reads no
-        clock.
-
-        **It is here because ADR-0193 §1's stated recourse would otherwise name an
-        act the user cannot perform**, and not for completeness. The ceiling counts
-        **outstanding** granting records, which includes expired ones;
-        :meth:`standing_recipient_grants` correctly omits those, because it states
-        what the user currently authorises. Without this read a user at the ceiling
-        could hold an expired grant occupying a slot, see it in no listing, and have
-        no id to pass to :meth:`revoke_recipient_grant`.
-
-        **Bounded by its ``limit``, and it states no liveness.** A grant older than
-        the window is not in it and the recourse is a larger ``limit``; this mints
-        no complete read of the store for a surface, and
-        :meth:`revoke_recipient_grant` is what authoritatively answers whether a
-        record is still outstanding.
-
-        Args:
-            limit: How many records to return. Defaults to
-                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, and an
-                implementation called without it behaves as though it had been
-                passed.
-
-        Returns:
-            A detached snapshot of the most recent records, newest first.
-
-        Raises:
-            ValueError: If ``limit`` is not strictly positive, or is outside
-                ``[0, 2**63)``. Refused locally and before any I/O, in every
-                implementation, on :meth:`recent_grants`' reason.
-            TypeError: If ``limit`` is not an integer, or is a ``bool``.
-            RecipientGrantError: If the grant store could not be read.
-        """
-        ...
-
-    async def revoke_recipient_grant(self, grant_id: DurableIdentifier) -> RecipientGrant | None:
-        """Withdraw one standing recipient grant, or report there was none.
-
-        Appends a revoking record naming the grant and returns it, or returns
-        ``None`` where the store holds no outstanding granting record with that id
-        (ADR-0235 §7). The revoking record is built from the outstanding record the
-        store holds, transcribing its ``tool``, ``account`` and ``destinations`` by
-        value, with the caller supplying the record's own ``id`` and instants.
-
-        **Revocation is whole**: no operation narrows a grant, re-scopes one,
-        extends one, or edits one in place. Changing what a user has authorised is a
-        revocation followed by a new grant, and a new grant needs a fresh
-        confirmation about a real call.
-
-        **Never refused for the ceiling**, whatever the outstanding count, which is
-        ADR-0193 §1's clause read at the surface that performs it: a ceiling that
-        could block a revocation would trap a user above it with no way down.
-
-        **A concurrent revocation is lost gracefully, and this is decided rather
-        than left to an implementation** (ADR-0235 §7). Two callers may both read
-        the same outstanding grant and both build a revoking record; the first is
-        appended and the second meets ``record``'s revocation invariant. Where
-        ``record`` refuses a revoking record this operation built, it re-reads
-        :meth:`RecipientGrantStore.outstanding` and returns ``None`` where the id is
-        now absent — which is this method's own second branch reached late rather
-        than a third outcome — and the error **propagates unchanged** where the
-        grant is still outstanding, because the refusal was then not the race.
-
-        ``None`` is the honest answer to the loser and not a swallowed error: by the
-        time that call completes the store holds no outstanding granting record with
-        that id, which is exactly what ``None`` means here. **The user's recourse
-        succeeded** — the grant they asked to revoke is revoked — and ADR-0193 §1's
-        *"the recourse is to revoke a grant they hold"* would be undischarged by an
-        operation that failed spuriously on the one act the ceiling makes users
-        perform. No lane retries, appends a second revoking record, or reports the
-        loss as a fault.
-
-        Args:
-            grant_id: The id either recipient-grant listing renders. Undergoes
-                :data:`~ai_assistant.core.types.Identifier` validation before any
-                I/O.
-
-        Returns:
-            A detached snapshot of the revoking record that was appended, or
-            ``None`` where the store held no outstanding grant with that id.
-
-        Raises:
-            ValueError: If ``grant_id`` is blank or has no UTF-8 encoding. Refused
-                locally, before any I/O.
-            InvalidRecipientGrantError: If the store refused the revoking record on
-                any ground other than the grant having been revoked in the interval.
-            RecipientGrantError: If the grant store could not be read or written.
-        """
-        ...
-
-    # --- the destination-trust surface (ADR-0242 §2, §4) ---------------------
-    #
-    # **Three operations and not five**, and the two ADR-0235 has that are absent
-    # here are absent for a reason rather than by omission (ADR-0242 §2). There is no
-    # ``trustable_decisions`` read, because the availability set ADR-0242 §1 fixes is
-    # **three** conditions wide and ``grantable_decisions``' rows satisfied every one
-    # of them a user was looking at — ADR-0242 §5 made that listing name both acts,
-    # and it has since left the surface (ADR-0313 §5:1). And there is no history read
-    # beside the standing one, because the reason ADR-0235 §7 needed
-    # :meth:`recent_recipient_grants` does not arise: that member exists because a
-    # user at the ceiling could hold an *expired* grant occupying a slot, see it in no
-    # listing and have no id to revoke, and a trust record has **no ceiling and no
-    # expiry** — so a record not in the live listing is one that has been revoked and
-    # needs no act.
-    #
-    # **Destination trust and recipient grants are two vocabularies and never one**
-    # (ADR-0242 §4), as recipient grants and source grants already are (ADR-0235 §7).
-    # No operation, command, route, view or listing answers one with the other,
-    # presents a trust record among grants or the reverse, offers a control that
-    # revokes across both, or names a combined total. A surface may put them on one
-    # screen; what it may not do is answer either question with the other's records.
-    #
-    # **The names qualify with ``destination`` deliberately.** On this Protocol
-    # "grant" already names ``SourceGrant`` and "recipient grant" names
-    # ``RecipientGrant``, so ADR-0186 §1's naming rule — the shorter name is right
-    # only where the word has one referent on the surface — comes out the same way a
-    # third time (ADR-0242 §5).
-    #
-    # **The two acts are two acts** (ADR-0238 §1, ADR-0242 §1). A
-    # ``RecipientGrant`` decides *whether this system may talk to this party*; a
-    # ``DestinationTrustRecord`` decides *what class of payload it may compose for
-    # it*. Neither operation reads, consults or is influenced by the other's store,
-    # and no surface offers a single control, flag, prompt or keystroke performing
-    # both: "A deployment reaching ``USER_CHOSEN`` has a user who answered the second
-    # question **knowing it was a second question**".
-    #
-    # **The engine holds the** :class:`DestinationTrustStore` **face and no
-    # ``interfaces`` adapter holds it** (ADR-0242 §2), nor a
-    # :class:`RecipientGrantStore`, a :class:`RecipientGrants` or an
-    # :class:`AuditTrail`. A surface is given records by these operations and reads no
-    # store — golden rule 3, and ADR-0235 §4's clause read one store over: a renderer
-    # given the store face would hold ``record``, ``revoke`` and ``export``, and a
-    # remote client could not perform the read at all. ``app/composition.py`` stays
-    # the only place the concrete store is constructed (ADR-0238 §14).
-    #
-    # **Nothing a model steers reaches any of them** (ADR-0242 §1). No
-    # ``ToolDefinition`` binds one, no plan step reaches one, and no model-authored
-    # value becomes an argument to one: the act is a decision of the user made while
-    # looking at a recorded call.
-    #
-    # **Every one is cancellable under this module's cancellation clause
-    # (ADR-0060), observes no caller-owned container (ADR-0065), and returns a
-    # detached snapshot** — the tuple, the records in it, and everything mutable
-    # those reach (ADR-0018 §3), as every neighbouring promoted read does.
-
-    async def establish_destination_trust(
-        self, decision_id: DurableIdentifier
-    ) -> DestinationTrustRecord:
-        """Record that the user chose a recorded decision's destinations (ADR-0242 §1).
-
-        The act **rides a recorded** :class:`~ai_assistant.core.types.PermissionDecision`
-        and is offered on no other subject. The user names a decision from a listing
-        that already renders the canonical destination set ``core`` derived, and this
-        records a :class:`~ai_assistant.core.types.DestinationTrustRecord` over **that
-        binding's canonical destination set, transcribed by value**.
-
-        **It accepts no destination the user typed.** No caller passes a host, a
-        :class:`~ai_assistant.core.types.CanonicalDestination`, a destination set, a
-        ``trust``, an ``id`` or an instant, so there is no parameter through which a
-        subject could be substituted — ADR-0235 §4's clause read one act over, and
-        ADR-0021 §3's move of removing the capability rather than forbidding it.
-        ``trust`` is ``USER_CHOSEN`` because ADR-0238 §1 refuses a record asserting
-        anything else at construction; the record's ``id`` is minted by the engine and
-        its ``established_at`` is the engine's clock read at the instant of the act,
-        both as :class:`~ai_assistant.core.types.RecipientGrant`'s are, so that the
-        record is a complete value before it reaches any store.
-
-        **The act is available on a decision meeting all three of the following, and
-        is refused on any other** (ADR-0242 §1): the trail holds a decision with that
-        id; that decision's ``egress_binding`` is an
-        :class:`~ai_assistant.core.types.EgressBinding` — never ``None``, never an
-        :class:`~ai_assistant.core.types.OriginUnrecordedBinding`, never a
-        :class:`~ai_assistant.core.types.CoverageUnrecordedBinding`; and that
-        binding's ``planned_with_external_content`` is ``False``.
-
-        **Three and not ADR-0235 §3's seven**, and the four that are absent are absent
-        for one reason. The decision's **ruling**, whether the trail holds a decision
-        **resolving** it, its ``step_id`` and ``execution_id`` (fields a decision no
-        longer carries, ADR-0318 §6:1), and its ``expires_at`` are **not** conditions
-        of this act, and no lane adds them: ADR-0235 §3's conditions over those fields
-        exist because that act *seeks a ruling from* ``ActionPolicy.resolve`` *and
-        records an answer*, and this act seeks no ruling, records no answer, sends
-        nothing, resumes nothing and services nothing. **A user may record trust from a
-        decision they answered a month ago**, and that is the point.
-
-        **The third condition is kept for a reason narrower and sharper than ADR-0235
-        §3's.** Trust is precisely what closes ADR-0238 §5's loop and lets a later
-        request be composed over what an earlier one returned, so trusting a
-        destination a model reached *from* external content is the loop closing on
-        itself: an injected page names a destination, the planner plans a call to it,
-        the call is refused and recorded, and the recorded row is then offered to the
-        user as something to trust. It is refused **at this operation** rather than
-        left to the store, because ``DestinationTrustStore.record`` does not consult a
-        binding and could not — ADR-0238 §1's five fields carry no tool, no account and
-        no call.
-
-        **The record carries no expiry and no surface offers one** (ADR-0242 §2).
-        ADR-0238 §1 fixes the record at exactly five fields with ``revoked_at`` the only
-        lifecycle member. **This is a real asymmetry with**
-        :class:`~ai_assistant.core.types.RecipientGrant` **and it is stated rather than
-        smoothed over**: a recipient grant ends at an instant the user chose, and
-        destination trust ends when the user revokes it.
-
-        **The act records no** :class:`~ai_assistant.core.types.PermissionDecision`,
-        **seeks no ruling and emits no audit event** (ADR-0242 §11). It sends nothing,
-        so there is no egress to rule on and nothing for the permission trail to hold;
-        **the record itself is the audit**, and ``DestinationTrustStore.export`` is what
-        answers every stored record, revoked ones included.
-
-        **The outcome is read from the type of the refusal and from nothing else**
-        (ADR-0242 §2). No caller parses a message, matches on its text, reads
-        :meth:`standing_destination_trust` after a refusal to work out which ground it
-        was, or infers the ground from a count it took itself — which is why
-        :class:`~ai_assistant.core.errors.DuplicateDestinationTrustError` exists instead
-        of a message convention.
-
-        Args:
-            decision_id: The recorded decision this act rides, from
-                :meth:`recent_decisions`. A
-                :data:`~ai_assistant.core.types.DurableIdentifier` and not a ``str``,
-                because it names a ``PermissionDecision.id`` which is one on the record
-                itself, so a client cannot make ``" id "`` and ``"id"`` disagree at the
-                seam. Undergoes :data:`~ai_assistant.core.types.Identifier` validation
-                before any I/O.
-
-        Returns:
-            A detached snapshot of the record the store accepted.
-
-        Raises:
-            ValueError: If ``decision_id`` is blank or has no UTF-8 encoding. Refused
-                locally, before any I/O.
-            UntrustableDestinationError: If any of the three availability conditions
-                fails. **Nothing is written to any store on any of them**, and where
-                more than one fails the first in the order above is the one named.
-            DuplicateDestinationTrustError: If a live record already names this
-                destination set — the ground on which the user's recourse is **no act
-                at all**, because what they asked for is already true.
-            InvalidDestinationTrustError: If the trust store refused the record on any
-                other ground, or could not be written.
-            AuditError: If the permission trail could not be read.
-        """
-        ...
-
-    async def standing_destination_trust(self) -> tuple[DestinationTrustRecord, ...]:
-        """Every destination-trust record that is live now (ADR-0242 §4).
-
-        Reads :meth:`DestinationTrustStore.live` — every record that is not revoked,
-        in the store's own order — and **takes no ``limit``**, for
-        :meth:`standing_recipient_grants`' and :meth:`connected_accounts`' stated
-        reason: a truncated answer to *"what do I trust"* is a false answer rather than
-        a partial one.
-
-        It composes, filters, projects, enriches and summarises nothing, and **reads no
-        other store**. In particular it does not annotate the set from a recipient
-        grant, a connection, a ``Settings`` value, an audit row or a search that
-        succeeded, and no surface derives liveness from anything but this read: a view
-        that has not taken it says the state is unread (ADR-0242 §4).
-
-        Returns:
-            A detached snapshot of every live record, in the store's own order.
-
-        Raises:
-            InvalidDestinationTrustError: If the trust store could not be read.
-        """
-        ...
-
-    async def revoke_destination_trust(self, record_id: DurableIdentifier) -> bool:
-        """Withdraw one destination-trust record, or report there was none (ADR-0242 §4).
-
-        Reads :meth:`DestinationTrustStore.live`; where no live record carries that id
-        it returns ``False``, **having written nothing**. Otherwise it calls
-        :meth:`DestinationTrustStore.revoke` with that id and the instant of the user's
-        act, and returns ``True``.
-
-        **It returns a ``bool`` and not a record**, because ADR-0238 §1 declares
-        ``revoke`` as taking a record ``id`` and the instant of the user's act and
-        declares no return — so a member returning a record would either author one,
-        which the engine may not do, or add a store member, which that section's
-        exact-surface clause forbids. :meth:`forget` and
-        :meth:`dismiss_notification` are the shape on this Protocol.
-
-        **A concurrent revocation is lost gracefully, and the store's own idempotence
-        is what makes it free** (ADR-0242 §4). Two callers may both find the record
-        live and both call ``revoke``; ADR-0238 §1 makes that member *prospective and
-        idempotent*, so the second changes nothing and neither caller is told a
-        falsehood. ``False`` is the honest answer to a caller arriving after the record
-        is gone — by the time that call completes the store holds no live record with
-        that id, which is exactly what ``False`` means here — and **the user's recourse
-        succeeded**. No lane retries, revokes twice, or reports the loss as a fault.
-
-        **An** :class:`~ai_assistant.core.errors.InvalidDestinationTrustError` **raised
-        on any other ground propagates unchanged**, and no lane converts one into
-        ``False``. ADR-0238 §1's unknown-id refusal is not reachable after a successful
-        live match and is not a case this operation reports.
-
-        **Revocation is never refused** for any count, budget or ceiling, is **whole** —
-        no operation narrows a trust record, re-scopes one, extends one or edits one in
-        place — and is **prospective**: it takes effect for every later request and
-        rewrites no recorded decision, so a search already ruled ``ALLOW`` stays ruled
-        and a record a search already returned is not retracted.
-
-        Args:
-            record_id: The id :meth:`standing_destination_trust` renders. A
-                :data:`~ai_assistant.core.types.DurableIdentifier` for
-                :meth:`establish_destination_trust`'s reason, and it undergoes
-                :data:`~ai_assistant.core.types.Identifier` validation before any I/O.
-
-        Returns:
-            ``True`` where a live record carried that id and was revoked, ``False``
-            where none did — in which case nothing was written.
-
-        Raises:
-            ValueError: If ``record_id`` is blank or has no UTF-8 encoding. Refused
-                locally, before any I/O.
-            InvalidDestinationTrustError: If the trust store could not be read or
-                written, on any ground other than the record having been revoked in the
-                interval.
         """
         ...
 

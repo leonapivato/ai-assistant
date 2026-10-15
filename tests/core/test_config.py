@@ -682,50 +682,20 @@ def test_the_deferral_settings_are_removed(monkeypatch: pytest.MonkeyPatch) -> N
         assert not hasattr(settings, name)
 
 
-# --- ADR-0193 §1's ceiling on outstanding standing recipient grants ----------
-#
-# Four cases, and each is named in ADR-0193 §14 because each fails against a
-# different plausible implementation.
+def test_the_recipient_grant_ceiling_is_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-0321 §7:1: recipient grants retire, and the store's one tuning leaves ``Settings``.
 
-
-def test_the_recipient_grant_ceiling_refuses_a_negative() -> None:
-    """An implementation special-casing only zero accepts ``-1`` (ADR-0193 §14).
-
-    And a store opened at ``-1`` would refuse every granting write for a reason no
-    message explains — the deployment would look configured and quietly decline
-    route (b) with nothing saying so.
+    Settings are read with ``extra="ignore"``, so a hub environment that still sets
+    ``ASSISTANT_RECIPIENT_GRANT_MAX_OUTSTANDING`` starts without an error and the
+    variable configures nothing. Pinned with a value the field would have **refused**
+    at load, so a field revived under its old name fails here.
     """
-    with pytest.raises(ValidationError):
-        Settings(recipient_grant_max_outstanding=-1)
+    monkeypatch.setenv("ASSISTANT_RECIPIENT_GRANT_MAX_OUTSTANDING", "-1")
 
+    settings = load_settings()
 
-def test_the_recipient_grant_ceiling_accepts_a_positive() -> None:
-    """The ordinary case, so the two refusals above and below are about their own grounds."""
-    assert Settings(recipient_grant_max_outstanding=8).recipient_grant_max_outstanding == 8
-
-
-def test_the_recipient_grant_ceiling_accepts_zero() -> None:
-    """Zero is **meaningful** rather than a misconfiguration (ADR-0193 §1).
-
-    It is how a deployment declines route (b): in one that has never established a
-    grant, nothing can be established and ``covering`` answers ``None`` for every
-    request. It is admission-only like every other value — a store already holding
-    live grants keeps them — so it is not a kill switch and the store's own tests
-    say so over a populated store.
-    """
-    assert Settings(recipient_grant_max_outstanding=0).recipient_grant_max_outstanding == 0
-
-
-def test_the_recipient_grant_ceiling_carries_the_shipped_default() -> None:
-    """A ``_IntegerSetting`` without a default leaves a fresh ``Settings()`` undefined.
-
-    And a lane free to pick would be picking whether route (b) is reachable at all
-    — zero declines it outright. Sixty-four is ADR-0193 §1's own figure, and §13
-    records that the ADR recommends nothing to a *deployment* over it: high enough
-    that ordinary use never reaches it, low enough that the store's ``standing()``
-    stays small in practice.
-    """
-    assert Settings().recipient_grant_max_outstanding == 64
+    assert "recipient_grant_max_outstanding" not in Settings.model_fields
+    assert not hasattr(settings, "recipient_grant_max_outstanding")
 
 
 # --- a flag is not a count: every integer setting refuses a non-integer (#471) ---
@@ -935,15 +905,6 @@ def test_every_integer_setting_is_discovered() -> None:
         # whose whole point is that "was this source read after I revoked it" has an
         # answer reports one attempt however many happened.
         "source_read_trail_max_rows",
-        # ADR-0193 §1's ceiling on outstanding standing recipient grants, and the
-        # same `bool` argument once more with a twist worth naming:
-        # `recipient_grant_max_outstanding=True` is a ceiling of one, which admits
-        # the user's first standing grant and refuses every one after it — a
-        # deployment that looks configured and quietly declines route (b) from the
-        # second recipient on. Zero is a *meaningful* value here (it declines route
-        # (b) outright), which is exactly why a flag arriving as one must not be
-        # mistaken for a deliberate setting.
-        "recipient_grant_max_outstanding",
         # ADR-0200 §6's bound on a spoken recording and a spoken rendering, in bytes
         # of decoded audio. Acknowledged here for the reason every byte ceiling above
         # is, and the ``bool`` argument bites hardest of any of them:

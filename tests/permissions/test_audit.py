@@ -28,7 +28,6 @@ from permission_builders import AT, action, decision, ruling, tool
 from ai_assistant.core.errors import (
     AuditError,
     DuplicateDecisionError,
-    InvalidAuthorisationError,
 )
 from ai_assistant.core.types import (
     BoundAccount,
@@ -60,7 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
-    from ai_assistant.core.protocols import AuditTrail, RecipientGrantResolution
+    from ai_assistant.core.protocols import AuditTrail
     from ai_assistant.core.types import PermissionDecision
     from ai_assistant.testing.cancellation import SuspendedCall
 
@@ -104,16 +103,6 @@ class TestSqliteAuditTrailContract(AuditTrailContract):
     def trail(self, ephemeral: SqliteAuditTrail) -> AuditTrail:
         return ephemeral
 
-    def trail_over(self, resolution: RecipientGrantResolution) -> AuditTrail:
-        """An empty in-memory trail resolving route-(b) pointers against ``resolution``.
-
-        The factory ADR-0193 §15 adds to the suite. Not closed by the case: an
-        in-memory database dies with its connection and its connection dies with
-        the object, so there is nothing to release that outliving the test would
-        leak — the same reason ``ephemeral`` above is the only fixture that closes.
-        """
-        return SqliteAuditTrail(path=":memory:", recipient_grants=resolution)
-
     async def store_as_history(self, trail: AuditTrail, recorded: PermissionDecision) -> None:
         """Insert ``recorded`` through this store's own write, minus its validation.
 
@@ -127,7 +116,7 @@ class TestSqliteAuditTrailContract(AuditTrailContract):
         this row going forward.
         """
         assert isinstance(trail, SqliteAuditTrail), trail
-        trail._record_sync(recorded, None)
+        trail._record_sync(recorded)
 
     @contextlib.asynccontextmanager
     async def trail_suspended_mid_write(
@@ -1229,15 +1218,13 @@ async def test_cancelling_a_record_does_not_release_the_connection(tmp_path: Pat
     release = threading.Event()
     original_record = trail._record_sync
 
-    def blocking_record(
-        snapshot: PermissionDecision, refusal: InvalidAuthorisationError | None
-    ) -> None:
+    def blocking_record(snapshot: PermissionDecision) -> None:
         if not entered.is_set():
             entered.set()
             if not release.wait(timeout=5):  # pragma: no cover - only on a hang
                 msg = "the blocked worker was never released"
                 raise AssertionError(msg)
-        original_record(snapshot, refusal)
+        original_record(snapshot)
 
     trail._record_sync = blocking_record  # type: ignore[method-assign]
     try:

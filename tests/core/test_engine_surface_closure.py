@@ -839,8 +839,15 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     and ``forget_question`` with the old path, and ``grantable_decisions`` and
     ``establish_recipient_grant`` with the establishing act — so the count falls to
     sixty-four. Their gateway panels and command-line commands left first.
+
+    **ADR-0321 §7:1 removes three and §7:2 three more**: ``standing_recipient_grants``,
+    ``recent_recipient_grants`` and ``revoke_recipient_grant`` with recipient grants,
+    and ``establish_destination_trust``, ``standing_destination_trust`` and
+    ``revoke_destination_trust`` with destination trust — so the count falls to
+    fifty-eight. None was a browser operation, and their command-line commands leave in
+    the same change.
     """
-    assert len(_method_names()) == 64
+    assert len(_method_names()) == 58
     assert "converse_spoken" not in _method_names()
     for retired in (
         "converse",
@@ -858,6 +865,12 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
         "forget_question",
         "grantable_decisions",
         "establish_recipient_grant",
+        "standing_recipient_grants",
+        "recent_recipient_grants",
+        "revoke_recipient_grant",
+        "establish_destination_trust",
+        "standing_destination_trust",
+        "revoke_destination_trust",
     ):
         assert retired not in _method_names()
 
@@ -1715,6 +1728,16 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     approval and the part it runs under. A peer at 105 refuses each as extra or unknown
     (ADR-0124 §9:2). **The method set does not move and stays at 64.**
 
+    **107 is ADR-0321 §9:2, on the method set and the error vocabulary.** Recipient
+    grants and destination trust retire (§7:1, §7:2): ``standing_recipient_grants``,
+    ``recent_recipient_grants``, ``revoke_recipient_grant``,
+    ``establish_destination_trust``, ``standing_destination_trust`` and
+    ``revoke_destination_trust`` leave the promoted set with ``RecipientGrant`` and
+    ``DestinationTrustRecord``, which only they carried, and their seven errors leave
+    ``core.errors``, by whose names the wire rebuilds an error. A peer at 106 calls six
+    methods a hub at 107 does not route (ADR-0124 §9:2). **The method set moves from 64
+    to 58.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1723,7 +1746,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (64, 106), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (58, 107), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

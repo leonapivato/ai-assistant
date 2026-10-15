@@ -2617,7 +2617,19 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``approved_part`` (``QuestionPart``), carried by ``recent_decisions`` and
 #:     ``export_decisions``. A peer at 105 refuses each new field as extra and the new
 #:     member as unknown (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 106
+#: 107: ADR-0321 §9:2 advances the version once for recipient grants and destination
+#:     trust retiring (§7:1, §7:2), on these grounds: ``standing_recipient_grants``,
+#:     ``recent_recipient_grants``, ``revoke_recipient_grant``,
+#:     ``establish_destination_trust``, ``standing_destination_trust`` and
+#:     ``revoke_destination_trust`` leave the promoted ``AssistantEngine`` method set,
+#:     with ``RecipientGrant`` and ``DestinationTrustRecord``, which only they carried;
+#:     and ``RecipientGrantError``, ``InvalidRecipientGrantError``,
+#:     ``RecipientGrantCeilingError``, ``DuplicateRecipientGrantError``,
+#:     ``InvalidDestinationTrustError``, ``DuplicateDestinationTrustError`` and
+#:     ``UntrustableDestinationError`` leave ``core.errors``; the wire rebuilds an error
+#:     by its name there. A peer at 106 calls six methods a hub at 107 does not route,
+#:     and may name an error class a peer at 107 no longer has (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 107
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client
