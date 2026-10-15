@@ -10,6 +10,7 @@
   [ADR-0235](0235-the-establishing-act-rides-an-answer-to-a-confirmation-live-or-recorded-and-a-refused-search-reaches-the-user-as-history-and-not-as-work.md) and
   [ADR-0242](0242-the-act-that-trusts-a-destination-has-its-own-surface-and-a-search-that-did-not-happen-is-explained-in-the-reply.md).
 - **Partially supersedes**, each in the scope §10 states:
+  [ADR-0152](0152-the-binding-is-derived-at-one-seam-never-supplied-to-it-and-a-call-it-cannot-describe-is-refused.md),
   [ADR-0192](0192-an-authorisation-is-spent-by-the-act-it-authorises-and-the-trail-gains-an-invocation-row.md),
   [ADR-0193](0193-a-standing-recipient-grant-is-a-user-act-on-a-canonical-destination-set-and-never-covers-a-call-planned-over-external-content.md),
   [ADR-0236](0236-the-operator-declares-what-one-web-search-costs-and-where-none-is-declared-the-search-confirms-on-that-ground-as-well.md),
@@ -198,9 +199,10 @@ yes's own activation, after the policy is asked fresh and three facts are checke
 > **covers**, exactly the calls of the approved parts; **given**, in the yes's input; and
 > **ends**, when used. A later kind of approval extends this shape rather than replacing it.
 
-> **Normative.** A confirm, the policy's or the stand-in's, is resolved on route (a): the
-> confirm ruled fresh in the yes's activation is recorded, `ActionPolicy.resolve` is asked
-> with `approved=True`, and the resolving decision records `resolves` naming that confirm.
+> **Normative.** A confirm the policy rules, its lineage rule's (ADR-0181 §5) included, is
+> resolved on route (a): the confirm ruled fresh in the yes's activation is recorded,
+> `ActionPolicy.resolve` is asked with `approved=True`, and the resolving decision records
+> `resolves` naming that confirm.
 
 > **Normative.** Every decision about a call that runs under an approval names the approval,
 > as "allowed by your yes at 2:15 to the question in that message, part 1" does, and is
@@ -235,6 +237,16 @@ yes's own activation, after the policy is asked fresh and three facts are checke
 > Together they are the attempt identifier and the explicit outcome ADR-0154 §4:1's
 > Condition 12 requires.
 
+> **Normative.** `EgressBinder.rebind` takes `forecast_reach` from the approved binding, as it
+> takes `closed_loop`, so an approved forecast read rebinds equal to the binding that was
+> shown. This is the fifth transcription ADR-0260 §11:7 leaves to the decision that rebinds a
+> forecast binding.
+
+> **Normative.** Where the policy allows and what needs you is the stand-in, which is
+> orchestration's rule (ADR-0306 §4:4), or `MemoryPolicy`'s ask, the policy's recorded allow
+> is the deciding decision. The approval lifts the stand-in, or reaches `MemoryPolicy` as
+> §5:2 states, and no confirm is made outside `permissions`.
+
 ### 5. Memory asks
 
 > **Normative.** A remember that `MemoryPolicy` rules to ask about needs you, and planning asks
@@ -255,7 +267,9 @@ yes's own activation, after the policy is asked fresh and three facts are checke
 > **Normative.** A conflict found only at write time
 > ([#2845](https://github.com/leonapivato/ai-assistant/issues/2845)) comes back needing you,
 > not not done. The question shows both statements, as "replacing …", and a yes writes the new
-> one and retires exactly the records the question showed.
+> one and retires the old as the memory writer supersedes. An assertion the question did not
+> show is not retired on that yes: `MemoryPolicy` asks again, as it honours a
+> `UserConfirmation` today.
 
 > **Normative.** What is asked about stays the built `MemoryPolicy` until the learning
 > milestone revisits it.
@@ -364,7 +378,8 @@ Acceptance #3058 holds these checks; *T* is the test hub and *L* the live hub af
 | `ActivationEffectClaim` and `PlanStore.claim_activation_effect` | The claim takes the part key and answers, writing nothing, where a record carries it (§4:9); and admits §6:2's retry |
 | `UserConfirmation` | `deferral_id` gives way to the question it answers, its message and part; `question_key`, `confirmed_at` and `retires` stay |
 | `_NEEDS_YOU` and the needs-you outcome text in `orchestration/planning.py` | Replaced by §2:9–§2:10 |
-| `ActionPolicy.resolve`, `PermissionDecision.authorises`, `EgressBinder.rebind`, `AuditTrail.record`'s resolution checks | Unchanged, and used by the yes path |
+| `ActionPolicy.resolve`, `PermissionDecision.authorises`, `AuditTrail.record`'s resolution checks | Unchanged, and used by the yes path |
+| `EgressBinder.rebind` | Used by the yes path, and takes `forecast_reach` from the approved binding (§4:16) |
 | `RecipientGrant`, `RecipientGrants`, `RecipientGrantResolution`, `RecipientGrantStore`, their errors, `permissions/recipient_grants.py`, `orchestration/recipient_grants.py`, and the engine members, routes and commands named in §7:1 | Leave |
 | `PermissionRuling.authorised_subject` and `AuditTrail.record` | The field stays, set by nothing; the trail refuses a non-resolving `ALLOW` carrying it (§7:7) |
 | `DestinationTrust`, `DestinationTrustRecord`, `DestinationTrustStore`, their errors, `permissions/destination_trust.py`, `orchestration/destination_trust.py`, and the engine members, routes and commands named in §7:2 | Leave |
@@ -407,6 +422,8 @@ Acceptance #3058 holds these checks; *T* is the test hub and *L* the live hub af
 | ADR-0235 | Whole: what §§1–14 still bind is the establishing act and its surfaces, which retire (§7:1), and `from_confirmation` (§4:13–§4:17, §12:22), which retires with them (§9) |
 | ADR-0238 | §1, §6:1–§6:3, §6:5–§6:9, §7:3–§7:5, §12:3, §14:1, §14:6, §14:8, §15:8, §15:27 and §15:29, and §13:1's destination-trust limb: destination trust and route (b)'s closed-loop carve-out retire (§7:1–§7:2). `closed_loop` as the configured-provider routes' eligibility, the spend clauses, §3:2, §6:4 and §12:6 stand |
 | ADR-0242 | Whole: what it still binds is the trust act's surface and its listing and revocation, which retire (§7:2) |
+| ADR-0152 §7:1, ADR-0247 §7:1 | The count of what `rebind` takes from `approved`, in that count alone, which becomes five: `forecast_reach` (§4:16) |
+| ADR-0260 §11:7 | *`EgressBinder.rebind` transcribes nothing new*, and *ADR-0152 §7's and ADR-0247 §7's count is untouched*: an approved forecast read is rebound (§4:16) |
 | ADR-0247 §1:4, §6:9 | Their *destination trust is untouched* limbs (§7:2) |
 | ADR-0247 §12:7, §12:9 | Their route-(b) limbs, validated against or read back after the grant store: a row carrying a digest is refused (§7:7). Their route-(c) limbs stand |
 | ADR-0247 §12:17 | Whole: its subject, the trust store, is gone (§7:2) |
@@ -417,7 +434,7 @@ Acceptance #3058 holds these checks; *T* is the test hub and *L* the live hub af
 | ADR-0154 §4 condition 3 | Nothing superseded: the retiring lane re-attests it (§7:8) |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
-> dated header note of ADR-0192, ADR-0193, ADR-0235, ADR-0236, ADR-0238, ADR-0242, ADR-0247,
+> dated header note of ADR-0152, ADR-0192, ADR-0193, ADR-0235, ADR-0236, ADR-0238, ADR-0242, ADR-0247,
 > ADR-0260, ADR-0272, ADR-0276, ADR-0306, ADR-0307, ADR-0313, ADR-0315 and ADR-0319,
 > atomically with this ADR under ADR-0070 and ADR-0082, preserving their ratified bodies. The
 > replacements take effect on this ADR's ratification.
