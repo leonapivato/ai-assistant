@@ -2328,6 +2328,9 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
             stories=seams.stories,
             memory=seams.memory,
             binder=seams.binder,
+            # ADR-0321 §4:4, §4:11, §6:1: the yes path's facts are read from the one
+            # plan store acting claims in.
+            plans=seams.plans,
             preference=Preference(TOOL_PREFERENCE),
             registered_search=(
                 frozenset() if seams.searcher is None else frozenset({WEB_SEARCH_ID})
