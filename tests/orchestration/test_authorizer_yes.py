@@ -897,6 +897,34 @@ async def test_values_equal_in_python_but_not_as_json_are_not_waiting(
     assert verdict.already_asked is None
 
 
+_REORDERED: Final = _tool(
+    "book",
+    parameters_schema={
+        "additionalProperties": False,
+        "required": ["q"],
+        "properties": {"q": {"type": "string"}},
+        "type": "object",
+    },
+)
+
+
+async def test_a_declaration_with_its_keys_reordered_is_the_same_declaration() -> None:
+    """§4:4, §4:11: the same tool by value; an object's key order changes nothing."""
+    assert list(_REORDERED.parameters_schema) != list(_BOOK.parameters_schema)
+    hub = _Hub(_REORDERED)
+    await hub.asked(_asked())
+    await _linked(hub, _ASKING, _YES)
+
+    approved = await hub.authorize(_round(_approved_booking(), yes=_yes()))
+    waiting = await hub.authorize(
+        _round((_call("c1", "book", q="table for two at 8"), None), activation_id=_YES)
+    )
+
+    assert approved.verdicts[0].verdict is Verdict.ALLOWED
+    assert approved.allowed[0].call.decision.approval is not None
+    assert waiting.verdicts[0].already_asked == _PART
+
+
 async def test_the_same_json_values_are_waiting() -> None:
     hub = _Hub(_LOOSE)
     await hub.asked(_asked(_LOOSE, q=[True, 2]))
