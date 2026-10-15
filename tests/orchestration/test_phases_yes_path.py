@@ -1,0 +1,977 @@
+"""ADR-0321 end to end: a question, its answer, and the call run on a yes, over fakes.
+
+The phases as the composition root wires them, driven through the engine across
+several activations, for #3058's scenarios. Each case scripts planning's rounds and
+understanding's reading, because the model's own judgment is QA's to test live; what
+these cases pin is what the code owns. That is how a question is asked and recorded,
+how understanding's pointer reaches authorizing and planning, how the facts are checked
+against the records, how a part is spent once, and that every failure ends in another
+question rather than in a call that runs.
+"""
+
+from __future__ import annotations
+
+import json
+from collections import deque
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import TYPE_CHECKING, Final
+
+import pytest
+from phases_support import chat_turn, processing, written
+from story_support import CONVERSATION
+from test_engine import AT, Harness
+from understanding_support import recall_stage
+
+from ai_assistant.core.errors import ClassifiedToolError, OversizedValueError
+from ai_assistant.core.types import (
+    TRANSCRIPT_MESSAGE_MAX_CHARS,
+    AskedCall,
+    CapabilityEffect,
+    CapabilityResult,
+    ChannelIdentity,
+    ChannelInput,
+    CostBasis,
+    DataTier,
+    Idempotency,
+    InputOrigin,
+    MemorySource,
+    MessageAuthor,
+    NewMessage,
+    PermissionOutcome,
+    PermissionRuling,
+    PlanningRound,
+    ProposedCall,
+    Provenance,
+    Reversibility,
+    RiskLevel,
+    RoundResponse,
+    SemanticMemory,
+    StoryActor,
+    StoryMember,
+    StoryMemberKind,
+    TextChannelPayload,
+    ToolCost,
+    ToolDefinition,
+    ToolFailure,
+    ToolFailureKind,
+    TranscriptMessage,
+)
+from ai_assistant.memory import DefaultMemoryPolicy
+from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
+from ai_assistant.orchestration.activation_state import active_state
+from ai_assistant.orchestration.authorizer import AuthorizingStage
+from ai_assistant.orchestration.chat import ChatWriter
+from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
+from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools
+from ai_assistant.orchestration.planning import APPROVED_ACTION_TOOL
+from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls
+from ai_assistant.orchestration.understanding import (
+    RecentEpisodes,
+    TranscriptWindow,
+    UnderstandingStage,
+    WindowsStage,
+)
+from ai_assistant.testing import (
+    FakeMemoryStore,
+    FakeMemoryWriter,
+    FakeModelProvider,
+    FakeStoryStore,
+    FakeToolCallingCompleter,
+    FakeToolImplementation,
+    FakeWebSearcher,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
+
+    from ai_assistant.core.types import (
+        ActionRequest,
+        EpisodicMemory,
+        FrozenJson,
+        Message,
+        MessageReceipt,
+        OfferedTool,
+        PermissionDecision,
+    )
+
+
+def _tool(name: str, properties: Mapping[str, FrozenJson]) -> ToolDefinition:
+    """A call in the world: not safe to repeat, its outcome can be unknown, high risk."""
+    return ToolDefinition(
+        id=name,
+        capability=name,
+        description=f"{name} for the user.",
+        risk_level=RiskLevel.HIGH,
+        reversibility=Reversibility.RECOVERABLE,
+        side_effecting=True,
+        reads=(DataTier.PERSONAL,),
+        writes=(DataTier.PERSONAL,),
+        discloses=(),
+        cost=ToolCost(basis=CostBasis.FREE),
+        idempotency=Idempotency.NONE,
+        effect=CapabilityEffect.WORLD,
+        leaves_hub=True,
+        result=CapabilityResult.NO_OUTSIDE_TEXT,
+        outcome_can_be_unknown=True,
+        safe_to_repeat=False,
+        parameters_schema={
+            "type": "object",
+            "properties": dict(properties),
+            "required": list(properties),
+            "additionalProperties": False,
+        },
+    )
+
+
+#: A booking: the policy confirms it, so it needs the user's yes.
+_BOOK: Final = _tool("book", {"date": {"type": "string"}})
+#: An email: the policy confirms it, and its body must show whole (§8:9).
+_EMAIL: Final = _tool("send_email", {"to": {"type": "string"}, "body": {"type": "string"}})
+#: A call the user's settings do not allow: the policy denies it.
+_WIPE: Final = _tool("wipe_calendar", {"month": {"type": "string"}})
+
+_TOOLS: Final = (_BOOK, _EMAIL, _WIPE)
+_CAPABILITIES: Final = ("web_search", "remember", "book", "send_email", "wipe_calendar")
+
+#: What a digest of the search's result answers.
+_DIGESTED: Final = json.dumps({"evidence": [{"text": "It opens at nine.", "source": "D1"}]})
+
+#: The question's text, which understanding's reading finds the question by.
+_ASKING: Final = "Shall I book a table for Friday?"
+#: The booking's exact line, as the question shows it (§2:5).
+_FRIDAY_LINE: Final = 'book — date: "Friday"'
+
+
+class _Policy:
+    """The test hub's policy: a call in the world needs you, and a wipe is denied.
+
+    It resolves the confirm a yes answers on route (a) (ADR-0321 §4:7), resting the
+    allow on that confirm as the trail requires.
+    """
+
+    def __init__(self) -> None:
+        self.resolved: list[PermissionDecision] = []
+
+    async def decide(self, request: ActionRequest) -> PermissionRuling:
+        capability = str(request.tool.capability)
+        if capability == _WIPE.capability:
+            return PermissionRuling(outcome=PermissionOutcome.DENY, reason="test: not allowed")
+        if request.tool.effect is CapabilityEffect.WORLD and capability != "web_search":
+            return PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="test: the world")
+        return PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="test: allowed")
+
+    async def resolve(self, confirmed: PermissionDecision, *, approved: bool) -> PermissionRuling:
+        self.resolved.append(confirmed)
+        if not approved:
+            return PermissionRuling(outcome=PermissionOutcome.DENY, reason="test: declined")
+        return PermissionRuling(
+            outcome=PermissionOutcome.ALLOW, reason="test: your yes", authorised_by=confirmed.id
+        )
+
+
+# --- the scripts --------------------------------------------------------------------------
+
+type _Respond = Callable[[Sequence[Message], Sequence[OfferedTool]], RoundResponse]
+
+
+@dataclass(frozen=True)
+class _Hooked:
+    """A round whose response is given once ``hook`` has run, inside the activation."""
+
+    hook: Callable[[], Awaitable[None]]
+    response: RoundResponse
+
+
+class _Planner(FakeToolCallingCompleter):
+    """Planning's rounds, scripted in order across every activation of a case."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._steps: deque[RoundResponse | _Hooked] = deque()
+
+    def then(self, *steps: RoundResponse | _Hooked) -> None:
+        self._steps.extend(steps)
+
+    async def respond(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[OfferedTool],
+        *,
+        model: str | None = None,
+    ) -> RoundResponse:
+        assert self._steps, "planning ran a round the case did not script"
+        step = self._steps.popleft()
+        if isinstance(step, _Hooked):
+            await step.hook()
+            step = step.response
+        self._response = step
+        return await super().respond(messages, tools, model=model)
+
+    def shown(self, index: int) -> str:
+        """What round ``index``, counted across the case, was shown."""
+        return self.calls[index].messages[-1].content
+
+    def offered(self, index: int) -> set[str]:
+        """The tools round ``index`` was offered, by name."""
+        return {one.name for one in self.calls[index].tools}
+
+
+def _labelled(content: str, needle: str) -> list[str]:
+    """Every label of an item whose rendering holds ``needle``, in the order shown."""
+    found: list[str] = []
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            label = value.get("label")
+            if isinstance(label, str) and needle in json.dumps(value, ensure_ascii=False):
+                found.append(label)
+            for one in value.values():
+                walk(one)
+        elif isinstance(value, list):
+            for one in value:
+                walk(one)
+
+    walk(json.loads(content))
+    return found
+
+
+def _proposal(**fields: object) -> str:
+    return json.dumps({"meaning": "The user answers.", "meaning_ground": "stated"} | fields)
+
+
+class _Reader:
+    """Understanding's readings, one per activation, in order.
+
+    A reading is ``None`` for an input that approves nothing, or the text of the
+    question the input says yes to, with the parts it approves; the label is found in
+    what understanding is shown, preferring ``prefer``'s kind.
+    """
+
+    def __init__(self) -> None:
+        self._readings: deque[tuple[str, tuple[int, ...], str] | None] = deque()
+        self.model = FakeModelProvider(reply=self._reply)
+        self.labels: list[str] = []
+
+    def nothing(self) -> None:
+        self._readings.append(None)
+
+    def yes(
+        self, question: str = _ASKING, *, parts: tuple[int, ...] = (), prefer: str = "H"
+    ) -> None:
+        self._readings.append((question, parts, prefer))
+
+    def _reply(self, messages: Sequence[Message]) -> str:
+        reading = self._readings.popleft() if self._readings else None
+        if reading is None:
+            return _proposal()
+        question, parts, prefer = reading
+        labels = _labelled(messages[-1].content, question)
+        assert labels, f"understanding was shown no item holding {question!r}"
+        label = next((one for one in labels if one.startswith(prefer)), labels[0])
+        self.labels.append(label)
+        return _proposal(answers={"question": label, "parts": list(parts)})
+
+
+class _World:
+    """What each call in the world did, by capability.
+
+    A capability named in :attr:`unknown` fails its next call with its outcome
+    unknown, once, as a call that may have committed does.
+    """
+
+    def __init__(self) -> None:
+        self.ran: list[tuple[str, dict[str, FrozenJson]]] = []
+        self.unknown: set[str] = set()
+
+    def handler(self, capability: str) -> FakeToolImplementation:
+        async def run(
+            parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
+        ) -> FrozenJson:
+            del idempotency_key
+            self.ran.append((capability, dict(parameters)))
+            if capability in self.unknown:
+                self.unknown.discard(capability)
+                raise ClassifiedToolError(
+                    ToolFailure(kind=ToolFailureKind.UNAVAILABLE, message="test: no answer"),
+                    effect_may_have_committed=True,
+                )
+            return None
+
+        return run
+
+    def of(self, capability: str) -> list[dict[str, FrozenJson]]:
+        return [values for name, values in self.ran if name == capability]
+
+
+# --- the hub ------------------------------------------------------------------------------
+
+
+class _Hub:
+    """An engine with the phases wired as the composition root wires them, over fakes.
+
+    The authorizer reads the yes's facts from the one plan store acting claims in, the
+    built ``MemoryPolicy`` rules both at authorizing and at the write, and the remember
+    runner reads the memory store for what a write-time conflict would replace.
+    """
+
+    def __init__(self, *, recall: bool = False, aged_out: bool = False) -> None:
+        self.planner = _Planner()
+        self.reader = _Reader()
+        self.world = _World()
+        self.policy = _Policy()
+        self.searcher = FakeWebSearcher(results=("The museum opens at nine every day.",))
+        self.stories = FakeStoryStore(now=lambda: AT)
+        self.memory = FakeMemoryStore(now=lambda: AT)
+        self.harness = Harness(
+            memory=self.memory,
+            understanding=UnderstandingStage(model=self.reader.model, excerpt_chars=2000),
+            recall=recall_stage(self.memory) if recall else None,
+            # A question asked long enough ago has left the episode window, and is
+            # found through recall alone.
+            windows=(
+                WindowsStage(
+                    episodes=RecentEpisodes(memory=FakeMemoryStore(now=lambda: AT), limit=10)
+                )
+                if aged_out
+                else None
+            ),
+            phases=self.phases,
+        )
+        for tool in _TOOLS:
+            self.harness.invoker.register(tool, self.world.handler(str(tool.capability)))
+
+    def phases(self, harness: Harness, *, writer: ChatWriter | None = None) -> PhasePath:
+        tools = PhaseTools(
+            registry=harness.invoker,
+            invoker=harness.invoker,
+            own_records=(REMEMBER,),
+            searcher=self.searcher,
+            search_query="query",
+        )
+        memory_writer = FakeMemoryWriter(
+            store=harness.memory, policy=DefaultMemoryPolicy(), now=lambda: AT
+        )
+        return PhasePath(
+            completer=self.planner,
+            provider=FakeModelProvider(reply=_DIGESTED),
+            authorizing=AuthorizingStage(
+                registry=tools,
+                policy=self.policy,
+                memory_policy=DefaultMemoryPolicy(),
+                trail=harness.trail,
+                stories=self.stories,
+                memory=harness.memory,
+                plans=harness.plans,
+                now=lambda: AT,
+            ),
+            acting=ActingStage(
+                plans=harness.plans,
+                invoker=tools,
+                own_records=OwnRecordsByCapability(
+                    {
+                        "remember": RememberCalls(
+                            writer=memory_writer, memory=harness.memory, now=lambda: AT
+                        )
+                    }
+                ),
+                timeout=timedelta(seconds=5),
+                now=lambda: AT,
+            ),
+            tools=tools,
+            plans=harness.plans,
+            writer=writer
+            or ChatWriter(
+                conversations=harness.conversation_store,
+                max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES,
+            ),
+            capabilities=_CAPABILITIES,
+            round_limit=4,
+            round_wait=timedelta(seconds=5),
+            excerpt_chars=2000,
+            part_chars=4000,
+            memory=harness.memory,
+            recall_cap=6,
+            recall_digest_wait=timedelta(seconds=5),
+            now=lambda: AT,
+        )
+
+    async def turn(
+        self, text: str, *, conversation: str | None = None, message_id: str = "m-1"
+    ) -> tuple[str, EpisodicMemory]:
+        """One message from the user, and the episode its activation froze."""
+        return await chat_turn(self.harness, text, conversation=conversation, message_id=message_id)
+
+    async def said(self, conversation: str) -> list[TranscriptMessage]:
+        """The assistant's messages in ``conversation``, oldest first."""
+        return [
+            one
+            for one in await written(self.harness, conversation)
+            if one.author is MessageAuthor.ASSISTANT
+        ]
+
+    async def linked(self, *activations: str) -> None:
+        """One story holding these activations and the one running now (ADR-0321 §4:11)."""
+        state = active_state()
+        assert state is not None
+        assert state.activation_id is not None
+        await self.stories.create(
+            [
+                StoryMember(kind=StoryMemberKind.ACTIVATION, id=one)
+                for one in (*activations, state.activation_id)
+            ],
+            actor=StoryActor.OWNER,
+        )
+
+
+def _call(call_id: str, name: str, **arguments: object) -> ProposedCall:
+    return ProposedCall(call_id=call_id, name=name, arguments=arguments)  # type: ignore[arg-type]  # JSON values
+
+
+def _book(date: str = "Friday", **marks: object) -> RoundResponse:
+    """A round proposing the booking, writing nothing."""
+    return RoundResponse(calls=(_call("c1", "book", date=date, **marks),))
+
+
+def _ask(text: str = _ASKING, *refs: str) -> RoundResponse:
+    """A round whose message asks about the calls ``refs`` name: round 1's first call."""
+    return RoundResponse(text=text, asks=refs or ("1.1",))
+
+
+def _run_approved(label: str = "A1") -> RoundResponse:
+    """A round proposing the approved action ``label`` names, by its label alone."""
+    return RoundResponse(calls=(_call("c1", APPROVED_ACTION_TOOL, action=label),))
+
+
+_DONE: Final = RoundResponse(text="Done.")
+
+
+async def _asked(hub: _Hub) -> tuple[str, EpisodicMemory]:
+    """The booking asked about in a conversation of its own: round 1 needs you, round 2 asks."""
+    hub.reader.nothing()
+    hub.planner.then(_book(), _ask())
+    return await hub.turn("Book a table for Friday.")
+
+
+def _asked_calls(episode: EpisodicMemory) -> list[tuple[AskedCall, ...]]:
+    """What each of the episode's rounds recorded its message asking about."""
+    return [one.asked for one in processing(episode).rounds]
+
+
+def _activation(episode: EpisodicMemory) -> str:
+    return processing(episode).activation_id
+
+
+# --- a booking (§8:1) ---------------------------------------------------------------------
+
+
+async def test_a_booking_is_asked_with_its_exact_line_and_a_yes_runs_it_once() -> None:
+    hub = _Hub()
+    conversation, asking = await _asked(hub)
+
+    (question,) = await hub.said(conversation)
+    assert question.text == f"{_ASKING}\n\n{_FRIDAY_LINE}"
+    assert not question.cut_off
+    (asked,) = _asked_calls(asking)[1]
+    assert (asked.part, asked.values) == (1, {"date": "Friday"})
+    assert "needs the user's yes" in hub.planner.shown(1)
+    assert hub.world.of("book") == []
+
+    hub.reader.yes()
+    hub.planner.then(_run_approved(), RoundResponse(text="Booked for Friday."))
+    _, yes = await hub.turn("Yes please.", conversation=conversation, message_id="m-2")
+
+    assert hub.world.of("book") == [{"date": "Friday"}]
+    assert "approved_actions" in hub.planner.shown(2)
+    assert APPROVED_ACTION_TOOL in hub.planner.offered(2)
+    answers = processing(yes).understanding[-1].answers
+    assert answers is not None
+    assert answers.activation_id == _activation(asking)
+    # The decision that ran it names the approval, given in the yes's activation.
+    (ran,) = [
+        one
+        for one in await hub.harness.trail.recent(limit=20)
+        if one.approval is not None and one.ruling.outcome is PermissionOutcome.ALLOW
+    ]
+    assert ran.approval is not None
+    assert ran.approval.given.activation_id == _activation(yes)
+    assert ran.resolves is not None, "the confirm ruled fresh is resolved on route (a)"
+
+
+async def test_a_second_yes_does_not_run_it_again() -> None:
+    hub = _Hub()
+    conversation, _ = await _asked(hub)
+    hub.reader.yes()
+    hub.planner.then(_run_approved(), _DONE)
+    await hub.turn("Yes.", conversation=conversation, message_id="m-2")
+
+    # The second yes points at the same question, whose part is spent: planning is
+    # shown no approved action, and the call proposed outright needs the user again.
+    hub.reader.yes()
+    hub.planner.then(_book(), RoundResponse(text="That is already booked."))
+    await hub.turn("Yes!", conversation=conversation, message_id="m-3")
+
+    assert hub.world.of("book") == [{"date": "Friday"}]
+    assert "approved_actions" not in hub.planner.shown(4)
+    assert APPROVED_ACTION_TOOL not in hub.planner.offered(4)
+    assert "needs the user's yes" in hub.planner.shown(5)
+
+
+async def test_proposing_it_again_while_it_waits_is_already_asked() -> None:
+    """§4:11: a call identical to one asked in a story's episode, not yet used."""
+    hub = _Hub()
+    conversation, asking = await _asked(hub)
+
+    async def link() -> None:
+        await hub.linked(_activation(asking))
+
+    hub.reader.nothing()
+    hub.planner.then(_Hooked(link, _book()), _ask("Waiting on you for Friday."))
+    _, again = await hub.turn(
+        "And dinner on Friday, then?", conversation=conversation, message_id="m-2"
+    )
+
+    assert "already asked about and waiting" in hub.planner.shown(3)
+    # It is not asked about again: the second round's message carries no exact line.
+    assert _asked_calls(again) == [(), ()]
+    said = await hub.said(conversation)
+    assert said[-1].text == "Waiting on you for Friday."
+    assert hub.world.of("book") == []
+
+
+# --- the other answers (§8:2) -------------------------------------------------------------
+
+
+async def test_a_no_runs_nothing_and_a_later_actually_yes_runs_it() -> None:
+    hub = _Hub()
+    conversation, _ = await _asked(hub)
+
+    hub.reader.nothing()
+    hub.planner.then(RoundResponse(text="All right, I won't."))
+    await hub.turn("No, leave it.", conversation=conversation, message_id="m-2")
+    assert hub.world.of("book") == []
+    assert "approved_actions" not in hub.planner.shown(2)
+
+    hub.reader.yes()
+    hub.planner.then(_run_approved(), _DONE)
+    await hub.turn("Actually, yes.", conversation=conversation, message_id="m-3")
+
+    assert hub.world.of("book") == [{"date": "Friday"}]
+
+
+async def test_a_change_approves_nothing_and_brings_a_new_question() -> None:
+    hub = _Hub()
+    conversation, _ = await _asked(hub)
+
+    hub.reader.nothing()
+    hub.planner.then(_book("Saturday"), _ask("Shall I make it Saturday instead?"))
+    _, changed = await hub.turn("Make it Saturday.", conversation=conversation, message_id="m-2")
+
+    assert hub.world.of("book") == []
+    (asked,) = _asked_calls(changed)[1]
+    assert asked.values == {"date": "Saturday"}
+    said = await hub.said(conversation)
+    assert said[-1].text.endswith('book — date: "Saturday"')
+
+
+async def test_an_unclear_reply_runs_nothing() -> None:
+    hub = _Hub()
+    conversation, _ = await _asked(hub)
+
+    hub.reader.nothing()
+    hub.planner.then(RoundResponse(text="Do you want me to book it?"))
+    await hub.turn("Hmm, maybe.", conversation=conversation, message_id="m-2")
+
+    assert hub.world.of("book") == []
+    assert "approved_actions" not in hub.planner.shown(2)
+
+
+# --- only the user approves (§8:3) --------------------------------------------------------
+
+
+async def test_a_yes_arriving_as_an_event_approves_nothing() -> None:
+    """§3:3, §7:3: an email, a timer or any event comes through no chat, so no yes."""
+    hub = _Hub()
+    _, asking = await _asked(hub)
+
+    hub.reader.yes(prefer="P")
+    hub.planner.then(_book(), RoundResponse(text="Noted."))
+    result = await hub.harness.engine.receive(
+        ChannelInput(
+            target=ChannelIdentity(channel_type="informational_event", instance_id="mail-1"),
+            payload=TextChannelPayload(text=f"Re: {_ASKING} Yes, book it."),
+        ),
+        reply=None,
+        timeout=timedelta(seconds=10),
+    )
+
+    assert hub.world.of("book") == []
+    assert "approved_actions" not in hub.planner.shown(2)
+    assert "cannot message them" in hub.planner.shown(3)
+    assert result.capture.episode_id is not None
+    event = await hub.memory.get(result.capture.episode_id)
+    assert event is not None
+    answers = processing(event).understanding[-1].answers  # type: ignore[arg-type]  # an episode
+    assert answers is not None
+    assert answers.activation_id == _activation(asking)
+    assert _asked_calls(event) == [(), ()]  # type: ignore[arg-type]  # an episode
+
+
+def _window(*taken: TranscriptMessage) -> TranscriptWindow:
+    return TranscriptWindow(CONVERSATION, (), input_messages=taken, links={})
+
+
+def _from(author: MessageAuthor, position: int = 1) -> TranscriptMessage:
+    user = author is MessageAuthor.USER
+    return TranscriptMessage(
+        conversation_id=CONVERSATION.instance_id,
+        position=position,
+        written_at=AT + timedelta(minutes=position),
+        author=author,
+        text="yes",
+        device_id="phone" if user else None,
+        message_id=f"m-{position}" if user else None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("origin", "taken", "expected"),
+    [
+        pytest.param(InputOrigin.USER, (MessageAuthor.USER,), True, id="the-users-message"),
+        pytest.param(InputOrigin.OUTSIDE, (MessageAuthor.USER,), False, id="an-outside-origin"),
+        pytest.param(None, (MessageAuthor.USER,), False, id="no-origin-recorded"),
+        pytest.param(InputOrigin.USER, (), False, id="nothing-taken-in"),
+        pytest.param(
+            InputOrigin.USER,
+            (MessageAuthor.USER, MessageAuthor.ASSISTANT),
+            False,
+            id="a-message-not-the-users",
+        ),
+    ],
+)
+def test_only_the_users_own_chat_message_carries_their_authority(
+    origin: InputOrigin | None, taken: tuple[MessageAuthor, ...], expected: bool
+) -> None:
+    """§3:3, ADR-0292 §5:5: anything that cannot be established is not the user's."""
+    hub = _Hub()
+    path = hub.phases(hub.harness)
+    messages = tuple(_from(author, position) for position, author in enumerate(taken, 1))
+
+    working = path.begin(
+        activation_id="a-2",
+        window=_window(*messages),
+        conversation_id=CONVERSATION.instance_id,
+        trigger_origin=origin,
+        owner_records=True,
+    )
+
+    assert working.users_authority is expected
+    assert working.given_at == (messages[-1].written_at if messages else None)
+
+
+def test_an_event_never_carries_the_users_authority() -> None:
+    hub = _Hub()
+    working = hub.phases(hub.harness).begin_event(
+        activation_id="a-2", trigger_origin=InputOrigin.USER, owner_records=True
+    )
+
+    assert working.users_authority is False
+    assert working.conversation_id is None
+
+
+# --- a yes from elsewhere (§8:4) ----------------------------------------------------------
+
+
+async def test_a_yes_in_another_conversation_through_recall_runs_it() -> None:
+    hub = _Hub(recall=True, aged_out=True)
+    _, asking = await _asked(hub)
+
+    hub.reader.yes(prefer="M")
+    hub.planner.then(_run_approved(), _DONE)
+    other, yes = await hub.turn("Yes, book the table for Friday.")
+
+    assert hub.reader.labels[-1].startswith("M"), "found through recall"
+    answers = processing(yes).understanding[-1].answers
+    assert answers is not None
+    assert (answers.activation_id, answers.round) == (
+        _activation(asking),
+        processing(asking).rounds[1].id,
+    )
+    assert hub.world.of("book") == [{"date": "Friday"}]
+    (said,) = await hub.said(other)
+    assert said.text == "Done."
+
+
+async def test_a_bare_yes_with_nothing_to_connect_it_to_records_no_pointer() -> None:
+    hub = _Hub()
+
+    hub.reader.nothing()
+    hub.planner.then(RoundResponse(text="Yes to what?"))
+    _, bare = await hub.turn("Yes.")
+
+    assert processing(bare).understanding[-1].answers is None
+    assert "approved_actions" not in hub.planner.shown(0)
+    assert hub.world.ran == []
+
+
+# --- memory (§8:5, §5:5) ------------------------------------------------------------------
+
+
+async def test_after_a_search_a_remember_asks_and_a_yes_saves_it_with_its_source() -> None:
+    hub = _Hub()
+    statement = "The museum opens at nine."
+    hub.reader.nothing()
+    hub.planner.then(
+        RoundResponse(
+            calls=(_call("c1", "web_search", query="museum hours", looking_for="when it opens"),)
+        ),
+        RoundResponse(calls=(_call("c1", "remember", statement=statement),)),
+        _ask("It opens at nine. Shall I remember that?", "2.1"),
+    )
+    conversation, asking = await hub.turn("When does the museum open? Remember it.")
+
+    (asked,) = _asked_calls(asking)[2]
+    assert str(asked.tool.capability) == "remember"
+    said = await hub.said(conversation)
+    assert said[-1].text.endswith(f'remember — statement: "{statement}"')
+    assert await _beliefs(hub.memory, statement) == []
+
+    hub.reader.yes("Shall I remember that?")
+    hub.planner.then(_run_approved(), RoundResponse(text="Remembered."))
+    await hub.turn("Yes, keep that.", conversation=conversation, message_id="m-2")
+
+    (saved,) = await _beliefs(hub.memory, statement)
+    # Its source is kept as the proposal carried it, and the decision that wrote it
+    # names the approval (§5:3).
+    assert saved.provenance.derived_from_external
+    assert saved.provenance.source is MemorySource.INFERRED
+    (decided,) = [
+        one
+        for one in await hub.harness.trail.recent(limit=20)
+        if str(one.tool.capability) == "remember"
+        and one.approval is not None
+        and one.ruling.outcome is PermissionOutcome.ALLOW
+    ]
+    assert decided.approved_part is not None
+
+
+async def _beliefs(memory: FakeMemoryStore, fact: str) -> list[SemanticMemory]:
+    """The live beliefs stating ``fact``."""
+    return [
+        one
+        for one in await memory.export()
+        if isinstance(one, SemanticMemory) and one.fact == fact and one.validity.valid_until is None
+    ]
+
+
+async def test_a_conflict_at_write_time_asks_replacing_and_a_yes_retires_what_was_shown() -> None:
+    """§5:5, #2845: the writer's ask needs you, showing the assertion it replaces."""
+    hub = _Hub()
+    statement = "drinks coffee every morning"
+    old = f"never {statement}"
+    await hub.memory.add(
+        SemanticMemory(
+            id="assertion:1",
+            content=old,
+            fact=old,
+            provenance=Provenance(
+                source=MemorySource.USER_ASSERTED,
+                confidence=1.0,
+                evidence=("episode:earlier",),
+                last_updated=AT,
+            ),
+        )
+    )
+    hub.reader.nothing()
+    hub.planner.then(
+        RoundResponse(calls=(_call("c1", "remember", statement=statement),)),
+        _ask("You told me otherwise before. Shall I replace it?"),
+    )
+    conversation, asking = await hub.turn("Remember that I drink coffee every morning.")
+
+    (asked,) = _asked_calls(asking)[1]
+    assert asked.replaces == ("assertion:1",)
+    said = await hub.said(conversation)
+    assert f'replacing "{old}"' in said[-1].text.splitlines()[-1]
+    assert await _beliefs(hub.memory, old)
+
+    hub.reader.yes("Shall I replace it?")
+    hub.planner.then(_run_approved(), RoundResponse(text="Updated."))
+    await hub.turn("Yes, replace it.", conversation=conversation, message_id="m-2")
+
+    assert await _beliefs(hub.memory, old) == []
+    assert await _beliefs(hub.memory, statement)
+
+
+# --- a retry after an unknown outcome (§8:6, §6) ------------------------------------------
+
+
+async def test_a_retry_after_an_unknown_outcome_runs_only_on_a_yes() -> None:
+    hub = _Hub()
+    conversation, _ = await _asked(hub)
+    hub.world.unknown.add("book")
+    retry = "I could not tell whether the booking went through. Shall I try again?"
+
+    hub.reader.yes()
+    hub.planner.then(_run_approved(), _book(deliberate_repeat=True), _ask(retry, "2.1"))
+    _, unknown = await hub.turn("Yes.", conversation=conversation, message_id="m-2")
+
+    assert hub.world.of("book") == [{"date": "Friday"}], "the retry waits on a yes"
+    (asked,) = _asked_calls(unknown)[2]
+    assert asked.deliberate_repeat
+
+    hub.reader.yes(retry)
+    hub.planner.then(_run_approved(), _DONE)
+    await hub.turn("Yes, try again.", conversation=conversation, message_id="m-3")
+
+    assert hub.world.of("book") == [{"date": "Friday"}, {"date": "Friday"}]
+
+
+# --- a deny (§8:7) ------------------------------------------------------------------------
+
+
+async def test_a_deny_is_never_asked_about() -> None:
+    hub = _Hub()
+    hub.reader.nothing()
+    hub.planner.then(
+        RoundResponse(calls=(_call("c1", "wipe_calendar", month="May"),)),
+        _ask("Your settings do not allow that."),
+    )
+    conversation, denied = await hub.turn("Wipe my calendar for May.")
+
+    assert "never ask the user about it" in hub.planner.shown(1)
+    assert _asked_calls(denied) == [(), ()]
+    (said,) = await hub.said(conversation)
+    assert said.text == "Your settings do not allow that."
+    assert hub.world.ran == []
+
+
+# --- email (§8:9) -------------------------------------------------------------------------
+
+
+async def test_an_emails_full_text_is_in_its_exact_line_and_a_yes_sends_it_once() -> None:
+    hub = _Hub()
+    body = "Running late.\nSee you at 7."
+    hub.reader.nothing()
+    hub.planner.then(
+        RoundResponse(calls=(_call("c1", "send_email", to="sam@example.com", body=body),)),
+        _ask("Shall I email Sam that you are running late?"),
+    )
+    conversation, _ = await hub.turn("Email Sam that I'm running late.")
+
+    (question,) = await hub.said(conversation)
+    line = question.text.splitlines()[-1]
+    assert json.dumps(body) in line
+    assert '"sam@example.com"' in line
+
+    hub.reader.yes("Shall I email Sam")
+    hub.planner.then(_run_approved(), RoundResponse(text="Sent."))
+    await hub.turn("Yes, send it.", conversation=conversation, message_id="m-2")
+
+    assert hub.world.of("send_email") == [{"to": "sam@example.com", "body": body}]
+
+
+# --- a question cut to fit is not shown (§4:4) --------------------------------------------
+
+
+async def test_a_question_cut_to_fit_is_not_approvable_and_is_asked_again_whole() -> None:
+    hub = _Hub()
+    long = (
+        _ASKING
+        + " "
+        + "It is the corner table by the window. " * (TRANSCRIPT_MESSAGE_MAX_CHARS // 30)
+    )
+    hub.reader.nothing()
+    hub.planner.then(_book(), _ask(long))
+    conversation, cut = await hub.turn("Book a table for Friday.")
+
+    (question,) = await hub.said(conversation)
+    assert question.cut_off
+    assert _FRIDAY_LINE not in question.text
+    assert _asked_calls(cut) == [(), ()], "a cut question records no asked call"
+
+    # A yes to it approves nothing: planning is shown no approved action, and the call
+    # proposed again is not held back as already asked, so it is asked again, whole.
+    hub.reader.yes()
+    hub.planner.then(_book(), _ask())
+    _, again = await hub.turn("Yes.", conversation=conversation, message_id="m-2")
+
+    assert "approved_actions" not in hub.planner.shown(2)
+    assert "already asked" not in hub.planner.shown(3)
+    assert [len(one) for one in _asked_calls(again)] == [0, 1]
+    assert (await hub.said(conversation))[-1].text == f"{_ASKING}\n\n{_FRIDAY_LINE}"
+    assert hub.world.ran == []
+
+
+class _Narrow(ChatWriter):
+    """The chat's writer under a payload bound that cuts any message longer than 40."""
+
+    def fitted(self, conversation_id: str, message: NewMessage) -> NewMessage:
+        if len(message.text) <= 40:
+            return message
+        return message.model_copy(update={"text": message.text[:40], "cut_off": True})
+
+
+class _Unmeasurable(ChatWriter):
+    """A writer under a bound no non-blank prefix fits."""
+
+    def fitted(self, conversation_id: str, message: NewMessage) -> NewMessage:
+        msg = "too small for any message"
+        raise OversizedValueError(msg, limit=1, size=len(message.text))
+
+    async def send(self, conversation_id: str, message: NewMessage) -> MessageReceipt | None:
+        raise AssertionError  # pragma: no cover - nothing is written in these cases
+
+
+def _asking_round(text: str) -> PlanningRound:
+    return PlanningRound(
+        id="round:1",
+        recorded_at=AT,
+        text=text,
+        asked=(AskedCall(part=1, tool=_BOOK, values={"date": "Friday"}),),
+    )
+
+
+@pytest.mark.parametrize(
+    ("writer", "text", "whole"),
+    [
+        pytest.param(ChatWriter, f"{_ASKING}\n\n{_FRIDAY_LINE}", True, id="fits"),
+        pytest.param(_Narrow, f"{_ASKING}\n\n{_FRIDAY_LINE}", False, id="cut-by-the-writer"),
+        pytest.param(_Unmeasurable, "Shall I?", False, id="cannot-be-measured"),
+    ],
+)
+def test_a_round_whose_message_the_writer_would_cut_asks_about_nothing(
+    writer: type[ChatWriter], text: str, whole: bool
+) -> None:
+    hub = _Hub()
+    path = hub.phases(
+        hub.harness,
+        writer=writer(
+            conversations=hub.harness.conversation_store,
+            max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES,
+        ),
+    )
+    working = path.begin(
+        activation_id="a-1",
+        window=_window(),
+        conversation_id=CONVERSATION.instance_id,
+        trigger_origin=InputOrigin.USER,
+        owner_records=True,
+    )
+    planned = _asking_round(text)
+
+    shown = path.shown_whole(working, planned)
+
+    assert (shown is planned) is whole
+    assert len(shown.asked) == (1 if whole else 0)
+    assert shown.text == planned.text
+
+
+def test_a_round_in_a_place_that_takes_no_message_asks_about_nothing() -> None:
+    hub = _Hub()
+    path = hub.phases(hub.harness)
+    working = path.begin_event(
+        activation_id="a-1", trigger_origin=InputOrigin.OUTSIDE, owner_records=True
+    )
+
+    assert path.shown_whole(working, _asking_round("Shall I?")).asked == ()
