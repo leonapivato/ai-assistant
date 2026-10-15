@@ -60,7 +60,7 @@ from typing import TYPE_CHECKING, Final, cast
 from uuid import uuid4
 
 import structlog
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.diagnostics import failure_body, write_diagnostic
@@ -749,6 +749,25 @@ def values_digest(request: ActionRequest) -> str:
         }
     document = cast("FrozenJson", {"arguments": arguments, "binding": bound})
     return hashlib.sha256(canonical_json_bytes(document)).hexdigest()
+
+
+def _same_values(one: FrozenJsonMapping, other: FrozenJsonMapping) -> bool:
+    """Whether two calls' values are the same JSON, by their canonical encoding.
+
+    Python's equality is not JSON's: ``True == 1`` and ``1 == 1.0``, so two calls whose
+    values differ as JSON, and whose parameters digests differ, would compare equal
+    (ADR-0321 §4:4, §4:11 require the values to be identical).
+    """
+    return canonical_json_bytes(cast("FrozenJson", dict(one))) == canonical_json_bytes(
+        cast("FrozenJson", dict(other))
+    )
+
+
+def _same_model(one: BaseModel | None, other: BaseModel | None) -> bool:
+    """Whether two declarations or bindings are the same, by value and by their JSON."""
+    if one is None or other is None:
+        return one is None and other is None
+    return one == other and one.model_dump_json() == other.model_dump_json()
 
 
 def _detached_yes(given: YesContext | None) -> YesContext | None:
@@ -1500,7 +1519,8 @@ class AuthorizingStage:
         binding shown (§4:16), so the coverage is the binding that was shown, never one
         derived over the proposal's arguments (#2847).
         """
-        if asked.tool not in await self._registry.find(asked.tool.capability):
+        offered = await self._registry.find(asked.tool.capability)
+        if not any(_same_model(one, asked.tool) for one in offered):
             return None
         tool: ToolDefinition = asked.tool
         parameters: FrozenJsonMapping = asked.values
@@ -1514,7 +1534,11 @@ class AuthorizingStage:
                 return None
             if bound is not None:
                 tool, parameters, binding = bound.tool, bound.parameters, bound.binding
-        if tool != asked.tool or dict(parameters) != dict(asked.values) or binding != asked.binding:
+        if not (
+            _same_model(tool, asked.tool)
+            and _same_values(parameters, asked.values)
+            and _same_model(binding, asked.binding)
+        ):
             return None
         try:
             return ActionRequest(tool=tool, parameters=parameters, egress_binding=binding)
@@ -1620,9 +1644,9 @@ class AuthorizingStage:
         same = [
             each
             for each in await self._asked_here(state)
-            if each.asked.tool == request.tool
-            and each.asked.binding == request.egress_binding
-            and shown_values(each.asked.tool, each.asked.values) == values
+            if _same_model(each.asked.tool, request.tool)
+            and _same_model(each.asked.binding, request.egress_binding)
+            and _same_values(shown_values(each.asked.tool, each.asked.values), values)
         ]
         if not same:
             return None

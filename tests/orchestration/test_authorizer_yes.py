@@ -861,6 +861,52 @@ async def test_a_call_not_waiting_is_asked_about_again(case: str) -> None:
     assert verdict.already_asked is None
 
 
+_LOOSE: Final = _tool(
+    "book",
+    parameters_schema={
+        "type": "object",
+        "properties": {
+            "q": {
+                "type": ["boolean", "integer", "number", "array"],
+                "items": {"type": ["boolean", "integer", "number"]},
+            }
+        },
+        "required": ["q"],
+        "additionalProperties": False,
+    },
+)
+
+
+@pytest.mark.parametrize(
+    ("shown", "proposed"),
+    [(True, 1), (False, 0), (1, 1.0), ([True], [1]), ([1], [1.0])],
+    ids=["true-1", "false-0", "1-1.0", "nested-true-1", "nested-1-1.0"],
+)
+async def test_values_equal_in_python_but_not_as_json_are_not_waiting(
+    shown: Any, proposed: Any
+) -> None:
+    """§4:11: the same values means the same JSON, never Python's ``True == 1``."""
+    hub = _Hub(_LOOSE)
+    await hub.asked(_asked(_LOOSE, q=shown))
+    await _linked(hub, _ASKING, _YES)
+
+    decided = await hub.authorize(_round((_call("c1", "book", q=proposed), None)))
+
+    (verdict,) = decided.verdicts
+    assert verdict.verdict is Verdict.NEEDS_YOU
+    assert verdict.already_asked is None
+
+
+async def test_the_same_json_values_are_waiting() -> None:
+    hub = _Hub(_LOOSE)
+    await hub.asked(_asked(_LOOSE, q=[True, 2]))
+    await _linked(hub, _ASKING, _YES)
+
+    decided = await hub.authorize(_round((_call("c1", "book", q=[True, 2]), None)))
+
+    assert decided.verdicts[0].already_asked == _PART
+
+
 # --- a retry after an unknown outcome (§6:1) --------------------------------------------------
 
 
