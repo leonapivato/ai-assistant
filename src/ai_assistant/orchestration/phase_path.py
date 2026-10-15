@@ -215,6 +215,7 @@ from ai_assistant.core.types import (
     NewMessage,
     PlanningLabel,
     ProposedCall,
+    QuestionPart,
     RecallOutcome,
     SemanticMemory,
     SendOutcome,
@@ -247,6 +248,7 @@ from ai_assistant.orchestration.authorizer import (
     RoundToAuthorize,
     Verdict,
     WorkingRecord,
+    YesContext,
 )
 from ai_assistant.orchestration.chat import couldnt_finish
 from ai_assistant.orchestration.controller import (
@@ -266,6 +268,7 @@ from ai_assistant.orchestration.lookups import (
 )
 from ai_assistant.orchestration.outside_content import rests_on_outside_content
 from ai_assistant.orchestration.planning import (
+    ApprovedAction,
     CallOutcome,
     CallOutcomeKind,
     DigestedEvidence,
@@ -306,6 +309,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ActivationDigest,
         ActivationUnderstanding,
+        AnsweredQuestion,
         FrozenJson,
         MemoryRecord,
         MessageReceipt,
@@ -398,6 +402,13 @@ _NOT_OFFERED: Final = frozenset({"report_current_time"})
 #: a search's records are handed to it as the search returns them (ADR-0309 §5:10).
 _HOLDING: Final[contextvars.ContextVar[SuppliedRecords | None]] = contextvars.ContextVar(
     "phase_tools_holding", default=None
+)
+
+#: The activation whose round planning is deciding, set around planning's call, which
+#: records the round inside it: the recorder reads from it whether the round's message
+#: would be shown whole (ADR-0321 §4:4).
+_PLANNING: Final[contextvars.ContextVar[PhaseWorking | None]] = contextvars.ContextVar(
+    "phase_path_planning", default=None
 )
 
 
@@ -1073,7 +1084,7 @@ class PhaseWorking:
     never saved), and the messages it wrote.
     """
 
-    def __init__(  # noqa: PLR0913 — the activation, its place, its trigger's origin, its audience, its round limit and its recorded labels
+    def __init__(  # noqa: PLR0913 — the activation, its place, its trigger's origin, its audience, its round limit, its recorded labels and its input's authority
         self,
         *,
         activation_id: str,
@@ -1083,6 +1094,8 @@ class PhaseWorking:
         owner_records: bool,
         round_limit: int,
         labels: Sequence[PlanningLabel] = (),
+        users_authority: bool = False,
+        given_at: datetime | None = None,
     ) -> None:
         """Start an activation's working set, before its first round.
 
@@ -1096,6 +1109,12 @@ class PhaseWorking:
                 this pass (ADR-0307 §6:4).
             round_limit: The most rounds the activation runs (ADR-0307 §8:4).
             labels: The labels the episode already records.
+            users_authority: Whether the input carries the user's authority (ADR-0321
+                §3:3, ADR-0292 §5:5): only a message the user sent through the hub
+                chat does. ``False``, the default, wherever it cannot be established.
+            given_at: When the input was given, timezone-aware: a yes it carries is
+                given then (ADR-0321 §4:6). ``None`` where it is not known, and then
+                no yes is read from it.
 
         Raises:
             ValueError: If ``round_limit`` is below 1.
@@ -1108,6 +1127,11 @@ class PhaseWorking:
         self.conversation_id = conversation_id
         self.trigger_origin = trigger_origin
         self.owner_records = owner_records
+        self.users_authority = users_authority
+        self.given_at = given_at
+        # The actions the input's yes approved, as the records show them, by the pointer
+        # they were read for, read once (ADR-0321 §4:2).
+        self.approvable: tuple[AnsweredQuestion, tuple[ApprovedAction, ...]] | None = None
         self._round_limit = round_limit
         self.labels = ActivationLabels(labels)
         self.held = HeldResults(on_hold=self._on_hold)
@@ -1343,6 +1367,22 @@ class PhaseWorking:
             or any(one.outcome is DigestOutcome.ANSWERED for one in self.digests)
         )
 
+    def yes(self, understanding: ActivationUnderstanding | None) -> YesContext | None:
+        """The yes the input carries, as authorizing takes it (ADR-0321 §3:1, §4:4).
+
+        Understanding's recorded pointer, with when the input was given and whether it
+        carries the user's authority; ``None`` where understanding recorded no pointer,
+        or where when the input was given is not known, and then no call runs under an
+        approval (§4:5). It grants nothing by itself: authorizing checks it against the
+        records.
+        """
+        answers = None if understanding is None else understanding.answers
+        if answers is None or self.given_at is None:
+            return None
+        return YesContext(
+            answers=answers, given_at=self.given_at, users_authority=self.users_authority
+        )
+
     def outcome(self) -> str | None:
         """The episode's ``outcome``: the messages written, joined by a blank line (§10)."""
         return "\n\n".join(self.messages) if self.messages else None
@@ -1396,8 +1436,11 @@ def call_outcomes(
     """What came of one round's calls, as planning reads them, in the round's order.
 
     A call planning's own check refused, or authorizing found not done, is refused;
-    one authorizing sent to the user needs you; and one it allowed is what acting made
-    of it, its result under the id acting minted (ADR-0306 §5:1, §5:14). A call with no
+    one authorizing sent to the user needs you, carrying the request a question about it
+    shows and records, or the part of the question it already waits on (ADR-0321 §2:8,
+    §4:11); and one it allowed is what acting made of it, its result under the id acting
+    minted (ADR-0306 §5:1, §5:14), or needing you where the memory writer asked at write
+    time, with the assertions its question shows replaced (ADR-0321 §5:5). A call with no
     decision yet has no outcome.
     """
     refused = {one.call.call_id: one.reason for one in planned.refused}
@@ -1416,8 +1459,18 @@ def call_outcomes(
         if verdict is None:
             continue
         if verdict.verdict is Verdict.NEEDS_YOU:
+            # ADR-0321 §2:8, §4:11: what a question about it shows and records, or the
+            # part of the question it is already waiting on.
             outcomes.append(
-                CallOutcome(round_id, call_id, CallOutcomeKind.NEEDS_YOU, reason=verdict.reason)
+                CallOutcome(
+                    round_id,
+                    call_id,
+                    CallOutcomeKind.NEEDS_YOU,
+                    reason=verdict.reason,
+                    request=verdict.request,
+                    deliberate_repeat=verdict.deliberate_repeat,
+                    already_asked=verdict.already_asked,
+                )
             )
             continue
         if verdict.verdict is Verdict.NOT_DONE:
@@ -1427,6 +1480,21 @@ def call_outcomes(
             continue
         one = None if verdict.decision_id is None else ran.get(verdict.decision_id)
         if one is None:
+            continue
+        if one.outcome is ActedOutcome.NEEDS_YOU:
+            # ADR-0321 §5:5: a remember the writer asked about at write time needs you,
+            # showing the assertions it would replace (#2845).
+            outcomes.append(
+                CallOutcome(
+                    round_id,
+                    call_id,
+                    CallOutcomeKind.NEEDS_YOU,
+                    reason=one.reason,
+                    request=one.call.call.request,
+                    deliberate_repeat=one.call.deliberate_repeat,
+                    replaces=one.replaces,
+                )
+            )
             continue
         kind = {
             ActedOutcome.DONE: CallOutcomeKind.DONE,
@@ -1449,12 +1517,16 @@ def call_outcomes(
 
 
 def authorized_round(decided: RoundAuthorization) -> AuthorizedRound:
-    """Authorizing's decision as acting's input: the allowed calls, in the round's order."""
+    """Authorizing's decision as acting's input: the allowed calls, in the round's order.
+
+    A call that runs under an approval carries the asked call it was rebuilt from
+    (ADR-0321 §4:2), whose ``replaces`` a remember retires on the yes (§5:5).
+    """
     return AuthorizedRound(
         activation_id=decided.activation_id,
         round_id=decided.round_id,
         calls=tuple(
-            AuthorizedCall(one.call, deliberate_repeat=one.deliberate_repeat)
+            AuthorizedCall(one.call, deliberate_repeat=one.deliberate_repeat, asked=one.asked)
             for one in decided.allowed
         ),
         story_activations=decided.story_activations,
@@ -1504,6 +1576,9 @@ class _RoundRecorder:
         state = active_state()
         if state is None:
             return
+        working = _PLANNING.get()
+        if working is not None:
+            planning_round = self._path.shown_whole(working, planning_round)
         state.recorded_round(planning_round, labels)
         await _extended(state, self._path.append)
 
@@ -1578,6 +1653,31 @@ def _new_effect_id() -> str:
 def _place_id(conversation_id: str) -> str:
     """The place a message goes into: the conversation, by its id (ADR-0306 §6)."""
     return f"conversation:{conversation_id}"
+
+
+def _delivered_round(effects: Sequence[ActivationEffect], pointer: AnsweredQuestion) -> str | None:
+    """The round whose message the pointer names, where its delivery is done.
+
+    As authorizing reads ADR-0321 §4:4's *shown*: the asking activation's message
+    record for the pointer's round, at its place and position where the pointer names
+    them, its outcome done and its position written (ADR-0306 §5:5). The *couldn't
+    finish* message names no round and is never a question.
+    """
+    for one in effects:
+        if (
+            not one.is_call
+            and one.activation_id == pointer.activation_id
+            and one.outcome is ToolOutcome.SUCCEEDED
+            and one.position is not None
+            and one.round is not None
+            and (pointer.round is None or one.round == pointer.round)
+            and (
+                pointer.place is None
+                or (one.place == pointer.place and one.position == pointer.position)
+            )
+        ):
+            return one.round
+    return None
 
 
 def _working(given: PhasePass) -> PhaseWorking:
@@ -2008,6 +2108,12 @@ class PhasePath:
     ) -> PhaseWorking:
         """Start one conversation turn's working set, before its first stage.
 
+        A turn is the hub chat's: the chat's reader brings its input in. Its input
+        carries the user's authority (ADR-0321 §3:3, ADR-0292 §5:5) only where the
+        trigger says the user sent it and every message taken in is the user's, the
+        author a conversation establishes; anything not established is not the user's.
+        A yes it carries is given when its latest message was written (§4:6).
+
         Args:
             activation_id: The activation.
             window: The conversation's recent transcript, brought in with the input.
@@ -2020,6 +2126,7 @@ class PhasePath:
         Returns:
             The working set, which the engine holds on the pass.
         """
+        taken = window.input_messages
         return PhaseWorking(
             activation_id=activation_id,
             place=place_window(window),
@@ -2028,6 +2135,12 @@ class PhasePath:
             owner_records=owner_records,
             round_limit=self._round_limit,
             labels=labels,
+            users_authority=(
+                trigger_origin is InputOrigin.USER
+                and bool(taken)
+                and all(one.author is MessageAuthor.USER for one in taken)
+            ),
+            given_at=max((one.written_at for one in taken), default=None),
         )
 
     def begin_event(
@@ -2044,6 +2157,11 @@ class PhasePath:
         finish* message included, and authorizing is handed no place (ADR-0307 §3:8,
         ADR-0309 §5:6). The event's own words reach planning through understanding's
         record alone, as an outside report (ADR-0307 §9:2), so its place window is empty.
+
+        Its input never carries the user's authority: an email, a timer or any other
+        event saying yes approves nothing (ADR-0321 §3:3), and a call that needs the
+        user is neither asked about nor run (§7:3). It is taken to be given when it
+        begins, which only the record of a refused yes reads.
 
         Args:
             activation_id: The activation.
@@ -2062,6 +2180,8 @@ class PhasePath:
             owner_records=owner_records,
             round_limit=self._round_limit,
             labels=labels,
+            users_authority=False,
+            given_at=self._now(),
         )
 
     async def written(
@@ -2312,13 +2432,22 @@ class PhasePath:
             evidence=tuple(working.evidence),
             outside_content_read=working.read_outside_content,
             stories=stories,
+            approved=await self._approved(given, working),
         )
+        # The round is recorded inside planning's call, so the recorder reads what it
+        # needs of this activation from here (ADR-0321 §4:4: a question cut to fit).
+        planning = _PLANNING.set(working)
         try:
             async with asyncio.timeout_at(given.deadline):
                 planned = await self._planning.plan(inputs)
                 planned = await self._notes_checked(planned, working)
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
+        finally:
+            _PLANNING.reset(planning)
+        whole = self.shown_whole(working, planned.round)
+        if whole is not planned.round:
+            planned = replace(planned, round=whole)
         working.planned(planned)
 
     async def _offered(self) -> tuple[ToolDefinition, ...]:
@@ -2574,7 +2703,9 @@ class PhasePath:
         planned = latest.planned
         calls = [
             CallToAuthorize(
-                call=await self._tools.filled(one.call), deliberate_repeat=one.deliberate_repeat
+                call=await self._tools.filled(one.call),
+                deliberate_repeat=one.deliberate_repeat,
+                approved_part=one.approved_part,
             )
             for one in planned.calls
         ]
@@ -2599,6 +2730,7 @@ class PhasePath:
             calls=tuple(calls),
             input_place=place,
             message=message,
+            yes=working.yes(given.understanding),
         )
         try:
             async with asyncio.timeout_at(given.deadline):
@@ -2828,6 +2960,132 @@ class PhasePath:
         working.digests.append(digested.digest)
         working.evidence.append(digested_evidence(digested, working.labels.labels))
 
+    # --- the yes path (ADR-0321) ---
+
+    def shown_whole(self, working: PhaseWorking, planning_round: PlanningRound) -> PlanningRound:
+        """``planning_round``, asking about nothing where its message would not be shown whole.
+
+        The dispatcher's ruling on ADR-0321 §4:4's *shown*: a message cut to fit is not
+        shown, since its exact lines come last (§2:5) and any cut takes them. So a round
+        whose message the place would cut, by the transcript's bound or the writer's,
+        records no asked call: by §2:2 nothing waits on the user that they were not
+        clearly asked about, so no yes to that message approves anything, no proposal is
+        held back as already asked, and the call may be asked about again whole. Where
+        whether it fits cannot be told, it is taken not to, failing closed.
+
+        Returns:
+            ``planning_round`` itself where it asks about nothing or its message would be
+            shown whole; otherwise a copy that asks about nothing.
+        """
+        if not planning_round.asked:
+            return planning_round
+        conversation_id = working.conversation_id
+        whole = False
+        if conversation_id is not None:
+            try:
+                whole = not self._fitted(conversation_id, planning_round.text).cut_off
+            except Exception as exc:  # whether it fits is not known: not shown whole
+                if is_defect(exc):
+                    log_defect(
+                        "phase_question_unmeasured",
+                        exc,
+                        stage="planning",
+                        activation_id=working.activation_id,
+                    )
+        if whole:
+            return planning_round
+        _log.info("phase_question_cut", stage="planning", asked=len(planning_round.asked))
+        return planning_round.model_copy(update={"asked": ()})
+
+    def _fitted(self, conversation_id: str, text: str) -> NewMessage:
+        """``text`` as the place records it: cut to the transcript's bound, then the writer's.
+
+        Raises:
+            OversizedValueError: If the writer finds no non-blank prefix that fits.
+        """
+        cut = len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS
+        return self._writer.fitted(
+            conversation_id,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT,
+                text=text[:TRANSCRIPT_MESSAGE_MAX_CHARS],
+                cut_off=cut,
+            ),
+        )
+
+    async def _approved(
+        self, given: PhasePass, working: PhaseWorking
+    ) -> tuple[ApprovedAction, ...]:
+        """The actions the input's yes approved, as planning is shown them (ADR-0321 §4:2).
+
+        Read from understanding's pointer and the records it leads to: the asking
+        activation's message delivery record names the question's round, by the
+        pointer's round or by its place and position, and the asking episode's round
+        records the calls it asked about (§2:8). The parts approved are those the
+        pointer names, or every part shown where it names none (§3:6), less those an
+        effect record has already used (§4:9), so a second yes shows nothing to run.
+
+        None where the input does not carry the user's authority (§3:3), the place takes
+        no message (§7:3), the pointer names this activation's own question (§4:1), or it
+        resolves to nothing; and none where the records cannot be read. This shows and
+        grants nothing that authorizing does not check again (§4:4).
+        """
+        pointer = None if given.understanding is None else given.understanding.answers
+        if (
+            pointer is None
+            or not working.users_authority
+            or working.conversation_id is None
+            or pointer.activation_id == working.activation_id
+        ):
+            return ()
+        if working.approvable is None or working.approvable[0] != pointer:
+            working.approvable = (pointer, await self._approvable(pointer, working))
+        actions = working.approvable[1]
+        if not actions:
+            return ()
+        try:
+            spent = await self._plans.part_effects([one.part for one in actions])
+        except Exception as exc:  # the store is down: nothing is shown as approved
+            self._unread(exc, working)
+            return ()
+        used = {one.part for one in spent}
+        return tuple(one for one in actions if one.part not in used)
+
+    async def _approvable(
+        self, pointer: AnsweredQuestion, working: PhaseWorking
+    ) -> tuple[ApprovedAction, ...]:
+        """The calls the pointer's question asked about and approves, as recorded."""
+        try:
+            effects = await self._plans.activation_effects([pointer.activation_id])
+            round_id = _delivered_round(effects, pointer)
+            if round_id is None:
+                return ()
+            record = await self._memory.get(episode_address(pointer.activation_id))
+        except Exception as exc:  # a store is down: nothing is shown as approved
+            self._unread(exc, working)
+            return ()
+        if not isinstance(record, EpisodicMemory) or record.processing_record is None:
+            return ()
+        asked = next(
+            (one.asked for one in record.processing_record.rounds if one.id == round_id), ()
+        )
+        recorded = {one.part: one for one in asked}
+        return tuple(
+            ApprovedAction(part=QuestionPart(round=round_id, part=number), call=recorded[number])
+            for number in (pointer.parts or sorted(recorded))
+            if number in recorded
+        )
+
+    @staticmethod
+    def _unread(exc: Exception, working: PhaseWorking) -> None:
+        """Log a failed read of the yes's records, a defect as one (#2904)."""
+        if is_defect(exc):
+            log_defect(
+                "phase_approved_unread", exc, stage="planning", activation_id=working.activation_id
+            )
+        else:
+            _log.warning("phase_approved_unread", stage="planning", reason="store_failed")
+
     # --- the place ---
 
     async def _write(
@@ -2841,15 +3099,7 @@ class PhasePath:
         conversation_id = working.conversation_id
         if conversation_id is None:
             return False
-        cut = len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS
-        fitted = self._writer.fitted(
-            conversation_id,
-            NewMessage(
-                author=MessageAuthor.ASSISTANT,
-                text=text[:TRANSCRIPT_MESSAGE_MAX_CHARS],
-                cut_off=cut,
-            ),
-        )
+        fitted = self._fitted(conversation_id, text)
         effect = ActivationEffect(
             id=effect_id,
             activation_id=working.activation_id,

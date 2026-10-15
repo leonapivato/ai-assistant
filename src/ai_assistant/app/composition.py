@@ -2220,7 +2220,11 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
             invoker=tools,
             own_records=OwnRecordsByCapability(
                 {
-                    REMEMBER_CAPABILITY: RememberCalls(writer=seams.writer, now=_utcnow),
+                    # ADR-0321 §5:5: the store the writer writes to, read for the
+                    # assertions a write-time conflict's question shows replaced.
+                    REMEMBER_CAPABILITY: RememberCalls(
+                        writer=seams.writer, memory=seams.memory, now=_utcnow
+                    ),
                     **dict.fromkeys(STORY_CALL_CAPABILITIES, story_calls),
                     **dict.fromkeys(LOOK_UP_CAPABILITIES, look_ups),
                 }
