@@ -26,8 +26,10 @@ one by its decision's ``approval``. It gets an effect record whatever its capabi
 and the record carries the decision's ``approved_part``, the asking round's id and the
 part number, so the claim spends the part in the same indivisible step. A part some
 record already carries comes back ``already_used``, and the call is not done, with the
-reason, and never run: two yeses to one part cannot both run. A deliberate repeat under
-an approval is claimed with both marks, which is how the store admits §6:2's retry.
+reason, and never run: two yeses to one part cannot both run. A call whose approval
+was given to another activation is not done either, before anything is claimed: the
+yes's activation alone uses its approval (§4:1). A deliberate repeat under an approval
+is claimed with both marks, which is how the store admits §6:2's retry.
 
 **Two routes to run** (§3:3, §5:7). A call whose effect is the assistant's own records
 runs directly against the store it reaches, through :class:`OwnRecordsCalls`, and is
@@ -170,6 +172,9 @@ _STOPPED: Final = "the activation was stopped before this call was claimed"
 _NOTHING_HELD: Final = "nothing is held under the result it names in this activation"
 _ALREADY_DONE: Final = "already done: an equal call was made in this matter"
 _ALREADY_USED: Final = "already used: the yes that approved this call has let it run once"
+_ANOTHER_ACTIVATIONS: Final = (
+    "not run: the yes that approved this call was given to another activation"
+)
 _REFUSED: Final = "refused before the call was made"
 
 
@@ -551,10 +556,19 @@ class ActingStage:
         one: AuthorizedCall,
         held: HeldResults,
     ) -> ActedCall:
-        """Claim one detached call where it gets a record, run it, and finish the record."""
+        """Claim one detached call where it gets a record, run it, and finish the record.
+
+        A call under an approval given to another activation is not done, and nothing is
+        claimed or run: the yes's activation runs the calls it approved, and no other
+        activation uses that approval (ADR-0321 §4:1).
+        """
         call = one.call
         tool = call.request.tool
         effect_id = call.decision.effect
+        approval = call.decision.approval
+        if approval is not None and approval.given.activation_id != activation_id:
+            _log.info("acting_call_not_done", stage="acting", reason="another_activations_yes")
+            return ActedCall(one, ActedOutcome.NOT_DONE, reason=_ANOTHER_ACTIVATIONS)
         if effect_id is not None:
             record = ActivationEffect(
                 id=effect_id,

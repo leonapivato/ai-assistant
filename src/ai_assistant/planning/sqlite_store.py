@@ -130,6 +130,18 @@ _RECORD_SCHEMA = (
 #: :func:`_checked_activation_effect` reconciles them with the record.
 _EFFECT_COLUMNS = "id, activation_id, data, part_round, part_number"
 
+#: The rows carrying any of ``{keys}``'s question parts, in claim order: matched by the
+#: promoted columns **or** by the record itself, so a row whose columns an outside
+#: writer changed or cleared is still found, and then refused by
+#: :func:`_checked_activation_effect` rather than read as a part nobody spent
+#: (ADR-0321 §4:9). The parameters are the keys twice, once for each side.
+_PART_ROWS = (
+    "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only constants and placeholders are interpolated
+    "WHERE (part_round, part_number) IN (VALUES {keys}) "
+    "OR (json_extract(data, '$.part.round'), json_extract(data, '$.part.part')) "
+    "IN (VALUES {keys}) ORDER BY claimed_seq ASC"
+)
+
 _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
     "stopped_activations": {
         "activation_id": ("TEXT", False),
@@ -777,12 +789,17 @@ class SqlitePlanStore:
             held = conn.execute(
                 "SELECT 1 FROM activation_effects WHERE id = ?", (record.id,)
             ).fetchone()
-            spent = record.part is not None and (
-                conn.execute(
-                    "SELECT 1 FROM activation_effects WHERE part_round = ? AND part_number = ?",
-                    (record.part.round, record.part.part),
-                ).fetchone()
-                is not None
+            # Every row carrying the part, by its promoted columns or by its record, and
+            # each reconciled: a column an outside writer changed or cleared would
+            # otherwise hide a spent part and let a second yes run (ADR-0321 §4:9).
+            spent = record.part is not None and bool(
+                [
+                    _checked_activation_effect(str(self._path), row)
+                    for row in conn.execute(
+                        _PART_ROWS.format(keys="(?, ?)"),
+                        (record.part.round, record.part.part) * 2,
+                    ).fetchall()
+                ]
             )
             matched: list[ActivationEffect] = []
             if named:
@@ -909,12 +926,7 @@ class SqlitePlanStore:
         try:
             return [
                 tuple(row)
-                for row in self._conn.execute(
-                    "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only placeholders are interpolated
-                    f"WHERE (part_round, part_number) IN (VALUES {keys}) "
-                    "ORDER BY claimed_seq ASC",
-                    values,
-                ).fetchall()
+                for row in self._conn.execute(_PART_ROWS.format(keys=keys), values * 2).fetchall()
             ]
         except sqlite3.Error as exc:
             raise _wrap("read activation effects by question part", "", exc) from exc
