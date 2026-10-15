@@ -2774,6 +2774,10 @@ class PhasePath:
         if isinstance(ran, ActedRound):
             # Kept even where the message beside it failed: what acting ran happened.
             latest.acted = ran
+            # The assertions a remember that needs you would replace were read from the
+            # store, and planning is shown them: obtained, so they place what follows
+            # (ADR-0309 §5:10, ADR-0321 §5:5).
+            working.supplied.obtained(record for one in ran.calls for record in one.replaces)
         for answer in (ran, wrote):
             if isinstance(answer, BaseException):
                 raise answer
@@ -3073,11 +3077,17 @@ class PhasePath:
             (one.asked for one in record.processing_record.rounds if one.id == round_id), ()
         )
         recorded = {one.part: one for one in asked}
-        return tuple(
+        actions = tuple(
             ApprovedAction(part=QuestionPart(round=round_id, part=number), call=recorded[number])
             for number in (pointer.parts or sorted(recorded))
             if number in recorded
         )
+        if actions:
+            # What planning may be shown of it was obtained from the asking episode, so
+            # the episode and what this activation remembers are placed by it too
+            # (ADR-0309 §5:10, ADR-0217 §3:12).
+            working.supplied.obtained((record,))
+        return actions
 
     @staticmethod
     def _unread(exc: Exception, working: PhaseWorking) -> None:
