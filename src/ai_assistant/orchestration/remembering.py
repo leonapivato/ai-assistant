@@ -40,15 +40,41 @@ reads no placement, so the proposal authorizing rules on, which carries the defa
 is ruled exactly as the one written.
 
 **The writer rules again.** ``MemoryWriter.ingest`` finds the proposal's conflicts and
-asks its own policy over them (ADR-0028). A ruling there that writes nothing, an ask or a
-reject, is a call not done, and nothing is written: ADR-0306 §4:3's *memory it rules to
-ask about is not written* holds at both rulings.
+asks its own policy over them (ADR-0028). A reject is a call not done, and nothing is
+written. An ask writes nothing either, and **comes back needing you**, not not done
+(ADR-0321 §5:5, #2845): the runner answers :class:`NeedsYou` carrying the assertions among the
+conflicts the writer ruled against, as stored, so the question can show the statement
+*replacing* them. Where it cannot show every one of them, because no memory store was
+wired to read them, one is gone, or one is not a statement, the call is not done
+instead: a question that could not show what a yes retires would only be asked again.
+
+**A yes keeps it** (ADR-0321 §5:2, §5:3). A remember that runs under a yes reaches the
+runner with the asked call the yes approved (:meth:`RememberCalls.run_approved`), and
+code builds a :class:`~ai_assistant.core.types.UserConfirmation` from the approval and
+that asked call. The proposal carries it to the writer and so to ``MemoryPolicy``, which
+honours it as ADR-0106 §6:1-§6:3 and ADR-0214 §3:2 decide. This is the confirmation's
+only production producer: the user's assent to text they were shown, never a model's
+paraphrase claiming their standing (ADR-0098 §4).
+
+- ``question`` is the part the decision's approval approved, and ``confirmed_at`` is
+  when the yes was given.
+- ``retires`` is exactly the asked call's ``replaces``, the assertions the question
+  showed, and nothing else. The proposal's frozen ``conflicts`` are those same ids, and
+  ``question_key`` is the proposal's key over them, so the confirmation binds what is
+  written against what was shown (ADR-0078 §5, §7). An assertion the question did not
+  show is not retired on that yes: the policy asks again, and the call needs you again.
+- The provenance is the one set by rule above, written unchanged: a confirmed memory
+  keeps its source. The decision naming the approval is authorizing's.
+- A confirmation is built only where the decision names an approval whose approved part
+  is the asked call's, and the asked call is a remember stating exactly the call's
+  statement. Otherwise none is, and the writer rules as it would on any call.
 
 **It logs stage and code-owned reason only**, never the statement (ADR-0275 §8).
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
@@ -78,14 +104,15 @@ from ai_assistant.core.types import (
     ToolFailureKind,
     ToolOutcome,
     ToolResult,
+    UserConfirmation,
 )
 from ai_assistant.orchestration.activation_state import active_state
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
-    from ai_assistant.core.protocols import MemoryWriter
-    from ai_assistant.core.types import FrozenJson, ToolCall
+    from ai_assistant.core.protocols import MemoryStore, MemoryWriter
+    from ai_assistant.core.types import AskedCall, FrozenJson, ToolCall
 
 __all__ = [
     "EPISODE_ARGUMENT",
@@ -95,6 +122,7 @@ __all__ = [
     "REMEMBER_CAPABILITY",
     "STATEMENT_ARGUMENT",
     "STATEMENT_MAX_CHARS",
+    "NeedsYou",
     "RememberCalls",
     "remembered_proposal",
     "remembered_record_id",
@@ -266,6 +294,28 @@ _WRITTEN: Final = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class NeedsYou:
+    """A call on the assistant's own records that needs the user's yes (ADR-0321 §5:5).
+
+    What a runner on acting's own-records seam answers where nothing was written
+    because what the call would write needs the user first: a remember whose statement
+    the memory writer's own policy asks about at write time (#2845). Acting reports it
+    as ``needs_you``, never as done or not done.
+
+    Declared here, beside its one producer, rather than in acting, whose seam it is
+    an answer of: acting may import this module, and this module may not import acting,
+    because the authorizing phase imports it and the phase modules are independent of
+    each other (ADR-0309 §2:3).
+
+    Attributes:
+        replaces: The assertions the question shows the call replacing, as stored:
+            what a yes retires, and nothing else. Empty where it replaces none.
+    """
+
+    replaces: tuple[SemanticMemory, ...] = ()
+
+
 def _not_done(kind: ToolFailureKind, message: str) -> ToolResult:
     return ToolResult(outcome=ToolOutcome.FAILED, failure=ToolFailure(kind=kind, message=message))
 
@@ -283,36 +333,118 @@ def _placement(at: datetime) -> Placement:
     return Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=at)
 
 
+def _shown_values(values: Mapping[str, FrozenJson]) -> dict[str, FrozenJson]:
+    """A remember's values as its question shows them: those the hub fills left out."""
+    return {key: value for key, value in values.items() if key not in REMEMBER.system_supplied}
+
+
+def _confirmed(
+    proposal: MemoryUpdateProposal, call: ToolCall, asked: AskedCall
+) -> MemoryUpdateProposal:
+    """``proposal`` carrying the confirmation a yes to ``asked`` makes (ADR-0321 §5:2).
+
+    Built only where the call runs under an approval whose approved part is
+    ``asked``'s, and ``asked`` is a remember stating exactly what the call states;
+    otherwise ``proposal`` is returned as it is, and the writer rules on it as on any
+    call. ``retires`` and the frozen ``conflicts`` are exactly ``asked.replaces``, the
+    assertions the question showed (§5:5), and ``question_key`` is the key of the
+    proposal over them (ADR-0078 §7). The provenance is untouched (§5:3).
+    """
+    decision = call.decision
+    approval = decision.approval
+    part = decision.approved_part
+    if (
+        approval is None
+        or part is None
+        or part.part != asked.part
+        or asked.tool.capability != REMEMBER_CAPABILITY
+        or _shown_values(asked.values) != _shown_values(call.request.parameters)
+    ):
+        _log.info("remember_unconfirmed", stage="acting", reason="not_the_call_approved")
+        return proposal
+    shown = tuple(str(record_id) for record_id in asked.replaces)
+    asked_against = MemoryUpdateProposal(
+        proposed=proposal.proposed,
+        rationale=proposal.rationale,
+        sensitivity=proposal.sensitivity,
+        conflicts=shown,
+    )
+    confirmation = UserConfirmation(
+        question=part,
+        question_key=asked_against.question_key,
+        confirmed_at=approval.given.at,
+        retires=shown,
+    )
+    return MemoryUpdateProposal(
+        proposed=proposal.proposed,
+        rationale=proposal.rationale,
+        sensitivity=proposal.sensitivity,
+        conflicts=shown,
+        confirmation=confirmation,
+    )
+
+
 class RememberCalls:
     """Run a remember call against the memory writer (ADR-0306 §3:3).
 
-    Structurally acting's ``OwnRecordsCalls``: acting awaits it to its end, with no
-    deadline and no cancellation, and its outcome is what the writer answered. It
-    answers ``succeeded`` where the writer wrote the belief, and ``failed`` with a
-    code-owned kind otherwise: never ``indeterminate``.
+    Structurally acting's ``OwnRecordsCalls``, and its ``ApprovedOwnRecordsCalls`` for
+    a remember that runs under a yes: acting awaits it to its end, with no deadline and
+    no cancellation, and its outcome is what the writer answered. It answers
+    ``succeeded`` where the writer wrote the belief; :class:`NeedsYou` where the writer
+    asked and every assertion the question would show replaced could be read; and
+    ``failed`` with a code-owned kind otherwise: never ``indeterminate``.
     """
 
-    def __init__(self, *, writer: MemoryWriter, now: Callable[[], datetime] = _utcnow) -> None:
+    def __init__(
+        self,
+        *,
+        writer: MemoryWriter,
+        memory: MemoryStore | None = None,
+        now: Callable[[], datetime] = _utcnow,
+    ) -> None:
         """Wire the runner to the memory write path.
 
         Args:
             writer: The memory writer, which finds conflicts, rules and persists.
+            memory: The store the writer writes to, read for the assertions a call
+                that needs you would replace (ADR-0321 §5:5). With none, a call whose
+                writer asked over any conflict is not done, as no question could show
+                what it replaces.
             now: The clock a proposal's transaction time is read from.
         """
         self._writer = writer
+        self._memory = memory
         self._now = checked_clock(now, owner="RememberCalls")
 
-    async def run(self, call: ToolCall) -> ToolResult:
+    async def run(self, call: ToolCall) -> ToolResult | NeedsYou:
         """Write the statement ``call`` carries, and say what the writer answered.
 
         Args:
             call: The authorized remember call.
 
         Returns:
-            ``succeeded`` with no output where the belief was written; ``failed``
+            ``succeeded`` with no output where the belief was written;
+            :class:`NeedsYou` where the writer asked (ADR-0321 §5:5); ``failed``
             where the call is not a remember call, carries no effect record, is
-            malformed, or the writer wrote nothing or could not write.
+            malformed, or the writer rejected it, could not write, or asked over an
+            assertion no question could show.
         """
+        return await self._run(call, None)
+
+    async def run_approved(self, call: ToolCall, asked: AskedCall) -> ToolResult | NeedsYou:
+        """Write the statement a yes approved, confirmed by that yes (ADR-0321 §5:2).
+
+        Args:
+            call: The authorized remember call, its decision naming the approval.
+            asked: The asked call the yes approved, which ``call`` was rebuilt from.
+
+        Returns:
+            What :meth:`run` answers. The proposal carries the confirmation the yes
+            makes, where the call is the one the yes approved.
+        """
+        return await self._run(call, asked)
+
+    async def _run(self, call: ToolCall, asked: AskedCall | None) -> ToolResult | NeedsYou:
         tool = call.request.tool
         effect_id = call.decision.effect
         if tool.capability != REMEMBER_CAPABILITY or effect_id is None:
@@ -331,6 +463,8 @@ class RememberCalls:
         except ValueError:
             _log.info("remember_not_done", stage="acting", reason="malformed")
             return _not_done(ToolFailureKind.INVALID_REQUEST, "the call's arguments are malformed")
+        if asked is not None:
+            proposal = _confirmed(proposal, call, asked)
         try:
             ingested = await self._writer.ingest(proposal)
         except MemoryStoreError:
@@ -339,5 +473,48 @@ class RememberCalls:
         kind = ingested.decision.kind
         if kind in _WRITTEN:
             return ToolResult(outcome=ToolOutcome.SUCCEEDED)
+        if kind is MemoryDecisionKind.ASK_USER:
+            return await self._asked(ingested.conflicts)
         _log.info("remember_not_done", stage="acting", reason=kind.value)
         return _not_done(ToolFailureKind.REFUSED, f"the memory policy ruled {kind.value}")
+
+    async def _asked(self, conflicts: Sequence[str]) -> ToolResult | NeedsYou:
+        """The writer asked: the call needs you, where the question can show what it replaces."""
+        replaced = await self._replaced(conflicts)
+        if replaced is None:
+            _log.info("remember_not_done", stage="acting", reason="replaced_not_shown")
+            return _not_done(
+                ToolFailureKind.REFUSED,
+                "the memory policy asked, over an assertion no question could show",
+            )
+        _log.info("remember_needs_you", stage="acting", reason="ask_user")
+        return NeedsYou(replaces=replaced)
+
+    async def _replaced(self, conflicts: Sequence[str]) -> tuple[SemanticMemory, ...] | None:
+        """The assertions among ``conflicts`` a question shows replaced, as stored (§5:5).
+
+        Every conflict the writer ruled against is read, and those the user asserted
+        are kept, in the writer's order. ``None`` where one cannot be shown: no store is
+        wired, the read fails, a conflict is gone so that whether it is an assertion is
+        unknown, or an assertion is not a statement.
+        """
+        ids = tuple(dict.fromkeys(str(record_id) for record_id in conflicts))
+        if not ids:
+            return ()
+        if self._memory is None:
+            return None
+        try:
+            found = await self._memory.get_many(ids)
+        except MemoryStoreError:
+            return None
+        replaced: list[SemanticMemory] = []
+        for record_id in ids:
+            record = found.get(record_id)
+            if record is None:
+                return None
+            if record.provenance.source is not MemorySource.USER_ASSERTED:
+                continue
+            if not isinstance(record, SemanticMemory):
+                return None
+            replaced.append(record)
+        return tuple(replaced)
