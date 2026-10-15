@@ -40,7 +40,11 @@ Nothing is deployed yet: the deploy waits for this milestone's acceptance run (A
 - the recipient-grant store with its listing and revoke (ADR-0313 §5:2);
 - destination trust, whose act is live although nothing reads it.
 
-Every ruling below is the owner's, from the walks of 2026-10-12 and 2026-10-15.
+Every ruling below is the owner's, from the walks of 2026-10-12 and 2026-10-15. Three points were
+agreed without objection rather than ruled outright, and the owner's acceptance confirms them:
+- §0's principle (a rule wherever the AI lacks an instinct);
+- the approval's general shape (§3:4);
+- the property that every failure ends in another question (§3:9).
 
 ## 0. The frame
 
@@ -75,6 +79,7 @@ right is care, which is planning's judgment. Planning may always check with you 
 
    - One generic renderer writes the line for every capability.
    - A test checks that it includes every argument the call sends.
+   - Later, the clean writer (§8) may replace the line.
    - Where a question carries several actions, each line is numbered, so "just the first" is easy to
      read.
 3. **What is kept.** The round records the exact calls its question asks about, with their values and
@@ -92,6 +97,9 @@ right is care, which is planning's judgment. Planning may always check with you 
      - *needs the user, but this activation cannot message them: it will not run*.
 
    These replace `_NEEDS_YOU` and its outcome text, which today say the opposite.
+   - **One line of care,** in its standing instructions: check with the user first when unsure what
+     they meant, or when a mistake would be costly. This is care, not authority (§0), and it may ask
+     even where the user's authority already covers the action.
 5. **No buttons.** Questions are ordinary messages (ADR-0307 §3:6). Voice is retired until #2889.
 
 ## 2. The answer
@@ -112,7 +120,8 @@ right is care, which is planning's judgment. Planning may always check with you 
 5. **What a reply can be:**
    - **yes** approves every part shown;
    - a **partial yes** approves only those parts;
-   - **no** approves nothing, and a later "actually, yes" still works;
+   - **no** approves nothing, and a later "actually, yes" still works. Not asking again about
+     something you refused, in the same activation, is planning's care;
    - a **change** ("make it 8") approves nothing, and planning asks again with the new values;
    - an **unclear** reply approves nothing, and the assistant asks again;
    - a **conditional yes** counts as a change, because there are no timers to act later.
@@ -156,7 +165,8 @@ right is care, which is planning's judgment. Planning may always check with you 
 7. **A yes overrides every confirm,** the outside-content stand-in's included, because the values were
    shown. **It never overrides a deny.**
 8. **If the world changed** (the slot is gone, the price differs), the call runs as approved, and a
-   failure or a different charge is reported. Nothing is substituted.
+   failure or a different charge is reported. Anything else becomes a new question. Nothing is
+   substituted.
 9. **Every failure ends in another question.** Each piece of the approval has a writer, and if any
    piece is missing the check fails toward asking again, never toward running something you did not
    approve:
@@ -209,8 +219,9 @@ without your yes.
   to a place other than the input's, when the same question path applies.
 - **No new screen.** What is waiting on you is the questions in your conversations.
   `assistant decisions`'s "asked (a question put to you)" becomes true (#3056).
-- **The deploy configures email sending,** so email is the live hub's first action in the world. Booking
-  stays the simulator, on the test hub.
+- **The deploy configures email sending,** so email is the live hub's first action in the world. The
+  owner sets the email connection and endpoint (`send_email_connection`) at the deploy, as a deploy
+  checklist step. Booking stays the simulator, on the test hub.
 
 ## 7. Acceptance before the deploy
 
@@ -233,7 +244,7 @@ without your yes.
 7. **A deny (T)** is never asked about, and planning says plainly that it is not allowed.
 8. **#2862 (T).** The original scenario and variants, run 10 to 20 times each. No invented approval
    steps, and the booking runs once after the yes. These runs decide whether the held layer (§9) is
-   needed.
+   needed, and #2862 closes when they pass.
 9. **Email (L).** "Email Sam that I'm running late" shows the full text in the exact line, and a yes
    sends it once.
 10. **The exact line (test suite)** includes every argument the call sends, for every capability.
@@ -261,15 +272,18 @@ This proposal relies on that design as follows:
 | Outgoing text that outside content cannot shape | The clean writer | Every send shows its full text and asks |
 | One web search not marking every later activation | Retiring the activation-level mark | The mark stays, failing in the safe direction |
 | A direct instruction approving without a question | The instruction path, built on the above | Every action the policy confirms asks once |
+| "Why did you suggest that?" answered from sources | The sources of findings, and citations | None |
 
 Nothing in the deploy slice reads the activation-level mark. The approval's general shape (§3:4) is
 what later kinds of approval extend.
 
 ## 9. Held
 
-**Code-written sentences for the cases with no route:** "your settings don't allow this", and "this
-needs you, but I can't ask from here". They are held until the repeated runs (§7:8) show planning's own
-wording is not enough.
+**Code-written sentences for the cases with no route** are held until the repeated runs (§7:8) show
+planning's own wording is not enough:
+- "your settings don't allow this", written into the reply;
+- "this needs you, but I can't ask from here". An activation started by a timer or an event cannot
+  message you, so this one would be kept in its episode (§6).
 
 ## 10. Changes to ratified decisions
 
@@ -291,13 +305,16 @@ wording is not enough.
 
 ## Options considered
 
-- **Code renders the whole question.** Rejected for the deploy: planning explains better. The exact
-  line keeps the guarantee that what you see is what runs.
+- **Code renders the whole question.** Rejected for the deploy: the owner preferred the model to
+  explain the important facts in its own words. The exact line keeps the guarantee that what you see
+  is what runs.
 - **The model writes the question with no exact line.** Rejected: a mistake or a steered description
   would get your yes for something other than what runs.
 - **Showing every value in custom displays, with tiers.** Rejected as over-built for now.
-- **Code guaranteeing that every needs-you call is asked about.** Rejected: the QA failures came from
-  an instruction saying no route existed. Asking is planning's call, and an unasked call is dropped.
+- **Code guaranteeing that every needs-you call is asked about.** Rejected: the model should be able
+  to ask on its own. The #2862 failures came mainly from the model having no picture of how approval
+  works here, together with an instruction saying no route existed. §1:4 addresses both. Asking is
+  planning's call, and an unasked call is dropped.
 - **A list of unanswered questions shown to understanding and planning.** Rejected: the window, recall
   and the story already show them, and messages link to their activations.
 - **Questions that open and close, or expire after a day.** Rejected: spending covers reuse, and
@@ -306,7 +323,9 @@ wording is not enough.
   activation. Stored approvals come with delegations.
 - **Reading money back, or a stakes dial.** Rejected: money is not an exception, and double-checking is
   care, not permission.
-- **A model judging whether "Sam" matches an address.** Rejected for authority: it is not a rule.
+- **Matching your words to exact values** (whether "Sam" means this address). Not needed at the deploy,
+  because a yes approves the values it was shown. It belongs to the instruction path. Resolving names
+  without asking waits until the friction shows.
 - **Recipient grants redone now.** Rejected: delegations replace them.
 
 ## What it leaves open
@@ -324,8 +343,9 @@ wording is not enough.
 
 ## Delivery, roughly
 
-One ADR converts this proposal. Its number is the next free one, 0321 or higher, taken after a scan at
-conversion. The lanes after it are a sketch:
+One ADR converts this proposal: ADR-0321, assigned after a scan. The work is tracked as milestone M44,
+with an acceptance issue holding §7's checks and a batch issue for the lanes. The authority design
+session dispatches it. The lanes after the ADR are a sketch:
 
 1. **Types:**
    - the round's asked calls;
