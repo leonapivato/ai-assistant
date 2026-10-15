@@ -104,6 +104,7 @@ them.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -1975,7 +1976,8 @@ def exact_line(
 
     One renderer for every capability. It names the capability and lists every argument
     the call sends, in the order the call carries them, each value as its JSON text, so
-    a string is quoted whole and a line break in it stays on the line. It leaves out the
+    a string is quoted whole and a line break in it stays on the line; a name that is not
+    a plain identifier is quoted the same way. It leaves out the
     arguments the hub fills in, ``filled`` (the declaration's ``system_supplied``), and,
     wherever the call carries them, the *looking for* argument and the *deliberate
     repeat* mark. Where the message asks about several calls the line starts with its
@@ -1993,21 +1995,40 @@ def exact_line(
     """
     left_out = _NEVER_SHOWN | frozenset(filled)
     arguments = [
-        f"{name}: {_json_text(value)}"
+        f"{_name_text(name)}: {_json_text(value)}"
         for name, value in call.values.items()
         if name not in left_out
     ]
     if replacing:
-        arguments.append("replacing: " + ", ".join(_json_text(one) for one in replacing))
-    line = str(call.tool.capability)
+        arguments.append("replacing " + ", ".join(_json_text(one) for one in replacing))
+    line = _name_text(str(call.tool.capability))
     if arguments:
         line = f"{line} — " + "; ".join(arguments)
     return f"{call.part}. {line}" if numbered else line
 
 
+#: A name an exact line shows bare: one that can carry no line break, quote or
+#: delimiter of the line's own.
+_BARE_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _name_text(name: str) -> str:
+    """A capability's or an argument's name as an exact line shows it.
+
+    Bare where it is a plain identifier, and otherwise as its JSON text, so a name can
+    never start another line or pass for a delimiter, a value or another argument.
+    """
+    return name if _BARE_NAME.fullmatch(name) else _json_text(name)
+
+
 def _json_text(value: object) -> str:
     """A value as its JSON text, on one line, with its characters as written."""
     return json.dumps(_thawed(value), ensure_ascii=False)
+
+
+def _canonical(value: object) -> str:
+    """A model's or a value's JSON form with its keys sorted, for comparing as JSON."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _filled(capabilities: Sequence[ToolDefinition], call: AskedCall) -> frozenset[str]:
@@ -2040,21 +2061,23 @@ def _same_call(asked: AskedCall, request: ActionRequest) -> bool:
 def _same_request(one: ActionRequest, other: ActionRequest) -> bool:
     """Whether two requests are one call: the same tool, values and binding (§4:4).
 
-    Compared as JSON, never by Python equality, which holds ``true`` equal to ``1``: the
-    values by the request's own canonical digest, the tool and the binding by their
-    JSON forms.
+    Compared as JSON, never by Python equality, which holds ``true`` equal to ``1``, and
+    never by key order, which a rebuilt declaration need not keep: the values by the
+    request's own canonical digest, the tool and the binding by their JSON forms with
+    their keys sorted.
     """
     return (
         one.parameters_digest == other.parameters_digest
-        and one.tool.model_dump_json() == other.tool.model_dump_json()
+        and _canonical(one.tool.model_dump(mode="json"))
+        == _canonical(other.tool.model_dump(mode="json"))
         and _binding_json(one) == _binding_json(other)
     )
 
 
 def _binding_json(request: ActionRequest) -> str | None:
-    """A request's binding as its JSON form, or ``None`` where it has none."""
+    """A request's binding as its sorted JSON form, or ``None`` where it has none."""
     binding = request.egress_binding
-    return None if binding is None else binding.model_dump_json()
+    return None if binding is None else _canonical(binding.model_dump(mode="json"))
 
 
 def _shown_replaced(replaces: Sequence[SemanticMemory]) -> tuple[SemanticMemory, ...]:
