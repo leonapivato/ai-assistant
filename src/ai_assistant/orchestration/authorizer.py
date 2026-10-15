@@ -1168,7 +1168,7 @@ class AuthorizingStage:
             # ADR-0321 §6:1: the claim would refuse it as already done; it needs you.
             state.note(one.call, "repeat", Verdict.NEEDS_YOU.value, _UNKNOWN_REPEAT)
             verdict = replace(verdict, verdict=Verdict.NEEDS_YOU, reason=_UNKNOWN_REPEAT)
-        if verdict.verdict is Verdict.NEEDS_YOU:
+        if verdict.verdict is not Verdict.NOT_DONE:
             verdict = await self._needing_you(
                 one.call, verdict, ruled.request, state, repeat=repeat
             )
@@ -1190,11 +1190,15 @@ class AuthorizingStage:
         *,
         repeat: bool,
     ) -> CallVerdict:
-        """What a needs-you verdict carries for asking (ADR-0321 §2:8, §4:11).
+        """The repeat check, and what a needs-you verdict carries for asking (§2:8, §4:11).
 
-        The request as ruled on and the repeat mark, which the round that asks records;
-        and, where the call is one the user was already asked about and has not answered,
-        that question's part, so it is not asked about again.
+        A call identical to one the user was already asked about and has not answered
+        goes back as already asked and waiting on them, carrying that question's part,
+        whether the fresh checks would allow it or need the user: a call allowed now
+        that ran while its question waited would run again on the yes that answers it.
+        A refusal stays a refusal, and a call that runs under an approval never reaches
+        here. A needs-you verdict carries the request as ruled on and the repeat mark,
+        which the round that asks records; an allowed one is returned as it was.
         """
         waiting = await self._waiting(request, state)
         if waiting is not None:
@@ -1202,10 +1206,14 @@ class AuthorizingStage:
             state.note(call, "asked", "waiting", _ALREADY_ASKED)
             return replace(
                 verdict,
+                verdict=Verdict.NEEDS_YOU,
+                reason=verdict.reason or _ALREADY_ASKED,
                 request=request,
                 deliberate_repeat=repeat,
                 already_asked=waiting,
             )
+        if verdict.verdict is not Verdict.NEEDS_YOU:
+            return verdict
         return replace(verdict, request=request, deliberate_repeat=repeat)
 
     async def _selected(self, call: ProposedCall, state: _Round) -> _Selected | CallVerdict:

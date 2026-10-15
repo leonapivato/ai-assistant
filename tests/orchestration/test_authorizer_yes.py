@@ -897,6 +897,41 @@ async def test_values_equal_in_python_but_not_as_json_are_not_waiting(
     assert verdict.already_asked is None
 
 
+async def test_a_call_allowed_now_but_still_waiting_on_you_does_not_run() -> None:
+    """§4:11: any proposed call identical to one waiting goes back as already asked.
+
+    Run while its question waited, it would run again on the yes that answers it.
+    """
+    hub = _Hub(policy=FakeActionPolicy(confirm_at=None))
+    await hub.asked(_asked(_LOOKUP, q="trains to Lyon"), outside=True)
+    await _linked(hub, _ASKING, _YES)
+
+    plain = await hub.authorize(_round((_call("c1", "lookup", q="trains to Lyon"), None)))
+    unauthorized = await hub.authorize(
+        _round((_call("c1", "lookup", q="trains to Lyon"), _PART), yes=_yes(authority=False))
+    )
+
+    for decided in (plain, unauthorized):
+        (verdict,) = decided.verdicts
+        assert verdict.verdict is Verdict.NEEDS_YOU
+        assert verdict.already_asked == _PART
+        assert verdict.reason is not None
+        assert verdict.request is not None
+        assert decided.allowed == ()
+
+
+async def test_a_refusal_stays_a_refusal_while_a_question_waits() -> None:
+    hub = _Hub(policy=FakeActionPolicy(deny_at=RiskLevel.MEDIUM))
+    await hub.asked(_asked())
+    await _linked(hub, _ASKING, _YES)
+
+    decided = await hub.authorize(_round((_call("c1", "book", q="table for two at 8"), None)))
+
+    (verdict,) = decided.verdicts
+    assert verdict.verdict is Verdict.NOT_DONE
+    assert verdict.already_asked is None
+
+
 _REORDERED: Final = _tool(
     "book",
     parameters_schema={
