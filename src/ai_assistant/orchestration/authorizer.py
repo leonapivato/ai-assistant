@@ -357,7 +357,9 @@ class RoundToAuthorize:
 
     Raises:
         ValueError: If two calls share a call id, or a call is not one the round
-            proposed under that id and name.
+            proposed under that id and name. A call proposed by an approved action's
+            label is recorded under the label's tool and handed on as its capability's
+            call (ADR-0321 §4:2), so it is matched by its id alone.
     """
 
     activation_id: str
@@ -376,7 +378,8 @@ class RoundToAuthorize:
             msg = "a round's calls are authorized once each"
             raise ValueError(msg)
         for one in self.calls:
-            if proposed.get(one.call.call_id) != one.call.name:
+            named = proposed.get(one.call.call_id)
+            if named is None or (one.approved_part is None and named != one.call.name):
                 msg = "authorizing checks only the calls the round proposed"
                 raise ValueError(msg)
 
