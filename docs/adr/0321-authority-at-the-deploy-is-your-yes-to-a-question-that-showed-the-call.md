@@ -1,6 +1,6 @@
 # 321. Authority at the deploy is your yes to a question that showed the call
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-15
 - Scope: the authority milestone, M44 ([milestone #11](https://github.com/leonapivato/ai-assistant/milestone/11)), acceptance [#3058](https://github.com/leonapivato/ai-assistant/issues/3058), batch [#3059](https://github.com/leonapivato/ai-assistant/issues/3059): how the assistant asks about a call that needs you, how your answer becomes permission, and how the call is then checked and run. It is the smallest version the deploy waits for (ADR-0309 §6).
 - Dependency: the phases as ADR-0306 to ADR-0309 and ADR-0312 to ADR-0320 decide them, all Accepted and built on `main` at `2ff6298c`.
