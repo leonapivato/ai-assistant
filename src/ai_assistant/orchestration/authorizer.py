@@ -764,10 +764,16 @@ def _same_values(one: FrozenJsonMapping, other: FrozenJsonMapping) -> bool:
 
 
 def _same_model(one: BaseModel | None, other: BaseModel | None) -> bool:
-    """Whether two declarations or bindings are the same, by value and by their JSON."""
+    """Whether two declarations or bindings are the same, by value and by their JSON.
+
+    Their JSON compared by its canonical encoding, as :func:`_same_values` compares
+    values: a ``True`` against a ``1`` differs, and an object's key order does not.
+    """
     if one is None or other is None:
         return one is None and other is None
-    return one == other and one.model_dump_json() == other.model_dump_json()
+    return one == other and canonical_json_bytes(
+        cast("FrozenJson", one.model_dump(mode="json"))
+    ) == canonical_json_bytes(cast("FrozenJson", other.model_dump(mode="json")))
 
 
 def _detached_yes(given: YesContext | None) -> YesContext | None:
