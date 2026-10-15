@@ -1197,11 +1197,17 @@ _ALREADY_ASKED: Final = (
 #: A call that needs the user but whose request was not handed on cannot be shown exactly,
 #: so it is never asked about (§2:5).
 _UNSHOWABLE: Final = "needs the user, and it cannot be asked about, so it will not run"
-#: §5:5: a replaced assertion resting on outside content, whose fact planning is not shown.
-_REPLACED_OUTSIDE: Final = (
-    "a remembered fact resting on outside content, not shown to you; the exact details "
-    "show it to the user"
-)
+
+
+def _not_replacing(count: int) -> str:
+    """What planning is told of the replaced assertions that rest on outside content."""
+    facts = "remembered fact" if count == 1 else "remembered facts"
+    return (
+        f"{count} {facts} resting on outside content, which this question cannot show "
+        "and a yes will not replace"
+    )
+
+
 #: §4:2: how an approved action came to be approved.
 _APPROVED_BY: Final = "by the user's yes in this input, to the question that showed it"
 
@@ -1756,10 +1762,27 @@ class _Request:
             shown["outcome"] = _NEEDS_YES
             shown["ask_as"] = reference
             self.askable[reference] = outcome
-            if outcome.replaces:
-                shown["replacing"] = [self._replaced(record) for record in outcome.replaces]
+            shown |= self._replacing(outcome.replaces)
         if outcome.reason is not None:
             shown["because"] = outcome.reason
+        return shown
+
+    def _replacing(self, replaces: Sequence[SemanticMemory]) -> dict[str, object]:
+        """What a remember's question would show it replacing, as planning may see it.
+
+        Each assertion whose source is not outside is shown by its fact under its M
+        label, as a found record is. One resting on outside content is not shown here
+        and is not shown in the question either (ADR-0307 §9:2): the question's text is
+        the round's, which every later round and the place window replay. So it is not
+        retired on a yes (ADR-0321 §5:5), and planning is told so by count.
+        """
+        shown: dict[str, object] = {}
+        kept = _shown_replaced(replaces)
+        if kept:
+            shown["replacing"] = [self._memory(record) for record in kept]
+        withheld = len({record.id for record in replaces} - {record.id for record in kept})
+        if withheld:
+            shown["not_replacing"] = _not_replacing(withheld)
         return shown
 
     def _asked_earlier(self, request: ActionRequest) -> tuple[int, AskedCall] | None:
@@ -1768,16 +1791,6 @@ class _Request:
             if _same_call(asked, request):
                 return number, asked
         return None
-
-    def _replaced(self, record: SemanticMemory) -> dict[str, object]:
-        """An assertion a remember's question shows replaced, as planning may be shown it.
-
-        Its fact is shown only where its source is not outside, as a found record's is
-        (ADR-0307 §9:2); the exact details show the user every one.
-        """
-        if rests_on_recorded_external_content(record.provenance):
-            return {"item": _REPLACED_OUTSIDE}
-        return self._memory(record)
 
     def _approved(self, one: ApprovedAction) -> dict[str, object]:
         """An approved action under its A label, with the details its question showed."""
@@ -2025,12 +2038,37 @@ def _same_call(asked: AskedCall, request: ActionRequest) -> bool:
 
 
 def _same_request(one: ActionRequest, other: ActionRequest) -> bool:
-    """Whether two requests are one call: the same tool, values and binding (§4:4)."""
+    """Whether two requests are one call: the same tool, values and binding (§4:4).
+
+    Compared as JSON, never by Python equality, which holds ``true`` equal to ``1``: the
+    values by the request's own canonical digest, the tool and the binding by their
+    JSON forms.
+    """
     return (
-        one.tool == other.tool
-        and one.parameters == other.parameters
-        and one.egress_binding == other.egress_binding
+        one.parameters_digest == other.parameters_digest
+        and one.tool.model_dump_json() == other.tool.model_dump_json()
+        and _binding_json(one) == _binding_json(other)
     )
+
+
+def _binding_json(request: ActionRequest) -> str | None:
+    """A request's binding as its JSON form, or ``None`` where it has none."""
+    binding = request.egress_binding
+    return None if binding is None else binding.model_dump_json()
+
+
+def _shown_replaced(replaces: Sequence[SemanticMemory]) -> tuple[SemanticMemory, ...]:
+    """The replaced assertions a question shows: each once, none resting on outside content.
+
+    A question's text is the round's, replayed to every later round and, once written,
+    in the place window, so an assertion resting on outside content is not shown in it
+    (ADR-0307 §9:2), and so it is not retired on the yes (ADR-0321 §5:5).
+    """
+    kept: dict[str, SemanticMemory] = {}
+    for record in replaces:
+        if not rests_on_recorded_external_content(record.provenance):
+            kept.setdefault(record.id, record)
+    return tuple(kept.values())
 
 
 def _approved_id(part: QuestionPart) -> str:
@@ -2054,7 +2092,8 @@ def _asked_calls(names: Sequence[str], askable: Mapping[str, CallOutcome]) -> tu
     call, by tool, values and binding, as a name before it: the question shows a call
     once. A call whose values and binding make no request its declaration admits cannot
     be recorded as asked about (§2:8), and is dropped as well. A remember's replaced
-    assertions are recorded by id and shown by statement, exactly the same ones (§5:5).
+    assertions are recorded by id and shown by statement, exactly the same ones (§5:5),
+    which are those :func:`_shown_replaced` keeps.
     """
     chosen: list[tuple[ActionRequest, CallOutcome]] = []
     for name in names:
@@ -2069,7 +2108,7 @@ def _asked_calls(names: Sequence[str], askable: Mapping[str, CallOutcome]) -> tu
         chosen.append((request, outcome))
     asked: list[_Asked] = []
     for request, outcome in chosen:
-        replaced = {record.id: record.fact for record in outcome.replaces}
+        replaced = {record.id: record.fact for record in _shown_replaced(outcome.replaces)}
         try:
             call = AskedCall(
                 part=len(asked) + 1,
