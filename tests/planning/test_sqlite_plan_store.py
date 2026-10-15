@@ -1297,12 +1297,15 @@ async def test_a_spent_part_whose_columns_disagree_with_its_record_is_refused(
     """ADR-0321 §4:9: the promoted part key is reconciled with the record on every read.
 
     The spend and ``part_effects`` select on ``part_round`` and ``part_number``, so a
-    column an outside writer changed would hide a spent part from the claim and let a
-    second yes run; every read refuses the row as ``PlanningError`` instead.
+    column an outside writer changed or cleared would hide a spent part from the claim
+    and let a second yes run. The row is found by its record as well, and every read,
+    the claim's own included, refuses it as ``PlanningError`` instead.
     """
     path = tmp_path / "plans.db"
     store = SqlitePlanStore(path=path, now=_fixed_now)
-    spent = _acted("e1").model_copy(update={"part": QuestionPart(round="q-round", part=1)})
+    part = QuestionPart(round="q-round", part=1)
+    spent = _acted("e1").model_copy(update={"part": part})
+    again = _acted("e2", activation="act-2").model_copy(update={"part": part})
     try:
         await store.claim_activation_effect(spent, match=None)
         with sqlite3.connect(path) as conn:
@@ -1311,6 +1314,12 @@ async def test_a_spent_part_whose_columns_disagree_with_its_record_is_refused(
             await store.activation_effects(["act-1"])
         with pytest.raises(PlanningError, match="the store is corrupt"):
             await store.export()
+        with pytest.raises(PlanningError, match="the store is corrupt"):
+            await store.part_effects([part])
+        with pytest.raises(PlanningError, match="the store is corrupt"):
+            await store.claim_activation_effect(again, match=None)
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("SELECT id FROM activation_effects").fetchall() == [("e1",)]
     finally:
         store.close()
 

@@ -197,6 +197,24 @@ def test_an_asked_calls_refusal_renders_none_of_its_values() -> None:
     assert "secret-recipient" not in str(caught.value)
 
 
+def test_a_round_and_its_record_render_none_of_an_asked_calls_values() -> None:
+    """ADR-0145 §8: pydantic renders an error by the model validated, so the round and
+    the processing record holding it hide their input too."""
+    asked = {"part": 1, "tool": _tool().model_dump(), "values": {"to": "kept@secret.example"}}
+    round_ = {"id": "q-round", "recorded_at": _AT.isoformat(), "asked": [asked]}
+    record = {
+        "activation_id": "act-1",
+        "started_at": _AT.isoformat(),
+        "trigger": {"never": "read"},
+        "rounds": [round_],
+    }
+
+    for model, data in ((PlanningRound, round_), (EpisodeProcessingRecord, record)):
+        with pytest.raises(ValidationError) as caught:
+            model.model_validate(data)
+        assert "kept@secret.example" not in str(caught.value), model.__name__
+
+
 def test_only_a_call_not_safe_to_repeat_is_a_deliberate_repeat() -> None:
     """ADR-0306 §2:9: the mark is offered only where a capability is not safe to repeat."""
     assert _asked(deliberate_repeat=True).deliberate_repeat is True

@@ -906,12 +906,13 @@ def _approval(*parts: int, yes: str = "act-1") -> Approval:
     )
 
 
-def _approved(
+def _approved(  # noqa: PLR0913 — the call's name, its two ids, its part, its yes and its mark
     name: str,
     *,
     decision: str = "d1",
     effect: str | None = "e1",
     part: int = 1,
+    yes: str = "act-1",
     deliberate_repeat: bool = False,
     **overrides: Any,
 ) -> AuthorizedCall:
@@ -925,7 +926,7 @@ def _approved(
         id=decision,
         decided_at=_AT,
         effect=effect,
-        approval=_approval(part),
+        approval=_approval(part, yes=yes),
         approved_part=QuestionPart(round="q1", part=part),
     )
     return AuthorizedCall(
@@ -964,6 +965,26 @@ def test_a_call_under_an_approval_naming_no_record_is_refused() -> None:
         _approved("lookup", effect=None)
 
 
+async def test_an_approval_given_to_another_activation_runs_nothing() -> None:
+    """§4:1: no activation but the yes's own uses its approval; nothing is claimed."""
+    plans = FakePlanStore(now=_now)
+    invoker = _Invoker()
+
+    acted = await _stage(plans, invoker).act(
+        held=HeldResults(),
+        authorized=AuthorizedRound(
+            activation_id="act-2", round_id="r2", calls=(_approved("book"),)
+        ),
+    )
+
+    assert acted.calls[0].outcome is ActedOutcome.NOT_DONE
+    assert acted.calls[0].reason is not None
+    assert "another activation" in acted.calls[0].reason
+    assert invoker.calls == []
+    assert await plans.activation_effects(["act-1", "act-2"]) == ()
+    assert await plans.part_effects([QuestionPart(round="q1", part=1)]) == ()
+
+
 async def test_a_second_yes_to_one_part_does_not_run_it_again() -> None:
     """§4:9, §8:1: a part is spent once, and its second claim comes back not done."""
     plans = FakePlanStore(now=_now)
@@ -975,7 +996,7 @@ async def test_a_second_yes_to_one_part_does_not_run_it_again() -> None:
         authorized=AuthorizedRound(
             activation_id="act-2",
             round_id="r2",
-            calls=(_approved("book", decision="d2", effect="e2"),),
+            calls=(_approved("book", decision="d2", effect="e2", yes="act-2"),),
         ),
     )
 

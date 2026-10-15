@@ -4076,7 +4076,11 @@ class PlanningRound(BaseModel):
             order.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    # The values the round keeps, its proposed calls' arguments and its asked calls'
+    # values, are the user's Tier 1 arguments, which ActionRequest keeps out of its
+    # validation errors (ADR-0145 §8). Pydantic renders an error by the configuration of
+    # the model validated, never a nested one's, so the round hides its input itself.
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     id: Identifier
     follows: Identifier | None = None
     recorded_at: UtcInstant
@@ -4210,7 +4214,10 @@ class EpisodeProcessingRecord(BaseModel):
     validate here.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    # Its rounds keep the user's arguments, which the round keeps out of its own
+    # validation errors (ADR-0145 §8, :class:`PlanningRound`); a record validated whole
+    # renders by its own configuration, so it hides its input too.
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     schema_version: Literal[11] = 11
     activation_id: Identifier
     started_at: UtcInstant
@@ -11929,7 +11936,8 @@ class AskedCall(BaseModel):
     """
 
     # The values are the user's Tier 1 arguments, which ActionRequest keeps out of its
-    # validation errors (ADR-0145 §8); this record keeps them out of its own too.
+    # validation errors (ADR-0145 §8); this record keeps them out of its own too, and
+    # the round and the processing record that hold it out of theirs.
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     part: int = Field(strict=True, ge=1, le=QUESTION_PART_MAX)
