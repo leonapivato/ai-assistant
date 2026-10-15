@@ -4,11 +4,11 @@ The dependency-free implementation of the planning contract. It keeps the stop
 records and acting's effect records in process-local containers, so a consumer can
 be built against a real store without a data directory.
 
-It implements the six members the phases use, and none that ADR-0309 §5 retires: the
-stop record (ADR-0297 §1), the activation effect records (ADR-0306 §6), and the
-ADR-0004 data-rights operations (``export``/``clear``). It is **not persistent**: the
-contract is resumable, this implementation is not, and that gap is named in
-ADR-0014 §5 rather than hidden.
+It implements the seven members the phases use, and none that ADR-0309 §5 retires: the
+stop record (ADR-0297 §1), the activation effect records (ADR-0306 §6) and their read
+by question part (ADR-0321 §4:9), and the ADR-0004 data-rights operations
+(``export``/``clear``). It is **not persistent**: the contract is resumable, this
+implementation is not, and that gap is named in ADR-0014 §5 rather than hidden.
 :class:`~ai_assistant.planning.sqlite_store.SqlitePlanStore` is the durable one.
 """
 
@@ -26,6 +26,7 @@ from ai_assistant.planning.activation_effects import (
     finished,
     matched_activations,
     requested_activations,
+    requested_parts,
     revalidated_claim,
 )
 from ai_assistant.planning.stops import revalidated_activation_id
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import ActivationEffect, ToolOutcome
+    from ai_assistant.core.types import ActivationEffect, QuestionPart, ToolOutcome
 
 
 def _utcnow() -> datetime:
@@ -119,6 +120,8 @@ class InMemoryPlanStore:
                     if held.activation_id in named
                 ]
             ),
+            spent=record.part is not None
+            and any(held.part == record.part for held in self._activation_effects.values()),
         )
         if answer is ActivationEffectClaim.CLAIMED:
             self._activation_effects[record.id] = record
@@ -154,6 +157,19 @@ class InMemoryPlanStore:
             held.model_copy(deep=True)
             for held in self._activation_effects.values()
             if held.activation_id in named
+        )
+
+    async def part_effects(self, parts: Sequence[QuestionPart], /) -> tuple[ActivationEffect, ...]:
+        """Return the records carrying any of ``parts``, in claim order (ADR-0321 §4:9).
+
+        Raises:
+            PlanningError: If ``parts`` holds anything but a ``QuestionPart``.
+        """
+        named = set(requested_parts(parts))
+        return tuple(
+            held.model_copy(deep=True)
+            for held in self._activation_effects.values()
+            if held.part is not None and held.part in named
         )
 
     async def export(self) -> PlanExport:

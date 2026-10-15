@@ -6,11 +6,12 @@ real, contract-correct implementation *without importing the planning subsystem'
 internals*
 (CLAUDE.md golden rule 1).
 
-It holds the six members the phases use, and none that ADR-0309 §5 retires: the
-stop record (ADR-0297 §1), acting's effect records (ADR-0306 §6), ``export`` and
-``clear``. It deliberately re-implements their rules rather than importing
-``ai_assistant.planning``: importing it would defeat the purpose, since a
-consumer's tests would then pull in the very subsystem the fake stands in for.
+It holds the seven members the phases use, and none that ADR-0309 §5 retires: the
+stop record (ADR-0297 §1), acting's effect records (ADR-0306 §6) and their read by
+question part (ADR-0321 §4:9), ``export`` and ``clear``. It deliberately
+re-implements their rules rather than importing ``ai_assistant.planning``: importing
+it would defeat the purpose, since a consumer's tests would then pull in the very
+subsystem the fake stands in for.
 The shared conformance suite is what keeps the two implementations honest — both
 must pass it, so a divergence is a test failure rather than a latent surprise.
 
@@ -36,6 +37,7 @@ from ai_assistant.core.types import (
     ActivationEffectClaim,
     Identifier,
     PlanExport,
+    QuestionPart,
     ToolOutcome,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
@@ -103,7 +105,11 @@ def _named_activations(match: object) -> tuple[str, ...] | None:
 
 
 def _refuses_as_done(held: ActivationEffect, effect: ActivationEffect, *, deliberate: bool) -> bool:
-    """Whether ``held`` refuses ``effect`` as already done (ADR-0306 §5:9, §5:11)."""
+    """Whether ``held`` refuses ``effect`` as already done (ADR-0306 §5:9, §5:11).
+
+    A deliberate repeat under an approval passes an unknown or unwritten outcome
+    (ADR-0321 §6:2).
+    """
     if not (held.is_call and effect.is_call):
         return False
     if (held.capability, held.values_digest) != (effect.capability, effect.values_digest):
@@ -112,7 +118,25 @@ def _refuses_as_done(held: ActivationEffect, effect: ActivationEffect, *, delibe
         return False
     if held.outcome is ToolOutcome.SUCCEEDED:
         return not deliberate
-    return True
+    return not (deliberate and effect.part is not None)
+
+
+def _named_parts(parts: object) -> tuple[QuestionPart, ...]:
+    """Return ``parts`` as the detached question parts a read names, or refuse them.
+
+    Raises:
+        PlanningError: If ``parts`` is not a list or tuple of ``QuestionPart`` values.
+    """
+    if not isinstance(parts, (list, tuple)) or not all(
+        isinstance(one, QuestionPart) for one in parts
+    ):
+        msg = "part_effects reads a sequence of QuestionPart values (ADR-0321 §4:9)"
+        raise PlanningError(msg)
+    try:
+        return tuple(dict.fromkeys(QuestionPart.model_validate(one.model_dump()) for one in parts))
+    except ValidationError as exc:
+        msg = f"a question part to read does not validate: {exc}"
+        raise PlanningError(msg) from exc
 
 
 def _finished_effect(
@@ -236,8 +260,8 @@ class FakePlanStore:
     ) -> ActivationEffectClaim:
         """Claim one effect of an activation by writing its record (ADR-0306 §6:2).
 
-        The stop, the id, the backstop and the write are decided under the modelled
-        resource, with no ``await`` between.
+        The stop, the id, the spend, the backstop and the write are decided under the
+        modelled resource, with no ``await`` between.
 
         Raises:
             ClaimStopped: If the store holds a stop record for the activation.
@@ -253,6 +277,10 @@ class FakePlanStore:
             if record.id in self._activation_effects:
                 msg = f"the plan store already holds activation effect {record.id}"
                 raise PlanningError(msg)
+            if record.part is not None and any(
+                held.part == record.part for held in self._activation_effects.values()
+            ):
+                return ActivationEffectClaim.ALREADY_USED
             if named is not None and any(
                 _refuses_as_done(held, record, deliberate=deliberate_repeat)
                 for held in self._activation_effects.values()
@@ -305,6 +333,20 @@ class FakePlanStore:
                 held.model_copy(deep=True)
                 for held in self._activation_effects.values()
                 if held.activation_id in named
+            )
+
+    async def part_effects(self, parts: Sequence[QuestionPart], /) -> tuple[ActivationEffect, ...]:
+        """Return the records carrying any of ``parts``, in claim order (ADR-0321 §4:9).
+
+        Raises:
+            PlanningError: If ``parts`` holds anything but a ``QuestionPart``.
+        """
+        named = set(_named_parts(parts))
+        async with self._resource.held():
+            return tuple(
+                held.model_copy(deep=True)
+                for held in self._activation_effects.values()
+                if held.part is not None and held.part in named
             )
 
     async def export(self) -> PlanExport:

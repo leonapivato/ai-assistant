@@ -54,6 +54,7 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     PreferenceMemory,
     Provenance,
+    QuestionPart,
     UserConfirmation,
 )
 from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor
@@ -180,7 +181,7 @@ def _confirmed_proposal(record: MemoryRecord) -> MemoryUpdateProposal:
         proposed=record,
         rationale="because",
         confirmation=UserConfirmation(
-            deferral_id="deferral-1",
+            question=QuestionPart(round="deferral-1", part=1),
             question_key=unconfirmed.question_key,
             confirmed_at=_WHEN,
         ),

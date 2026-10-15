@@ -2592,31 +2592,54 @@ class EgressBinderContract(ABC):
         assert bound.binding.closed_loop is True
         assert bound.binding.forecast_reach is True
 
-    async def test_rebind_leaves_forecast_reach_at_its_restrictive_default(
+    async def test_rebind_transcribes_forecast_reach_so_an_approved_forecast_read_rebinds(
         self, binder: EgressBinder
     ) -> None:
-        """ADR-0260 §11: ``rebind`` "transcribes nothing new, because no forecast binding
-        is ever rebound".
+        """ADR-0321 §4:16: ``rebind`` takes ``forecast_reach`` from the approved binding.
 
-        §11 mints **no park** for a forecast read — "ADR-0244's park is a ``CONFIRM``
-        on a **search**, and nothing here widens it" — so "a forecast read ruled
-        ``CONFIRM`` is recorded, is not made, is not parked". What ``rebind`` rebuilds
-        is therefore always "a ``CarriedProvenance`` for a **search** binding, where
-        ``forecast_reach``'s restrictive default is the correct value", and ADR-0152
-        §7's and ADR-0247 §7's closed transcription count stays at **four**.
+        "``EgressBinder.rebind`` takes ``forecast_reach`` from the approved binding, as
+        it takes ``closed_loop``, so an approved forecast read rebinds equal to the
+        binding that was shown" — the fifth transcription ADR-0260 §11:7 left to the
+        decision that rebinds a forecast binding.
 
-        The input is the park ADR-0247 §12's Arm E names, so the case says the
-        transcription count did not quietly become five: the re-derived binding carries
-        ``closed_loop`` transcribed from ``approved`` and ``forecast_reach`` defaulted,
-        and equals the approved binding — which is what kept the parked read's answer
-        from being ``OPERATION_CHANGED`` (#2232) until it retired at the cutover
-        (ADR-0319). What fails it is a ``rebind`` that **invents** the fact: any value
-        but ``False`` on this path derives a binding unequal to the recorded one, and
-        would have refused every park a deployment could hold. On the
-        parks §11 admits, transcribing and defaulting are indistinguishable by
-        construction, so the case pins the equality rather than claiming to tell them
-        apart — and §14 defers the resumable forecast park, naming the ADR that would
-        owe the fifth transcription if one were ever minted.
+        The input is a forecast read at the configured forecast pair whose binding
+        carries the fact ``True``. A ``rebind`` that defaulted the fact, as the
+        ``False`` literal this seam used to pass did, derives ``False``, compares
+        unequal to the binding the user was shown, and refuses the call they approved.
+        """
+        forecaster = forecast_tool()
+        self.register_egress(
+            binder, forecaster, reference=FORECAST_REFERENCE, identity=FORECAST_IDENTITY
+        )
+        parameters: dict[str, FrozenJson] = {"origin": FORECAST_ORIGIN}
+        shown = await binder.bind(
+            forecaster,
+            parameters=parameters,
+            provenance=CarriedProvenance(
+                spans={},
+                planned_with_external_content=False,
+                coverage=SpanCoverage.NOT_COVERED,
+                forecast_reach=True,
+            ),
+        )
+        assert shown is not None
+        assert shown.binding.forecast_reach is True
+
+        again = await binder.rebind(forecaster, parameters=parameters, approved=shown.binding)
+
+        assert again is not None
+        assert again.binding.forecast_reach is True, "transcribed from ``approved``"
+        assert again.binding == shown.binding, "ADR-0152 §7's equality holds on this field"
+
+    async def test_rebind_leaves_a_binding_without_forecast_reach_without_it(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0321 §4:16's other half: a binding carrying ``False`` rebinds ``False``.
+
+        The search park ADR-0247 §12's Arm E names carries ``closed_loop`` and not
+        ``forecast_reach``, and the re-derived binding equals it on both. A seam that
+        hard-coded either value of ``forecast_reach`` passes one of this case and the
+        one above and fails the other; transcribing passes both.
         """
         searcher = https_tool()
         self.register_egress(binder, searcher)

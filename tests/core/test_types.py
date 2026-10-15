@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     PreferenceMemory,
     ProceduralMemory,
     Provenance,
+    QuestionPart,
     Role,
     SemanticMemory,
     UserConfirmation,
@@ -1281,13 +1282,24 @@ def _ask() -> MemoryDecision:
 def test_a_user_confirmation_requires_a_real_digest_and_a_named_question() -> None:
     proposal = MemoryUpdateProposal(proposed=_semantic("1"), rationale="because")
     confirmation = UserConfirmation(
-        deferral_id="d1", question_key=proposal.question_key, confirmed_at=_WHEN, retires=("r1",)
+        question=QuestionPart(round="d1", part=1),
+        question_key=proposal.question_key,
+        confirmed_at=_WHEN,
+        retires=("r1",),
     )
     assert confirmation.retires == ("r1",)
     with pytest.raises(ValidationError):
-        UserConfirmation(deferral_id="d1", question_key="not-a-digest", confirmed_at=_WHEN)
+        UserConfirmation(
+            question=QuestionPart(round="d1", part=1),
+            question_key="not-a-digest",
+            confirmed_at=_WHEN,
+        )
     with pytest.raises(ValidationError):
-        UserConfirmation(deferral_id="  ", question_key=proposal.question_key, confirmed_at=_WHEN)
+        UserConfirmation(
+            question=QuestionPart(round="  ", part=1),
+            question_key=proposal.question_key,
+            confirmed_at=_WHEN,
+        )
 
 
 def test_a_secret_tier_proposal_cannot_carry_a_confirmation() -> None:
@@ -1297,7 +1309,9 @@ def test_a_secret_tier_proposal_cannot_carry_a_confirmation() -> None:
     # so it is unconstructable rather than merely refused downstream.
     proposal = MemoryUpdateProposal(proposed=_semantic("1"), rationale="because")
     confirmation = UserConfirmation(
-        deferral_id="d1", question_key=proposal.question_key, confirmed_at=_WHEN
+        question=QuestionPart(round="d1", part=1),
+        question_key=proposal.question_key,
+        confirmed_at=_WHEN,
     )
     with pytest.raises(ValidationError, match="SECRET"):
         MemoryUpdateProposal(
@@ -1337,7 +1351,9 @@ def test_the_key_ignores_the_confirmation_attached_to_a_proposal() -> None:
     confirmed = proposal.model_copy(
         update={
             "confirmation": UserConfirmation(
-                deferral_id="d1", question_key=proposal.question_key, confirmed_at=_WHEN
+                question=QuestionPart(round="d1", part=1),
+                question_key=proposal.question_key,
+                confirmed_at=_WHEN,
             )
         }
     )

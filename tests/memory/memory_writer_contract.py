@@ -185,6 +185,7 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     PreferenceMemory,
     Provenance,
+    QuestionPart,
     UserConfirmation,
     Validity,
     band_of,
@@ -965,7 +966,7 @@ def _confirmed(
 def _authority(proposal: MemoryUpdateProposal, retires: tuple[str, ...]) -> UserConfirmation:
     """The authority a claim would mint for ``proposal``'s own question."""
     return UserConfirmation(
-        deferral_id="q-1",
+        question=QuestionPart(round="q-1", part=1),
         question_key=proposal.question_key,
         confirmed_at=_WHEN,
         retires=retires,
