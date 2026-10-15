@@ -280,26 +280,25 @@ def test_a_scalar_output_with_a_lone_surrogate_is_rejected() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 19
+    assert export.schema_version == 20
     assert export.activation_effects == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_nineteen() -> None:
+def test_export_pins_the_schema_version_to_exactly_twenty() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[19]`` refuses an explicit ``18`` — a document of the shape this export
-    had before the old path's sections left it does not validate against this contract
-    at all (ADR-0309 §5), and no reader for it is written (ADR-0309 §6:4) — and any
-    other value, so the advertised version cannot be mislabelled. The positive default
-    is what a producer gets for free; only the rejections pin it.
+    ``Literal[20]`` refuses an explicit ``19`` — a document whose effect records carry
+    no question part (ADR-0321 §4:9), for which no reader is written (ADR-0321 §9:2) —
+    and any other value, so the advertised version cannot be mislabelled. The positive
+    default is what a producer gets for free; only the rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``18`` is
-    the shape this contract had one decision ago and ``20`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``19`` is
+    the shape this contract had one decision ago and ``21`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=19).schema_version == 19
-    for stale in (*range(1, 19), 20):
+    assert PlanExport(exported_at=_WHEN, schema_version=20).schema_version == 20
+    for stale in (*range(1, 20), 21):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)
 

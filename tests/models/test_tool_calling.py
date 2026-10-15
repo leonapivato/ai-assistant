@@ -103,8 +103,12 @@ def _native(response: RoundResponse) -> ModelResponse:
         ToolCallPart(call.name, call.model_dump()["arguments"], tool_call_id=call.call_id)
         for call in response.calls
     )
-    if response.notes is not None:
-        arguments: dict[str, Any] = {"notes": response.notes}
+    if response.notes is not None or response.asks:
+        arguments: dict[str, Any] = {}
+        if response.notes is not None:
+            arguments["notes"] = response.notes
+        if response.asks:
+            arguments["asks"] = list(response.asks)
         parts.append(ToolCallPart(ROUND_TOOL, arguments, tool_call_id="round"))
     return ModelResponse(parts=parts)
 
@@ -205,8 +209,9 @@ async def test_several_round_tool_calls_join_their_notes() -> None:
     assert response == RoundResponse(notes="first\n\nsecond")
 
 
-async def test_the_round_tool_offers_the_notes_alone() -> None:
-    """ADR-0315 §3:3: the reserved tool carries the notes, and no mark."""
+async def test_the_round_tool_offers_the_notes_and_the_naming_alone() -> None:
+    """ADR-0315 §3:3, ADR-0321 §2:3: the reserved tool carries the notes and the naming of
+    the calls the message asks about, and no mark."""
     seen: list[dict[str, Any]] = []
 
     def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -218,8 +223,33 @@ async def test_the_round_tool_offers_the_notes_alone() -> None:
 
     await PydanticAIToolCallingCompleter(FunctionModel(answer)).respond(_request(), [])
     (schema,) = seen
-    assert set(schema["properties"]) == {"notes"}
+    assert set(schema["properties"]) == {"notes", "asks"}
+    assert schema["properties"]["asks"]["type"] == "array"
+    assert schema["properties"]["asks"]["items"] == {"type": "string"}
     assert schema["additionalProperties"] is False
+
+
+async def test_several_round_tool_calls_join_their_naming_each_name_once() -> None:
+    """ADR-0321 §2:3: every name, once, in the order first given; a blank one dropped."""
+    world = _scripted(
+        ToolCallPart(ROUND_TOOL, {"asks": ["R2", "R1"]}, tool_call_id="a"),
+        ToolCallPart(ROUND_TOOL, {"notes": "n", "asks": ["R1", "  ", "R3"]}, tool_call_id="b"),
+        ToolCallPart(ROUND_TOOL, {"asks": []}, tool_call_id="c"),
+    )
+    response = await world.completer.respond(_request(), [])
+    assert response == RoundResponse(notes="n", asks=("R2", "R1", "R3"))
+
+
+async def test_the_naming_is_never_a_call() -> None:
+    """ADR-0321 §2:3: the naming is a part of the response and never a call."""
+    world = _scripted(
+        TextPart("May I book it?"),
+        ToolCallPart(ROUND_TOOL, {"asks": ["R1"]}, tool_call_id="a"),
+    )
+    response = await world.completer.respond(_request(), [_tool()])
+    assert response.calls == ()
+    assert response.asks == ("R1",)
+    assert response.notes is None
 
 
 async def test_blank_notes_are_no_notes() -> None:
@@ -255,6 +285,12 @@ async def test_a_call_named_for_a_tool_not_offered_is_returned_as_proposed() -> 
             id="retired-mark",
         ),
         pytest.param(ToolCallPart(ROUND_TOOL, {"other": 1}, tool_call_id="a"), id="extra-key"),
+        pytest.param(
+            ToolCallPart(ROUND_TOOL, {"asks": "R1"}, tool_call_id="a"), id="asks-not-list"
+        ),
+        pytest.param(
+            ToolCallPart(ROUND_TOOL, {"asks": ["R1", 2]}, tool_call_id="a"), id="asks-not-text"
+        ),
         pytest.param(TextPart("\ud800"), id="unencodable-text"),
     ],
 )
@@ -683,7 +719,7 @@ async def test_the_returned_entry_shows_every_tool_the_provider_was_offered() ->
     (reserved,) = body["offered_tools"][2:]
     assert reserved["name"] == ROUND_TOOL
     assert "runs nothing" in reserved["description"]
-    assert set(reserved["parameters"]["properties"]) == {"notes"}
+    assert set(reserved["parameters"]["properties"]) == {"notes", "asks"}
 
 
 async def test_a_response_that_is_no_round_is_written_before_the_completer_raises() -> None:

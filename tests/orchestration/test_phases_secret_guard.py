@@ -396,6 +396,18 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     result, judged above; ``Digested`` is the recorded digest, its labels and a
     code-owned failure word; ``ActivationLabels`` takes nothing but ``PlanningLabel``s.
 
+    **The yes path's records** (ADR-0321 §2:8, §3:1). ``AskedCall`` is a call a round's
+    message asked about: its part, the ``ToolDefinition`` judged above, the values it
+    sends as frozen JSON (the arguments planning wrote and the hub filled, which a
+    proposed call already carries), its ``EgressBinding`` and the ids of the assertions
+    it replaces. The binding, with ``EgressDestination``, ``EgressSpan`` and
+    ``BoundAccount``, is what a call discloses and to whom: destinations in their
+    supplied and canonical forms, spans with their provenance and extent, and the
+    account's connection reference and identity, which name a connection and are not
+    its credential — that stays in the keyring, read by ``tools/`` alone. The answer
+    pointer, ``ProposedAnswer`` on the parse of understanding's reply and
+    ``AnsweredQuestion`` on the record, is a label or ids, and part numbers.
+
     **Recall is not a seam.** :class:`~ai_assistant.orchestration.recall.RecallStage`
     calls no model (ADR-0281 §3); what it decides reaches a model as
     ``ActivationRecall`` through understanding's ``recall`` and as records through
@@ -408,7 +420,10 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ActivationLabels",
         "ActivationRecall",
         "ActivationUnderstanding",
+        "AnsweredQuestion",
+        "AskedCall",
         "Attestation",
+        "BoundAccount",
         "BoundedAudienceSupply",
         "CallOutcome",
         "Candidates",
@@ -420,6 +435,9 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "DigestItem",
         "Digested",
         "DigestedEvidence",
+        "EgressBinding",
+        "EgressDestination",
+        "EgressSpan",
         "EpisodeProcessingRecord",
         "EpisodicMemory",
         "EvidenceItem",
@@ -438,6 +456,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "PlanningStories",
         "PlanningStory",
         "ProposedActivationUnderstanding",
+        "ProposedAnswer",
         "ProposedCall",
         "ProposedReference",
         "ProposedRelationship",

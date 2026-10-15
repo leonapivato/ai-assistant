@@ -11,6 +11,7 @@ from ai_assistant.core.errors import AssistantError, UnderstandingError
 from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
     ActivationUnderstanding,
+    AnsweredQuestion,
     ChannelContext,
     EpisodeProcessingRecord,
     InputOrigin,
@@ -134,8 +135,11 @@ def test_a_proposal_carries_labels_and_no_identity() -> None:
         "unresolved",
         # ADR-0300 §6:6: the labels of the matters the input belongs with.
         "story_labels",
+        # ADR-0321 §3:1: the proposed answer pointer, naming its question by label.
+        "answers",
     }
     assert proposal.story_labels == ()
+    assert proposal.answers is None
     assert proposal.references[0].labels == ("H1", "P2")
     for forbidden in ("version", "recorded_at", "producer", "id"):
         with pytest.raises(ValidationError):
@@ -226,8 +230,15 @@ def test_a_recorded_understanding_carries_no_label() -> None:
         "grounding_dropped",
         # ADR-0300 §6:7: the story labels, resolved to story members.
         "story_links",
+        # ADR-0321 §3:1: the recorded answer pointer, resolved to ids.
+        "answers",
     }
-    for model in (ActivationUnderstanding, UnderstandingReference, UnderstandingRelationship):
+    for model in (
+        ActivationUnderstanding,
+        UnderstandingReference,
+        UnderstandingRelationship,
+        AnsweredQuestion,
+    ):
         assert "labels" not in model.model_fields
         assert "meaning_labels" not in model.model_fields
         assert "story_labels" not in model.model_fields

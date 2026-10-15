@@ -15,6 +15,7 @@ stands in for.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from pydantic import TypeAdapter, ValidationError
@@ -29,7 +30,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Container, Iterable, Sequence
+    from collections.abc import Container, Iterable
 
 _EFFECT_ID: TypeAdapter[Identifier] = TypeAdapter(Identifier)
 
@@ -139,10 +140,13 @@ def requested_parts(parts: object) -> tuple[QuestionPart, ...]:
         The parts, each once, in the order given.
 
     Raises:
-        PlanningError: If ``parts`` is not a list or tuple of ``QuestionPart`` values.
+        PlanningError: If ``parts`` is a string, or not a sequence of ``QuestionPart``
+            values.
     """
-    if not isinstance(parts, (list, tuple)) or not all(
-        isinstance(one, QuestionPart) for one in parts
+    if (
+        not isinstance(parts, Sequence)
+        or isinstance(parts, (str, bytes))
+        or not all(isinstance(one, QuestionPart) for one in parts)
     ):
         msg = "part_effects reads a sequence of QuestionPart values (ADR-0321 §4:9)"
         raise PlanningError(msg)
