@@ -406,7 +406,12 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     account's connection reference and identity, which name a connection and are not
     its credential — that stays in the keyring, read by ``tools/`` alone. The answer
     pointer, ``ProposedAnswer`` on the parse of understanding's reply and
-    ``AnsweredQuestion`` on the record, is a label or ids, and part numbers.
+    ``AnsweredQuestion`` on the record, is a label or ids, and part numbers. On
+    planning's side (ADR-0321 §2:8, §4:2), ``CallOutcome.request`` is an
+    ``ActionRequest``: the ``ToolDefinition`` and ``EgressBinding`` judged here and the
+    values as frozen JSON, exactly what the ``AskedCall`` made from it holds.
+    ``QuestionPart`` is a round's id and a part number, and ``ApprovedAction`` pairs one
+    with the ``AskedCall`` it names.
 
     **Recall is not a seam.** :class:`~ai_assistant.orchestration.recall.RecallStage`
     calls no model (ADR-0281 §3); what it decides reaches a model as
@@ -416,11 +421,13 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     reachable = _seams_reach()
 
     assert set(reachable) == {
+        "ActionRequest",
         "ActivationDigest",
         "ActivationLabels",
         "ActivationRecall",
         "ActivationUnderstanding",
         "AnsweredQuestion",
+        "ApprovedAction",
         "AskedCall",
         "Attestation",
         "BoundAccount",
@@ -461,6 +468,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ProposedReference",
         "ProposedRelationship",
         "Provenance",
+        "QuestionPart",
         "RecalledItem",
         "RecordedChannelTrigger",
         "RecordedSpeechInput",
