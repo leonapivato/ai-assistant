@@ -197,9 +197,9 @@ def test_an_asked_calls_refusal_renders_none_of_its_values() -> None:
     assert "secret-recipient" not in str(caught.value)
 
 
-def test_a_round_and_its_record_render_none_of_an_asked_calls_values() -> None:
-    """ADR-0145 §8: pydantic renders an error by the model validated, so the round and
-    the processing record holding it hide their input too."""
+def test_a_round_and_what_holds_it_render_none_of_an_asked_calls_values() -> None:
+    """ADR-0145 §8: pydantic renders an error by the model validated, so the round, the
+    processing record holding it and the episode holding that hide their input too."""
     asked = {"part": 1, "tool": _tool().model_dump(), "values": {"to": "kept@secret.example"}}
     round_ = {"id": "q-round", "recorded_at": _AT.isoformat(), "asked": [asked]}
     record = {
@@ -208,8 +208,13 @@ def test_a_round_and_its_record_render_none_of_an_asked_calls_values() -> None:
         "trigger": {"never": "read"},
         "rounds": [round_],
     }
+    episode = {"id": "ep-1", "occurred_at": _AT.isoformat(), "processing_record": record}
 
-    for model, data in ((PlanningRound, round_), (EpisodeProcessingRecord, record)):
+    for model, data in (
+        (PlanningRound, round_),
+        (EpisodeProcessingRecord, record),
+        (EpisodicMemory, episode),
+    ):
         with pytest.raises(ValidationError) as caught:
             model.model_validate(data)
         assert "kept@secret.example" not in str(caught.value), model.__name__

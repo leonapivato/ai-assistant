@@ -4388,6 +4388,11 @@ class EpisodicMemory(MemoryBase):
     ``DERIVED``: the freezing write derives its search text and its placement.
     """
 
+    # Its processing record's rounds keep the user's arguments, which the round keeps
+    # out of its validation errors (ADR-0145 §8, :class:`PlanningRound`). An episode
+    # validated whole renders by its own configuration, so it hides its input too.
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
+
     kind: Literal["episodic"] = "episodic"
     occurred_at: UtcInstant
     participants: tuple[EncodableText, ...] = Field(default=())

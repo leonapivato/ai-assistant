@@ -3181,3 +3181,23 @@ async def test_a_corrupt_blob_is_still_deletable(tmp_path: Path) -> None:
         assert await store.channel_episode_ids(_CHANNEL_A, limit=10) == ()
     finally:
         store.close()
+
+
+def test_a_stored_record_that_does_not_decode_renders_none_of_its_values() -> None:
+    """ADR-0145 §8, ADR-0321 §2:8: the decode error names no argument an episode keeps.
+
+    An episode's rounds keep the user's arguments, its asked calls' values among them,
+    and pydantic renders an error by the configuration of what validated at the top, so
+    the decoder hides its input itself and the message it raises carries none of them.
+    """
+    stored = {
+        "kind": "episodic",
+        "processing_record": {
+            "rounds": [{"asked": [{"part": 1, "values": {"to": "kept@secret.example"}}]}]
+        },
+    }
+
+    with pytest.raises(MemoryStoreError) as caught:
+        SqliteMemoryStore._decode(json.dumps(stored))
+
+    assert "kept@secret.example" not in str(caught.value)
