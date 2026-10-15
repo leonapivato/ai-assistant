@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 import sqlite_vec
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.episode_encoding import (
@@ -108,7 +108,13 @@ if TYPE_CHECKING:
         WalkPosition,
     )
 
-_ADAPTER: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
+#: Decodes a stored record. It hides its input in errors: an episode's rounds keep the
+#: user's arguments (ADR-0321 §2:8), and pydantic renders an error by the configuration
+#: of what validated it at the top, never a nested model's, so the message
+#: :meth:`SqliteMemoryStore._decode` raises would otherwise carry them (ADR-0145 §8).
+_ADAPTER: TypeAdapter[MemoryRecord] = TypeAdapter(
+    MemoryRecord, config=ConfigDict(hide_input_in_errors=True)
+)
 # **There is no candidate over-fetch, because there is nothing left to over-fetch
 # for.** ``search`` used to multiply ``limit`` by 8 to leave room for rows a
 # post-KNN pass would drop for kind, expiry or validity window; ADR-0128 §1 binds
