@@ -2396,6 +2396,9 @@ class PhasePath:
                 found = await self._found(given, working)
                 stories = await self._stories(given, working)
                 await self._searched(given, working)
+                # The yes's records are read inside the activation's deadline, as
+                # every read before the round is (ADR-0280 §5).
+                approved = await self._approved(given, working)
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         outside = (
@@ -2432,7 +2435,7 @@ class PhasePath:
             evidence=tuple(working.evidence),
             outside_content_read=working.read_outside_content,
             stories=stories,
-            approved=await self._approved(given, working),
+            approved=approved,
         )
         # The round is recorded inside planning's call, so the recorder reads what it
         # needs of this activation from here (ADR-0321 §4:4: a question cut to fit).
