@@ -89,7 +89,7 @@ async def _open(drive: Drive, *, devices: tuple[str, ...] = ("hub",)) -> str:
     await drive.page.click("#chat-button")
     await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
     await _streaming(drive)
-    await drive.page.locator("#chat-conversations button", has_text="Open").click()
+    await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
     await expect(drive.page.locator("#chat-heading")).to_have_text(f"Conversation {started.id}")
     # The conversation's opening reads have landed: its state is the last of them.
     await drive.page.wait_for_function("() => chat.state !== null")
@@ -377,7 +377,7 @@ async def test_a_transcript_read_before_a_deletion_does_not_bring_the_message_ba
         )
 
         await drive.page.evaluate(_HOLDING, "/chat/transcript")
-        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
         await drive.page.wait_for_function("() => window.__held.reached")
         await drive.engine.delete_message(conversation, position=1)
         await drive.page.wait_for_function("() => chat.deleted.has(1)", timeout=_IDLE_FOLLOWED)
@@ -428,7 +428,7 @@ async def test_a_state_read_that_fails_on_opening_stops_the_following(
         drive.engine.conversation = failing  # type: ignore[method-assign]
         await drive.page.click("#chat-button")
         await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
-        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
 
         await expect(drive.page.locator("#chat-follow")).to_contain_text("Stopped following")
         stopped_at = len(reads)
@@ -546,7 +546,7 @@ async def test_a_transcript_that_could_not_be_read_is_offered_again(
 
         drive.engine.transcript = failing  # type: ignore[method-assign]
         await drive.page.click("#chat-button")
-        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
         again = drive.page.locator("#chat-reread")
         await expect(again).to_be_visible()
 
@@ -736,7 +736,7 @@ async def test_a_reply_to_a_deleted_message_older_than_the_snapshot_says_so(
         await drive.engine.delete_message(started.id, position=1)
 
         await drive.page.click("#chat-button")
-        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
         reply = drive.page.locator("#chat-transcript li", has_text="About the first.")
         await expect(reply).to_contain_text("In reply to a message that was deleted.")
 
@@ -798,7 +798,7 @@ async def test_every_old_reply_target_is_read_including_one_a_live_reply_names(
             await drive.engine.delete_message(started.id, position=index)
 
         await drive.page.click("#chat-button")
-        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
         replies = drive.page.locator("#chat-transcript li", has_text="About ")
         await expect(replies).to_have_count(25)
         assert await drive.page.evaluate("() => chat.oldest") > 26
@@ -847,7 +847,7 @@ async def test_a_reply_target_lookup_that_failed_is_not_made_again_unasked(
 
         drive.engine.transcript = failing_lookups  # type: ignore[method-assign]
         await drive.page.click("#chat-button")
-        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
         reply = drive.page.locator("#chat-transcript li", has_text="About the first.")
         await expect(reply).to_contain_text("In reply to message 1.")
         await drive.page.wait_for_function("() => chat.resolving === null")
@@ -884,7 +884,7 @@ async def test_a_read_reply_target_deleted_later_is_named_as_deleted(
             NewMessage(author=MessageAuthor.ASSISTANT, text="About the secret.", replies_to=1),
         )
         await drive.page.click("#chat-button")
-        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
         reply = drive.page.locator("#chat-transcript li", has_text="About the secret.")
         await expect(reply).to_contain_text("The secret.")
 
@@ -943,7 +943,7 @@ async def test_a_lookups_marker_removes_a_loaded_message_whatever_the_next_looku
 
         drive.engine.transcript = gated  # type: ignore[method-assign]
         await drive.page.click("#chat-button")
-        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
         await drive.page.wait_for_function("() => chat.resolving !== null")
         assert lookups == [2]
 
@@ -1013,7 +1013,7 @@ async def test_a_device_added_to_a_conversation_is_listed_it_with_its_snapshot(
 
         listing = drive.page.locator("#chat-conversations")
         await expect(listing).to_contain_text(f"Conversation {started.id}", timeout=_FOLLOWED)
-        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
         await expect(drive.page.locator("#chat-transcript")).to_contain_text("Written before.")
 
 

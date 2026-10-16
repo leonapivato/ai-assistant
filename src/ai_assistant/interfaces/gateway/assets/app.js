@@ -1751,10 +1751,15 @@ function statedForget(id, held, destroyed) {
 // page is told which device it is, so it can offer to add itself, and never sends a
 // device of its own.
 
-// Which chat this tab has open, and which conversation it is reading. The tab's, in
-// `sessionStorage` rather than beside the header half in `localStorage`: the header half
-// admits the browser and is shared across the origin's tabs, while which conversation is
-// open is what *this view* is looking at, and two tabs are two views.
+// Whether this browser has the chat open, and which conversation this tab is reading.
+//
+// **Open is the browser's, in `localStorage`** (#3098): the page is the chat first, so
+// once the owner has opened it here every load opens it again, in any tab — the owner's
+// one press, kept, rather than a stream opened on a load nobody asked for. It is not a
+// session value: it admits nothing, and holds nothing the hub sent.
+//
+// **Which conversation is the tab's, in `sessionStorage`**: which conversation is open is
+// what *this view* is looking at, and two tabs are two views.
 const CHAT_OPEN_KEY = "assistant.session.chat-open";
 const CHAT_CONVERSATION_KEY = "assistant.session.chat-conversation";
 
@@ -1897,6 +1902,10 @@ const chat = {
   // one back; a change that makes this device a reader again takes it off.
   dropped: new Set(),
   selected: null,
+  // Whether a phone shows the open conversation rather than the list (`renderChatView`):
+  // set by opening one, and cleared by the conversation's own control back to the list,
+  // which leaves it open and reads nothing.
+  reading: false,
   // Bumped on every change of selection, so a read for a conversation the owner left
   // renders nothing.
   chosen: 0,
@@ -1940,7 +1949,7 @@ function settle(subject, before) {
 
 function chatWasOpen() {
   try {
-    return window.sessionStorage.getItem(CHAT_OPEN_KEY) !== null;
+    return window.localStorage.getItem(CHAT_OPEN_KEY) !== null;
   } catch (_) {
     return false;
   }
@@ -1956,7 +1965,7 @@ function storedChatConversation() {
 
 function rememberChat() {
   try {
-    window.sessionStorage.setItem(CHAT_OPEN_KEY, "open");
+    window.localStorage.setItem(CHAT_OPEN_KEY, "open");
     if (chat.selected === null) {
       window.sessionStorage.removeItem(CHAT_CONVERSATION_KEY);
     } else {
@@ -1971,6 +1980,7 @@ function rememberChat() {
 // The owner opening the chat, or a reload restoring the chat this tab had open.
 function openChat() {
   show("chat", true);
+  renderChatView();
   if (!chat.open) {
     chat.open = true;
     // Read before anything is written back, so a reload keeps the conversation it had.
@@ -1997,7 +2007,33 @@ function closeChat() {
   chat.referenced = new Map();
   chat.unfound = new Set();
   chat.pending = [];
+  chat.reading = false;
   el("chat-thread").hidden = true;
+  renderChatView();
+}
+
+// --- the chat's two halves (#3098) --------------------------------------------
+//
+// The conversations down the side and the open one beside them, where there is room for
+// both; on a phone, one at a time. The width is the stylesheet's one breakpoint, asked of
+// the browser here rather than written twice, and what is not on screen is set aside
+// with the attribute, the sheet's one way of hiding anything (#1475). Nothing is read
+// and nothing is dropped: the list and the open conversation are both kept, and going
+// back to the list leaves the conversation open.
+const NARROW = window.matchMedia("(max-width: 480px)");
+
+function renderChatView() {
+  const open = !el("chat-thread").hidden;
+  const narrow = NARROW.matches;
+  el("chat-empty").hidden = open;
+  el("chat-side").hidden = narrow && open && chat.reading;
+  el("chat-main").hidden = narrow && !(open && chat.reading);
+  el("chat-back").hidden = !narrow;
+}
+
+function backToList() {
+  chat.reading = false;
+  renderChatView();
 }
 
 // Catch up from nothing: the cursor first, then what the page shows, then follow. Each
@@ -2542,23 +2578,35 @@ function renderChatListing() {
     list.appendChild(item);
     return;
   }
+  // Each row is one control that opens its conversation (#3098). The open one is marked
+  // as current and opening it again reads nothing: on a phone it only comes back to it.
   chat.listing.forEach((summary) => {
     const item = document.createElement("li");
     item.className = "chat-conversation-row";
-    line(item, `Conversation ${summary.id}`, "conversation-name");
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "chat-open";
+    const name = document.createElement("span");
+    name.className = "chat-name";
+    name.textContent = `Conversation ${summary.id}`;
+    open.appendChild(name);
     const when = `Started ${chatTime(summary.started_at)}`;
-    line(item, chat.unread.has(summary.id) ? `${when} · new messages` : when, "hint");
+    const said = document.createElement("span");
+    said.className = "chat-when";
+    said.textContent = chat.unread.has(summary.id) ? `${when} · new messages` : when;
+    open.appendChild(said);
     if (summary.id === chat.selected) {
-      line(item, "Open below.", "hint");
-    } else {
-      const open = document.createElement("button");
-      open.type = "button";
-      open.textContent = "Open";
-      open.addEventListener("click", () => {
-        void selectChat(summary.id);
-      });
-      item.appendChild(open);
+      open.setAttribute("aria-current", "true");
     }
+    open.addEventListener("click", () => {
+      if (summary.id === chat.selected && !el("chat-thread").hidden) {
+        chat.reading = true;
+        renderChatView();
+        return;
+      }
+      void selectChat(summary.id);
+    });
+    item.appendChild(open);
     list.appendChild(item);
   });
 }
@@ -2611,7 +2659,9 @@ async function selectChat(id) {
   setReplyTo(null);
   sayChat(null);
   rememberChat();
+  chat.reading = true;
   el("chat-thread").hidden = false;
+  renderChatView();
   el("chat-heading").textContent = `Conversation ${id}`;
   renderChatListing();
   renderTranscript();
@@ -2644,7 +2694,9 @@ function chatGone(said) {
   chat.devices = null;
   setReplyTo(null);
   rememberChat();
+  chat.reading = false;
   el("chat-thread").hidden = true;
+  renderChatView();
   sayChat(said);
   renderChatListing();
 }
@@ -2852,6 +2904,8 @@ function renderChatState() {
   }
   slot.textContent = said;
   slot.hidden = said === "";
+  // Marked as well as said, so the line that says the assistant is working looks it.
+  slot.classList.toggle("working", chat.state !== null && chat.state.working === true);
   renderChatStop();
 }
 
@@ -3019,14 +3073,21 @@ function renderChatMessage(message) {
   if (mine && message.device_id !== chat.thisDevice) {
     who = `You, on ${message.device_id}`;
   }
+  // Who wrote it, when, and the message's own controls, on one line above its text.
+  const head = document.createElement("div");
+  head.className = "chat-head";
   const meta = document.createElement("p");
   meta.className = "hint chat-meta";
-  meta.textContent = `${who} · `;
+  const author = document.createElement("strong");
+  author.textContent = who;
+  meta.appendChild(author);
+  meta.appendChild(document.createTextNode(" · "));
   const when = document.createElement("time");
   when.dateTime = message.written_at;
   when.textContent = chatTime(message.written_at);
   meta.appendChild(when);
-  item.appendChild(meta);
+  head.appendChild(meta);
+  item.appendChild(head);
   if (message.replies_to !== null) {
     line(item, quoted(message.replies_to), "hint chat-quote");
   }
@@ -3051,7 +3112,7 @@ function renderChatMessage(message) {
   chatButton(acts, "Delete", () => {
     void deleteChatMessage(conversation, message.position);
   });
-  item.appendChild(acts);
+  head.appendChild(acts);
   return item;
 }
 
@@ -5696,7 +5757,6 @@ function renderConnectionAct(list, one) {
 }
 
 const CONTROL_PANELS = [
-  "control",
   "sources",
   "standing",
   "history",
@@ -5710,6 +5770,29 @@ const CONTROL_PANELS = [
   // session may not be showing. `closeChat` stops its following with it.
   "chat",
 ];
+
+// --- the menu (#3098) ------------------------------------------------------------
+//
+// Every panel but the chat is opened from one menu in the bar. An entry closes the menu
+// and runs the act it always ran, and once that has put its panel on screen the panel's
+// heading takes the focus, which brings it into view below the chat. The act is the
+// same act it was: the menu adds no request, no timer and nothing that could become one.
+function closeMenu() {
+  el("menu").open = false;
+}
+
+function fromMenu(panelId, act) {
+  return async () => {
+    closeMenu();
+    await act();
+    const panel = el(panelId);
+    if (!panel.hidden) {
+      const heading = panel.firstElementChild;
+      heading.tabIndex = -1;
+      heading.focus();
+    }
+  };
+}
 
 // `because` is the re-entry sentence (ADR-0182 §6), and **omitting it leaves whatever
 // is there alone** rather than clearing it. Every act on this page guards on a missing
@@ -5742,12 +5825,11 @@ function showConsole() {
   // notifications" from "not connected", which is ADR-0083's ruling 4 failure at the
   // one place ADR-0175 §4 spends a keep-alive to prevent it.
   show("notifications", true);
-  // The control surface's own entry points are shown with the console; each panel
-  // below them appears when it has been read, so a panel on screen is always a
-  // panel showing an answer rather than an empty promise.
-  show("control", true);
+  // The control surface's own entry points are in the console's menu; each panel
+  // appears when it has been read, so a panel on screen is always a panel showing an
+  // answer rather than an empty promise.
   watchDeliveries();
-  // The chat this tab had open before a reload, opened again; a tab that never opened
+  // The chat this browser has opened before, opened again; a browser that never opened
   // it reads nothing of it until the owner presses Chat.
   if (chatWasOpen()) {
     openChat();
@@ -5759,8 +5841,10 @@ el("bootstrap-form").addEventListener("submit", startSession);
 // `watchDeliveries` reads its first argument as the sentence to announce.
 el("watch-button").addEventListener("click", () => watchDeliveries());
 el("fault-dismiss").addEventListener("click", () => fault(null));
-el("conversations-button").addEventListener("click", listConversations);
+el("conversations-button").addEventListener("click", fromMenu("conversations", listConversations));
 el("chat-button").addEventListener("click", openChat);
+el("chat-back").addEventListener("click", backToList);
+NARROW.addEventListener("change", renderChatView);
 el("chat-follow-again").addEventListener("click", followAgain);
 el("chat-start").addEventListener("click", startChat);
 el("chat-more").addEventListener("click", () => listChat(true));
@@ -5791,20 +5875,37 @@ el("chat-delete").addEventListener("click", deleteChat);
 el("chat-forget").addEventListener("click", forgetChat);
 document.addEventListener("visibilitychange", chatVisibility);
 window.addEventListener("online", chatOnline);
-el("sources-button").addEventListener("click", listSources);
-el("standing-button").addEventListener("click", listStanding);
-el("history-button").addEventListener("click", listGrantHistory);
-el("beliefs-button").addEventListener("click", listBeliefs);
+el("sources-button").addEventListener("click", fromMenu("sources", listSources));
+el("standing-button").addEventListener("click", fromMenu("standing", listStanding));
+el("history-button").addEventListener("click", fromMenu("history", listGrantHistory));
+el("beliefs-button").addEventListener("click", fromMenu("beliefs", listBeliefs));
 // A band changed is a different question, so it starts the listing again rather than
 // filtering what is already on screen: this page holds no beliefs of its own and the
 // hub is what answers which ones match.
 ["band-asserted", "band-derived", "band-attested"].forEach((box) => {
   el(box).addEventListener("change", listBeliefs);
 });
-el("review-button").addEventListener("click", listNotifications);
-el("tuning-button").addEventListener("click", listTuning);
-el("connections-button").addEventListener("click", listConnections);
-el("connection-log-button").addEventListener("click", listConnectionLog);
+el("review-button").addEventListener("click", fromMenu("review", listNotifications));
+el("tuning-button").addEventListener("click", fromMenu("tuning", listTuning));
+el("connections-button").addEventListener("click", fromMenu("connections", listConnections));
+el("connection-log-button").addEventListener(
+  "click",
+  fromMenu("connection-log", listConnectionLog)
+);
+// The menu closes on a link of the index it carries, on a press anywhere outside it, and
+// on Escape, as a menu does.
+el("panel-index").addEventListener("click", closeMenu);
+document.addEventListener("click", (event) => {
+  if (!el("menu").contains(event.target)) {
+    closeMenu();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && el("menu").open) {
+    closeMenu();
+    el("menu").querySelector("summary").focus();
+  }
+});
 
 // Two events, no timer (#1429). Both go through `rearm`, which does nothing at all
 // unless a stream is actually shut and this browser still holds a session half — so a

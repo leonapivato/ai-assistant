@@ -95,7 +95,7 @@ async def _open(drive: Drive) -> _Scripted:
     await drive.page.click("#chat-button")
     await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
     await drive.page.wait_for_function("() => chat.stream !== null && chat.stream.headed")
-    await drive.page.locator("#chat-conversations button", has_text="Open").click()
+    await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
     await expect(drive.page.locator("#chat-heading")).to_have_text(f"Conversation {started.id}")
     await drive.page.wait_for_function("() => chat.state !== null")
     return scripted

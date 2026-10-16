@@ -15,7 +15,61 @@
       inline one would be sent and then refused by the browser.
     -->
     <main class="shell">
-      <h1>Assistant</h1>
+      <!--
+        The page is the chat first (#3098): the chat fills the screen under a bar that
+        carries the page's name and its controls, and every other panel is behind one
+        menu in that bar and opens below the chat, working as it always has. Nothing
+        here is removed for the look, and no panel is reached any differently once it
+        is open.
+      -->
+      <header class="topbar">
+        <h1>Assistant</h1>
+        <!--
+          The chat is where the assistant is talked to (ADR-0293, ADR-0309 §5:4): typed
+          messages go into a conversation there, and the assistant writes its reply back.
+          This page has no Ask box and no push-to-talk: the Ask panel retired (ADR-0309
+          §5:4) and push-to-talk with it (ADR-0313 §3:4).
+
+          The chat is opened by the owner rather than on a first load, because following
+          it holds a stream to the hub open (ADR-0296 §4). Once opened in this browser it
+          opens again on every load, so the chat is what the page shows.
+        -->
+        <section id="console" class="console" hidden>
+          <button type="button" id="chat-button">Chat</button>
+          <!--
+            The menu: every panel that is not the chat. A panel opened from here opens
+            below the chat and keeps its own heading, its own read and its own controls.
+
+            The two grant questions stay two entries and two panels: ADR-0139 §1 rules
+            that "neither answer is derivable from the other and no surface may present
+            one as the other". So do the two notification questions (ADR-0177 §10) —
+            what am I holding for you, and what may reach you — and the two connection
+            questions (ADR-0177 §3, ADR-0151 §1): what is connected now and what was
+            done are answered from different halves of the store.
+          -->
+          <details id="menu" class="menu">
+            <summary>More</summary>
+            <div class="menu-list">
+              <!--
+                The index of what is open (#1429), built by `app.js` from the open
+                panels' own headings and empty in this document: a name written here
+                would be a second place a panel is called something, and the
+                interesting thing about it would be which of the two had gone stale.
+              -->
+              <nav id="panel-index" class="panel-index" aria-label="Panels on this page" hidden></nav>
+              <button type="button" id="conversations-button">Conversations</button>
+              <button type="button" id="beliefs-button">Beliefs</button>
+              <button type="button" id="sources-button">Sources</button>
+              <button type="button" id="standing-button">What I may read now</button>
+              <button type="button" id="history-button">Grant history</button>
+              <button type="button" id="review-button">Notifications I am holding</button>
+              <button type="button" id="tuning-button">What may reach you unprompted</button>
+              <button type="button" id="connections-button">Accounts I am connected to</button>
+              <button type="button" id="connection-log-button">What was done to connections</button>
+            </div>
+          </details>
+        </section>
+      </header>
 
       <section id="bootstrap" class="panel" hidden>
         <h2>Start a session</h2>
@@ -51,167 +105,133 @@
         </form>
       </section>
 
-      <section id="console" class="panel" hidden>
-        <h2>Talk</h2>
-        <!--
-          The chat is where the assistant is talked to (ADR-0293, ADR-0309 §5:4): typed
-          messages go into a conversation there, and the assistant writes its reply back.
-          This page has no Ask box and no push-to-talk: the Ask panel retired (ADR-0309
-          §5:4) and push-to-talk with it (ADR-0313 §3:4).
-        -->
-        <!--
-          Opened by the owner rather than on load, because following the chat holds a
-          stream to the hub open (ADR-0296 §4) and that is the owner's to start.
-        -->
-        <p class="choice">
-          <button type="button" id="chat-button">Chat</button>
-        </p>
-        <button type="button" id="conversations-button">Conversations</button>
-      </section>
-
       <!--
         The chat space (ADR-0293). Each conversation keeps its transcript; a message is
         written into it as an act (§4) and is *received* once the conversation has
         recorded it, and the assistant's reply arrives as a message of its own (§6).
         What the assistant is doing is shown beside the transcript and never in it
         (§8:1). Every value the hub sends is inserted as text.
+
+        The conversations are down the side and the open one is beside them. On a phone
+        the list and the open conversation take the screen in turn, and the open
+        conversation's own control goes back to the list (#3098).
       -->
       <section id="chat" class="panel" hidden>
-        <h2>Chat</h2>
+        <h2 class="visually-hidden">Chat</h2>
         <!--
           Whether this page is following the chat on its change stream, said on screen
           at every change of it: following, paused while hidden, or stopped by the
           stream's ending — and stopped it stays until the owner presses the control or
           one of ADR-0182 §7's two events comes (ADR-0182 §7, ADR-0168 §9). Following
           again carries on from the last change this page applied (ADR-0296 §4:4).
+
+          Above both halves of the chat rather than inside either, so a phone showing
+          one half still shows it: ADR-0182 §7 announces a re-establishment "visible
+          without an interaction, at the surface the stream feeds".
         -->
-        <p class="hint" id="chat-follow" aria-live="polite"></p>
-        <button type="button" id="chat-follow-again" hidden>Follow changes again</button>
-
-        <h3>Your devices</h3>
-        <!--
-          "My devices" (ADR-0293 §3:1): every new conversation is shown on each of
-          them. Shown here and changed at the command line (`assistant my-devices`).
-        -->
-        <p class="hint" id="chat-this-device"></p>
-        <ul id="chat-my-devices" class="chat-devices"></ul>
-
-        <h3>Conversations</h3>
-        <p class="choice">
-          <button type="button" id="chat-start">Start a conversation</button>
-        </p>
-        <ul id="chat-conversations" class="chat-conversations"></ul>
-        <button type="button" id="chat-more" hidden>Show more conversations</button>
-
-        <div id="chat-thread" class="chat-thread" hidden>
-          <h3 id="chat-heading"></h3>
-          <!--
-            The current state (ADR-0293 §8): "working…" while the assistant works on
-            something this conversation started, and how the last of those ended.
-            Informational — the box below stays open while it works (§8:2).
-          -->
-          <p class="hint" id="chat-state" aria-live="polite"></p>
-          <!--
-            The stop control (ADR-0295 §1:2, ADR-0297 §5:7): offered while the state
-            shows "working…" with an id, naming that activation and no other, and gone
-            once it ends. What the stop answered is said beside it (§5:4-§5:6).
-          -->
-          <p class="choice" id="chat-stop-row" hidden>
-            <button type="button" id="chat-stop">Stop</button>
-          </p>
-          <p class="hint" id="chat-stop-said" aria-live="polite" hidden></p>
-          <!-- Offered where the transcript could not be read; nothing reads it again unasked. -->
-          <button type="button" id="chat-reread" hidden>Read this conversation again</button>
-          <button type="button" id="chat-older" hidden>Show earlier messages</button>
-          <ol id="chat-transcript" class="chat-transcript"></ol>
-          <form id="chat-form">
-            <p class="hint" id="chat-replying" hidden></p>
-            <button type="button" id="chat-reply-cancel" hidden>Not a reply</button>
-            <label for="chat-text">Message</label>
-            <textarea id="chat-text" name="chat-text" rows="3" required></textarea>
-            <button type="submit" id="chat-send">Send</button>
-          </form>
-
-          <h4>Who sees this conversation</h4>
-          <!--
-            A conversation's devices (ADR-0293 §3:3). Shown here and changed at the
-            command line (`assistant conversation-devices`).
-          -->
-          <ul id="chat-conversation-devices" class="chat-devices"></ul>
-
-          <h4>Delete or forget</h4>
-          <!--
-            Two acts side by side and never one (ADR-0293 §2:7): deleting removes the
-            conversation and forgets nothing; forgetting removes what the assistant
-            remembers of it and leaves the conversation (§5:7).
-          -->
-          <p class="choice">
-            <button type="button" id="chat-delete">Delete this conversation</button>
-            <button type="button" id="chat-forget">Forget it</button>
-          </p>
+        <div class="chat-status">
+          <p class="hint" id="chat-follow" aria-live="polite"></p>
+          <button type="button" id="chat-follow-again" hidden>Follow changes again</button>
+          <p class="notice" id="chat-said" hidden></p>
         </div>
-        <p class="notice" id="chat-said" hidden></p>
+
+        <div class="chat-app">
+          <div id="chat-side" class="chat-side">
+            <button type="button" id="chat-start" class="chat-new">New conversation</button>
+            <ul id="chat-conversations" class="chat-conversations"></ul>
+            <button type="button" id="chat-more" class="quiet" hidden>Show more conversations</button>
+
+            <div class="chat-devices-said">
+              <h3>Your devices</h3>
+              <!--
+                "My devices" (ADR-0293 §3:1): every new conversation is shown on each of
+                them. Shown here and changed at the command line (`assistant my-devices`).
+              -->
+              <p class="hint" id="chat-this-device"></p>
+              <ul id="chat-my-devices" class="chat-devices"></ul>
+            </div>
+          </div>
+
+          <div id="chat-main" class="chat-main">
+            <p class="hint chat-empty" id="chat-empty">Open a conversation, or start a new one.</p>
+            <div id="chat-thread" class="chat-thread" hidden>
+              <div class="chat-thread-head">
+                <button type="button" id="chat-back" class="quiet" hidden>‹ Conversations</button>
+                <h3 id="chat-heading"></h3>
+                <details class="chat-about">
+                  <summary>Details</summary>
+                  <div class="chat-about-body">
+                    <h4>Who sees this conversation</h4>
+                    <!--
+                      A conversation's devices (ADR-0293 §3:3). Shown here and changed at
+                      the command line (`assistant conversation-devices`).
+                    -->
+                    <ul id="chat-conversation-devices" class="chat-devices"></ul>
+
+                    <h4>Delete or forget</h4>
+                    <!--
+                      Two acts side by side and never one (ADR-0293 §2:7): deleting removes
+                      the conversation and forgets nothing; forgetting removes what the
+                      assistant remembers of it and leaves the conversation (§5:7).
+                    -->
+                    <p class="choice">
+                      <button type="button" id="chat-delete">Delete this conversation</button>
+                      <button type="button" id="chat-forget">Forget it</button>
+                    </p>
+                  </div>
+                </details>
+              </div>
+              <!-- Offered where the transcript could not be read; nothing reads it again unasked. -->
+              <button type="button" id="chat-reread" hidden>Read this conversation again</button>
+              <button type="button" id="chat-older" class="quiet" hidden>Show earlier messages</button>
+              <ol id="chat-transcript" class="chat-transcript"></ol>
+              <div class="chat-working">
+                <!--
+                  The current state (ADR-0293 §8): "working…" while the assistant works on
+                  something this conversation started, and how the last of those ended.
+                  Informational — the box below stays open while it works (§8:2) — and
+                  beside the transcript, never in it (§8:1).
+                -->
+                <p class="hint" id="chat-state" aria-live="polite"></p>
+                <!--
+                  The stop control (ADR-0295 §1:2, ADR-0297 §5:7): offered while the state
+                  shows "working…" with an id, naming that activation and no other, and
+                  gone once it ends. What the stop answered is said beside it (§5:4-§5:6).
+                -->
+                <p class="choice" id="chat-stop-row" hidden>
+                  <button type="button" id="chat-stop">Stop</button>
+                </p>
+                <p class="hint" id="chat-stop-said" aria-live="polite" hidden></p>
+              </div>
+              <form id="chat-form" class="chat-composer">
+                <p class="hint" id="chat-replying" hidden></p>
+                <button type="button" id="chat-reply-cancel" class="quiet" hidden>Not a reply</button>
+                <label for="chat-text" class="visually-hidden">Message</label>
+                <div class="chat-compose-row">
+                  <textarea
+                    id="chat-text"
+                    name="chat-text"
+                    rows="2"
+                    placeholder="Write a message"
+                    required
+                  ></textarea>
+                  <button type="submit" id="chat-send">Send</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
       </section>
-
-      <!--
-        The three conditions of the session this page is running under (ADR-0182 §6):
-        "The page states, in the page and without requiring an interaction to reveal
-        it, three conditions of the session it is running under."
-
-        **Here, and not in the bootstrap panel**, because the clause is about the
-        session the page is *running under* — so the audience is an owner with a live
-        session, and the bootstrap panel is on screen exactly when there is none. This
-        block sits between the two and is shown under whichever of them is up.
-
-        **Not hidden, and reached by no script.** These are three sentences about how
-        any session at this gateway ends; none of them is a value, a state or a thing
-        the page has read. A block the script revealed would be one an owner whose
-        script failed never sees, and "without requiring an interaction" is a floor
-        rather than a description of a click.
-
-        **No signal is named here, and that is ADR-0182 §1 rather than an omission.**
-        §1's mint act is the delivery of a signal whose default action terminates the
-        process, and a gateway that could install neither the disposition nor an
-        ignore "names the act in no disclosure" — a state this page cannot see from
-        the browser. So the page says a value is minted at the machine the gateway
-        runs on and stops there; the first-run guide states the act itself (§10).
-      -->
-      <div class="session-conditions">
-        <p class="hint">
-          Every session ends when the gateway process does. A session is held in that
-          process's memory and written down nowhere, so a gateway that starts again
-          has no memory of this one.
-        </p>
-        <p class="hint">
-          A session also ends on its own: at <code>gateway_session_ttl</code> from when
-          it started, and after <code>gateway_session_idle_timeout</code> with no
-          request the gateway admitted. Watching for notifications is not such a
-          request, so a page left open and asked nothing expires on time.
-        </p>
-        <p class="hint">
-          Closing the browser may end it and may not — that depends on a setting of
-          your browser's that the gateway cannot see. Either way the way back is a
-          fresh bootstrap value, minted at the machine the gateway runs on.
-        </p>
-      </div>
-
-      <!--
-        The index of what is on screen (#1429), built by `app.js` from the open panels'
-        own headings and empty in this document: a name written here would be a second
-        place a panel is called something,
-        and the interesting thing about it would be which of the two had gone stale.
-
-        It sits here, immediately under the console, because the console is where a
-        panel is asked for — so the list of what that produced is beside the controls
-        that produced it, rather than at the foot of everything it points at.
-      -->
-      <nav id="panel-index" class="panel-index" aria-label="Panels on this page" hidden></nav>
 
       <!--
         Notifications are rendered here and by no other means (ADR-0175 §9). No
         Notification API, no Push API, no service worker and no operating-system
         notification: the owner ruled the pushed notification in-page on #1230, and
         every one of those capabilities needs a secure context ADR-0174 §7 defers.
+
+        Shown with the console and outside the menu, because what it mostly says is
+        whether this browser is watching, and a re-arm is announced "visible without an
+        interaction, at the surface the stream feeds" (ADR-0182 §7).
       -->
       <section id="notifications" class="panel" hidden>
         <h2>Notifications</h2>
@@ -244,49 +264,14 @@
       </section>
 
       <!--
-        The control surface (ADR-0177). Four subjects, four panels, and the two
-        grant questions are two panels rather than one: ADR-0139 §1 rules that
-        "neither answer is derivable from the other and no surface may present one
-        as the other", and §3's fourth clause forbids a view answering one with the
-        other. A page shows several things at once where a command line answers one
-        question per invocation, so keeping them apart is a layout obligation here
-        and not only a wording one.
+        The control surface's panels (ADR-0177), opened from the menu. The two grant
+        questions are two panels rather than one: ADR-0139 §1 rules that "neither answer
+        is derivable from the other and no surface may present one as the other", and
+        §3's fourth clause forbids a view answering one with the other. A page shows
+        several things at once where a command line answers one question per
+        invocation, so keeping them apart is a layout obligation here and not only a
+        wording one.
       -->
-      <section id="control" class="panel" hidden>
-        <h2>What I may read, and what I believe</h2>
-        <p class="choice">
-          <button type="button" id="sources-button">Sources</button>
-          <button type="button" id="standing-button">What I may read now</button>
-          <button type="button" id="history-button">Grant history</button>
-          <button type="button" id="beliefs-button">Beliefs</button>
-        </p>
-        <!--
-          The notification review surface (ADR-0177 §10). Two buttons and two panels
-          because they answer two questions: what am I holding for you, and what have
-          you decided may reach you. Both are about the notification *record*; the
-          panel above, which fills from the delivery stream, is about a delivery, and
-          §10 keeps the two apart on the surface as well as in the gateway.
-        -->
-        <p class="choice">
-          <button type="button" id="review-button">Notifications I am holding</button>
-          <button type="button" id="tuning-button">What may reach you unprompted</button>
-        </p>
-        <!--
-          The connection surface (ADR-0177 §3, ADR-0151 §1). Two buttons and two
-          panels, and they are two for ADR-0139 §1's reason once more: what is
-          connected now and what was done are answered from different halves of the
-          store. ADR-0151 §9 adds the sharper version — a reference whose latest act
-          falls outside the log's page is one a reader walking the page would report
-          by an *earlier* act, so a surface deriving one from the other would show a
-          disconnected account as connected, on the deployment with the most history
-          and nowhere else.
-        -->
-        <p class="choice">
-          <button type="button" id="connections-button">Accounts I am connected to</button>
-          <button type="button" id="connection-log-button">What was done to connections</button>
-        </p>
-      </section>
-
       <section id="sources" class="panel" hidden>
         <h3>Sources you can connect me to</h3>
         <p class="hint">
@@ -343,6 +328,13 @@
         <div id="belief-list"></div>
       </section>
 
+      <!--
+        The notification review surface (ADR-0177 §10). Two panels because they answer
+        two questions: what am I holding for you, and what have you decided may reach
+        you. Both are about the notification *record*; the panel above, which fills
+        from the delivery stream, is about a delivery, and §10 keeps the two apart on
+        the surface as well as in the gateway.
+      -->
       <section id="review" class="panel" hidden>
         <h3>Notifications I am holding</h3>
         <p class="hint">
@@ -366,7 +358,13 @@
       </section>
 
       <!--
-        The connection surface's two panels (ADR-0177 §3, §4).
+        The connection surface's two panels (ADR-0177 §3, §4). Two, for ADR-0139 §1's
+        reason once more: what is connected now and what was done are answered from
+        different halves of the store. ADR-0151 §9 adds the sharper version — a
+        reference whose latest act falls outside the log's page is one a reader walking
+        the page would report by an *earlier* act, so a surface deriving one from the
+        other would show a disconnected account as connected, on the deployment with
+        the most history and nowhere else.
 
         **There is no credential field in this document, and its absence is the
         guarantee** (ADR-0177 §4's fourth clause): "the front end presents no
@@ -413,6 +411,49 @@
       <div id="fault" class="fault" hidden>
         <p class="fault-text"></p>
         <button type="button" id="fault-dismiss" class="fault-dismiss">Dismiss</button>
+      </div>
+
+      <!--
+        The three conditions of the session this page is running under (ADR-0182 §6):
+        "The page states, in the page and without requiring an interaction to reveal
+        it, three conditions of the session it is running under."
+
+        **A footnote, and the same words** (#3098): moved to the foot of the page and
+        set small, and still shown under whichever of the bootstrap panel and the
+        console is up. The clause is about the session the page is *running under*, so
+        the audience is an owner with a live session; and it binds where the sentences
+        are and that nothing has to be done to read them, not how large they are.
+
+        **Not hidden, and reached by no script.** These are three sentences about how
+        any session at this gateway ends; none of them is a value, a state or a thing
+        the page has read. A block the script revealed would be one an owner whose
+        script failed never sees, and "without requiring an interaction" is a floor
+        rather than a description of a click.
+
+        **No signal is named here, and that is ADR-0182 §1 rather than an omission.**
+        §1's mint act is the delivery of a signal whose default action terminates the
+        process, and a gateway that could install neither the disposition nor an
+        ignore "names the act in no disclosure" — a state this page cannot see from
+        the browser. So the page says a value is minted at the machine the gateway
+        runs on and stops there; the first-run guide states the act itself (§10).
+      -->
+      <div class="session-conditions">
+        <p class="hint">
+          Every session ends when the gateway process does. A session is held in that
+          process's memory and written down nowhere, so a gateway that starts again
+          has no memory of this one.
+        </p>
+        <p class="hint">
+          A session also ends on its own: at <code>gateway_session_ttl</code> from when
+          it started, and after <code>gateway_session_idle_timeout</code> with no
+          request the gateway admitted. Watching for notifications is not such a
+          request, so a page left open and asked nothing expires on time.
+        </p>
+        <p class="hint">
+          Closing the browser may end it and may not — that depends on a setting of
+          your browser's that the gateway cannot see. Either way the way back is a
+          fresh bootstrap value, minted at the machine the gateway runs on.
+        </p>
       </div>
     </main>
 

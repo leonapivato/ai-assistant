@@ -235,6 +235,24 @@ class Drive:
         await self.page.wait_for_selector("#console:not([hidden])")
 
 
+async def press(page: Page, control: str) -> None:
+    """Press one control, opening the bar's menu first where the control is in it.
+
+    Every panel but the chat is opened from one menu in the page's bar (#3098), and an
+    entry of a closed menu is not on screen — so a case presses one the way the owner
+    does, by opening the menu and then pressing it, rather than by reaching past it.
+
+    Args:
+        page: The page to press it on.
+        control: The control's selector.
+    """
+    if await page.locator(f"#menu {control}").count() and not await page.locator("#menu").evaluate(
+        "(menu) => menu.open"
+    ):
+        await page.click("#menu > summary")
+    await page.click(control)
+
+
 @contextlib.asynccontextmanager
 async def driving(
     browser: Browser,
