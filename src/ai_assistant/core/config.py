@@ -2384,7 +2384,7 @@ class Settings(BaseSettings):
     # orchestration layer reaches for when a caller doesn't specify one.
     # Format follows pydantic-ai's "provider:model" convention.
     default_model: _ModelSpec = Field(
-        default="anthropic:claude-opus-4-8",
+        default="anthropic:claude-sonnet-5-5",
         description="Default model in pydantic-ai 'provider:model' form.",
     )
 

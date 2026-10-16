@@ -284,8 +284,11 @@ async def test_a_leading_system_prompt_becomes_anthropics_top_level_system_field
     body = await _record(ANTHROPIC, _LEADING_SYSTEM)
 
     # Anthropic takes the system instruction *out* of the message array and into
-    # a sibling field; the three conversational turns keep their order and text.
-    assert body["system"] == "be terse"
+    # a sibling field, as one block marked for caching (#3077); the three
+    # conversational turns keep their order and text.
+    assert body["system"] == [
+        {"type": "text", "text": "be terse", "cache_control": {"type": "ephemeral", "ttl": "5m"}}
+    ]
     assert ANTHROPIC.transcript(body) == [
         ("user", "hi"),
         ("assistant", "hello"),
