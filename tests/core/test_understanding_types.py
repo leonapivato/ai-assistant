@@ -117,6 +117,21 @@ def test_a_proposal_carries_one_pointer_per_question_and_refuses_none_named_twic
         )
 
 
+def test_a_proposal_says_a_bare_yes_fits_several_by_a_json_boolean_alone() -> None:
+    """#3080: the reading the stage acts on is a JSON boolean, false where left out."""
+    proposal = ProposedActivationUnderstanding.model_validate_json(
+        '{"meaning": "yes", "meaning_ground": "stated", "bare_yes_fits_several": true}'
+    )
+
+    assert proposal.bare_yes_fits_several is True
+    for loose in ('"true"', "1", "null"):
+        with pytest.raises(ValidationError):
+            ProposedActivationUnderstanding.model_validate_json(
+                '{"meaning": "yes", "meaning_ground": "stated", '
+                f'"bare_yes_fits_several": {loose}}}'
+            )
+
+
 def _understood(*answers: AnsweredQuestion) -> ActivationUnderstanding:
     return ActivationUnderstanding(
         version=1,
@@ -210,7 +225,10 @@ def test_a_proposal_carries_labels_and_no_identity() -> None:
         # ADR-0321 §3:1, ADR-0322 §2:1: the proposed answer pointers, each naming its
         # question by its Q label.
         "answers",
+        # ADR-0321 §3:5, ADR-0322 §2:3, #3080: the reading that a bare yes fits several.
+        "bare_yes_fits_several",
     }
+    assert proposal.bare_yes_fits_several is False
     assert proposal.story_labels == ()
     assert proposal.answers == ()
     assert proposal.references[0].labels == ("H1", "P2")

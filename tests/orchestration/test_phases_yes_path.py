@@ -314,11 +314,12 @@ class _Reader:
     """Understanding's readings, one per activation, in order.
 
     A reading is ``None`` for an input that approves nothing, or the questions the input
-    says yes to, each with the parts it approves.
+    says yes to, each with the parts it approves, and whether the reading also says the
+    input is a bare yes that could fit several (#3080).
     """
 
     def __init__(self) -> None:
-        self._readings: deque[tuple[_Yes, ...] | None] = deque()
+        self._readings: deque[tuple[tuple[_Yes, ...], bool] | None] = deque()
         self.model = FakeModelProvider(reply=self._reply)
         #: The label of the item each pointer's question was found on, in order.
         self.labels: list[str] = []
@@ -331,18 +332,19 @@ class _Reader:
     def yes(
         self, question: str = _ASKING, *, parts: tuple[int, ...] = (), prefer: str = "H"
     ) -> None:
-        self._readings.append((_Yes(question, parts, prefer),))
+        self._readings.append(((_Yes(question, parts, prefer),), False))
 
-    def several(self, *yeses: _Yes) -> None:
-        self._readings.append(yeses)
+    def several(self, *yeses: _Yes, fits_several: bool = False) -> None:
+        self._readings.append((yeses, fits_several))
 
     def _reply(self, messages: Sequence[Message]) -> str:
         reading = self._readings.popleft() if self._readings else None
         if reading is None:
             return _proposal()
+        yeses, fits_several = reading
         content = messages[-1].content
         answers: list[dict[str, object]] = []
-        for one in reading:
+        for one in yeses:
             if one.unmarked:
                 labels = [label for label in _labelled(content, one.question) if label[0] == "H"]
                 assert labels, f"understanding was shown no message holding {one.question!r}"
@@ -356,7 +358,7 @@ class _Reader:
             self.labels.append(holder)
             self.named.append(named)
             answers.append({"question": named, "parts": list(one.parts)})
-        return _proposal(answers=answers)
+        return _proposal(answers=answers, bare_yes_fits_several=fits_several)
 
 
 class _World:
@@ -1219,6 +1221,53 @@ async def test_a_bare_yes_to_two_waiting_questions_runs_neither() -> None:
     assert processing(bare).understanding[-1].answers == ()
     assert "approved_actions" not in hub.planner.shown(4)
     assert hub.world.ran == []
+
+
+async def test_a_bare_yes_read_as_fitting_two_but_pointing_runs_neither_then_both_does() -> None:
+    """#3080: the reading says the bare yes fits both questions, and points at one anyway.
+
+    Code records no pointer on the reading's own word, so nothing runs and planning is
+    shown the matter to ask "yes to which?" by (ADR-0322 §2:3, ADR-0321 §3:5); "both"
+    then says which, and books each once (§2:2).
+    """
+    hub = _Hub()
+    conversation, _ = await _asked(hub)
+    hub.reader.nothing()
+    hub.planner.then(
+        RoundResponse(calls=(_call("c1", "send_email", to="sam@example.com", body="Late."),)),
+        _ask("Shall I email Sam that you are running late? Say the word and I'll do both."),
+    )
+    await hub.turn("And email Sam that I'm late.", conversation=conversation, message_id="m-2")
+
+    hub.reader.several(_Yes("Shall I email Sam"), fits_several=True)
+    hub.planner.then(RoundResponse(text="Yes to which: the booking, the email, or both?"))
+    _, bare = await hub.turn("Yes, go ahead.", conversation=conversation, message_id="m-3")
+
+    understood = processing(bare).understanding[-1]
+    assert understood.answers == ()
+    assert any("does not say which question" in one.matter for one in understood.unresolved)
+    assert "approved_actions" not in hub.planner.shown(4)
+    assert "does not say which question" in hub.planner.shown(4)
+    assert hub.world.ran == []
+
+    hub.reader.several(_Yes(_ASKING), _Yes("Shall I email Sam"))
+    hub.planner.then(_run_approved_all(2), _DONE)
+    await hub.turn("Both, please.", conversation=conversation, message_id="m-4")
+
+    assert hub.world.of("book") == [{"date": "Friday"}]
+    assert hub.world.of("send_email") == [{"to": "sam@example.com", "body": "Late."}]
+
+
+async def test_a_bare_yes_to_the_one_waiting_question_still_runs_it() -> None:
+    """ADR-0321 §3:5 binds several questions: with one shown, a bare yes approves it."""
+    hub = _Hub()
+    conversation, _ = await _asked(hub)
+
+    hub.reader.several(_Yes(_ASKING), fits_several=True)
+    hub.planner.then(_run_approved_all(1), _DONE)
+    await hub.turn("Yes.", conversation=conversation, message_id="m-2")
+
+    assert hub.world.of("book") == [{"date": "Friday"}]
 
 
 # --- a question cut to fit is not shown (§4:4) --------------------------------------------
