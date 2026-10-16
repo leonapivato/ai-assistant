@@ -482,9 +482,10 @@ def test_the_page_states_the_three_conditions_of_the_session_it_runs_under() -> 
     anything the page has read, so a block a script had to reveal would be one an owner
     whose script failed never sees.
 
-    It sits between the bootstrap panel and the console because §6's clause is about
-    the session the page "is running under" — the audience is an owner holding one, and
-    the bootstrap panel is on screen exactly when there is none.
+    It sits outside every panel, as a footnote at the page's foot (#3098), so it is under
+    whichever of the bootstrap panel and the console is up: §6's clause is about the
+    session the page "is running under" — the audience is an owner holding one, and the
+    bootstrap panel is on screen exactly when there is none.
     """
     document = _asset("index.html")
     opened = document.index('<div class="session-conditions">')
@@ -639,14 +640,17 @@ def test_the_header_half_is_held_in_origin_scoped_storage_shared_across_tabs() -
 
     assert "localStorage" in script
     assert "window.localStorage.setItem(STORAGE_KEY, value)" in script
-    # The page stores one other thing, and it is **not** a session half: the chat this
-    # view has open, which is the tab's rather than the origin's. So the clause is
-    # asserted where it is about — no half of a session is ever in tab-scoped storage —
-    # and the keys that are, are named: whether this tab has the chat open and which
-    # conversation it reads.
+    # The page stores two other things, and neither is a session half: whether this
+    # browser has the chat open (the browser's, so every load of a chat-first page opens
+    # it again, #3098), and which conversation this tab reads (the tab's rather than the
+    # origin's). So the clause is asserted where it is about — no half of a session is
+    # ever in tab-scoped storage — and the key that is, is named.
     assert set(re.findall(r"window\.sessionStorage\.\w+\((\w+)", script)) == {
-        "CHAT_OPEN_KEY",
         "CHAT_CONVERSATION_KEY",
+    }
+    assert set(re.findall(r"window\.localStorage\.\w+\((\w+)", script)) == {
+        "STORAGE_KEY",
+        "CHAT_OPEN_KEY",
     }
 
 
@@ -3800,7 +3804,8 @@ def test_the_page_offers_none_of_the_panels_adr_0309_retires() -> None:
     the gateway now answers with a ``404``. The renderers go with them — the outcome a
     park's answer rendered, and the routed account inside it — so nothing in the script
     reads a turn's outcome at all. What stays is pinned beside it: the console offers the
-    chat and the conversations listing, and nothing else.
+    chat, and its menu the conversations listing and the control surface's panels, and
+    nothing else (#3098 moved the control surface's openers into the console's menu).
     """
     script = _code("app.js")
     document = _markup("index.html")
@@ -3820,4 +3825,12 @@ def test_the_page_offers_none_of_the_panels_adr_0309_retires() -> None:
     assert re.findall(r'<button type="button" id="([a-z-]+)"', console) == [
         "chat-button",
         "conversations-button",
+        "beliefs-button",
+        "sources-button",
+        "standing-button",
+        "history-button",
+        "review-button",
+        "tuning-button",
+        "connections-button",
+        "connection-log-button",
     ]

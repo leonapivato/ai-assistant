@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 import pytest
-from browser_drive import DESKTOP, PHONE, driving
+from browser_drive import DESKTOP, PHONE, driving, press
 from gateway_mint import bootstrap_value
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import expect
@@ -306,11 +306,11 @@ async def test_a_listing_that_outlives_its_session_renders_nothing_and_reveals_n
         _seed_conversation(drive, "c-1", turns=3)
         await drive.page.route(listing.path, hang)
         async with drive.page.expect_request(listing.path):
-            await drive.page.click(listing.opener)
+            await press(drive.page, listing.opener)
 
         # The session ends under the held listing, through a request of its own.
         await drive.page.route(killer, _ends_the_session)
-        await drive.page.click(opener)
+        await press(drive.page, opener)
         await drive.page.wait_for_selector("#bootstrap:not([hidden])")
 
         async with drive.page.expect_response(listing.path) as stale:
@@ -345,10 +345,10 @@ async def test_a_listing_released_after_re_entry_is_not_the_new_session_s_answer
         _seed_conversation(drive, "c-1", turns=3)
         await drive.page.route("**/conversations", hang)
         async with drive.page.expect_request("**/conversations"):
-            await drive.page.click("#conversations-button")
+            await press(drive.page, "#conversations-button")
 
         await drive.page.route("**/sources", _ends_the_session)
-        await drive.page.click("#sources-button")
+        await press(drive.page, "#sources-button")
         await drive.page.wait_for_selector("#bootstrap:not([hidden])")
 
         # Re-entry, and only then the old session's answer.
@@ -357,7 +357,7 @@ async def test_a_listing_released_after_re_entry_is_not_the_new_session_s_answer
             release.set_result(None)
         await (await stale.value).finished()
         async with drive.page.expect_response("**/beliefs"):
-            await drive.page.click("#beliefs-button")
+            await press(drive.page, "#beliefs-button")
 
         # The session the owner has just started is still theirs. The held request
         # carried the old header half and the *new* cookie, so the gateway answered
@@ -403,10 +403,10 @@ async def test_a_refusal_answered_to_a_dead_session_opens_no_panel(
     async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
         await drive.page.route("**/beliefs", refuses)
         async with drive.page.expect_request("**/beliefs"):
-            await drive.page.click("#beliefs-button")
+            await press(drive.page, "#beliefs-button")
 
         await drive.page.route("**/sources", _ends_the_session)
-        await drive.page.click("#sources-button")
+        await press(drive.page, "#sources-button")
         await drive.page.wait_for_selector("#bootstrap:not([hidden])")
 
         async with drive.page.expect_response("**/beliefs") as stale:
@@ -439,7 +439,7 @@ async def test_a_preference_write_is_not_sent_under_a_session_that_has_ended(
 
     async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
         drive.page.on("request", lambda one: written.append(one.url))
-        await drive.page.click("#tuning-button")
+        await press(drive.page, "#tuning-button")
         await drive.page.wait_for_selector("#tuning:not([hidden])")
 
         await drive.page.route("**/notification/preferences", hang)
@@ -448,7 +448,7 @@ async def test_a_preference_write_is_not_sent_under_a_session_that_has_ended(
             await drive.page.get_by_role("button", name="Set", exact=True).click()
 
         await drive.page.route("**/sources", _ends_the_session)
-        await drive.page.click("#sources-button")
+        await press(drive.page, "#sources-button")
         await drive.page.wait_for_selector("#bootstrap:not([hidden])")
 
         async with drive.page.expect_response("**/notification/preferences") as stale:
@@ -487,10 +487,10 @@ async def test_a_listing_whose_request_fails_after_its_session_ended_opens_no_pa
     async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
         await drive.page.route("**/beliefs", fails)
         async with drive.page.expect_request("**/beliefs"):
-            await drive.page.click("#beliefs-button")
+            await press(drive.page, "#beliefs-button")
 
         await drive.page.route("**/sources", _ends_the_session)
-        await drive.page.click("#sources-button")
+        await press(drive.page, "#sources-button")
         await drive.page.wait_for_selector("#bootstrap:not([hidden])")
 
         async with drive.page.expect_event(
@@ -547,7 +547,7 @@ async def test_a_record_read_to_be_confirmed_over_is_not_put_after_its_session_e
             )
 
         await drive.page.route("**/sources", _ends_the_session)
-        await drive.page.click("#sources-button")
+        await press(drive.page, "#sources-button")
         await drive.page.wait_for_selector("#bootstrap:not([hidden])")
 
         async with drive.page.expect_response("**/conversation") as stale:
@@ -627,7 +627,7 @@ async def test_a_destruction_consented_under_a_session_that_ended_ends_no_other(
         # the conversation it did not destroy is not reported as gone. The listing is
         # what orders the assertions -- only a page still holding a session makes it.
         async with drive.page.expect_response("**/conversations"):
-            await drive.page.click("#conversations-button")
+            await press(drive.page, "#conversations-button")
         await expect(drive.page.locator("#bootstrap")).to_be_hidden()
         await expect(drive.page.locator("#console")).to_be_visible()
         assert "is gone" not in await drive.page.inner_text("#conversations")
@@ -688,7 +688,7 @@ async def test_a_destruction_that_lands_after_its_session_ended_opens_nothing(
             )
 
         await drive.page.route("**/sources", _ends_the_session)
-        await drive.page.click("#sources-button")
+        await press(drive.page, "#sources-button")
         await drive.page.wait_for_selector("#bootstrap:not([hidden])")
 
         if reaching:
@@ -811,7 +811,7 @@ async def test_a_delivery_stream_that_outlived_its_session_ends_no_other(
         # rather than inferred from storage, because what the owner loses is the ability
         # to go on using the session, and only a round trip says they still can.
         async with elsewhere.expect_response("**/conversations") as answered:
-            await elsewhere.click("#conversations-button")
+            await press(elsewhere, "#conversations-button")
         assert (await answered.value).status == 200
         await expect(elsewhere.locator("#bootstrap")).to_be_hidden()
         await expect(elsewhere.locator("#console")).to_be_visible()

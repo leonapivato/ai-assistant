@@ -1,24 +1,45 @@
 /*
  * The front end's only stylesheet, served from the gateway's own origin because
  * ADR-0168 §10 forbids the page loading "any asset, font, style, script or datum
- * from any origin but the gateway's own". No web font, no CDN, no import.
+ * from any origin but the gateway's own". No web font, no CDN, no import: the type is
+ * the system's own stack.
+ *
+ * The page is the chat first (#3098): a bar with the page's name and its controls,
+ * the chat filling the screen under it, and every other panel opened from the bar's
+ * menu below the chat. Calm on purpose — one accent, quiet surfaces, and the owner's
+ * messages set off from the assistant's by where they sit and who they say wrote
+ * them, never by colour alone.
  */
 
 :root {
   color-scheme: light dark;
-  --ink: #16181d;
-  --paper: #fbfbfd;
-  --muted: #5b6270;
-  --line: #d6d9e0;
+  --ink: #1d2026;
+  --paper: #f6f6f4;
+  --surface: #ffffff;
+  --side: #fafaf9;
+  --muted: #5f6573;
+  --line: #e1e2e6;
+  --hover: #f0f1f3;
+  --selected: #e7ecf5;
+  --accent: #3c5a8a;
+  --on-accent: #ffffff;
+  --bubble: #e8eef7;
   --alarm: #a4232b;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --ink: #e8eaf0;
-    --paper: #16181d;
-    --muted: #9aa2b1;
-    --line: #333845;
+    --ink: #e6e7ea;
+    --paper: #131518;
+    --surface: #1a1d21;
+    --side: #171a1d;
+    --muted: #9aa1ad;
+    --line: #2c3038;
+    --hover: #23272d;
+    --selected: #263247;
+    --accent: #8eaad8;
+    --on-accent: #10141b;
+    --bubble: #243149;
     --alarm: #f08a90;
   }
 }
@@ -31,9 +52,7 @@
  * its width (issue #1340).
  *
  * `overflow-wrap` inherits, so the rule is written once here rather than per class
- * — the answer, the rationale, the step lines, a notification's summary and detail,
- * the conversation rows and the fault all sit under this element, and a rule per
- * class would owe a new clause to every surface added after it.
+ * — and a rule per class would owe a new clause to every surface added after it.
  *
  * `anywhere` rather than `break-word`: they break identically, and differ only in
  * whether the break opportunity counts towards intrinsic size. `.conversation-row`
@@ -45,7 +64,7 @@ body {
   margin: 0;
   background: var(--paper);
   color: var(--ink);
-  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   overflow-wrap: anywhere;
 }
 
@@ -55,40 +74,68 @@ body {
  *
  * `[hidden] { display: none }` is a *user agent* rule, and every rule in this file is
  * an *author* rule — author origin beats user agent origin whatever the selectors say.
- * So `button { display: inline-flex }` below silently un-hid every button on the page:
- * `el("watch-button").hidden = true` set the attribute and changed nothing on screen,
- * leaving an inert "Watch for notifications" sitting under the line that says watching
- * is already happening. It reached `.panel-index` too — the panel index is a `nav` that
- * ships `hidden` and takes `display: flex`, so the index rendered below its own floor
- * of two open panels.
+ * So `button { display: inline-flex }` below silently un-hid every button on the page.
  *
  * **Written for the attribute rather than for `button`**, because the defect is not
  * about buttons: it is about an author `display` beating the attribute, and this file
- * declares one for seven selectors. A `button[hidden]` rule would fix the two controls
- * that were noticed and leave the `nav` — and every class rule added later — carrying
- * the same fault.
+ * declares one for many selectors.
  *
  * **`!important` rather than source order.** An attribute selector is one class worth
- * of specificity, which is exactly what `.panel-index`, `.choice`, `.check` and
- * `.conversation-row` are: last-in-the-file would win today and lose to the next class
- * rule anybody adds, which is precisely how this happened. Important-author beats every
- * ordinary declaration in any origin, so the rule cannot be taken back by accident.
- * This is the sheet's one `display: none` and it hides only what carries the attribute
- * — nothing here is hidden at a width, by a class, or from a script's reach.
+ * of specificity: last-in-the-file would win today and lose to the next class rule
+ * anybody adds. This is the sheet's one `display: none` and it hides only what carries
+ * the attribute — nothing here is hidden at a width, by a class, or from a script's
+ * reach. The chat's two halves on a phone are set aside with the attribute too, by the
+ * script (`renderChatView`), so this stays the one way anything leaves the screen.
  */
 [hidden] {
   display: none !important;
 }
 
 .shell {
-  max-width: 44rem;
+  max-width: 72rem;
   margin: 0 auto;
-  padding: 2rem 1.25rem 4rem;
+  padding: 0 1.25rem 3rem;
+}
+
+/*
+ * A heading or a label that is for a reader of the page's structure rather than for
+ * the eye: the chat's own heading, which the panel index and a fault slot read, and the
+ * message box's label. Clipped, not removed, so a screen reader still has it.
+ */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/*
+ * The bar: the page's name, the Chat control and the menu. It stays at the top while
+ * the panels below the chat are read, so the menu is always one press away.
+ */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 3.5rem;
+  margin-bottom: 0.75rem;
+  background: var(--paper);
+  border-bottom: 1px solid var(--line);
 }
 
 h1 {
-  font-size: 1.35rem;
+  font-size: 1.1rem;
   letter-spacing: 0.01em;
+  margin: 0;
 }
 
 h2 {
@@ -96,11 +143,105 @@ h2 {
   margin: 0 0 0.6rem;
 }
 
-.panel {
+h3 {
+  font-size: 0.95rem;
+}
+
+.console {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.console > button {
+  margin-top: 0;
+}
+
+/*
+ * The menu: a disclosure whose list drops below the bar. Its summary is a control like
+ * every other and holds the same touch floor.
+ */
+.menu {
+  position: relative;
+}
+
+.menu > summary,
+.chat-about > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0.45rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.menu > summary::-webkit-details-marker,
+.chat-about > summary::-webkit-details-marker {
+  font-size: 0;
+}
+
+.menu > summary::after {
+  content: "▾";
+  margin-left: 0.4rem;
+  color: var(--muted);
+}
+
+.menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.35rem);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  width: min(20rem, calc(100vw - 1.5rem));
+  max-height: calc(100vh - 5rem);
+  overflow-y: auto;
+  padding: 0.4rem;
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 10px;
+  box-shadow: 0 10px 28px rgb(0 0 0 / 0.14);
+}
+
+.menu-list > button {
+  margin-top: 0;
+  justify-content: flex-start;
+  text-align: left;
+  background: transparent;
+  border-color: transparent;
+}
+
+.menu-list > button:hover {
+  background: var(--hover);
+}
+
+/*
+ * Every panel but the chat is a card of reading width, centred under the chat. The
+ * scroll margin keeps a panel's heading clear of the bar when the index or the menu
+ * brings it into view.
+ */
+.panel {
+  max-width: 48rem;
+  margin: 1.2rem auto;
   padding: 1.1rem 1.2rem;
-  margin: 1.2rem 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  scroll-margin-top: 4.5rem;
+}
+
+.panel > :first-child {
+  scroll-margin-top: 4.5rem;
+}
+
+#bootstrap {
+  max-width: 28rem;
+  margin-top: 3rem;
 }
 
 label {
@@ -111,13 +252,10 @@ label {
 }
 
 /*
- * Text entry — and `input` is filtered by type here, which is issue #1440. The rule
- * was written for the bootstrap value and the tuning figures, and with no filter its
- * `width: 100%` stretched every **checkbox** on the page to the width of its container
- * (measured 656.6px inside a 44rem shell). A `.choice` row is a flex line, so a box
- * that wide filled it and pushed the label onto the next one: the box rendered above
- * its own label, on every checkbox row, at every width. A box is not a text field and
- * takes none of this rule — not the width, not the border, not the padding.
+ * Text entry — and `input` is filtered by type here, which is issue #1440. With no
+ * filter its `width: 100%` stretched every **checkbox** on the page to the width of its
+ * container, and a `.choice` row is a flex line, so the box rendered above its own
+ * label. A box is not a text field and takes none of this rule.
  *
  * `:not(...):not(...)` rather than one `:not(a, b)` because the list form is Selectors
  * 4 and this file is served to whatever browser the owner has.
@@ -133,16 +271,22 @@ textarea {
   min-height: 44px;
   font: inherit;
   color: inherit;
-  background: transparent;
+  background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 0.5rem 0.6rem;
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):focus,
+textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
 }
 
 /*
  * The box itself: sized, and never shrunk below its size by the flex row it sits in.
  * No `accent-color` — `:root`'s `color-scheme: light dark` already hands the native
- * control both palettes, and naming one colour here would fix it to one of them.
+ * control both palettes.
  */
 input[type="checkbox"] {
   flex: none;
@@ -152,33 +296,34 @@ input[type="checkbox"] {
 }
 
 /*
- * A `select` is built by the script (the reach levels, ADR-0177 §10) and had no rule
- * at all, so it took the browser's own font — under 16px on iOS, which is the zoom
- * trap above. It gets the field's font and the touch floor and not its width: a
- * chooser is as wide as its longest option.
+ * A `select` is built by the script (the reach levels, ADR-0177 §10). It gets the
+ * field's font and the touch floor and not its width: a chooser is as wide as its
+ * longest option.
  */
 select {
   max-width: 100%;
   min-height: 44px;
   font: inherit;
   color: inherit;
-  background: transparent;
+  background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 8px;
   padding: 0.4rem 0.5rem;
 }
 
 /*
- * Every button on this page comes through this one rule — the panel openers, the row
- * controls a listing builds (a belief's Forget, a notification's Dismiss, a question's
- * Accept, a confirmation's Yes), lane 3's `.fault-dismiss` and "Start a new
- * conversation" — so the 44px touch floor is written once and there is no button that
- * can be added without it.
+ * Every button on this page comes through this one rule — the menu's entries, the row
+ * controls a listing builds, a message's Reply and Delete, the fault slot's Dismiss —
+ * so the 44px touch floor is written once and there is no button that can be added
+ * without it.
  *
  * `inline-flex` is what makes `min-height` centre the label rather than leave it at
  * the top of a taller box. `max-width: 100%` with the wrapping left alone is the pair
  * that keeps a long label inside the page: a button that cannot exceed its container
  * wraps between its words, where one that could would push the document sideways.
+ *
+ * Outlined and quiet by default; the acts the page leads with — sending, starting a
+ * conversation, starting a session — are filled (the rule after the next).
  */
 button {
   margin-top: 0.7rem;
@@ -187,18 +332,42 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 0.4rem;
   font: inherit;
-  color: var(--paper);
-  background: var(--ink);
-  border: 0;
-  border-radius: 7px;
-  padding: 0.45rem 1.1rem;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.45rem 1rem;
   cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--muted);
+}
+
+button[type="submit"],
+.chat-new {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
 }
 
 button[disabled] {
   opacity: 0.5;
   cursor: progress;
+}
+
+/* A control that is offered but is not the act on the page: no frame of its own. */
+button.quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+
+button.quiet:hover {
+  color: var(--ink);
+  background: var(--hover);
 }
 
 .hint {
@@ -245,6 +414,12 @@ button[disabled] {
   color: var(--alarm);
 }
 
+#fault {
+  max-width: 48rem;
+  margin: 1.2rem auto;
+  box-sizing: border-box;
+}
+
 /*
  * An account of an act whose reply this browser never read, in the node that owns it
  * rather than in the panel's fault slot (ADR-0177 §7's fourth clause, ADR-0244 §11).
@@ -264,7 +439,7 @@ button[disabled] {
 /*
  * Dismiss is quieter than an ordinary button because it is not the act on offer: the
  * act is whatever the panel already carries, and this only takes a condition off the
- * screen. It is outlined rather than filled for that reason and for no other.
+ * screen.
  */
 .fault-dismiss {
   margin-top: 0.6rem;
@@ -274,10 +449,7 @@ button[disabled] {
 }
 
 /*
- * The choice between the two turn entries (ADR-0175 §3). Laid out on one line
- * because it is one question, and the gateway never answers it — a silent fallback
- * from a failed stream to the whole-answer entry is refused by ADR-0168 §9 and
- * ADR-0173 §7 alike.
+ * A row of controls, laid out on one line where it fits.
  */
 .choice {
   display: flex;
@@ -287,10 +459,8 @@ button[disabled] {
   /*
    * Without this the row is `nowrap`, so a line of controls narrower than its
    * content shrinks each one below its own width — and `body`'s `overflow-wrap:
-   * anywhere` then breaks the label inside it, rendering a button as "Remo ve" and a
-   * quiet window's row as a column of letters. A wrapped row is the same controls on
-   * two lines, which is what a phone needs and what the control surface's own row of
-   * buttons needed already.
+   * anywhere` then breaks the label inside it, rendering a button as "Remo ve". A
+   * wrapped row is the same controls on two lines, which is what a phone needs.
    */
   flex-wrap: wrap;
 }
@@ -301,17 +471,10 @@ button[disabled] {
 
 /*
  * A checkbox and the words beside it are **one** element (#1429, #1440): the box is
- * inside its own `<label>`, in the document and in `offerScope` alike. Two reasons,
- * and each on its own would be enough.
- *
- * A flex row wraps between its items, so a box and a label that were siblings could be
- * put on two lines by a narrow viewport — the beliefs panel offers three pairs in one
- * row, and at 390px a wrap between the third box and its own words reads as a box
- * belonging to the band above it. Nested, the pair is one item and cannot be split.
- *
- * And it is what makes the target 44px without a 44px box. The tappable area of a
- * label is the label, so the whole strip — box, gap and words — toggles the band, at
- * the floor the rest of this sheet holds, while the box stays the size a box is.
+ * inside its own `<label>`, in the document and in `offerScope` alike. Nested, the pair
+ * is one flex item and cannot be split by a wrap; and the tappable area of a label is
+ * the label, so the whole strip toggles the band at the 44px floor while the box stays
+ * the size a box is.
  */
 .check {
   display: flex;
@@ -323,17 +486,23 @@ button[disabled] {
 }
 
 /*
- * The three standing conditions of a session (ADR-0182 §6). Quiet, because they are
- * true all the time and are not an event — but never `display: none` at any width and
- * never behind a control, which §6 forbids in the same sentence that requires them:
- * "in the page and without requiring an interaction to reveal it".
+ * The three standing conditions of a session (ADR-0182 §6), as a footnote at the foot
+ * of the page (#3098). Small and quiet, because they are true all the time and are not
+ * an event — but never `display: none` at any width and never behind a control, which
+ * §6 forbids in the same sentence that requires them: "in the page and without
+ * requiring an interaction to reveal it".
  */
 .session-conditions {
-  margin: 0 0 1.2rem;
+  max-width: 48rem;
+  margin: 2rem auto 0;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
 }
 
 .session-conditions p {
-  margin: 0 0 0.4rem;
+  margin: 0 0 0.3rem;
+  font-size: 0.75rem;
+  line-height: 1.45;
 }
 
 /*
@@ -347,24 +516,23 @@ code {
 }
 
 /*
- * The index of what is on screen (#1429). A phone shows about a third of one panel at
- * a time, and this page grows a panel every time a listing is read — so by the fourth
- * read the control the owner just pressed has put its answer a thousand pixels below
- * the button that asked for it.
+ * The index of what is open (#1429), at the top of the menu: the panels below the chat
+ * grow every time a listing is read, and this reaches each of them without scrolling
+ * past the others.
  *
  * It is a plain list of in-page links, so nothing here is a timer and nothing is a
- * request. It carries exactly the panels that are open, never a panel that is not, and
- * it takes each name from that panel's own heading — one vocabulary, and a panel added
- * later is indexed without this file learning its name.
- *
- * It wraps rather than scrolling or truncating: a name shortened to fit would be the
- * one place on this surface where what is on screen is not what the panel says it is.
+ * request. It carries exactly the panels that are open, and it takes each name from
+ * that panel's own heading. It wraps rather than truncating: a name shortened to fit
+ * would be the one place on this surface where what is on screen is not what the panel
+ * says it is.
  */
 .panel-index {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem;
-  margin: 0 0 1.2rem;
+  gap: 0.35rem;
+  padding: 0.2rem 0.2rem 0.5rem;
+  margin-bottom: 0.3rem;
+  border-bottom: 1px solid var(--line);
 }
 
 .panel-index a {
@@ -373,7 +541,7 @@ code {
   min-height: 44px;
   padding: 0.2rem 0.7rem;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 8px;
   font-size: 0.85rem;
   color: var(--muted);
   text-decoration: none;
@@ -426,22 +594,11 @@ code {
 }
 
 /*
- * Which conversation the row is (#1371). `flex-basis: 100%` gives it the whole
- * width of a wrapping row, which puts it on its own line above the instants and the
- * two controls at every viewport rather than only at a narrow one — the id is what
- * the eye is looking for, and it is a hub value of no bounded length, so competing
- * for horizontal space with two timestamps is the one arrangement that cannot work.
- *
- * **No `overflow-wrap` of its own, deliberately.** An id has no spaces to break at,
- * so a long one really would push the row past the viewport — but `body` already
- * declares `overflow-wrap: anywhere` and it inherits, which is the arrangement issue
- * #1340 chose in terms: "one declaration covers every surface on the page, including
- * ones added later, where a rule per class would owe each of them a clause". An
- * earlier draft of this rule restated it here, which is a second place for the sheet
- * to drift and buys nothing. What holds the line is that the *page* does not scroll
- * sideways for an unbroken id, and that is driven at 390px with one far wider than
- * the viewport — the class of defect a hand drive of this page has already found once
- * (#1385's "Remo ve").
+ * Which conversation the row is (#1371). `flex-basis: 100%` gives it the whole width
+ * of a wrapping row, which puts it on its own line above the instants and the two
+ * controls at every viewport — the id is what the eye is looking for, and it is a hub
+ * value of no bounded length. `body`'s `overflow-wrap: anywhere` is what keeps a long
+ * one inside the page.
  */
 .conversation-name {
   flex: 1 1 100%;
@@ -450,97 +607,368 @@ code {
 }
 
 /*
- * The chat (ADR-0293). The transcript scrolls in its own box so the box to write in
- * stays near it, and each message is a row of its own: the owner's set off from the
- * assistant's by a rule on the side it was written from, never by colour alone. The
- * text keeps the breaks it was written with (`pre-wrap`), as the composed answer does.
+ * The chat (ADR-0293, #3098). One frame holding two halves: the conversations down the
+ * side, and the open conversation beside them — its transcript scrolling in its own box,
+ * the current state under it, and the box to write in at the bottom.
  */
-/* The chat's sub-headings sit under its `h2`, so they are no larger than it is. */
-#chat h3,
-#chat h4 {
-  font-size: 0.95rem;
-  margin: 1.1rem 0 0.3rem;
+#chat {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
 }
 
-#chat h4 {
-  color: var(--muted);
+.chat-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 0.75rem;
+}
+
+.chat-status p {
+  margin: 0 0 0.45rem;
+}
+
+.chat-status > button {
+  margin: 0 0 0.45rem;
+}
+
+#chat-follow {
+  font-size: 0.8rem;
+}
+
+.chat-app {
+  display: grid;
+  grid-template-columns: minmax(12rem, 17rem) minmax(0, 1fr);
+  height: calc(100vh - 7.5rem);
+  height: calc(100dvh - 7.5rem);
+  min-height: 24rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.chat-side {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 0;
+  padding: 0.75rem;
+  overflow-y: auto;
+  background: var(--side);
+  border-right: 1px solid var(--line);
+}
+
+.chat-new {
+  width: 100%;
+  margin-top: 0;
 }
 
 .chat-conversations,
 .chat-devices,
 .chat-transcript {
   list-style: none;
-  margin: 0.4rem 0;
+  margin: 0;
   padding: 0;
 }
 
-.chat-conversation-row,
-.chat-device {
-  border-top: 1px solid var(--line);
-  padding: 0.5rem 0;
+.chat-conversations {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
 }
 
-.chat-conversation-row .hint,
+.chat-conversations > .hint {
+  padding: 0.5rem 0.25rem;
+}
+
+/* One conversation, as the one control that opens it. */
+.chat-open {
+  width: 100%;
+  margin-top: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.05rem;
+  padding: 0.5rem 0.65rem;
+  text-align: left;
+  background: transparent;
+  border-color: transparent;
+}
+
+.chat-open:hover {
+  background: var(--hover);
+  border-color: transparent;
+}
+
+.chat-open[aria-current="true"] {
+  background: var(--selected);
+}
+
+.chat-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.chat-when {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.chat-devices-said {
+  margin-top: auto;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--line);
+}
+
+.chat-devices-said h3 {
+  margin: 0 0 0.2rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.chat-devices-said .hint,
 .chat-device p {
   margin: 0.2rem 0;
+  font-size: 0.78rem;
 }
 
+.chat-device {
+  color: var(--muted);
+}
+
+.chat-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chat-empty {
+  margin: auto;
+  padding: 2rem;
+  text-align: center;
+}
 
 .chat-thread {
-  border-top: 1px solid var(--line);
-  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
-.chat-transcript {
-  max-height: 60vh;
-  overflow-y: auto;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 0.3rem 0.7rem;
-}
-
-.chat-message {
-  padding: 0.5rem 0 0.5rem 0.7rem;
+.chat-thread-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.9rem;
   border-bottom: 1px solid var(--line);
 }
 
-.chat-message:last-child {
-  border-bottom: 0;
+.chat-thread-head h3 {
+  flex: 1 1 10rem;
+  min-width: 0;
+  margin: 0;
 }
 
-.chat-message.from-user {
-  border-left: 3px solid var(--muted);
+.chat-thread-head > button {
+  margin-top: 0;
 }
 
-.chat-message.from-assistant {
-  border-left: 3px solid var(--ink);
+/* The conversation's own settings: who sees it, and deleting or forgetting it. */
+.chat-about {
+  position: relative;
+}
+
+.chat-about > summary {
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+}
+
+.chat-about-body {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.35rem);
+  z-index: 5;
+  width: min(22rem, calc(100vw - 2rem));
+  padding: 0.3rem 0.9rem 0.6rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgb(0 0 0 / 0.14);
+}
+
+.chat-about-body h4 {
+  margin: 0.8rem 0 0.2rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+#chat-reread,
+#chat-older {
+  align-self: center;
+  margin-top: 0.5rem;
+}
+
+/*
+ * The transcript scrolls in its own box, so the box to write in stays under it. Each
+ * message keeps the line breaks it was written with (`pre-wrap`), as the composed answer
+ * does — so a question's "Needs your yes:" line and the exact lines under it read as
+ * the assistant wrote them.
+ */
+.chat-transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  padding: 1rem 0.9rem;
 }
 
 .chat-message p {
   margin: 0.15rem 0;
 }
 
+/*
+ * The assistant's messages read as the page's text, full width with a rule on their
+ * side; the owner's sit to the right in a bubble. Which is which is said in words on
+ * every message as well ("You", "Assistant"), so neither colour nor side is the only
+ * signal.
+ */
+.chat-message.from-assistant {
+  align-self: stretch;
+  padding-left: 0.8rem;
+  border-left: 3px solid var(--accent);
+}
+
+.chat-message.from-user {
+  align-self: flex-end;
+  max-width: min(85%, 38rem);
+  padding: 0.3rem 0.85rem 0.55rem;
+  background: var(--bubble);
+  border-radius: 14px 14px 4px 14px;
+}
+
+.chat-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0 0.5rem;
+}
+
+.chat-message .chat-meta {
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.chat-meta strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
 .chat-text {
   white-space: pre-wrap;
+  line-height: 1.6;
 }
 
 .chat-quote {
   font-style: italic;
+  padding-left: 0.5rem;
+  border-left: 2px solid var(--line);
 }
 
 /*
- * A message's own controls are outlined rather than filled: they sit on every row, and
- * the acts on offer for the conversation are the filled ones.
+ * A message's own controls are quiet: they sit on every message, and the acts on
+ * offer for the conversation are the framed ones.
  */
-.chat-acts button {
-  margin-top: 0.2rem;
-  background: transparent;
-  color: var(--ink);
-  border: 1px solid var(--line);
+.chat-acts {
+  gap: 0;
 }
 
-#chat-form {
-  margin-top: 0.8rem;
+.chat-message .chat-acts {
+  margin: 0;
+}
+
+.chat-acts button {
+  margin-top: 0;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+}
+
+.chat-acts button:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
+
+.chat-message.pending {
+  opacity: 0.85;
+}
+
+/* Whether the assistant is working, between the transcript and the box to write in. */
+.chat-working {
+  padding: 0 0.9rem;
+}
+
+.chat-working p {
+  margin: 0.35rem 0;
+}
+
+#chat-state.working {
+  color: var(--ink);
+}
+
+#chat-state.working::before {
+  content: "";
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  margin-right: 0.45rem;
+  vertical-align: 0.05rem;
+  background: var(--accent);
+  border-radius: 50%;
+}
+
+#chat-stop {
+  margin-top: 0;
+}
+
+.chat-composer {
+  padding: 0.6rem 0.9rem 0.8rem;
+  border-top: 1px solid var(--line);
+}
+
+.chat-composer > p {
+  margin: 0 0 0.3rem;
+}
+
+.chat-composer > button {
+  margin: 0 0 0.4rem;
+}
+
+.chat-compose-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+
+.chat-compose-row textarea {
+  flex: 1;
+  min-width: 0;
+  max-height: 12rem;
+  resize: vertical;
+}
+
+.chat-compose-row button {
+  margin-top: 0;
 }
 
 /*
@@ -639,9 +1067,11 @@ code {
 }
 
 /*
- * The phone (#1429). One breakpoint, at 480px, because there is one layout question
- * on this page — whether a 44rem column's gutters and a panel's inset are affordable
- * — and it is answered the same way by every width below it.
+ * The phone (#1429, #3098). One breakpoint, at 480px, because there is one layout
+ * question on this page — whether there is room for the chat's two halves side by side,
+ * and for a card's gutters — and it is answered the same way by every width below it.
+ * The script asks the browser the same width (`NARROW`) to show the chat's halves one
+ * at a time.
  *
  * Nothing here hides anything, shortens anything or moves anything into a scroller.
  * The panels are the same panels carrying the same text: what changes is how much of
@@ -649,27 +1079,56 @@ code {
  * ADRs repeatedly forbid one answer standing in for another (ADR-0139 §3, ADR-0177 §6,
  * ADR-0178 §7) — a responsive rule that clamped a confirmation's recipients or a
  * grant's uses to fit a phone would breach them from the stylesheet.
- *
- * `44rem` needs no rule: it is a maximum, so the column is already the viewport here.
  */
 @media (max-width: 480px) {
   .shell {
-    padding: 1rem 0.85rem 3rem;
+    padding: 0 0.75rem 2rem;
   }
 
   h1 {
-    font-size: 1.2rem;
-    margin: 0 0 0.8rem;
+    font-size: 1rem;
   }
 
   /*
-   * The inset costs 2.4rem of a 390px screen — a tenth of it — to draw a border the
-   * heading already implies. It is halved rather than dropped, because the border is
-   * what says where one panel's answer ends and the next begins.
+   * The inset costs a tenth of a 390px screen to draw a border the heading already
+   * implies. It is halved rather than dropped, because the border is what says where
+   * one panel's answer ends and the next begins.
    */
   .panel {
     padding: 0.9rem 0.85rem;
     margin: 0.9rem 0;
+  }
+
+  .console > button,
+  .menu > summary {
+    padding: 0.45rem 0.8rem;
+  }
+
+  /* One half of the chat at a time, each the frame's whole width. */
+  .chat-app {
+    grid-template-columns: minmax(0, 1fr);
+    height: calc(100vh - 8rem);
+    height: calc(100dvh - 8rem);
+    border-radius: 10px;
+  }
+
+  .chat-side {
+    border-right: 0;
+  }
+
+  .chat-transcript {
+    padding: 0.8rem 0.7rem;
+  }
+
+  .chat-message.from-user {
+    max-width: 92%;
+  }
+
+  .chat-thread-head,
+  .chat-working,
+  .chat-composer {
+    padding-left: 0.7rem;
+    padding-right: 0.7rem;
   }
 
   .scope-form {
@@ -678,7 +1137,7 @@ code {
 
   /*
    * A row of buttons is a column of buttons here, and each keeps its own width rather
-   * than being shrunk to a share of the line: `flex` would squeeze six openers into
+   * than being shrunk to a share of the line: `flex` would squeeze six controls into
    * one row of slivers, and `body`'s `overflow-wrap: anywhere` would then break their
    * labels mid-word — the "Remo ve" this project has already shipped once (PR #1385).
    */

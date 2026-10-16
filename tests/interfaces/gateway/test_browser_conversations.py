@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import pytest
-from browser_drive import driving
+from browser_drive import driving, press
 from playwright.async_api import expect
 
 from ai_assistant.core.types import ChatDevice, DeviceAccess, UserMessage
@@ -124,7 +124,7 @@ async def _answered(drive: Drive, conversation_id: str) -> None:
 
 async def _open_listing(drive: Drive) -> None:
     """Press Conversations and wait for the panel to be showing."""
-    await drive.page.click("#conversations-button")
+    await press(drive.page, "#conversations-button")
     await drive.page.wait_for_selector("#conversations:not([hidden])")
 
 
@@ -416,7 +416,7 @@ async def test_a_refresh_that_lost_its_race_does_not_write_over_the_newer_listin
         await _first_row(drive).get_by_role("button", name="Forget").click()
         assert await answered
         await held.reached.wait()
-        await drive.page.click("#conversations-button")
+        await press(drive.page, "#conversations-button")
         # Both rows: forgetting leaves the conversation listed (ADR-0293 §11:4).
         await expect(drive.page.locator("#conversation-list .conversation-row")).to_have_count(2)
         assert await drive.page.is_hidden("#forget-outcome")
@@ -448,12 +448,12 @@ async def test_a_superseded_listing_read_cannot_put_back_a_row_the_newer_one_dro
         await _open_listing(drive)
         await expect(rows).to_have_count(2)
         # The second read is answered while `doomed` is still there, and held.
-        await drive.page.click("#conversations-button")
+        await press(drive.page, "#conversations-button")
         await drive.page.wait_for_function("() => window.__held.reached")
         drive.engine.conversations_held.pop("doomed")
         drive.engine.activity.pop("doomed")
         # The third read goes out afterwards and is answered with the shorter truth.
-        await drive.page.click("#conversations-button")
+        await press(drive.page, "#conversations-button")
         await expect(rows).to_have_count(1)
         await drive.page.evaluate("() => window.__held.release()")
         # One round trip after the release, which is a later task: every microtask the
@@ -480,6 +480,6 @@ async def test_a_second_read_of_the_listing_clears_the_outcome_it_did_not_produc
         await _first_row(drive).get_by_role("button", name="Forget").click()
         assert await answered
         await drive.page.wait_for_selector("#forget-outcome:not([hidden])")
-        await drive.page.click("#conversations-button")
+        await press(drive.page, "#conversations-button")
         await drive.page.wait_for_selector("#forget-outcome", state="hidden")
         assert await drive.page.inner_text("#forget-outcome") == ""
