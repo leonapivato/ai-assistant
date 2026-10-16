@@ -47,6 +47,7 @@ from ai_assistant.core.errors import (
     ModelUnavailableError,
 )
 from ai_assistant.core.types import Message, Role
+from ai_assistant.models.prompt_cache import prompt_cache_settings
 
 _HTTP_UNAUTHORIZED: Final = 401
 _HTTP_FORBIDDEN: Final = 403
@@ -57,7 +58,9 @@ _HTTP_SERVER_ERROR: Final = 500
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from pydantic_ai import RunContext
     from pydantic_ai.messages import ModelMessage, ModelRequestPart
+    from pydantic_ai.settings import ModelSettings
 
 
 def ensure_vendor_available(spec: str) -> None:
@@ -397,6 +400,10 @@ class PydanticAIProvider:
     The default model may be a ``"provider:model"`` string (the production path)
     or a pydantic-ai :class:`~pydantic_ai.models.Model` instance (used by tests
     to inject a deterministic fake without network access).
+
+    Each completion asks the provider to cache its instructions where the model
+    it goes to is Anthropic's (:mod:`~ai_assistant.models.prompt_cache`, #3077),
+    whether it is the default model or a call's override.
     """
 
     def __init__(self, default_model: models.Model | str) -> None:
@@ -410,7 +417,9 @@ class PydanticAIProvider:
         self._default_model = default_model
         # ``defer_model_check`` keeps construction offline: a string model is
         # only resolved (and credentials required) at first completion.
-        self._agent: Agent[None, str] = Agent(model=default_model, defer_model_check=True)
+        self._agent: Agent[None, str] = Agent(
+            model=default_model, defer_model_check=True, model_settings=_cached
+        )
 
     async def complete(
         self,
@@ -470,3 +479,8 @@ class PydanticAIProvider:
             raise _classify(exc) from exc
 
         return Message(role=Role.ASSISTANT, content=result.output)
+
+
+def _cached(context: RunContext[None]) -> ModelSettings:
+    """The prompt-cache marks for the model this completion resolved to (#3077)."""
+    return prompt_cache_settings(context.model)

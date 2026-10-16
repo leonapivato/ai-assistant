@@ -60,6 +60,11 @@ none is bound. The thinking still reaches nothing else: :class:`RoundResponse`, 
 episode and the next round never carry it (§5:3). Where the record is off, the request
 is as it is without this.
 
+**A round asks the provider to cache its tools and instructions** (#3077): they are
+the same from one round to the next, and :mod:`~ai_assistant.models.prompt_cache` marks
+them where the model is Anthropic's, as it does for every completion. A fallback model
+keeps the request it had, so it is given no marks either.
+
 **Nothing here retries or re-routes**, as nothing in the streaming sibling does:
 ``RoutingProvider`` and ``RetryingProvider`` wrap ``ModelProvider`` completions, and a
 round's resilience is the caller's to decide.
@@ -93,6 +98,7 @@ from ai_assistant.core.types import (
     Role,
     RoundResponse,
 )
+from ai_assistant.models.prompt_cache import prompt_cache_settings
 from ai_assistant.models.provider import _classify, _to_model_messages
 
 if TYPE_CHECKING:
@@ -310,7 +316,7 @@ class PydanticAIToolCallingCompleter:
 def _settings(
     thinking: ThinkingLevel, model: models.Model, *, summarised: bool = False
 ) -> ModelSettings | None:
-    """A round's model settings: the thinking it asks for, and room for it.
+    """A round's model settings: the thinking it asks for, room for it, and the cache marks.
 
     A budget-based Anthropic model is given a budget and refuses a ceiling that does
     not exceed it; an adaptive one spends its thinking out of the same ceiling. So where
@@ -331,6 +337,10 @@ def _settings(
     of a model with Anthropic's adaptive thinking whose own settings do not configure
     it, the request asks for the thinking's summarised text (ADR-0314 §5:1). The key is
     Anthropic's own, so any other model ignores it.
+
+    Where the model is Anthropic's, the round's tools and instructions are marked for
+    caching (:func:`~ai_assistant.models.prompt_cache.prompt_cache_settings`); any other
+    model is given no marks.
     """
     inner = model
     while isinstance(inner, WrapperModel):
@@ -343,12 +353,12 @@ def _settings(
         if ceiling is None
         else ModelSettings(thinking=thinking, max_tokens=ceiling)
     )
+    widened: dict[str, object] = {**settings, **prompt_cache_settings(inner)}
     if summarised and thinking is not False and _adaptive_unconfigured(inner):
         # Anthropic's own settings key, which ``ModelSettings`` does not declare and
         # every other model ignores.
-        widened: dict[str, object] = {**settings, "anthropic_thinking": dict(_SUMMARISED_ADAPTIVE)}
-        return cast("ModelSettings", widened)
-    return settings
+        widened["anthropic_thinking"] = dict(_SUMMARISED_ADAPTIVE)
+    return cast("ModelSettings", widened)
 
 
 def _adaptive_unconfigured(model: models.Model) -> bool:

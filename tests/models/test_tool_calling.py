@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
@@ -1088,3 +1089,102 @@ async def test_a_preparation_that_raises_for_the_record_still_writes_the_entry_m
         "class": "RuntimeError",
         "message": "cannot prepare",
     }
+
+
+# --- #3077: a round's tools and instructions are marked for the provider's cache -------------
+
+_FIVE_MINUTES: Final = {"type": "ephemeral", "ttl": "5m"}
+
+
+async def test_an_anthropic_round_marks_its_tools_and_instructions_for_caching() -> None:
+    """The mark after the last tool caches the tools; the one after the system prompt both."""
+    _, body = await _anthropic_round("claude-sonnet-5-5", anthropic_success)
+    tools = cast("list[dict[str, Any]]", body["tools"])
+    assert [tool["name"] for tool in tools] == ["web_search", ROUND_TOOL]
+    assert "cache_control" not in tools[0]
+    assert tools[-1]["cache_control"] == _FIVE_MINUTES
+    assert body["system"] == [
+        {"type": "text", "text": "You plan one round.", "cache_control": _FIVE_MINUTES}
+    ]
+
+
+async def test_an_anthropic_rounds_messages_are_not_marked() -> None:
+    """The user turn is rendered afresh each round, so a mark on it would never be read."""
+    _, body = await _anthropic_round("claude-sonnet-5-5", anthropic_success)
+    assert "cache_control" not in body
+    messages = cast("list[dict[str, Any]]", body["messages"])
+    assert all("cache_control" not in block for turn in messages for block in turn["content"])
+
+
+async def test_a_models_own_cache_setting_is_kept() -> None:
+    settings = AnthropicModelSettings(anthropic_cache_instructions=False)
+    _, body = await _anthropic_round("claude-sonnet-5-5", anthropic_success, settings=settings)
+    assert body["system"] == "You plan one round."
+    tools = cast("list[dict[str, Any]]", body["tools"])
+    assert tools[-1]["cache_control"] == _FIVE_MINUTES
+
+
+async def test_an_openai_round_is_given_no_cache_marks() -> None:
+    """ADR-0061: the marks are Anthropic's, and another provider's request is as it was."""
+    recorder = RequestRecorder(openai_success)
+    with network_denied():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(recorder)) as http_client:
+            client = AsyncOpenAI(api_key=_DUMMY_KEY, http_client=http_client, max_retries=0)
+            model = OpenAIChatModel("gpt-4o", provider=OpenAIProvider(openai_client=client))
+            await PydanticAIToolCallingCompleter(model).respond(_request(), [_tool()])
+    sent = json.dumps(recorder.only)
+    assert "cache_control" not in sent
+    assert "prompt_cache" not in sent
+
+
+async def test_a_sonnet_5_5_round_thinks_adaptively_within_a_widened_ceiling() -> None:
+    """The default model takes adaptive thinking, never a budget, and no sampling settings."""
+    _, body = await _anthropic_round("claude-sonnet-5-5", anthropic_success)
+    assert body["thinking"] == {"type": "adaptive"}
+    assert body["max_tokens"] == 4096 + 10000
+    assert "output_config" not in body
+    assert "temperature" not in body
+
+
+async def test_with_the_record_on_sonnet_5_5_is_asked_for_its_summarised_thinking() -> None:
+    """ADR-0314 §5:1 holds on the default model: its adaptive thinking omits the text too."""
+    _, body = await _anthropic_round(
+        "claude-sonnet-5-5", anthropic_success, diagnostics=FakeDiagnosticSink()
+    )
+    assert body["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert body["max_tokens"] == 4096 + 10000
+
+
+def _answered_from_the_cache(request: httpx.Request) -> httpx.Response:
+    del request
+    return httpx.Response(
+        200,
+        json={
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-5-5",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": 900,
+                "cache_creation_input_tokens": 120,
+                "cache_read_input_tokens": 6800,
+                "output_tokens": 40,
+            },
+        },
+    )
+
+
+async def test_the_returned_entry_keeps_the_cache_read_and_write_tokens() -> None:
+    """QA measures the saving from the record: the provider's cache usage reaches it."""
+    sink = FakeDiagnosticSink()
+    with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now):
+        await _anthropic_round("claude-sonnet-5-5", _answered_from_the_cache, diagnostics=sink)
+
+    usage = sink.recorded[0].model_dump(mode="json")["body"]["response"]["usage"]
+    assert usage["cache_read_tokens"] == 6800
+    assert usage["cache_write_tokens"] == 120
+    assert usage["input_tokens"] == 900 + 120 + 6800
+    assert usage["output_tokens"] == 40
