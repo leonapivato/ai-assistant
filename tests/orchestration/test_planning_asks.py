@@ -201,12 +201,13 @@ async def test_the_round_that_proposes_a_call_says_nothing_about_it() -> None:
     instruction = _instruction(completer)
     assert (
         "Whether a call needs the user's yes is known only once it comes back, in the round "
-        "after the one that proposed it, and that round tells the user. So a round says "
-        "nothing to them about an action it proposes itself: not that you are doing it, such "
-        'as "Let me book that", not that it is done, and not that details will follow. It '
-        "does not ask them to confirm it or name it in asks, and writes text only for "
-        "something else they need to hear. The same round still asks about an earlier call "
-        "that came back needing a yes."
+        "after the one that proposed it, and that round tells the user. So, other than for "
+        "a tidy-up, which brings no round after, a round says nothing to them about an "
+        'action it proposes itself: not that you are doing it, such as "Let me book that", '
+        "not that it is done, and not that details will follow. It does not ask them to "
+        "confirm it or name it in asks, and writes text only for something else they need "
+        "to hear. The same round still asks about an earlier call that came back needing a "
+        "yes."
     ) in instruction
     assert "It may say what you are doing" not in instruction
 
@@ -282,7 +283,7 @@ async def test_a_place_that_takes_no_message_is_not_told_how_to_ask() -> None:
     stage, completer, _ = _stage()
     await stage.plan(_inputs(place=PlaceWindow(takes_message=False)))
     instruction = _instruction(completer)
-    assert "says nothing to them about an action it proposes" not in instruction
+    assert "a round says nothing to them about an" not in instruction
     assert "A call shown as already asked about" not in instruction
 
 

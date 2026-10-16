@@ -542,7 +542,10 @@ async def test_a_round_that_acts_on_the_request_is_instructed_to_reply() -> None
     ) in instruction
     assert "this round's message tells them so" not in instruction
     assert "Empty text writes no message" in instruction
-    assert "leave the text empty only where the user asked nothing of you" in instruction
+    assert (
+        "leave the text empty only where the user asked nothing of you, where this round "
+        "proposes the action and has nothing else to tell them, or where an earlier round"
+    ) in instruction
     assert "Write no text where you have nothing to say" not in instruction
 
 
