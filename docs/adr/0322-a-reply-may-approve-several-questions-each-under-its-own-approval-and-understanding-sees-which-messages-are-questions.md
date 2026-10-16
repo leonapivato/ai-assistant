@@ -4,9 +4,12 @@
 - Date: 2026-10-15
 - Scope: the authority milestone, M44 ([milestone #11](https://github.com/leonapivato/ai-assistant/milestone/11)), acceptance [#3058](https://github.com/leonapivato/ai-assistant/issues/3058), batch [#3059](https://github.com/leonapivato/ai-assistant/issues/3059): how many questions one reply may approve, and how understanding tells a question from a message that only asked in words.
 - Dependency: [ADR-0321](0321-authority-at-the-deploy-is-your-yes-to-a-question-that-showed-the-call.md), Accepted, and the yes path its lanes built, on `main` at `8257e6fa`.
-- Authorization: the owner's two rulings of 2026-10-15, given to the dispatcher after #3058's re-run: on [#3075](https://github.com/leonapivato/ai-assistant/issues/3075), "why can one reply only authorize one thing?", then "go ahead"; and on [#3072](https://github.com/leonapivato/ai-assistant/issues/3072), "yes, fold it in". The dispatcher assigned 0322.
-- **Changes `core`, so it is a contract-surface decision.** `ProposedActivationUnderstanding` and `ActivationUnderstanding` carry a sequence of answer pointers in place of one. Both cross the wire, so `PROTOCOL_VERSION` advances (§6).
-- **Partially supersedes** [ADR-0321](0321-authority-at-the-deploy-is-your-yes-to-a-question-that-showed-the-call.md), in the scopes §7 states: §3:1's one pointer, §3:2 in the addition alone, §3:6 per question, and §9's two understanding rows.
+- Authorization: the owner's two rulings of 2026-10-15, given to the dispatcher after #3058's re-run: on [#3075](https://github.com/leonapivato/ai-assistant/issues/3075), "why can one reply only authorize one thing?", then "go ahead"; and on [#3072](https://github.com/leonapivato/ai-assistant/issues/3072), "yes, fold it in". The dispatcher assigned 0322, and on this draft's first review settled two details the rulings leave open: the mark is read through `project_episode`, and each question carries a label of its own that a pointer names it by (§4:3–§4:6).
+- **Changes `core`, so it is a contract-surface decision.** `ProposedActivationUnderstanding` and `ActivationUnderstanding` carry a sequence of answer pointers in place of one, and `project_episode`'s projected round gains the parts its message asked about. Both cross the wire, so `PROTOCOL_VERSION` advances (§6).
+- **Partially supersedes**, each in the scopes §7 states:
+  [ADR-0321](0321-authority-at-the-deploy-is-your-yes-to-a-question-that-showed-the-call.md) (§3:1's one pointer, §3:2 in the addition alone, §3:6 per question, and §9's two understanding rows),
+  [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) (§3:3's label scheme and §2:1's field sets, in the additions alone) and
+  [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md) (§8:1's projection, in the addition alone).
 
 ## Context
 
@@ -22,10 +25,15 @@ Two failures remain, each with nothing run:
   the 3 strict failures in the 40 runs, and three more activations in #3075's flows. Understanding
   cannot tell from its window which messages are questions.
 
+**What the first review found.** Every rendering of a stored episode reads it through
+`project_episode` and renders no other field (ADR-0284 §8:3), so a mark read from the rounds
+must ride the projection. And a story is shown under one `S` label whose episodes take none
+(ADR-0300 §6:5), so two questions seen only through a story could not be named apart.
+
 ## Decision
 
 We will let one reply approve several questions, each by its own pointer and under its own
-approval, and mark for understanding every message that is a question.
+approval, and mark and label for understanding every message that is a question.
 
 ### 1. Status and delivery
 
@@ -38,12 +46,12 @@ approval, and mark for understanding every message that is a question.
 ### 2. Several questions
 
 > **Normative.** Where an input approves, understanding records one pointer per question it
-> approves, each naming that question's message and the parts of it the input approves, and
-> no question twice.
+> approves, each naming that question by its label (§4:4) and the parts of it the input
+> approves, and no question twice.
 
 > **Normative.** A reply approves several questions only where it says which: "both", "all
 > of them", naming them, or naming them in reply to a message that asked which was meant. The
-> pointers name the questions' messages, never the message that asked which.
+> pointers name the questions, never the message that asked which.
 
 > **Normative.** ADR-0321 §3:5 stands: a bare yes that could fit more than one question
 > records no pointer and gets "yes to which?", never a guess.
@@ -53,12 +61,12 @@ approval, and mark for understanding every message that is a question.
 
 > **Normative.** Each pointer is a reading and grants nothing by itself (ADR-0276 §7:7).
 
-> **Normative.** Each pointer resolves on its own. One that names no question, or a part its
-> question did not show, is not recorded, and the understanding gains the code-owned
-> unresolved matter saying so; the others stand.
+> **Normative.** Each pointer resolves on its own. One that §4:5 does not admit, or that
+> names a part its question did not show, is not recorded, and the understanding gains the
+> code-owned unresolved matter saying so; the others stand.
 
-> **Normative.** Where two proposed pointers resolve to one question, neither is recorded,
-> and the understanding gains the code-owned unresolved matter saying so.
+> **Normative.** Where two proposed pointers name one question, neither is recorded, and the
+> understanding gains the code-owned unresolved matter saying so.
 
 ### 3. One approval per question
 
@@ -75,18 +83,32 @@ approval, and mark for understanding every message that is a question.
 > **Normative.** Planning is shown, under ADR-0321 §4:2's labels, the approved actions of
 > every recorded pointer.
 
-### 4. Questions are marked
+### 4. Questions are marked and labelled
 
 > **Normative.** Code marks, in what understanding is shown, each message that is a question:
 > one whose round recorded asked calls (ADR-0321 §2:8), with the parts it showed. A message
 > that asked only in words carries no mark.
 
 > **Normative.** The mark is carried wherever understanding is shown a question: on its
-> message in the place window, and on the episode whose round asked it, recalled or through a
-> story.
+> message in the place window, and on the round that asked it in an episode shown in the
+> episode window, in the recalled section or in a story's short view.
 
-> **Normative.** The mark is derived from the round records the understanding phase holds and
-> never from a message's text (ADR-0276 §3:6).
+> **Normative.** Every mark is read through `project_episode`: a projected round carries the
+> part numbers its message asked about, and no values, derived from the round's recorded
+> asked calls and never from a message's text (ADR-0284 §8:3, ADR-0276 §3:6). It carries
+> them only where it carries the round's message.
+
+> **Normative.** Each marked question carries a label of its own: the ASCII string `Q`
+> followed by its 1-based index in decimal with no padding, on ADR-0276 §3:3's scheme, in
+> the order the questions are first rendered. A question rendered in more than one place
+> carries one label, and no label survives the call.
+
+> **Normative.** A pointer names its question by its `Q` label and by no other. A pointer
+> naming another label, or a `Q` label the call did not render, is not recorded (§2:6), so a
+> yes never lands on an unmarked message.
+
+> **Normative.** A `Q` label names no referent. Anywhere in a proposal but a pointer, it is
+> a label naming nothing (ADR-0276 §3:4).
 
 > **Normative.** The mark is information for understanding's reading. It approves nothing,
 > and the three facts still decide (ADR-0321 §4:4).
@@ -95,12 +117,9 @@ approval, and mark for understanding every message that is a question.
 > never whether it was answered. ADR-0321 §3:2's *nothing lists unanswered questions* and
 > §3:10's *nothing opens or closes it* stand.
 
-> **Normative.** A pointer naming a message that carries no mark is not recorded, and the
-> understanding gains the code-owned unresolved matter saying so, as for one naming no
-> question (§2:6).
-
-> **Normative.** Understanding's instruction says what the mark means, that a pointer names a
-> marked message, and when one reply approves several questions (§2:2).
+> **Normative.** Understanding's instruction says what the mark and the `Q` label mean, that
+> a pointer names a question by its `Q` label alone, and when one reply approves several
+> questions (§2:2).
 
 ### 5. Acceptance
 
@@ -118,15 +137,16 @@ approval, and mark for understanding every message that is a question.
 
 | Code | Change |
 | --- | --- |
-| `ProposedActivationUnderstanding` | `answers` becomes a sequence of `ProposedAnswer`, empty where the input approves no question |
+| `ProposedActivationUnderstanding` | `answers` becomes a sequence of `ProposedAnswer`, each naming a `Q` label, empty where the input approves no question |
 | `ActivationUnderstanding` | `answers` becomes a sequence of `AnsweredQuestion`, naming no question twice |
-| `orchestration/understanding.py` | Several pointers, each resolved on its own (§2:6–§2:7, §4:6); the marks (§4:1–§4:3); the instruction (§4:7) |
+| `ProjectedRound`, through `project_episode` | Gains the part numbers its message asked about, where it carries the message (§4:3) |
+| `orchestration/understanding.py` | The marks and the `Q` labels (§4:1–§4:6); several pointers, each resolved on its own (§2:6–§2:7); the instruction (§4:9) |
 | `orchestration/authorizer.py` | The yes's context carries every pointer, and an approved call is checked against the one whose question asked it (§3:1, §3:3) |
 | `orchestration/phase_path.py` | The approved actions are gathered from every pointer (§3:4) |
 | `Approval`, `PermissionDecision`, `ActivationEffect`, `PlanStore.claim_activation_effect` | Unchanged |
 
-> **Normative.** The two `core` types change as the table states; their exact shapes are the
-> code lane's, within the table.
+> **Normative.** The `core` types change as the table states; their exact shapes are the code
+> lane's, within the table.
 
 > **Normative.** The change advances `PROTOCOL_VERSION` on ADR-0124 §9's rule, and the deploy
 > starts from a fresh data directory, so nothing stored with a single pointer is read.
@@ -135,25 +155,29 @@ approval, and mark for understanding every message that is a question.
 
 | Earlier decision | What changes |
 | --- | --- |
-| ADR-0321 §3:1 | Its one pointer: one per question the input approves (§2:1) |
-| ADR-0321 §3:2 | In the addition alone: questions are marked (§4). *Nothing lists unanswered questions* stands |
+| ADR-0321 §3:1 | Its one pointer: one per question the input approves, named by its `Q` label (§2:1, §4:5) |
+| ADR-0321 §3:2 | In the addition alone: questions are marked and labelled (§4). *Nothing lists unanswered questions* stands |
 | ADR-0321 §3:6 | Per question: a yes approves every part of each question it names (§2:4) |
 | ADR-0321 §9's `ProposedActivationUnderstanding` and `ActivationUnderstanding` rows | The pointer becomes a sequence (§6) |
-| ADR-0321 §3:5, §3:10, §4 | Nothing: §2:3, §4:5 and §3 apply them per question |
-| ADR-0276 §2:1, §7:7 | Nothing beyond ADR-0321's addition, which this amends; *grants no authority* stands |
-| ADR-0284 §8:1 | Nothing: the mark is rendered beside an episode's projection, which gains no field |
+| ADR-0321 §3:5, §3:10, §4 | Nothing: §2:3, §4:8 and §3 apply them per question |
+| ADR-0276 §3:3 | In the addition alone: a fifth sequence, `Q`, for questions (§4:4) |
+| ADR-0276 §2:1 | `ProposedActivationUnderstanding`'s and `ActivationUnderstanding`'s field sets, in ADR-0321's addition alone: the pointer becomes a sequence. §7:7's *grants no authority* stands |
+| ADR-0284 §8:1 | The projection, in the addition alone: a projected round carries the parts its message asked about (§4:3). §8:3 stands, and the mark is read through it |
+| ADR-0300 §6:5 | Nothing: the episodes in a short view still take no label; a question shown in one takes a `Q` label, which names no referent (§4:6) |
 
-> **Normative.** This numbered draft records its replacements on the status line and in a
-> dated header note of ADR-0321, atomically with this ADR under ADR-0070 and ADR-0082,
-> preserving its ratified body. The replacements take effect on this ADR's ratification.
+> **Normative.** This numbered draft records its replacements on the status lines and in a
+> dated header note of ADR-0321, ADR-0276 and ADR-0284, atomically with this ADR under
+> ADR-0070 and ADR-0082, preserving their ratified bodies. The replacements take effect on
+> this ADR's ratification.
 
 ## Consequences
 
 - "Both", "all of them" and a change that adds to a waiting call can be approved in one
   reply, and each call still runs only under its own question's approval, once.
-- A yes can no longer land on a prose copy: it points at a marked message or records nothing,
+- A yes can no longer land on a prose copy: a pointer names a `Q` label or records nothing,
   and planning can ask which was meant.
-- Understanding's rendering and instruction grow by one mark and one paragraph.
+- Understanding's prompt grows by one mark and one label sequence, and its instruction by
+  one paragraph.
 
 **Held, not decided.** "Know before, ask first", forecasting that a call will need you and
 asking in the proposing round, is held for a later design.
@@ -167,3 +191,6 @@ asking in the proposing round, is held for a later design.
   the user.
 - **Marking whether a question was answered.** Rejected: ADR-0321 §3:10 keeps staleness a
   reading of the story.
+- **Pointers keep naming the message's or episode's label, and a label holding several
+  questions records none.** Rejected: "both" would stay unanswerable for questions seen only
+  through a story.
