@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 from phases_support import chat_turn, processing, written
-from story_support import CONVERSATION
+from story_support import CONVERSATION, episode
 from test_engine import AT, Harness
 from understanding_support import recall_stage
 
@@ -65,6 +65,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
     ToolFailure,
     ToolFailureKind,
+    ToolOutcome,
     TranscriptMessage,
     UnderstandingGround,
     UnderstandingProducer,
@@ -1359,6 +1360,77 @@ class _Given:
     windows: Windows | None = None
     recalled: Recalled | None = None
     story_candidates: Candidates | None = None
+
+
+async def _asked_in(hub: _Hub, activation_id: str, round_id: str, date: str) -> None:
+    """``activation_id``'s frozen episode, whose round ``round_id`` asked one booking, shown."""
+    stored = episode(activation_id)
+    record = stored.processing_record
+    assert record is not None
+    asked = AskedCall(part=1, tool=_BOOK, values={"date": date})
+    planned = PlanningRound(id=round_id, recorded_at=AT, text="Shall I?", asked=(asked,))
+    await hub.memory.add(
+        stored.model_copy(
+            update={"processing_record": record.model_copy(update={"rounds": (planned,)})}
+        )
+    )
+    effect = ActivationEffect(
+        id=f"e-{activation_id}",
+        activation_id=activation_id,
+        round=round_id,
+        place=f"conversation:{CONVERSATION.instance_id}",
+        claimed_at=AT,
+    )
+    await hub.harness.plans.claim_activation_effect(effect, match=None)
+    await hub.harness.plans.finish_activation_effect(effect.id, ToolOutcome.SUCCEEDED, position=1)
+
+
+@pytest.mark.parametrize(
+    ("rounds", "shown"),
+    [
+        pytest.param(("round:a", "round:b"), ["Friday", "Saturday"], id="two-rounds"),
+        pytest.param(("round:x", "round:x"), [], id="one-round-id-under-two-activations"),
+    ],
+)
+async def test_the_approved_actions_are_gathered_from_every_pointer(
+    rounds: tuple[str, str], shown: list[str]
+) -> None:
+    """ADR-0322 §3:4: every pointer's actions; a part two askers share is shown by neither.
+
+    A part's label names it by its round and number alone, so a part reached from two
+    asking activations could not be told apart when proposed (§3:3), and fails closed.
+    """
+    hub = _Hub()
+    await _asked_in(hub, "a-1", rounds[0], "Friday")
+    await _asked_in(hub, "a-2", rounds[1], "Saturday")
+    path = hub.phases(hub.harness)
+    working = path.begin(
+        activation_id="a-3",
+        window=_window(_from(MessageAuthor.USER)),
+        conversation_id=CONVERSATION.instance_id,
+        trigger_origin=InputOrigin.USER,
+        owner_records=True,
+    )
+    understanding = ActivationUnderstanding(
+        version=1,
+        recorded_at=AT,
+        producer=UnderstandingProducer.INTERPRETATION,
+        meaning="yes to both",
+        meaning_ground=UnderstandingGround.STATED,
+        answers=(
+            AnsweredQuestion(activation_id="a-1", round=rounds[0]),
+            AnsweredQuestion(activation_id="a-2", round=rounds[1]),
+        ),
+    )
+    given = _Given(
+        deadline=asyncio.get_running_loop().time() + 5,
+        phases=working,
+        understanding=understanding,
+    )
+
+    approved = await path._approved(given, working)
+
+    assert [one.call.values["date"] for one in approved] == shown
 
 
 async def test_a_stalled_read_of_the_yes_records_times_the_round_out() -> None:
