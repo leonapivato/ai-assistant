@@ -174,6 +174,8 @@ h3 {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
+  box-sizing: border-box;
+  line-height: 1.2;
   cursor: pointer;
   list-style: none;
   user-select: none;
@@ -187,6 +189,7 @@ h3 {
 .menu > summary::after {
   content: "▾";
   margin-left: 0.4rem;
+  font-size: 0.8em;
   color: var(--muted);
 }
 
@@ -759,23 +762,34 @@ code {
   min-height: 0;
 }
 
+/*
+ * The open conversation's name, between the control back to the list (a phone's) and
+ * its details. The name takes what room is left and wraps inside it.
+ */
 .chat-thread-head {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.9rem;
+  gap: 0.25rem;
+  padding: 0.4rem 0.5rem 0.4rem 0.9rem;
   border-bottom: 1px solid var(--line);
 }
 
 .chat-thread-head h3 {
-  flex: 1 1 10rem;
+  flex: 1 1 0;
   min-width: 0;
   margin: 0;
 }
 
 .chat-thread-head > button {
+  flex: none;
   margin-top: 0;
+  padding-left: 0.5rem;
+  padding-right: 0.6rem;
+}
+
+.chat-about > summary {
+  padding-left: 0.7rem;
+  padding-right: 0.7rem;
 }
 
 /* The conversation's own settings: who sees it, and deleting or forgetting it. */
@@ -1129,6 +1143,28 @@ code {
   .chat-composer {
     padding-left: 0.7rem;
     padding-right: 0.7rem;
+  }
+
+  /*
+   * The control back to the list and the details share the first line, and the name —
+   * a hub id of no bounded length — has the second to itself.
+   */
+  .chat-thread-head {
+    flex-wrap: wrap;
+  }
+
+  .chat-thread-head h3 {
+    order: 1;
+    flex: 1 1 100%;
+    padding: 0 0 0.3rem 0.5rem;
+  }
+
+  .chat-about {
+    margin-left: auto;
+  }
+
+  .chat-about-body {
+    width: calc(100vw - 4.5rem);
   }
 
   .scope-form {

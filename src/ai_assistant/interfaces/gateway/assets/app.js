@@ -2898,6 +2898,10 @@ async function readChatDigest(id, mine) {
 
 function renderChatState() {
   const slot = el("chat-state");
+  // The state's line sits under the transcript, so a line appearing shortens the
+  // transcript's box: a reader at the newest message is kept there (#3098).
+  const list = el("chat-transcript");
+  const atEnd = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
   let said = "";
   if (chat.state !== null) {
     said = chat.state.working ? CHAT_WORKING : CHAT_ENDINGS[chat.state.last_ended] || "";
@@ -2907,6 +2911,9 @@ function renderChatState() {
   // Marked as well as said, so the line that says the assistant is working looks it.
   slot.classList.toggle("working", chat.state !== null && chat.state.working === true);
   renderChatStop();
+  if (atEnd) {
+    list.scrollTop = list.scrollHeight;
+  }
 }
 
 // The activation the state says is running, where it names one; `null` otherwise —
@@ -5893,11 +5900,15 @@ el("connection-log-button").addEventListener(
   fromMenu("connection-log", listConnectionLog)
 );
 // The menu closes on a link of the index it carries, on a press anywhere outside it, and
-// on Escape, as a menu does.
+// on Escape, as a menu does; so does a conversation's details.
 el("panel-index").addEventListener("click", closeMenu);
 document.addEventListener("click", (event) => {
   if (!el("menu").contains(event.target)) {
     closeMenu();
+  }
+  const details = document.querySelector(".chat-about");
+  if (!details.contains(event.target)) {
+    details.open = false;
   }
 });
 document.addEventListener("keydown", (event) => {
