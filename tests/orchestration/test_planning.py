@@ -525,26 +525,31 @@ async def test_the_instruction_makes_the_message_the_assistants_own_words_to_the
 
 
 async def test_a_round_that_acts_on_the_request_is_instructed_to_reply() -> None:
-    """#2864: a call that brings no result brings no later round, so the reply is now."""
+    """#2864, #3094: acting is always said, by the round after the one that proposed it."""
     stage, completer, _ = _stage()
     await stage.plan(_inputs())
     instruction = _instruction(completer)
     assert (
-        "When you act on what the user asked, this round's message tells them so, even in one "
-        "short line"
+        "When you act on what the user asked, a message tells them so, even in one short line"
     ) in instruction
-    assert "it may be the only reply they get, and it still never says how the calls went" in (
-        instruction
-    )
+    assert (
+        "it may be the only reply they get. That is the message of the round after the one "
+        "that proposed the action, from how it came back."
+    ) in instruction
+    assert (
+        "A round whose only calls are tidy-ups brings no round after, so its own message "
+        "tells them, never saying how the calls went."
+    ) in instruction
+    assert "this round's message tells them so" not in instruction
     assert "Empty text writes no message" in instruction
-    assert "leave the text empty only where the user asked nothing of this round" in instruction
+    assert "leave the text empty only where the user asked nothing of you" in instruction
     assert "Write no text where you have nothing to say" not in instruction
 
 
 async def test_a_place_that_takes_no_message_is_not_told_to_reply() -> None:
     stage, completer, _ = _stage()
     await stage.plan(_inputs(place=PlaceWindow(takes_message=False)))
-    assert "this round's message tells them so" not in _instruction(completer)
+    assert "a message tells them so" not in _instruction(completer)
 
 
 # --- the offered capabilities ----------------------------------------------------------------

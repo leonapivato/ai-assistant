@@ -153,10 +153,11 @@ _PROPOSE_DONT_PREASK: Final = (
     "runs only once the system has asked them with its exact details and they have said "
     "yes, so that question is the check, even where a mistake would be costly. Asking in "
     "words first makes them say yes twice, once to you and again to the system. What you "
-    "found out on the way, such as a price or a time, goes in that question's explanation "
-    "and is no reason to ask first. Check in words before proposing only when you are "
-    "unsure what they meant, such as which date or which place, or when you know that a "
-    "costly action would run without their yes.\n"
+    "found out on the way, such as a price or a time, goes in that question's explanation, "
+    "in the round after the one that proposes the action, and is no reason to ask first. "
+    "Check in words before proposing only when you are unsure what they meant, such as "
+    "which date or which place, or when you know that a costly action would run without "
+    "their yes.\n"
     "\n"
     "Whether a call needs the user's yes is known only once it comes back"
 )
@@ -193,18 +194,21 @@ async def test_the_instruction_says_how_to_ask_and_how_answers_go() -> None:
     assert "ask again, with the new values where they changed them" in instruction
 
 
-async def test_the_round_that_proposes_a_call_is_told_not_to_ask_about_it() -> None:
-    """#3071: a call needs the user only once it comes back, a round after it was proposed."""
+async def test_the_round_that_proposes_a_call_says_nothing_about_it() -> None:
+    """#3071, #3094: a call needs the user only once it comes back, and that round tells them."""
     stage, completer, _ = _stage()
     await stage.plan(_inputs())
+    instruction = _instruction(completer)
     assert (
         "Whether a call needs the user's yes is known only once it comes back, in the round "
-        "after the one that proposed it. So a round does not ask about an action it proposes "
-        "itself: it does not ask them to confirm it, does not say details will follow, and "
-        'does not name it in asks. It may say what you are doing, such as "Let me book '
-        'that", or nothing. The same round still asks about an earlier call that came back '
-        "needing a yes."
-    ) in _instruction(completer)
+        "after the one that proposed it, and that round tells the user. So a round says "
+        "nothing to them about an action it proposes itself: not that you are doing it, such "
+        'as "Let me book that", not that it is done, and not that details will follow. It '
+        "does not ask them to confirm it or name it in asks, and writes text only for "
+        "something else they need to hear. The same round still asks about an earlier call "
+        "that came back needing a yes."
+    ) in instruction
+    assert "It may say what you are doing" not in instruction
 
 
 async def test_a_round_that_proposes_a_call_still_asks_about_an_earlier_one() -> None:
@@ -278,7 +282,7 @@ async def test_a_place_that_takes_no_message_is_not_told_how_to_ask() -> None:
     stage, completer, _ = _stage()
     await stage.plan(_inputs(place=PlaceWindow(takes_message=False)))
     instruction = _instruction(completer)
-    assert "does not ask about an action it proposes" not in instruction
+    assert "says nothing to them about an action it proposes" not in instruction
     assert "A call shown as already asked about" not in instruction
 
 

@@ -934,10 +934,11 @@ _PROPOSING: Final = (
     "runs only once the system has asked them with its exact details and they have said "
     "yes, so that question is the check, even where a mistake would be costly. Asking in "
     "words first makes them say yes twice, once to you and again to the system. What you "
-    "found out on the way, such as a price or a time, goes in that question's explanation "
-    "and is no reason to ask first. Check in words before proposing only when you are "
-    "unsure what they meant, such as which date or which place, or when you know that a "
-    "costly action would run without their yes.\n"
+    "found out on the way, such as a price or a time, goes in that question's explanation, "
+    "in the round after the one that proposes the action, and is no reason to ask first. "
+    "Check in words before proposing only when you are unsure what they meant, such as "
+    "which date or which place, or when you know that a costly action would run without "
+    "their yes.\n"
     "\n"
 )
 
@@ -946,14 +947,16 @@ _PROPOSING: Final = (
 #: back, so the round that proposes it does not ask, the round after always does unless
 #: the user no longer wants it (§2:1-§2:2), and only a message that showed the exact line
 #: asked (§4:11). #3072: a call waiting on the user is never said to be going through,
-#: and a question always carries planning's explanation (§2:4).
+#: and a question always carries planning's explanation (§2:4). #3094: the proposing round
+#: says nothing about the action, so the question is the first the user hears of it.
 _ASKING: Final = (
     "Whether a call needs the user's yes is known only once it comes back, in the round "
-    "after the one that proposed it. So a round does not ask about an action it proposes "
-    "itself: it does not ask them to confirm it, does not say details will follow, and does "
-    'not name it in asks. It may say what you are doing, such as "Let me book that", or '
-    "nothing. The same round still asks about an earlier call that came back needing a "
-    "yes.\n"
+    "after the one that proposed it, and that round tells the user. So a round says nothing "
+    "to them about an action it proposes itself: not that you are doing it, such as "
+    '"Let me book that", not that it is done, and not that details will follow. It does '
+    "not ask them to confirm it or name it in asks, and writes text only for something "
+    "else they need to hear. The same round still asks about an earlier call that came "
+    "back needing a yes.\n"
     "\n"
     "When a call comes back needing the user's yes, this round's message asks them about "
     "it, unless they no longer want it: a call no message asks about is dropped, and "
@@ -999,18 +1002,20 @@ _APPROVED: Final = (
     "\n"
 )
 
-#: #2864: a call that brings no result brings no later round, so a round that acts on the
-#: request says so itself: that is how the user hears that the assistant acted, and an
-#: activation that ends silent ends done with no reply (ADR-0317 §2, §5). Empty text
-#: still writes no message (ADR-0307 §3:2), and is left only where the user asked
-#: nothing of the round.
+#: #2864: an activation that ends silent ends done with no reply (ADR-0317 §2, §5), so
+#: acting on the request is always said. #3094: the round after the proposing one says it,
+#: since every round with a call other than a tidy-up brings it (ADR-0315 §2); a round
+#: whose only calls are tidy-ups brings none, so it says so itself. Empty text still
+#: writes no message (ADR-0307 §3:2), and is left only where the user asked nothing.
 _REPLY: Final = (
-    "When you act on what the user asked, this round's message tells them so, even in one "
-    "short line, such as that you'll keep something in mind: it may be the only reply they "
-    "get, and it still never says how the calls went. Empty text writes no message, so "
-    "leave the text empty only where the user asked nothing of this round, or where an "
-    "earlier round of this activation already told them what you are doing and there is "
-    "nothing new. A call that came back needing their yes is always new.\n"
+    "When you act on what the user asked, a message tells them so, even in one short line, "
+    "such as that you'll keep something in mind: it may be the only reply they get. That "
+    "is the message of the round after the one that proposed the action, from how it came "
+    "back. A round whose only calls are tidy-ups brings no round after, so its own message "
+    "tells them, never saying how the calls went. Empty text writes no message, so leave "
+    "the text empty only where the user asked nothing of you, or where an earlier round of "
+    "this activation already told them what you are doing and there is nothing new. A "
+    "call that came back needing their yes is always new.\n"
     "\n"
 )
 
