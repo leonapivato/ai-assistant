@@ -67,6 +67,7 @@ from ai_assistant.core.diagnostics import failure_body, write_diagnostic
 from ai_assistant.core.errors import (
     AuditError,
     EgressBindingError,
+    PlanningError,
     StoryStoreError,
 )
 from ai_assistant.core.types import (
@@ -1505,27 +1506,43 @@ class AuthorizingStage:
     ) -> tuple[AnsweredQuestion, str] | str:
         """The pointer whose question asked ``part``, with its round (ADR-0322 §3:1, §3:3).
 
-        Each pointer is resolved on its own to its question's delivered round; the one
-        whose round asked the part is the one the call is checked against. A pointer
-        naming this activation's own question is passed over (ADR-0321 §4:1).
+        The call is checked against its own question's records alone: a pointer naming
+        another round is passed over unread, so another question's records, readable or
+        not, never decide this call. A pointer naming its question by place and position
+        alone is resolved to its round by its own delivery record, and one whose record
+        cannot be read is passed over as naming no delivered message, failing closed. A
+        pointer naming this activation's own question is passed over (ADR-0321 §4:1).
 
         Returns:
             The pointer and its delivered round; otherwise the code-owned word naming
             why none applies: every pointer names this activation's question, none
-            names a delivered message, or none names the question that asked the part.
+            names the question that asked the part, or none names a delivered message.
+
+        Raises:
+            PlanningError: If the plan store cannot be read for a pointer naming the
+                part's own round.
         """
         others = [one for one in pointers if one.activation_id != state.activation_id]
         if not others:
             return _ASKED_HERE
+        named = [one for one in others if one.round == part.round]
+        unnamed = [one for one in others if one.round is None]
+        if not named and not unnamed:
+            return _NOT_APPROVED
+        for pointer in named:
+            if await self._delivered(plans, pointer) == part.round:
+                return pointer, part.round
         shown = False
-        for pointer in others:
-            delivered = await self._delivered(plans, pointer)
-            if delivered is None:
+        for pointer in unnamed:
+            try:
+                delivered = await self._delivered(plans, pointer)
+            except PlanningError:
+                _log.warning("authorizing_pointer_unread", stage="authorizing")
                 continue
-            shown = True
+            shown = shown or delivered is not None
             if delivered == part.round:
                 return pointer, delivered
-        return _NOT_APPROVED if shown else _NOT_SHOWN
+        return _NOT_APPROVED if shown and not named else _NOT_SHOWN
 
     @staticmethod
     async def _delivered(plans: PlanStore, pointer: AnsweredQuestion) -> str | None:

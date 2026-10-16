@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from channel_receiver_contract import event_input
+from story_support import episode
 from structlog.testing import capture_logs
 from test_activation_state import _admitted
 from test_authorizer import _ACTIVATION, _episode
@@ -54,6 +55,7 @@ from ai_assistant.core.types import (
     ActivationEnding,
     ActivationRecall,
     ActivationStop,
+    AskedCall,
     Attestation,
     BeliefBand,
     BoundAccount,
@@ -151,6 +153,7 @@ from ai_assistant.orchestration.story_calls import (
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
 from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
 from ai_assistant.orchestration.understanding import (
+    AskedIn,
     Fetched,
     TranscriptWindow,
     UnderstandingStage,
@@ -1986,6 +1989,47 @@ async def test_the_writers_read_keeps_only_a_message_done_in_the_conversation() 
     }
     assert await path.written("c1", [], [2]) == {}
     assert await path.written("c1", ["activation-unknown"], [2]) == {}
+
+
+async def test_the_writers_read_marks_a_question_by_its_own_activations_round() -> None:
+    """ADR-0322 §4:1-§4:3: a round's id names it only within its activation.
+
+    Two activations each wrote a message from a round of one id. Only B's round asked,
+    so only B's message is a question, with the parts B's episode's projection marks.
+    """
+    completer = FakeToolCallingCompleter.scripted()
+    harness = _harness(completer)
+    path = _phases(completer)(harness)
+    asked = tuple(AskedCall(part=part, tool=_BOOK, values={"date": "Friday"}) for part in (1, 2))
+    rounds = {
+        "act-a": PlanningRound(id="round:1", recorded_at=AT, text="Looking into it."),
+        "act-b": PlanningRound(id="round:1", recorded_at=AT, text="Shall I?", asked=asked),
+    }
+    for position, (activation_id, planned) in enumerate(rounds.items(), start=2):
+        stored = episode(activation_id)
+        processing = stored.processing_record
+        assert processing is not None
+        await harness.memory.add(
+            stored.model_copy(
+                update={"processing_record": processing.model_copy(update={"rounds": (planned,)})}
+            )
+        )
+        effect = ActivationEffect(
+            id=f"e-{activation_id}",
+            activation_id=activation_id,
+            round="round:1",
+            place="conversation:c1",
+            claimed_at=AT,
+        )
+        await harness.plans.claim_activation_effect(effect, match=None)
+        await harness.plans.finish_activation_effect(
+            effect.id, ToolOutcome.SUCCEEDED, position=position
+        )
+
+    assert await path.written("c1", ["act-a", "act-b"], [2, 3]) == {
+        2: WrittenBy(activation_id="act-a"),
+        3: WrittenBy(activation_id="act-b", asked=AskedIn(round="round:1", parts=(1, 2))),
+    }
 
 
 async def test_the_writers_read_links_nothing_where_the_records_cannot_be_read(

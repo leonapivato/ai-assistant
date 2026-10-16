@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 
 from ai_assistant.core.diagnostics import diagnosed_activation
+from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     ActionRequest,
     ActivationEffect,
@@ -1150,6 +1151,62 @@ def test_when_a_yes_was_given_is_an_instant() -> None:
             answers=(AnsweredQuestion(activation_id=_ASKING, round=_QUESTION),),
             given_at=datetime(2026, 10, 15, 14, 15),  # noqa: DTZ001 — the naive value refused
         )
+
+
+async def test_another_questions_unreadable_records_never_decide_this_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0322 §3:1: each question is checked against its own records alone.
+
+    The yes names two questions. The first's records cannot be read, and the call to
+    authorize is the second's part, so the first pointer is never read and the call runs
+    under the second's approval.
+    """
+    hub = _Hub()
+    asked = _asked()
+    await hub.asked(asked)
+    read = hub.plans.activation_effects
+
+    async def unreadable_for_the_other(
+        activation_ids: Sequence[str], /
+    ) -> tuple[ActivationEffect, ...]:
+        if "act-other" in activation_ids:
+            msg = "the other question's records cannot be read"
+            raise PlanningError(msg)
+        return await read(activation_ids)
+
+    monkeypatch.setattr(hub.plans, "activation_effects", unreadable_for_the_other)
+    yes = YesContext(
+        answers=(
+            AnsweredQuestion(activation_id="act-other", round="round:other"),
+            AnsweredQuestion(activation_id=_ASKING, round=_QUESTION),
+        ),
+        given_at=_AT,
+        users_authority=True,
+    )
+
+    decided = await hub.authorize(_round(_approved_booking(), yes=yes))
+
+    (verdict,) = decided.verdicts
+    assert verdict.verdict is Verdict.ALLOWED
+    deciding = await _recorded(hub.trail, verdict.decision_id)
+    assert deciding.approval is not None
+    assert deciding.approval.how.round == _QUESTION
+
+
+async def test_a_part_no_pointer_names_the_round_of_is_not_approved() -> None:
+    """ADR-0322 §3:3: a call runs only under the approval of the question that asked it."""
+    hub = _Hub()
+    await hub.asked(_asked())
+    await hub.asked(_asked(), activation_id="act-2", round_id="round:2")
+
+    decided = await hub.authorize(
+        _round(_approved_booking(), yes=_yes(activation_id="act-2", round_id="round:2"))
+    )
+
+    (verdict,) = decided.verdicts
+    assert verdict.verdict is Verdict.NEEDS_YOU
+    assert decided.allowed == ()
 
 
 def test_a_yes_carries_a_pointer_and_names_each_question_once() -> None:
