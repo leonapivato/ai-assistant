@@ -1,6 +1,6 @@
 # 322. A reply may approve several questions, each under its own approval, and understanding sees which messages are questions
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-15
 - Scope: the authority milestone, M44 ([milestone #11](https://github.com/leonapivato/ai-assistant/milestone/11)), acceptance [#3058](https://github.com/leonapivato/ai-assistant/issues/3058), batch [#3059](https://github.com/leonapivato/ai-assistant/issues/3059): how many questions one reply may approve, and how understanding tells a question from a message that only asked in words.
 - Dependency: [ADR-0321](0321-authority-at-the-deploy-is-your-yes-to-a-question-that-showed-the-call.md), Accepted, and the yes path its lanes built, on `main` at `8257e6fa`.
