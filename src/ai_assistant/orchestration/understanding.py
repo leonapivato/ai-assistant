@@ -105,11 +105,13 @@ each against the records (ADR-0321 §4:4, ADR-0322 §3:1).
 
 **A bare yes that fits several records nothing** (ADR-0321 §3:5, ADR-0322 §2:3). The
 model's reading alone did not hold that rule (#3080): it recorded a pointer while its own
-unresolved matter said the yes could fit either question. So the reply carries the
-reading as its own field, and code acts on it: where the model says the input is a bare
-yes that could fit more than one question, and the call rendered more than one, no
-pointer is recorded, whatever ``answers`` proposes, and a code-owned unresolved matter
-says so, so planning asks which was meant. The rule fails toward asking.
+unresolved matter said the yes could fit either question. So code acts on that matter:
+the instruction has an unresolved matter name, by its ``Q`` label, each question the
+input could answer, and where the model's own matters name two or more ``Q`` labels the
+call rendered, no pointer is recorded, whatever ``answers`` proposes, and a code-owned
+unresolved matter says so, so planning asks which was meant. The rule fails toward
+asking. A ``Q`` label in a matter's words is prose the record keeps as written, never a
+label resolved to a referent (§4:6).
 
 **It logs stage and code-owned reason only** — no input, no window content, no model
 output and no exception content (ADR-0275 §8).
@@ -119,6 +121,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections import Counter
 
 # At runtime, not under TYPE_CHECKING: `EpisodeSelector` is a PEP 695 alias, whose
@@ -329,7 +332,8 @@ _ANSWERS: Final = (
     "which parts it showed, never whether it was answered. A message that asked only in "
     "words carries no mark, and is not a question an answer can be recorded to. A Q "
     "label names a question and nothing else: cite it only in `answers`, and nowhere "
-    "else a label may be cited.\n"
+    "else a label may be cited. An unresolved matter's words may still name questions "
+    "by their Q labels, as said below.\n"
     "\n"
     "In `answers`, record one entry for each question the input approves, naming the "
     "question by its Q label and by no other label, with the parts it approves; name no "
@@ -345,14 +349,13 @@ _ANSWERS: Final = (
     'was shown across several questions, such as "book both" when each booking was '
     "asked about in a question of its own, record each of those questions.\n"
     "- A bare yes that could fit more than one question approves nothing: leave "
-    "`answers` empty and set `bare_yes_fits_several` to true. Never guess which one was "
-    "meant. A yes is bare when it names no question, part or detail that tells the "
-    'questions apart, says neither "both" nor "all of them", and is not a reply to one '
-    "question's message; where more than one question shown is still waiting, a bare "
-    "yes could fit more than one. A question's words may promise more than its lines "
-    'show, such as "say the word and I\'ll book both" above one line: a yes to those '
-    "words still names only that question's parts, so they do not tell the questions "
-    "apart. Otherwise `bare_yes_fits_several` is false.\n"
+    "`answers` empty. Never guess which one was meant. A yes is bare when it names no "
+    'question, part or detail that tells the questions apart, says neither "both" nor '
+    '"all of them", and is not a reply to one question\'s message; where more than one '
+    "question shown is still waiting, a bare yes could fit more than one. A question's "
+    "words may promise more than its lines show, such as \"say the word and I'll book "
+    "both\" above one line: a yes to those words still names only that question's "
+    "parts, so they do not tell the questions apart.\n"
     "- A no approves nothing. A later yes to the same question still approves it.\n"
     '- A change, such as "make it 8", approves nothing, and neither does a conditional '
     "yes, which counts as a change.\n"
@@ -364,7 +367,10 @@ _ANSWERS: Final = (
     "meaning states the request as well.\n"
     "Where the input reads as an answer but `answers` is empty, because it could fit more "
     "than one question, or no marked question fits it, record that in `unresolved`, "
-    "naming the questions it could answer, if any. `answers` records your reading and "
+    "naming in the matter's words each question it could answer, if any, by its Q "
+    "label. Name Q labels in `unresolved` for nothing else: a matter naming two or more "
+    "of them says the input could fit more than one question, and then no question is "
+    "recorded as approved, whatever `answers` holds. `answers` records your reading and "
     "grants nothing.\n"
     "\n"
 )
@@ -381,8 +387,7 @@ _SHAPE_HEAD: Final = (
     '"unresolved": [{"matter": "<what this reading leaves unsettled>", '
     '"why_it_matters": "<why that matters to understanding the input>"}], '
     '"answers": [{"question": "<Q label of a question the input approves>", '
-    '"parts": [<part number>]}], '
-    '"bare_yes_fits_several": <true or false>'
+    '"parts": [<part number>]}]'
 )
 
 _SHAPE_TAIL: Final = (
@@ -476,14 +481,16 @@ _SAME_QUESTION_TWICE: Final = (
     "The input was read as approving one earlier question twice over, so neither reading "
     "of it was recorded."
 )
-#: The code-owned matter for a bare yes the model read as fitting several questions
-#: (ADR-0321 §3:5, ADR-0322 §2:3): stated whether or not a pointer was proposed, so
-#: planning asks which was meant even where the model's own matter is missing.
+#: The code-owned matter for a yes whose own reading named several questions it could
+#: answer and pointed anyway (ADR-0321 §3:5, ADR-0322 §2:3): what was not recorded, by why.
 _FITS_SEVERAL: Final = (
     "The input was read as a yes that does not say which question it approves, and more "
     "than one question the assistant asked could fit it, so no question was recorded as "
     "approved."
 )
+#: A ``Q`` label standing alone in a matter's words: ``Q`` and a 1-based index with no
+#: padding, on ADR-0322 §4:4's form, touching no other letter, digit or underscore.
+_Q_LABEL: Final = re.compile(r"(?<![0-9A-Za-z_])Q[1-9][0-9]*(?![0-9A-Za-z_])")
 _NOT_APPROVED: Final = (
     "Nothing the input approves can run until the user says which question, and which "
     "parts of it, they meant."
@@ -1980,11 +1987,12 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
     code-owned unresolved matter saying why, after the model's own, so the activation
     can ask which question was meant (ADR-0321 §3:5); the other pointers stand.
 
-    Where the model reads the input as a bare yes that could fit more than one
-    question, and the call rendered more than one, no pointer is recorded at all, and
-    the code-owned matter saying so takes the place of any other (ADR-0321 §3:5,
-    ADR-0322 §2:3): the backstop for a reading that says it fits several and points
-    anyway (#3080). A pointer naming no rendered label is still counted as dropped.
+    Where the model's own unresolved matters name two or more questions the call
+    rendered, by their ``Q`` labels, the reading says the input could fit more than one
+    question, so no pointer is recorded at all, and the code-owned matter saying so
+    takes the place of any other (ADR-0321 §3:5, ADR-0322 §2:3, :func:`_fits_several`):
+    the backstop for a reading that says it fits several and points anyway (#3080). A
+    pointer naming no rendered label is still counted as dropped.
     """
     links: dict[StoryMember, None] = {}
     unlinked = 0
@@ -2018,7 +2026,7 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
         )
     resolution.dropped += sum(one.question not in questions for one in proposal.answers)
     answers, whys = _answers(proposal.answers, questions)
-    if proposal.bare_yes_fits_several and len(questions) > 1:
+    if proposal.answers and _fits_several(proposal.unresolved, questions):
         answers, whys = (), (_FITS_SEVERAL,)
     unresolved = (
         *proposal.unresolved,
@@ -2038,6 +2046,27 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
         story_links=tuple(links),
         answers=answers,
     )
+
+
+def _fits_several(matters: Sequence[UnresolvedMatter], questions: Mapping[str, _Question]) -> bool:
+    """Whether the model's own matters name two or more questions the call rendered.
+
+    The instruction has an unresolved matter name, by its ``Q`` label, each question an
+    input it reads as an answer could answer, and nothing else by one; so two or more
+    distinct ``Q`` labels the call rendered, in a matter's words, are the reading's own
+    statement that the input could fit more than one question (ADR-0321 §3:5, ADR-0322
+    §2:3). A token is a ``Q`` label only as the call rendered it, exactly and standing
+    alone, and one the call did not render is not counted (ADR-0276 §3:4). The words are
+    read here and nowhere resolved: the matter is recorded as written.
+    """
+    named = {
+        label
+        for one in matters
+        for text in (one.matter, one.why_it_matters)
+        for label in _Q_LABEL.findall(text)
+        if label in questions
+    }
+    return len(named) > 1
 
 
 def _answers(
