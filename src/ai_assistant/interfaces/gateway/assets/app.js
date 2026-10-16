@@ -2029,6 +2029,16 @@ function renderChatView() {
   el("chat-side").hidden = narrow && open && chat.reading;
   el("chat-main").hidden = narrow && !(open && chat.reading);
   el("chat-back").hidden = !narrow;
+  // Back on screen, the open conversation's new messages are no longer news.
+  if (chatReadable() && chat.unread.delete(chat.selected)) {
+    renderChatListing();
+  }
+}
+
+// Whether the open conversation's transcript is on screen: there is one, and this is not
+// a phone showing the list instead.
+function chatReadable() {
+  return !el("chat-thread").hidden && (!NARROW.matches || chat.reading);
 }
 
 function backToList() {
@@ -2392,6 +2402,12 @@ function applyChanges(changes, snapshot) {
       if (change.conversation_id === chat.selected && !chat.deleted.has(change.message.position)) {
         chat.entries.set(change.message.position, change.message);
         touched = true;
+        // A phone showing the list is not showing the open conversation, so its new
+        // message is marked on its row as any other conversation's is (#3098).
+        if (!chatReadable()) {
+          chat.unread.add(change.conversation_id);
+          relist = true;
+        }
       } else {
         chat.unread.add(change.conversation_id);
         relist = true;

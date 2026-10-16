@@ -23,6 +23,7 @@ from playwright.async_api import expect
 
 from ai_assistant.core.errors import ConversationStoreError, DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import (
+    CHAT_DEVICES_MAX,
     ChatDevice,
     ChatStreamChunk,
     ChatStreamEnd,
@@ -1169,3 +1170,104 @@ async def test_a_hub_shutting_down_stops_the_following_and_it_carries_on_after(
         await expect(follow).to_contain_text("because you asked")
         await _followed(drive, 2)
         assert _follows(drive)[-1] == cursor + 5
+
+
+# --- the phone's two halves (#3098) ---------------------------------------------
+
+
+async def test_a_message_to_the_open_conversation_is_news_on_a_phone_showing_the_list(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Going back to the list leaves the conversation open but off the screen, so a
+    message arriving in it is marked on its row like any other's; opening it again
+    shows the message, clears the mark, and reads nothing."""
+    async with driving(gateway_browser, tmp_path, viewport=PHONE) as drive:
+        drive.engine.chat_reader = False  # the message is the case's own
+        conversation = await _open(drive)
+        await drive.page.click("#chat-back")
+        await expect(drive.page.locator("#chat-transcript")).to_be_hidden()
+        reads = [name for name, _ in drive.engine.calls if name == "transcript"]
+
+        await drive.engine.chat.append_message(
+            conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="While you were away.")
+        )
+        row = drive.page.locator("#chat-conversations button.chat-open[aria-current]")
+        await expect(row).to_contain_text("new messages", timeout=_FOLLOWED)
+
+        await row.click()
+        await expect(drive.page.locator("#chat-transcript")).to_contain_text("While you were away.")
+        await expect(row).not_to_contain_text("new messages")
+        assert [name for name, _ in drive.engine.calls if name == "transcript"] == reads
+
+
+#: Whether the open details end inside the chat's frame and the window.
+_DETAILS_INSIDE_THE_FRAME: Final = """() => {
+  const body = document.querySelector(".chat-about-body").getBoundingClientRect();
+  const frame = document.querySelector(".chat-app").getBoundingClientRect();
+  return body.bottom <= frame.bottom && body.bottom <= window.innerHeight;
+}"""
+
+#: The details scrolled within themselves to their end, as a finger would scroll them.
+_DETAILS_SCROLLED_TO_THE_END: Final = """() => {
+  const body = document.querySelector(".chat-about-body");
+  body.scrollTop = body.scrollHeight;
+}"""
+
+#: Whether the element is what a press at its centre lands on.
+_ON_TOP: Final = """(selector) => {
+  const target = document.querySelector(selector);
+  const box = target.getBoundingClientRect();
+  const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+  return hit !== null && (hit === target || target.contains(hit));
+}"""
+
+
+async def test_every_device_and_both_acts_in_a_conversations_details_are_reachable(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The details open over a frame that clips what passes its edge, so at a phone's
+    height a conversation with the surface's most devices still ends inside the frame,
+    scrolls within itself to its last device, and its Forget still answers a press.
+
+    Measured rather than reached with Playwright's own scrolling: the frame's clip is a
+    box a script can scroll and a finger cannot, so a drive that let Playwright scroll it
+    would pass on exactly the page this case is about.
+    """
+    async with driving(gateway_browser, tmp_path, viewport=PHONE) as drive:
+        await drive.engine.set_my_devices(
+            [ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)]
+        )
+        started = await drive.engine.start_conversation()
+        await drive.engine.set_conversation_devices(
+            started.id,
+            devices=[
+                ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE),
+                *(
+                    ChatDevice(device_id=f"nDEVICE{one:02d}", access=DeviceAccess.READ)
+                    for one in range(1, CHAT_DEVICES_MAX)
+                ),
+            ],
+        )
+        await drive.page.click("#chat-button")
+        await _streaming(drive)
+        await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
+        listed = drive.page.locator("#chat-conversation-devices li")
+        await expect(listed).to_have_count(CHAT_DEVICES_MAX)
+
+        await drive.page.click("#chat-thread .chat-about > summary")
+        assert await drive.page.evaluate(_DETAILS_INSIDE_THE_FRAME)
+        await drive.page.evaluate(_DETAILS_SCROLLED_TO_THE_END)
+        for target in ("#chat-conversation-devices li:last-child", "#chat-forget"):
+            assert await drive.page.evaluate(_ON_TOP, target), target
+
+        loop = asyncio.get_running_loop()
+        asked: asyncio.Future[str] = loop.create_future()
+        running: list[asyncio.Task[None]] = []
+
+        async def dismiss(dialog: Dialog) -> None:
+            await dialog.dismiss()
+            asked.set_result(dialog.message)
+
+        drive.page.once("dialog", lambda dialog: running.append(loop.create_task(dismiss(dialog))))
+        await drive.page.click("#chat-forget")
+        assert "Forget this conversation?" in await asked

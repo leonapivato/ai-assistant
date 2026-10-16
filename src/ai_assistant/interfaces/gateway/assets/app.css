@@ -809,6 +809,14 @@ code {
   top: calc(100% + 0.35rem);
   z-index: 5;
   width: min(22rem, calc(100vw - 2rem));
+  /*
+   * Bounded by the screen and scrolled within, because the frame it opens over clips
+   * what passes its edge: a conversation's whole device list — up to the surface's
+   * limit — and the two acts under it stay reachable at any height.
+   */
+  max-height: calc(100vh - 13rem);
+  max-height: calc(100dvh - 13rem);
+  overflow-y: auto;
   padding: 0.3rem 0.9rem 0.6rem;
   background: var(--surface);
   border: 1px solid var(--line);
