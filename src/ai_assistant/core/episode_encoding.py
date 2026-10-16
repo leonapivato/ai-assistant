@@ -3,7 +3,9 @@
 Inspection is ADR-0275's. ADR-0284 adds the two derivations every reader of an episode
 shares: :func:`episode_content`, its search text (§7), and :func:`project_episode`, what
 a model is shown of it (§8). ADR-0286 adds :func:`episode_extends`, the one test of
-whether a revision of an open episode only extends the stored one (§3).
+whether a revision of an open episode only extends the stored one (§3). ADR-0322 adds
+the question's mark to the projection (§4:3), and :func:`question_marks`, which pairs
+each mark with the round it was read from.
 """
 
 from __future__ import annotations
@@ -236,7 +238,8 @@ def project_episode(
     ceiling of its own applies it to what this returns (§8:7).
 
     **Planning's rounds** (ADR-0307 §10) render under the reader's audience: each
-    round's message, and its episode notes with their mark only where
+    round's message, with the parts it asked about where it is a question (ADR-0322
+    §4:3), and its episode notes with their mark only where
     ``owner_records`` says a record placed for the owner alone may be shown to this
     reader (ADR-0307 §4:4, §6:4). That placement holds for every reader of a stored
     episode (ADR-0312 §4:3), so the default withholds them; the round's message is
@@ -314,19 +317,69 @@ def project_episode(
 def _projected_rounds(
     rounds: tuple[PlanningRound, ...], bound: int, *, owner_records: bool
 ) -> tuple[ProjectedRound, ...]:
-    """Each round's message and, where the reader may be shown them, its notes."""
+    """Each round's message, its question's mark, and its notes where they may be shown.
+
+    The mark is the part numbers of the round's recorded asked calls (ADR-0321 §2:8),
+    carried only with the message (ADR-0322 §4:3).
+    """
     projected: list[ProjectedRound] = []
     for one in rounds:
-        message = _projected(one.text, bound) if one.text.strip() else None
+        message = _projected(one.text, bound) if _shows_message(one) else None
         notes = _projected(one.notes, bound) if owner_records else None
         if message is None and notes is None:
             continue
         projected.append(
             ProjectedRound(
-                message=message, notes=notes, notes_marked=notes is not None and one.notes_marked
+                message=message,
+                notes=notes,
+                notes_marked=notes is not None and one.notes_marked,
+                asked=tuple(asked.part for asked in one.asked) if _is_marked(one) else (),
             )
         )
     return tuple(projected)
+
+
+def question_marks(
+    record: EpisodicMemory, projection: EpisodeProjection
+) -> tuple[tuple[str, ProjectedRound], ...]:
+    """Each question mark ``projection`` carries, with the id of the round it was read from.
+
+    The projection carries no id (ADR-0284 §8:3), so a reader that labels the marks it
+    renders, or names a message's question by its round, pairs them by this
+    (ADR-0322 §4:3-§4:4). The marked rounds are exactly those :func:`project_episode`
+    projects with a non-empty ``asked``, in its order, whatever the reader: a round's
+    message, and so its mark, is shown wherever the episode is (ADR-0307 §10).
+
+    Args:
+        record: The stored episode, exactly as held.
+        projection: Its projection, as :func:`project_episode` returned it.
+
+    Returns:
+        Each marked round's id and its projected round, in the projection's order. None
+        for an episode with no processing record, and none where the projection's marks
+        do not match the record's rounds, which fails closed: no question is marked.
+    """
+    processing = record.processing_record
+    if processing is None:
+        return ()
+    rounds = [one for one in processing.rounds if _is_marked(one)]
+    shown = [one for one in projection.rounds if one.asked]
+    if len(rounds) != len(shown) or any(
+        one.asked != tuple(asked.part for asked in planned.asked)
+        for one, planned in zip(shown, rounds, strict=True)
+    ):
+        return ()
+    return tuple((planned.id, one) for one, planned in zip(shown, rounds, strict=True))
+
+
+def _shows_message(one: PlanningRound) -> bool:
+    """Whether the projection carries the round's message: it wrote some text."""
+    return bool(one.text.strip())
+
+
+def _is_marked(one: PlanningRound) -> bool:
+    """Whether the projection marks the round a question: it asked, and its message shows."""
+    return bool(one.asked) and _shows_message(one)
 
 
 def _projected_evidence(

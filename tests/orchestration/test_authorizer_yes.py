@@ -310,12 +310,14 @@ def _yes(  # noqa: PLR0913 — one keyword per part of the pointer a case varies
     position: int | None = None,
 ) -> YesContext:
     return YesContext(
-        answers=AnsweredQuestion(
-            activation_id=activation_id,
-            round=round_id,
-            place=place,
-            position=position,
-            parts=parts,
+        answers=(
+            AnsweredQuestion(
+                activation_id=activation_id,
+                round=round_id,
+                place=place,
+                position=position,
+                parts=parts,
+            ),
         ),
         given_at=_AT,
         users_authority=authority,
@@ -1145,8 +1147,22 @@ def test_the_shown_values_leave_out_what_the_hub_fills() -> None:
 def test_when_a_yes_was_given_is_an_instant() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         YesContext(
-            answers=AnsweredQuestion(activation_id=_ASKING, round=_QUESTION),
+            answers=(AnsweredQuestion(activation_id=_ASKING, round=_QUESTION),),
             given_at=datetime(2026, 10, 15, 14, 15),  # noqa: DTZ001 — the naive value refused
+        )
+
+
+def test_a_yes_carries_a_pointer_and_names_each_question_once() -> None:
+    """ADR-0322 §2:7: an input with no pointer carries no yes, nor one naming a question twice."""
+    with pytest.raises(ValueError, match="at least one pointer"):
+        YesContext(answers=(), given_at=_AT)
+    with pytest.raises(ValueError, match="each question it approves once"):
+        YesContext(
+            answers=(
+                AnsweredQuestion(activation_id=_ASKING, round=_QUESTION),
+                AnsweredQuestion(activation_id=_ASKING, round=_QUESTION, parts=(1,)),
+            ),
+            given_at=_AT,
         )
 
 

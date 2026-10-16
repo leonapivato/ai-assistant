@@ -14,13 +14,16 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError
 
-from ai_assistant.core.episode_encoding import episode_extends, project_episode
+from ai_assistant.core.episode_encoding import episode_extends, project_episode, question_marks
 from ai_assistant.core.types import (
+    AskedCall,
     ChannelContext,
     ControllerRule,
     ControllerStage,
+    CostBasis,
     EpisodeProcessingRecord,
     EpisodicMemory,
+    Idempotency,
     InputOrigin,
     LabelKind,
     MemorySource,
@@ -39,13 +42,18 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    Reversibility,
+    RiskLevel,
     RoundResponse,
     StageEntry,
     StageOutcome,
+    ToolCost,
+    ToolDefinition,
     UnderstandingOmission,
     WholeTextReply,
     label_prefix,
 )
+from ai_assistant.testing import with_phase_declaration
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _LATER = _NOW + timedelta(seconds=30)
@@ -386,3 +394,95 @@ def test_a_projected_round_shows_something() -> None:
         ProjectedRound()
     with pytest.raises(ValidationError, match="marks only notes it carries"):
         ProjectedRound(message=ProjectedText(text="m", full_chars=1), notes_marked=True)
+
+
+# --- the question's mark (ADR-0322 §4:3) ---------------------------------------------
+
+
+def _asked(part: int) -> AskedCall:
+    """A booking for ``part`` nights, asked about as part ``part``."""
+    tool = ToolDefinition(
+        **with_phase_declaration(  # type: ignore[arg-type]  # heterogeneous test kwargs
+            {
+                "id": "booking",
+                "capability": "book",
+                "description": "Book a night.",
+                "risk_level": RiskLevel.HIGH,
+                "reversibility": Reversibility.RECOVERABLE,
+                "side_effecting": True,
+                "leaves_hub": False,
+                "reads": (),
+                "writes": (),
+                "discloses": (),
+                "cost": ToolCost(basis=CostBasis.FREE),
+                "idempotency": Idempotency.NONE,
+                "parameters_schema": {
+                    "type": "object",
+                    "properties": {"night": {"type": "integer"}},
+                    "required": ["night"],
+                },
+            }
+        )
+    )
+    return AskedCall(part=part, tool=tool, values={"night": part})
+
+
+def _asking_episode() -> EpisodicMemory:
+    """Rounds: one asking two parts, notes only, one asking in no text, then one asking."""
+    return _episode(
+        _frozen(
+            _open(
+                rounds=(
+                    _round("r1", text="Shall I book both?", asked=(_asked(1), _asked(2))),
+                    _round("r2", follows="r1", notes="waiting"),
+                    _round("r3", follows="r2", text="  ", asked=(_asked(1),)),
+                    _round("r4", follows="r3", text="And this one?", asked=(_asked(1),)),
+                    _round("r5", follows="r4", text="Done."),
+                )
+            )
+        ),
+        outcome="Shall I book both?\n\nAnd this one?\n\nDone.",
+    )
+
+
+def test_a_projected_round_carries_the_parts_its_message_asked_about() -> None:
+    """§4:3: the part numbers from the recorded asked calls, no values, with the message."""
+    rounds = project_episode(_asking_episode(), excerpt_chars=50, owner_records=True).rounds
+
+    assert [one.asked for one in rounds] == [(1, 2), (), (1,), ()]
+    assert [None if one.message is None else one.message.text for one in rounds] == [
+        "Shall I book both?",
+        None,
+        "And this one?",
+        "Done.",
+    ]
+
+
+def test_each_mark_is_paired_with_the_round_it_was_read_from() -> None:
+    """§4:3: a round asking with no message shown carries no mark, so it is not among them."""
+    record = _asking_episode()
+    projection = project_episode(record, excerpt_chars=50)
+
+    assert [(round_id, one.asked) for round_id, one in question_marks(record, projection)] == [
+        ("r1", (1, 2)),
+        ("r4", (1,)),
+    ]
+
+
+def test_marks_that_do_not_match_the_record_pair_with_nothing() -> None:
+    """A projection of another record fails closed: no question is marked."""
+    record = _asking_episode()
+    other = _episode(_frozen(_open(rounds=(_round("r1", text="Done."),))))
+
+    assert question_marks(record, project_episode(other, excerpt_chars=50)) == ()
+    assert question_marks(other, project_episode(record, excerpt_chars=50)) == ()
+
+
+def test_a_projected_mark_rides_only_on_its_message_and_numbers_its_parts() -> None:
+    """§4:3: carried only where the message is, and the parts 1 to n in order."""
+    message = ProjectedText(text="m", full_chars=1)
+    assert ProjectedRound(message=message, asked=(1, 2)).asked == (1, 2)
+    with pytest.raises(ValidationError, match="only on the message it carries"):
+        ProjectedRound(notes=message, asked=(1,))
+    with pytest.raises(ValidationError, match="1 to n, in order"):
+        ProjectedRound(message=message, asked=(2,))

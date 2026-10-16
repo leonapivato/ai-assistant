@@ -411,7 +411,8 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     ``ActionRequest``: the ``ToolDefinition`` and ``EgressBinding`` judged here and the
     values as frozen JSON, exactly what the ``AskedCall`` made from it holds.
     ``QuestionPart`` is a round's id and a part number, and ``ApprovedAction`` pairs one
-    with the ``AskedCall`` it names.
+    with the ``AskedCall`` it names. ``AskedIn`` (ADR-0322 §4:2), on the chat's window,
+    is the question a message is: a round's id and part numbers.
 
     **Recall is not a seam.** :class:`~ai_assistant.orchestration.recall.RecallStage`
     calls no model (ADR-0281 §3); what it decides reaches a model as
@@ -422,6 +423,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
 
     assert set(reachable) == {
         "ActionRequest",
+        "AskedIn",
         "ActivationDigest",
         "ActivationLabels",
         "ActivationRecall",

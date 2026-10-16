@@ -32,7 +32,8 @@ author, and the window informs and never authorizes. The reader brings its bookk
 with it: the activation that took in each message of the window, where one did, which
 is what the message links to (ADR-0303 §7:3). Where the phases write messages, it also
 brings the activation that **wrote** each assistant message, by acting's effect record
-(ADR-0303 §7:1, ADR-0306 §5:3), read through the ``written`` reader it is handed.
+(ADR-0303 §7:1, ADR-0306 §5:3), read through the ``written`` reader it is handed, and
+the question each such message is, where it is one (ADR-0322 §4:2).
 
 **The writer** (§9, §10). The phases write the activation's messages into the
 conversation the input came from as it runs, and a pass that cannot finish writes the
@@ -62,7 +63,7 @@ from ai_assistant.core.types import (
     TranscriptMessage,
 )
 from ai_assistant.orchestration.conversations import conversation_channel, fitted_message
-from ai_assistant.orchestration.understanding import TranscriptWindow
+from ai_assistant.orchestration.understanding import AskedIn, TranscriptWindow, WrittenBy
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -226,7 +227,7 @@ class ChatReader:
         closing: Callable[[], bool],
         mint: Callable[[], str],
         window_size: int = CHAT_WINDOW_SIZE,
-        written: Callable[[str, Sequence[str], Sequence[int]], Awaitable[Mapping[int, str]]]
+        written: Callable[[str, Sequence[str], Sequence[int]], Awaitable[Mapping[int, WrittenBy]]]
         | None = None,
     ) -> None:
         """Wire the reader.
@@ -247,9 +248,10 @@ class ChatReader:
             written: Reads which activation wrote each assistant message, by its
                 effect record, where the phases write messages (ADR-0303 §7:1):
                 given the conversation, the candidate activations and the assistant
-                messages' positions, it answers the activation by position, a
-                position no record names simply missing. ``None``, the default,
-                links no assistant message, as before the phases.
+                messages' positions, it answers the activation, and the question the
+                message is where it is one, by position, a position no record names
+                simply missing. ``None``, the default, links no assistant message, as
+                before the phases.
         """
         self._conversations = conversations
         self._written = written
@@ -435,12 +437,14 @@ class ChatReader:
             )
             if earlier is not None and earlier.entries and earlier.entries[-1].position == wanted:
                 replied.append(earlier.entries[-1])
+        links, asked = await self._links(conversation_id, recent, replied)
         return TranscriptWindow(
             conversation=conversation_channel(conversation_id),
             messages=recent,
             input_messages=tuple(waiting),
             replied_to=tuple(replied),
-            links=await self._links(conversation_id, recent, replied),
+            links=links,
+            asked=asked,
         )
 
     async def _links(
@@ -448,8 +452,11 @@ class ChatReader:
         conversation_id: str,
         recent: Sequence[TranscriptMessage],
         replied: Sequence[TranscriptMessage | DeletedMessage],
-    ) -> dict[int, str]:
-        """The activation each window message links to (ADR-0303 §7:1-§7:3).
+    ) -> tuple[dict[int, str], dict[int, AskedIn]]:
+        """The activation each window message links to, and the question each one is.
+
+        ADR-0303 §7:1-§7:3, with ADR-0322 §4:2's question: for an assistant message
+        linked by its effect record, the question it is, where ``written`` found one.
 
         Brought with the window, so the understanding phase reads no further store to
         link a message. A user's message links to the activation that took it in, by
@@ -470,8 +477,9 @@ class ChatReader:
             for one in (*recent, *replied)
             if isinstance(one, TranscriptMessage) and one.author is MessageAuthor.ASSISTANT
         ]
+        asked: dict[int, AskedIn] = {}
         if self._written is None or not writes:
-            return links
+            return links, asked
         recent_positions = {one.position for one in recent}
         heads = {min(recent_positions)} if recent_positions else set()
         heads.update(position for position in writes if position not in recent_positions)
@@ -485,13 +493,15 @@ class ChatReader:
         before = await self._taken_in(conversation_id, looked)
         candidates = list(dict.fromkeys((*links.values(), *before.values())))
         if not candidates:
-            return links
+            return links, asked
         written = await self._written(conversation_id, candidates, writes)
         for position in writes:
             writer = written.get(position)
             if writer is not None and position not in links:
-                links[position] = writer
-        return links
+                links[position] = writer.activation_id
+                if writer.asked is not None:
+                    asked[position] = writer.asked
+        return links, asked
 
     async def _taken_in(self, conversation_id: str, positions: Sequence[int]) -> dict[int, str]:
         """The bookkeeping for ``positions``, in as many calls as the store's bound needs."""

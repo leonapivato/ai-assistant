@@ -77,21 +77,31 @@ referent recorded ``inferred`` — because a label the model misspelled twice is
 the stage cannot ground, not a mechanical failure. A ``ModelError`` propagates
 unchanged. Nothing here substitutes an empty, default or invented understanding.
 
-**The answer pointer** (ADR-0321 §3). The proposal's ``answers`` names the question
-the input approves, by the label of what showed it, and the parts it approves. A
-question is an ordinary message (§3:2), and nothing lists unanswered ones: an ``H``
-label names one where its item is a message the assistant wrote that links to the
-activation that wrote it, and resolves to that activation, the conversation as the
-place and the message's position; a ``P`` or ``M`` label naming an episode, an ``H``
-label naming a supplied item that is one exchange with an episode, and an ``S`` label
-naming a story through its latest episodes, each resolve to the one round of those
-episodes whose message asked, with its activation. A label naming nothing, an item that
-is no question, episodes that asked more than one question, or a part the question did
-not show records **no pointer**, and the understanding gains a code-owned unresolved
-matter saying so, so that planning can ask which question was meant. Which question an
-input answers, and whether it approves at all, is the model's reading (§3:4-§3:11); the
-pointer grants nothing (ADR-0276 §7:7), and authorizing checks it against the records
-(ADR-0321 §4:4).
+**Questions are marked and labelled** (ADR-0322 §4). A question is a message whose
+round recorded asked calls (ADR-0321 §2:8), and code marks it wherever understanding is
+shown it, with the parts it showed, read through ``project_episode`` from the round's
+records and never from a message's text (§4:3): on a message of the place window the
+assistant wrote, where the chat's reader brought with the window the round that wrote
+it and the parts the writer's episode's projection marks it with; and on the round that
+asked it in an episode shown in the episode window, the recalled section or a story's
+short view, or with the place-window item that is one exchange with it.
+Each marked question carries a ``Q`` label, ``Q1``, ``Q2``… in the order the questions
+are first rendered, one label per question however many places show it (§4:4). A
+message that asked only in words carries no mark. A ``Q`` label names no referent:
+cited anywhere but a pointer it is a label naming nothing (§4:6). Nothing lists
+unanswered questions, and the mark never says whether one was answered (§4:8).
+
+**The answer pointers** (ADR-0321 §3, ADR-0322 §2). The proposal's ``answers`` names
+each question the input approves by its ``Q`` label and by no other, with the parts it
+approves (§4:5). Each pointer resolves on its own, to the asking activation and round,
+and to the message's place and position where the place window showed it: a pointer
+naming anything but a ``Q`` label the call rendered, or a part its question did not
+show, is not recorded, and two naming one question are neither recorded (§2:6-§2:7).
+Each such case adds a code-owned unresolved matter saying so, so that planning can ask
+which question was meant, and the other pointers stand. Which questions an input
+answers, and whether it approves at all, is the model's reading (ADR-0321 §3:4-§3:11,
+ADR-0322 §2:2-§2:4); a pointer grants nothing (ADR-0276 §7:7), and authorizing checks
+each against the records (ADR-0321 §4:4, ADR-0322 §3:1).
 
 **It logs stage and code-owned reason only** — no input, no window content, no model
 output and no exception content (ADR-0275 §8).
@@ -101,6 +111,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
 
 # At runtime, not under TYPE_CHECKING: `EpisodeSelector` is a PEP 695 alias, whose
 # value is read lazily and must resolve when it is (#1706).
@@ -114,7 +125,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.channel_validation import input_origin
 from ai_assistant.core.diagnostics import write_diagnostic, write_failure
-from ai_assistant.core.episode_encoding import project_episode
+from ai_assistant.core.episode_encoding import project_episode, question_marks
 from ai_assistant.core.errors import UnderstandingError
 from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
@@ -158,6 +169,8 @@ if TYPE_CHECKING:
         ChannelContextItem,
         ChannelIdentity,
         EpisodeProjection,
+        ProjectedRound,
+        ProposedAnswer,
         StoryNote,
         StorySummaryLine,
         TranscriptMessage,
@@ -166,12 +179,14 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.story_links import Candidates, ShortView
 
 __all__ = [
+    "AskedIn",
     "ChannelWindow",
     "EpisodeSelector",
     "RecentEpisodes",
     "SuppliedWindow",
     "TranscriptWindow",
     "UnderstandingStage",
+    "WrittenBy",
     "place_window_links",
 ]
 
@@ -286,39 +301,54 @@ _STORIES: Final = (
     "\n"
 )
 
-#: ADR-0321 §3's readings: whether the input approves an earlier question, which one,
-#: and which parts (§3:1, §3:4-§3:11). Rendered on every pass, since a question is an
-#: ordinary message any section may show (§3:2). Authority is not read here: whose
-#: input approves is authorizing's check (§3:3), and the pointer grants nothing.
+#: ADR-0321 §3's readings, as ADR-0322 §2 and §4 extend them: what the mark and the ``Q``
+#: label mean, that a pointer names a question by its ``Q`` label alone, and when one
+#: reply approves several questions (ADR-0322 §4:9). Rendered on every pass, since a
+#: question is an ordinary message any section may show (ADR-0321 §3:2). Authority is not
+#: read here: whose input approves is authorizing's check (§3:3), and a pointer grants
+#: nothing.
 _ANSWERS: Final = (
-    "An input may answer a question the assistant asked earlier. A question is an "
-    "ordinary message the assistant wrote: an item of the channel window written by the "
-    "assistant, or the response of an earlier episode, a recalled episode or a story's "
-    "latest episode. Where a question asks about actions, its message ends with one "
-    "exact line per action, numbered where there are several; a line's number is that "
-    "action's part, and a question with one unnumbered line has the one part 1.\n"
+    "An input may answer a question the assistant asked earlier. A question is a message "
+    "the assistant wrote that asked about actions: it ends with one exact line per "
+    "action, numbered where there are several; a line's number is that action's part, "
+    "and a question with one unnumbered line has the one part 1.\n"
     "\n"
-    "In `answers`, record the question the input approves and the parts it approves, or "
-    "null where it approves none. Name the question by the label of what shows it: the "
-    "H label of the assistant's message, or the P, M or S label of the episode or story "
-    "whose response shows it. Which question the input answers is your judgment; an "
-    "input message that replies to the question's message is a strong hint.\n"
+    "Every question is marked wherever it is shown, with a label Q1, Q2, and so on, and "
+    "the parts it showed: a message of the channel window carries its mark as "
+    "`question`, and an episode, a recalled episode or a story's latest episode carries "
+    "the questions it asked as `questions_asked`. A question shown in more than one "
+    "place carries one Q label. The mark says only that a message is a question and "
+    "which parts it showed, never whether it was answered. A message that asked only in "
+    "words carries no mark, and is not a question an answer can be recorded to. A Q "
+    "label names a question and nothing else: cite it only in `answers`, and nowhere "
+    "else a label may be cited.\n"
+    "\n"
+    "In `answers`, record one entry for each question the input approves, naming the "
+    "question by its Q label and by no other label, with the parts it approves; name no "
+    "question twice. Leave `answers` empty where the input approves no question. Which "
+    "questions the input answers is your judgment; an input message that replies to a "
+    "question's message is a strong hint.\n"
     "- A yes approves every part the question showed: leave `parts` empty. A yes to some "
     "parts only names those parts in `parts`.\n"
-    "- A no approves nothing: `answers` is null. A later yes to the same question still "
-    "approves it.\n"
+    '- A reply approves several questions only where it says which: "both", "all of '
+    'them", or naming them, including naming them in reply to a message that asked '
+    "which was meant. Record one entry for each question it says, by that question's own "
+    "Q label, never by the label of the message that asked which. Where what it approves "
+    'was shown across several questions, such as "book both" when each booking was '
+    "asked about in a question of its own, record each of those questions.\n"
+    "- A bare yes that could fit more than one question approves nothing: leave "
+    "`answers` empty. Never guess which one was meant.\n"
+    "- A no approves nothing. A later yes to the same question still approves it.\n"
     '- A change, such as "make it 8", approves nothing, and neither does a conditional '
-    "yes, which counts as a change: `answers` is null.\n"
-    "- An unclear reply approves nothing: `answers` is null.\n"
-    "- A bare yes that could fit more than one question approves nothing: `answers` is "
-    "null. Never guess which one was meant.\n"
+    "yes, which counts as a change.\n"
+    "- An unclear reply approves nothing.\n"
     "- A question does not expire. Whether it was changed, has gone stale or was already "
     "dealt with is your reading of what the windows, the recalled section and the "
     "stories show.\n"
     "- An input that mixes a yes with a request records the yes in `answers`, and its "
     "meaning states the request as well.\n"
-    "Where the input reads as an answer but `answers` is null, because it could fit more "
-    "than one question, or no question shown fits it, record that in `unresolved`, "
+    "Where the input reads as an answer but `answers` is empty, because it could fit more "
+    "than one question, or no marked question fits it, record that in `unresolved`, "
     "naming the questions it could answer, if any. `answers` records your reading and "
     "grants nothing.\n"
     "\n"
@@ -335,8 +365,8 @@ _SHAPE_HEAD: Final = (
     '"labels": ["<label>"], "ground": "stated|supplied|inferred"}], '
     '"unresolved": [{"matter": "<what this reading leaves unsettled>", '
     '"why_it_matters": "<why that matters to understanding the input>"}], '
-    '"answers": null or {"question": "<label of what shows the question>", '
-    '"parts": [<part number>]}'
+    '"answers": [{"question": "<Q label of a question the input approves>", '
+    '"parts": [<part number>]}]'
 )
 
 _SHAPE_TAIL: Final = (
@@ -414,21 +444,21 @@ _SUMMARY_OUTSIDE_TEXT: Final = (
     "the user said; its lines' own words say which"
 )
 
-#: The code-owned unresolved matter an understanding gains where it read the input as
-#: approving a question and the stage recorded no pointer (ADR-0321 §3:1, §3:5): what
-#: was not found, by why, and one statement of what follows, so planning can ask which
-#: question was meant. Neither renders anything of the model's output.
+#: The code-owned unresolved matter an understanding gains for each pointer it read and
+#: the stage did not record (ADR-0321 §3:1, §3:5, ADR-0322 §2:6-§2:7): what was not
+#: found, by why, and one statement of what follows, so planning can ask which question
+#: was meant. None renders anything of the model's output.
 _NO_SUCH_QUESTION: Final = (
     "The input was read as approving an earlier question, and the label it was read to "
-    "answer names no question the assistant asked."
-)
-_SEVERAL_QUESTIONS: Final = (
-    "The input was read as approving an earlier question, and what the label it was read "
-    "to answer shows holds more than one question."
+    "answer is not the Q label of a question the assistant asked."
 )
 _NO_SUCH_PART: Final = (
     "The input was read as approving parts of an earlier question, and that question did "
     "not show every part it was read to approve."
+)
+_SAME_QUESTION_TWICE: Final = (
+    "The input was read as approving one earlier question twice over, so neither reading "
+    "of it was recorded."
 )
 _NOT_APPROVED: Final = (
     "Nothing the input approves can run until the user says which question, and which "
@@ -484,6 +514,12 @@ class TranscriptWindow:
             further store to resolve a message. A message missing here links to
             nothing: neither the bookkeeping nor an effect record names an activation
             for it, as for an assistant message the old path wrote (ADR-0303 §7:5).
+        asked: The question each assistant message ``links`` names its writer for is,
+            by its position, where it is one (ADR-0322 §4:2): the round the same effect
+            record names, whose recorded asked calls make its message a question, and
+            the parts the writer's episode's projection marks it with (§4:3). The
+            reader brings it with the window, as it brings the links. A message missing
+            here carries no mark.
     """
 
     conversation: ChannelIdentity
@@ -491,6 +527,36 @@ class TranscriptWindow:
     input_messages: tuple[TranscriptMessage, ...] = ()
     replied_to: tuple[TranscriptMessage | DeletedMessage, ...] = ()
     links: Mapping[int, str] = field(default_factory=dict)
+    asked: Mapping[int, AskedIn] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class AskedIn:
+    """The question a message is, by its records (ADR-0322 §4:1-§4:3).
+
+    Attributes:
+        round: The planning round that wrote the message, as its effect record names
+            it, which recorded the calls the message asked about (ADR-0321 §2:8).
+        parts: The parts its mark shows, as ``project_episode`` projects that round of
+            the writer's episode, ``1`` to *n*; never read from the message's text.
+    """
+
+    round: str
+    parts: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class WrittenBy:
+    """What wrote an assistant message, by its effect record (ADR-0303 §7:1, ADR-0306 §5:3).
+
+    Attributes:
+        activation_id: The activation the record names as having written it.
+        asked: The question the message is, where its round asked about calls and the
+            writer's episode marks it; ``None`` for every other message.
+    """
+
+    activation_id: str
+    asked: AskedIn | None = None
 
 
 type ChannelWindow = SuppliedWindow | TranscriptWindow
@@ -754,36 +820,49 @@ class _Brief:
     #: How many ``S`` labels the stories section rendered; ``None`` where the call
     #: rendered no stories section at all (ADR-0300 §6:5).
     story_count: int | None = None
-    #: What an answer pointer's label may name a question by (ADR-0321 §3:2): an ``H``
-    #: label naming a message the assistant wrote that links to its writer, and every
-    #: label naming episodes, whose rounds say whether one asked. A label not here
-    #: names no question.
-    questions: dict[str, _QuestionSite] = field(default_factory=dict)
+    #: What each ``Q`` label the call rendered names: the marked question, by its
+    #: records (ADR-0322 §4:4-§4:5). A pointer naming a label not here is not recorded.
+    questions: dict[str, _Question] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
-class _AskedMessage:
-    """A message of the place window the assistant wrote, by its records (ADR-0321 §3:2).
+class _Question:
+    """A marked question, by the records its mark was read from (ADR-0322 §4:1-§4:4).
 
-    ``activation_id`` is the activation the effect record names as having written it
-    (ADR-0303 §7:1), ``place`` the conversation it was written into as acting names a
-    message's place, and ``position`` where the medium recorded it: what the message's
-    delivery record carries (ADR-0306 §5:5), so authorizing reaches it from them.
+    ``activation_id`` is the activation that asked and ``round`` the round whose message
+    is the question; ``parts`` the parts its mark showed, ``1`` to *n*. ``place`` and
+    ``position`` name the message where the place window showed it, as its delivery
+    record carries them (ADR-0306 §5:5), so authorizing reaches the record by both.
     """
 
     activation_id: str
-    place: str
-    position: int
+    round: str
+    parts: tuple[int, ...]
+    place: str | None = None
+    position: int | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class _AskedIn:
-    """Episodes one label shows, any of whose rounds may have asked (ADR-0321 §3:2)."""
+class _Marks:
+    """The ``Q`` labels one call mints, in the order the questions are first rendered.
 
-    episodes: tuple[EpisodicMemory, ...]
+    One label per question, keyed by its activation and round, however many places
+    render it (ADR-0322 §4:4); the first rendering's records are what the label resolves
+    to.
+    """
 
+    def __init__(self) -> None:
+        self.questions: dict[str, _Question] = {}
+        self._labels: dict[tuple[str, str], str] = {}
 
-type _QuestionSite = _AskedMessage | _AskedIn
+    def mark(self, question: _Question) -> dict[str, object]:
+        """The question's mark as rendered: its ``Q`` label and the parts it showed."""
+        key = (question.activation_id, question.round)
+        label = self._labels.get(key)
+        if label is None:
+            label = f"Q{len(self.questions) + 1}"
+            self._labels[key] = label
+            self.questions[label] = question
+        return {"label": label, "parts": list(question.parts)}
 
 
 class UnderstandingStage:
@@ -949,13 +1028,20 @@ class UnderstandingStage:
         recalled: tuple[EpisodicMemory | SemanticMemory, ...],
         stories: Candidates | None,
     ) -> _Brief:
-        """Render the prompt, filtering the episode window's stored records first (§3, §4)."""
+        """Render the prompt, filtering the episode window's stored records first (§3, §4).
+
+        Every question rendered is marked and given its ``Q`` label as it is rendered,
+        so the labels run in the order the questions are first shown (ADR-0322 §4:4).
+        """
         placed = _Placed.of(window, audience, episodes)
         shared = placed.shared
         window_episodes = placed.episodes
         labels: dict[str, UnderstandingReferent] = {}
         story_members: dict[str, StoryMember] = {}
-        questions: dict[str, _QuestionSite] = {}
+        marks = _Marks()
+        # ADR-0322 §4:2: the rounds whose questions a place-window message carries, which
+        # an episode shown with the window then leaves to that message.
+        carried = frozenset(one.item.asked.round for one in placed.items if one.item.asked)
         rendered_items: list[dict[str, object]] = []
         for index, one in enumerate(placed.items, start=1):
             label = f"H{index}"
@@ -966,6 +1052,8 @@ class UnderstandingStage:
                     excerpt_chars=self._excerpt_chars,
                     linkable=one.link is not None,
                     annotated=one.annotated,
+                    marks=marks,
+                    carried=carried,
                 )
             )
             labels[label] = one.item.referent
@@ -975,8 +1063,6 @@ class UnderstandingStage:
             # reader's bookkeeping. Anything withheld has no label.
             if one.link is not None:
                 story_members[label] = StoryMember(kind=StoryMemberKind.ACTIVATION, id=one.link)
-            if (site := one.question) is not None:
-                questions[label] = site
         rendered_episodes: list[dict[str, object]] = []
         for record in (record for record in window_episodes if record.id not in shared):
             label = f"P{len(rendered_episodes) + 1}"
@@ -985,10 +1071,9 @@ class UnderstandingStage:
             projected = _ProjectedEpisode.of(
                 record, excerpt_chars=self._excerpt_chars, admit_outside_input=True
             )
-            rendered_episodes.append(projected.rendering(label))
+            rendered_episodes.append(projected.rendering(label, marks))
             labels[label] = projected.referent()
             _member_of(record, label, story_members)
-            questions[label] = _AskedIn((record,))
         received = _input_rendering(text, channel)
         if isinstance(window, TranscriptWindow) and window.input_messages:
             received["messages"] = [_input_message(one) for one in window.input_messages]
@@ -1007,13 +1092,13 @@ class UnderstandingStage:
             # ADR-0281 §7: a record either window already rendered stays there only.
             rendered = shared | {record.id for record in window_episodes}
             section, recalled_count = self._recalled_section(
-                recall.outcome, recalled, rendered, labels, story_members, questions
+                recall.outcome, recalled, rendered, labels, story_members, marks
             )
             payload["recalled"] = section
         story_count: int | None = None
         if stories is not None:
             payload["stories"], story_count = self._stories_section(
-                stories, labels, story_members, questions
+                stories, labels, story_members, marks
             )
         instruction = _instruction(recalled=recall is not None, stories=stories is not None)
         messages = (
@@ -1028,7 +1113,7 @@ class UnderstandingStage:
             recalled_count,
             story_members,
             story_count,
-            questions,
+            marks.questions,
         )
 
     def _stories_section(
@@ -1036,29 +1121,28 @@ class UnderstandingStage:
         stories: Candidates,
         labels: dict[str, UnderstandingReferent],
         story_members: dict[str, StoryMember],
-        questions: dict[str, _QuestionSite],
+        marks: _Marks,
     ) -> tuple[list[dict[str, object]] | str, int]:
         """ADR-0300 §6:5's fourth section, labelled ``S`` in the candidates' order.
 
         Each ``S`` label resolves twice: as a story label to its story member (§6:7),
-        and as a label cited anywhere else to a ``story`` referent (ADR-0304 §8:1). As
-        an answer pointer's label it names the question its latest episodes asked, the
-        episodes taking no label of their own (§6:5, ADR-0321 §3:2).
+        and as a label cited anywhere else to a ``story`` referent (ADR-0304 §8:1). A
+        question a latest episode asked carries its own ``Q`` label, the episodes taking
+        no label of their own (§6:5, ADR-0322 §4:2, §4:4).
         """
         if stories.unreadable:
             return _STORIES_UNREADABLE, 0
         section: list[dict[str, object]] = []
         for view in stories.views:
             label = f"S{len(section) + 1}"
-            section.append(self._short_view(label, view))
+            section.append(self._short_view(label, view, marks))
             labels[label] = _story_referent(view)
             story_members[label] = StoryMember(kind=StoryMemberKind.STORY, id=view.story_id)
-            questions[label] = _AskedIn(view.episodes)
         if section:
             return section, len(section)
         return _NO_STORIES, 0
 
-    def _short_view(self, label: str, view: ShortView) -> dict[str, object]:
+    def _short_view(self, label: str, view: ShortView, marks: _Marks) -> dict[str, object]:
         """One candidate under its label: summary lines, newest notes, latest episodes (§6:2).
 
         The summary and each note are attributed by their records — the summary as the
@@ -1074,7 +1158,7 @@ class UnderstandingStage:
         episodes = [
             _ProjectedEpisode.of(
                 record, excerpt_chars=self._excerpt_chars, admit_outside_input=False
-            ).described()
+            ).described(marks)
             for record in view.episodes
         ]
         rendered: dict[str, object] = {
@@ -1100,12 +1184,12 @@ class UnderstandingStage:
         rendered: frozenset[str],
         labels: dict[str, UnderstandingReferent],
         story_members: dict[str, StoryMember],
-        questions: dict[str, _QuestionSite],
+        marks: _Marks,
     ) -> tuple[list[dict[str, object]] | str, int]:
         """ADR-0281 §7's third section, labelled ``M`` in recall's order, and its count.
 
-        An ``M`` label naming an episode names the question its rounds asked, as a ``P``
-        label does; one naming a fact names none (ADR-0321 §3:2).
+        A question a recalled episode asked carries its ``Q`` label, as one a ``P``
+        episode asked does (ADR-0322 §4:2).
         """
         if outcome in {RecallOutcome.FAILED, RecallOutcome.TIMED_OUT}:
             return _RECALL_FAILED, 0
@@ -1120,10 +1204,9 @@ class UnderstandingStage:
                 projected = _ProjectedEpisode.of(
                     record, excerpt_chars=self._excerpt_chars, admit_outside_input=True
                 )
-                section.append(projected.rendering(label))
+                section.append(projected.rendering(label, marks))
                 labels[label] = projected.referent()
                 _member_of(record, label, story_members)
-                questions[label] = _AskedIn((record,))
             else:
                 memory = _RecalledFact.of(record, excerpt_chars=self._excerpt_chars)
                 section.append(memory.rendering(label))
@@ -1187,20 +1270,6 @@ class _PlacedItem:
     also: EpisodicMemory | None
     link: str | None
     annotated: bool = True
-
-    @property
-    def question(self) -> _QuestionSite | None:
-        """What an answer pointer naming this item names (ADR-0321 §3:2), if anything.
-
-        A transcript message names itself, and only where the assistant wrote it and
-        it links to its writer: a user's message is no question, and one that links to
-        nothing has no record authorizing could check. A supplied item is no record of
-        its own, and names the question its episode asked where it is one exchange with
-        an episode of the episode window (ADR-0301 §1:1).
-        """
-        if self.item.position is not None:
-            return self.item.asked
-        return None if self.also is None else _AskedIn((self.also,))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1301,7 +1370,7 @@ class _ChannelItem:
     ``position`` is a transcript message's place in its conversation, the medium's
     own item id (ADR-0303 §7:2), and what orders the window newest first.
     ``asked`` is, for a transcript message the assistant wrote that links to its
-    writer, the message as its delivery record names it (ADR-0321 §3:2).
+    writer, the question it is, where the reader brought one (ADR-0322 §4:2).
     """
 
     identifier: str | None
@@ -1309,9 +1378,9 @@ class _ChannelItem:
     referent: UnderstandingReferent
     link: str | None = None
     position: int | None = None
-    asked: _AskedMessage | None = None
+    asked: _Question | None = None
 
-    def rendering(
+    def rendering(  # noqa: PLR0913 — the label, the record it shares, the bound, its two place-window marks, and the question marks
         self,
         label: str,
         also: EpisodicMemory | None,
@@ -1319,28 +1388,37 @@ class _ChannelItem:
         excerpt_chars: int,
         linkable: bool,
         annotated: bool = True,
+        marks: _Marks,
+        carried: frozenset[str] = frozenset(),
     ) -> dict[str, object]:
         """The item under its label, marked where it is also in the episode window.
 
-        An item that links to no activation is marked not linkable (ADR-0303 §7:5),
-        the one mark the place window gains: a story label naming it links nothing.
+        An item that links to no activation is marked not linkable (ADR-0303 §7:5): a
+        story label naming it links nothing. A message that is a question carries its
+        mark as ``question`` (ADR-0322 §4:2).
 
         ``also`` is the episode-window record the item names, where it names one: its
         status, reason and understanding ride here, rendered once (§3). A supplied
         item or a transcript message is not a record and keeps its own text, gaining
         only those annotations, and only where ``annotated``: of several items that are
         one exchange, the first carries them and the rest are only marked, so the
-        exchange is rendered once.
+        exchange is rendered once. Among them are the questions the episode asked,
+        marked on the rounds that asked them (ADR-0322 §4:2), less those a message of
+        the window already carries, by their rounds in ``carried``.
 
         **A stored understanding version rides only on an item also in the episode
         window** — what that window would have added about it.
         """
         rendered: dict[str, object] = {"label": label, **self.body}
+        if self.asked is not None:
+            rendered["question"] = marks.mark(self.asked)
         if also is not None and annotated:
             projected = _ProjectedEpisode.of(
                 also, excerpt_chars=excerpt_chars, admit_outside_input=False
             )
             rendered.update(projected.annotations())
+            if questions := projected.questions(marks, carried=carried):
+                rendered["questions_asked"] = questions
         if also is not None:
             # §3: one exchange, rendered once, here; what the episode window would have
             # added about it — its status and what was understood then — rides here too.
@@ -1404,16 +1482,9 @@ def _transcript_items(window: TranscriptWindow) -> list[_ChannelItem]:
     earliest message of the input says so, so the activation can tell that a message
     was written before the reply it follows (ADR-0293 §6).
     """
-    conversation = window.conversation
     first = min((one.position for one in window.input_messages), default=None)
-    links = window.links
-    items = [
-        _message_item(one, conversation, _TRANSCRIPT_ITEM, first, links) for one in window.messages
-    ]
-    items.extend(
-        _message_item(one, conversation, _REPLIED_TO_ITEM, first, links)
-        for one in window.replied_to
-    )
+    items = [_message_item(one, window, _TRANSCRIPT_ITEM, first) for one in window.messages]
+    items.extend(_message_item(one, window, _REPLIED_TO_ITEM, first) for one in window.replied_to)
     return items
 
 
@@ -1446,10 +1517,9 @@ def _input_message(message: TranscriptMessage) -> dict[str, object]:
 
 def _message_item(
     message: TranscriptMessage | DeletedMessage,
-    conversation: ChannelIdentity,
+    window: TranscriptWindow,
     role: str,
     first: int | None,
-    links: Mapping[int, str],
 ) -> _ChannelItem:
     """One message of the transcript, quoted as the medium holds it (ADR-0293 §5:2).
 
@@ -1463,13 +1533,17 @@ def _message_item(
     to it (ADR-0303 §7:5's conservative direction). Its referent stays the message,
     by its position: a reading grounded in it names the message, not the episode.
 
-    A message the assistant wrote that links to its writer may be a question, and an
-    answer pointer naming it names it by its writer, its place and its position
-    (ADR-0321 §3:2); a deleted message, a user's and one linking to nothing is none.
+    A message the assistant wrote that links to its writer is a question where the
+    reader brought the question it is (ADR-0322 §4:2): it resolves to its writer and
+    round, and to its place and position, what its delivery record carries (ADR-0306
+    §5:5), so authorizing reaches the record by them. A deleted message, a user's, and
+    one linking to nothing is none.
     """
+    conversation = window.conversation
     body: dict[str, object] = {"item": role, "position": message.position}
     excerpt = ""
-    link = links.get(message.position)
+    link = window.links.get(message.position)
+    question = window.asked.get(message.position)
     asked = None
     if isinstance(message, DeletedMessage):
         body["deleted"] = True
@@ -1482,9 +1556,13 @@ def _message_item(
             body["replies_to"] = message.replies_to
         if message.cut_off:
             body["cut_off"] = True
-        if message.author is MessageAuthor.ASSISTANT and link is not None:
-            asked = _AskedMessage(
-                activation_id=link, place=_place_of(conversation), position=message.position
+        if message.author is MessageAuthor.ASSISTANT and link is not None and question:
+            asked = _Question(
+                activation_id=link,
+                round=question.round,
+                parts=question.parts,
+                place=_place_of(conversation),
+                position=message.position,
             )
     if first is not None and message.position > first:
         body["written_after_the_input_began"] = True
@@ -1518,18 +1596,54 @@ class _ProjectedEpisode:
 
     episode_id: str
     projection: EpisodeProjection
+    #: The projection's marked rounds, each with the id of the round it projects and the
+    #: activation that asked, which the projection does not carry (ADR-0322 §4:3).
+    marked: tuple[tuple[ProjectedRound, str, str], ...] = ()
 
     @classmethod
     def of(
         cls, record: EpisodicMemory, *, excerpt_chars: int, admit_outside_input: bool
     ) -> _ProjectedEpisode:
-        """Project the episode through ``core``'s one projection (§8:1)."""
-        return cls(
-            episode_id=record.id,
-            projection=project_episode(
-                record, excerpt_chars=excerpt_chars, admit_outside_input=admit_outside_input
-            ),
+        """Project the episode through ``core``'s one projection (§8:1).
+
+        Each mark the projection carries is paired with the round it was read from, by
+        :func:`question_marks`, so its ``Q`` label resolves to that round.
+        """
+        projection = project_episode(
+            record, excerpt_chars=excerpt_chars, admit_outside_input=admit_outside_input
         )
+        processing = record.processing_record
+        marked = (
+            ()
+            if processing is None
+            else tuple(
+                (one, round_id, processing.activation_id)
+                for round_id, one in question_marks(record, projection)
+            )
+        )
+        return cls(episode_id=record.id, projection=projection, marked=marked)
+
+    def questions(
+        self, marks: _Marks, *, carried: frozenset[str] = frozenset()
+    ) -> list[dict[str, object]]:
+        """The questions the episode asked, each on its round's message (ADR-0322 §4:2).
+
+        Each carries its ``Q`` label and parts, and the message that asked, as the
+        projection cut it; a round in ``carried`` is left out, its message already
+        carrying its mark elsewhere.
+        """
+        rendered: list[dict[str, object]] = []
+        for one, round_id, activation_id in self.marked:
+            message = one.message
+            if round_id in carried or message is None:
+                continue
+            mark = marks.mark(
+                _Question(activation_id=activation_id, round=round_id, parts=one.asked)
+            )
+            rendered.append(
+                {**mark, "message": message.text, "message_cut_to_first_chars": message.cut}
+            )
+        return rendered
 
     @property
     def source(self) -> str:
@@ -1541,11 +1655,11 @@ class _ProjectedEpisode:
             return f"capture modality {projection.capture_modality.value}"
         return "a channel the record does not name"
 
-    def rendering(self, label: str) -> dict[str, object]:
+    def rendering(self, label: str, marks: _Marks) -> dict[str, object]:
         """The episode under its label, attributed from its origin (§4, ADR-0284 §2:3)."""
-        return {"label": label, **self.described()}
+        return {"label": label, **self.described(marks)}
 
-    def described(self) -> dict[str, object]:
+    def described(self, marks: _Marks) -> dict[str, object]:
         """The episode with no label, attributed from its origin, as a short view shows it."""
         report = self.projection.origin is InputOrigin.OUTSIDE
         return {
@@ -1554,20 +1668,21 @@ class _ProjectedEpisode:
                 if report
                 else f"an earlier exchange on {self.source}"
             ),
-            **self.parts(),
+            **self.parts(marks),
         }
 
-    def parts(self) -> dict[str, object]:
-        """Its time, input, response, status and reason, and understanding.
+    def parts(self, marks: _Marks) -> dict[str, object]:
+        """Its time, input, response, the questions it asked, status and reason, and understanding.
 
         ADR-0284 §8:6 as ADR-0318 §3:1 leaves it: a rendering states the episode's
         status and reason, and no verdict. The latest understanding version is shown:
         the episode window and the recalled section show it (ADR-0276 §4, ADR-0281 §7),
         and a channel-window item shows it only where it is also in the episode window,
-        through :meth:`annotations`.
+        through :meth:`annotations`. The questions it asked carry their marks and ``Q``
+        labels (ADR-0322 §4:2), where it asked any.
         """
         projection = self.projection
-        return {
+        rendered: dict[str, object] = {
             "occurred_at": projection.occurred_at.isoformat(),
             "input": None if projection.input is None else projection.input.text,
             "input_cut_to_first_chars": projection.input is not None and projection.input.cut,
@@ -1575,8 +1690,10 @@ class _ProjectedEpisode:
             "response_cut_to_first_chars": (
                 projection.response is not None and projection.response.cut
             ),
-            **self.annotations(),
         }
+        if questions := self.questions(marks):
+            rendered["questions_asked"] = questions
+        return rendered | self.annotations()
 
     def annotations(self) -> dict[str, object]:
         """Its status and reason and, where it has one, its understanding.
@@ -1678,18 +1795,18 @@ def _parsed(content: str) -> ProposedActivationUnderstanding | None:
 
 
 def _labels_of(proposal: ProposedActivationUnderstanding) -> list[str]:
-    """Every label the proposal names, in order, duplicates kept.
+    """Every label the proposal names a referent by, in order, duplicates kept.
 
-    The answer pointer's label among them (ADR-0321 §3:1): it is a label of the same
-    scheme, so one resolving to nothing takes part in the one repair.
+    Not the answer pointers' labels: a pointer names a question by its ``Q`` label,
+    which names no referent (ADR-0322 §4:5-§4:6), and one naming anything else is not
+    recorded rather than repaired, so a repair never presses a reading that named no
+    marked question onto one (§2:6).
     """
     labels = list(proposal.meaning_labels)
     for reference in proposal.references:
         labels.extend(reference.labels)
     for relationship in proposal.relationships:
         labels.extend(relationship.labels)
-    if proposal.answers is not None:
-        labels.append(proposal.answers.question)
     return labels
 
 
@@ -1736,6 +1853,9 @@ def _label_statement(
         rendered.append(_sequence("M", brief.recalled_count, "recalled section"))
     if brief.story_count is not None:
         rendered.append(_sequence("S", brief.story_count, "stories section"))
+    if brief.questions:
+        # ADR-0322 §4:6: a Q label names a question, never a referent.
+        rendered.append(_sequence("Q", len(brief.questions), "questions, cited only in `answers`"))
     # ADR-0304 §8:6: an S label the stories section rendered resolves wherever it is
     # cited, so the statement carries no rule on where one may be cited.
     parts.append(f"The message rendered {', '.join(rendered[:-1])} and {rendered[-1]}.")
@@ -1810,7 +1930,7 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
     proposal: ProposedActivationUnderstanding,
     labels: dict[str, UnderstandingReferent],
     story_members: dict[str, StoryMember],
-    questions: Mapping[str, _QuestionSite],
+    questions: Mapping[str, _Question],
     *,
     version: int,
     recorded_at: datetime,
@@ -1825,11 +1945,12 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
     order with no member twice, and a story label naming nothing a link can be made to
     is dropped and counted in ``grounding_dropped`` (§6:8).
 
-    The answer pointer resolves to the question's ids with no label (ADR-0321 §3:1,
-    ADR-0276 §2:4), as :func:`_answer` decides. Where it records none, the proposed
-    pointer is dropped — counted where its label resolves to nothing, as any label is —
-    and the understanding gains a code-owned unresolved matter saying why, after the
-    model's own, so the activation can ask which question was meant (§3:5).
+    Each answer pointer resolves on its own to its question's ids with no label
+    (ADR-0321 §3:1, ADR-0276 §2:4, ADR-0322 §2:6), as :func:`_answers` decides. One it
+    does not record is dropped — counted where its label is no ``Q`` label the call
+    rendered, as any label resolving to nothing is — and the understanding gains a
+    code-owned unresolved matter saying why, after the model's own, so the activation
+    can ask which question was meant (ADR-0321 §3:5); the other pointers stand.
     """
     links: dict[StoryMember, None] = {}
     unlinked = 0
@@ -1861,14 +1982,12 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
                 ground=resolution.ground(relationship.ground, relationship.labels, referents),
             )
         )
-    unresolved = proposal.unresolved
-    answers: AnsweredQuestion | None = None
-    if proposal.answers is not None:
-        if proposal.answers.question not in labels:
-            resolution.dropped += 1
-        answers, why = _answer(proposal.answers.question, proposal.answers.parts, questions)
-        if why is not None:
-            unresolved = (*unresolved, UnresolvedMatter(matter=why, why_it_matters=_NOT_APPROVED))
+    resolution.dropped += sum(one.question not in questions for one in proposal.answers)
+    answers, whys = _answers(proposal.answers, questions)
+    unresolved = (
+        *proposal.unresolved,
+        *(UnresolvedMatter(matter=why, why_it_matters=_NOT_APPROVED) for why in whys),
+    )
     return ActivationUnderstanding(
         version=version,
         recorded_at=recorded_at,
@@ -1885,49 +2004,45 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
     )
 
 
-def _answer(
-    label: str, parts: Sequence[int], questions: Mapping[str, _QuestionSite]
-) -> tuple[AnsweredQuestion | None, str | None]:
-    """The recorded pointer a proposed one resolves to, or none and why (ADR-0321 §3).
+def _answers(
+    proposed: Sequence[ProposedAnswer], questions: Mapping[str, _Question]
+) -> tuple[tuple[AnsweredQuestion, ...], tuple[str, ...]]:
+    """The recorded pointers the proposed ones resolve to, and why any were not (ADR-0322 §2).
 
-    A message the assistant wrote resolves to its writer, its place and its position.
-    Episodes resolve to the one round of theirs whose message asked about calls, with
-    its activation, and the parts named must be parts it showed. Everything else records
-    no pointer, failing closed: a label naming nothing or no question, episodes that
-    asked none, and episodes that asked more than one, which is §3:5's *could fit more
-    than one question* found by code rather than by the reading. The parts are recorded
-    ascending, each once; none named means every part shown (§3:6).
+    Each pointer resolves on its own (§2:6): a ``Q`` label the call rendered resolves to
+    its question's asking activation and round, with the message's place and position
+    where the place window showed it, and the parts named must be parts the question
+    showed. A pointer naming any other label, or a part its question did not show, is
+    not recorded (§4:5); two naming one question are neither recorded (§2:7). The parts
+    are recorded ascending, each once; none named means every part shown (§2:4).
 
     Returns:
-        The pointer and ``None``, or ``None`` and the code-owned matter saying why
-        there is none.
+        The recorded pointers in proposal order, and the code-owned matters saying why
+        a pointer was not recorded, each once, in the order first met.
     """
-    site = questions.get(label)
-    approved = tuple(sorted(set(parts)))
-    if site is None:
-        return None, _NO_SUCH_QUESTION
-    if isinstance(site, _AskedMessage):
-        return AnsweredQuestion(
-            activation_id=site.activation_id,
-            place=site.place,
-            position=site.position,
-            parts=approved,
-        ), None
-    asking = [
-        (processing.activation_id, one)
-        for record in site.episodes
-        if (processing := record.processing_record) is not None
-        for one in processing.rounds
-        if one.asked
-    ]
-    if not asking:
-        return None, _NO_SUCH_QUESTION
-    if len(asking) > 1:
-        return None, _SEVERAL_QUESTIONS
-    activation_id, asked = asking[0]
-    if approved and approved[-1] > len(asked.asked):
-        return None, _NO_SUCH_PART
-    return AnsweredQuestion(activation_id=activation_id, round=asked.id, parts=approved), None
+    named = Counter(one.question for one in proposed)
+    answers: list[AnsweredQuestion] = []
+    whys: dict[str, None] = {}
+    for one in proposed:
+        question = questions.get(one.question)
+        approved = tuple(sorted(set(one.parts)))
+        if question is None:
+            whys.setdefault(_NO_SUCH_QUESTION)
+        elif named[one.question] > 1:
+            whys.setdefault(_SAME_QUESTION_TWICE)
+        elif approved and approved[-1] > len(question.parts):
+            whys.setdefault(_NO_SUCH_PART)
+        else:
+            answers.append(
+                AnsweredQuestion(
+                    activation_id=question.activation_id,
+                    round=question.round,
+                    place=question.place,
+                    position=question.position,
+                    parts=approved,
+                )
+            )
+    return tuple(answers), tuple(whys)
 
 
 # --- rendering helpers -------------------------------------------------------------

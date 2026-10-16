@@ -155,6 +155,7 @@ from ai_assistant.orchestration.understanding import (
     TranscriptWindow,
     UnderstandingStage,
     WindowsStage,
+    WrittenBy,
 )
 from ai_assistant.permissions.policy import ConfiguredSearchDestination, ThresholdActionPolicy
 from ai_assistant.testing import (
@@ -1980,7 +1981,9 @@ async def test_the_writers_read_keeps_only_a_message_done_in_the_conversation() 
     await claimed(message("e4"), ToolOutcome.SUCCEEDED, position=9)
     await _claimed(harness, "e5", "remember", ToolOutcome.SUCCEEDED)
 
-    assert await path.written("c1", [_ACTIVATION], [2, 3, 5]) == {2: _ACTIVATION}
+    assert await path.written("c1", [_ACTIVATION], [2, 3, 5]) == {
+        2: WrittenBy(activation_id=_ACTIVATION)
+    }
     assert await path.written("c1", [], [2]) == {}
     assert await path.written("c1", ["activation-unknown"], [2]) == {}
 
