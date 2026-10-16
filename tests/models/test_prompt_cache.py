@@ -80,9 +80,27 @@ def test_any_other_model_is_given_none(model: Callable[[], Model]) -> None:
     assert dict(prompt_cache_settings(model())) == {}
 
 
-def test_a_mark_the_models_own_settings_set_is_left_to_them() -> None:
-    model = _anthropic(AnthropicModelSettings(anthropic_cache_instructions="1h"))
-    assert dict(prompt_cache_settings(model)) == {"anthropic_cache_tool_definitions": True}
+@pytest.mark.parametrize(
+    "own",
+    [
+        pytest.param(AnthropicModelSettings(anthropic_cache_instructions="1h"), id="instructions"),
+        pytest.param(AnthropicModelSettings(anthropic_cache_tool_definitions="1h"), id="tools"),
+        pytest.param(AnthropicModelSettings(anthropic_cache_messages="1h"), id="messages"),
+        pytest.param(AnthropicModelSettings(anthropic_cache="1h"), id="automatic"),
+        pytest.param(AnthropicModelSettings(anthropic_cache_instructions=False), id="off"),
+    ],
+)
+def test_a_model_whose_own_settings_configure_caching_is_given_no_marks(
+    own: AnthropicModelSettings,
+) -> None:
+    """A five-minute mark before a one-hour one the model set would be refused."""
+    assert dict(prompt_cache_settings(_anthropic(own))) == {}
+    assert dict(prompt_cache_settings(WrapperModel(_anthropic(own)))) == {}
+
+
+def test_a_models_other_own_settings_leave_the_marks() -> None:
+    model = _anthropic(AnthropicModelSettings(max_tokens=2000))
+    assert dict(prompt_cache_settings(model)) == _MARKS
 
 
 async def _completed(vendor: VendorStack, messages: list[Message]) -> dict[str, Any]:

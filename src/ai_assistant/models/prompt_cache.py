@@ -21,8 +21,14 @@ breakpoint (``anthropic_cache``) is that mark, and is not set for the same reaso
 **Anthropic only, and model-agnostic for everything else** (ADR-0061). The marks are
 pydantic-ai's Anthropic settings, given only where the request goes to pydantic-ai's
 Anthropic model, wrapped or not; any other model, a fallback model included, is
-given none and its request is as it was. A mark the model's own settings already set
-is left to them, as a model's own thinking setting is.
+given none and its request is as it was.
+
+**A model whose own settings configure caching keeps them, and is given no marks.**
+Its settings are left to it as its own thinking setting is, and they are left whole
+rather than filled in: Anthropic refuses a request whose cache lifetimes shorten and
+lengthen again along the prefix (a one-hour entry may not follow a five-minute one),
+so a five-minute mark added beside a one-hour one the model set could turn a request
+it would have accepted into one it refuses.
 """
 
 from __future__ import annotations
@@ -50,6 +56,10 @@ _MARKS: Final[Mapping[str, object]] = {
     "anthropic_cache_instructions": True,
 }
 
+#: Every pydantic-ai Anthropic setting that places a cache mark. A model whose own
+#: settings set any of them is given no marks.
+_CACHE_SETTINGS: Final = frozenset({*_MARKS, "anthropic_cache_messages", "anthropic_cache"})
+
 
 def prompt_cache_settings(model: models.Model) -> ModelSettings:
     """The settings marking ``model``'s request's tools and instructions for caching.
@@ -58,8 +68,8 @@ def prompt_cache_settings(model: models.Model) -> ModelSettings:
         model: The model the request goes to, as pydantic-ai resolved it.
 
     Returns:
-        The marks, where ``model`` is pydantic-ai's Anthropic model or wraps one,
-        less any its own settings already set; otherwise no settings at all.
+        The marks, where ``model`` is pydantic-ai's Anthropic model or wraps one and
+        its own settings configure no caching; otherwise no settings at all.
     """
     inner = model
     while isinstance(inner, WrapperModel):
@@ -67,9 +77,10 @@ def prompt_cache_settings(model: models.Model) -> ModelSettings:
     if not _is_anthropic(inner):
         return cast("ModelSettings", {})
     configured: Mapping[str, object] = inner.settings or {}
-    marks = {key: value for key, value in _MARKS.items() if key not in configured}
+    if _CACHE_SETTINGS & configured.keys():
+        return cast("ModelSettings", {})
     # Anthropic's own settings keys, which ``ModelSettings`` does not declare.
-    return cast("ModelSettings", marks)
+    return cast("ModelSettings", dict(_MARKS))
 
 
 def _is_anthropic(model: models.Model) -> bool:
