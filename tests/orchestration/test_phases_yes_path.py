@@ -161,6 +161,9 @@ _DIGESTED: Final = json.dumps({"evidence": [{"text": "It opens at nine.", "sourc
 _ASKING: Final = "Shall I book a table for Friday?"
 #: The booking's exact line, as the question shows it (§2:5).
 _FRIDAY_LINE: Final = 'book — date: "Friday"'
+#: The question as the user reads it: the text, then the fixed line code puts above the
+#: exact line (the owner's ruling on #3094), then the line.
+_QUESTION: Final = f"{_ASKING}\n\nNeeds your yes:\n{_FRIDAY_LINE}"
 
 
 class _Policy:
@@ -572,7 +575,7 @@ async def test_a_booking_is_asked_with_its_exact_line_and_a_yes_runs_it_once() -
     conversation, asking = await _asked(hub)
 
     (question,) = await hub.said(conversation)
-    assert question.text == f"{_ASKING}\n\n{_FRIDAY_LINE}"
+    assert question.text == _QUESTION
     assert not question.cut_off
     (asked,) = _asked_calls(asking)[1]
     assert (asked.part, asked.values) == (1, {"date": "Friday"})
@@ -624,7 +627,7 @@ async def test_a_prose_question_in_the_proposing_round_asks_nothing() -> None:
     assert "already asked" not in shown
     assert [one.text for one in await hub.said(conversation)] == [
         prose,
-        f"{_ASKING}\n\n{_FRIDAY_LINE}",
+        _QUESTION,
     ]
 
     async def link() -> None:
@@ -1304,8 +1307,28 @@ async def test_a_question_cut_to_fit_is_not_approvable_and_is_asked_again_whole(
     assert "approved_actions" not in hub.planner.shown(2)
     assert "already asked" not in hub.planner.shown(3)
     assert [len(one) for one in _asked_calls(again)] == [0, 1]
-    assert (await hub.said(conversation))[-1].text == f"{_ASKING}\n\n{_FRIDAY_LINE}"
+    assert (await hub.said(conversation))[-1].text == _QUESTION
     assert hub.world.ran == []
+
+
+async def test_the_fixed_line_counts_toward_the_size_a_question_must_fit() -> None:
+    """#3094 with §4:4: the cut rule measures the whole message, the fixed line in it.
+
+    The text and the exact line alone come to the transcript's bound exactly, so only
+    the fixed line puts the question over it: it is cut, and records no asked call.
+    """
+    hub = _Hub()
+    long = _ASKING + "x" * (TRANSCRIPT_MESSAGE_MAX_CHARS - len(f"{_ASKING}\n\n{_FRIDAY_LINE}"))
+    assert len(f"{long}\n\n{_FRIDAY_LINE}") == TRANSCRIPT_MESSAGE_MAX_CHARS
+    hub.reader.nothing()
+    hub.planner.then(_book(), _ask(long))
+    conversation, cut = await hub.turn("Book a table for Friday.")
+
+    (question,) = await hub.said(conversation)
+    assert question.cut_off
+    assert question.text.startswith(f"{long}\n\nNeeds your yes:\n")
+    assert _FRIDAY_LINE not in question.text
+    assert _asked_calls(cut) == [(), ()], "a cut question records no asked call"
 
 
 class _Narrow(ChatWriter):
@@ -1340,8 +1363,8 @@ def _asking_round(text: str) -> PlanningRound:
 @pytest.mark.parametrize(
     ("writer", "text", "whole"),
     [
-        pytest.param(ChatWriter, f"{_ASKING}\n\n{_FRIDAY_LINE}", True, id="fits"),
-        pytest.param(_Narrow, f"{_ASKING}\n\n{_FRIDAY_LINE}", False, id="cut-by-the-writer"),
+        pytest.param(ChatWriter, _QUESTION, True, id="fits"),
+        pytest.param(_Narrow, _QUESTION, False, id="cut-by-the-writer"),
         pytest.param(_Unmeasurable, "Shall I?", False, id="cannot-be-measured"),
     ],
 )

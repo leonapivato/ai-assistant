@@ -88,8 +88,9 @@ it by that reference in the response's ``asks``. A name that resolves to no such
 dropped, and so is every name where the place takes no message (§7:3). For each call the
 message asks about, code appends one exact line, written by :func:`exact_line` for every
 capability alike, and records the call in the round's ``asked``, its part the line's
-number. The exact lines are the message's last lines, so a cut that loses any of them
-loses the end of the message.
+number. The lines go under one fixed ``Needs your yes:`` line, whether or not planning
+wrote text (#3094). The exact lines are the message's last lines, so a cut that loses
+any of them loses the end of the message.
 
 **Approved actions** (§4:2). The actions the activation's yes approved are shown under A
 labels and proposed through :data:`APPROVED_ACTION_TOOL` by label alone. The judge fills
@@ -942,13 +943,18 @@ _PROPOSING: Final = (
     "\n"
 )
 
+#: The owner's ruling on #3094 (2026-10-16): the one fixed line code puts above the exact
+#: lines it appends to a round's message, so a question never goes out as a bare line.
+_NEEDS_YOUR_YES: Final = "Needs your yes:"
+
 #: ADR-0321 §2:1-§2:6, §2:12 and planning's side of §3:5, §3:8-§3:9: how a round asks,
 #: where its message reaches the user. #3071: a call needs the user only once it comes
 #: back, so the round that proposes it does not ask, the round after always does unless
 #: the user no longer wants it (§2:1-§2:2), and only a message that showed the exact line
 #: asked (§4:11). #3072: a call waiting on the user is never said to be going through,
 #: and a question always carries planning's explanation (§2:4). #3094: the proposing round
-#: says nothing about the action, so the question is the first the user hears of it.
+#: says nothing about the action, so the question is the first the user hears of it, and
+#: names the fixed line code adds, so planning does not write its own.
 _ASKING: Final = (
     "Whether a call needs the user's yes is known only once it comes back, in the round "
     "after the one that proposed it, and that round tells the user. So, other than for a "
@@ -963,8 +969,9 @@ _ASKING: Final = (
     "nothing waits on them. To ask, explain the action in your own words, with the details "
     "that matter to them, and name the call in asks by the reference shown with its "
     "outcome, after the message, as you keep notes. The system adds the exact details "
-    "below your message, one line for each call you name, numbered where there are "
-    "several. Always write the explanation: the exact details never go out alone. Only a "
+    f'below your message, under its own "{_NEEDS_YOUR_YES}" line, which you never write '
+    "yourself, one line for each call you name, numbered where there are several. Always "
+    "write the explanation: the exact details never go out alone. Only a "
     "message that showed a call's exact details asked about it, so a call that needs a yes "
     "is new to the user and not yet asked, even where an earlier message mentioned it or "
     "asked about it in words. The question is an ordinary message, with no buttons and no "
@@ -2217,7 +2224,10 @@ def _with_questions(
 ) -> str:
     """The round's message with an exact line for each call it asks about (§2:5-§2:6).
 
-    The lines come last, after a blank line, so a message cut to fit loses them first.
+    The lines come last, under the fixed :data:`_NEEDS_YOUR_YES` line, which follows
+    planning's text after a blank line, so a message cut to fit loses them first. The
+    fixed line is there whether or not planning wrote text, so the lines never go out
+    as a bare line that does not read as a question (#3094).
     """
     if not asked:
         return text
@@ -2230,7 +2240,8 @@ def _with_questions(
         )
         for one in asked
     )
-    return f"{text.rstrip()}\n\n{lines}" if text.strip() else lines
+    question = f"{_NEEDS_YOUR_YES}\n{lines}"
+    return f"{text.rstrip()}\n\n{question}" if text.strip() else question
 
 
 def _approved_tool(
