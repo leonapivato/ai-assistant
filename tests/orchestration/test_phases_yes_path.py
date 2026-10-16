@@ -261,25 +261,23 @@ def _marked(content: str, needle: str) -> list[tuple[str, str]]:
 
     As ``(Q label, label of the item that shows it)``: a message of the place window
     carries its mark as ``question`` (ADR-0322 §4:2), and an episode its questions as
-    ``questions_asked``, each with its message; a story's latest episodes take no label
-    of their own, so the item that shows them is the story.
+    ``questions_asked``, each with its message; a mark gives its ``Q`` label as
+    ``answer_label`` (#3081). A story's latest episodes take no label of their own, so
+    the item that shows them is the story.
     """
     found: list[tuple[str, str]] = []
 
     def walk(value: object, holder: str) -> None:
         if isinstance(value, dict):
             label = value.get("label")
-            if isinstance(label, str) and not label.startswith("Q"):
+            if isinstance(label, str):
                 holder = label
             mark = value.get("question")
             if isinstance(mark, dict) and needle in str(value.get("text", "")):
-                found.append((str(mark["label"]), holder))
-            if (
-                isinstance(label, str)
-                and label.startswith("Q")
-                and needle in str(value.get("message", ""))
-            ):
-                found.append((label, holder))
+                found.append((str(mark["answer_label"]), holder))
+            asked = value.get("answer_label")
+            if isinstance(asked, str) and needle in str(value.get("message", "")):
+                found.append((asked, holder))
             for one in value.values():
                 walk(one, holder)
         elif isinstance(value, list):

@@ -317,23 +317,33 @@ _STORIES: Final = (
 #: reply approves several questions (ADR-0322 §4:9). Rendered on every pass, since a
 #: question is an ordinary message any section may show (ADR-0321 §3:2). Authority is not
 #: read here: whose input approves is authorizing's check (§3:3), and a pointer grants
-#: nothing.
+#: nothing. Where a ``Q`` label may not go, and what names a question there instead, is
+#: said outright, and the mark gives the label as ``answer_label`` rather than ``label``,
+#: so a first reading cites it only in ``answers`` (#3081): §4:6 still sends one cited
+#: elsewhere back for ADR-0276 §6's one repair.
 _ANSWERS: Final = (
     "An input may answer a question the assistant asked earlier. A question is a message "
     "the assistant wrote that asked about actions: it ends with one exact line per "
     "action, numbered where there are several; a line's number is that action's part, "
     "and a question with one unnumbered line has the one part 1.\n"
     "\n"
-    "Every question is marked wherever it is shown, with a label Q1, Q2, and so on, and "
-    "the parts it showed: a message of the channel window carries its mark as "
-    "`question`, and an episode, a recalled episode or a story's latest episode carries "
-    "the questions it asked as `questions_asked`. A question shown in more than one "
-    "place carries one Q label. The mark says only that a message is a question and "
-    "which parts it showed, never whether it was answered. A message that asked only in "
-    "words carries no mark, and is not a question an answer can be recorded to. A Q "
-    "label names a question and nothing else: cite it only in `answers`, and nowhere "
-    "else a label may be cited. An unresolved matter's words may still name questions "
-    "by their Q labels, as said below.\n"
+    "Every question is marked wherever it is shown, with a label Q1, Q2, and so on, given "
+    "as its `answer_label`, and the parts it showed: a message of the channel window "
+    "carries its mark as `question`, and an episode, a recalled episode or a story's "
+    "latest episode carries the questions it asked as `questions_asked`. A question "
+    "shown in more than one place carries one Q label. The mark says only that a "
+    "message is a question and which parts it showed, never whether it was answered. A "
+    "message that asked only in words carries no mark, and is not a question an answer "
+    "can be recorded to.\n"
+    "\n"
+    "A Q label names a question and nothing else, so it goes only in `answers`. Never "
+    "put a Q label in any other list of labels: not in `meaning_labels`, and not in the "
+    "`labels` of a reference or a relationship, where it names nothing and the reply is "
+    "sent back to be corrected. Where a reference or a relationship is about a "
+    "question, name the item that shows it: the H label of its message in the channel "
+    "window, or the P, M or S label of the episode or story that shows it. An "
+    "unresolved matter's words may still name questions by their Q labels, as said "
+    "below.\n"
     "\n"
     "In `answers`, record one entry for each question the input approves, naming the "
     "question by its Q label and by no other label, with the parts it approves; name no "
@@ -379,11 +389,11 @@ _SHAPE_HEAD: Final = (
     "Reply with only one JSON object, no prose and no code fence, of exactly this "
     "shape:\n"
     '{"meaning": "<what the input means>", "meaning_ground": "stated|supplied|inferred", '
-    '"meaning_labels": ["<label>"], '
+    '"meaning_labels": ["<label, never a Q label>"], '
     '"references": [{"phrase": "<a phrase of the input that refers to something>", '
-    '"labels": ["<label of what it refers to>"]}], '
+    '"labels": ["<label of what it refers to, never a Q label>"]}], '
     '"relationships": [{"statement": "<how the input relates to something seen>", '
-    '"labels": ["<label>"], "ground": "stated|supplied|inferred"}], '
+    '"labels": ["<label, never a Q label>"], "ground": "stated|supplied|inferred"}], '
     '"unresolved": [{"matter": "<what this reading leaves unsettled>", '
     '"why_it_matters": "<why that matters to understanding the input>"}], '
     '"answers": [{"question": "<Q label of a question the input approves>", '
@@ -886,14 +896,19 @@ class _Marks:
         self._labels: dict[tuple[str, str], str] = {}
 
     def mark(self, question: _Question) -> dict[str, object]:
-        """The question's mark as rendered: its ``Q`` label and the parts it showed."""
+        """The question's mark as rendered: its ``Q`` label and the parts it showed.
+
+        The label is given as ``answer_label``, never ``label``: ``label`` is the key of
+        every item a reference or a relationship may cite, and a ``Q`` label is cited
+        only in ``answers`` (ADR-0322 §4:5-§4:6, #3081).
+        """
         key = (question.activation_id, question.round)
         label = self._labels.get(key)
         if label is None:
             label = f"Q{len(self.questions) + 1}"
             self._labels[key] = label
             self.questions[label] = question
-        return {"label": label, "parts": list(question.parts)}
+        return {"answer_label": label, "parts": list(question.parts)}
 
 
 class UnderstandingStage:

@@ -231,17 +231,19 @@ def _marks(model: FakeModelProvider) -> list[tuple[str, str, list[int]]]:
     """Every question mark the first call rendered, in order.
 
     As ``(Q label, label of the item that shows it, parts)``: a place-window message's
-    own mark is ``question``, an episode's are ``questions_asked``; a story's episodes
-    take no label, so the item that shows them is the story.
+    own mark is ``question``, an episode's are ``questions_asked``, each giving its ``Q``
+    label as ``answer_label``; a story's episodes take no label, so the item that shows
+    them is the story.
     """
     found: list[tuple[str, str, list[int]]] = []
 
     def walk(value: object, holder: str) -> None:
         if isinstance(value, dict):
-            label = value.get("label")
-            if isinstance(label, str) and label.startswith("Q"):
-                found.append((label, holder, value["parts"]))
+            asked = value.get("answer_label")
+            if isinstance(asked, str):
+                found.append((asked, holder, value["parts"]))
                 return
+            label = value.get("label")
             if isinstance(label, str):
                 holder = label
             for one in value.values():
@@ -274,7 +276,7 @@ async def test_the_instruction_carries_the_mark_the_label_and_the_readings() -> 
         "A question shown in more than one place carries one Q label",
         "never whether it was answered",
         "A message that asked only in words carries no mark",
-        "cite it only in `answers`",
+        "A Q label names a question and nothing else, so it goes only in `answers`",
         # ADR-0322 §4:5, §2:1, §2:7: a pointer names a question by its Q label alone.
         "naming the question by its Q label and by no other label",
         "name no question twice",
@@ -320,6 +322,65 @@ async def test_a_pass_with_stories_carries_answers_in_its_shape_too() -> None:
     assert '"answers": [{"question":' in instruction
 
 
+@pytest.mark.parametrize("stories", [False, True], ids=["no-stories", "stories"])
+async def test_the_instruction_keeps_q_labels_to_answers_and_says_what_names_a_question(
+    stories: bool,
+) -> None:
+    """#3081: a first reading cites a Q label only in `answers`, so no repair is owed.
+
+    The instruction says where a Q label may not go, and what a reference or a
+    relationship names a question by instead; the shape says it beside each list of
+    labels. An unresolved matter's words may still name Q labels: that is what #3083's
+    backstop reads (ADR-0321 §3:5, ADR-0322 §2:3).
+    """
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, stories=Candidates(views=()) if stories else None)
+
+    instruction = _instruction(model)
+    for said in (
+        "Never put a Q label in any other list of labels: not in `meaning_labels`, and not "
+        "in the `labels` of a reference or a relationship, where it names nothing and the "
+        "reply is sent back to be corrected.",
+        "Where a reference or a relationship is about a question, name the item that shows "
+        "it: the H label of its message in the channel window, or the P, M or S label of "
+        "the episode or story that shows it.",
+        "given as its `answer_label`",
+        '"meaning_labels": ["<label, never a Q label>"]',
+        '"labels": ["<label of what it refers to, never a Q label>"]',
+        '"labels": ["<label, never a Q label>"], "ground"',
+        # #3083's signal stays allowed.
+        "An unresolved matter's words may still name questions by their Q labels",
+        "naming in the matter's words each question it could answer, if any, by its Q label",
+    ):
+        assert said in instruction
+    assert "<label>" not in instruction
+
+
+async def test_a_mark_gives_its_q_label_as_answer_label_never_as_label() -> None:
+    """#3081: ``label`` keys the items a reference may cite; a mark's Q label is not one."""
+    record = _asking("a-7", _round("r-7", asked=1))
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, window=_CHAT, episodes=(record,))
+
+    labels: list[str] = []
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            if isinstance(label := value.get("label"), str):
+                labels.append(label)
+            for one in value.values():
+                walk(one)
+        elif isinstance(value, list):
+            for one in value:
+                walk(one)
+
+    walk(_shown(model))
+    assert _marks(model) == [("Q1", "H2", [1, 2]), ("Q2", "P1", [1])]
+    assert labels == ["H1", "H2", "H3", "H4", "P1"]
+
+
 # --- the marks and the Q labels (ADR-0322 §4:1-§4:4) -------------------------------------
 
 
@@ -332,7 +393,7 @@ async def test_a_question_in_the_place_window_carries_its_mark_on_its_message() 
     items = _shown(model)["channel_window"]
     assert [item.get("question") for item in items] == [
         None,
-        {"label": "Q1", "parts": [1, 2]},
+        {"answer_label": "Q1", "parts": [1, 2]},
         None,
         None,
     ]
@@ -349,7 +410,7 @@ async def test_a_question_an_episode_asked_is_marked_on_its_round() -> None:
     (rendered,) = _shown(model)["episode_window"]
     assert rendered["questions_asked"] == [
         {
-            "label": "Q1",
+            "answer_label": "Q1",
             "parts": [1, 2],
             "message": "Shall I book r-2?",
             "message_cut_to_first_chars": False,
@@ -451,7 +512,7 @@ async def test_an_exchange_shown_in_the_place_window_leaves_its_question_to_the_
 
     first, second = _shown(model)["channel_window"]
     assert [one["message"] for one in first["questions_asked"]] == ["And r-2?"]
-    assert second["question"] == {"label": "Q2", "parts": [1]}
+    assert second["question"] == {"answer_label": "Q2", "parts": [1]}
     assert _marks(model) == [("Q1", "H1", [1]), ("Q2", "H2", [1])]
 
 
