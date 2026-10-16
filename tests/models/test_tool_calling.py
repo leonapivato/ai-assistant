@@ -1116,12 +1116,29 @@ async def test_an_anthropic_rounds_messages_are_not_marked() -> None:
     assert all("cache_control" not in block for turn in messages for block in turn["content"])
 
 
-async def test_a_models_own_cache_setting_is_kept() -> None:
-    settings = AnthropicModelSettings(anthropic_cache_instructions=False)
+async def test_a_models_own_one_hour_instructions_are_kept_with_no_mark_before_them() -> None:
+    """Anthropic refuses a five-minute entry before a one-hour one, so none is added."""
+    settings = AnthropicModelSettings(anthropic_cache_instructions="1h")
     _, body = await _anthropic_round("claude-sonnet-5-5", anthropic_success, settings=settings)
-    assert body["system"] == "You plan one round."
     tools = cast("list[dict[str, Any]]", body["tools"])
-    assert tools[-1]["cache_control"] == _FIVE_MINUTES
+    assert all("cache_control" not in tool for tool in tools)
+    assert body["system"] == [
+        {
+            "type": "text",
+            "text": "You plan one round.",
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        }
+    ]
+
+
+async def test_a_models_own_one_hour_message_cache_is_kept_with_no_mark_before_it() -> None:
+    settings = AnthropicModelSettings(anthropic_cache_messages="1h")
+    _, body = await _anthropic_round("claude-sonnet-5-5", anthropic_success, settings=settings)
+    tools = cast("list[dict[str, Any]]", body["tools"])
+    assert all("cache_control" not in tool for tool in tools)
+    assert body["system"] == "You plan one round."
+    messages = cast("list[dict[str, Any]]", body["messages"])
+    assert messages[-1]["content"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
 
 
 async def test_an_openai_round_is_given_no_cache_marks() -> None:
