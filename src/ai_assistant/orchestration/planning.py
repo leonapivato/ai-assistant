@@ -923,6 +923,24 @@ _APPROVAL: Final = (
     "\n"
 )
 
+#: #3088: the line of care (ADR-0321 §2:11) is met by proposing. For an action that needs
+#: the user's yes, the system's question with the exact line (§2:5, §2:9) is the check, so
+#: a question in words before the proposal only makes them say yes twice. Checking in
+#: words first stays for meaning, and for a costly action planning knows would run without
+#: a yes. Said only where a message goes: where none does, nothing is asked (§7:3).
+_PROPOSING: Final = (
+    "When the user has asked for an action, propose it as soon as you know its details, "
+    "rather than first asking them in words whether to do it. If it needs their yes, it "
+    "runs only once the system has asked them with its exact details and they have said "
+    "yes, so that question is the check, even where a mistake would be costly. Asking in "
+    "words first makes them say yes twice, once to you and again to the system. What you "
+    "found out on the way, such as a price or a time, goes in that question's explanation "
+    "and is no reason to ask first. Check in words before proposing only when you are "
+    "unsure what they meant, such as which date or which place, or when you know that a "
+    "costly action would run without their yes.\n"
+    "\n"
+)
+
 #: ADR-0321 §2:1-§2:6, §2:12 and planning's side of §3:5, §3:8-§3:9: how a round asks,
 #: where its message reaches the user. #3071: a call needs the user only once it comes
 #: back, so the round that proposes it does not ask, the round after always does unless
@@ -1006,7 +1024,7 @@ _MESSAGE: Final = (
     "they show. Always report a call that was not done or whose outcome is unknown, "
     "and report an unknown outcome as unknown. A question to the user is an ordinary "
     "message.\n"
-    "\n" + _REPLY + _APPROVAL + _ASKING
+    "\n" + _REPLY + _APPROVAL + _PROPOSING + _ASKING
 )
 
 #: §3:8: where the place takes no message, planning is told so up front.
