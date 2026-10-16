@@ -1,6 +1,6 @@
 # 321. Authority at the deploy is your yes to a question that showed the call
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0322 (§3:1's one pointer: one per question; §3:2, in the addition alone: questions are marked; §3:6, per question; §9's `ProposedActivationUnderstanding` and `ActivationUnderstanding` rows: the pointer becomes a sequence)
 - Date: 2026-10-15
 - Scope: the authority milestone, M44 ([milestone #11](https://github.com/leonapivato/ai-assistant/milestone/11)), acceptance [#3058](https://github.com/leonapivato/ai-assistant/issues/3058), batch [#3059](https://github.com/leonapivato/ai-assistant/issues/3059): how the assistant asks about a call that needs you, how your answer becomes permission, and how the call is then checked and run. It is the smallest version the deploy waits for (ADR-0309 §6).
 - Dependency: the phases as ADR-0306 to ADR-0309 and ADR-0312 to ADR-0320 decide them, all Accepted and built on `main` at `2ff6298c`.
@@ -24,6 +24,7 @@
   [ADR-0313](0313-spoken-conversation-retires-at-the-cutover-an-event-returns-how-it-ended-and-the-establishing-act-leaves-the-engine.md),
   [ADR-0315](0315-a-round-that-made-a-call-brings-another-round-and-the-mark-asking-for-one-retires.md) and
   [ADR-0319](0319-the-decisions-the-cutover-left-standing-over-deleted-code-retire-the-stamp-drops-recalls-limit-and-an-unasked-memory-question-is-logged.md).
+- Partially superseded: 2026-10-15 by ADR-0322 — four narrow scopes. §3:1's one pointer becomes one per question the input approves, and a reply approves several only where it says which (ADR-0322 §2:1–§2:2). §3:2 gains, in the addition alone, a mark on each message that is a question; *nothing lists unanswered questions* stands (ADR-0322 §4). §3:6 applies per question (ADR-0322 §2:4). §9's `ProposedActivationUnderstanding` and `ActivationUnderstanding` rows carry a sequence of pointers (ADR-0322 §6). §3:5, §3:10 and §4 stand, applied to each question separately (ADR-0322 §3). These replacements take effect on ratification of ADR-0322. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
