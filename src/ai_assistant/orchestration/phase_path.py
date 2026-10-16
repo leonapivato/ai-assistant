@@ -187,6 +187,7 @@ from uuid import uuid4
 import structlog
 
 from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.episode_encoding import project_episode, question_marks
 from ai_assistant.core.errors import (
     ActivationStoppedError,
     ClaimStopped,
@@ -259,6 +260,7 @@ from ai_assistant.orchestration.controller import (
 )
 from ai_assistant.orchestration.defects import ToleratedStageError, is_defect, log_defect
 from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
+from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.lookups import (
     OLDER_NOTES_PAGE,
@@ -290,7 +292,7 @@ from ai_assistant.orchestration.story_links import admitted_episodes
 from ai_assistant.orchestration.story_privacy import SummaryVisibility
 from ai_assistant.orchestration.story_standing import story_standing
 from ai_assistant.orchestration.supplied_records import SuppliedRecords
-from ai_assistant.orchestration.understanding import fetch_held
+from ai_assistant.orchestration.understanding import AskedIn, WrittenBy, fetch_held
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
@@ -1129,9 +1131,11 @@ class PhaseWorking:
         self.owner_records = owner_records
         self.users_authority = users_authority
         self.given_at = given_at
-        # The actions the input's yes approved, as the records show them, by the pointer
-        # they were read for, read once (ADR-0321 §4:2).
-        self.approvable: tuple[AnsweredQuestion, tuple[ApprovedAction, ...]] | None = None
+        # The actions the input's yes approved, as the records show them, by the pointers
+        # they were read for, read once (ADR-0321 §4:2, ADR-0322 §3:4).
+        self.approvable: tuple[tuple[AnsweredQuestion, ...], tuple[ApprovedAction, ...]] | None = (
+            None
+        )
         self._round_limit = round_limit
         self.labels = ActivationLabels(labels)
         self.held = HeldResults(on_hold=self._on_hold)
@@ -1370,14 +1374,14 @@ class PhaseWorking:
     def yes(self, understanding: ActivationUnderstanding | None) -> YesContext | None:
         """The yes the input carries, as authorizing takes it (ADR-0321 §3:1, §4:4).
 
-        Understanding's recorded pointer, with when the input was given and whether it
-        carries the user's authority; ``None`` where understanding recorded no pointer,
-        or where when the input was given is not known, and then no call runs under an
-        approval (§4:5). It grants nothing by itself: authorizing checks it against the
-        records.
+        Every pointer understanding recorded (ADR-0322 §3:1), with when the input was
+        given and whether it carries the user's authority; ``None`` where understanding
+        recorded none, or where when the input was given is not known, and then no call
+        runs under an approval (ADR-0321 §4:5). It grants nothing by itself: authorizing
+        checks each pointer against the records.
         """
-        answers = None if understanding is None else understanding.answers
-        if answers is None or self.given_at is None:
+        answers = () if understanding is None else understanding.answers
+        if not answers or self.given_at is None:
             return None
         return YesContext(
             answers=answers, given_at=self.given_at, users_authority=self.users_authority
@@ -2186,7 +2190,7 @@ class PhasePath:
 
     async def written(
         self, conversation_id: str, activation_ids: Sequence[str], positions: Sequence[int]
-    ) -> dict[int, str]:
+    ) -> dict[int, WrittenBy]:
         """Which of ``activation_ids`` wrote each message at ``positions`` (ADR-0303 §7:1).
 
         Read from their effect records (ADR-0306 §5:3): a message done in this
@@ -2195,13 +2199,19 @@ class PhasePath:
         cannot be read: the message is then not linkable, the conservative direction
         (§7:5), and the window is still brought in.
 
+        Each such message is also the question its round asked, where it is one
+        (ADR-0322 §4:1-§4:3): its record names the round, and the writer's stored
+        episode, projected, marks that round with the parts it asked about, read from
+        the round's recorded asked calls and never from the message's text. Where the
+        episodes cannot be read, no message is a question, failing closed.
+
         Args:
             conversation_id: The conversation the messages are in.
             activation_ids: The candidate activations.
             positions: The assistant messages' positions.
 
         Returns:
-            The activation that wrote each message, by its position.
+            What wrote each message, by its position.
         """
         wanted = frozenset(positions)
         if not activation_ids or not wanted:
@@ -2212,15 +2222,52 @@ class PhasePath:
             _log.warning("phase_writers_unread", stage="reader", reason="store_failed")
             return {}
         place = _place_id(conversation_id)
-        return {
-            one.position: one.activation_id
+        done = [
+            one
             for one in recorded
             if not one.is_call
             and one.place == place
             and one.outcome is ToolOutcome.SUCCEEDED
             and one.position is not None
             and one.position in wanted
+        ]
+        marks = await self._question_marks(
+            [one.activation_id for one in done if one.round is not None]
+        )
+        return {
+            one.position: WrittenBy(
+                activation_id=one.activation_id,
+                asked=None
+                if one.round is None or (parts := marks.get(one.round)) is None
+                else AskedIn(round=one.round, parts=parts),
+            )
+            for one in done
+            if one.position is not None
         }
+
+    async def _question_marks(self, activation_ids: Sequence[str]) -> dict[str, tuple[int, ...]]:
+        """The parts each marked round of these activations' episodes asked about (§4:3).
+
+        Read through ``project_episode``, by round id; an episode still open, or one the
+        store no longer holds, marks nothing, and a store that cannot be read marks
+        nothing, so its messages carry no mark.
+        """
+        if not activation_ids:
+            return {}
+        addresses = list(dict.fromkeys(episode_address(one) for one in activation_ids))
+        try:
+            found = without_open_episodes(await self._memory.get_many(addresses))
+        except Exception:  # the store is down: no message is marked a question
+            _log.warning("phase_questions_unread", stage="reader", reason="store_failed")
+            return {}
+        marks: dict[str, tuple[int, ...]] = {}
+        for record in found.values():
+            if isinstance(record, EpisodicMemory):
+                projection = project_episode(record, excerpt_chars=1)
+                marks.update(
+                    (round_id, one.asked) for round_id, one in question_marks(record, projection)
+                )
+        return marks
 
     def stages(self) -> tuple[ControllerStageRun[PhasePass], ...]:
         """The four phase stages, as the controller runs them (ADR-0309 §3)."""
@@ -3025,28 +3072,33 @@ class PhasePath:
     ) -> tuple[ApprovedAction, ...]:
         """The actions the input's yes approved, as planning is shown them (ADR-0321 §4:2).
 
-        Read from understanding's pointer and the records it leads to: the asking
-        activation's message delivery record names the question's round, by the
-        pointer's round or by its place and position, and the asking episode's round
-        records the calls it asked about (§2:8). The parts approved are those the
-        pointer names, or every part shown where it names none (§3:6), less those an
-        effect record has already used (§4:9), so a second yes shows nothing to run.
+        Gathered from every pointer understanding recorded, in its order (ADR-0322
+        §3:4), each read from the records it leads to: the asking activation's message
+        delivery record names the question's round, by the pointer's round or by its
+        place and position, and the asking episode's round records the calls it asked
+        about (§2:8). The parts approved are those the pointer names, or every part
+        shown where it names none (§3:6), less those an effect record has already used
+        (§4:9), so a second yes shows nothing to run.
 
-        None where the input does not carry the user's authority (§3:3), the place takes
-        no message (§7:3), the pointer names this activation's own question (§4:1), or it
-        resolves to nothing; and none where the records cannot be read. This shows and
-        grants nothing that authorizing does not check again (§4:4).
+        None where the input does not carry the user's authority (§3:3) or the place
+        takes no message (§7:3); none from a pointer naming this activation's own
+        question (§4:1) or resolving to nothing; and none from one whose records cannot
+        be read. This shows and grants nothing that authorizing does not check again
+        (§4:4).
         """
-        pointer = None if given.understanding is None else given.understanding.answers
-        if (
-            pointer is None
-            or not working.users_authority
-            or working.conversation_id is None
-            or pointer.activation_id == working.activation_id
-        ):
+        pointers = () if given.understanding is None else given.understanding.answers
+        if not pointers or not working.users_authority or working.conversation_id is None:
             return ()
-        if working.approvable is None or working.approvable[0] != pointer:
-            working.approvable = (pointer, await self._approvable(pointer, working))
+        if working.approvable is None or working.approvable[0] != pointers:
+            # By part, each once: no two pointers name one question (ADR-0322 §2:7), so
+            # none is repeated, and a part is one call however it was reached.
+            gathered: dict[QuestionPart, ApprovedAction] = {}
+            for pointer in pointers:
+                if pointer.activation_id == working.activation_id:
+                    continue
+                for action in await self._approvable(pointer, working):
+                    gathered.setdefault(action.part, action)
+            working.approvable = (pointers, tuple(gathered.values()))
         actions = working.approvable[1]
         if not actions:
             return ()

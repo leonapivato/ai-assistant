@@ -3352,13 +3352,14 @@ class QuestionPart(BaseModel):
 
 
 class ProposedAnswer(BaseModel):
-    """What understanding proposes an input approves (ADR-0321 §3:1).
+    """One question understanding proposes an input approves (ADR-0321 §3:1, ADR-0322 §2:1).
 
-    ``question`` names the question as understanding was shown it: a label of
-    ADR-0276 §3's scheme, meaningful only within the call that rendered it. ``parts``
-    are the parts the input approves; empty means every part the question showed
-    (§3:6). Like every proposed field it is a reading, and the stage resolves or drops
-    it, so a label naming nothing is not refused here.
+    ``question`` names the question by its ``Q`` label, the label the call gave the
+    question's mark (ADR-0322 §4:4-§4:5), meaningful only within the call that rendered
+    it. ``parts`` are the parts the input approves; empty means every part the question
+    showed (ADR-0321 §3:6, ADR-0322 §2:4). Like every proposed field it is a reading,
+    and the stage resolves or drops it, so a label naming nothing, or naming something
+    other than a question, is not refused here.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3367,9 +3368,10 @@ class ProposedAnswer(BaseModel):
 
 
 class AnsweredQuestion(BaseModel):
-    """The recorded answer pointer: the question an input approves, by ids (ADR-0321 §3:1).
+    """One recorded answer pointer: a question an input approves, by ids (ADR-0321 §3:1).
 
-    The resolved form of :class:`ProposedAnswer`, carrying no label (ADR-0276 §2:4). It
+    The resolved form of :class:`ProposedAnswer`, carrying no label (ADR-0276 §2:4); an
+    understanding records one per question its input approves (ADR-0322 §2:1). It
     names the question's message by the records its writer and its delivery keep:
     ``activation_id`` is the activation that asked, and the message is then named by
     the round that wrote it, by its place and position in that place, or by both.
@@ -3507,10 +3509,12 @@ class ProposedActivationUnderstanding(BaseModel):
     nothing a story link can be made from is a label defect the stage repairs and
     then drops (§6:8), so this type validates nothing about them either.
 
-    ``answers`` (ADR-0321 §3:1) is the proposed answer pointer: the question the input
-    approves, named as understanding was shown it, and the parts it approves. ``None``
-    where the input approves no question, a bare yes that could fit more than one
-    included (§3:5). It is a reading and grants nothing.
+    ``answers`` (ADR-0321 §3:1, ADR-0322 §2:1) are the proposed answer pointers, one
+    per question the input approves, each naming its question by the ``Q`` label the
+    call rendered and the parts it approves. Empty where the input approves no
+    question, a bare yes that could fit more than one included (ADR-0321 §3:5). Each is
+    a reading and grants nothing; two naming one question are the stage's to drop
+    (ADR-0322 §2:7), so this type does not refuse them.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3521,7 +3525,7 @@ class ProposedActivationUnderstanding(BaseModel):
     relationships: tuple[ProposedRelationship, ...] = ()
     unresolved: tuple[UnresolvedMatter, ...] = ()
     story_labels: tuple[EncodableText, ...] = ()
-    answers: ProposedAnswer | None = None
+    answers: tuple[ProposedAnswer, ...] = ()
 
 
 #: ADR-0276 §2: an excerpt is a bounded prefix of the referent's rendered text.
@@ -3588,10 +3592,11 @@ class ActivationUnderstanding(BaseModel):
     store (§6:12), and a record written before the field validates unchanged
     (§12:1).
 
-    ``answers`` (ADR-0321 §3:1) is the recorded answer pointer, resolved to ids with no
-    label (ADR-0276 §2:4), or ``None`` where the input approves no question. Like every
-    other field here it grants no authority: authorizing checks it against the records
-    (ADR-0321 §4:4). A record written before the field validates unchanged.
+    ``answers`` (ADR-0321 §3:1, ADR-0322 §2:1) are the recorded answer pointers, one per
+    question the input approves, each resolved to ids with no label (ADR-0276 §2:4),
+    naming no question twice (ADR-0322 §2:7); empty where the input approves no
+    question. Like every other field here they grant no authority: authorizing checks
+    each against the records (ADR-0321 §4:4, ADR-0322 §3:1).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3606,12 +3611,27 @@ class ActivationUnderstanding(BaseModel):
     unresolved: tuple[UnresolvedMatter, ...] = ()
     grounding_dropped: int = Field(default=0, strict=True, ge=0, lt=2**31)
     story_links: tuple[StoryMember, ...] = ()
-    answers: AnsweredQuestion | None = None
+    answers: tuple[AnsweredQuestion, ...] = ()
 
     @model_validator(mode="after")
     def _no_story_link_twice(self) -> Self:
         if len(set(self.story_links)) != len(self.story_links):
             msg = "an understanding links to each story member at most once (ADR-0300 §6:7)"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _no_question_twice(self) -> Self:
+        # A question is its asking activation's message: named by its round, by its place
+        # and position, or by both, and either names exactly one message (ADR-0321 §3:1).
+        by_round = [(one.activation_id, one.round) for one in self.answers if one.round is not None]
+        by_place = [
+            (one.activation_id, one.place, one.position)
+            for one in self.answers
+            if one.place is not None
+        ]
+        if len(set(by_round)) != len(by_round) or len(set(by_place)) != len(by_place):
+            msg = "an understanding names each question it approves once (ADR-0322 §2:7)"
             raise ValueError(msg)
         return self
 
@@ -4496,6 +4516,12 @@ class ProjectedRound(BaseModel):
     shown them: episode notes are placed for the owner alone (ADR-0307 §4:4), and a
     later reader keeps that placement (ADR-0312 §4:3).
 
+    ``asked`` (ADR-0322 §4:3) is the mark a question carries: the part numbers its
+    message asked about, read from the round's recorded asked calls and never from its
+    text, and no values. It is carried only where the message is, so a round whose
+    message is not shown carries no mark; and it says the message is a question and
+    which parts it showed, never whether it was answered (§4:8).
+
     Attributes:
         message: The round's text, where it wrote any: the message it wrote into its
             place, or the text kept in the episode where the place took none
@@ -4503,12 +4529,15 @@ class ProjectedRound(BaseModel):
         notes: Its episode notes, where it wrote any and the reader may be shown them.
         notes_marked: Whether those notes rest on outside content (ADR-0307 §4:3).
             Never set without ``notes``.
+        asked: The parts the message asked about, ``1`` to *n* in order; empty where
+            it asked about none. Never set without ``message``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     message: ProjectedText | None = None
     notes: ProjectedText | None = None
     notes_marked: bool = False
+    asked: tuple[Annotated[int, Field(strict=True, ge=1, le=QUESTION_PART_MAX)], ...] = ()
 
     @model_validator(mode="after")
     def _marked_with_notes(self) -> Self:
@@ -4517,6 +4546,12 @@ class ProjectedRound(BaseModel):
             raise ValueError(msg)
         if self.message is None and self.notes is None:
             msg = "a projected round shows its message, its notes or both"
+            raise ValueError(msg)
+        if self.asked and self.message is None:
+            msg = "a projected round marks a question only on the message it carries"
+            raise ValueError(msg)
+        if list(self.asked) != list(range(1, len(self.asked) + 1)):
+            msg = "a projected question's parts are 1 to n, in order (ADR-0321 §2:6)"
             raise ValueError(msg)
         return self
 

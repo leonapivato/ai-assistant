@@ -303,19 +303,21 @@ class WorkingRecord:
 class YesContext:
     """The yes this activation's input may carry, as authorizing takes it (ADR-0321 §3, §4).
 
-    The lane that wires the phases fills it from understanding's recorded pointer
+    The lane that wires the phases fills it from understanding's recorded pointers
     (``ActivationUnderstanding.answers``) and from the input itself. It is a reading and
     a fact about the input, and grants nothing by itself (ADR-0276 §7:7): an approval is
-    assembled only from the records it leads to, where §4:4's facts hold.
+    assembled only from the records a pointer leads to, where §4:4's facts hold, one
+    per question (ADR-0322 §3:1-§3:2).
 
     The question's asked calls are not carried here: authorizing reads them from the
     asking activation's stored episode, the record the round wrote them to (§2:8, §4:4),
     so the facts are checked against the records and not against a copy of them.
 
     Attributes:
-        answers: The recorded pointer: the question's message, by its asking activation
-            and its round or its place and position, and the parts approved, every part
-            shown where it names none (§3:6).
+        answers: Every recorded pointer, at least one: each a question's message, by its
+            asking activation and its round or its place and position, and the parts
+            approved, every part shown where it names none (§3:6). No two name one
+            question (ADR-0322 §2:7).
         given_at: When the input carrying the yes was given, timezone-aware; the
             approval's *given* (§4:6).
         users_authority: Whether the input carries the user's authority (§3:3,
@@ -323,15 +325,25 @@ class YesContext:
             hub chat; an email or an event saying yes approves nothing.
 
     Raises:
-        ValueError: If ``given_at`` is naive.
+        ValueError: If it carries no pointer, names one question twice, or ``given_at``
+            is naive.
     """
 
-    answers: AnsweredQuestion
+    answers: tuple[AnsweredQuestion, ...]
     given_at: datetime
     users_authority: bool = False
 
     def __post_init__(self) -> None:
-        """When the yes was given is an instant, never a wall-clock reading."""
+        """A yes carries a pointer, and when it was given is an instant."""
+        if not self.answers:
+            msg = "a yes carries at least one pointer; an input with none carries no yes"
+            raise ValueError(msg)
+        rounds = [(one.activation_id, one.round) for one in self.answers if one.round]
+        places = [(one.activation_id, one.place, one.position) for one in self.answers]
+        places = [one for one in places if one[1] is not None]
+        if len(set(rounds)) != len(rounds) or len(set(places)) != len(places):
+            msg = "a yes names each question it approves once (ADR-0322 §2:7)"
+            raise ValueError(msg)
         if self.given_at.tzinfo is None or self.given_at.utcoffset() is None:
             msg = "when a yes was given is timezone-aware"
             raise ValueError(msg)
@@ -352,8 +364,8 @@ class RoundToAuthorize:
             came from none.
         message: The round's message, where it has one to write.
         yes: The yes the activation's input carries, where understanding recorded a
-            pointer (ADR-0321 §3:1); ``None`` where it recorded none, and then no call
-            runs under an approval (§4:5).
+            pointer (ADR-0321 §3:1, ADR-0322 §2:1); ``None`` where it recorded none, and
+            then no call runs under an approval (§4:5).
 
     Raises:
         ValueError: If two calls share a call id, or a call is not one the round
@@ -784,7 +796,7 @@ def _detached_yes(given: YesContext | None) -> YesContext | None:
     if given is None:
         return None
     return YesContext(
-        answers=AnsweredQuestion.model_validate(given.answers.model_dump()),
+        answers=tuple(AnsweredQuestion.model_validate(one.model_dump()) for one in given.answers),
         given_at=given.given_at,
         users_authority=given.users_authority is True,
     )
@@ -1417,24 +1429,28 @@ class AuthorizingStage:
 
     # --- the yes path (ADR-0321 §4) ------------------------------------------------------
 
-    async def _shown(self, one: CallToAuthorize, state: _Round) -> _Shown | str:  # noqa: C901, PLR0911 — each fact able to fail, in order
+    async def _shown(self, one: CallToAuthorize, state: _Round) -> _Shown | str:  # noqa: PLR0911 — each fact able to fail, in order
         """Check, by rule against the records, that ``one`` runs under an approval.
 
         ADR-0321 §4:4's three facts, and those §3:3 and §3:6 add, each failing closed
         (§4:5):
 
         - the input carries the user's authority (§3:3);
-        - **shown**: the question's message has a done delivery record, the asking
-          activation's message effect for the pointer's round, or at its place and
-          position, with its outcome done and its position written (ADR-0306 §5:5);
-        - the approval covers the part: it is a part of that question, and the pointer
-          names it or names no part, which is every part shown (§3:6);
+        - **shown**: some pointer's question message has a done delivery record, the
+          asking activation's message effect for the pointer's round, or at its place
+          and position, with its outcome done and its position written (ADR-0306 §5:5);
+        - the approval covers the part: the call is checked against the pointer whose
+          question asked it, by its round (ADR-0322 §3:1, §3:3), and that pointer names
+          the part or names no part, which is every part shown (§3:6);
         - **exactly the call shown**: the asking round recorded a call under that part
           (§2:8), the proposal names its capability, the registry still offers its very
           declaration, and the call rebuilt from its values rebinds, through
           ``EgressBinder.rebind``, to the declaration, the values and the binding
           recorded (§4:2, §4:16);
         - **not already run**: no effect record carries the part (§4:9).
+
+        The approval it assembles covers parts of that one question alone, so a yes that
+        approves several questions gives one approval per question (ADR-0322 §3:2).
 
         Returns:
             The rebuilt call and its approval where every fact holds; otherwise the
@@ -1448,13 +1464,11 @@ class AuthorizingStage:
             return _NOT_THE_USERS
         if self._plans is None:
             return _NO_RECORDS
-        pointer = yes.answers
-        if pointer.activation_id == state.activation_id:
-            return _ASKED_HERE
-        delivered = await self._delivered(self._plans, pointer)
-        if delivered is None:
-            return _NOT_SHOWN
-        if part.round != delivered or (pointer.parts and part.part not in pointer.parts):
+        found = await self._pointer_for(self._plans, yes.answers, part, state)
+        if isinstance(found, str):
+            return found
+        pointer, delivered = found
+        if pointer.parts and part.part not in pointer.parts:
             return _NOT_APPROVED
         asked_calls = await self._asked_calls(pointer.activation_id, delivered)
         asked = next((each for each in asked_calls if each.part == part.part), None)
@@ -1481,6 +1495,37 @@ class AuthorizingStage:
             ends=ApprovalEnd.WHEN_USED,
         )
         return _Shown(asked=asked, part=part, approval=approval, request=request)
+
+    async def _pointer_for(
+        self,
+        plans: PlanStore,
+        pointers: Sequence[AnsweredQuestion],
+        part: QuestionPart,
+        state: _Round,
+    ) -> tuple[AnsweredQuestion, str] | str:
+        """The pointer whose question asked ``part``, with its round (ADR-0322 §3:1, §3:3).
+
+        Each pointer is resolved on its own to its question's delivered round; the one
+        whose round asked the part is the one the call is checked against. A pointer
+        naming this activation's own question is passed over (ADR-0321 §4:1).
+
+        Returns:
+            The pointer and its delivered round; otherwise the code-owned word naming
+            why none applies: every pointer names this activation's question, none
+            names a delivered message, or none names the question that asked the part.
+        """
+        others = [one for one in pointers if one.activation_id != state.activation_id]
+        if not others:
+            return _ASKED_HERE
+        shown = False
+        for pointer in others:
+            delivered = await self._delivered(plans, pointer)
+            if delivered is None:
+                continue
+            shown = True
+            if delivered == part.round:
+                return pointer, delivered
+        return _NOT_APPROVED if shown else _NOT_SHOWN
 
     @staticmethod
     async def _delivered(plans: PlanStore, pointer: AnsweredQuestion) -> str | None:

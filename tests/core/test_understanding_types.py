@@ -99,6 +99,78 @@ def test_processing_reason_gains_understanding_failed() -> None:
     assert ProcessingReason("understanding_failed") is ProcessingReason.UNDERSTANDING_FAILED
 
 
+# --- ADR-0322 §2, §6: one pointer per question ------------------------------
+
+
+def test_a_proposal_carries_one_pointer_per_question_and_refuses_none_named_twice() -> None:
+    """§6: a sequence of pointers, empty where none; two naming one label are the stage's."""
+    proposal = ProposedActivationUnderstanding.model_validate_json(
+        '{"meaning": "yes to both", "meaning_ground": "stated", "answers": ['
+        '{"question": "Q1"}, {"question": "Q2", "parts": [2]}, {"question": "Q1"}]}'
+    )
+
+    assert [one.question for one in proposal.answers] == ["Q1", "Q2", "Q1"]
+    assert proposal.answers[1].parts == (2,)
+    with pytest.raises(ValidationError):
+        ProposedActivationUnderstanding.model_validate_json(
+            '{"meaning": "yes", "meaning_ground": "stated", "answers": {"question": "Q1"}}'
+        )
+
+
+def _understood(*answers: AnsweredQuestion) -> ActivationUnderstanding:
+    return ActivationUnderstanding(
+        version=1,
+        recorded_at=datetime(2026, 1, 1, tzinfo=UTC),
+        producer=UnderstandingProducer.INTERPRETATION,
+        meaning="yes to both",
+        meaning_ground=UnderstandingGround.STATED,
+        answers=answers,
+    )
+
+
+def test_a_recorded_understanding_carries_several_pointers() -> None:
+    """§2:1, §6: one per question the input approves, round trip unchanged."""
+    first = AnsweredQuestion(activation_id="a-1", round="r-1")
+    second = AnsweredQuestion(activation_id="a-2", round="r-2", place="conv-1", position=4)
+    understood = _understood(first, second)
+
+    assert understood.answers == (first, second)
+    assert ActivationUnderstanding.model_validate_json(understood.model_dump_json()) == understood
+    assert _understood().answers == ()
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        pytest.param(
+            AnsweredQuestion(activation_id="a-1", round="r-1"),
+            AnsweredQuestion(activation_id="a-1", round="r-1", parts=(2,)),
+            id="one-round-twice",
+        ),
+        pytest.param(
+            AnsweredQuestion(activation_id="a-1", place="conv-1", position=4),
+            AnsweredQuestion(activation_id="a-1", round="r-9", place="conv-1", position=4),
+            id="one-message-twice",
+        ),
+    ],
+)
+def test_a_recorded_understanding_names_no_question_twice(
+    first: AnsweredQuestion, second: AnsweredQuestion
+) -> None:
+    """§2:7: two pointers naming one question are never recorded."""
+    with pytest.raises(ValidationError, match="each question it approves once"):
+        _understood(first, second)
+
+
+def test_two_activations_may_each_have_a_round_of_one_name() -> None:
+    """A question is its activation's message: one round id under two activations is two."""
+    understood = _understood(
+        AnsweredQuestion(activation_id="a-1", round="r-1"),
+        AnsweredQuestion(activation_id="a-2", round="r-1"),
+    )
+    assert len(understood.answers) == 2
+
+
 def test_understanding_error_is_an_assistant_error_with_the_standard_constructor() -> None:
     """§6: a new ``AssistantError`` subclass carrying a message and no content field."""
     error = UnderstandingError("second output did not parse")
@@ -135,11 +207,12 @@ def test_a_proposal_carries_labels_and_no_identity() -> None:
         "unresolved",
         # ADR-0300 §6:6: the labels of the matters the input belongs with.
         "story_labels",
-        # ADR-0321 §3:1: the proposed answer pointer, naming its question by label.
+        # ADR-0321 §3:1, ADR-0322 §2:1: the proposed answer pointers, each naming its
+        # question by its Q label.
         "answers",
     }
     assert proposal.story_labels == ()
-    assert proposal.answers is None
+    assert proposal.answers == ()
     assert proposal.references[0].labels == ("H1", "P2")
     for forbidden in ("version", "recorded_at", "producer", "id"):
         with pytest.raises(ValidationError):
@@ -230,7 +303,7 @@ def test_a_recorded_understanding_carries_no_label() -> None:
         "grounding_dropped",
         # ADR-0300 §6:7: the story labels, resolved to story members.
         "story_links",
-        # ADR-0321 §3:1: the recorded answer pointer, resolved to ids.
+        # ADR-0321 §3:1, ADR-0322 §2:1: the recorded answer pointers, resolved to ids.
         "answers",
     }
     for model in (

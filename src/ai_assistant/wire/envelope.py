@@ -2629,7 +2629,14 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``UntrustableDestinationError`` leave ``core.errors``; the wire rebuilds an error
 #:     by its name there. A peer at 106 calls six methods a hub at 107 does not route,
 #:     and may name an error class a peer at 107 no longer has (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 107
+#: 108: ADR-0322 §6:2 advances the version once for several questions per reply, on
+#:     this ground: the wire-carried ``EpisodicMemory.processing_record`` holds
+#:     ``ActivationUnderstanding.answers``, which becomes a sequence of
+#:     ``AnsweredQuestion`` in place of one. ``ProjectedRound.asked`` is not a ground:
+#:     the projection is never stored and crosses no wire. A peer at 107 refuses the
+#:     sequence where it reads one pointer, and a hub at 108 refuses one pointer where
+#:     it reads a sequence (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 108
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

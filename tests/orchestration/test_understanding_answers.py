@@ -1,12 +1,14 @@
-"""ADR-0321 §3: understanding reads whether an input approves an earlier question.
+"""ADR-0321 §3 and ADR-0322: understanding reads which earlier questions an input approves.
 
 The stage alone, over a scripted model and hand-built windows. The model's readings
-(§3:4-§3:11) cannot be unit-tested for quality, so these cases pin what code owns: the
-instruction carries the readings, ``answers`` parses, each kind of label that can name
-a question resolves to the asking activation with its round or its place and position,
-and every path that cannot name exactly one question records **no pointer** (§3:5),
-gaining a code-owned unresolved matter so planning can ask which question was meant.
-A reply the model reads as approving nothing is a null ``answers``, and records none.
+(ADR-0321 §3:4-§3:11, ADR-0322 §2:2-§2:4) cannot be unit-tested for quality, so these
+cases pin what code owns. Every message that is a question is marked, with its parts and
+a ``Q`` label of its own, wherever understanding is shown it, and a message that asked
+only in words is not (ADR-0322 §4). Each pointer names a question by its ``Q`` label
+alone and resolves on its own, to the asking activation and round (§2:6, §4:5). A
+pointer that cannot be recorded, or two naming one question, record nothing and gain a
+code-owned unresolved matter, while the others stand (§2:6-§2:7). A reply the model
+reads as approving nothing records no pointer.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ from ai_assistant.orchestration import phase_path
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.story_links import Candidates, ShortView
 from ai_assistant.orchestration.understanding import (
+    AskedIn,
     SuppliedWindow,
     TranscriptWindow,
     UnderstandingStage,
@@ -63,9 +66,22 @@ BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 _NO_WINDOW: Final = SuppliedWindow(ChannelContext())
 _PLACE: Final = "conversation:c-1"
 
+#: The matters the stage adds for a pointer it does not record.
+_NO_SUCH_QUESTION: Final = "is not the Q label of a question the assistant asked"
+_NO_SUCH_PART: Final = "did not show every part"
+_TWICE: Final = "one earlier question twice over"
+
 
 def _proposal(**fields: Any) -> str:
     return json.dumps({"meaning": "The user says yes.", "meaning_ground": "stated"} | fields)
+
+
+def _pointers(*questions: str | tuple[str, list[int]]) -> list[dict[str, Any]]:
+    """``answers`` naming each question, with the parts where a pair gives them."""
+    return [
+        {"question": one} if isinstance(one, str) else {"question": one[0], "parts": one[1]}
+        for one in questions
+    ]
 
 
 def _tool() -> ToolDefinition:
@@ -92,13 +108,15 @@ def _tool() -> ToolDefinition:
     return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
-def _round(round_id: str, *, asked: int = 0, follows: str | None = None) -> PlanningRound:
+def _round(
+    round_id: str, *, asked: int = 0, follows: str | None = None, text: str | None = None
+) -> PlanningRound:
     """A round whose message asks about ``asked`` calls, parts 1 to ``asked``."""
     return PlanningRound(
         id=round_id,
         follows=follows,
         recorded_at=AT,
-        text="Shall I book it?" if asked else "Looking into it.",
+        text=text if text is not None else (f"Shall I book {round_id}?" if asked else "Looking."),
         asked=tuple(
             AskedCall(part=part, tool=_tool(), values={"people": 4 + part})
             for part in range(1, asked + 1)
@@ -130,8 +148,10 @@ def _message(
     )
 
 
-#: A conversation: the user asked, the assistant (activation a-1) asked back with two
-#: exact lines, and an older assistant message nothing records the writer of.
+#: A conversation: the user asked; the assistant (activation a-1, round r-1) asked back
+#: with two exact lines, which the reader brought as a question of two parts; the
+#: assistant then asked in words only, in a message a-1 also wrote; and an older
+#: assistant message nothing records the writer of.
 _CHAT: Final = TranscriptWindow(
     CONVERSATION,
     (
@@ -141,20 +161,23 @@ _CHAT: Final = TranscriptWindow(
             "Shall I book it?\n1. book_table people=5\n2. book_table people=6",
             author=MessageAuthor.ASSISTANT,
         ),
-        _message(3, "An older reply.", author=MessageAuthor.ASSISTANT),
+        _message(3, "Or would you rather I booked it for later?", author=MessageAuthor.ASSISTANT),
+        _message(4, "An older reply.", author=MessageAuthor.ASSISTANT),
     ),
     input_messages=(),
-    links={1: "a-1", 2: "a-1"},
+    links={1: "a-1", 2: "a-1", 3: "a-1"},
+    asked={2: AskedIn(round="r-1", parts=(1, 2))},
 )
 
 
-async def _understand(
+async def _understand(  # noqa: PLR0913 — one knob per section a case renders
     model: FakeModelProvider,
     *,
     window: ChannelWindow = _NO_WINDOW,
     episodes: tuple[EpisodicMemory, ...] | None = (),
     recalled: tuple[EpisodicMemory | SemanticMemory, ...] = (),
     stories: Candidates | None = None,
+    channel: Any = CONVERSATION,
 ) -> ActivationUnderstanding:
     recall = None
     if recalled:
@@ -165,7 +188,7 @@ async def _understand(
         )
     return await UnderstandingStage(model=model, excerpt_chars=2000).understand(
         "yes",
-        channel=CONVERSATION,
+        channel=channel,
         window=window,
         audience=BOUNDED,
         episodes=episodes,
@@ -198,31 +221,77 @@ def _instruction(model: FakeModelProvider) -> str:
     return model.calls[0].messages[0].content
 
 
+def _shown(model: FakeModelProvider) -> dict[str, Any]:
+    shown: dict[str, Any] = json.loads(model.calls[0].messages[-1].content)
+    return shown
+
+
+def _marks(model: FakeModelProvider) -> list[tuple[str, str, list[int]]]:
+    """Every question mark the first call rendered, in order.
+
+    As ``(Q label, label of the item that shows it, parts)``: a place-window message's
+    own mark is ``question``, an episode's are ``questions_asked``; a story's episodes
+    take no label, so the item that shows them is the story.
+    """
+    found: list[tuple[str, str, list[int]]] = []
+
+    def walk(value: object, holder: str) -> None:
+        if isinstance(value, dict):
+            label = value.get("label")
+            if isinstance(label, str) and label.startswith("Q"):
+                found.append((label, holder, value["parts"]))
+                return
+            if isinstance(label, str):
+                holder = label
+            for one in value.values():
+                walk(one, holder)
+        elif isinstance(value, list):
+            for one in value:
+                walk(one, holder)
+
+    walk(_shown(model), "")
+    return found
+
+
 def _matters(understood: ActivationUnderstanding) -> list[str]:
     return [one.matter for one in understood.unresolved]
 
 
-# --- the instruction (§3:4-§3:11) ------------------------------------------------------
+# --- the instruction (ADR-0322 §4:9, ADR-0321 §3:4-§3:11) --------------------------------
 
 
-async def test_the_instruction_carries_the_readings_and_the_shape() -> None:
+async def test_the_instruction_carries_the_mark_the_label_and_the_readings() -> None:
     model = FakeModelProvider(_proposal())
 
     await _understand(model)
 
     instruction = _instruction(model)
-    assert '"answers": null or {"question":' in instruction
+    assert '"answers": [{"question": "<Q label of a question the input approves>"' in instruction
     for reading in (
-        "a strong hint",  # §3:4
-        "A bare yes that could fit more than one question approves nothing",  # §3:5
-        "A yes approves every part the question showed: leave `parts` empty",  # §3:6
-        "A yes to some parts only names those parts",  # §3:6
-        "A no approves nothing",  # §3:7
-        "A later yes to the same question still approves it",  # §3:7
-        "a conditional yes, which counts as a change",  # §3:8
-        "An unclear reply approves nothing",  # §3:9
-        "A question does not expire",  # §3:10
-        "mixes a yes with a request records the yes",  # §3:11
+        # ADR-0322 §4:9: what the mark and the Q label mean.
+        "Every question is marked wherever it is shown, with a label Q1, Q2",
+        "A question shown in more than one place carries one Q label",
+        "never whether it was answered",
+        "A message that asked only in words carries no mark",
+        "cite it only in `answers`",
+        # ADR-0322 §4:5, §2:1, §2:7: a pointer names a question by its Q label alone.
+        "naming the question by its Q label and by no other label",
+        "name no question twice",
+        # ADR-0322 §2:2: several questions only where the reply says which.
+        "A reply approves several questions only where it says which",
+        "never by the label of the message that asked which",
+        "record each of those questions",
+        # ADR-0321 §3:4-§3:11, unchanged.
+        "a strong hint",
+        "A bare yes that could fit more than one question approves nothing",
+        "A yes approves every part the question showed: leave `parts` empty",
+        "A yes to some parts only names those parts",
+        "A no approves nothing",
+        "A later yes to the same question still approves it",
+        "a conditional yes, which counts as a change",
+        "An unclear reply approves nothing",
+        "A question does not expire",
+        "mixes a yes with a request records the yes",
         "record that in `unresolved`",
         "grants nothing",
     ):
@@ -236,21 +305,167 @@ async def test_a_pass_with_stories_carries_answers_in_its_shape_too() -> None:
 
     instruction = _instruction(model)
     assert '"story_labels"' in instruction
-    assert '"answers": null or {"question":' in instruction
+    assert '"answers": [{"question":' in instruction
 
 
-# --- the place window (§3:2) -------------------------------------------------------------
+# --- the marks and the Q labels (ADR-0322 §4:1-§4:4) -------------------------------------
 
 
-async def test_a_yes_in_the_place_window_points_at_the_message_by_writer_place_and_position() -> (
-    None
-):
-    model = FakeModelProvider(_proposal(answers={"question": "H2"}))
+async def test_a_question_in_the_place_window_carries_its_mark_on_its_message() -> None:
+    """§4:1-§4:2: the parts the reader brought, and a Q label; prose and others carry none."""
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, window=_CHAT)
+
+    items = _shown(model)["channel_window"]
+    assert [item.get("question") for item in items] == [
+        None,
+        {"label": "Q1", "parts": [1, 2]},
+        None,
+        None,
+    ]
+    assert _marks(model) == [("Q1", "H2", [1, 2])]
+
+
+async def test_a_question_an_episode_asked_is_marked_on_its_round() -> None:
+    """§4:2-§4:3: the round's message, its parts, its label; a round that asked nothing none."""
+    record = _asking("a-1", _round("r-1"), _round("r-2", asked=2, follows="r-1"))
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, episodes=(record,))
+
+    (rendered,) = _shown(model)["episode_window"]
+    assert rendered["questions_asked"] == [
+        {
+            "label": "Q1",
+            "parts": [1, 2],
+            "message": "Shall I book r-2?",
+            "message_cut_to_first_chars": False,
+        }
+    ]
+
+
+async def test_an_episode_that_asked_nothing_shows_no_questions() -> None:
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, episodes=(_asking("a-1", _round("r-1")),))
+
+    (rendered,) = _shown(model)["episode_window"]
+    assert "questions_asked" not in rendered
+
+
+async def test_a_round_that_asked_in_no_text_carries_no_mark() -> None:
+    """§4:3: a mark rides only where the projection carries the round's message."""
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, episodes=(_asking("a-1", _round("r-1", asked=1, text=" ")),))
+
+    assert _marks(model) == []
+
+
+async def test_every_place_understanding_is_shown_a_question_marks_it_in_order() -> None:
+    """§4:2, §4:4: the place window, the episode window, recall and a story, Q1 onward."""
+    window = TranscriptWindow(
+        CONVERSATION,
+        (_message(1, "Shall I book it?", author=MessageAuthor.ASSISTANT),),
+        links={1: "a-1"},
+        asked={1: AskedIn(round="r-1", parts=(1,))},
+    )
+    shown = _asking("a-2", _round("r-2", asked=1))
+    recalled = _asking(
+        "a-3",
+        _round("r-3", asked=1),
+        _round("r-4", asked=2, follows="r-3"),
+        channel=CONVERSATION.model_copy(update={"instance_id": "c-other"}),
+    )
+    told = _asking("a-5", _round("r-5", asked=1))
+    model = FakeModelProvider(_proposal())
+
+    await _understand(
+        model,
+        window=window,
+        episodes=(shown,),
+        recalled=(recalled,),
+        stories=Candidates(views=(_view("story:trip", told),)),
+    )
+
+    assert _marks(model) == [
+        ("Q1", "H1", [1]),
+        ("Q2", "P1", [1]),
+        ("Q3", "M1", [1]),
+        ("Q4", "M1", [1, 2]),
+        ("Q5", "S1", [1]),
+    ]
+
+
+async def test_a_question_rendered_in_two_places_keeps_one_label() -> None:
+    """§4:4: the question a message is, shown again in a story's latest episode."""
+    asking = _asking("a-1", _round("r-1", asked=1))
+    window = TranscriptWindow(
+        CONVERSATION,
+        (_message(1, "Shall I book r-1?", author=MessageAuthor.ASSISTANT),),
+        links={1: "a-1"},
+        asked={1: AskedIn(round="r-1", parts=(1,))},
+    )
+    model = FakeModelProvider(_proposal(answers=_pointers("Q1")))
+
+    understood = await _understand(
+        model, window=window, stories=Candidates(views=(_view("story:dinner", asking),))
+    )
+
+    assert _marks(model) == [("Q1", "H1", [1]), ("Q1", "S1", [1])]
+    assert understood.answers == (
+        AnsweredQuestion(activation_id="a-1", round="r-1", place=_PLACE, position=1),
+    )
+
+
+async def test_an_exchange_shown_in_the_place_window_leaves_its_question_to_the_message() -> None:
+    """§4:4: the episode one exchange with the window shows only questions no message carries."""
+    record = _asking(
+        "a-1", _round("r-1", asked=1), _round("r-2", asked=1, follows="r-1", text="And r-2?")
+    )
+    window = TranscriptWindow(
+        CONVERSATION,
+        (
+            _message(1, "Book it."),
+            _message(2, "Shall I book r-1?", author=MessageAuthor.ASSISTANT),
+        ),
+        links={1: "a-1", 2: "a-1"},
+        asked={2: AskedIn(round="r-1", parts=(1,))},
+    )
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, window=window, episodes=(record,))
+
+    first, second = _shown(model)["channel_window"]
+    assert [one["message"] for one in first["questions_asked"]] == ["And r-2?"]
+    assert second["question"] == {"label": "Q2", "parts": [1]}
+    assert _marks(model) == [("Q1", "H1", [1]), ("Q2", "H2", [1])]
+
+
+async def test_a_supplied_item_one_exchange_with_an_episode_shows_its_questions() -> None:
+    record = _asking("a-1", _round("r-1", asked=1))
+    window = SuppliedWindow(
+        ChannelContext(history=(ChannelContextItem(text="Shall I book it?", item_id=record.id),))
+    )
+    model = FakeModelProvider(_proposal(answers=_pointers("Q1")))
+
+    understood = await _understand(model, window=window, episodes=(record,))
+
+    assert _marks(model) == [("Q1", "H1", [1])]
+    assert understood.answers == (AnsweredQuestion(activation_id="a-1", round="r-1"),)
+
+
+# --- the pointers (ADR-0322 §2:1, §2:6, §4:5) --------------------------------------------
+
+
+async def test_a_yes_to_a_place_window_question_points_at_its_round_and_message() -> None:
+    model = FakeModelProvider(_proposal(answers=_pointers("Q1")))
 
     understood = await _understand(model, window=_CHAT)
 
-    assert understood.answers == AnsweredQuestion(
-        activation_id="a-1", place=_PLACE, position=2, parts=()
+    assert understood.answers == (
+        AnsweredQuestion(activation_id="a-1", round="r-1", place=_PLACE, position=2),
     )
     assert understood.unresolved == ()
     assert understood.grounding_dropped == 0
@@ -265,55 +480,47 @@ def test_the_place_is_named_as_the_phase_path_names_a_messages_place() -> None:
 
 
 async def test_a_partial_yes_records_the_parts_named_ascending_each_once() -> None:
-    model = FakeModelProvider(_proposal(answers={"question": "H2", "parts": [2, 1, 2]}))
+    model = FakeModelProvider(_proposal(answers=_pointers(("Q1", [2, 1, 2]))))
 
     understood = await _understand(model, window=_CHAT)
 
-    assert understood.answers is not None
-    assert understood.answers.parts == (1, 2)
+    (answer,) = understood.answers
+    assert answer.parts == (1, 2)
 
 
-@pytest.mark.parametrize(
-    "label",
-    [
-        pytest.param("H1", id="the-users-own-message"),
-        pytest.param("H3", id="an-assistant-message-nothing-links"),
-    ],
-)
-async def test_an_item_that_is_no_checkable_question_records_no_pointer(label: str) -> None:
-    model = FakeModelProvider(_proposal(answers={"question": label}))
+async def test_both_records_one_pointer_per_question_each_resolved_on_its_own() -> None:
+    """§2:1-§2:2: "both", given to two waiting questions, one seen only through a story."""
+    asked = _asking("a-2", _round("r-2", asked=1))
+    model = FakeModelProvider(_proposal(answers=_pointers("Q2", "Q1")))
 
-    understood = await _understand(model, window=_CHAT)
-
-    assert understood.answers is None
-    assert len(model.calls) == 1  # the label resolved: no repair
-    assert understood.grounding_dropped == 0
-    (matter,) = understood.unresolved
-    assert "names no question the assistant asked" in matter.matter
-
-
-async def test_a_supplied_item_names_the_question_its_episode_asked() -> None:
-    record = _asking("a-1", _round("r-1", asked=1))
-    window = SuppliedWindow(
-        ChannelContext(history=(ChannelContextItem(text="Shall I book it?", item_id=record.id),))
+    understood = await _understand(
+        model, window=_CHAT, stories=Candidates(views=(_view("story:dinner", asked),))
     )
-    model = FakeModelProvider(_proposal(answers={"question": "H1"}))
 
-    understood = await _understand(model, window=window, episodes=(record,))
-
-    assert understood.answers == AnsweredQuestion(activation_id="a-1", round="r-1")
-
-
-# --- the episode window, recall and the story (§3:2) --------------------------------------
+    assert understood.answers == (
+        AnsweredQuestion(activation_id="a-2", round="r-2"),
+        AnsweredQuestion(activation_id="a-1", round="r-1", place=_PLACE, position=2),
+    )
+    assert understood.unresolved == ()
 
 
-async def test_a_yes_to_an_episode_points_at_the_round_whose_message_asked() -> None:
-    record = _asking("a-1", _round("r-1"), _round("r-2", asked=2, follows="r-1"))
-    model = FakeModelProvider(_proposal(answers={"question": "P1", "parts": [2]}))
+async def test_two_questions_one_story_shows_take_a_label_each() -> None:
+    """§4:4: a story's episodes take no label, so each question takes its own."""
+    stories = Candidates(
+        views=(
+            _view(
+                "story:dinner",
+                _asking("a-1", _round("r-1", asked=1)),
+                _asking("a-2", _round("r-2", asked=1)),
+            ),
+        )
+    )
+    model = FakeModelProvider(_proposal(answers=_pointers("Q2")))
 
-    understood = await _understand(model, episodes=(record,))
+    understood = await _understand(model, stories=stories)
 
-    assert understood.answers == AnsweredQuestion(activation_id="a-1", round="r-2", parts=(2,))
+    assert _marks(model) == [("Q1", "S1", [1]), ("Q2", "S1", [1])]
+    assert understood.answers == (AnsweredQuestion(activation_id="a-2", round="r-2"),)
 
 
 async def test_a_yes_to_a_question_from_another_conversation_resolves_through_recall() -> None:
@@ -322,22 +529,11 @@ async def test_a_yes_to_a_question_from_another_conversation_resolves_through_re
         _round("r-9", asked=1),
         channel=CONVERSATION.model_copy(update={"instance_id": "c-other"}),
     )
-    model = FakeModelProvider(_proposal(answers={"question": "M1"}))
+    model = FakeModelProvider(_proposal(answers=_pointers("Q1")))
 
     understood = await _understand(model, episodes=(), recalled=(elsewhere,))
 
-    assert understood.answers == AnsweredQuestion(activation_id="a-9", round="r-9")
-
-
-async def test_a_yes_to_a_question_a_story_shows_resolves_through_its_latest_episodes() -> None:
-    asked = _asking("a-1", _round("r-1", asked=1))
-    model = FakeModelProvider(_proposal(answers={"question": "S1"}))
-
-    understood = await _understand(
-        model, stories=Candidates(views=(_view("story:dinner", episode("a-0"), asked),))
-    )
-
-    assert understood.answers == AnsweredQuestion(activation_id="a-1", round="r-1")
+    assert understood.answers == (AnsweredQuestion(activation_id="a-9", round="r-9"),)
 
 
 async def test_a_mixed_message_records_its_yes_beside_the_request() -> None:
@@ -345,17 +541,27 @@ async def test_a_mixed_message_records_its_yes_beside_the_request() -> None:
     model = FakeModelProvider(
         _proposal(
             meaning="The user approves the booking and asks for the weather.",
-            answers={"question": "P1"},
+            answers=_pointers("Q1"),
         )
     )
 
     understood = await _understand(model, episodes=(record,))
 
-    assert understood.answers == AnsweredQuestion(activation_id="a-1", round="r-1")
+    assert understood.answers == (AnsweredQuestion(activation_id="a-1", round="r-1"),)
     assert understood.meaning == "The user approves the booking and asks for the weather."
 
 
-# --- what records no pointer (§3:5, §3:7-§3:9) --------------------------------------------
+async def test_a_yes_on_an_event_channel_is_read_like_any_other() -> None:
+    """ADR-0321 §3:3: whose input approves is authorizing's check; this is a reading."""
+    record = _asking("a-1", _round("r-1", asked=1))
+    model = FakeModelProvider(_proposal(answers=_pointers("Q1")))
+
+    understood = await _understand(model, episodes=(record,), channel=EVENTS)
+
+    assert understood.answers == (AnsweredQuestion(activation_id="a-1", round="r-1"),)
+
+
+# --- what records no pointer (ADR-0322 §2:6-§2:7, §4:5; ADR-0321 §3:5, §3:7-§3:9) -------
 
 
 @pytest.mark.parametrize(
@@ -368,56 +574,99 @@ async def test_a_mixed_message_records_its_yes_beside_the_request() -> None:
 )
 async def test_a_reply_read_as_approving_nothing_records_no_pointer(meaning: str) -> None:
     record = _asking("a-1", _round("r-1", asked=1))
-    model = FakeModelProvider(_proposal(meaning=meaning, answers=None))
+    model = FakeModelProvider(_proposal(meaning=meaning, answers=[]))
 
     understood = await _understand(model, episodes=(record,))
 
-    assert understood.answers is None
+    assert understood.answers == ()
     assert understood.unresolved == ()
 
 
-async def test_a_bare_yes_read_as_fitting_two_questions_records_no_pointer_and_says_so() -> None:
+async def test_a_bare_yes_read_as_fitting_two_questions_records_none_and_says_so() -> None:
     first = _asking("a-1", _round("r-1", asked=1))
     second = _asking("a-2", _round("r-2", asked=1))
     matter = {
-        "matter": "The yes could answer the booking in P1 or the email in P2.",
+        "matter": "The yes could answer the booking in Q1 or the one in Q2.",
         "why_it_matters": "Which action the user approves is unknown.",
     }
-    model = FakeModelProvider(_proposal(answers=None, unresolved=[matter]))
+    model = FakeModelProvider(_proposal(unresolved=[matter]))
 
     understood = await _understand(model, episodes=(first, second))
 
-    assert understood.answers is None
+    assert understood.answers == ()
     assert understood.unresolved == (UnresolvedMatter.model_validate(matter),)
 
 
-async def test_an_episode_that_asked_twice_records_no_pointer() -> None:
-    record = _asking("a-1", _round("r-1", asked=1), _round("r-2", asked=1, follows="r-1"))
-    model = FakeModelProvider(_proposal(answers={"question": "P1"}))
+@pytest.mark.parametrize(
+    "label",
+    [
+        pytest.param("H2", id="the-label-of-the-marked-message-itself"),
+        pytest.param("H3", id="a-message-that-asked-only-in-words"),
+        pytest.param("H1", id="the-users-own-message"),
+        pytest.param("P1", id="an-episode"),
+        pytest.param("Q9", id="a-q-label-the-call-did-not-render"),
+    ],
+)
+async def test_a_pointer_naming_anything_but_a_rendered_q_label_records_nothing(
+    label: str,
+) -> None:
+    """§4:5: a yes never lands on an unmarked message, and is never repaired onto one."""
+    model = FakeModelProvider(_proposal(answers=_pointers(label)))
 
-    understood = await _understand(model, episodes=(record,))
+    understood = await _understand(model, window=_CHAT, episodes=(_asking("a-7", _round("r-7")),))
 
-    assert understood.answers is None
-    (matter,) = understood.unresolved
-    assert "holds more than one question" in matter.matter
+    assert understood.answers == ()
+    assert len(model.calls) == 1, "a pointer's label is not repaired"
+    assert understood.grounding_dropped == 1
+    (matter,) = _matters(understood)
+    assert _NO_SUCH_QUESTION in matter
 
 
-async def test_a_story_whose_episodes_asked_two_questions_records_no_pointer() -> None:
-    stories = Candidates(
-        views=(
-            _view(
-                "story:dinner",
-                _asking("a-1", _round("r-1", asked=1)),
-                _asking("a-2", _round("r-2", asked=1)),
-            ),
-        )
+async def test_a_pointer_not_recorded_leaves_the_others_standing() -> None:
+    """§2:6: each pointer resolves on its own."""
+    model = FakeModelProvider(_proposal(answers=_pointers("H3", "Q1")))
+
+    understood = await _understand(model, window=_CHAT)
+
+    assert understood.answers == (
+        AnsweredQuestion(activation_id="a-1", round="r-1", place=_PLACE, position=2),
     )
-    model = FakeModelProvider(_proposal(answers={"question": "S1"}))
+    (matter,) = _matters(understood)
+    assert _NO_SUCH_QUESTION in matter
 
-    understood = await _understand(model, stories=stories)
 
-    assert understood.answers is None
-    assert "holds more than one question" in _matters(understood)[0]
+async def test_two_pointers_naming_one_question_record_neither() -> None:
+    """§2:7: neither is recorded, the matter says so once, and the other pointer stands."""
+    other = _asking("a-2", _round("r-2", asked=1))
+    model = FakeModelProvider(_proposal(answers=_pointers("Q1", ("Q1", [2]), "Q2")))
+
+    understood = await _understand(model, window=_CHAT, episodes=(other,))
+
+    assert understood.answers == (AnsweredQuestion(activation_id="a-2", round="r-2"),)
+    (matter,) = _matters(understood)
+    assert _TWICE in matter
+
+
+async def test_a_part_the_question_did_not_show_records_that_pointer_alone_not() -> None:
+    other = _asking("a-2", _round("r-2", asked=1))
+    model = FakeModelProvider(_proposal(answers=_pointers(("Q1", [1, 3]), "Q2")))
+
+    understood = await _understand(model, window=_CHAT, episodes=(other,))
+
+    assert understood.answers == (AnsweredQuestion(activation_id="a-2", round="r-2"),)
+    (matter,) = _matters(understood)
+    assert _NO_SUCH_PART in matter
+
+
+async def test_each_reason_a_pointer_is_not_recorded_is_said_once() -> None:
+    model = FakeModelProvider(_proposal(answers=_pointers("H1", "H3", ("Q1", [9]))))
+
+    understood = await _understand(model, window=_CHAT)
+
+    assert understood.answers == ()
+    assert len(_matters(understood)) == 2
+    assert _NO_SUCH_QUESTION in _matters(understood)[0]
+    assert _NO_SUCH_PART in _matters(understood)[1]
 
 
 async def test_a_bare_yes_with_nothing_to_connect_it_to_records_no_pointer() -> None:
@@ -425,107 +674,44 @@ async def test_a_bare_yes_with_nothing_to_connect_it_to_records_no_pointer() -> 
         "matter": "The yes answers no question shown.",
         "why_it_matters": "It is unknown what the user agrees to.",
     }
-    model = FakeModelProvider(_proposal(answers=None, unresolved=[matter]))
+    model = FakeModelProvider(_proposal(unresolved=[matter]))
 
     understood = await _understand(model, episodes=None)
 
-    assert understood.answers is None
+    assert understood.answers == ()
     assert understood.unresolved == (UnresolvedMatter.model_validate(matter),)
 
 
-@pytest.mark.parametrize(
-    ("label", "kwargs"),
-    [
-        pytest.param("P1", {"episodes": (episode("a-1"),)}, id="an-episode-that-asked-nothing"),
-        pytest.param(
-            "M1",
-            {
-                "recalled": (
-                    SemanticMemory(
-                        id="fact-1",
-                        content="Dinner is at eight.",
-                        fact="Dinner is at eight.",
-                        provenance=Provenance(
-                            source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT
-                        ),
-                    ),
-                )
-            },
-            id="a-recalled-fact",
-        ),
-        pytest.param(
-            "S1",
-            {"stories": Candidates(views=(_view("story:quiet", episode("a-1")),))},
-            id="a-story-whose-episodes-asked-nothing",
-        ),
-    ],
-)
-async def test_a_label_naming_no_question_records_no_pointer(
-    label: str, kwargs: dict[str, Any]
-) -> None:
-    model = FakeModelProvider(_proposal(answers={"question": label}))
+async def test_a_recalled_fact_carries_no_question() -> None:
+    fact = SemanticMemory(
+        id="fact-1",
+        content="Dinner is at eight.",
+        fact="Dinner is at eight.",
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
+    )
+    model = FakeModelProvider(_proposal())
 
-    understood = await _understand(model, **kwargs)
+    await _understand(model, recalled=(fact,))
 
-    assert understood.answers is None
-    assert len(model.calls) == 1
-    (matter,) = understood.unresolved
-    assert "names no question the assistant asked" in matter.matter
+    assert _marks(model) == []
 
 
-async def test_a_part_the_question_did_not_show_records_no_pointer() -> None:
-    record = _asking("a-1", _round("r-1", asked=2))
-    model = FakeModelProvider(_proposal(answers={"question": "P1", "parts": [1, 3]}))
-
-    understood = await _understand(model, episodes=(record,))
-
-    assert understood.answers is None
-    (matter,) = understood.unresolved
-    assert "did not show every part" in matter.matter
+# --- a Q label names no referent (ADR-0322 §4:6) -----------------------------------------
 
 
-async def test_a_label_naming_nothing_is_repaired_once_then_records_no_pointer() -> None:
+async def test_a_q_label_cited_outside_a_pointer_names_nothing_and_is_repaired() -> None:
+    """§4:6: cited as a referent it resolves to nothing, as any unrendered label does."""
     record = _asking("a-1", _round("r-1", asked=1))
-    bad = _proposal(answers={"question": "P7"})
+    bad = _proposal(meaning_ground="supplied", meaning_labels=["Q1"], answers=_pointers("Q1"))
     model = FakeModelProvider.scripted(bad, bad)
 
     understood = await _understand(model, episodes=(record,))
 
     assert len(model.calls) == 2
-    assert '"P7"' in model.calls[1].messages[-1].content
-    assert understood.answers is None
+    statement = model.calls[1].messages[-1].content
+    assert '"Q1"' in statement
+    assert "Q1 (the questions, cited only in `answers`)" in statement
+    assert understood.meaning_referents == ()
     assert understood.grounding_dropped == 1
-    (matter,) = understood.unresolved
-    assert "names no question the assistant asked" in matter.matter
-
-
-async def test_a_repaired_label_records_the_pointer() -> None:
-    record = _asking("a-1", _round("r-1", asked=1))
-    model = FakeModelProvider.scripted(
-        _proposal(answers={"question": "p1"}), _proposal(answers={"question": "P1"})
-    )
-
-    understood = await _understand(model, episodes=(record,))
-
-    assert len(model.calls) == 2
-    assert understood.answers == AnsweredQuestion(activation_id="a-1", round="r-1")
-    assert understood.grounding_dropped == 0
-
-
-async def test_a_yes_on_an_event_channel_is_read_like_any_other() -> None:
-    """§3:3: whose input approves is authorizing's check; understanding records a reading."""
-    record = _asking("a-1", _round("r-1", asked=1))
-    model = FakeModelProvider(_proposal(answers={"question": "P1"}))
-
-    understood = await UnderstandingStage(model=model, excerpt_chars=2000).understand(
-        "yes",
-        channel=EVENTS,
-        window=_NO_WINDOW,
-        audience=BOUNDED,
-        episodes=(record,),
-        version=1,
-        now=lambda: AT,
-        deadline=asyncio.get_running_loop().time() + 60,
-    )
-
-    assert understood.answers == AnsweredQuestion(activation_id="a-1", round="r-1")
+    # The pointer itself stands: a Q label is what a pointer names.
+    assert understood.answers == (AnsweredQuestion(activation_id="a-1", round="r-1"),)
