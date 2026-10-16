@@ -1039,9 +1039,13 @@ class UnderstandingStage:
         labels: dict[str, UnderstandingReferent] = {}
         story_members: dict[str, StoryMember] = {}
         marks = _Marks()
-        # ADR-0322 §4:2: the rounds whose questions a place-window message carries, which
-        # an episode shown with the window then leaves to that message.
-        carried = frozenset(one.item.asked.round for one in placed.items if one.item.asked)
+        # ADR-0322 §4:2: the questions a place-window message carries, by activation and
+        # round, which an episode shown with the window then leaves to that message.
+        carried = frozenset(
+            (one.item.asked.activation_id, one.item.asked.round)
+            for one in placed.items
+            if one.item.asked
+        )
         rendered_items: list[dict[str, object]] = []
         for index, one in enumerate(placed.items, start=1):
             label = f"H{index}"
@@ -1389,7 +1393,7 @@ class _ChannelItem:
         linkable: bool,
         annotated: bool = True,
         marks: _Marks,
-        carried: frozenset[str] = frozenset(),
+        carried: frozenset[tuple[str, str]] = frozenset(),
     ) -> dict[str, object]:
         """The item under its label, marked where it is also in the episode window.
 
@@ -1404,7 +1408,7 @@ class _ChannelItem:
         one exchange, the first carries them and the rest are only marked, so the
         exchange is rendered once. Among them are the questions the episode asked,
         marked on the rounds that asked them (ADR-0322 §4:2), less those a message of
-        the window already carries, by their rounds in ``carried``.
+        the window already carries, by their activations and rounds in ``carried``.
 
         **A stored understanding version rides only on an item also in the episode
         window** — what that window would have added about it.
@@ -1624,18 +1628,18 @@ class _ProjectedEpisode:
         return cls(episode_id=record.id, projection=projection, marked=marked)
 
     def questions(
-        self, marks: _Marks, *, carried: frozenset[str] = frozenset()
+        self, marks: _Marks, *, carried: frozenset[tuple[str, str]] = frozenset()
     ) -> list[dict[str, object]]:
         """The questions the episode asked, each on its round's message (ADR-0322 §4:2).
 
         Each carries its ``Q`` label and parts, and the message that asked, as the
-        projection cut it; a round in ``carried`` is left out, its message already
-        carrying its mark elsewhere.
+        projection cut it; a question in ``carried``, by its activation and round, is
+        left out, its message already carrying its mark elsewhere.
         """
         rendered: list[dict[str, object]] = []
         for one, round_id, activation_id in self.marked:
             message = one.message
-            if round_id in carried or message is None:
+            if (activation_id, round_id) in carried or message is None:
                 continue
             mark = marks.mark(
                 _Question(activation_id=activation_id, round=round_id, parts=one.asked)

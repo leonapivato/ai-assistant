@@ -2238,19 +2238,23 @@ class PhasePath:
             one.position: WrittenBy(
                 activation_id=one.activation_id,
                 asked=None
-                if one.round is None or (parts := marks.get(one.round)) is None
+                if one.round is None or (parts := marks.get((one.activation_id, one.round))) is None
                 else AskedIn(round=one.round, parts=parts),
             )
             for one in done
             if one.position is not None
         }
 
-    async def _question_marks(self, activation_ids: Sequence[str]) -> dict[str, tuple[int, ...]]:
+    async def _question_marks(
+        self, activation_ids: Sequence[str]
+    ) -> dict[tuple[str, str], tuple[int, ...]]:
         """The parts each marked round of these activations' episodes asked about (§4:3).
 
-        Read through ``project_episode``, by round id; an episode still open, or one the
-        store no longer holds, marks nothing, and a store that cannot be read marks
-        nothing, so its messages carry no mark.
+        Read through ``project_episode``, by the activation and the round, since a round's
+        id names it only within its activation: a message is marked from its own round's
+        record and never another's. An episode still open, or one the store no longer
+        holds, marks nothing, and a store that cannot be read marks nothing, so its
+        messages carry no mark.
         """
         if not activation_ids:
             return {}
@@ -2260,12 +2264,14 @@ class PhasePath:
         except Exception:  # the store is down: no message is marked a question
             _log.warning("phase_questions_unread", stage="reader", reason="store_failed")
             return {}
-        marks: dict[str, tuple[int, ...]] = {}
+        marks: dict[tuple[str, str], tuple[int, ...]] = {}
         for record in found.values():
-            if isinstance(record, EpisodicMemory):
+            processing = record.processing_record if isinstance(record, EpisodicMemory) else None
+            if isinstance(record, EpisodicMemory) and processing is not None:
                 projection = project_episode(record, excerpt_chars=1)
                 marks.update(
-                    (round_id, one.asked) for round_id, one in question_marks(record, projection)
+                    ((processing.activation_id, round_id), one.asked)
+                    for round_id, one in question_marks(record, projection)
                 )
         return marks
 
@@ -3090,14 +3096,15 @@ class PhasePath:
         if not pointers or not working.users_authority or working.conversation_id is None:
             return ()
         if working.approvable is None or working.approvable[0] != pointers:
-            # By part, each once: no two pointers name one question (ADR-0322 §2:7), so
-            # none is repeated, and a part is one call however it was reached.
-            gathered: dict[QuestionPart, ApprovedAction] = {}
+            # Each part once, by its asking activation: no two pointers name one question
+            # (ADR-0322 §2:7), so none is repeated, and a part is one call however it was
+            # reached.
+            gathered: dict[tuple[str, QuestionPart], ApprovedAction] = {}
             for pointer in pointers:
                 if pointer.activation_id == working.activation_id:
                     continue
                 for action in await self._approvable(pointer, working):
-                    gathered.setdefault(action.part, action)
+                    gathered.setdefault((pointer.activation_id, action.part), action)
             working.approvable = (pointers, tuple(gathered.values()))
         actions = working.approvable[1]
         if not actions:
