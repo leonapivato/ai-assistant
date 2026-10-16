@@ -70,6 +70,7 @@ _PLACE: Final = "conversation:c-1"
 _NO_SUCH_QUESTION: Final = "is not the Q label of a question the assistant asked"
 _NO_SUCH_PART: Final = "did not show every part"
 _TWICE: Final = "one earlier question twice over"
+_FITS_SEVERAL: Final = "a yes that does not say which question it approves"
 
 
 def _proposal(**fields: Any) -> str:
@@ -267,6 +268,7 @@ async def test_the_instruction_carries_the_mark_the_label_and_the_readings() -> 
 
     instruction = _instruction(model)
     assert '"answers": [{"question": "<Q label of a question the input approves>"' in instruction
+    assert '"bare_yes_fits_several": <true or false>' in instruction
     for reading in (
         # ADR-0322 §4:9: what the mark and the Q label mean.
         "Every question is marked wherever it is shown, with a label Q1, Q2",
@@ -284,6 +286,15 @@ async def test_the_instruction_carries_the_mark_the_label_and_the_readings() -> 
         # ADR-0321 §3:4-§3:11, unchanged.
         "a strong hint",
         "A bare yes that could fit more than one question approves nothing",
+        # ADR-0321 §3:5, ADR-0322 §2:3, #3080: what makes a yes bare, and the field the
+        # stage acts on.
+        "set `bare_yes_fits_several` to true",
+        "A yes is bare when it names no question, part or detail that tells the questions apart",
+        'says neither "both" nor "all of them"',
+        "is not a reply to one question's message",
+        "say the word and I'll book both",
+        "still names only that question's parts",
+        "Otherwise `bare_yes_fits_several` is false",
         "A yes approves every part the question showed: leave `parts` empty",
         "A yes to some parts only names those parts",
         "A no approves nothing",
@@ -306,6 +317,7 @@ async def test_a_pass_with_stories_carries_answers_in_its_shape_too() -> None:
     instruction = _instruction(model)
     assert '"story_labels"' in instruction
     assert '"answers": [{"question":' in instruction
+    assert '"bare_yes_fits_several": <true or false>' in instruction
 
 
 # --- the marks and the Q labels (ADR-0322 §4:1-§4:4) -------------------------------------
@@ -595,6 +607,151 @@ async def test_a_bare_yes_read_as_fitting_two_questions_records_none_and_says_so
 
     assert understood.answers == ()
     assert understood.unresolved == (UnresolvedMatter.model_validate(matter),)
+
+
+#: #3080's two questions: the 27th's, on its message in the place window (Q1), whose
+#: words promise both nights above the 27th's line alone, and the 26th's, asked in
+#: another conversation and shown only through recall (Q2).
+_PROMISED_BOTH: Final = TranscriptWindow(
+    CONVERSATION,
+    (
+        _message(1, "Can you also book the 27th? As well as the 26th, not instead."),
+        _message(
+            2,
+            "Shall I book the 27th? Say the word and I'll book both.\nbook_table people=5",
+            author=MessageAuthor.ASSISTANT,
+        ),
+    ),
+    input_messages=(),
+    links={1: "a-27", 2: "a-27"},
+    asked={2: AskedIn(round="r-27", parts=(1,))},
+)
+_THE_26TH: Final = (
+    _asking(
+        "a-26",
+        _round("r-26", asked=1),
+        channel=CONVERSATION.model_copy(update={"instance_id": "c-other"}),
+    ),
+)
+_ITS_OWN_MATTER: Final = {
+    "matter": "The yes could approve the 27th's question or the 26th's, or both.",
+    "why_it_matters": "Which booking the user approves is unknown.",
+}
+
+
+@pytest.mark.parametrize(
+    "guess",
+    [
+        pytest.param(("Q1",), id="the-question-whose-words-promised-both"),
+        pytest.param(("Q2",), id="the-other-question"),
+        pytest.param(("Q1", "Q2"), id="both"),
+    ],
+)
+async def test_a_bare_yes_read_as_fitting_several_records_none_whatever_it_points_at(
+    guess: tuple[str, ...],
+) -> None:
+    """ADR-0321 §3:5, ADR-0322 §2:3, #3080: the reading says it fits several, and points.
+
+    Code acts on the reading's own field: no pointer is recorded, and a code-owned
+    matter after the model's own says why, so planning asks which was meant.
+    """
+    model = FakeModelProvider(
+        _proposal(
+            answers=_pointers(*guess),
+            unresolved=[_ITS_OWN_MATTER],
+            bare_yes_fits_several=True,
+        )
+    )
+
+    understood = await _understand(model, window=_PROMISED_BOTH, recalled=_THE_26TH)
+
+    assert [label for label, _, _ in _marks(model)] == ["Q1", "Q2"]
+    assert understood.answers == ()
+    own, code = _matters(understood)
+    assert own == _ITS_OWN_MATTER["matter"]
+    assert _FITS_SEVERAL in code
+    assert understood.grounding_dropped == 0
+
+
+async def test_a_bare_yes_read_as_fitting_several_says_so_without_the_models_matter() -> None:
+    """The code-owned matter stands where the reading pointed at nothing and said nothing."""
+    model = FakeModelProvider(_proposal(bare_yes_fits_several=True))
+
+    understood = await _understand(model, window=_PROMISED_BOTH, recalled=_THE_26TH)
+
+    assert understood.answers == ()
+    (matter,) = _matters(understood)
+    assert _FITS_SEVERAL in matter
+
+
+async def test_the_matter_for_a_bare_yes_replaces_the_reasons_its_pointers_failed() -> None:
+    """No pointer is recorded, so the one matter says why, and labels still count."""
+    model = FakeModelProvider(
+        _proposal(answers=_pointers("H2", ("Q1", [9]), "Q2"), bare_yes_fits_several=True)
+    )
+
+    understood = await _understand(model, window=_PROMISED_BOTH, recalled=_THE_26TH)
+
+    assert understood.answers == ()
+    (matter,) = _matters(understood)
+    assert _FITS_SEVERAL in matter
+    assert understood.grounding_dropped == 1
+
+
+async def test_a_bare_yes_to_the_one_question_shown_still_points_at_it() -> None:
+    """ADR-0321 §3:5 is about several questions: with one rendered, the reading stands."""
+    model = FakeModelProvider(_proposal(answers=_pointers("Q1"), bare_yes_fits_several=True))
+
+    understood = await _understand(model, window=_PROMISED_BOTH)
+
+    assert understood.answers == (
+        AnsweredQuestion(activation_id="a-27", round="r-27", place=_PLACE, position=2),
+    )
+    assert understood.unresolved == ()
+
+
+async def test_both_given_to_the_two_questions_records_both() -> None:
+    """ADR-0322 §2:2: "both" says which, so the reading does not mark it bare."""
+    model = FakeModelProvider(_proposal(answers=_pointers("Q1", "Q2")))
+
+    understood = await _understand(model, window=_PROMISED_BOTH, recalled=_THE_26TH)
+
+    assert understood.answers == (
+        AnsweredQuestion(activation_id="a-27", round="r-27", place=_PLACE, position=2),
+        AnsweredQuestion(activation_id="a-26", round="r-26"),
+    )
+    assert understood.unresolved == ()
+
+
+async def test_a_reply_to_one_questions_message_points_at_it_beside_another() -> None:
+    """A reply to one question's message says which, even with another question shown."""
+    window = TranscriptWindow(
+        CONVERSATION,
+        _PROMISED_BOTH.messages,
+        input_messages=(
+            TranscriptMessage(
+                conversation_id="c-1",
+                position=3,
+                written_at=AT,
+                author=MessageAuthor.USER,
+                text="Yes, go ahead.",
+                device_id="phone",
+                message_id="m-3",
+                replies_to=2,
+            ),
+        ),
+        links=_PROMISED_BOTH.links,
+        asked=_PROMISED_BOTH.asked,
+    )
+    model = FakeModelProvider(_proposal(answers=_pointers("Q1"), bare_yes_fits_several=False))
+
+    understood = await _understand(model, window=window, recalled=_THE_26TH)
+
+    assert _shown(model)["input"]["messages"][0]["replies_to"] == 2
+    assert understood.answers == (
+        AnsweredQuestion(activation_id="a-27", round="r-27", place=_PLACE, position=2),
+    )
+    assert understood.unresolved == ()
 
 
 @pytest.mark.parametrize(

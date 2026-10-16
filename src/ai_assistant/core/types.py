@@ -3515,6 +3515,13 @@ class ProposedActivationUnderstanding(BaseModel):
     question, a bare yes that could fit more than one included (ADR-0321 §3:5). Each is
     a reading and grants nothing; two naming one question are the stage's to drop
     (ADR-0322 §2:7), so this type does not refuse them.
+
+    ``bare_yes_fits_several`` (ADR-0321 §3:5, ADR-0322 §2:3) is the model's reading that
+    the input is a bare yes, one that does not say which question it approves, that
+    could fit more than one question shown. It names no label, and the stage reads it
+    as its own fact: where it is true and the call rendered more than one question, no
+    pointer is recorded, whatever ``answers`` proposes, so the activation asks which
+    was meant. ``False`` where the reply leaves it out.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3526,6 +3533,7 @@ class ProposedActivationUnderstanding(BaseModel):
     unresolved: tuple[UnresolvedMatter, ...] = ()
     story_labels: tuple[EncodableText, ...] = ()
     answers: tuple[ProposedAnswer, ...] = ()
+    bare_yes_fits_several: bool = Field(default=False, strict=True)
 
 
 #: ADR-0276 §2: an excerpt is a bounded prefix of the referent's rendered text.

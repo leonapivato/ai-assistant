@@ -103,6 +103,14 @@ answers, and whether it approves at all, is the model's reading (ADR-0321 §3:4-
 ADR-0322 §2:2-§2:4); a pointer grants nothing (ADR-0276 §7:7), and authorizing checks
 each against the records (ADR-0321 §4:4, ADR-0322 §3:1).
 
+**A bare yes that fits several records nothing** (ADR-0321 §3:5, ADR-0322 §2:3). The
+model's reading alone did not hold that rule (#3080): it recorded a pointer while its own
+unresolved matter said the yes could fit either question. So the reply carries the
+reading as its own field, and code acts on it: where the model says the input is a bare
+yes that could fit more than one question, and the call rendered more than one, no
+pointer is recorded, whatever ``answers`` proposes, and a code-owned unresolved matter
+says so, so planning asks which was meant. The rule fails toward asking.
+
 **It logs stage and code-owned reason only** — no input, no window content, no model
 output and no exception content (ADR-0275 §8).
 """
@@ -337,7 +345,14 @@ _ANSWERS: Final = (
     'was shown across several questions, such as "book both" when each booking was '
     "asked about in a question of its own, record each of those questions.\n"
     "- A bare yes that could fit more than one question approves nothing: leave "
-    "`answers` empty. Never guess which one was meant.\n"
+    "`answers` empty and set `bare_yes_fits_several` to true. Never guess which one was "
+    "meant. A yes is bare when it names no question, part or detail that tells the "
+    'questions apart, says neither "both" nor "all of them", and is not a reply to one '
+    "question's message; where more than one question shown is still waiting, a bare "
+    "yes could fit more than one. A question's words may promise more than its lines "
+    'show, such as "say the word and I\'ll book both" above one line: a yes to those '
+    "words still names only that question's parts, so they do not tell the questions "
+    "apart. Otherwise `bare_yes_fits_several` is false.\n"
     "- A no approves nothing. A later yes to the same question still approves it.\n"
     '- A change, such as "make it 8", approves nothing, and neither does a conditional '
     "yes, which counts as a change.\n"
@@ -366,7 +381,8 @@ _SHAPE_HEAD: Final = (
     '"unresolved": [{"matter": "<what this reading leaves unsettled>", '
     '"why_it_matters": "<why that matters to understanding the input>"}], '
     '"answers": [{"question": "<Q label of a question the input approves>", '
-    '"parts": [<part number>]}]'
+    '"parts": [<part number>]}], '
+    '"bare_yes_fits_several": <true or false>'
 )
 
 _SHAPE_TAIL: Final = (
@@ -459,6 +475,14 @@ _NO_SUCH_PART: Final = (
 _SAME_QUESTION_TWICE: Final = (
     "The input was read as approving one earlier question twice over, so neither reading "
     "of it was recorded."
+)
+#: The code-owned matter for a bare yes the model read as fitting several questions
+#: (ADR-0321 §3:5, ADR-0322 §2:3): stated whether or not a pointer was proposed, so
+#: planning asks which was meant even where the model's own matter is missing.
+_FITS_SEVERAL: Final = (
+    "The input was read as a yes that does not say which question it approves, and more "
+    "than one question the assistant asked could fit it, so no question was recorded as "
+    "approved."
 )
 _NOT_APPROVED: Final = (
     "Nothing the input approves can run until the user says which question, and which "
@@ -1955,6 +1979,12 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
     rendered, as any label resolving to nothing is — and the understanding gains a
     code-owned unresolved matter saying why, after the model's own, so the activation
     can ask which question was meant (ADR-0321 §3:5); the other pointers stand.
+
+    Where the model reads the input as a bare yes that could fit more than one
+    question, and the call rendered more than one, no pointer is recorded at all, and
+    the code-owned matter saying so takes the place of any other (ADR-0321 §3:5,
+    ADR-0322 §2:3): the backstop for a reading that says it fits several and points
+    anyway (#3080). A pointer naming no rendered label is still counted as dropped.
     """
     links: dict[StoryMember, None] = {}
     unlinked = 0
@@ -1988,6 +2018,8 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
         )
     resolution.dropped += sum(one.question not in questions for one in proposal.answers)
     answers, whys = _answers(proposal.answers, questions)
+    if proposal.bare_yes_fits_several and len(questions) > 1:
+        answers, whys = (), (_FITS_SEVERAL,)
     unresolved = (
         *proposal.unresolved,
         *(UnresolvedMatter(matter=why, why_it_matters=_NOT_APPROVED) for why in whys),
