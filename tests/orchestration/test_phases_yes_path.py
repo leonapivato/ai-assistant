@@ -314,12 +314,12 @@ class _Reader:
     """Understanding's readings, one per activation, in order.
 
     A reading is ``None`` for an input that approves nothing, or the questions the input
-    says yes to, each with the parts it approves, and whether the reading also says the
-    input is a bare yes that could fit several (#3080).
+    says yes to, each with the parts it approves, and the words of an unresolved matter
+    the reading also records, if any (#3080).
     """
 
     def __init__(self) -> None:
-        self._readings: deque[tuple[tuple[_Yes, ...], bool] | None] = deque()
+        self._readings: deque[tuple[tuple[_Yes, ...], str | None] | None] = deque()
         self.model = FakeModelProvider(reply=self._reply)
         #: The label of the item each pointer's question was found on, in order.
         self.labels: list[str] = []
@@ -332,16 +332,16 @@ class _Reader:
     def yes(
         self, question: str = _ASKING, *, parts: tuple[int, ...] = (), prefer: str = "H"
     ) -> None:
-        self._readings.append(((_Yes(question, parts, prefer),), False))
+        self._readings.append(((_Yes(question, parts, prefer),), None))
 
-    def several(self, *yeses: _Yes, fits_several: bool = False) -> None:
-        self._readings.append((yeses, fits_several))
+    def several(self, *yeses: _Yes, unresolved: str | None = None) -> None:
+        self._readings.append((yeses, unresolved))
 
     def _reply(self, messages: Sequence[Message]) -> str:
         reading = self._readings.popleft() if self._readings else None
         if reading is None:
             return _proposal()
-        yeses, fits_several = reading
+        yeses, unresolved = reading
         content = messages[-1].content
         answers: list[dict[str, object]] = []
         for one in yeses:
@@ -358,7 +358,8 @@ class _Reader:
             self.labels.append(holder)
             self.named.append(named)
             answers.append({"question": named, "parts": list(one.parts)})
-        return _proposal(answers=answers, bare_yes_fits_several=fits_several)
+        matters = [] if unresolved is None else [{"matter": unresolved, "why_it_matters": "?"}]
+        return _proposal(answers=answers, unresolved=matters)
 
 
 class _World:
@@ -1226,9 +1227,10 @@ async def test_a_bare_yes_to_two_waiting_questions_runs_neither() -> None:
 async def test_a_bare_yes_read_as_fitting_two_but_pointing_runs_neither_then_both_does() -> None:
     """#3080: the reading says the bare yes fits both questions, and points at one anyway.
 
-    Code records no pointer on the reading's own word, so nothing runs and planning is
-    shown the matter to ask "yes to which?" by (ADR-0322 §2:3, ADR-0321 §3:5); "both"
-    then says which, and books each once (§2:2).
+    Its own unresolved matter names both questions, so code records no pointer on the
+    reading's own word: nothing runs, and planning is shown the matter to ask "yes to
+    which?" by (ADR-0322 §2:3, ADR-0321 §3:5). "Both" then says which, and books each
+    once (§2:2).
     """
     hub = _Hub()
     conversation, _ = await _asked(hub)
@@ -1239,7 +1241,9 @@ async def test_a_bare_yes_read_as_fitting_two_but_pointing_runs_neither_then_bot
     )
     await hub.turn("And email Sam that I'm late.", conversation=conversation, message_id="m-2")
 
-    hub.reader.several(_Yes("Shall I email Sam"), fits_several=True)
+    hub.reader.several(
+        _Yes("Shall I email Sam"), unresolved="The yes could approve Q1, Q2 or both."
+    )
     hub.planner.then(RoundResponse(text="Yes to which: the booking, the email, or both?"))
     _, bare = await hub.turn("Yes, go ahead.", conversation=conversation, message_id="m-3")
 
@@ -1259,11 +1263,14 @@ async def test_a_bare_yes_read_as_fitting_two_but_pointing_runs_neither_then_bot
 
 
 async def test_a_bare_yes_to_the_one_waiting_question_still_runs_it() -> None:
-    """ADR-0321 §3:5 binds several questions: with one shown, a bare yes approves it."""
+    """ADR-0321 §3:5 binds several questions: with one shown, a bare yes approves it.
+
+    A matter naming a ``Q`` label the call did not render counts for nothing.
+    """
     hub = _Hub()
     conversation, _ = await _asked(hub)
 
-    hub.reader.several(_Yes(_ASKING), fits_several=True)
+    hub.reader.several(_Yes(_ASKING), unresolved="The yes fits Q1, unless Q2 was meant.")
     hub.planner.then(_run_approved_all(1), _DONE)
     await hub.turn("Yes.", conversation=conversation, message_id="m-2")
 
