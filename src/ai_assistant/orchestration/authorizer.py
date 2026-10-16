@@ -67,6 +67,7 @@ from ai_assistant.core.diagnostics import failure_body, write_diagnostic
 from ai_assistant.core.errors import (
     AuditError,
     EgressBindingError,
+    MemoryStoreError,
     PlanningError,
     StoryStoreError,
 )
@@ -201,6 +202,8 @@ _NOT_APPROVED: Final = "part_not_approved"
 _NOT_RECORDED: Final = "not_recorded"
 _NOT_THE_CALL: Final = "not_the_call_shown"
 _ALREADY_RUN: Final = "already_run"
+_AMBIGUOUS: Final = "question_ambiguous"
+_UNREADABLE: Final = "records_unreadable"
 
 
 class Verdict(StrEnum):
@@ -1430,7 +1433,7 @@ class AuthorizingStage:
 
     # --- the yes path (ADR-0321 §4) ------------------------------------------------------
 
-    async def _shown(self, one: CallToAuthorize, state: _Round) -> _Shown | str:  # noqa: PLR0911 — each fact able to fail, in order
+    async def _shown(self, one: CallToAuthorize, state: _Round) -> _Shown | str:
         """Check, by rule against the records, that ``one`` runs under an approval.
 
         ADR-0321 §4:4's three facts, and those §3:3 and §3:6 add, each failing closed
@@ -1451,7 +1454,10 @@ class AuthorizingStage:
         - **not already run**: no effect record carries the part (§4:9).
 
         The approval it assembles covers parts of that one question alone, so a yes that
-        approves several questions gives one approval per question (ADR-0322 §3:2).
+        approves several questions gives one approval per question (ADR-0322 §3:2). A
+        record this call's facts are read from that cannot be read fails this call
+        alone, closed: it goes back as needing you, and the round's other calls are
+        checked against their own records (§3:1).
 
         Returns:
             The rebuilt call and its approval where every fact holds; otherwise the
@@ -1465,7 +1471,27 @@ class AuthorizingStage:
             return _NOT_THE_USERS
         if self._plans is None:
             return _NO_RECORDS
-        found = await self._pointer_for(self._plans, yes.answers, part, state)
+        try:
+            return await self._held(one, part, yes, self._plans, state)
+        except PlanningError, MemoryStoreError:
+            _log.warning("authorizing_approval_unread", stage="authorizing")
+            return _UNREADABLE
+
+    async def _held(  # noqa: PLR0911 — each fact able to fail, in order
+        self,
+        one: CallToAuthorize,
+        part: QuestionPart,
+        yes: YesContext,
+        plans: PlanStore,
+        state: _Round,
+    ) -> _Shown | str:
+        """:meth:`_shown`'s facts read from the records, once the input may approve.
+
+        Raises:
+            PlanningError: If the plan store cannot be read.
+            MemoryStoreError: If the memory store cannot be read.
+        """
+        found = await self._pointer_for(plans, yes.answers, part, state)
         if isinstance(found, str):
             return found
         pointer, delivered = found
@@ -1480,7 +1506,7 @@ class AuthorizingStage:
         request = await self._rebuilt(asked)
         if request is None:
             return _NOT_THE_CALL
-        if await self._plans.part_effects([part]):
+        if await plans.part_effects([part]):
             return _ALREADY_RUN
         recorded = {each.part for each in asked_calls}
         covers = tuple(
@@ -1509,40 +1535,38 @@ class AuthorizingStage:
         The call is checked against its own question's records alone: a pointer naming
         another round is passed over unread, so another question's records, readable or
         not, never decide this call. A pointer naming its question by place and position
-        alone is resolved to its round by its own delivery record, and one whose record
-        cannot be read is passed over as naming no delivered message, failing closed. A
-        pointer naming this activation's own question is passed over (ADR-0321 §4:1).
+        alone is resolved to its round by its own delivery record. A pointer naming this
+        activation's own question is passed over (ADR-0321 §4:1). Where two pointers of
+        different asking activations both resolve to the part's round, which question
+        asked the call cannot be told, and the call fails closed (ADR-0322 §3:3).
 
         Returns:
             The pointer and its delivered round; otherwise the code-owned word naming
             why none applies: every pointer names this activation's question, none
-            names the question that asked the part, or none names a delivered message.
+            names the question that asked the part, none names a delivered message, or
+            more than one does.
 
         Raises:
-            PlanningError: If the plan store cannot be read for a pointer naming the
-                part's own round.
+            PlanningError: If the plan store cannot be read.
         """
         others = [one for one in pointers if one.activation_id != state.activation_id]
         if not others:
             return _ASKED_HERE
-        named = [one for one in others if one.round == part.round]
-        unnamed = [one for one in others if one.round is None]
-        if not named and not unnamed:
+        candidates = [one for one in others if one.round in {part.round, None}]
+        if not candidates:
             return _NOT_APPROVED
-        for pointer in named:
-            if await self._delivered(plans, pointer) == part.round:
-                return pointer, part.round
         shown = False
-        for pointer in unnamed:
-            try:
-                delivered = await self._delivered(plans, pointer)
-            except PlanningError:
-                _log.warning("authorizing_pointer_unread", stage="authorizing")
-                continue
+        matching: list[AnsweredQuestion] = []
+        for pointer in candidates:
+            delivered = await self._delivered(plans, pointer)
             shown = shown or delivered is not None
             if delivered == part.round:
-                return pointer, delivered
-        return _NOT_APPROVED if shown and not named else _NOT_SHOWN
+                matching.append(pointer)
+        if len({one.activation_id for one in matching}) > 1:
+            return _AMBIGUOUS
+        if matching:
+            return matching[0], part.round
+        return _NOT_APPROVED if shown else _NOT_SHOWN
 
     @staticmethod
     async def _delivered(plans: PlanStore, pointer: AnsweredQuestion) -> str | None:

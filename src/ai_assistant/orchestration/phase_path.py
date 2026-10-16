@@ -3096,16 +3096,21 @@ class PhasePath:
         if not pointers or not working.users_authority or working.conversation_id is None:
             return ()
         if working.approvable is None or working.approvable[0] != pointers:
-            # Each part once, by its asking activation: no two pointers name one question
-            # (ADR-0322 §2:7), so none is repeated, and a part is one call however it was
-            # reached.
-            gathered: dict[tuple[str, QuestionPart], ApprovedAction] = {}
+            # Each part once: no two pointers name one question (ADR-0322 §2:7), so none
+            # is repeated. A part reached from two asking activations cannot be told
+            # apart by its label, so neither is shown, failing closed (§3:3).
+            gathered: dict[QuestionPart, ApprovedAction] = {}
+            askers: dict[QuestionPart, set[str]] = {}
             for pointer in pointers:
                 if pointer.activation_id == working.activation_id:
                     continue
                 for action in await self._approvable(pointer, working):
-                    gathered.setdefault((pointer.activation_id, action.part), action)
-            working.approvable = (pointers, tuple(gathered.values()))
+                    gathered.setdefault(action.part, action)
+                    askers.setdefault(action.part, set()).add(pointer.activation_id)
+            working.approvable = (
+                pointers,
+                tuple(one for part, one in gathered.items() if len(askers[part]) == 1),
+            )
         actions = working.approvable[1]
         if not actions:
             return ()

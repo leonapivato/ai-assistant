@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 
 from ai_assistant.core.diagnostics import diagnosed_activation
-from ai_assistant.core.errors import PlanningError
+from ai_assistant.core.errors import MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
     ActionRequest,
     ActivationEffect,
@@ -104,7 +104,7 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import FrozenJson
+    from ai_assistant.core.types import FrozenJson, MemoryRecord
 
 _AT: Final = datetime(2026, 10, 15, 14, 15, tzinfo=UTC)
 _ASKING: Final = "act-0"
@@ -1192,6 +1192,77 @@ async def test_another_questions_unreadable_records_never_decide_this_call(
     deciding = await _recorded(hub.trail, verdict.decision_id)
     assert deciding.approval is not None
     assert deciding.approval.how.round == _QUESTION
+
+
+@pytest.mark.parametrize("unreadable", ["delivery", "episode"])
+async def test_a_question_whose_records_cannot_be_read_sends_back_its_call_alone(
+    monkeypatch: pytest.MonkeyPatch, unreadable: str
+) -> None:
+    """ADR-0322 §3:1: a failure sends back only its own question's calls.
+
+    The yes approves two questions and planning proposes both calls in one round. The
+    first question's delivery record, or its asking episode, cannot be read: its call
+    goes back as needing you, and the second runs under its own approval.
+    """
+    hub = _Hub()
+    await hub.asked(_asked(), activation_id="act-a", round_id="round:a")
+    await hub.asked(_asked(), activation_id="act-b", round_id="round:b")
+    effects, episodes = hub.plans.activation_effects, hub.memory.get
+
+    async def effects_unread(activation_ids: Sequence[str], /) -> tuple[ActivationEffect, ...]:
+        if "act-a" in activation_ids:
+            msg = "act-a's delivery records cannot be read"
+            raise PlanningError(msg)
+        return await effects(activation_ids)
+
+    async def episode_unread(record_id: str) -> MemoryRecord | None:
+        if record_id == "activation:act-a":
+            msg = "act-a's episode cannot be read"
+            raise MemoryStoreError(msg)
+        return await episodes(record_id)
+
+    if unreadable == "delivery":
+        monkeypatch.setattr(hub.plans, "activation_effects", effects_unread)
+    else:
+        monkeypatch.setattr(hub.memory, "get", episode_unread)
+    yes = YesContext(
+        answers=(
+            AnsweredQuestion(activation_id="act-a", round="round:a"),
+            AnsweredQuestion(activation_id="act-b", round="round:b"),
+        ),
+        given_at=_AT,
+        users_authority=True,
+    )
+    calls = (
+        (_call("c1", "book", q="table for two at 8"), QuestionPart(round="round:a", part=1)),
+        (_call("c2", "book", q="table for two at 8"), QuestionPart(round="round:b", part=1)),
+    )
+
+    decided = await hub.authorize(_round(*calls, yes=yes))
+
+    assert [one.verdict for one in decided.verdicts] == [Verdict.NEEDS_YOU, Verdict.ALLOWED]
+    (allowed,) = decided.allowed
+    approval = allowed.call.decision.approval
+    assert approval is not None
+    assert approval.how.activation_id == "act-b"
+
+
+async def test_two_asking_activations_resolving_to_one_round_approve_nothing() -> None:
+    """ADR-0322 §3:3: which question asked the call cannot be told, so it fails closed."""
+    hub = _Hub()
+    await hub.asked(_asked(), activation_id="act-a", round_id="round:shared")
+    await hub.asked(_asked(), activation_id="act-b", round_id="round:shared")
+    yes = YesContext(
+        answers=(
+            AnsweredQuestion(activation_id="act-a", round="round:shared"),
+            AnsweredQuestion(activation_id="act-b", round="round:shared"),
+        ),
+        given_at=_AT,
+        users_authority=True,
+    )
+    part = QuestionPart(round="round:shared", part=1)
+
+    await _failing(hub, _round((_call("c1", "book", q="table for two at 8"), part), yes=yes))
 
 
 async def test_a_part_no_pointer_names_the_round_of_is_not_approved() -> None:
