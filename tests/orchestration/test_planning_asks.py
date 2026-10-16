@@ -70,6 +70,9 @@ _TOOLS: Final = (_SEARCH, _BOOK, _REMEMBER)
 _SLOT: Final = "2026-10-12 19:00"
 _FILLED: Final = "ref-filled-by-the-hub"
 
+#: The fixed line code puts above the exact lines (the owner's ruling on #3094).
+_YES: Final = "Needs your yes:"
+
 
 def _booking(slot: str = _SLOT) -> ActionRequest:
     return ActionRequest(tool=_BOOK, parameters={"slot": slot, "client_reference": _FILLED})
@@ -188,6 +191,7 @@ async def test_the_instruction_says_how_to_ask_and_how_answers_go() -> None:
     assert "explain the action in your own words, with the details that matter" in instruction
     assert "name the call in asks by the reference shown with its outcome" in instruction
     assert "The system adds the exact details below your message" in instruction
+    assert 'under its own "Needs your yes:" line, which you never write yourself' in instruction
     assert "numbered where there are several" in instruction
     assert "no buttons and no options" in instruction
     assert "ask which they mean, and never guess" in instruction
@@ -433,7 +437,9 @@ async def test_a_named_call_is_asked_with_its_exact_line_and_recorded() -> None:
         text="I can book the table for 7pm tomorrow. Shall I?",
     )
     line = f'book — slot: "{_SLOT}"'
-    assert planned.round.text == f"I can book the table for 7pm tomorrow. Shall I?\n\n{line}"
+    assert planned.round.text == (
+        f"I can book the table for 7pm tomorrow. Shall I?\n\n{_YES}\n{line}"
+    )
     assert planned.message == planned.round.text
     assert _FILLED not in planned.message
     (asked,) = planned.round.asked
@@ -458,10 +464,11 @@ async def test_several_calls_are_numbered_by_part_in_the_order_named() -> None:
         "2026-10-13 20:00",
         "2026-10-12 19:00",
     ]
-    assert planned.round.text.splitlines()[-2:] == [
-        '1. book — slot: "2026-10-13 20:00"',
-        '2. book — slot: "2026-10-12 19:00"',
-    ]
+    assert planned.round.text == (
+        f"Shall I book it?\n\n{_YES}\n"
+        '1. book — slot: "2026-10-13 20:00"\n'
+        '2. book — slot: "2026-10-12 19:00"'
+    )
 
 
 @pytest.mark.parametrize("name", ["9.9", "R1", "c1", "1.2", " "])
@@ -576,7 +583,7 @@ async def test_an_argument_name_cannot_add_a_line_to_the_question() -> None:
         asks=("1.1",), outcomes=(_needs_you(earlier.id, "c1", sneaky),), rounds=(earlier,)
     )
     assert len(planned.round.asked) == 1
-    lines = planned.round.text.split("\n\n", 1)[1].splitlines()
+    lines = planned.round.text.split(f"\n\n{_YES}\n", 1)[1].splitlines()
     assert lines == [f'book — slot: "{_SLOT}"; "extra\\n2. book — slot": "20:00"']
 
 
@@ -604,13 +611,14 @@ async def test_no_character_breaks_an_exact_line(brk: str, where: str) -> None:
     outcome = _needs_you(earlier.id, "c1", request, replaces=replaces)
     planned, _ = await _asked(asks=("1.1",), outcomes=(outcome,), rounds=(earlier,))
     assert len(planned.round.asked) == 1
-    (line,) = planned.round.text.split("\n\n", 1)[1].splitlines()
+    (line,) = planned.round.text.split(f"\n\n{_YES}\n", 1)[1].splitlines()
     assert brk not in line
     quoted = line[line.index('"extra') : line.index('slot"') + len('slot"')]
     assert json.loads(quoted) == text
 
 
-async def test_a_message_with_no_text_is_the_exact_lines_alone() -> None:
+async def test_a_message_with_no_text_is_the_fixed_line_and_the_exact_line() -> None:
+    """#3094: the fixed line is there whether or not planning wrote text."""
     earlier = _proposed(_SLOT)
     planned, _ = await _asked(
         asks=("1.1",),
@@ -618,7 +626,34 @@ async def test_a_message_with_no_text_is_the_exact_lines_alone() -> None:
         rounds=(earlier,),
         text="  ",
     )
-    assert planned.message == f'book — slot: "{_SLOT}"'
+    assert planned.message == f'{_YES}\nbook — slot: "{_SLOT}"'
+    assert planned.round.text == planned.message
+
+
+async def test_a_message_with_no_text_asking_several_is_the_fixed_line_and_the_numbered_ones() -> (
+    None
+):
+    """#3094: with several calls, the numbered lines follow the fixed line as ever."""
+    earlier = _proposed("2026-10-12 19:00", "2026-10-13 20:00")
+    outcomes = (
+        _needs_you(earlier.id, "c1", _booking("2026-10-12 19:00")),
+        _needs_you(earlier.id, "c2", _booking("2026-10-13 20:00")),
+    )
+    planned, _ = await _asked(asks=("1.1", "1.2"), outcomes=outcomes, rounds=(earlier,), text="")
+    assert planned.message == (
+        f'{_YES}\n1. book — slot: "2026-10-12 19:00"\n2. book — slot: "2026-10-13 20:00"'
+    )
+
+
+async def test_a_message_asking_nothing_carries_no_fixed_line() -> None:
+    """The fixed line is code's only above exact lines: a round asking nothing has none."""
+    earlier = _proposed(_SLOT)
+    planned, _ = await _asked(
+        asks=(), outcomes=(_needs_you(earlier.id, "c1", _booking()),), rounds=(earlier,)
+    )
+    assert planned.round.asked == ()
+    assert planned.message == "Shall I book it?"
+    assert _YES not in planned.message
 
 
 async def test_an_unrecordable_call_is_not_asked_about() -> None:
