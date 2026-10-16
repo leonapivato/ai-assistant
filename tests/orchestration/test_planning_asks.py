@@ -144,6 +144,40 @@ async def test_the_instruction_carries_the_line_of_care() -> None:
     ) in _instruction(completer)
 
 
+#: #3088: the line of care is met by proposing, said right after it.
+_PROPOSE_DONT_PREASK: Final = (
+    "Checking is care: it grants nothing and withholds nothing.\n"
+    "\n"
+    "When the user has asked for an action, propose it as soon as you know its details, "
+    "rather than first asking them in words whether to do it. If it needs their yes, it "
+    "runs only once the system has asked them with its exact details and they have said "
+    "yes, so that question is the check, even where a mistake would be costly. Asking in "
+    "words first makes them say yes twice, once to you and again to the system. What you "
+    "found out on the way, such as a price or a time, goes in that question's explanation "
+    "and is no reason to ask first. Check in words before proposing only when you are "
+    "unsure what they meant, such as which date or which place, or when you know that a "
+    "costly action would run without their yes.\n"
+    "\n"
+    "Whether a call needs the user's yes is known only once it comes back"
+)
+
+
+async def test_an_asked_for_action_is_proposed_and_not_asked_about_in_words_first() -> None:
+    """#3088: the system's question with the exact line is the check, not a prose round."""
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs())
+    assert _PROPOSE_DONT_PREASK in _instruction(completer)
+
+
+async def test_a_place_that_takes_no_message_is_not_told_to_propose_instead_of_asking() -> None:
+    """§7:3: where no message goes, no question is the check, so the paragraph is left out."""
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(place=PlaceWindow(takes_message=False)))
+    instruction = _instruction(completer)
+    assert "Checking is care: it grants nothing and withholds nothing." in instruction
+    assert "rather than first asking them in words" not in instruction
+
+
 async def test_the_instruction_says_how_to_ask_and_how_answers_go() -> None:
     """§2:1-§2:4, §2:12; planning's side of §3:5, §3:8-§3:9."""
     stage, completer, _ = _stage()
