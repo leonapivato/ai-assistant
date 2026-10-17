@@ -83,7 +83,7 @@ async def test_the_default_bound_keeps_a_thousand_finished_polls() -> None:
     assert await record.call(claims[1].attempt) is not None
 
 
-@pytest.mark.parametrize("kept_calls", [0, -1, True, 1.5], ids=repr)
+@pytest.mark.parametrize("kept_calls", [0, -1, 2**63, True, 1.5], ids=repr)
 def test_a_bound_below_one_is_refused(kept_calls: object) -> None:
     with pytest.raises(ValueError, match="kept_calls"):
         FakeTelegramIntakeRecord(kept_calls=kept_calls)  # type: ignore[arg-type]

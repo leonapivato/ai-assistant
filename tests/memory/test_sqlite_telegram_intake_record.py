@@ -176,7 +176,7 @@ def test_a_path_that_cannot_be_opened_is_the_seams_error(tmp_path: Path) -> None
         SqliteTelegramIntakeRecord(path=tmp_path / "missing" / "telegram.db")
 
 
-@pytest.mark.parametrize("kept_calls", [0, -1, True, 1.5], ids=repr)
+@pytest.mark.parametrize("kept_calls", [0, -1, 2**63, True, 1.5], ids=repr)
 def test_a_bound_below_one_is_refused(tmp_path: Path, kept_calls: object) -> None:
     with pytest.raises(ValueError, match="kept_calls"):
         SqliteTelegramIntakeRecord(path=tmp_path / "telegram.db", kept_calls=kept_calls)  # type: ignore[arg-type]

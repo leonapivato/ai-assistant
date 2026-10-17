@@ -23,6 +23,7 @@ indivisible step, which is the exclusion the contract asks of it.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from itertools import islice
 from typing import TYPE_CHECKING, Final, final
 from uuid import uuid4
 
@@ -105,9 +106,11 @@ def _checked_update_ids(values: object) -> tuple[int, ...]:
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
         msg = f"update_ids must be a sequence of int, got {describe_untrusted(values)}"
         raise ValueError(msg)
-    held = tuple(values)
+    # Read at most one past the limit, so an enormous sequence is refused without
+    # being materialized: the limit is what bounds the work, not the caller's length.
+    held = tuple(islice(values, _MAX_NAMED + 1))
     if len(held) > _MAX_NAMED:
-        msg = f"update_ids holds {len(held)}; at most {_MAX_NAMED} are named at once"
+        msg = f"update_ids holds more than {_MAX_NAMED}; at most {_MAX_NAMED} are named at once"
         raise ValueError(msg)
     for one in held:
         _checked_update_id(one)
@@ -182,14 +185,15 @@ class FakeTelegramIntakeRecord:
 
         Args:
             kept_calls: How many finished polls and typing indicators are kept, the
-                newest; at least 1.
+                newest; in ``[1, 2**63)``, the range a SQLite integer binds.
             new_id: The attempt id factory every claim mints through.
 
         Raises:
-            ValueError: If ``kept_calls`` is not an ``int`` of at least 1.
+            ValueError: If ``kept_calls`` is not an ``int`` in ``[1, 2**63)``.
         """
-        if type(kept_calls) is not int or kept_calls < 1:
-            msg = f"kept_calls must be an int of at least 1, got {describe_untrusted(kept_calls)}"
+        if type(kept_calls) is not int or not 1 <= kept_calls < _ID_CEILING:
+            described = describe_untrusted(kept_calls)
+            msg = f"kept_calls must be an int in [1, {_ID_CEILING}), got {described}"
             raise ValueError(msg)
         self._kept_calls = kept_calls
         self._new_id = new_id

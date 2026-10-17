@@ -220,6 +220,18 @@ class TelegramIntakeRecordContract:
 
         assert (await record.export()).intake == ()
 
+    async def test_an_enormous_sequence_is_refused_without_being_read_whole(
+        self, record: TelegramIntakeRecord
+    ) -> None:
+        enormous = range(10**15)
+
+        with pytest.raises(ValueError, match="update_ids"):
+            await record.take_in(enormous, activation_id=ACTIVATION)
+        with pytest.raises(ValueError, match="update_ids"):
+            await record.recorded(enormous)
+
+        assert (await record.export()).intake == ()
+
     async def test_a_thousand_update_ids_are_accepted(self, record: TelegramIntakeRecord) -> None:
         marked = await record.take_in(range(1000), activation_id=ACTIVATION)
 
@@ -572,6 +584,21 @@ class TelegramIntakeRecordContract:
 
         assert await record.call("attempt-1") is None
         assert [one.attempt for one in (await record.export()).calls] == ["attempt-2", "attempt-3"]
+
+    async def test_the_largest_bound_accepted_still_lets_every_call_finish(
+        self, factory: TelegramIntakeRecordFactory
+    ) -> None:
+        record = factory(kept_calls=2**63 - 1)
+        typing = await record.claim_typing(ACTIVATION)
+        poll = await record.claim_poll()
+
+        await record.finish(typing, DONE)
+        await record.finish(poll.attempt, POLLED)
+
+        assert [one.outcome for one in (await record.export()).calls] == [
+            TelegramCallOutcome.DONE,
+            TelegramCallOutcome.DONE,
+        ]
 
     async def test_a_claim_with_no_outcome_is_never_dropped(
         self, factory: TelegramIntakeRecordFactory
