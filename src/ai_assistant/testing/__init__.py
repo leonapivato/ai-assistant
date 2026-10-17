@@ -133,6 +133,11 @@ from ai_assistant.testing.speech import (
     FakeSpeechTranscriber,
 )
 from ai_assistant.testing.stories import FakeStoryStore
+from ai_assistant.testing.telegram import (
+    DEFAULT_TELEGRAM_CHAT_ID,
+    FakeTelegramBotClient,
+    TelegramCall,
+)
 from ai_assistant.testing.tool_calling import (
     DEFAULT_ROUND_TEXT,
     FakeToolCallingCompleter,
@@ -185,6 +190,7 @@ __all__ = [
     "DEFAULT_SEARCH_CONTENT",
     "DEFAULT_SEARCH_ORIGIN",
     "DEFAULT_SEARCH_SOURCE_NAME",
+    "DEFAULT_TELEGRAM_CHAT_ID",
     "FAKE_FORECAST_ID",
     "FAKE_FORECAST_READ",
     "FAKE_WEB_SEARCH",
@@ -240,6 +246,7 @@ __all__ = [
     "FakeSpendGate",
     "FakeSpendLedger",
     "FakeStoryStore",
+    "FakeTelegramBotClient",
     "FakeToolCallingCompleter",
     "FakeToolImplementation",
     "FakeToolInvoker",
@@ -255,6 +262,7 @@ __all__ = [
     "ScriptedDay",
     "SecretBacking",
     "SecretMethod",
+    "TelegramCall",
     "TransportAttempt",
     "attested_proposal",
     "authorised",

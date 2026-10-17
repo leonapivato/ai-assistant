@@ -112,11 +112,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import ssl
 import string
 import unicodedata
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from email.policy import SMTP as SMTP_POLICY
 from typing import TYPE_CHECKING, Final, final
@@ -124,18 +127,36 @@ from typing import TYPE_CHECKING, Final, final
 import structlog
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import ConnectionStoreError, ToolError, TransportError
+from ai_assistant.core.errors import (
+    ConnectionStoreError,
+    SecretStoreError,
+    ToolError,
+    TransportError,
+)
 from ai_assistant.core.types import (
+    TELEGRAM_MESSAGE_LIMIT,
     TRANSPORT_OCTET_CEILING,
     DestinationProtocol,
     ProvisioningState,
+    TelegramFailure,
+    TelegramForwardKind,
+    TelegramForwardOrigin,
+    TelegramMessage,
+    TelegramOutcome,
+    TelegramPollOutcome,
+    TelegramQuotedMessage,
+    TelegramSendOutcome,
+    TelegramUpdate,
     TransportEndpoint,
+    telegram_length,
 )
+from ai_assistant.tools.consume import pending_cancellations
 from ai_assistant.tools.destinations import DestinationCanonicalisationError, canonicalise
 from ai_assistant.tools.destinations import DestinationProtocol as SeamProtocol
+from ai_assistant.tools.http_reading import decoded_object
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import ByteChannel, OutboundTransport, Secrets
     from ai_assistant.core.types import EgressBinding, FrozenJson, SecretName
@@ -2549,13 +2570,17 @@ class HttpsExchange:
     object is handed the header that carries the result and never the face that
     would produce one.
 
-    **A GET, and no other method.** ADR-0231 §5 leaves "which path, which parameter
-    names, which headers and which body shape a provider request takes" to the
-    integration, and this exchange narrows the last of those to *none*: a search is
-    a read of a remote index, which is the ground §5 gives for
-    ``reversibility=REVERSIBLE``, and a seam able to send a body is a seam able to
-    write. A later lane needing a body-bearing search endpoint widens this
-    deliberately rather than by default (issue filed alongside this change).
+    **A GET for the integrations, and one POST for the Telegram line alone.** ADR-0231
+    §5 leaves "which path, which parameter names, which headers and which body shape
+    a provider request takes" to the integration, and :meth:`get` narrows the last of
+    those to *none*: a search is a read of a remote index, which is the ground §5
+    gives for ``reversibility=REVERSIBLE``, and a seam able to send a body is a seam
+    able to write. The search and the forecast keep that ``GET`` and their
+    declarations are unchanged. ADR-0323 §11:6 is the deliberate widening #2076
+    parked: :meth:`post_json`, a ``POST`` with a JSON body and its
+    ``Content-Length``, "used by the line's route alone" —
+    :class:`HttpsTelegramBotClient` is its one caller, and
+    ``tests/tools/test_telegram_bot_client.py`` holds the tree to that.
 
     **Nothing constructs one yet.** ADR-0231 §17's Lane 2 is a transport nothing
     drives, "reviewable against a real exchange before anything is minted"; the
@@ -2657,6 +2682,94 @@ class HttpsExchange:
         """
         endpoint = parse_https_origin(origin)
         request = self._request(endpoint, target=target, headers=headers)
+        return await self._exchange(endpoint, request, on_written=None)
+
+    async def post_json(
+        self,
+        *,
+        origin: str,
+        target: str,
+        payload: Mapping[str, object],
+        on_written: Callable[[], None] | None = None,
+    ) -> HttpsResponse:
+        """Post ``payload`` as JSON to ``target`` at ``origin``, or refuse (ADR-0323 §11:6).
+
+        :meth:`get`'s order and every one of its properties, with a body: the origin
+        is pinned, the target checked and the body encoded **before a channel is
+        opened**; nothing is written before :attr:`ByteChannel.is_secure` reads
+        ``True``; the request, body included, is written in one write; and no
+        redirect is followed. The exchange writes ``Content-Type`` and
+        ``Content-Length`` itself, so no caller frames the body, and it takes no
+        other header: the line's route needs none.
+
+        **Used by the Telegram line's route alone** (§11:6). Its one caller is
+        :class:`HttpsTelegramBotClient`.
+
+        Args:
+            origin: The recipient, in any form ADR-0231 §8 canonicalises.
+            target: The origin-form request target, as :meth:`get` takes it.
+            payload: The JSON object to send. Encoded here, compactly and as UTF-8,
+                refusing ``NaN`` and the infinities, which JSON does not have.
+            on_written: Called once, with nothing, **immediately before** the
+                request's first octet is handed to the channel — the one moment
+                after which a request may have reached the far end. A caller that
+                must tell "never written" from "written and unanswered" (§6:3 to §6:4)
+                reads it, because a bound it enforces from outside this call cannot.
+
+        Returns:
+            The response, whose ``status`` is never a redirect.
+
+        Raises:
+            TransportPinError: As :meth:`get`, and also if ``payload`` is not a JSON
+                object this exchange will encode. Raised before a channel is opened.
+            HttpsRedirectRefusedError: If the far end answered ``3xx``.
+            HttpsResponseTooLargeError: If the response passed the bound.
+            MalformedHttpResponseError: If it was not an HTTP/1.1 response this
+                exchange will read.
+            TransportError: If the channel could not be opened, verified or
+                continued.
+            CancelledError: Re-raised after the channel is released (ADR-0060 §1).
+        """
+        endpoint = parse_https_origin(origin)
+        try:
+            body = json.dumps(
+                dict(payload), ensure_ascii=False, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            # `UnicodeEncodeError` is a `ValueError`: a lone surrogate has no UTF-8
+            # form. The value is not named — the body may carry the user's text.
+            msg = "the request body is not a JSON object this seam will encode"
+            raise TransportPinError(msg) from exc
+        request = self._request(
+            endpoint,
+            target=target,
+            headers=(),
+            method="POST",
+            body=body,
+        )
+        return await self._exchange(endpoint, request, on_written=on_written)
+
+    async def _exchange(
+        self,
+        endpoint: TransportEndpoint,
+        request: bytes,
+        *,
+        on_written: Callable[[], None] | None,
+    ) -> HttpsResponse:
+        """Open one channel to ``endpoint``, write ``request``, read one response.
+
+        Steps 2 to 6 of :meth:`get`'s order, shared by both methods so that the
+        properties ADR-0231 §5 lists hold for the ``POST`` because they are the same
+        lines, not a second copy of them.
+
+        Args:
+            endpoint: The pinned endpoint.
+            request: The request's octets, already checked.
+            on_written: See :meth:`post_json`.
+
+        Returns:
+            The response.
+        """
         channel = await self._transport.open_channel(endpoint)
         try:
             if not channel.is_secure:  # pragma: no cover — no conforming transport
@@ -2680,13 +2793,21 @@ class HttpsExchange:
                     "written to it; this seam has no cleartext form"
                 )
                 raise TransportPinError(msg)
+            if on_written is not None:
+                on_written()
             await channel.write(request)
             return await self._response(channel)
         finally:
             await channel.close()
 
     def _request(
-        self, endpoint: TransportEndpoint, *, target: str, headers: Sequence[tuple[str, str]]
+        self,
+        endpoint: TransportEndpoint,
+        *,
+        target: str,
+        headers: Sequence[tuple[str, str]],
+        method: str = "GET",
+        body: bytes = b"",
     ) -> bytes:
         """Render the request line, the fields this exchange owns, and ``headers``.
 
@@ -2701,10 +2822,13 @@ class HttpsExchange:
                 the ``Host`` field.
             target: The origin-form request target.
             headers: The caller's fields, in order.
+            method: ``GET``, or ``POST`` for :meth:`post_json` alone.
+            body: A ``POST``'s JSON octets, framed here by ``Content-Type`` and
+                ``Content-Length``. Empty for a ``GET``, which sends no body.
 
         Returns:
-            The request's octets, terminated by the empty line that ends the field
-            section. There is no body: this exchange sends none.
+            The request's octets: the field section, its terminating empty line, and
+            the body where there is one.
 
         Raises:
             TransportPinError: If the target or a field is not one this exchange
@@ -2719,7 +2843,7 @@ class HttpsExchange:
                 "than encoded, and the value is not named"
             )
             raise TransportPinError(msg)
-        lines = [f"GET {target} HTTP/1.1"]
+        lines = [f"{method} {target} HTTP/1.1"]
         authority = (
             endpoint.host
             if endpoint.port == _HTTPS_DEFAULT_PORT
@@ -2731,10 +2855,12 @@ class HttpsExchange:
         # be holding a route this seam has no intention of using again — and where
         # the response declares no length, the close is what frames it.
         lines.append("Connection: close")
+        if method == "POST":
+            lines.extend(("Content-Type: application/json", f"Content-Length: {len(body)}"))
         for name, value in headers:
             self._check_field(name, value)
             lines.append(f"{name}: {value}")
-        return _CRLF.join(line.encode("ascii") for line in [*lines, "", ""])
+        return _CRLF.join(line.encode("ascii") for line in [*lines, "", ""]) + body
 
     def _check_field(self, name: str, value: str) -> None:
         """Refuse a field this exchange will not write.
@@ -3614,10 +3740,847 @@ class HttpsEgressTransport:
             raise _refuse_changed(msg)
 
 
+# --- The Telegram line's Bot API client (ADR-0323 §11, §13, §15) -------------
+#
+# The line's one route to Telegram, and the one production implementation of
+# `core.protocols.TelegramBotClient`. Here because §11:1 puts "every call to
+# Telegram's Bot API" in this module and in no other, and §11:4 puts the token read
+# here too: the line's reader and writer, in `orchestration`, hold the contract and
+# never this class.
+
+#: The one origin the line reaches, fixed in code and never configured (§11:5).
+TELEGRAM_BOT_API_ORIGIN: Final = "https://api.telegram.org"
+
+#: What a bot token may be spelled in before it is bound into a request target.
+#: BotFather's tokens are a numeric id, a colon and a run of letters, digits, ``_``
+#: and ``-``. Anything else is refused rather than written, because the token is a
+#: **path segment** (§11:8): a ``/``, ``?``, ``#`` or ``%`` in it would change which
+#: method, or which request, the target names — a value read off a keyring choosing
+#: what the line does.
+_TELEGRAM_TOKEN_CHARACTERS: Final = frozenset(string.ascii_letters + string.digits + ":_-")
+
+#: The Bot API methods the line calls, and nothing else (§11, §15's table row).
+_GET_UPDATES: Final = "getUpdates"
+_SEND_MESSAGE: Final = "sendMessage"
+_SEND_CHAT_ACTION: Final = "sendChatAction"
+
+#: The one kind of update a poll asks for: a new message (§5:1). Telegram keeps the
+#: last list a bot asked with, so asking every time is what keeps edits and every
+#: other kind away whatever was asked before.
+_ALLOWED_UPDATES: Final = ("message",)
+
+#: The status a done Bot API call answers with.
+_OK: Final = 200
+
+#: The Bot API's "too many requests", the one refusal §6:3 calls retryable.
+_RATE_LIMITED: Final = 429
+
+#: The client-error class, which is Telegram saying it will not perform the request
+#: (§6:5). A server error is not that: it says nothing about whether the request
+#: was performed, so it is :attr:`TelegramFailure.UNKNOWN`.
+_CLIENT_ERRORS: Final = range(400, 500)
+
+#: The most seconds a rate limit's wait is read as. Beyond it the figure is no
+#: wait anyone means, and the outcome carries none.
+_MAX_RETRY_AFTER: Final = 2**31
+
+#: The keys a message carries when it is a forward, in Bot API 7's spelling and in
+#: the one it replaced. A message carrying any of them is a forward, and one whose
+#: origin cannot be read is not read at all rather than read as the user's own.
+_FORWARD_KEYS: Final = frozenset(
+    {"forward_origin", "forward_from", "forward_from_chat", "forward_sender_name", "forward_date"}
+)
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class _Failed:
+    """A call that ends here, with its class and a rate limit's wait."""
+
+    failure: TelegramFailure
+    retry_after: int | None = None
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class _Answered:
+    """A call Telegram answered as done, with the ``result`` it returned."""
+
+    result: object
+
+
+@final
+class _Written:
+    """Whether a call's request reached the channel: §6:3 against §6:4."""
+
+    __slots__ = ("written",)
+
+    def __init__(self) -> None:
+        """Start unwritten."""
+        self.written = False
+
+    def __call__(self) -> None:
+        """Mark the request written, from :meth:`HttpsExchange.post_json`."""
+        self.written = True
+
+
+@final
+class HttpsTelegramBotClient:
+    """The owner's bot on Telegram, reached through this seam (ADR-0323 §11).
+
+    :class:`HttpsEgressTransport`'s order for the line's route, with no binding in
+    it, because the line's calls are not egress calls (§11:2). Every call, after its
+    arguments are checked and its bound has started:
+
+    1. A chat other than :attr:`chat_id` is refused — the channel's rule, held here
+       as well as at the writer (§6:1, §9:2), and before anything is read.
+    2. The connection record is read **once**, and the token is read for the slot
+       that record names with no ``await`` in between (§11:4, ADR-0148 §6).
+    3. The record is re-read before any byte is written, and the token is dropped
+       unless the record is still active and still at the revision and identity read
+       before. An unanswerable re-read is a changed one.
+    4. The token is bound into the target ``/bot<token>/<method>`` and handed to
+       :meth:`HttpsExchange.post_json` with the call's JSON body, and nowhere else.
+       The target is never stored, returned, logged or put into an error (§11:9).
+
+    **It holds no ledger and no clock.** The record a call is claimed on is the
+    caller's, named by ``attempt`` (§13:2); the bound is the caller's, handed per
+    call and enforced here (§11:10 to §11:12).
+
+    **Built only where the line is configured**, from ``Settings.telegram_connection``
+    and ``Settings.telegram_user_id`` (§3:3), over an :class:`HttpsExchange` built
+    with ``Settings.telegram_max_response_bytes`` (§11:13) and its own injected
+    transport (ADR-0191 §3).
+    """
+
+    __slots__ = ("_chat_id", "_exchange", "_records", "_reference", "_secrets")
+
+    def __init__(
+        self,
+        *,
+        reference: str,
+        chat_id: int,
+        records: ConnectionRecords,
+        secrets: Secrets,
+        exchange: HttpsExchange,
+    ) -> None:
+        """Bind a client to the line's connection and its one chat.
+
+        Args:
+            reference: ``Settings.telegram_connection``: the connection whose
+                credential is the bot's token. Compared byte for byte against the
+                store, as every reference is.
+            chat_id: ``Settings.telegram_user_id``: the owner's account, which is the
+                id of their private chat with the bot.
+            records: The connection records this client reads, twice per call.
+            secrets: The ``INTEGRATION``-scoped reading face (ADR-0125 §8), never a
+                ``SecretStore``.
+            exchange: The HTTPS exchange, holding the line's read bound.
+
+        Raises:
+            ValueError: If ``reference`` is blank or ``chat_id`` is not a positive
+                ``int``. ``Settings`` refuses both at load.
+        """
+        if type(reference) is not str or not reference.strip():
+            msg = "reference is the line's connection reference, a non-blank string"
+            raise ValueError(msg)
+        if type(chat_id) is not int or chat_id < 1:
+            msg = "chat_id is the owner's Telegram account id, a positive int"
+            raise ValueError(msg)
+        self._reference = reference
+        self._chat_id = chat_id
+        self._records = records
+        self._secrets = secrets
+        self._exchange = exchange
+
+    def __repr__(self) -> str:
+        """Name the connection, never the token and never a target."""
+        return f"HttpsTelegramBotClient(reference={self._reference!r})"
+
+    @property
+    def chat_id(self) -> int:
+        """The owner's private chat with the bot, the one chat this client writes to."""
+        return self._chat_id
+
+    async def poll(
+        self,
+        *,
+        attempt: str,
+        offset: int | None,
+        wait: timedelta,
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, ADR-0323 §11:10)
+    ) -> TelegramPollOutcome:
+        """Ask Telegram for new messages (see the Protocol).
+
+        Args:
+            attempt: The claimed record's id.
+            offset: The lowest update id still wanted, or ``None``.
+            wait: How long Telegram may hold the request open.
+            timeout: The bound on the whole poll, strictly greater than ``wait``.
+
+        Returns:
+            The outcome.
+        """
+        attempt = _checked_attempt(attempt)
+        if offset is not None and (type(offset) is not int or not 0 <= offset < 2**63):
+            msg = "offset is None or a non-negative int"
+            raise ValueError(msg)
+        held = _checked_duration(wait, name="wait", floor="zero")
+        bound = _checked_duration(timeout, name="timeout", floor="positive")
+        if bound <= held:
+            msg = f"timeout ({bound}) must be strictly greater than wait ({held}) (ADR-0323 §11:10)"
+            raise ValueError(msg)
+        payload: dict[str, object] = {
+            "timeout": int(held.total_seconds()),
+            "allowed_updates": list(_ALLOWED_UPDATES),
+        }
+        if offset is not None:
+            payload["offset"] = offset
+        reply = await self._call(
+            attempt=attempt, method=_GET_UPDATES, payload=payload, bound=bound, poll=True
+        )
+        if isinstance(reply, _Failed):
+            return TelegramPollOutcome(failure=reply.failure, retry_after_seconds=reply.retry_after)
+        return _polled(reply.result)
+
+    async def send(
+        self,
+        *,
+        attempt: str,
+        chat_id: int,
+        text: str,
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, ADR-0323 §11:12)
+    ) -> TelegramSendOutcome:
+        """Send one message of plain text to the line's chat (see the Protocol).
+
+        Args:
+            attempt: The claimed record's id.
+            chat_id: The chat to send to, which must be :attr:`chat_id`.
+            text: The text, within one Telegram message.
+            timeout: The bound on this send.
+
+        Returns:
+            The outcome.
+        """
+        attempt = _checked_attempt(attempt)
+        chat = _checked_chat(chat_id)
+        body = _checked_text(text)
+        bound = _checked_duration(timeout, name="timeout", floor="positive")
+        if chat != self._chat_id:
+            return TelegramSendOutcome(failure=self._other_chat(attempt, _SEND_MESSAGE))
+        reply = await self._call(
+            attempt=attempt,
+            method=_SEND_MESSAGE,
+            payload={"chat_id": chat, "text": body},
+            bound=bound,
+            poll=False,
+        )
+        if isinstance(reply, _Failed):
+            return TelegramSendOutcome(failure=reply.failure, retry_after_seconds=reply.retry_after)
+        message_id = _sent_id(reply.result)
+        if message_id is None:
+            _log.warning("telegram_call_unread", attempt=attempt, method=_SEND_MESSAGE)
+            return TelegramSendOutcome(failure=TelegramFailure.UNKNOWN)
+        return TelegramSendOutcome(message_id=message_id)
+
+    async def show_typing(
+        self,
+        *,
+        attempt: str,
+        chat_id: int,
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, ADR-0323 §11:12)
+    ) -> TelegramOutcome:
+        """Show Telegram's "typing…" in the line's chat once (see the Protocol).
+
+        Args:
+            attempt: The claimed record's id.
+            chat_id: The chat, which must be :attr:`chat_id`.
+            timeout: The bound on this call.
+
+        Returns:
+            The outcome.
+        """
+        attempt = _checked_attempt(attempt)
+        chat = _checked_chat(chat_id)
+        bound = _checked_duration(timeout, name="timeout", floor="positive")
+        if chat != self._chat_id:
+            return TelegramOutcome(failure=self._other_chat(attempt, _SEND_CHAT_ACTION))
+        reply = await self._call(
+            attempt=attempt,
+            method=_SEND_CHAT_ACTION,
+            payload={"chat_id": chat, "action": "typing"},
+            bound=bound,
+            poll=False,
+        )
+        if isinstance(reply, _Failed):
+            return TelegramOutcome(failure=reply.failure, retry_after_seconds=reply.retry_after)
+        if reply.result is not True:
+            _log.warning("telegram_call_unread", attempt=attempt, method=_SEND_CHAT_ACTION)
+            return TelegramOutcome(failure=TelegramFailure.UNKNOWN)
+        return TelegramOutcome()
+
+    def _other_chat(self, attempt: str, method: str) -> TelegramFailure:
+        """Refuse a call to another chat, before anything is read (§6:1).
+
+        Args:
+            attempt: The claimed record's id, for the log line.
+            method: The method that was not called.
+
+        Returns:
+            :attr:`TelegramFailure.OTHER_CHAT`.
+        """
+        _log.warning("telegram_call_other_chat_refused", attempt=attempt, method=method)
+        return TelegramFailure.OTHER_CHAT
+
+    async def _call(
+        self,
+        *,
+        attempt: str,
+        method: str,
+        payload: Mapping[str, object],
+        bound: timedelta,
+        poll: bool,
+    ) -> _Answered | _Failed:
+        """Make one call under its bound, and class what came of it (§6, §11).
+
+        **The class is read off what happened, never off an exception's type alone**
+        (ADR-0241 §7). Whether the request was written is :class:`_Written`'s, set by
+        the exchange the moment before the first octet goes; whether *this* bound
+        ended is ``Timeout.expired()``, which nothing a collaborator does can reset.
+        A bound that ended outranks whatever else came back: a channel that caught
+        the cancellation and answered anyway is not a call that kept within it.
+
+        Args:
+            attempt: The claimed record's id.
+            method: The Bot API method.
+            payload: Its JSON body.
+            bound: The call's bound, already checked.
+            poll: Whether this is a poll, whose expiry is always unknown (§11:11).
+
+        Returns:
+            What Telegram answered, or the failure.
+
+        Raises:
+            CancelledError: Re-raised when the call is cancelled from outside, after
+                the channel is closed; raised freshly where a collaborator absorbed
+                one (ADR-0060 §1).
+        """
+        entered_with = pending_cancellations()
+        written = _Written()
+        deadline = asyncio.timeout(bound.total_seconds())
+        reply: _Answered | _Failed
+        try:
+            async with deadline:
+                reply = await self._asked(method, payload, written)
+        except asyncio.CancelledError:
+            if pending_cancellations() > entered_with:
+                raise
+            # A cancellation with nothing cancelled is a fault a collaborator raised
+            # (ADR-0031 §2), so it is classed as the transport failure it stands in for.
+            reply = _Failed(_unanswered(written))
+        except (TimeoutError, TransportError, HttpsExchangeError) as exc:
+            _deliver_absorbed(entered_with)
+            reply = _Failed(
+                TelegramFailure.UNKNOWN
+                if isinstance(exc, HttpsExchangeError)
+                else _unanswered(written)
+            )
+        else:
+            _deliver_absorbed(entered_with)
+        if deadline.expired():
+            reply = _Failed(TelegramFailure.UNKNOWN if poll else _unanswered(written))
+        outcome = reply.failure.value if isinstance(reply, _Failed) else "done"
+        _log.info("telegram_call", attempt=attempt, method=method, outcome=outcome)
+        return reply
+
+    async def _asked(
+        self, method: str, payload: Mapping[str, object], written: _Written
+    ) -> _Answered | _Failed:
+        """Read the token under its record, and make the one request (§11:4, §11:8).
+
+        Args:
+            method: The Bot API method.
+            payload: Its JSON body.
+            written: Set once the request is handed to the channel.
+
+        Returns:
+            What Telegram answered, or :attr:`TelegramFailure.UNAVAILABLE` where the
+            line could not be used and nothing was written.
+        """
+        secret = await self._token()
+        if isinstance(secret, _Failed):
+            return secret
+        try:
+            response = await self._exchange.post_json(
+                origin=TELEGRAM_BOT_API_ORIGIN,
+                target=f"/bot{secret}/{method}",
+                payload=payload,
+                on_written=written,
+            )
+        except EgressTransportError:
+            # Raised before a channel is opened — the target or the body is not one
+            # this seam will write — so nothing was sent. Neither is named.
+            return self._unavailable("request_unwritable")
+        return _answer_of(response)
+
+    async def _token(self) -> str | _Failed:
+        """Read the bot's token under the record that names it (§11:4, ADR-0148 §6).
+
+        Returns:
+            The token, or :attr:`TelegramFailure.UNAVAILABLE` where the record is not
+            active, moved across the read, or names a slot holding no token this
+            seam will write into a path.
+        """
+        try:
+            before = await self._records.latest(self._reference)
+        except ConnectionStoreError as exc:
+            return self._unavailable("record_unreadable", error_type=type(exc).__name__)
+        slot = self._slot_of(before)
+        if slot is None:
+            return self._unavailable("not_connectable")
+        try:
+            token = await self._secrets.get(slot)
+        except (SecretStoreError, ValueError) as exc:
+            return self._unavailable("token_unreadable", error_type=type(exc).__name__)
+        if not _unchanged(before, await self._reread()):
+            return self._unavailable("record_changed")
+        secret = None if token is None else token.get_secret_value()
+        if not secret or any(character not in _TELEGRAM_TOKEN_CHARACTERS for character in secret):
+            return self._unavailable("token_absent" if token is None else "token_unwritable")
+        return secret
+
+    def _slot_of(self, stored: StoredEntry | None) -> SecretName | None:
+        """The slot an active record names, or ``None`` where it is not connectable.
+
+        Synchronous, for :meth:`HttpsEgressTransport._slot_of`'s reason: nothing
+        suspends between reading the record and asking the keyring for its slot.
+
+        Args:
+            stored: The record read for the line's reference.
+
+        Returns:
+            The slot, or ``None``.
+        """
+        entry = _entry_of(stored)
+        if entry is None or entry.state is not ProvisioningState.ACTIVE or entry.slot is None:
+            return None
+        return entry.slot
+
+    async def _reread(self) -> StoredEntry | None:
+        """Re-read the record, an unanswerable read standing for a changed one.
+
+        Returns:
+            The record, or ``None`` where it could not be read.
+        """
+        try:
+            return await self._records.latest(self._reference)
+        except ConnectionStoreError as exc:
+            _log.warning(
+                "telegram_record_reread_unanswerable",
+                reference=self._reference,
+                error_type=type(exc).__name__,
+            )
+            return None
+
+    def _unavailable(self, reason: str, *, error_type: str | None = None) -> _Failed:
+        """Log why the line could not be used, and say so (§11:4).
+
+        Args:
+            reason: A fixed word naming which check refused.
+            error_type: The class of the error behind it, where there was one.
+
+        Returns:
+            :attr:`TelegramFailure.UNAVAILABLE`.
+        """
+        _log.warning(
+            "telegram_line_unavailable",
+            reference=self._reference,
+            reason=reason,
+            error_type=error_type,
+        )
+        return _Failed(TelegramFailure.UNAVAILABLE)
+
+
+def _unchanged(before: StoredEntry | None, after: StoredEntry | None) -> bool:
+    """Whether the record is still the active one read before the token (§11:4).
+
+    Args:
+        before: The record read immediately before the token.
+        after: The record re-read after it, or ``None`` for an unanswerable read.
+
+    Returns:
+        Whether both reads found an active entry at the same revision and identity.
+    """
+    first, second = _entry_of(before), _entry_of(after)
+    return (
+        first is not None
+        and second is not None
+        and second.state is ProvisioningState.ACTIVE
+        and second.revision == first.revision
+        and second.identity == first.identity
+    )
+
+
+def _unanswered(written: _Written) -> TelegramFailure:
+    """A call that got no Bot API answer, classed by whether it was written (§6).
+
+    Args:
+        written: Whether the request reached the channel.
+
+    Returns:
+        :attr:`TelegramFailure.UNKNOWN` where it did — Telegram may have done it —
+        and :attr:`TelegramFailure.NOT_WRITTEN` where it never did.
+    """
+    return TelegramFailure.UNKNOWN if written.written else TelegramFailure.NOT_WRITTEN
+
+
+def _deliver_absorbed(entered_with: int) -> None:
+    """Deliver a cancellation a collaborator swallowed, before any outcome (ADR-0060 §1).
+
+    Args:
+        entered_with: The task's pending count when the call began.
+
+    Raises:
+        CancelledError: Freshly, where the count rose during the call.
+    """
+    if pending_cancellations() > entered_with:
+        raise asyncio.CancelledError
+
+
+def _checked_attempt(attempt: object) -> str:
+    """Refuse a call that names no claimed record (§13:2).
+
+    Args:
+        attempt: The value the caller passed.
+
+    Returns:
+        The attempt, as a plain string.
+
+    Raises:
+        ValueError: If it is not a string, or is blank.
+    """
+    if type(attempt) is not str or not attempt.strip():
+        msg = "attempt is the id of the record claimed for this call, a non-blank string"
+        raise ValueError(msg)
+    return attempt
+
+
+def _checked_chat(chat_id: object) -> int:
+    """Refuse a chat id that is not an exact ``int``.
+
+    Args:
+        chat_id: The value the caller passed.
+
+    Returns:
+        The chat id.
+
+    Raises:
+        ValueError: If it is not an exact ``int``; a ``bool`` is refused with them.
+    """
+    if type(chat_id) is not int:
+        msg = "chat_id is an int"
+        raise ValueError(msg)
+    return chat_id
+
+
+def _checked_text(text: object) -> str:
+    """Refuse a text Telegram could not take as one message (§6:6, §9).
+
+    Args:
+        text: The value the caller passed.
+
+    Returns:
+        The text, unchanged.
+
+    Raises:
+        ValueError: If it is not an exact ``str``, holds only whitespace, has no
+            UTF-8 form, or is longer than one message. The text is never named.
+    """
+    if type(text) is not str or not text.strip():
+        msg = "text is a non-blank string"
+        raise ValueError(msg)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        msg = "text has no UTF-8 form, so it cannot be sent"
+        raise ValueError(msg) from None
+    if telegram_length(text) > TELEGRAM_MESSAGE_LIMIT:
+        msg = (
+            f"text is longer than one Telegram message ({TELEGRAM_MESSAGE_LIMIT} UTF-16 "
+            f"units); send each of telegram_message_parts(text) instead (ADR-0323 §6:6)"
+        )
+        raise ValueError(msg)
+    return text
+
+
+def _checked_duration(value: object, *, name: str, floor: str) -> timedelta:
+    """Refuse a duration a call could not be bounded or asked by (ADR-0241 §1).
+
+    ``registry.checked_timeout``'s rule, restated here because that module imports
+    this one: an exact reading of the ``timedelta``'s own fields, so a subclass
+    whose arithmetic lies decides nothing later.
+
+    Args:
+        value: The value the caller passed.
+        name: The parameter's name, for the message.
+        floor: ``"positive"`` for a bound, ``"zero"`` for a poll's wait.
+
+    Returns:
+        A plain ``timedelta`` of the same length.
+
+    Raises:
+        ValueError: If it is not a ``timedelta``, or is below its floor.
+    """
+    if not isinstance(value, timedelta):
+        msg = f"{name} must be a timedelta, got {type(value).__name__}"
+        raise ValueError(msg)
+    duration = timedelta(
+        days=timedelta.days.__get__(value),
+        seconds=timedelta.seconds.__get__(value),
+        microseconds=timedelta.microseconds.__get__(value),
+    )
+    if duration < timedelta(0) or (floor == "positive" and duration == timedelta(0)):
+        msg = f"{name} must be {'strictly positive' if floor == 'positive' else 'zero or more'}"
+        raise ValueError(msg)
+    return duration
+
+
+def _answer_of(response: HttpsResponse) -> _Answered | _Failed:
+    """Read a Bot API answer: done, a refusal, or not an answer at all (§6:3 to §6:5).
+
+    **Only a Bot API answer can say Telegram did not do it.** A body that is not a
+    JSON object with a boolean ``ok`` — a front end's error page, a server error,
+    anything else — is no word from the Bot API about the request, and a request
+    that was written and got no such word is unknown (§6:4).
+
+    Args:
+        response: The response the exchange read.
+
+    Returns:
+        :class:`_Answered` for ``ok: true`` with a ``result`` on a ``200``;
+        :attr:`TelegramFailure.RATE_LIMITED` for a ``429``;
+        :attr:`TelegramFailure.REFUSED` for any other client error; and
+        :attr:`TelegramFailure.UNKNOWN` for everything else.
+    """
+    decoded = decoded_object(response.body)
+    if decoded is None:
+        return _Failed(TelegramFailure.UNKNOWN)
+    ok = decoded.get("ok")
+    if ok is True and response.status == _OK and "result" in decoded:
+        return _Answered(decoded["result"])
+    code = decoded.get("error_code")
+    if ok is not False or type(code) is not int:
+        return _Failed(TelegramFailure.UNKNOWN)
+    if code == _RATE_LIMITED:
+        return _Failed(TelegramFailure.RATE_LIMITED, _retry_after(decoded.get("parameters")))
+    if code in _CLIENT_ERRORS:
+        return _Failed(TelegramFailure.REFUSED)
+    return _Failed(TelegramFailure.UNKNOWN)
+
+
+def _retry_after(parameters: object) -> int | None:
+    """The wait a rate limit asked for, in seconds, where it said one.
+
+    Args:
+        parameters: The answer's ``parameters`` member.
+
+    Returns:
+        The seconds, or ``None`` where there is no usable figure.
+    """
+    if not isinstance(parameters, Mapping):
+        return None
+    seconds = parameters.get("retry_after")
+    if type(seconds) is not int or not 0 <= seconds < _MAX_RETRY_AFTER:
+        return None
+    return seconds
+
+
+def _sent_id(result: object) -> int | None:
+    """The message id a ``sendMessage`` result carries, or ``None`` (§6:2).
+
+    Args:
+        result: The answer's ``result``.
+
+    Returns:
+        The id, where it is a non-negative ``int``.
+    """
+    if not isinstance(result, Mapping):
+        return None
+    message_id = result.get("message_id")
+    if type(message_id) is not int or not 0 <= message_id < 2**63:
+        return None
+    return message_id
+
+
+def _polled(result: object) -> TelegramPollOutcome:
+    """A poll's updates, or *unknown* where the result is not a list of them.
+
+    **An update this line cannot place is a poll it cannot use**: its id is what the
+    next offset confirms, so one with no readable id, or ids out of order, would
+    have the reader confirm what it never saw. Such a result is unknown and takes
+    nothing in (§11:11). A **message** this line cannot read is different: its
+    update still has an id to confirm, and it is carried with no message (§5:2).
+
+    Args:
+        result: The answer's ``result``.
+
+    Returns:
+        The outcome.
+    """
+    if not isinstance(result, list):
+        return TelegramPollOutcome(failure=TelegramFailure.UNKNOWN)
+    updates: list[TelegramUpdate] = []
+    for raw in result:
+        update_id = raw.get("update_id") if isinstance(raw, Mapping) else None
+        if type(update_id) is not int or not 0 <= update_id < 2**63:
+            return TelegramPollOutcome(failure=TelegramFailure.UNKNOWN)
+        updates.append(TelegramUpdate(update_id=update_id, message=_message_of(raw.get("message"))))
+    try:
+        return TelegramPollOutcome(updates=tuple(updates))
+    except ValidationError:
+        return TelegramPollOutcome(failure=TelegramFailure.UNKNOWN)
+
+
+def _message_of(raw: object) -> TelegramMessage | None:
+    """A new message as the line reads it, or ``None`` where it cannot be read whole.
+
+    Args:
+        raw: An update's ``message`` member.
+
+    Returns:
+        The message; or ``None`` where there is none, or where any part the line
+        reads — its sender, chat, time, text, forward origin or the message it
+        replies to — is not in the shape the Bot API documents. **A forward whose
+        origin cannot be read is not read at all**, rather than read as the user's
+        own words: a forward is claimed, and a message that lost the mark would be
+        established (§4:1, §4:10).
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    chat, sender, date = raw.get("chat"), raw.get("from"), raw.get("date")
+    if not isinstance(chat, Mapping) or (sender is not None and not isinstance(sender, Mapping)):
+        return None
+    sent_at = _instant_of(date)
+    text = raw.get("text")
+    forward = _forward_of(raw.get("forward_origin"))
+    reply = raw.get("reply_to_message")
+    quoted = _quoted_of(reply)
+    if (
+        sent_at is None
+        or (text is not None and type(text) is not str)
+        or (forward is None and _FORWARD_KEYS & set(raw))
+        or (reply is not None and quoted is None)
+    ):
+        return None
+    try:
+        return TelegramMessage.model_validate(
+            {
+                "message_id": raw.get("message_id"),
+                "chat_id": chat.get("id"),
+                "private_chat": chat.get("type") == "private",
+                "sender_id": None if sender is None else sender.get("id"),
+                "sender_is_bot": sender is not None and sender.get("is_bot") is True,
+                "sent_at": sent_at,
+                "text": text,
+                "forward_origin": forward,
+                "reply_to": quoted,
+            }
+        )
+    except ValidationError:
+        return None
+
+
+def _instant_of(date: object) -> datetime | None:
+    """The UTC instant a Bot API ``date`` names, or ``None`` (§5:4).
+
+    Args:
+        date: Seconds since the epoch, as Telegram sends them.
+
+    Returns:
+        The instant, or ``None`` for a value that is not an ``int`` or names no
+        representable instant.
+    """
+    if type(date) is not int:
+        return None
+    try:
+        return datetime.fromtimestamp(date, tz=UTC)
+    except OverflowError, OSError, ValueError:
+        return None
+
+
+def _forward_of(raw: object) -> TelegramForwardOrigin | None:
+    """A forward's origin, as Telegram's ``MessageOrigin`` reports it (§4:10).
+
+    Args:
+        raw: The message's ``forward_origin``.
+
+    Returns:
+        The origin, or ``None`` where there is none or it is not one of the four
+        kinds in the documented shape.
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    kind = raw.get("type")
+    named: tuple[object, object]
+    if kind == TelegramForwardKind.USER:
+        user = raw.get("sender_user")
+        if not isinstance(user, Mapping):
+            return None
+        first, last = user.get("first_name"), user.get("last_name")
+        name = first if last is None or type(first) is not str else f"{first} {last}"
+        named = (name, user.get("id"))
+    elif kind == TelegramForwardKind.HIDDEN_USER:
+        named = (raw.get("sender_user_name"), None)
+    elif kind in {TelegramForwardKind.CHAT, TelegramForwardKind.CHANNEL}:
+        source = raw.get("sender_chat" if kind == TelegramForwardKind.CHAT else "chat")
+        if not isinstance(source, Mapping):
+            return None
+        named = (source.get("title"), source.get("id"))
+    else:
+        return None
+    try:
+        return TelegramForwardOrigin.model_validate(
+            {"kind": kind, "name": named[0], "account_id": named[1]}
+        )
+    except ValidationError:
+        return None
+
+
+def _quoted_of(raw: object) -> TelegramQuotedMessage | None:
+    """The message a reply was written to (§4:12), or ``None``.
+
+    Args:
+        raw: The message's ``reply_to_message``.
+
+    Returns:
+        The quoted message, or ``None`` where there is none or it is not in the
+        documented shape.
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    sender, text = raw.get("from"), raw.get("text")
+    if (sender is not None and not isinstance(sender, Mapping)) or (
+        text is not None and type(text) is not str
+    ):
+        return None
+    try:
+        return TelegramQuotedMessage.model_validate(
+            {
+                "message_id": raw.get("message_id"),
+                "sender_id": None if sender is None else sender.get("id"),
+                "sender_is_bot": sender is not None and sender.get("is_bot") is True,
+                "text": text,
+            }
+        )
+    except ValidationError:
+        return None
+
+
 __all__ = [
     "HTTPS_SCHEME",
     "IMPLICIT_TLS_SCHEME",
     "STARTTLS_SCHEME",
+    "TELEGRAM_BOT_API_ORIGIN",
     "BoundCallChangedError",
     "EgressTransportError",
     "HttpsEgressTransport",
@@ -3626,6 +4589,7 @@ __all__ = [
     "HttpsRedirectRefusedError",
     "HttpsResponse",
     "HttpsResponseTooLargeError",
+    "HttpsTelegramBotClient",
     "IndeterminateTransmissionError",
     "MalformedHttpResponseError",
     "OutboundEmail",
