@@ -213,11 +213,13 @@ A message you send to the bot is sent as an instruction, exactly as a message in
 > it, claimed. It informs and authorizes nothing, and what the user writes beside it is the
 > user's.
 
-> **Normative.** An input that takes in a forward is an outside trigger in ADR-0306 §4:5's
-> sense: its recorded trigger carries the forward's author, and the activation has read outside
-> content.
+> **Normative.** The kind declares an input's origin per input (ADR-0284 §2:2): `outside` for an
+> input that takes in a forward, and `user` for every other. An input that takes in a forward is
+> therefore an outside trigger (ADR-0306 §4:5), its recorded trigger carries the forward's
+> author, and the activation has read outside content.
 
-That has a cost, and the owner accepts it. After a forward, a remember of what you said is asked
+That has a cost, and the owner accepts it. What you write beside a forward is taken in with it,
+so it is read as outside too. After a forward, a remember of what you said is asked
 about and a call that leaves the hub needs you, because the outside-content mark is the
 activation's ([#2856](https://github.com/leonapivato/ai-assistant/issues/2856)). That redesign is
 the owner's for later, and nothing here designs it.
@@ -265,19 +267,22 @@ rules it for its own chat.
 > waits in Telegram and is never refused, and when that activation ends everything waiting is
 > taken in together as one input.
 
-> **Normative.** The reader confirms an update to Telegram only once it is taken in, which is
-> when its activation is admitted, and it asks Telegram for nothing while an activation
-> started from the chat runs.
+> **Normative.** The reader confirms an update to Telegram only once it is dealt with: input once
+> its activation is admitted; an update that is not input once it is seen; and a non-text
+> message once the intake record shows it answered (§5:3).
+
+> **Normative.** The reader asks Telegram for nothing while an activation started from the chat
+> runs.
 
 This is ADR-0292 §11:5's "lands in the medium and waits", with Telegram as the medium.
 
 **The intake record.** The reader's bookkeeping, as the hub chat's is (ADR-0293 §6:6–§6:9).
 
 > **Normative.** The reader records which updates it took in, by their Telegram update ids, and
-> by which activation, holding no message text.
+> by which activation, and which non-text messages it answered, holding no message text.
 
-> **Normative.** An update taken in once is never taken in again: a duplicate fetch starts no
-> second activation.
+> **Normative.** An update taken in or answered once is never taken in or answered again: a
+> duplicate fetch starts no second activation and sends no second fixed line.
 
 > **Normative.** After a restart, updates an interrupted activation already took in are not
 > taken in again, and updates never taken in are taken in as usual.
@@ -324,7 +329,9 @@ reply may not have reached you.
 > chat shows plain text.
 
 > **Normative.** A message longer than Telegram's 4,096 characters is sent as consecutive parts,
-> split at paragraph breaks. The episode records one message. Its effect record never records
+> none longer than that, together holding the whole text in order. It is split at paragraph
+> breaks; a paragraph longer than a part is split at line breaks, then between words, and at the
+> limit only where a run of text has no break. The episode records one message. Its effect record never records
 > done for a part Telegram did not accept, and how a message cut short between parts is
 > recorded is the implementation's, within ADR-0306 §5:5.
 
@@ -428,13 +435,15 @@ transports (ADR-0124 §1:1, ADR-0174 §1:1). The line goes through the seam.
 > `EgressBinding` or policy ruling is made for them, and the rules this section and §13 state
 > stand where ADR-0148's per-call machinery would.
 
-> **Normative.** The line reaches the seam by its own route, and by no other. A message is sent
-> only after ADR-0306 §4:7's place check has passed and its effect record has been claimed
-> (ADR-0306 §5:4), and only to the chat the settings name.
+> **Normative.** The line reaches the seam by its own route, and by no other. An activation's
+> message is sent only after ADR-0306 §4:7's place check has passed and its effect record has
+> been claimed (ADR-0306 §5:4). Every other call is made only after its own record has been
+> claimed (§13:2). Every message, of either kind, goes only to the chat the settings name.
 
 > **Normative.** The bot's token is read inside `ai_assistant.tools.egress`, through the
-> `INTEGRATION`-scoped `Secrets` face (ADR-0125 §8), only after those checks, or for a poll only
-> after the line was found configured and its connection active. It is read once per call, with
+> `INTEGRATION`-scoped `Secrets` face (ADR-0125 §8), only after the call's record has been
+> claimed and, for a message, its checks have passed, and only while the line is configured and
+> its connection active. It is read once per call, with
 > the connection record read before it and again before any byte is sent, as
 > `HttpsEgressTransport.fetch` does (ADR-0148 §6).
 
@@ -542,15 +551,20 @@ implementation holds in code.
 | 9 | Multi-recipient calls as one set | One recipient, always: a send to any other chat is refused (§6:1) |
 | 10 | Destinations canonicalised | The origin is compared exactly, and the chat id is compared for equality with the setting |
 | 11 | Resolving a name is gated or forbidden | Forbidden: the line resolves no username, and the account id is the owner's setting |
-| 12 | An attempt identifier and an explicit outcome | Each message's effect record (ADR-0306 §5:3–§5:5). A fixed reply sent by rule is recorded with its outcome. A typing indicator and a poll carry no message and record no outcome |
+| 12 | An attempt identifier and an explicit outcome | Every call is claimed by a durable record before it is sent, and completed with its outcome. An activation's message has its effect record (ADR-0306 §5:3–§5:5). A fixed reply, a typing indicator and a poll each have a record of the line's own (§13:2) |
 | 13 | Payload classification settled | By §12: the line's calls may carry covered content to the one chat |
 | 14 | Failure paths tested | §15:5 |
 
 > **Normative.** Each row of the table above holds in code on the line's route before the line's
 > first call reaches Telegram, and the lane that builds the route attests each row in its change.
 
-> **Normative.** Every send the writer makes by rule, outside an activation's messages, has a
-> durable record of its outcome.
+> **Normative.** Every call the line makes other than an activation's message, a fixed reply, a
+> typing indicator or a poll alike, is claimed before it is sent by a durable record of the
+> line's own, carrying an attempt identifier, and completed with its outcome: done, not done or
+> unknown. A record left with no outcome, as after a crash, is never resolved by guessing.
+
+How long a poll's or a typing indicator's record is kept is the implementation's. Like
+every record of the line, it is the user's data and is purged with it.
 
 ### 14. What it costs in privacy
 
@@ -580,10 +594,10 @@ instructions.
 
 ### 15. How it is built
 
-> **Normative.** The line is built so that no half of it merges switched off. The reader, the
-> writer, the client, the settings and the intake record merge together with the message flow
-> that runs them, or the first lane to merge carries a whole working line. No lane merges code
-> that nothing runs (owner, 2026-10-11).
+> **Normative.** The line's lanes are cut at its contract seams as ADR-0137 decides. They are
+> dispatched together in one milestone and merged back to back, so that no part of the line
+> sits in the tree waiting on a later design, and the line goes live in the deploy after the
+> last of them (owner, 2026-10-11: both halves together, no switched-off code).
 
 > **Normative.** No Telegram library is added. The Bot API is a handful of HTTPS calls returning
 > JSON, made through the seam's own exchange.
@@ -592,12 +606,12 @@ A library would bring its own HTTP stack, which would have to be kept behind the
 
 | What | Where | Change |
 | --- | --- | --- |
-| The `telegram` channel type | `core/channel_validation.py`'s `_INPUT_ORIGINS` and the admission table | New, origin `InputOrigin.USER` |
+| The `telegram` channel type | `core/channel_validation.py`'s `_INPUT_ORIGINS` and the admission table | New, its origin declared per input: `outside` where the input takes in a forward, `user` otherwise (§4:11) |
 | A forward's author | The recorded input (`RecordedChannelTrigger` and what it carries) | Carries each forward's original sender, claimed (§4:10–§4:11) |
 | `ApprovalGiver` | `core/types.py` | Gains a member for the line (§4:9) |
 | The line's settings | `core/config.py` | `telegram_connection`, `telegram_user_id`, the poll's wait, and the line's bounds (§3:2, §11) |
 | The Bot API client | A new Protocol in `core/protocols.py`, implemented in `tools/egress.py` | New: polls, sends and the typing indicator, on §11's route |
-| The intake record | A new Protocol in `core/protocols.py`, with its store | New: §5:7–§5:9 |
+| The intake record | A new Protocol in `core/protocols.py`, with its store | New: §5:8–§5:10 |
 | `HttpsExchange` | `tools/egress.py` | Gains the `POST` with a JSON body (§11:6) |
 | The reader and the writer | `orchestration`, beside `ChatReader` and `ChatWriter` | New, run as a long-running task in the hub |
 | `PhaseWorking`'s `users_authority` flag | `orchestration/phase_path.py` | Set from the line's intake as §4:5–§4:6 state; its docstring's hub-chat wording follows §4:7 |
@@ -651,6 +665,7 @@ voice work ([#2578](https://github.com/leonapivato/ai-assistant/issues/2578)).
 | ADR-0321 §4:6 | Its *who*'s *through the hub chat*: through the channel the yes came on (§4:9) |
 | ADR-0321 §2:12, ADR-0307 §3:6 | Nothing: a question on the line carries no buttons and no options (§7:1) |
 | ADR-0322 | Nothing: applied on the line as in the hub chat (§7) |
+| ADR-0284 §2:2 | Nothing: applied. The kind's declaration states the origin per input, `outside` for an input that takes in a forward (§4:11) |
 | ADR-0295 | Nothing: the line adds no stop route (§8) |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a dated
@@ -678,7 +693,7 @@ voice work ([#2578](https://github.com/leonapivato/ai-assistant/issues/2578)).
   supersession is scoped to the line, and §13 is what holds the seam's conditions on it.
 
 **What follows.** A Telegram milestone, with acceptance scenarios, once this ADR merges (owner,
-2026-10-17). Its lanes build §15's table, so that no half merges switched off.
+2026-10-17). Its lanes build §15's table, back to back, in that milestone.
 
 **What it leaves open.**
 - **Withholding secret-tier memories from lines another party holds.** Not taken for now (owner,
