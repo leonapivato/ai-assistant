@@ -1,6 +1,6 @@
 # 324. A pull is the assistant asking a channel's sensor, and the calendar and the weather come back as pulls
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-17
 - Scope: batch [#3113](https://github.com/leonapivato/ai-assistant/issues/3113), lane L2, and [#2890](https://github.com/leonapivato/ai-assistant/issues/2890): the rule for a pull, and the calendar and weather channels declared whole, with only their pulls built. It answers [#2593](https://github.com/leonapivato/ai-assistant/issues/2593)'s "which read capabilities survive" for these two capabilities alone, and decides the coverage half of [#2685](https://github.com/leonapivato/ai-assistant/issues/2685).
 - Dependency: the phases as ADR-0306 to ADR-0309 decide them, the grant uses as ADR-0318 leaves them, and the forecast seam as ADR-0260 leaves it, all Accepted and on `main` at `abf4e206`.
