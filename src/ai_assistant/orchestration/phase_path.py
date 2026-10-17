@@ -346,6 +346,7 @@ __all__ = [
     "CHAT_DESCRIPTION",
     "EVENT_DESCRIPTION",
     "Delivery",
+    "Fitted",
     "MessageWriter",
     "PhasePass",
     "PhasePath",
@@ -480,22 +481,41 @@ class Delivery:
             raise ValueError(msg)
 
 
+@dataclass(frozen=True, slots=True)
+class Fitted:
+    """A round's text as a place would write it: whole, or cut to fit its bounds.
+
+    Attributes:
+        text: What the place would write.
+        cut_off: Whether anything of the round's text was cut to fit, so its message
+            is not shown whole (ADR-0321 §4:4's *shown*).
+    """
+
+    text: str
+    cut_off: bool = False
+
+
 class PlaceWriter(Protocol):
     """One place's writer, as the phases write an activation's message into it.
 
-    What the phases are handed for a place other than the hub chat's conversations, as
-    the Telegram line's chat (ADR-0323 §6). The message is claimed under its effect
-    record before :meth:`deliver` is called, and finished with what it returns
-    (ADR-0306 §5:3-§5:5); the writer holds its channel's rules, before anything leaves
-    (ADR-0292 §8:3).
+    The hub chat's conversation is one, through its chat writer; the Telegram line's
+    chat is another (ADR-0323 §6). The message is claimed under its effect record before
+    :meth:`deliver` is called, and finished with what it returns (ADR-0306 §5:3-§5:5);
+    the writer holds its channel's rules and its bounds, before anything leaves
+    (ADR-0292 §8:3) — a conversation's transcript bound is the conversation's, and a
+    line that splits a long message cuts none (ADR-0323 §6:6).
     """
 
-    def fitted(self, message: NewMessage) -> NewMessage:
-        """``message`` exactly as :meth:`deliver` would write it whole."""
+    def fitted(self, text: str) -> Fitted:
+        """``text`` exactly as :meth:`deliver` would write it.
+
+        Raises:
+            OversizedValueError: If no non-blank prefix fits the place's bounds.
+        """
         ...
 
-    async def deliver(self, message: NewMessage, *, effect_id: str) -> Delivery:
-        """Write ``message``, claimed under ``effect_id``, and say what came of it.
+    async def deliver(self, fitted: Fitted, *, effect_id: str) -> Delivery:
+        """Write ``fitted``, claimed under ``effect_id``, and say what came of it.
 
         Raises:
             Exception: Only for what the writer could not class; the phases then
@@ -536,11 +556,27 @@ class _ConversationWriter:
     writer: MessageWriter
     conversation_id: str
 
-    def fitted(self, message: NewMessage) -> NewMessage:
-        return self.writer.fitted(self.conversation_id, message)
+    def fitted(self, text: str) -> Fitted:
+        """``text`` cut to the transcript's bound, then to the writer's (ADR-0293 §4:7)."""
+        message = self._message(text)
+        return Fitted(text=message.text, cut_off=message.cut_off)
 
-    async def deliver(self, message: NewMessage, *, effect_id: str) -> Delivery:
+    def _message(self, text: str) -> NewMessage:
+        cut = len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS
+        return self.writer.fitted(
+            self.conversation_id,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT,
+                text=text[:TRANSCRIPT_MESSAGE_MAX_CHARS],
+                cut_off=cut,
+            ),
+        )
+
+    async def deliver(self, fitted: Fitted, *, effect_id: str) -> Delivery:
         del effect_id
+        message = NewMessage(
+            author=MessageAuthor.ASSISTANT, text=fitted.text, cut_off=fitted.cut_off
+        )
         try:
             receipt = await self.writer.send(self.conversation_id, message)
         except ConversationStoreError:
@@ -1547,8 +1583,9 @@ def place_window(
     Each message keeps its author; the input's messages are marked as the input; and a
     message the window links to an activation, the one that took it in or wrote it,
     names that activation's episode (ADR-0303 §7:1, ADR-0307 §5:6). A deleted message
-    is not shown. A forward is someone else's, claimed (ADR-0323 §4:10): it is an item
-    of ``other``'s, whose raw text planning is never shown (ADR-0307 §9:2), and it
+    is not shown. A forward is someone else's, claimed (ADR-0323 §4:10), as is any
+    other message whose author the place's kind does not establish (§4:2): each is an
+    item of ``other``'s, whose raw text planning is never shown (ADR-0307 §9:2), and
     reaches planning through understanding's record alone.
 
     Args:
@@ -1566,7 +1603,7 @@ def place_window(
     items = tuple(
         PlaceItem(
             author=PlaceAuthor.OTHER
-            if position in window.forwarded
+            if position in window.forwarded or position in window.claimed
             else PlaceAuthor.USER
             if one.author is MessageAuthor.USER
             else PlaceAuthor.ASSISTANT,
@@ -3291,20 +3328,13 @@ class PhasePath:
         return planning_round.model_copy(update={"asked": ()})
 
     @staticmethod
-    def _fitted(target: PlaceTarget, text: str) -> NewMessage:
-        """``text`` as the place records it: cut to the transcript's bound, then the writer's.
+    def _fitted(target: PlaceTarget, text: str) -> Fitted:
+        """``text`` as the place would write it: within its bounds, its writer's to say.
 
         Raises:
             OversizedValueError: If the writer finds no non-blank prefix that fits.
         """
-        cut = len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS
-        return target.writer.fitted(
-            NewMessage(
-                author=MessageAuthor.ASSISTANT,
-                text=text[:TRANSCRIPT_MESSAGE_MAX_CHARS],
-                cut_off=cut,
-            ),
-        )
+        return target.writer.fitted(text)
 
     def _target(self, working: PhaseWorking) -> PlaceTarget | None:
         """The place the activation's messages go into, and its writer, or ``None``.

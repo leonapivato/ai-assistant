@@ -18,6 +18,7 @@ data and is not stamped (ADR-0319 §4).
 
 from __future__ import annotations
 
+import hashlib
 import os
 import uuid
 from dataclasses import dataclass
@@ -437,6 +438,25 @@ class Composition:
     engine: Engine
     trace_sink: TraceSink
     conflict_search_limit: int
+
+
+def telegram_intake_path(directory: Path, *, reference: str, chat_id: int) -> Path:
+    """The Telegram line's intake record's file, one per line (ADR-0323 §2:3, §5:8).
+
+    Keyed by the line's identity — its connection's reference with its chat — as a
+    digest, so the file name carries neither and two lines never share a record. A
+    line set up again under the same pair finds its own record where it left it.
+
+    Args:
+        directory: The data directory.
+        reference: ``Settings.telegram_connection``.
+        chat_id: ``Settings.telegram_user_id``.
+
+    Returns:
+        The record's path under ``directory``.
+    """
+    key = hashlib.sha256(f"{reference}\x00{chat_id}".encode()).hexdigest()[:24]
+    return directory / f"telegram-{key}.db"
 
 
 def _search_destinations(origin: str | None) -> tuple[CanonicalDestination, ...]:
@@ -1514,11 +1534,21 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         #
         # **The intake record is a Tier 1 store on its own file** (ADR-0155 §1:2),
         # opened here, closed in the ordered shutdown below and on a failed build,
-        # for the other stores' reasons.
+        # for the other stores' reasons. **One file per line** (§2:3): the record keys
+        # its updates and the confirmation it owes by Telegram's update ids alone, which
+        # are a bot's own, so a line named by another connection or another account is
+        # a new place whose record starts empty — another bot's owed offset never
+        # confirms this one's unread messages (§5:6).
         telegram_line: TelegramLineSeams | None = None
         telegram_intake: SqliteTelegramIntakeRecord | None = None
         if settings.telegram_connection is not None and settings.telegram_user_id is not None:
-            telegram_intake = SqliteTelegramIntakeRecord(path=directory / "telegram.db")
+            telegram_intake = SqliteTelegramIntakeRecord(
+                path=telegram_intake_path(
+                    directory,
+                    reference=settings.telegram_connection,
+                    chat_id=settings.telegram_user_id,
+                )
+            )
             opened.append(telegram_intake.close)
             telegram_line = TelegramLineSeams(
                 client=HttpsTelegramBotClient(

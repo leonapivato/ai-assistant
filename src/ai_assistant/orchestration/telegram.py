@@ -106,7 +106,7 @@ from ai_assistant.orchestration.channel_kinds import (
 )
 from ai_assistant.orchestration.chat import CHAT_WINDOW_SIZE, COULDNT_FINISH
 from ai_assistant.orchestration.defects import is_defect, log_defect
-from ai_assistant.orchestration.phase_path import Delivery
+from ai_assistant.orchestration.phase_path import Delivery, Fitted
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.understanding import (
     AskedIn,
@@ -120,7 +120,6 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import MemoryStore, TelegramBotClient, TelegramIntakeRecord
     from ai_assistant.core.types import (
-        NewMessage,
         TelegramMessage,
         TelegramSendOutcome,
         TelegramUpdate,
@@ -501,9 +500,7 @@ class TelegramWriter:
         """
         return _PlaceWriter(self, channel)
 
-    async def deliver(
-        self, channel: ChannelIdentity, message: NewMessage, *, effect_id: str
-    ) -> Delivery:
+    async def deliver(self, channel: ChannelIdentity, text: str, *, effect_id: str) -> Delivery:
         """Send one activation message, claimed under ``effect_id``, in parts (§6:2-§6:6).
 
         A message is *sent* when Telegram accepted every part and returned its id: the
@@ -511,7 +508,8 @@ class TelegramWriter:
         end, where its question is, quotes (§6:2, §4:13). A message cut short between
         parts is never recorded done: it is *unknown* where the part that failed may
         have reached Telegram, and *not done* otherwise, and what the chat holds of it
-        is what the episode records as sent.
+        is what the episode records as sent. The whole text is sent, however long: the
+        line splits a message and cuts none (§6:6).
 
         Returns:
             What came of it.
@@ -519,7 +517,7 @@ class TelegramWriter:
         if channel != self._channel:
             _log.warning("telegram_message_unsent", stage="writer", reason="other_chat")
             return Delivery(ToolOutcome.FAILED, reason=_OTHER_CHAT)
-        parts = split_message(message.text)
+        parts = split_message(text)
         sent: list[str] = []
         last: int | None = None
         for part in parts:
@@ -530,7 +528,7 @@ class TelegramWriter:
             last = outcome.message_id
         if last is None:
             return Delivery(ToolOutcome.FAILED, reason=_NOT_SENT)
-        return Delivery(ToolOutcome.SUCCEEDED, position=last, written=message.text)
+        return Delivery(ToolOutcome.SUCCEEDED, position=last, written=text)
 
     async def _send(self, text: str, *, attempt: str) -> TelegramSendOutcome | None:
         """Send one part, retrying only as §6:3 allows; ``None`` where it cannot be sent."""
@@ -645,13 +643,13 @@ class _PlaceWriter:
     writer: TelegramWriter
     channel: ChannelIdentity
 
-    def fitted(self, message: NewMessage) -> NewMessage:
-        """The message, whole: a longer one is split into parts, never cut (§6:6)."""
-        return message
+    def fitted(self, text: str) -> Fitted:
+        """The text, whole: a longer one is split into parts, never cut (§6:6)."""
+        return Fitted(text=text)
 
-    async def deliver(self, message: NewMessage, *, effect_id: str) -> Delivery:
+    async def deliver(self, fitted: Fitted, *, effect_id: str) -> Delivery:
         """:meth:`TelegramWriter.deliver`, into this place."""
-        return await self.writer.deliver(self.channel, message, effect_id=effect_id)
+        return await self.writer.deliver(self.channel, fitted.text, effect_id=effect_id)
 
 
 @dataclass(slots=True)
@@ -991,7 +989,7 @@ class TelegramReader:
         recent = tuple(one for position, one in sorted(shown.items()) if position not in taken)[
             -CHAT_WINDOW_SIZE:
         ]
-        replied = self._replied(messages, inputs, recent, writes, links, asked)
+        replied, claimed = self._replied(messages, inputs, recent, writes, links, asked)
         for one in messages:
             if one.forward_origin is not None:
                 forwarded[one.message_id] = ClaimedAuthor(
@@ -1006,6 +1004,7 @@ class TelegramReader:
             links={position: one for position, one in links.items() if position in kept},
             asked={position: one for position, one in asked.items() if position in kept},
             forwarded={position: one for position, one in forwarded.items() if position in kept},
+            claimed=frozenset(claimed),
         )
 
     def _episode_items(
@@ -1073,17 +1072,24 @@ class TelegramReader:
         writes: Mapping[int, WrittenBy],
         links: dict[int, str],
         asked: dict[int, AskedIn],
-    ) -> tuple[LineMessage, ...]:
+    ) -> tuple[tuple[LineMessage, ...], set[int]]:
         """Each message the input replies to that the window does not show (§4:12-§4:13).
 
         Telegram sends the quoted message with the reply, so it is brought in as it
-        came: the assistant's where the bot wrote it, the user's where the user did.
-        Telegram gives no time with it, so it is dated by the reply that quotes it.
-        One the bot wrote links to the activation that wrote it by that message's
-        effect record, where the window's activations include the writer.
+        came: the assistant's where the bot wrote it, and otherwise an author the line
+        does not establish (§4:2). That one is claimed — it may be the user's own, or a
+        forward Telegram quotes without its origin — so planning is never shown its
+        raw text (ADR-0307 §9:2). Telegram gives no time with it, so it is dated by the
+        reply that quotes it. One the bot wrote links to the activation that wrote it by
+        that message's effect record, where the window's activations include the
+        writer.
+
+        Returns:
+            The messages, ascending, and the positions of those whose author is claimed.
         """
         shown = {one.position for one in (*recent, *inputs)}
         replied: dict[int, LineMessage] = {}
+        claimed: set[int] = set()
         for one in messages:
             quoted = one.reply_to
             if (
@@ -1102,12 +1108,14 @@ class TelegramReader:
                 author=MessageAuthor.ASSISTANT if bot else MessageAuthor.USER,
                 text=quoted.text[:TRANSCRIPT_MESSAGE_MAX_CHARS],
             )
+            if not bot:
+                claimed.add(quoted.message_id)
             writer = writes.get(quoted.message_id) if bot else None
             if writer is not None:
                 links[quoted.message_id] = writer.activation_id
                 if writer.asked is not None:
                     asked[quoted.message_id] = writer.asked
-        return tuple(one for _, one in sorted(replied.items()))
+        return tuple(one for _, one in sorted(replied.items())), claimed
 
 
 def _failure(outcome: TelegramOutcome) -> str:

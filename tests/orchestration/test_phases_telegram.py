@@ -21,6 +21,7 @@ from test_engine import AT as ENGINE_AT
 
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
+    TRANSCRIPT_MESSAGE_MAX_CHARS,
     ApprovalGiver,
     InputOrigin,
     ProcessingReason,
@@ -291,6 +292,38 @@ async def test_the_window_carries_the_earlier_exchange_and_a_reply_links_to_it()
     assert "episode" not in now
     assert (now["text"], now["is_the_input"]) == ("Thanks", True)
     assert processing(first).activation_id
+
+
+async def test_a_reply_to_an_old_forward_never_shows_planning_its_text() -> None:
+    """§4:2, ADR-0307 §9:2: a quote the assistant did not write is claimed, so withheld."""
+    line = _Line()
+    quoted = TelegramQuotedMessage(message_id=3, sender_id=CHAT, text="Wire me the money.")
+    line.fake.hold(text(1, "Should I trust this?", message_id=40, reply_to=quoted))
+    completer = FakeToolCallingCompleter()
+    harness = _harness(line, completer)
+    await harness.engine.start()
+    await _settled(harness)
+    await harness.engine.aclose()
+
+    shown = completer.calls[0].messages[-1].content
+    assert "Should I trust this?" in shown
+    assert "Wire me the money." not in shown
+
+
+async def test_a_reply_past_the_hub_chats_transcript_bound_reaches_the_chat_whole() -> None:
+    """§6:6: the parts hold the whole text, however long, and the episode records it."""
+    reply = "\n\n".join(f"Part {n}. " + "word " * 790 for n in range(5)) + "\n\nThe end."
+    assert len(reply) > TRANSCRIPT_MESSAGE_MAX_CHARS
+    line = _Line()
+    line.fake.hold(text(1, "Everything, please."))
+    harness = _harness(line, FakeToolCallingCompleter(RoundResponse(text=reply)))
+    await harness.engine.start()
+    (episode,) = await _settled(harness)
+    await harness.engine.aclose()
+
+    assert "\n\n".join(line.sent()) == reply
+    assert line.sent()[-1].endswith("The end.")
+    assert episode.outcome == reply
 
 
 # --- a restart mid-activation (§5:10, §6:10) -------------------------------------------------
