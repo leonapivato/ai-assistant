@@ -268,6 +268,7 @@ class _Hub:
         round_id: str = _QUESTION,
         delivered: ToolOutcome | None = ToolOutcome.SUCCEEDED,
         outside: bool = False,
+        place: str = _PLACE,
     ) -> None:
         """Store the asking activation's episode, and its question's delivery record."""
         await self.memory.add(
@@ -281,7 +282,7 @@ class _Hub:
             id=f"effect:message-{activation_id}-{round_id}",
             activation_id=activation_id,
             round=round_id,
-            place=_PLACE,
+            place=place,
             claimed_at=_AT,
         )
         await self.plans.claim_activation_effect(effect, match=None)
@@ -309,6 +310,7 @@ def _yes(  # noqa: PLR0913 — one keyword per part of the pointer a case varies
     round_id: str | None = _QUESTION,
     place: str | None = None,
     position: int | None = None,
+    who: ApprovalGiver = ApprovalGiver.USER_THROUGH_HUB_CHAT,
 ) -> YesContext:
     return YesContext(
         answers=(
@@ -322,6 +324,7 @@ def _yes(  # noqa: PLR0913 — one keyword per part of the pointer a case varies
         ),
         given_at=_AT,
         users_authority=authority,
+        who=who,
     )
 
 
@@ -1310,3 +1313,40 @@ async def test_the_diagnostic_record_names_the_fact_that_failed() -> None:
     )
     assert failed == {"check": "approval", "verdict": "failed", "reason": "not_the_users_authority"}
     assert held == {"check": "approval", "verdict": "held", "reason": None}
+
+
+# --- ADR-0323 §4:8-§4:9: *shown to you* in a place whose kind establishes the user --------
+
+
+async def test_a_question_shown_on_the_telegram_line_is_shown_and_its_who_is_the_lines() -> None:
+    """§4:8: the line's chat is a place whose kind establishes the user; §4:9: its who."""
+    hub = _Hub()
+    await hub.asked(_asked(), place="telegram:conn-0001/424242")
+
+    decided = await hub.authorize(
+        _round(_approved_booking(), yes=_yes(who=ApprovalGiver.USER_THROUGH_TELEGRAM))
+    )
+
+    (verdict,) = decided.verdicts
+    assert verdict.verdict is Verdict.ALLOWED
+    deciding = await _recorded(hub.trail, verdict.decision_id)
+    assert deciding.approval is not None
+    assert deciding.approval.who is ApprovalGiver.USER_THROUGH_TELEGRAM
+
+
+@pytest.mark.parametrize(
+    "place",
+    ["informational_event:mail-1", "place:chat", "elsewhere"],
+    ids=["an-event", "an-unknown-kind", "no-kind"],
+)
+async def test_a_question_done_in_a_place_no_kind_establishes_the_user_in_is_not_shown(
+    place: str,
+) -> None:
+    """§4:8: a done delivery elsewhere was not shown to you, so nothing is approved."""
+    hub = _Hub()
+    await hub.asked(_asked(), place=place)
+
+    decided = await hub.authorize(_round(_approved_booking(), yes=_yes()))
+
+    (verdict,) = decided.verdicts
+    assert verdict.verdict is Verdict.NEEDS_YOU

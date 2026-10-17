@@ -195,6 +195,7 @@ __all__ = [
     "AskedIn",
     "ChannelWindow",
     "EpisodeSelector",
+    "LineMessage",
     "RecentEpisodes",
     "SuppliedWindow",
     "TranscriptWindow",
@@ -574,12 +575,42 @@ class TranscriptWindow:
     """
 
     conversation: ChannelIdentity
-    messages: tuple[TranscriptMessage, ...]
-    input_messages: tuple[TranscriptMessage, ...] = ()
-    replied_to: tuple[TranscriptMessage | DeletedMessage, ...] = ()
+    messages: tuple[TranscriptMessage | LineMessage, ...]
+    input_messages: tuple[TranscriptMessage | LineMessage, ...] = ()
+    replied_to: tuple[TranscriptMessage | LineMessage | DeletedMessage, ...] = ()
     links: Mapping[int, str] = field(default_factory=dict)
     asked: Mapping[int, AskedIn] = field(default_factory=dict)
     forwarded: Mapping[int, ClaimedAuthor] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class LineMessage:
+    """One message of a line's window, as its kind's window brings it in (ADR-0323 §10).
+
+    The hub chat's window carries the chat's own
+    :class:`~ai_assistant.core.types.TranscriptMessage`, which records the device a
+    user's message was written from (ADR-0293 §5:2). A line's messages come from no
+    device of the hub — the user's Telegram apps are the user's end of the chat, not
+    devices (ADR-0323 §2:4) — so they are carried in this shape, which holds what the
+    window renders of a message and nothing of a device: where it is in its place,
+    when it was sent, who wrote it, what it says, and what it replies to.
+
+    Attributes:
+        position: Its id in its place, as the medium gives it.
+        written_at: When it was sent.
+        author: Who wrote it, as the place records it: the assistant's own messages,
+            and every other the user's, a forward among them marked by the window.
+        text: What it says.
+        replies_to: The position of the earlier message it replies to, or ``None``.
+        cut_off: Never set on a line: its writer splits a long message, never cuts it.
+    """
+
+    position: int
+    written_at: datetime
+    author: MessageAuthor
+    text: str
+    replies_to: int | None = None
+    cut_off: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1584,7 +1615,9 @@ def _forward_of(author: ClaimedAuthor) -> dict[str, object]:
     return rendered
 
 
-def _input_message(message: TranscriptMessage, window: TranscriptWindow) -> dict[str, object]:
+def _input_message(
+    message: TranscriptMessage | LineMessage, window: TranscriptWindow
+) -> dict[str, object]:
     """One message of the input as the medium holds it: where it is, what it answers.
 
     Its ``replies_to`` is the position of the window item, or of another message of
@@ -1605,7 +1638,7 @@ def _input_message(message: TranscriptMessage, window: TranscriptWindow) -> dict
 
 
 def _message_item(
-    message: TranscriptMessage | DeletedMessage,
+    message: TranscriptMessage | LineMessage | DeletedMessage,
     window: TranscriptWindow,
     role: str,
     first: int | None,

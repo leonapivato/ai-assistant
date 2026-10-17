@@ -22,8 +22,10 @@ from ai_assistant.core.types import (
     ChannelContext,
     ChannelContextItem,
     ChannelIdentity,
+    ClaimedAuthor,
     EpisodeProcessingRecord,
     EpisodicMemory,
+    InputOrigin,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
@@ -49,6 +51,7 @@ from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
 )
 from ai_assistant.orchestration.understanding import (
+    LineMessage,
     RecentEpisodes,
     SuppliedWindow,
     TranscriptWindow,
@@ -804,3 +807,79 @@ async def test_the_stage_logs_no_content() -> None:
     assert logs
     for secret in ("LEAK-OUTPUT", "LEAK-WINDOW", "LEAK-INPUT"):
         assert secret not in rendered
+
+
+# --- the Telegram line (ADR-0323 §4:10-§4:11, §10) ------------------------------------
+
+
+_LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="conn-0001/424242")
+
+
+async def test_a_line_input_taking_in_a_forward_is_attributed_as_a_report_by_its_origin() -> None:
+    """§4:11: the origin is declared per input, and admission's record of it attributes."""
+    window = TranscriptWindow(
+        _LINE,
+        (),
+        input_messages=(
+            LineMessage(position=1, written_at=AT, author=MessageAuthor.USER, text="Pay me"),
+            LineMessage(position=2, written_at=AT, author=MessageAuthor.USER, text="Real?"),
+        ),
+        forwarded={1: ClaimedAuthor(name="A stranger", account_id=9)},
+    )
+    model = FakeModelProvider.scripted(_proposal())
+    pipeline = _stage(model, await _store())
+    windows = await pipeline.windows.assemble(window, audience=BOUNDED, episodes=False)
+    await pipeline.stage.understand(
+        "Pay me\n\nReal?",
+        channel=_LINE,
+        window=windows.channel,
+        audience=BOUNDED,
+        episodes=None,
+        version=1,
+        now=lambda: AT,
+        deadline=math.inf,
+        origin=InputOrigin.OUTSIDE,
+    )
+
+    sent = _sent(model)
+    assert "report received on telegram:conn-0001/424242" in sent["input"]["received_as"]
+    forwarded, own = sent["input"]["messages"]
+    assert forwarded["forwarded_from"] == {
+        "name": "A stranger",
+        "author": "claimed",
+        "account_id": 9,
+    }
+    assert "forwarded_from" not in own
+
+
+async def test_a_line_input_with_no_forward_is_the_users_message() -> None:
+    model = FakeModelProvider.scripted(_proposal())
+    await _understand(
+        _stage(model, await _store()),
+        "Hello",
+        channel=_LINE,
+        window=TranscriptWindow(_LINE, ()),
+        episodes=False,
+    )
+
+    assert "the message the user just sent on telegram:" in _sent(model)["input"]["received_as"]
+
+
+async def test_a_forward_in_the_window_is_rendered_as_someone_elses_claimed() -> None:
+    window = TranscriptWindow(
+        _LINE,
+        (
+            LineMessage(position=1, written_at=AT, author=MessageAuthor.USER, text="Forwarded"),
+            LineMessage(position=2, written_at=AT, author=MessageAuthor.USER, text="Mine"),
+        ),
+        forwarded={1: ClaimedAuthor(name="Sam")},
+    )
+    model = FakeModelProvider.scripted(_proposal())
+    await _understand(
+        _stage(model, await _store()), "Hi", channel=_LINE, window=window, episodes=False
+    )
+
+    first, second = _sent(model)["channel_window"]
+    assert first["author"] == "a forward from someone else, its sender claimed"
+    assert first["forwarded_from"] == {"name": "Sam", "author": "claimed"}
+    assert second["author"] == "the user"

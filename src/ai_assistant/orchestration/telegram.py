@@ -94,7 +94,6 @@ from ai_assistant.core.types import (
     TelegramOutcome,
     TelegramPollOutcome,
     ToolOutcome,
-    TranscriptMessage,
     telegram_length,
 )
 from ai_assistant.orchestration.channel_kinds import (
@@ -109,7 +108,12 @@ from ai_assistant.orchestration.chat import CHAT_WINDOW_SIZE, COULDNT_FINISH
 from ai_assistant.orchestration.defects import is_defect, log_defect
 from ai_assistant.orchestration.phase_path import Delivery
 from ai_assistant.orchestration.stories import episode_address
-from ai_assistant.orchestration.understanding import AskedIn, TranscriptWindow, WrittenBy
+from ai_assistant.orchestration.understanding import (
+    AskedIn,
+    LineMessage,
+    TranscriptWindow,
+    WrittenBy,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -122,11 +126,6 @@ if TYPE_CHECKING:
         TelegramUpdate,
     )
     from ai_assistant.orchestration.phase_path import PlaceWriter
-
-    #: The phases' ``written_in``: which activation wrote each message in a place.
-    type _Written = Callable[
-        [str, Sequence[str], Sequence[int] | None], Awaitable[Mapping[int, WrittenBy]]
-    ]
 
 __all__ = [
     "INTERRUPTED_LINE",
@@ -284,6 +283,8 @@ def _split(text: str, limit: int, level: int) -> list[str]:
     parts: list[str] = []
     current: str | None = None
     for chunk in text.split(separator):
+        if not chunk:
+            continue  # a run of breaks is one break: nothing between them is sent
         if telegram_length(chunk) > limit:
             if current is not None:
                 parts.append(current)
@@ -689,7 +690,10 @@ class TelegramReader:
         activate: Callable[[TelegramInput], Awaitable[bool]],
         closing: Callable[[], bool],
         mint: Callable[[], str],
-        written: _Written | None = None,
+        written: Callable[
+            [str, Sequence[str], Sequence[int] | None], Awaitable[Mapping[int, WrittenBy]]
+        ]
+        | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         """Wire the reader.
@@ -932,6 +936,11 @@ class TelegramReader:
             await self._writer.fixed(lambda: self._intake.claim_interrupted(last), INTERRUPTED_LINE)
         except TelegramIntakeRecordError, MemoryStoreError:
             _log.warning("telegram_restart_unread", stage="reader", reason="store_failed")
+        except Exception as exc:  # the line still starts: a defect is logged, never raised
+            if is_defect(exc):
+                log_defect("telegram_restart_unread", exc, stage="reader", activation_id=None)
+            else:
+                _log.warning("telegram_restart_unread", stage="reader", reason="failed")
 
     async def _cut_off(self, activation_id: str) -> bool:
         """Whether a restart cut ``activation_id`` off: closed *interrupted*, not stopped."""
@@ -970,7 +979,7 @@ class TelegramReader:
         )
         inputs = tuple(self._input_message(one) for one in messages)
         taken = {one.position for one in inputs}
-        shown: dict[int, TranscriptMessage] = {}
+        shown: dict[int, LineMessage] = {}
         links: dict[int, str] = {}
         asked: dict[int, AskedIn] = {}
         forwarded: dict[int, ClaimedAuthor] = {}
@@ -1003,7 +1012,7 @@ class TelegramReader:
         self,
         episode: EpisodicMemory,
         writes: Mapping[int, WrittenBy],
-        shown: dict[int, TranscriptMessage],
+        shown: dict[int, LineMessage],
         links: dict[int, str],
         forwarded: dict[int, ClaimedAuthor],
     ) -> None:
@@ -1015,8 +1024,7 @@ class TelegramReader:
         for one in processing.trigger.messages:
             if one.position is None or one.position < 1 or not one.text.strip():
                 continue
-            shown[one.position] = TranscriptMessage(
-                conversation_id=self._channel.instance_id,
+            shown[one.position] = LineMessage(
                 position=one.position,
                 written_at=one.sent_at,
                 author=MessageAuthor.USER,
@@ -1033,8 +1041,7 @@ class TelegramReader:
             text = COULDNT_FINISH if writer.round is None else rounds.get(writer.round, "")
             if not text.strip():
                 continue
-            shown[position] = TranscriptMessage(
-                conversation_id=self._channel.instance_id,
+            shown[position] = LineMessage(
                 position=position,
                 written_at=at,
                 author=MessageAuthor.ASSISTANT,
@@ -1042,7 +1049,7 @@ class TelegramReader:
             )
             links[position] = activation_id
 
-    def _input_message(self, message: TelegramMessage) -> TranscriptMessage:
+    def _input_message(self, message: TelegramMessage) -> LineMessage:
         """One message of the input, at its Telegram id and time (§5:4)."""
         quoted = message.reply_to
         replies_to = (
@@ -1050,8 +1057,7 @@ class TelegramReader:
             if quoted is not None and 1 <= quoted.message_id < message.message_id
             else None
         )
-        return TranscriptMessage(
-            conversation_id=self._channel.instance_id,
+        return LineMessage(
             position=message.message_id,
             written_at=message.sent_at,
             author=MessageAuthor.USER,
@@ -1062,12 +1068,12 @@ class TelegramReader:
     def _replied(  # noqa: PLR0913 — the input, as Telegram sent it and as taken in, the window, and the three links it extends
         self,
         messages: Sequence[TelegramMessage],
-        inputs: Sequence[TranscriptMessage],
-        recent: Sequence[TranscriptMessage],
+        inputs: Sequence[LineMessage],
+        recent: Sequence[LineMessage],
         writes: Mapping[int, WrittenBy],
         links: dict[int, str],
         asked: dict[int, AskedIn],
-    ) -> tuple[TranscriptMessage, ...]:
+    ) -> tuple[LineMessage, ...]:
         """Each message the input replies to that the window does not show (§4:12-§4:13).
 
         Telegram sends the quoted message with the reply, so it is brought in as it
@@ -1077,7 +1083,7 @@ class TelegramReader:
         effect record, where the window's activations include the writer.
         """
         shown = {one.position for one in (*recent, *inputs)}
-        replied: dict[int, TranscriptMessage] = {}
+        replied: dict[int, LineMessage] = {}
         for one in messages:
             quoted = one.reply_to
             if (
@@ -1090,8 +1096,7 @@ class TelegramReader:
             ):
                 continue
             bot = quoted.sender_is_bot
-            replied[quoted.message_id] = TranscriptMessage(
-                conversation_id=self._channel.instance_id,
+            replied[quoted.message_id] = LineMessage(
                 position=quoted.message_id,
                 written_at=one.sent_at,
                 author=MessageAuthor.ASSISTANT if bot else MessageAuthor.USER,

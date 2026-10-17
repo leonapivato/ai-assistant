@@ -1802,3 +1802,22 @@ def test_an_unreadable_trail_is_reported_and_no_row_is_invented(
     rendered = _flat(output.getvalue())
     assert "the trail could not be opened" in rendered
     assert "Nothing recorded" not in rendered
+
+
+def test_a_yes_given_on_the_telegram_line_names_the_line(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0323 §4:9: the approval's *who* is the user through the channel the yes came on."""
+    approval = _approval(1).model_copy(update={"who": ApprovalGiver.USER_THROUGH_TELEGRAM})
+    decided = _decision(
+        "d-fresh",
+        outcome=PermissionOutcome.CONFIRM,
+        reason="needs the user's confirmation",
+        approval=approval,
+        approved_part=QuestionPart(round="r-ask", part=1),
+    )
+
+    rendered = _listing(output, monkeypatch, decided)
+
+    assert "by you, through Telegram, in activation a-yes" in rendered
+    assert "through the hub chat" not in rendered

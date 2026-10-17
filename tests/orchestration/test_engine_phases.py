@@ -1985,7 +1985,7 @@ async def test_the_writers_read_keeps_only_a_message_done_in_the_conversation() 
     await _claimed(harness, "e5", "remember", ToolOutcome.SUCCEEDED)
 
     assert await path.written("c1", [_ACTIVATION], [2, 3, 5]) == {
-        2: WrittenBy(activation_id=_ACTIVATION)
+        2: WrittenBy(activation_id=_ACTIVATION, round="round:1")
     }
     assert await path.written("c1", [], [2]) == {}
     assert await path.written("c1", ["activation-unknown"], [2]) == {}
@@ -2027,8 +2027,12 @@ async def test_the_writers_read_marks_a_question_by_its_own_activations_round() 
         )
 
     assert await path.written("c1", ["act-a", "act-b"], [2, 3]) == {
-        2: WrittenBy(activation_id="act-a"),
-        3: WrittenBy(activation_id="act-b", asked=AskedIn(round="round:1", parts=(1, 2))),
+        2: WrittenBy(activation_id="act-a", round="round:1"),
+        3: WrittenBy(
+            activation_id="act-b",
+            asked=AskedIn(round="round:1", parts=(1, 2)),
+            round="round:1",
+        ),
     }
 
 

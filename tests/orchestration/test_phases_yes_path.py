@@ -16,11 +16,12 @@ import json
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from phases_support import chat_turn, processing, written
+from phases_support import chat_turn, frozen, processing, until, written
 from story_support import CONVERSATION, episode
+from telegram_support import CHAT, REFERENCE, YieldingTelegram, text
 from test_engine import AT, Harness
 from understanding_support import recall_stage
 
@@ -31,11 +32,13 @@ from ai_assistant.core.types import (
     ActivationUnderstanding,
     AnsweredQuestion,
     Approval,
+    ApprovalGiver,
     AskedCall,
     CapabilityEffect,
     CapabilityResult,
     ChannelIdentity,
     ChannelInput,
+    ClaimedAuthor,
     ControllerStage,
     CostBasis,
     DataTier,
@@ -60,6 +63,10 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryMember,
     StoryMemberKind,
+    TelegramForwardKind,
+    TelegramForwardOrigin,
+    TelegramQuotedMessage,
+    TelegramUpdate,
     TextChannelPayload,
     ToolCost,
     ToolDefinition,
@@ -77,11 +84,20 @@ from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
-from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, PhaseWorking
-from ai_assistant.orchestration.planning import APPROVED_ACTION_TOOL
+from ai_assistant.orchestration.phase_path import (
+    Delivery,
+    PhasePath,
+    PhaseTools,
+    PhaseWorking,
+    PlaceTarget,
+    place_window,
+)
+from ai_assistant.orchestration.planning import APPROVED_ACTION_TOOL, PlaceAuthor
 from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
+from ai_assistant.orchestration.telegram import TelegramLineSeams, line_channel
 from ai_assistant.orchestration.understanding import (
+    LineMessage,
     RecentEpisodes,
     TranscriptWindow,
     UnderstandingStage,
@@ -93,6 +109,8 @@ from ai_assistant.testing import (
     FakeModelProvider,
     FakePlanStore,
     FakeStoryStore,
+    FakeTelegramBotClient,
+    FakeTelegramIntakeRecord,
     FakeToolCallingCompleter,
     FakeToolImplementation,
     FakeWebSearcher,
@@ -412,6 +430,7 @@ class _Hub:
         aged_out: bool = False,
         plans: FakePlanStore | None = None,
         stories_shown: bool = False,
+        telegram: TelegramLineSeams | None = None,
     ) -> None:
         self.planner = _Planner()
         self.reader = _Reader()
@@ -442,6 +461,7 @@ class _Hub:
             if stories_shown
             else None,
             story_links=StoryLinksStage(stories=self.stories) if stories_shown else None,
+            telegram=telegram,
         )
         for tool in _TOOLS:
             self.harness.invoker.register(tool, self.world.handler(str(tool.capability)))
@@ -506,6 +526,22 @@ class _Hub:
     ) -> tuple[str, EpisodicMemory]:
         """One message from the user, and the episode its activation froze."""
         return await chat_turn(self.harness, text, conversation=conversation, message_id=message_id)
+
+    async def line_turn(
+        self, fake: FakeTelegramBotClient, update: TelegramUpdate
+    ) -> EpisodicMemory:
+        """One update the line takes in, and the episode its activation froze."""
+        before = {one.id for one in await frozen(self.harness)}
+        fake.hold(update)
+        found: list[EpisodicMemory] = []
+
+        async def done() -> bool:
+            found[:] = [one for one in await frozen(self.harness) if one.id not in before]
+            return bool(found) and fake.held == ()
+
+        await until(done, what="the line's activation to settle")
+        (episode,) = found
+        return episode
 
     async def said(self, conversation: str) -> list[TranscriptMessage]:
         """The assistant's messages in ``conversation``, oldest first."""
@@ -824,6 +860,87 @@ def test_only_the_users_own_chat_message_carries_their_authority(
 
     assert working.users_authority is expected
     assert working.given_at == (messages[-1].written_at if messages else None)
+
+
+class _NoWrites:
+    """A place writer no case here reaches: it only names the place."""
+
+    def fitted(self, message: NewMessage) -> NewMessage:
+        return message
+
+    async def deliver(self, message: NewMessage, *, effect_id: str) -> Delivery:
+        raise AssertionError
+
+
+_LINE = line_channel(REFERENCE, CHAT)
+
+
+def _said_on_the_line(position: int, author: MessageAuthor = MessageAuthor.USER) -> LineMessage:
+    return LineMessage(
+        position=position,
+        written_at=AT + timedelta(minutes=position),
+        author=author,
+        text="yes",
+    )
+
+
+@pytest.mark.parametrize(
+    ("origin", "forwarded", "expected"),
+    [
+        pytest.param(InputOrigin.USER, (), True, id="the-owners-own-messages"),
+        pytest.param(InputOrigin.OUTSIDE, (2,), False, id="a-forward-among-them"),
+        pytest.param(InputOrigin.USER, (2,), False, id="a-forward-whatever-the-origin"),
+        pytest.param(InputOrigin.OUTSIDE, (), False, id="an-outside-origin"),
+    ],
+)
+def test_on_the_line_only_the_owners_own_messages_none_forwarded_carry_authority(
+    origin: InputOrigin, forwarded: tuple[int, ...], expected: bool
+) -> None:
+    """ADR-0323 §4:6: every message taken in is the user's, established, none a forward."""
+    hub = _Hub()
+    path = hub.phases(hub.harness)
+    taken = (_said_on_the_line(1), _said_on_the_line(2))
+    window = TranscriptWindow(
+        _LINE,
+        (),
+        input_messages=taken,
+        forwarded={one: ClaimedAuthor(name="Sam") for one in forwarded},
+    )
+
+    working = path.begin_line(
+        activation_id="a-2",
+        window=window,
+        target=PlaceTarget(channel=_LINE, writer=_NoWrites()),
+        description="the line",
+        giver=ApprovalGiver.USER_THROUGH_TELEGRAM,
+        trigger_origin=origin,
+        owner_records=True,
+    )
+
+    assert working.users_authority is expected
+    assert working.given_at == taken[-1].written_at
+    assert working.giver is ApprovalGiver.USER_THROUGH_TELEGRAM
+    assert working.conversation_id is None
+    assert working.target is not None
+    assert working.target.place == f"telegram:{_LINE.instance_id}"
+
+
+def test_a_forward_in_the_lines_window_is_someone_elses_whose_text_planning_never_sees() -> None:
+    """ADR-0323 §4:10, ADR-0307 §9:2: a forward is ``other``'s in the place window."""
+    window = TranscriptWindow(
+        _LINE,
+        (_said_on_the_line(1, MessageAuthor.ASSISTANT),),
+        input_messages=(_said_on_the_line(2), _said_on_the_line(3)),
+        forwarded={2: ClaimedAuthor(name="Sam")},
+    )
+
+    place = place_window(window, description="the line")
+
+    assert [one.author for one in place.items] == [
+        PlaceAuthor.ASSISTANT,
+        PlaceAuthor.OTHER,
+        PlaceAuthor.USER,
+    ]
 
 
 def test_an_event_never_carries_the_users_authority() -> None:
@@ -1542,3 +1659,82 @@ async def test_a_stalled_read_of_the_yes_records_times_the_round_out() -> None:
     assert plans.entered.is_set()
     assert result.outcome is StageOutcome.TIMED_OUT
     assert hub.planner.calls == []
+
+
+# --- the Telegram line (ADR-0323 §4:7-§4:9, §7) ---------------------------------------------
+
+
+def _line() -> tuple[FakeTelegramBotClient, TelegramLineSeams]:
+    fake = FakeTelegramBotClient(chat_id=CHAT, first_message_id=300)
+    return fake, TelegramLineSeams(
+        client=YieldingTelegram(fake),
+        intake=FakeTelegramIntakeRecord(),
+        reference=REFERENCE,
+        poll_wait=timedelta(seconds=1),
+        poll_bound=timedelta(seconds=2),
+        send_bound=timedelta(seconds=1),
+    )
+
+
+async def _asked_on_the_line() -> tuple[_Hub, FakeTelegramBotClient, int, EpisodicMemory]:
+    """The booking asked about on the line: the question is the chat's first message."""
+    fake, seams = _line()
+    hub = _Hub(telegram=seams)
+    await hub.harness.engine.start()
+    hub.reader.nothing()
+    hub.planner.then(_book(), _ask())
+    asking = await hub.line_turn(fake, text(1, "Book a table for Friday.", message_id=10))
+    ((question_id, question),) = fake.messages
+    assert question == _QUESTION, "plain text with its exact lines, no buttons (§7:1)"
+    return hub, fake, question_id, asking
+
+
+def _reply(update_id: int, words: str, question_id: int, **marks: Any) -> TelegramUpdate:
+    """The owner's reply to the question's message, which Telegram sends it with (§7:2)."""
+    return text(
+        update_id,
+        words,
+        message_id=question_id + update_id,
+        reply_to=TelegramQuotedMessage(
+            message_id=question_id, sender_id=1, sender_is_bot=True, text=_QUESTION
+        ),
+        **marks,
+    )
+
+
+async def test_a_typed_yes_on_the_line_approves_once_given_through_the_line() -> None:
+    """§4:7-§4:9, §7:2: a typed reply approves under ADR-0321 §3, once, by the line."""
+    hub, fake, question_id, asking = await _asked_on_the_line()
+    assert hub.world.of("book") == []
+
+    hub.reader.yes()
+    hub.planner.then(_run_approved(), RoundResponse(text="Booked for Friday."))
+    yes = await hub.line_turn(fake, _reply(2, "Yes please.", question_id))
+
+    assert hub.world.of("book") == [{"date": "Friday"}]
+    (answers,) = processing(yes).understanding[-1].answers
+    assert answers.activation_id == _activation(asking)
+    (approval,) = await _approvals(hub)
+    assert approval.who is ApprovalGiver.USER_THROUGH_TELEGRAM, "the line's member (§4:9)"
+    assert approval.given.activation_id == _activation(yes)
+
+    hub.reader.yes()
+    hub.planner.then(_book(), RoundResponse(text="That is already booked."))
+    await hub.line_turn(fake, _reply(3, "Yes!", question_id))
+    await hub.harness.engine.aclose()
+
+    assert hub.world.of("book") == [{"date": "Friday"}], "a part is spent once (§4:9)"
+
+
+async def test_a_forward_saying_yes_on_the_line_approves_nothing() -> None:
+    """§4:6-§4:7: an input taking in a forward carries no authority, so no yes."""
+    hub, fake, question_id, _ = await _asked_on_the_line()
+    forward = TelegramForwardOrigin(kind=TelegramForwardKind.USER, name="Sam", account_id=5)
+
+    hub.reader.yes()
+    hub.planner.then(_run_approved(), RoundResponse(text="Noted."), _DONE)
+    await hub.line_turn(fake, _reply(2, "Yes, book it.", question_id, forward=forward))
+    await hub.harness.engine.aclose()
+
+    assert hub.world.of("book") == []
+    assert "approved_actions" not in hub.planner.shown(2)

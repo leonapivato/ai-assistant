@@ -207,6 +207,7 @@ from ai_assistant.core.types import (
     CapabilityResult,
     ControllerRule,
     ControllerStage,
+    DeletedMessage,
     DigestOutcome,
     EpisodicMemory,
     InputOrigin,
@@ -229,7 +230,6 @@ from ai_assistant.core.types import (
     ToolFailureKind,
     ToolOutcome,
     ToolResult,
-    TranscriptMessage,
     rests_on_recorded_external_content,
 )
 from ai_assistant.orchestration.acting import (
@@ -326,6 +326,7 @@ if TYPE_CHECKING:
         StorySummaryState,
         ToolCall,
         ToolDefinition,
+        TranscriptMessage,
     )
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.controller import ControllerStageRun
@@ -334,7 +335,12 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.story_calls import StoryCalls
     from ai_assistant.orchestration.story_links import Candidates, ShortView, StoryCandidates
-    from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow, Windows
+    from ai_assistant.orchestration.understanding import (
+        Fetched,
+        LineMessage,
+        TranscriptWindow,
+        Windows,
+    )
 
 __all__ = [
     "CHAT_DESCRIPTION",
@@ -1553,9 +1559,9 @@ def place_window(
         The place, oldest item first.
     """
     inputs = {one.position for one in window.input_messages}
-    shown: dict[int, TranscriptMessage] = {}
+    shown: dict[int, TranscriptMessage | LineMessage] = {}
     for one in (*window.replied_to, *window.messages, *window.input_messages):
-        if isinstance(one, TranscriptMessage):
+        if not isinstance(one, DeletedMessage):
             shown[one.position] = one
     items = tuple(
         PlaceItem(
