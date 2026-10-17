@@ -89,7 +89,8 @@ dropped, and so is every name where the place takes no message (§7:3). For each
 message asks about, code appends one exact line, written by :func:`exact_line` for every
 capability alike, and records the call in the round's ``asked``, its part the line's
 number. The lines go under one fixed ``Needs your yes:`` line, whether or not planning
-wrote text (#3094). The exact lines are the message's last lines, so a cut that loses
+wrote text (#3094), and a copy of that line ending planning's text is dropped, so it
+appears once (#3103). The exact lines are the message's last lines, so a cut that loses
 any of them loses the end of the message.
 
 **Approved actions** (§4:2). The actions the activation's yes approved are shown under A
@@ -2219,6 +2220,24 @@ def _asked_calls(names: Sequence[str], askable: Mapping[str, CallOutcome]) -> tu
     return tuple(asked)
 
 
+def _bare_line(line: str) -> str:
+    """A line as :func:`_without_fixed_line` compares it: no whitespace, colon or case."""
+    return line.strip().removesuffix(":").rstrip().casefold()
+
+
+def _without_fixed_line(text: str) -> str:
+    """Planning's text without a :data:`_NEEDS_YOUR_YES` line of its own at its end (#3103).
+
+    Planning is told it never writes the fixed line, and code is the backstop: a last
+    line that is the fixed line, whatever its case, surrounding whitespace or missing
+    colon, is dropped. Only the last line: a mention anywhere else is left as written.
+    """
+    lines = text.rstrip().splitlines(keepends=True)
+    if lines and _bare_line(lines[-1]) == _bare_line(_NEEDS_YOUR_YES):
+        return "".join(lines[:-1])
+    return text
+
+
 def _with_questions(
     text: str, asked: Sequence[_Asked], capabilities: Sequence[ToolDefinition]
 ) -> str:
@@ -2227,10 +2246,12 @@ def _with_questions(
     The lines come last, under the fixed :data:`_NEEDS_YOUR_YES` line, which follows
     planning's text after a blank line, so a message cut to fit loses them first. The
     fixed line is there whether or not planning wrote text, so the lines never go out
-    as a bare line that does not read as a question (#3094).
+    as a bare line that does not read as a question (#3094). Where planning's text ends
+    with that line itself, its copy is dropped, so the line appears once (#3103).
     """
     if not asked:
         return text
+    text = _without_fixed_line(text)
     lines = "\n".join(
         exact_line(
             one.call,
