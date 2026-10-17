@@ -217,6 +217,9 @@ if TYPE_CHECKING:
         StorySummaryView,
         StoryView,
         StoryViewPage,
+        TelegramOutcome,
+        TelegramPollOutcome,
+        TelegramSendOutcome,
         ToolCall,
         ToolCost,
         ToolDefinition,
@@ -11905,5 +11908,220 @@ class OutboundTransport(Protocol):
         write to a far end that has gone. Releasing there is the holder's, under
         the rule that a channel is closed by whoever opened it: the division is by
         *where the failure lands*, and there is no case belonging to both.
+        """
+        ...
+
+
+@runtime_checkable
+class TelegramBotClient(Protocol):
+    """The owner's bot on Telegram, as the line's reader and writer reach it (ADR-0323).
+
+    **The line's one route to Telegram** (§11). Every Bot API call the line makes —
+    a poll for new messages, a message sent, the typing indicator renewed — is made
+    by the one production implementation of this contract, in
+    ``ai_assistant.tools.egress`` and in no other module (§11:1), and the line's
+    reader and writer in ``orchestration`` reach it through this Protocol alone
+    (§15). Named for the thing it talks to, as :class:`OutboundTransport` is: what a
+    caller holds is the bot, and what it can ask of it is these three calls.
+
+    **These are not egress calls in ADR-0148's sense** (§11:2): no ``ActionRequest``,
+    binding or ruling exists for them, and the approval that covers what they carry
+    is the owner's connect act and the line's two settings (§12:1). What stands in
+    for ADR-0148's per-call machinery is the order every implementation keeps, and
+    which §11 and §13 state:
+
+    1. **The arguments are checked first**, before anything is read and before the
+       call's bound starts: a value no call could be made with is a ``ValueError``,
+       and nothing is touched for it.
+    2. **A chat other than the one the line's settings name is refused** before
+       anything else is read (§6:1, §12:1) — :attr:`TelegramFailure.OTHER_CHAT`.
+       Nothing a caller passes can name a chat the owner did not.
+    3. **Only then is the token read**, through the ``INTEGRATION``-scoped
+       ``Secrets`` face, once per call, with the connection record read before it and
+       again before any byte is sent (§11:4, ADR-0148 §6). A record that is not
+       active, that moved across the read, or that names a slot holding nothing, is
+       :attr:`TelegramFailure.UNAVAILABLE`, and nothing is written.
+    4. **The token is bound into the request target inside the implementation**, and
+       no caller ever holds the target (§11:8). Nothing this contract returns or
+       raises, and nothing an implementation logs, carries the target or any part of
+       the token (§11:9).
+    5. **One request, to the one origin** ``https://api.telegram.org``, fixed in code,
+       on a channel opened for this call and closed by it, with no redirect followed
+       (§11:5, §11:14). Every call is a ``POST`` with a JSON body (§11:7).
+
+    **The claim is the caller's, and the contract makes naming it unavoidable.**
+    §11:3 and §13:2 make every call wait for a durable record claimed before it is
+    sent — an activation's message on its effect record (ADR-0306 §5:4), and a fixed
+    reply, a typing indicator and a poll on a record of the line's own. That record
+    is the caller's to claim and to complete with the outcome returned here: this
+    contract holds no ledger, as :class:`Forecaster` holds none. What it
+    does hold is that **every call names the attempt it is the claimed record's**:
+    ``attempt`` is required on all three members and refused blank, so a call
+    written without a claim in hand does not have a value to pass, and what the
+    implementation records of the call is filed under it.
+
+    **The line's two bounds are the caller's, and there is no spelling for
+    "unbounded"** (§11:10 to §11:12, ADR-0241 §1). Every member takes ``timeout``,
+    required, keyword-only, strictly positive, and enforced inside the call: a
+    caller wrapping a call in ``asyncio.timeout`` instead would cancel it mid-await
+    and could not tell a request that was written from one that was not, which is
+    the distinction §6:3 to §6:4 turns on.
+
+    **No member raises for anything Telegram or the network did.** Each failure is
+    a :class:`~ai_assistant.core.types.TelegramFailure` on the returned outcome,
+    for :class:`Forecaster`'s reason: the caller has a record to complete whatever
+    happened, and an exception would leave it claimed with no outcome — which
+    §13:2 forbids resolving by guessing. ``ValueError`` is raised only for an
+    argument no call could be made with, before anything is read.
+
+    **Cancellation** (ADR-0060): a call cancelled from outside re-raises
+    ``CancelledError`` after closing its channel, and is converted into no outcome.
+    Its effect is indeterminate to the caller: a request may have been written.
+    A call's own bound ending is not a cancellation from outside, and is an
+    outcome.
+
+    **A BREAKING contract change under golden rule 5**, decided by ADR-0323 §15 and
+    landing with its conformance suite and canonical fake in
+    :mod:`ai_assistant.testing` (``CONTRIBUTING.md`` → "Adding a Protocol").
+    """
+
+    @property
+    def chat_id(self) -> int:
+        """The one chat this client writes to: the owner's private chat with the bot.
+
+        Telegram identifies a private chat by the other account's id, so this is
+        ``Settings.telegram_user_id`` (§3:2). Fixed for the client's life. A send or
+        a typing indicator naming any other chat is refused before the token is read.
+        """
+        ...
+
+    async def poll(
+        self,
+        *,
+        attempt: str,
+        offset: int | None,
+        wait: timedelta,
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, ADR-0323 §11:10); an outer `asyncio.timeout` could not tell a written request from one never sent
+    ) -> TelegramPollOutcome:
+        """Ask Telegram for new messages, confirming what ``offset`` says was dealt with.
+
+        One ``getUpdates`` call, asking for new messages only, which Telegram holds
+        open for at most ``wait`` while none is waiting (§11:10). **The offset
+        confirms**: Telegram forgets every update whose id is below it, so a caller
+        passes one only for updates already dealt with (§5:6) — and ``None`` confirms
+        nothing. That makes a poll a write, which is why it is a ``POST`` (§11:6).
+
+        An update returned is one Telegram still holds: a poll that confirms nothing
+        returns it again. Which updates are input is the reader's (§5:1 to §5:3); this
+        returns every update Telegram handed back, those from other accounts and chats
+        included, so the reader can confirm them too.
+
+        Args:
+            attempt: The id of the durable record the caller claimed for this poll
+                (§13:2). Non-blank.
+            offset: The lowest update id still wanted, or ``None``. Non-negative:
+                Telegram reads a negative offset as "forget all but the last few",
+                which no reader means.
+            wait: How long Telegram may hold the request while nothing is waiting —
+                ``Settings.telegram_poll_wait``. Zero or more; Telegram takes whole
+                seconds, so a fraction is dropped and the wait is never longer than
+                asked.
+            timeout: The bound on the whole poll — ``Settings.telegram_poll_bound``.
+                Strictly greater than ``wait`` (§11:10).
+
+        Returns:
+            Done, with the updates Telegram handed back in ascending update id; or a
+            failure, carrying none. **A poll that reaches its bound is**
+            :attr:`~ai_assistant.core.types.TelegramFailure.UNKNOWN`, its channel
+            closed, and has taken nothing in (§11:11).
+
+        Raises:
+            ValueError: If ``attempt`` is blank, ``offset`` is not a non-negative
+                ``int`` or ``None``, ``wait`` is not a non-negative ``timedelta``, or
+                ``timeout`` is not a ``timedelta`` strictly greater than ``wait``.
+                Raised before anything is read.
+            CancelledError: Re-raised after the channel is closed, when the poll is
+                cancelled from outside (ADR-0060 §1).
+        """
+        ...
+
+    async def send(
+        self,
+        *,
+        attempt: str,
+        chat_id: int,
+        text: str,
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, ADR-0323 §11:12); an outer `asyncio.timeout` could not tell a written request from one never sent
+    ) -> TelegramSendOutcome:
+        """Send one message of plain text to the line's chat (§6).
+
+        One ``sendMessage`` call, and **never a retry**: whether to send again is the
+        caller's, read off the outcome's
+        :attr:`~ai_assistant.core.types.TelegramFailure.retryable` (§6:3). A text
+        longer than one Telegram message is not this member's to cut: the caller
+        sends each of :func:`~ai_assistant.core.types.telegram_message_parts`, so that
+        each part is one call with its own outcome, and a message cut short between
+        parts is recorded as what it is (§6:6).
+
+        Args:
+            attempt: The id of the durable record the caller claimed for this
+                message — for an activation's message, its effect record (§11:3).
+                Non-blank.
+            chat_id: The chat to send to. Anything but :attr:`chat_id` is refused as
+                :attr:`~ai_assistant.core.types.TelegramFailure.OTHER_CHAT`.
+            text: The message's text, sent as plain text. Not blank, encodable as
+                UTF-8, and within
+                :data:`~ai_assistant.core.types.TELEGRAM_MESSAGE_LIMIT` as
+                :func:`~ai_assistant.core.types.telegram_length` measures it.
+            timeout: The bound on this send — ``Settings.telegram_send_bound``
+                (§11:12). Strictly positive.
+
+        Returns:
+            Done, with the message id Telegram returned (§6:2); or a failure. **A
+            send cut off by its bound after its request was written is**
+            :attr:`~ai_assistant.core.types.TelegramFailure.UNKNOWN`; one cut off
+            before it was written is
+            :attr:`~ai_assistant.core.types.TelegramFailure.NOT_WRITTEN`.
+
+        Raises:
+            ValueError: If ``attempt`` is blank, ``chat_id`` is not an ``int``,
+                ``text`` is not text this member will send, or ``timeout`` is not a
+                strictly positive ``timedelta``. Raised before anything is read.
+            CancelledError: Re-raised after the channel is closed, when the send is
+                cancelled from outside (ADR-0060 §1). Whether the message was sent is
+                then unknown to the caller.
+        """
+        ...
+
+    async def show_typing(
+        self,
+        *,
+        attempt: str,
+        chat_id: int,
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, ADR-0323 §11:12); an outer `asyncio.timeout` could not tell a written request from one never sent
+    ) -> TelegramOutcome:
+        """Show Telegram's "typing…" in the line's chat, once (§6:7).
+
+        One ``sendChatAction`` call. Telegram shows the indicator for a few seconds,
+        so the writer renews it while an activation runs; nothing is written into the
+        chat (ADR-0292 §11:7).
+
+        Args:
+            attempt: The id of the durable record the caller claimed for this
+                indicator (§13:2). Non-blank.
+            chat_id: The chat to show it in. Anything but :attr:`chat_id` is refused
+                as :attr:`~ai_assistant.core.types.TelegramFailure.OTHER_CHAT`.
+            timeout: The bound on this call — ``Settings.telegram_send_bound``.
+                Strictly positive.
+
+        Returns:
+            Done, or a failure classed as a send's is.
+
+        Raises:
+            ValueError: If ``attempt`` is blank, ``chat_id`` is not an ``int``, or
+                ``timeout`` is not a strictly positive ``timedelta``. Raised before
+                anything is read.
+            CancelledError: Re-raised after the channel is closed, when the call is
+                cancelled from outside (ADR-0060 §1).
         """
         ...

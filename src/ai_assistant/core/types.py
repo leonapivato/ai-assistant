@@ -18305,3 +18305,395 @@ class DiagnosticEntry(BaseModel):
     kind: DiagnosticKind
     recorded_at: UtcInstant
     body: FrozenJsonMapping
+
+
+# --- The Telegram line's Bot API client (ADR-0323 §5, §6, §11, §15) ---------
+#
+# The shapes :class:`~ai_assistant.core.protocols.TelegramBotClient` exchanges, and
+# the one rule both of its sides need: how a message too long for one Telegram
+# message is cut into parts (§6:6). They are here, rather than beside the client in
+# ``ai_assistant.tools.egress``, because the line's writer is in ``orchestration``
+# (§15's table) and reaches the client only through the contract: what it hands the
+# client and what it reads back cross that boundary, and the cut has to be made by
+# the writer, which owns the effect record each part's outcome lands on.
+
+#: Telegram's limit on one message's text (ADR-0323 §6:6, §9's requirements row).
+#: Counted in UTF-16 code units by :func:`telegram_length`, which is never fewer
+#: than the characters it holds — so a part within it is within 4,096 characters
+#: on every reading of "character".
+TELEGRAM_MESSAGE_LIMIT: Final = 4096
+
+
+def telegram_length(text: str) -> int:
+    """How long ``text`` is against :data:`TELEGRAM_MESSAGE_LIMIT`.
+
+    **UTF-16 code units, and that is the conservative reading of §6:6.** Telegram
+    measures text in UTF-16 (its entity offsets are UTF-16 offsets), and a character
+    outside the Basic Multilingual Plane, an emoji above all, is two units there and
+    one code point in Python. Counting code points would let a part of 4,096
+    characters full of emoji past this rule and into a refusal Telegram answers
+    with, which is a *not done* nothing could have retried into a success.
+
+    Args:
+        text: The text to measure.
+
+    Returns:
+        Its length in UTF-16 code units.
+    """
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+#: Where §6:6 prefers to cut, in its own order: a paragraph break, then a line
+#: break. A break between words is the third preference and is any whitespace,
+#: which :func:`_telegram_cut` finds itself.
+_TELEGRAM_BREAKS: Final = ("\n\n", "\n")
+
+
+def telegram_message_parts(text: str) -> tuple[str, ...]:
+    """Cut ``text`` into consecutive parts none longer than Telegram takes (§6:6).
+
+    "A message longer than Telegram's 4,096 characters is sent as consecutive parts,
+    none longer than that, together holding the whole text in order. It is split at
+    paragraph breaks; a paragraph longer than a part is split at line breaks, then
+    between words, and at the limit only where a run of text has no break."
+
+    **Each part ends at the latest break that keeps it within the limit**, the
+    preference taken in that order: the latest paragraph break, else the latest line
+    break, else the latest whitespace, else the limit itself. The break stays at the
+    end of the part before it, so the parts **concatenate to the text exactly** —
+    "the whole text in order" with nothing re-spaced — and Telegram, which trims a
+    message's surrounding whitespace, shows each part without it.
+
+    **A part holding nothing but whitespace is the one thing left out**, because
+    Telegram refuses an empty message: such a part arises only from a run of
+    whitespace longer than a whole part, and it carries no text to keep.
+
+    Args:
+        text: The message, of any length.
+
+    Returns:
+        The parts, in order: one part for a text within the limit, and none for a
+        text that holds only whitespace.
+    """
+    parts: list[str] = []
+    rest = text
+    while rest:
+        cut = _telegram_cut(rest)
+        part, rest = rest[:cut], rest[cut:]
+        if part.strip():
+            parts.append(part)
+    return tuple(parts)
+
+
+def _telegram_cut(rest: str) -> int:
+    """Where the next part of ``rest`` ends, in code points (§6:6's preferences).
+
+    Args:
+        rest: What remains of the text, non-empty.
+
+    Returns:
+        A cut in ``1..len(rest)``: the whole of ``rest`` where it fits, and otherwise
+        the end of the latest paragraph break, line break or whitespace character
+        inside the longest prefix that fits, or that prefix's end where there is none.
+    """
+    if telegram_length(rest) <= TELEGRAM_MESSAGE_LIMIT:
+        return len(rest)
+    fits, units = 0, 0
+    for character in rest:
+        units += telegram_length(character)
+        if units > TELEGRAM_MESSAGE_LIMIT:
+            break
+        fits += 1
+    window = rest[:fits]
+    for brk in _TELEGRAM_BREAKS:
+        found = window.rfind(brk)
+        if found >= 0 and window[:found].strip():
+            return found + len(brk)
+    # A break is usable only after the part's first visible character, so that no
+    # part is whitespace alone while there is text it could have carried instead.
+    first = len(window) - len(window.lstrip())
+    for index in range(len(window) - 1, first, -1):
+        if window[index].isspace():
+            return index + 1
+    return fits
+
+
+class TelegramFailure(StrEnum):
+    """Why one Bot API call did not do what it asked (ADR-0323 §6:3 to §6:5, §11).
+
+    **The classes are what the line's records and its one retry rule turn on**, and
+    the rule is §6:3 to §6:5's: a send is retried *only* where Telegram did not get it —
+    the request was never written — or where Telegram answered that it was not sent
+    and a retry can succeed; a request written and left unanswered is *unknown* and
+    never retried; and every other refusal is *not done* and not retried.
+    :attr:`retryable` states that rule over the classes, so a caller never has to.
+
+    Closed: a member is added by the change that needs it and never renamed.
+    """
+
+    UNAVAILABLE = "unavailable"
+    """The line could not be used, so nothing was written and no token was used.
+
+    The connection the line names is not active, its record moved across the token
+    read or could not be re-read, or the keyring holds no token under the slot the
+    record names (ADR-0323 §11:4, ADR-0148 §6). Not retried: what would change the
+    answer is the owner's act, not time."""
+
+    OTHER_CHAT = "other_chat"
+    """The call named a chat other than the one the settings name, and was refused
+    before the token was read and before any byte was written (§6:1, §12:1)."""
+
+    NOT_WRITTEN = "not_written"
+    """The request was never written: the channel to Telegram could not be opened,
+    or a send's bound ended before its request was. Telegram did not get it, so a
+    retry can succeed (§6:3)."""
+
+    RATE_LIMITED = "rate_limited"
+    """Telegram answered that it did not do it because too many requests came, which
+    is the retry §6:3 names; the outcome carries how long Telegram asked to wait."""
+
+    REFUSED = "refused"
+    """Telegram answered with any other refusal — a client error naming the request
+    as one it will not perform — so the call is *not done* and is not retried
+    (§6:5)."""
+
+    UNKNOWN = "unknown"
+    """The request was written and no Bot API answer came back: the bound ended, the
+    channel failed, or what came back was not an answer this line reads — a redirect,
+    a server error, a response past the read bound, or a body that is not one.
+    Telegram may have done it, so it is never retried (§6:4, ADR-0306 §5:13). A poll
+    that reaches its bound is this, whatever it had written (§11:11)."""
+
+    @property
+    def retryable(self) -> bool:
+        """Whether §6:3 lets the writer try the same message again.
+
+        Returns:
+            ``True`` for :attr:`NOT_WRITTEN` and :attr:`RATE_LIMITED`, and for no
+            other member.
+        """
+        return self in {TelegramFailure.NOT_WRITTEN, TelegramFailure.RATE_LIMITED}
+
+
+#: The lowest and highest values a Telegram identifier is read in. Telegram's ids
+#: fit 52 bits; a 64-bit signed range bounds both ways without guessing at its own.
+_TELEGRAM_ID_FLOOR: Final = -(2**63)
+_TELEGRAM_ID_CEILING: Final = 2**63
+
+
+class TelegramForwardKind(StrEnum):
+    """Who Telegram says a forwarded message originally came from (§4:10).
+
+    Telegram's own four ``MessageOrigin`` kinds. Whatever the kind, the author it
+    names is *claimed* and never established (§4:2): the reader carries it, and
+    nothing it says authorizes anything.
+    """
+
+    USER = "user"
+    """A Telegram account, named and identified."""
+
+    HIDDEN_USER = "hidden_user"
+    """An account that hides itself from forwards, named only."""
+
+    CHAT = "chat"
+    """A group, posting as itself."""
+
+    CHANNEL = "channel"
+    """A channel's post."""
+
+
+class TelegramForwardOrigin(BaseModel):
+    """A forward's original sender, as Telegram reported it (ADR-0323 §4:10).
+
+    Attributes:
+        kind: Which of Telegram's four origins it is.
+        name: The name Telegram gives the origin — the account's name, the hidden
+            account's chosen name, or the chat's or channel's title. Claimed.
+        account_id: The account's or chat's Telegram id where Telegram reports one;
+            ``None`` for a hidden account.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: TelegramForwardKind
+    name: EncodableText
+    account_id: int | None = Field(
+        default=None, strict=True, ge=_TELEGRAM_ID_FLOOR, lt=_TELEGRAM_ID_CEILING
+    )
+
+
+class TelegramQuotedMessage(BaseModel):
+    """The message a reply was written to, as Telegram sends it with the reply (§4:12).
+
+    Attributes:
+        message_id: Its id in the chat — the position the writer's effect record
+            holds where the bot wrote it (§4:13, §6:2).
+        sender_id: Who wrote it, where Telegram says.
+        sender_is_bot: Whether a bot wrote it. In the line's private chat the one bot
+            is the line's own, so this is how the reader tells the assistant's words
+            from the user's.
+        text: Its text, or ``None`` for a message with none.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    message_id: int = Field(strict=True, ge=0, lt=_TELEGRAM_ID_CEILING)
+    sender_id: int | None = Field(
+        default=None, strict=True, ge=_TELEGRAM_ID_FLOOR, lt=_TELEGRAM_ID_CEILING
+    )
+    sender_is_bot: bool = Field(default=False, strict=True)
+    text: EncodableText | None = None
+
+
+class TelegramMessage(BaseModel):
+    """One new message an update carries, in the terms the line reads (§4, §5).
+
+    **What the reader needs and nothing it does not**: who sent it and where, when,
+    its text or that it has none, a forward's origin, and the message it replies
+    to. Which of these make an input is the reader's (§5:1 to §5:3); this is what
+    Telegram said, read and carried unjudged.
+
+    Attributes:
+        message_id: Its id in its chat.
+        chat_id: The chat it was sent in. For a private chat that is the other
+            account's id, so the line's chat is the one whose id is
+            ``telegram_user_id`` (§3:2).
+        private_chat: Whether Telegram says the chat is a private one.
+        sender_id: The account that sent it, where Telegram names one.
+        sender_is_bot: Whether that account is a bot.
+        sent_at: The time Telegram gives it (§5:4).
+        text: Its text, or ``None`` for a voice note, a photo, a file, a sticker, a
+            location or any other message with no text (§5:3). A caption is not
+            text.
+        forward_origin: Who it was forwarded from, or ``None`` where it is not a
+            forward.
+        reply_to: The message it replies to, or ``None``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    message_id: int = Field(strict=True, ge=0, lt=_TELEGRAM_ID_CEILING)
+    chat_id: int = Field(strict=True, ge=_TELEGRAM_ID_FLOOR, lt=_TELEGRAM_ID_CEILING)
+    private_chat: bool = Field(strict=True)
+    sender_id: int | None = Field(
+        default=None, strict=True, ge=_TELEGRAM_ID_FLOOR, lt=_TELEGRAM_ID_CEILING
+    )
+    sender_is_bot: bool = Field(default=False, strict=True)
+    sent_at: UtcInstant
+    text: EncodableText | None = None
+    forward_origin: TelegramForwardOrigin | None = None
+    reply_to: TelegramQuotedMessage | None = None
+
+
+class TelegramUpdate(BaseModel):
+    """One update a poll took off Telegram (§5).
+
+    Attributes:
+        update_id: Telegram's id for it, which a later poll's offset confirms
+            (§5:6) and the intake record keys on (§5:8).
+        message: The new message it carries, or ``None`` where it carries none this
+            line reads — which is still an update to confirm once it is seen.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    update_id: int = Field(strict=True, ge=0, lt=_TELEGRAM_ID_CEILING)
+    message: TelegramMessage | None = None
+
+
+class TelegramOutcome(BaseModel):
+    """What one Bot API call came to: done, or the class of why not (§6, §13:2).
+
+    The outcome a typing indicator's record is completed with, and the base of a
+    send's and a poll's. **Done is the absence of a failure**, so the two cannot
+    disagree.
+
+    Attributes:
+        failure: Why it was not done, or ``None`` where it was.
+        retry_after_seconds: How long Telegram asked to be left before a retry, on a
+            :attr:`TelegramFailure.RATE_LIMITED` failure where it said; ``None`` on
+            every other outcome.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    failure: TelegramFailure | None = None
+    retry_after_seconds: int | None = Field(default=None, strict=True, ge=0, lt=2**31)
+
+    @property
+    def done(self) -> bool:
+        """Whether Telegram did what the call asked.
+
+        Returns:
+            ``True`` exactly where :attr:`failure` is ``None``.
+        """
+        return self.failure is None
+
+    @model_validator(mode="after")
+    def _a_wait_is_only_a_rate_limits(self) -> Self:
+        """Refuse a wait on any outcome but a rate limit's.
+
+        Raises:
+            ValueError: If :attr:`retry_after_seconds` is set on another outcome.
+        """
+        if self.retry_after_seconds is not None and self.failure is not (
+            TelegramFailure.RATE_LIMITED
+        ):
+            msg = "retry_after_seconds is carried only by a rate_limited outcome"
+            raise ValueError(msg)
+        return self
+
+
+class TelegramSendOutcome(TelegramOutcome):
+    """What one ``sendMessage`` came to (ADR-0323 §6:2).
+
+    Attributes:
+        message_id: The id Telegram returned for the message, present exactly where
+            it was sent — "a message is *sent* when Telegram accepted it and returned
+            its message id" — and the position its effect record holds.
+    """
+
+    message_id: int | None = Field(default=None, strict=True, ge=0, lt=_TELEGRAM_ID_CEILING)
+
+    @model_validator(mode="after")
+    def _an_id_is_exactly_a_sent_messages(self) -> Self:
+        """Refuse a sent message with no id, and an id on one not sent.
+
+        Raises:
+            ValueError: If :attr:`message_id` is absent on a done outcome or present
+                on another.
+        """
+        if self.done != (self.message_id is not None):
+            msg = "message_id is present exactly where the message was sent"
+            raise ValueError(msg)
+        return self
+
+
+class TelegramPollOutcome(TelegramOutcome):
+    """What one ``getUpdates`` came to (§5, §11:10 to §11:11).
+
+    Attributes:
+        updates: The updates Telegram handed back, in ascending update id — empty
+            where it had none, and always empty where the poll was not done, since a
+            poll not done takes nothing in (§11:11).
+    """
+
+    updates: tuple[TelegramUpdate, ...] = ()
+
+    @model_validator(mode="after")
+    def _updates_come_only_from_a_done_poll_and_in_order(self) -> Self:
+        """Refuse updates on a poll not done, and updates out of order.
+
+        Raises:
+            ValueError: If a poll not done carries updates, or the updates' ids are
+                not strictly ascending — the order every offset computed from them
+                relies on.
+        """
+        if self.updates and not self.done:
+            msg = "a poll not done takes nothing in, so it carries no updates"
+            raise ValueError(msg)
+        ids = [update.update_id for update in self.updates]
+        if any(later <= earlier for earlier, later in pairwise(ids)):
+            msg = "a poll's updates are in strictly ascending update_id"
+            raise ValueError(msg)
+        return self
