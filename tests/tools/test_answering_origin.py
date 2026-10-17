@@ -18,8 +18,9 @@ ADR-0231 §16 forbids retention. So neither half is here. What is here is the ar
 **shape at the seam**: that a first search over a real origin mints real records,
 that a second search against the same origin stalled past its handshake expires as
 ``DEADLINE_EXPIRED`` under a real bound, and that the expiry did nothing to the
-first call's outcome. The loop's half belongs to the QA re-drive, and
-:mod:`answering_origin_harness`'s module docstring is the runbook for it.
+first call's outcome. The loop's half belongs to a live drive of the whole
+servicing path, which this suite does not carry and no runbook in the tree
+describes (#2225).
 
 **No transport-level bound is under test here and none exists** — ADR-0241 §13
 defers one. What ends the stalled read is the searcher's own deadline, delivered as
