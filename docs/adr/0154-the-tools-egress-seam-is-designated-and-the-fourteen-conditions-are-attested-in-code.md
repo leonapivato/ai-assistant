@@ -1,6 +1,6 @@
 # 154. The `tools/` egress seam is designated, and the fourteen conditions are attested in code
 
-- Status: Partially superseded by ADR-0193 (§4's standing-authorisation floor, item (ii)'s first clause, in the single respect that a user-established recipient grant may cover an egress call at this seam) and ADR-0231 (§2's second clause, only as it reaches a `WEB_SEARCH` servicing's send, and only in the limb restating the single route through `ToolInvoker.invoke`: that send leaves by the route that decision's §6 states, while the clause's other limbs, §1's designation of this module and no other, §2's remaining clauses, §4's fourteen attestations including its actuator clause, §6's residues and residency clause and §7's `DestinationProtocol` reservation all stand entire)
+- Status: Partially superseded by ADR-0193 (§4's standing-authorisation floor, item (ii)'s first clause, in the single respect that a user-established recipient grant may cover an egress call at this seam) and ADR-0231 (§2's second clause, only as it reaches a `WEB_SEARCH` servicing's send, and only in the limb restating the single route through `ToolInvoker.invoke`: that send leaves by the route that decision's §6 states, while the clause's other limbs, §1's designation of this module and no other, §2's remaining clauses, §4's fourteen attestations including its actuator clause, §6's residues and residency clause and §7's `DestinationProtocol` reservation all stand entire) and ADR-0323 (§2:2's single-route limb, §2:4's *no configuration that grants a standing authorisation for a recipient* limb and §4:3, each for the Telegram line's own route alone)
 - Date: 2026-08-14
 - **Note (2026-10-15): §4's condition 3 is re-attested, and holds by the first limb
   of ADR-0017 §3's disjunct alone again.** ADR-0321 §7:1 retires recipient grants
@@ -231,6 +231,16 @@
   reading its own §4 does not support is corrected rather than grandfathered. Appended
   dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
   other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
+- Partially superseded: 2026-10-17 by ADR-0323 — three scopes, each for the Telegram line's
+  own route alone. §2:2's limb restating §1's single route through `ToolInvoker.invoke`: the
+  line reaches the seam by ADR-0323 §11:3's route. §2:4's *no configuration that grants a
+  standing authorisation for a recipient*, and §4:3: the line's settings and its connect
+  act, the owner's recorded acts, authorise its one chat (ADR-0323 §12:1), as ADR-0247
+  rested a search on the configured provider. §1's designation, §4:1's fourteen conditions,
+  which ADR-0323 §13 states for the line's route, and every other clause stand for every
+  egress call. This replacement takes effect on ratification of ADR-0323. This reciprocal
+  header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

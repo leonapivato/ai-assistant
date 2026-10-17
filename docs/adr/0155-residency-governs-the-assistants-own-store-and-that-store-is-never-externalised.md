@@ -1,6 +1,6 @@
 # 155. Residency governs the assistant's own store, and that store is never externalised
 
-- Status: Partially superseded by ADR-0233 (§3's third clause, to the extent of the four conditions the commissioned approval surface states, and §4's marked no-mechanism clause, to the extent a recorded coverage makes the refusal mechanical; §3's second clause and every other clause of this ADR stand) and ADR-0238 (§3's third clause a second time — the prohibition sentence acquires a second exception beside the four conditions the record above names, for a search query composed over a supply that decision's §2 admits, on a closed-loop request ruled `ALLOW`; §3's second clause and its absolute prohibition, §3's covered-content and covered-path definitions, the export exception and every other clause of this ADR stand)
+- Status: Partially superseded by ADR-0233 (§3's third clause, to the extent of the four conditions the commissioned approval surface states, and §4's marked no-mechanism clause, to the extent a recorded coverage makes the refusal mechanical; §3's second clause and every other clause of this ADR stand) and ADR-0238 (§3's third clause a second time — the prohibition sentence acquires a second exception beside the four conditions the record above names, for a search query composed over a supply that decision's §2 admits, on a closed-loop request ruled `ALLOW`; §3's second clause and its absolute prohibition, §3's covered-content and covered-path definitions, the export exception and every other clause of this ADR stand) and ADR-0323 (§1:1, §1:3, §2:1, §3:2 and §3:3, each for the Telegram line's calls to its one configured chat alone)
 - Date: 2026-08-14
 - **Partially superseded: 2026-09-05 by ADR-0238 — §3's third clause, in its
   prohibition sentence alone, and nothing else in this ADR.** The owner ruled arm
@@ -178,6 +178,19 @@
   reading its own §4 does not support is corrected rather than grandfathered. Appended
   dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
   other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
+- Partially superseded: 2026-10-17 by ADR-0323 — five scopes, each for the Telegram line's
+  calls to its one configured chat alone, on the owner's ruling of 2026-10-17 under §3:3's
+  arm (b), ADR-0323 being the ADR that arm commissions. §3:3 and §3:2: covered content,
+  whatever its covered paths, may be carried by the line's calls to that chat under the
+  connect act's approval (ADR-0323 §12); §3:2's *no authorisation cures it* is superseded
+  for those calls alone. §1:1: those calls place covered content in Telegram's copy of the
+  chat. §1:3, in the addition: that copy is outside the residency clause. §2:1, in the
+  addition: content may also leave on the line's route, not as an egress call authorised per
+  call. Every other span at the seam stays forbidden as written, with ADR-0233's and
+  ADR-0238's exceptions, and every other clause stands. This replacement takes effect on
+  ratification of ADR-0323. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 
