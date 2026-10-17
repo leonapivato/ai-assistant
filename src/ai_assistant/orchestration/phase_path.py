@@ -202,6 +202,7 @@ from ai_assistant.core.types import (
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEffect,
     ActivationRecall,
+    ApprovalGiver,
     CapabilityEffect,
     CapabilityResult,
     ControllerRule,
@@ -251,6 +252,7 @@ from ai_assistant.orchestration.authorizer import (
     WorkingRecord,
     YesContext,
 )
+from ai_assistant.orchestration.channel_kinds import place_of
 from ai_assistant.orchestration.chat import couldnt_finish
 from ai_assistant.orchestration.controller import (
     Stage,
@@ -258,6 +260,7 @@ from ai_assistant.orchestration.controller import (
     TolerantStage,
     recall_digest_due,
 )
+from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.defects import ToleratedStageError, is_defect, log_defect
 from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
 from ai_assistant.orchestration.episode_reads import without_open_episodes
@@ -312,6 +315,7 @@ if TYPE_CHECKING:
         ActivationDigest,
         ActivationUnderstanding,
         AnsweredQuestion,
+        ChannelIdentity,
         FrozenJson,
         MemoryRecord,
         MessageReceipt,
@@ -335,11 +339,14 @@ if TYPE_CHECKING:
 __all__ = [
     "CHAT_DESCRIPTION",
     "EVENT_DESCRIPTION",
+    "Delivery",
     "MessageWriter",
     "PhasePass",
     "PhasePath",
     "PhaseTools",
     "PhaseWorking",
+    "PlaceTarget",
+    "PlaceWriter",
     "StoryReads",
     "authorized_round",
     "call_outcomes",
@@ -430,6 +437,118 @@ class MessageWriter(Protocol):
     async def send(self, conversation_id: str, message: NewMessage) -> MessageReceipt | None:
         """Write one assistant message into a conversation, or ``None`` where it is gone."""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class Delivery:
+    """What came of writing one message into a place, as its effect record finishes it.
+
+    ADR-0306 §5:5's three outcomes: done, with the position the medium recorded it at;
+    not done, with why; or unknown, where it may have reached the medium.
+
+    Attributes:
+        outcome: ``SUCCEEDED``, ``FAILED`` or ``INDETERMINATE``.
+        position: Where the medium recorded it; present exactly on a message done.
+        reason: Why it was not done; only on ``FAILED``.
+        written: The text the place now holds of it, which the episode records as sent
+            (ADR-0284 §4:1): the whole message where it was done, what reached the
+            place of a message cut short, and ``None`` where nothing did.
+    """
+
+    outcome: ToolOutcome
+    position: int | None = None
+    reason: str | None = None
+    written: str | None = None
+
+    def __post_init__(self) -> None:
+        """A position is a done message's, and a reason a not-done one's.
+
+        Raises:
+            ValueError: If either rides on another outcome.
+        """
+        if (self.position is not None) != (self.outcome is ToolOutcome.SUCCEEDED):
+            msg = "a delivery carries a position exactly where the message is done"
+            raise ValueError(msg)
+        if self.reason is not None and self.outcome is not ToolOutcome.FAILED:
+            msg = "only a message not done carries why"
+            raise ValueError(msg)
+
+
+class PlaceWriter(Protocol):
+    """One place's writer, as the phases write an activation's message into it.
+
+    What the phases are handed for a place other than the hub chat's conversations, as
+    the Telegram line's chat (ADR-0323 §6). The message is claimed under its effect
+    record before :meth:`deliver` is called, and finished with what it returns
+    (ADR-0306 §5:3-§5:5); the writer holds its channel's rules, before anything leaves
+    (ADR-0292 §8:3).
+    """
+
+    def fitted(self, message: NewMessage) -> NewMessage:
+        """``message`` exactly as :meth:`deliver` would write it whole."""
+        ...
+
+    async def deliver(self, message: NewMessage, *, effect_id: str) -> Delivery:
+        """Write ``message``, claimed under ``effect_id``, and say what came of it.
+
+        Raises:
+            Exception: Only for what the writer could not class; the phases then
+                finish the record unknown, since it may have been written.
+        """
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class PlaceTarget:
+    """The place an activation's messages go into, and its writer (ADR-0306 §4:7).
+
+    Attributes:
+        channel: The input's channel, whose place this is; its effect records name the
+            place by :func:`~ai_assistant.orchestration.channel_kinds.place_of`.
+        writer: The place's writer.
+    """
+
+    channel: ChannelIdentity
+    writer: PlaceWriter
+
+    @property
+    def place(self) -> str:
+        """The place, as a message's effect record names it."""
+        return place_of(self.channel)
+
+
+@dataclass(frozen=True, slots=True)
+class _ConversationWriter:
+    """The hub chat's writer, as a :class:`PlaceWriter` for one conversation.
+
+    The conversation store's answers, read as ADR-0306 §5:5's outcomes: a store fault
+    is unknown, since whether it recorded is not known; a conversation gone, or one
+    that refused the message, is not done; and a message recorded is done, at its
+    position.
+    """
+
+    writer: MessageWriter
+    conversation_id: str
+
+    def fitted(self, message: NewMessage) -> NewMessage:
+        return self.writer.fitted(self.conversation_id, message)
+
+    async def deliver(self, message: NewMessage, *, effect_id: str) -> Delivery:
+        del effect_id
+        try:
+            receipt = await self.writer.send(self.conversation_id, message)
+        except ConversationStoreError:
+            # Whether the store recorded it is not known: unknown, with no position.
+            _log.warning("phase_message_unwritten", stage="acting", reason="store_failed")
+            return Delivery(ToolOutcome.INDETERMINATE)
+        if (
+            receipt is None
+            or receipt.outcome is not SendOutcome.RECORDED
+            or receipt.position is None
+        ):
+            _log.info("phase_message_unwritten", stage="acting", reason="place_gone")
+            return Delivery(ToolOutcome.FAILED, reason=_GONE)
+        return Delivery(ToolOutcome.SUCCEEDED, position=receipt.position, written=message.text)
 
 
 class PhasePass(Protocol):
@@ -1098,31 +1217,45 @@ class PhaseWorking:
         labels: Sequence[PlanningLabel] = (),
         users_authority: bool = False,
         given_at: datetime | None = None,
+        target: PlaceTarget | None = None,
+        giver: ApprovalGiver = ApprovalGiver.USER_THROUGH_HUB_CHAT,
     ) -> None:
         """Start an activation's working set, before its first round.
 
         Args:
             activation_id: The activation.
             place: The place the input came from, and what planning is shown of it.
-            conversation_id: The conversation a message is written into, or ``None``
-                where the place takes none.
+            conversation_id: The conversation a message is written into, through the
+                path's chat writer, or ``None`` where it is not a conversation.
             trigger_origin: Who the trigger's input came from.
             owner_records: Whether a record placed for the owner alone may be shown on
                 this pass (ADR-0307 §6:4).
             round_limit: The most rounds the activation runs (ADR-0307 §8:4).
             labels: The labels the episode already records.
             users_authority: Whether the input carries the user's authority (ADR-0321
-                §3:3, ADR-0292 §5:5): only a message the user sent through the hub
-                chat does. ``False``, the default, wherever it cannot be established.
+                §3:3, ADR-0292 §5:5), read as ADR-0323 §4:7 restates it for every
+                channel: only an input whose author its channel's kind establishes as
+                the user, sent as an instruction, does — the user's message in the hub
+                chat, or on the Telegram line from their own account, not forwarding.
+                ``False``, the default, wherever it cannot be established.
             given_at: When the input was given, timezone-aware: a yes it carries is
                 given then (ADR-0321 §4:6). ``None`` where it is not known, and then
                 no yes is read from it.
+            target: The place a message is written into and its writer, where it is
+                not one of the hub chat's conversations, as the Telegram line's chat
+                (ADR-0323 §6:1). Never given beside ``conversation_id``.
+            giver: Who a yes the input carries is given by: the user, through the
+                channel the input came on (ADR-0323 §4:9).
 
         Raises:
-            ValueError: If ``round_limit`` is below 1.
+            ValueError: If ``round_limit`` is below 1, or both a conversation and a
+                target are given.
         """
         if round_limit < 1:
             msg = "the round limit is at least one round (ADR-0307 §8:4)"
+            raise ValueError(msg)
+        if conversation_id is not None and target is not None:
+            msg = "a working set's messages go into one place: a conversation or a target"
             raise ValueError(msg)
         self.activation_id = activation_id
         self.place = place
@@ -1131,6 +1264,8 @@ class PhaseWorking:
         self.owner_records = owner_records
         self.users_authority = users_authority
         self.given_at = given_at
+        self.target = target
+        self.giver = giver
         # The actions the input's yes approved, as the records show them, by the pointers
         # they were read for, read once (ADR-0321 §4:2, ADR-0322 §3:4).
         self.approvable: tuple[tuple[AnsweredQuestion, ...], tuple[ApprovedAction, ...]] | None = (
@@ -1384,7 +1519,10 @@ class PhaseWorking:
         if not answers or self.given_at is None:
             return None
         return YesContext(
-            answers=answers, given_at=self.given_at, users_authority=self.users_authority
+            answers=answers,
+            given_at=self.given_at,
+            users_authority=self.users_authority,
+            who=self.giver,
         )
 
     def outcome(self) -> str | None:
@@ -1403,7 +1541,9 @@ def place_window(
     Each message keeps its author; the input's messages are marked as the input; and a
     message the window links to an activation, the one that took it in or wrote it,
     names that activation's episode (ADR-0303 §7:1, ADR-0307 §5:6). A deleted message
-    is not shown.
+    is not shown. A forward is someone else's, claimed (ADR-0323 §4:10): it is an item
+    of ``other``'s, whose raw text planning is never shown (ADR-0307 §9:2), and it
+    reaches planning through understanding's record alone.
 
     Args:
         window: The conversation's recent transcript, brought in with the input.
@@ -1419,7 +1559,11 @@ def place_window(
             shown[one.position] = one
     items = tuple(
         PlaceItem(
-            author=PlaceAuthor.USER if one.author is MessageAuthor.USER else PlaceAuthor.ASSISTANT,
+            author=PlaceAuthor.OTHER
+            if position in window.forwarded
+            else PlaceAuthor.USER
+            if one.author is MessageAuthor.USER
+            else PlaceAuthor.ASSISTANT,
             text=one.text,
             at=one.written_at,
             is_input=position in inputs,
@@ -1656,7 +1800,7 @@ def _new_effect_id() -> str:
 
 def _place_id(conversation_id: str) -> str:
     """The place a message goes into: the conversation, by its id (ADR-0306 §6)."""
-    return f"conversation:{conversation_id}"
+    return place_of(conversation_channel(conversation_id))
 
 
 def _delivered_round(effects: Sequence[ActivationEffect], pointer: AnsweredQuestion) -> str | None:
@@ -2147,6 +2291,66 @@ class PhasePath:
             given_at=max((one.written_at for one in taken), default=None),
         )
 
+    def begin_line(  # noqa: PLR0913 — the activation, its window, its place, its kind's two facts, its origin, its audience and its recorded labels
+        self,
+        *,
+        activation_id: str,
+        window: TranscriptWindow,
+        target: PlaceTarget,
+        description: str,
+        giver: ApprovalGiver,
+        trigger_origin: InputOrigin | None,
+        owner_records: bool,
+        labels: Sequence[PlanningLabel] = (),
+    ) -> PhaseWorking:
+        """Start one activation's working set for a line's chat, before its first stage.
+
+        A line is a place other than the hub chat's conversations whose kind
+        establishes the user, as the Telegram line's chat (ADR-0323 §2): its reader
+        brings the input in with the window its kind declares (§10), and its messages
+        go into the input's place through ``target``'s writer alone (§6:1). Its input
+        carries the user's authority (ADR-0321 §3:3 as ADR-0323 §4:7 restates it) only
+        where the trigger says the user sent it and **every message taken in is the
+        user's, established, and none is a forward** (§4:6): a forward's author is
+        claimed (§4:10), and an input taking one in is an outside trigger (§4:11). A
+        yes it carries is given by ``giver`` when its latest message was sent (§4:9).
+
+        Args:
+            activation_id: The activation.
+            window: The line's window, brought in with the input.
+            target: The line's chat and its writer.
+            description: The line's kind's description, which planning is shown with
+                the place (ADR-0292 §8:1).
+            giver: Who a yes on the line is: the user, through it (§4:9).
+            trigger_origin: Who the trigger's input came from.
+            owner_records: Whether a record placed for the owner alone may be shown.
+            labels: The labels the episode already records.
+
+        Returns:
+            The working set, which the engine holds on the pass.
+        """
+        taken = window.input_messages
+        return PhaseWorking(
+            activation_id=activation_id,
+            place=place_window(window, description=description),
+            conversation_id=None,
+            trigger_origin=trigger_origin,
+            owner_records=owner_records,
+            round_limit=self._round_limit,
+            labels=labels,
+            users_authority=(
+                trigger_origin is InputOrigin.USER
+                and bool(taken)
+                and all(
+                    one.author is MessageAuthor.USER and one.position not in window.forwarded
+                    for one in taken
+                )
+            ),
+            given_at=max((one.written_at for one in taken), default=None),
+            target=target,
+            giver=giver,
+        )
+
     def begin_event(
         self,
         *,
@@ -2191,6 +2395,15 @@ class PhasePath:
     async def written(
         self, conversation_id: str, activation_ids: Sequence[str], positions: Sequence[int]
     ) -> dict[int, WrittenBy]:
+        """Which of ``activation_ids`` wrote each message at ``positions`` in a conversation.
+
+        :meth:`written_in`, for the hub chat's reader, which names the conversation.
+        """
+        return await self.written_in(_place_id(conversation_id), activation_ids, positions)
+
+    async def written_in(
+        self, place: str, activation_ids: Sequence[str], positions: Sequence[int] | None
+    ) -> dict[int, WrittenBy]:
         """Which of ``activation_ids`` wrote each message at ``positions`` (ADR-0303 §7:1).
 
         Read from their effect records (ADR-0306 §5:3): a message done in this
@@ -2206,22 +2419,24 @@ class PhasePath:
         episodes cannot be read, no message is a question, failing closed.
 
         Args:
-            conversation_id: The conversation the messages are in.
+            place: The place the messages are in, as their effect records name it
+                (:func:`~ai_assistant.orchestration.channel_kinds.place_of`).
             activation_ids: The candidate activations.
-            positions: The assistant messages' positions.
+            positions: The assistant messages' positions, or ``None`` for every
+                message the candidates wrote into the place: the Telegram line's
+                window, built from its episodes, reads them so (ADR-0323 §10).
 
         Returns:
             What wrote each message, by its position.
         """
-        wanted = frozenset(positions)
-        if not activation_ids or not wanted:
+        wanted = None if positions is None else frozenset(positions)
+        if not activation_ids or (wanted is not None and not wanted):
             return {}
         try:
             recorded = await self._plans.activation_effects(activation_ids)
         except Exception:  # the store is down: nothing is linked by what wrote it
             _log.warning("phase_writers_unread", stage="reader", reason="store_failed")
             return {}
-        place = _place_id(conversation_id)
         done = [
             one
             for one in recorded
@@ -2229,7 +2444,7 @@ class PhasePath:
             and one.place == place
             and one.outcome is ToolOutcome.SUCCEEDED
             and one.position is not None
-            and one.position in wanted
+            and (wanted is None or one.position in wanted)
         ]
         marks = await self._question_marks(
             [one.activation_id for one in done if one.round is not None]
@@ -2240,6 +2455,7 @@ class PhasePath:
                 asked=None
                 if one.round is None or (parts := marks.get((one.activation_id, one.round))) is None
                 else AskedIn(round=one.round, parts=parts),
+                round=one.round,
             )
             for one in done
             if one.position is not None
@@ -2391,7 +2607,13 @@ class PhasePath:
                 state.holds_external(value=external)
 
     async def unbegun(
-        self, *, activation_id: str, conversation_id: str, state: ActivationState | None
+        self,
+        *,
+        activation_id: str,
+        conversation_id: str | None = None,
+        state: ActivationState | None,
+        target: PlaceTarget | None = None,
+        description: str = CHAT_DESCRIPTION,
     ) -> None:
         """Write *couldn't finish* for a conversation's activation that failed before :meth:`run`.
 
@@ -2407,18 +2629,22 @@ class PhasePath:
 
         Args:
             activation_id: The activation that marked the messages.
-            conversation_id: The conversation it marked them in.
+            conversation_id: The conversation it marked them in, for the hub chat.
             state: The activation's state, read for its stop mark.
+            target: The line's chat and its writer, for a line's activation, which
+                marks what it took in on the line's own intake record (ADR-0323 §5:8).
+            description: The place's kind's description.
         """
         if state is not None and state.stopped:
             return
         working = PhaseWorking(
             activation_id=activation_id,
-            place=PlaceWindow(takes_message=True, description=CHAT_DESCRIPTION),
+            place=PlaceWindow(takes_message=True, description=description),
             conversation_id=conversation_id,
             trigger_origin=None,
             owner_records=False,
             round_limit=self._round_limit,
+            target=target,
         )
         try:
             await self._couldnt_finish(working)
@@ -2765,7 +2991,8 @@ class PhasePath:
             )
             for one in planned.calls
         ]
-        place = None if working.conversation_id is None else _place_id(working.conversation_id)
+        target = self._target(working)
+        place = None if target is None else target.place
         message = (
             None
             if planned.message is None or place is None
@@ -3039,11 +3266,11 @@ class PhasePath:
         """
         if not planning_round.asked:
             return planning_round
-        conversation_id = working.conversation_id
+        target = self._target(working)
         whole = False
-        if conversation_id is not None:
+        if target is not None:
             try:
-                whole = not self._fitted(conversation_id, planning_round.text).cut_off
+                whole = not self._fitted(target, planning_round.text).cut_off
             except Exception as exc:  # whether it fits is not known: not shown whole
                 if is_defect(exc):
                     log_defect(
@@ -3057,20 +3284,36 @@ class PhasePath:
         _log.info("phase_question_cut", stage="planning", asked=len(planning_round.asked))
         return planning_round.model_copy(update={"asked": ()})
 
-    def _fitted(self, conversation_id: str, text: str) -> NewMessage:
+    @staticmethod
+    def _fitted(target: PlaceTarget, text: str) -> NewMessage:
         """``text`` as the place records it: cut to the transcript's bound, then the writer's.
 
         Raises:
             OversizedValueError: If the writer finds no non-blank prefix that fits.
         """
         cut = len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS
-        return self._writer.fitted(
-            conversation_id,
+        return target.writer.fitted(
             NewMessage(
                 author=MessageAuthor.ASSISTANT,
                 text=text[:TRANSCRIPT_MESSAGE_MAX_CHARS],
                 cut_off=cut,
             ),
+        )
+
+    def _target(self, working: PhaseWorking) -> PlaceTarget | None:
+        """The place the activation's messages go into, and its writer, or ``None``.
+
+        The working set's own target, as the Telegram line's chat; otherwise its
+        conversation, through this path's chat writer; and ``None`` where the place
+        takes no message, an event's (ADR-0307 §3:8).
+        """
+        if working.target is not None:
+            return working.target
+        if working.conversation_id is None:
+            return None
+        return PlaceTarget(
+            channel=conversation_channel(working.conversation_id),
+            writer=_ConversationWriter(self._writer, working.conversation_id),
         )
 
     async def _approved(
@@ -3093,7 +3336,7 @@ class PhasePath:
         (§4:4).
         """
         pointers = () if given.understanding is None else given.understanding.answers
-        if not pointers or not working.users_authority or working.conversation_id is None:
+        if not pointers or not working.users_authority or self._target(working) is None:
             return ()
         if working.approvable is None or working.approvable[0] != pointers:
             # Each part once: no two pointers name one question (ADR-0322 §2:7), so none
@@ -3170,18 +3413,23 @@ class PhasePath:
     ) -> bool:
         """Claim, write and finish one message into the input's place (ADR-0306 §5:3-§5:5).
 
+        The place's writer says what came of it (:class:`Delivery`): done at a position,
+        not done with why, or unknown. Whatever of it the place now holds is what the
+        episode records the activation sent, a message cut short between parts
+        included, whatever becomes of the record's finish (ADR-0284 §4:1).
+
         Returns:
-            Whether the medium recorded it.
+            Whether the medium recorded it whole.
         """
-        conversation_id = working.conversation_id
-        if conversation_id is None:
+        target = self._target(working)
+        if target is None:
             return False
-        fitted = self._fitted(conversation_id, text)
+        fitted = self._fitted(target, text)
         effect = ActivationEffect(
             id=effect_id,
             activation_id=working.activation_id,
             round=round_id,
-            place=_place_id(conversation_id),
+            place=target.place,
             claimed_at=self._now(),
         )
         try:
@@ -3190,31 +3438,21 @@ class PhasePath:
             _log.info("phase_message_unwritten", stage="acting", reason="stopped")
             return False
         try:
-            receipt = await self._writer.send(conversation_id, fitted)
-        except ConversationStoreError:
-            # Whether the store recorded it is not known: unknown, with no position.
-            _log.warning("phase_message_unwritten", stage="acting", reason="store_failed")
-            await self._plans.finish_activation_effect(effect_id, ToolOutcome.INDETERMINATE)
-            return False
+            delivered = await target.writer.deliver(fitted, effect_id=effect_id)
         except Exception:
-            # Whatever else the writer raised, whether it wrote is not known either; the
-            # record is finished so, and the stage ends on the error.
+            # Whatever the writer raised, whether it wrote is not known; the record is
+            # finished so, and the stage ends on the error.
             await self._plans.finish_activation_effect(effect_id, ToolOutcome.INDETERMINATE)
             raise
-        if (
-            receipt is None
-            or receipt.outcome is not SendOutcome.RECORDED
-            or receipt.position is None
-        ):
-            _log.info("phase_message_unwritten", stage="acting", reason="place_gone")
-            await self._plans.finish_activation_effect(effect_id, ToolOutcome.FAILED, reason=_GONE)
-            return False
-        # Written, as the conversation holds it, whatever becomes of the record's finish.
-        working.messages.append(fitted.text)
+        if delivered.written is not None:
+            working.messages.append(delivered.written)
         await self._plans.finish_activation_effect(
-            effect_id, ToolOutcome.SUCCEEDED, position=receipt.position
+            effect_id,
+            delivered.outcome,
+            reason=delivered.reason,
+            position=delivered.position,
         )
-        return True
+        return delivered.outcome is ToolOutcome.SUCCEEDED
 
     async def _couldnt_finish(self, working: PhaseWorking) -> None:
         """Write the fixed *couldn't finish* message, listing the effects that happened.
@@ -3228,7 +3466,7 @@ class PhasePath:
         message, an event's, nothing is written and nothing read (ADR-0307 §3:8,
         ADR-0309 §5:6).
         """
-        if working.conversation_id is None:
+        if self._target(working) is None:
             return
         effects = await self._effects(working)
         text = couldnt_finish(effects).text

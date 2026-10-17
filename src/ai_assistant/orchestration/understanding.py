@@ -165,6 +165,7 @@ from ai_assistant.core.types import (
     UnresolvedMatter,
     band_of,
 )
+from ai_assistant.orchestration.channel_kinds import place_of
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.stories import episode_address
@@ -179,6 +180,7 @@ if TYPE_CHECKING:
         ChannelContext,
         ChannelContextItem,
         ChannelIdentity,
+        ClaimedAuthor,
         EpisodeProjection,
         ProjectedRound,
         ProposedAnswer,
@@ -561,6 +563,14 @@ class TranscriptWindow:
             the parts the writer's episode's projection marks it with (§4:3). The
             reader brings it with the window, as it brings the links. A message missing
             here carries no mark.
+        forwarded: The original sender of each message that is a forward, by its
+            position, claimed (ADR-0323 §4:10). A forward is rendered as its original
+            sender's, never as the user's, and planning is never shown its raw text
+            (ADR-0307 §9:2). Empty for a place that takes no forward, as the hub chat's.
+
+    **The Telegram line brings its window in this same shape** (ADR-0323 §10): its
+    ``conversation`` is the line's channel, its messages are built from the recent
+    episodes on the channel and place, and each links to the activation it records.
     """
 
     conversation: ChannelIdentity
@@ -569,6 +579,7 @@ class TranscriptWindow:
     replied_to: tuple[TranscriptMessage | DeletedMessage, ...] = ()
     links: Mapping[int, str] = field(default_factory=dict)
     asked: Mapping[int, AskedIn] = field(default_factory=dict)
+    forwarded: Mapping[int, ClaimedAuthor] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -594,10 +605,13 @@ class WrittenBy:
         activation_id: The activation the record names as having written it.
         asked: The question the message is, where its round asked about calls and the
             writer's episode marks it; ``None`` for every other message.
+        round: The planning round the record names as having written it; ``None`` for
+            the *couldn't finish* message, which names none (ADR-0307 §10).
     """
 
     activation_id: str
     asked: AskedIn | None = None
+    round: str | None = None
 
 
 type ChannelWindow = SuppliedWindow | TranscriptWindow
@@ -961,13 +975,15 @@ class UnderstandingStage:
         recall: ActivationRecall | None = None,
         recalled: tuple[EpisodicMemory | SemanticMemory, ...] = (),
         stories: Candidates | None = None,
+        origin: InputOrigin | None = None,
     ) -> ActivationUnderstanding:
         """Read one input against its windows, and record what it was understood to mean.
 
         Args:
             text: The activation's input — the utterance, the transcript or the
                 event's text — exactly as the pass holds it.
-            channel: The channel it arrived on, from which its attribution is derived.
+            channel: The channel it arrived on, from which its attribution is derived
+                where ``origin`` is not given.
             window: The channel window (§3).
             audience: The pass's audience posture. Its predicate filters the stored
                 records of both windows before anything is rendered (§4).
@@ -990,6 +1006,10 @@ class UnderstandingStage:
                 (ADR-0300 §6:1-§6:4), rendered as a fourth section labelled ``S``.
                 ``None`` where the phase assembled none, and then the call renders no
                 stories section and the instruction says nothing of one.
+            origin: Who the input came from, as admission recorded it on the trigger
+                (ADR-0284 §2:2). A kind that declares its origin per input (ADR-0323
+                §4:11) is attributed by it; ``None`` reads the channel type's one
+                declaration, which is the same value for every other kind.
 
         Returns:
             The recorded understanding.
@@ -1008,6 +1028,7 @@ class UnderstandingStage:
             recall=recall,
             recalled=recalled,
             stories=stories,
+            origin=origin,
         )
         _within(deadline)
         first = await self._completed(brief.messages)
@@ -1073,6 +1094,7 @@ class UnderstandingStage:
         recall: ActivationRecall | None,
         recalled: tuple[EpisodicMemory | SemanticMemory, ...],
         stories: Candidates | None,
+        origin: InputOrigin | None = None,
     ) -> _Brief:
         """Render the prompt, filtering the episode window's stored records first (§3, §4).
 
@@ -1124,9 +1146,9 @@ class UnderstandingStage:
             rendered_episodes.append(projected.rendering(label, marks))
             labels[label] = projected.referent()
             _member_of(record, label, story_members)
-        received = _input_rendering(text, channel)
+        received = _input_rendering(text, channel, origin)
         if isinstance(window, TranscriptWindow) and window.input_messages:
-            received["messages"] = [_input_message(one) for one in window.input_messages]
+            received["messages"] = [_input_message(one, window) for one in window.input_messages]
         payload = {
             "input": received,
             "channel_window": rendered_items
@@ -1524,6 +1546,10 @@ _AUTHOR_TEXT: Final = {
     MessageAuthor.ASSISTANT: "the assistant",
 }
 
+#: Who wrote a forward, as the window renders it: its original sender, never the user
+#: who forwarded it (ADR-0323 §4:10).
+_FORWARDED_TEXT: Final = "a forward from someone else, its sender claimed"
+
 
 def _transcript_items(window: TranscriptWindow) -> list[_ChannelItem]:
     """The chat's window, its recent messages then those the input replies to (§6:4).
@@ -1539,21 +1565,32 @@ def _transcript_items(window: TranscriptWindow) -> list[_ChannelItem]:
 
 
 def _place_of(conversation: ChannelIdentity) -> str:
-    """The place a conversation's messages are written into, as acting's records name it.
+    """The place a window's messages are written into, as acting's records name it.
 
-    ``conversation:`` then the conversation's id, the place a message's delivery record
-    carries (ADR-0306 §6) as the phase path names it; a test pins the two equal, since
-    the answer pointer reaches the delivery record by it (ADR-0321 §3:1, §4:4).
+    The place a message's delivery record carries (ADR-0306 §6), spelled once by
+    :func:`~ai_assistant.orchestration.channel_kinds.place_of` for the phase path and
+    this module alike, since the answer pointer reaches the delivery record by it
+    (ADR-0321 §3:1, §4:4): ``conversation:`` then the conversation's id for the hub
+    chat, and the line's chat for Telegram.
     """
-    return f"conversation:{conversation.instance_id}"
+    return place_of(conversation)
 
 
-def _input_message(message: TranscriptMessage) -> dict[str, object]:
+def _forward_of(author: ClaimedAuthor) -> dict[str, object]:
+    """A forward's original sender, as the window renders it: claimed (ADR-0323 §4:10)."""
+    rendered: dict[str, object] = {"name": author.name, "author": "claimed"}
+    if author.account_id is not None:
+        rendered["account_id"] = author.account_id
+    return rendered
+
+
+def _input_message(message: TranscriptMessage, window: TranscriptWindow) -> dict[str, object]:
     """One message of the input as the medium holds it: where it is, what it answers.
 
     Its ``replies_to`` is the position of the window item, or of another message of
     the input, it replies to (ADR-0293 §4:5), so a correction is tied to the message
-    it corrects rather than left to its words.
+    it corrects rather than left to its words. A forward names its original sender,
+    claimed, and is not the user's words (ADR-0323 §4:10).
     """
     rendered: dict[str, object] = {
         "position": message.position,
@@ -1562,6 +1599,8 @@ def _input_message(message: TranscriptMessage) -> dict[str, object]:
     }
     if message.replies_to is not None:
         rendered["replies_to"] = message.replies_to
+    if (forward := window.forwarded.get(message.position)) is not None:
+        rendered["forwarded_from"] = _forward_of(forward)
     return rendered
 
 
@@ -1598,7 +1637,10 @@ def _message_item(
     if isinstance(message, DeletedMessage):
         body["deleted"] = True
     else:
-        body["author"] = _AUTHOR_TEXT[message.author]
+        forward = window.forwarded.get(message.position)
+        body["author"] = _AUTHOR_TEXT[message.author] if forward is None else _FORWARDED_TEXT
+        if forward is not None:
+            body["forwarded_from"] = _forward_of(forward)
         body["written_at"] = message.written_at.isoformat()
         body["text"] = message.text
         excerpt = _excerpt(message.text)
@@ -2196,14 +2238,18 @@ def _within(deadline: float) -> None:
         raise TimeoutError(msg)
 
 
-def _input_rendering(text: str, channel: ChannelIdentity) -> dict[str, object]:
+def _input_rendering(
+    text: str, channel: ChannelIdentity, origin: InputOrigin | None = None
+) -> dict[str, object]:
     """The input, attributed from where it came from and never from its text (ADR-0098 §2).
 
     Who it came from is the origin its channel declares (ADR-0284 §2:2) — the very
-    declaration admission recorded on the trigger — and never a test of the channel
-    type, so a second outside channel is attributed as a report too (§2:3).
+    declaration admission recorded on the trigger, ``origin`` where the pass hands it
+    — and never a test of the channel type, so a second outside channel is attributed
+    as a report too (§2:3), and a Telegram input that takes in a forward is a report
+    (ADR-0323 §4:11).
     """
-    if input_origin(channel) is InputOrigin.OUTSIDE:
+    if (input_origin(channel) if origin is None else origin) is InputOrigin.OUTSIDE:
         received = f"a report received on {_channel_text(channel)}, never something the user said"
     else:
         received = f"the message the user just sent on {_channel_text(channel)}"

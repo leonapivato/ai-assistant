@@ -41,7 +41,7 @@ from ai_assistant.orchestration.controller import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from datetime import datetime
 
     from ai_assistant.core.clock import Clock
@@ -54,6 +54,7 @@ if TYPE_CHECKING:
         Modality,
         PlanningLabel,
         PlanningRound,
+        RecordedInputMessage,
         ReplyCapability,
         StageEntry,
     )
@@ -439,25 +440,37 @@ def active_state() -> ActivationState | None:
     return None if scope is None else scope.state
 
 
-def admit_channel(
+def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata seams, the stage bound and the messages it took in
     input: ChannelInput,  # noqa: A002 — channel contract parameter
     reply: ReplyCapability | None,
     *,
     clock: Clock,
     id_factory: Callable[[], str],
     stage_limit: int = DEFAULT_STAGE_RECORD_LIMIT,
+    messages: Sequence[RecordedInputMessage] = (),
 ) -> ActivationState:
     """Allocate capture metadata after channel validation, without making it admission policy.
 
     The trigger's ``origin`` is what the channel declares about its input (ADR-0284
     §2:2), read from the one declaration beside the dispatch table and fixed on the
     episode here. ``input_origin`` refuses a channel type that declares none; the
-    dispatch table has already refused every such type by the time this runs.
+    dispatch table has already refused every such type by the time this runs. A kind
+    that declares its origin per input is read for this one: an input whose
+    ``messages`` take in a forward has the origin its kind declares for that
+    (ADR-0323 §4:11).
+
+    A channel that is not a conversation is on its own channel from admission, as an
+    event's is, so its episode is read by it (ADR-0283 §1, ADR-0323 §10); a
+    conversation's is named once its lifecycle has resolved it (ADR-0275 §4:5).
+    ``messages`` are each message the input took in, recorded on the trigger
+    (ADR-0323 §5:4); none for a channel that records none.
     """
-    origin = input_origin(input.target)
-    event = (
-        isinstance(input.target, ChannelIdentity)
-        and input.target.channel_type == "informational_event"
+    origin = input_origin(
+        input.target,
+        takes_in_forward=any(one.forwarded_from is not None for one in messages),
+    )
+    on_its_channel = (
+        isinstance(input.target, ChannelIdentity) and input.target.channel_type != "conversation"
     )
     payload = (
         RecordedSpeechInput(media_type=input.payload.audio.media_type, transcript=None)
@@ -468,17 +481,22 @@ def admit_channel(
     return ActivationState(
         trigger=RecordedChannelTrigger(
             target=input.target,
-            channel=input.target if event and isinstance(input.target, ChannelIdentity) else None,
+            channel=(
+                input.target
+                if on_its_channel and isinstance(input.target, ChannelIdentity)
+                else None
+            ),
             payload=payload,
             context=input.context,
             reply=reply,
             origin=origin,
+            messages=tuple(messages),
         ),
         activation_id=activation_id,
         started_at=started_at,
         conversation_id=(
             input.target.instance_id
-            if isinstance(input.target, ChannelIdentity) and not event
+            if isinstance(input.target, ChannelIdentity) and not on_its_channel
             else None
         ),
         stage_limit=stage_limit,

@@ -2775,13 +2775,68 @@ class InputOrigin(StrEnum):
     """Something the world reported, never something the user said."""
 
 
+#: The bound a medium's own identifier is read below, where a recorded input carries
+#: one: the 64-bit signed ceiling, which bounds it without guessing at any medium's own.
+_MEDIUM_ID_CEILING: Final = 2**63
+
+
+class ClaimedAuthor(BaseModel):
+    """An author an input carries whom its channel does not establish (ADR-0323 §4:2).
+
+    **Claimed, and never established**: the channel reports who it says wrote the
+    message, and nothing it says authorizes anything (§4:10). A forward's original
+    sender is one, as the medium reported it. The type has no field for how sure the
+    channel is, because an author recorded here is claimed by construction (§4:3).
+
+    Attributes:
+        name: The name the medium gives the author — an account's name, or a group's or
+            a channel's title.
+        account_id: The medium's id for the author, where it reports one.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: EncodableText
+    account_id: int | None = Field(
+        default=None, strict=True, ge=-_MEDIUM_ID_CEILING, lt=_MEDIUM_ID_CEILING
+    )
+
+
+class RecordedInputMessage(BaseModel):
+    """One message an input took in, kept separate and dated (ADR-0323 §5:4).
+
+    A channel that takes several messages in as one input records each here, so the
+    episode keeps them apart, each at the time its medium gave it, beside the text they
+    make together (``RecordedTextInput``). A channel that records none leaves its
+    trigger's ``messages`` empty.
+
+    Attributes:
+        text: The message's text, exactly as it was taken in.
+        sent_at: The time its medium gave it.
+        position: Its id in its place, where the medium gives one: what a reply to it
+            names.
+        forwarded_from: For a forward, its original sender, claimed (§4:10); ``None``
+            for a message its sender wrote.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: EncodableText
+    sent_at: UtcInstant
+    position: int | None = Field(default=None, strict=True, ge=0, lt=_MEDIUM_ID_CEILING)
+    forwarded_from: ClaimedAuthor | None = None
+
+
 class RecordedChannelTrigger(BaseModel):
     """One admitted channel envelope after transient audio has been discarded.
 
     It records how the input arrived (ADR-0284 §3): the target, the channel it
     resolved to, the payload, its context, the reply capability it was offered, and
     ``origin``, who the input came from (§2), set at admission from the channel's
-    declaration and fixed on the episode.
+    declaration and fixed on the episode. Where the channel took several messages in
+    as one input, ``messages`` keeps each of them, dated, with a forward's original
+    sender, claimed (ADR-0323 §4:10, §5:4); the payload is still the text they make
+    together, and a channel that records no messages leaves it empty.
 
     **It checks no combination per channel type** (§3:2). Which payloads, reply
     shapes and options a channel accepts is checked at admission, by
@@ -2798,6 +2853,7 @@ class RecordedChannelTrigger(BaseModel):
     context: ChannelContext
     reply: ReplyCapability | None
     origin: InputOrigin
+    messages: tuple[RecordedInputMessage, ...] = ()
 
     @model_validator(mode="after")
     def _channel_is_the_target(self) -> Self:
@@ -3413,12 +3469,17 @@ class AnsweredQuestion(BaseModel):
 class ApprovalGiver(StrEnum):
     """Who gave an approval: §4:6's *who* (ADR-0321 §4:6).
 
-    Closed, **added to and never renamed**: a later kind of approval adds a member
-    rather than reshaping this one.
+    The user, through the channel the yes came on (ADR-0323 §4:9). Closed, **added to
+    and never renamed**: a later kind of approval, or a later channel whose kind
+    establishes the user, adds a member rather than reshaping this one.
     """
 
     USER_THROUGH_HUB_CHAT = "user_through_hub_chat"
     """The user, by a message sent through the hub chat (§3:3)."""
+
+    USER_THROUGH_TELEGRAM = "user_through_telegram"
+    """The user, by a message sent through their Telegram line (ADR-0323 §4:9): their
+    own account, not forwarding, in its private chat with the bot (§4:1)."""
 
 
 class ApprovalEnd(StrEnum):
@@ -3461,7 +3522,8 @@ class ApprovalGiven(BaseModel):
 class Approval(BaseModel):
     """The approval a yes makes, in one general shape with five slots (ADR-0321 §4:6).
 
-    **who**, the user through the hub chat; **how**, a yes to a question; **covers**,
+    **who**, the user through the channel the yes came on (ADR-0323 §4:9); **how**, a
+    yes to a question; **covers**,
     exactly the calls of the approved parts, each by its :class:`QuestionPart`;
     **given**, in the yes's input; and **ends**, when used. Code assembles it from the
     records where authorizing's three facts hold (§4:4, §4:6), and nothing stores it but
