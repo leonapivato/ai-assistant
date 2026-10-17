@@ -1128,6 +1128,20 @@ code {
   color: var(--on-accent);
 }
 
+/*
+ * And the two marks the page draws in the gold — the focus ring and a selection — are
+ * drawn in the ink here instead, or they would be gold on gold on the controls a
+ * keyboard reaches first going back from the message box.
+ */
+.chat-message.from-user button:focus-visible {
+  outline-color: var(--on-accent);
+}
+
+.chat-message.from-user ::selection {
+  color: var(--accent);
+  background: var(--on-accent);
+}
+
 .chat-head {
   display: flex;
   flex-wrap: wrap;
