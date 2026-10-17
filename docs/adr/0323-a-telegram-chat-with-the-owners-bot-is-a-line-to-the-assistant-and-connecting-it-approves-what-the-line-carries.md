@@ -97,12 +97,14 @@ approval that lets what the assistant writes reach that one chat.
 > **Normative.** The kind's spoke is in the hub: a reader, which is its sensor, and a writer,
 > which is its actuator (ADR-0292 §2:13). Both reach Telegram only through §11's route.
 
-> **Normative.** One channel exists for each connected bot that the line's settings name (§3).
-> Its place is keyed by the chat's id, and its channel identity is (`telegram`, chat id), read
-> as (the bot's channel, that chat) the way ADR-0292 §10:8 reads the conversation's identity.
+> **Normative.** One channel exists for each connected bot that the line's settings name (§3),
+> keyed by its connection's reference, and its place is keyed by the chat's id. Its channel
+> identity is (`telegram`, that reference with that chat id), read as (that bot's channel, that
+> chat) the way ADR-0292 §10:8 reads the conversation's identity, and every read of the place,
+> its window and its message positions included, is keyed by both.
 
-So a change of the configured account is a new place: the old chat's history does not run on
-as if it were the same conversation.
+So a change of the configured account, or a new bot connected for the same account, is a new
+place: the old chat's history does not run on as if it were the same conversation.
 
 > **Normative.** The user's Telegram apps are the user's end of the chat. They are not devices
 > of the hub and not spokes, and no device role, "my devices" included, reaches them.
@@ -478,8 +480,9 @@ the wait (ADR-0029 §4, ADR-0241 §1).
 > and is handed a bound, required and with no default, that exceeds that wait by a margin and
 > covers the poll's whole work.
 
-> **Normative.** A poll that reaches its bound is cancelled and its channel closed. It confirms
-> nothing and takes nothing in, and the reader polls again.
+> **Normative.** A poll that reaches its bound is cancelled and its channel closed, its record's
+> outcome is unknown, and the reader polls again. It takes nothing in, and the offset it sent
+> can have confirmed only updates already dealt with (§5:6).
 
 > **Normative.** Each send is handed a bound of its own. A send cut off by its bound after its
 > request was written is *unknown* (§6:4).
@@ -594,10 +597,10 @@ instructions.
 
 ### 15. How it is built
 
-> **Normative.** The line's lanes are cut at its contract seams as ADR-0137 decides. They are
-> dispatched together in one milestone and merged back to back, so that no part of the line
-> sits in the tree waiting on a later design, and the line goes live in the deploy after the
-> last of them (owner, 2026-10-11: both halves together, no switched-off code).
+> **Normative.** The line's lanes are cut at its contract seams as ADR-0137 decides, and each
+> lane that consumes a contract is briefed only after the lane landing that contract has merged
+> (ADR-0137 §4:1). They run back to back in one milestone, with no other design waited on
+> between them, and the line goes live in the deploy after the last of them.
 
 > **Normative.** No Telegram library is added. The Bot API is a handful of HTTPS calls returning
 > JSON, made through the seam's own exchange.
@@ -630,6 +633,9 @@ A library would bring its own HTTP stack, which would have to be kept behind the
 > rule of §6, a chat other than the configured one refused before any byte, a redirect refused,
 > an update from another account ignored, a duplicate update taken in once, and no token in any
 > log line, record or error.
+
+The owner's ruling of 2026-10-11, both halves together and no switched-off code, is kept so: a
+part of the line sits in the tree only while the next lane of the same milestone is built.
 
 **Voice notes** are the first follow-up after the line is built. The hub transcribes them, and
 their author is still you, established. Live speech, with its audience questions, stays with the
