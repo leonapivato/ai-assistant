@@ -1,6 +1,6 @@
 # 151. The connection surface is five engine operations, and the reference is minted rather than typed
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0325 (§1:1's and §10:2's counts of five, each gaining the keyless act; §3:1's *and by nothing else*; §7:3 and §7:11's *activates a record whose credential write it did not itself perform* limb, each as it reaches the keyless act)
 - Date: 2026-08-14
 - Amended: 2026-08-22 — **§13's third clause is undischarged and unamended, and
   ADR-0177 rules a different hop.** ADR-0177 (`track:web-client` milestone 15,
@@ -56,6 +56,7 @@
 - **It amends no earlier ADR and supersedes none.** §17 applies ADR-0070 §1's test
   and ADR-0082 §1's record rule at the seven places where the opposite reading is
   available, and shows its working at each.
+- Partially superseded: 2026-10-17 by ADR-0325 — the keyless act, `connect_keyless_account` on `AssistantEngine` and `provision_keyless` on `ConnectionProvisioner`. §1:1's *exactly these five methods* and §10:2's *exactly five members* each gain it; §3:1's mint *at the moment `connect_account` writes the reference's first record, and by nothing else* gains its first record; and, as they reach the keyless act's one write, §7:3's classification, by its first bullet alone, and §7:11's *activates a record whose credential write it did not itself perform* limb. The five operations' signatures, failures and clauses stand. This replacement takes effect on ratification of ADR-0325. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
