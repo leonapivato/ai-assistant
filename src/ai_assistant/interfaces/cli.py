@@ -8038,6 +8038,8 @@ def _approval_giver(giver: ApprovalGiver) -> str:
     match giver:
         case ApprovalGiver.USER_THROUGH_HUB_CHAT:
             return "by you, through the hub chat"
+        case ApprovalGiver.USER_THROUGH_TELEGRAM:
+            return "by you, through Telegram"
     assert_never(giver)
 
 

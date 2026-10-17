@@ -110,7 +110,7 @@ _AT: Final = datetime(2026, 10, 15, 14, 15, tzinfo=UTC)
 _ASKING: Final = "act-0"
 _YES: Final = "act-1"
 _QUESTION: Final = "round:q"
-_PLACE: Final = "place:chat"
+_PLACE: Final = "conversation:chat"
 _PART: Final = QuestionPart(round=_QUESTION, part=1)
 
 

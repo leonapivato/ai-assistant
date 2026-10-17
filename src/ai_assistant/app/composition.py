@@ -42,6 +42,7 @@ from ai_assistant.memory import (
     SqliteNotificationOutbox,
     SqliteNotificationStore,
     SqliteStoryStore,
+    SqliteTelegramIntakeRecord,
 )
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.memory.health import DEFAULT_K, DEFAULT_SAMPLE, MAX_K, StoreHealthReader
@@ -95,6 +96,7 @@ from ai_assistant.orchestration.story_calls import (
 )
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
 from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
+from ai_assistant.orchestration.telegram import TelegramLineSeams
 from ai_assistant.orchestration.understanding import (
     RecentEpisodes,
     UnderstandingStage,
@@ -124,7 +126,11 @@ from ai_assistant.tools.booking import BOOKING_ACT, BOOKING_AVAILABILITY
 from ai_assistant.tools.booking import ORIGIN_ARGUMENT as BOOKING_ORIGIN_ARGUMENT
 from ai_assistant.tools.connection_store import SqliteConnectionStore
 from ai_assistant.tools.destinations import DestinationCanonicalisationError
-from ai_assistant.tools.egress import StreamOutboundTransport
+from ai_assistant.tools.egress import (
+    HttpsExchange,
+    HttpsTelegramBotClient,
+    StreamOutboundTransport,
+)
 from ai_assistant.tools.egress_binder import EgressBindingSeam, canonical_destination
 from ai_assistant.tools.forecast import FORECAST_READ_ID
 from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
@@ -1493,6 +1499,44 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 tidy_up=tidy_up,
             ),
         )
+        # --- the Telegram line (ADR-0323 §3, §11, §15) --------------------------
+        #
+        # **Built only while both of the line's settings are set** (§3:3), and
+        # `Settings` refuses one without the other (§3:2), so this is whole or
+        # absent: a deployment that names no line holds no client, opens no intake
+        # record and starts nothing. The client is the seam's one production
+        # implementation (§11:1), over the records and the keyring face this root
+        # already holds, for the search integration's reasons, and an exchange of its
+        # own holding the line's read bound (§11:13); the transport is the one this
+        # root hands every integration (ADR-0191 §3). While the connection the
+        # settings name is not active, every call is refused before a byte is
+        # written (§3:3, §12:3), and the reader rests until it is.
+        #
+        # **The intake record is a Tier 1 store on its own file** (ADR-0155 §1:2),
+        # opened here, closed in the ordered shutdown below and on a failed build,
+        # for the other stores' reasons.
+        telegram_line: TelegramLineSeams | None = None
+        telegram_intake: SqliteTelegramIntakeRecord | None = None
+        if settings.telegram_connection is not None and settings.telegram_user_id is not None:
+            telegram_intake = SqliteTelegramIntakeRecord(path=directory / "telegram.db")
+            opened.append(telegram_intake.close)
+            telegram_line = TelegramLineSeams(
+                client=HttpsTelegramBotClient(
+                    reference=settings.telegram_connection,
+                    chat_id=settings.telegram_user_id,
+                    records=connections,
+                    secrets=integration_secrets,
+                    exchange=HttpsExchange(
+                        transport=StreamOutboundTransport() if transport is None else transport,
+                        max_response_bytes=settings.telegram_max_response_bytes,
+                    ),
+                ),
+                intake=telegram_intake,
+                reference=settings.telegram_connection,
+                poll_wait=settings.telegram_poll_wait,
+                poll_bound=settings.telegram_poll_bound,
+                send_bound=settings.telegram_send_bound,
+            )
         engine = Engine(
             plans=plans,
             trail=trail,
@@ -1620,6 +1664,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             diagnostics=diagnostics,
             diagnostic_retention=diagnostic_record,
             diagnostic_window=settings.diagnostic_retention,
+            # ADR-0323 §2:2: the line's spoke, where it is configured; the engine starts
+            # its reader with the hub and stops it with it.
+            telegram=telegram_line,
             # The capture/lifecycle stage, holding *both* durable stores — the same
             # `memory` again, so a captured turn is retrievable and destroyable
             # through the surfaces the user already has (ADR-0074 §9). Its
@@ -1852,6 +1899,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # down has to find the connection still open. The façade drains
                 # in-flight work before any of these run, so what this protects is
                 # the tail of that drain rather than a race with it.
+                #
+                # And the Telegram line's intake record before it, where the line is
+                # configured (ADR-0323 §5:8, §13:2). No store reads it and it reads
+                # none; the façade has stopped the line's reader and drained its
+                # activation, so no claim is in flight when it closes.
+                *([_as_async(telegram_intake.close)] if telegram_intake is not None else []),
                 _as_async(traces.close),
             ],
             # The shutdown budget every production engine gets, hub and CLI alike

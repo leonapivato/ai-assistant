@@ -106,6 +106,7 @@ from ai_assistant.core.types import (
     canonical_json_bytes,
     rests_on_recorded_external_content,
 )
+from ai_assistant.orchestration.channel_kinds import users_place
 from ai_assistant.orchestration.outside_content import from_outside, is_outside_episode
 from ai_assistant.orchestration.remembering import (
     EPISODE_ARGUMENT,
@@ -325,8 +326,13 @@ class YesContext:
         given_at: When the input carrying the yes was given, timezone-aware; the
             approval's *given* (§4:6).
         users_authority: Whether the input carries the user's authority (§3:3,
-            ADR-0292 §5:5). At the deploy that is a message the user sent through the
-            hub chat; an email or an event saying yes approves nothing.
+            ADR-0292 §5:5): an input whose author its channel's kind establishes as
+            the user, sent as an instruction (ADR-0323 §4:7). An email, an event or a
+            forward saying yes approves nothing.
+        who: The approval's *who* (§4:6): the user, through the channel the yes came
+            on (ADR-0323 §4:9). The phases set it from the input's kind; authorizing
+            copies it onto the approval and reads nothing of the channel from it
+            (§4:5).
 
     Raises:
         ValueError: If it carries no pointer, names one question twice, or ``given_at``
@@ -336,6 +342,7 @@ class YesContext:
     answers: tuple[AnsweredQuestion, ...]
     given_at: datetime
     users_authority: bool = False
+    who: ApprovalGiver = ApprovalGiver.USER_THROUGH_HUB_CHAT
 
     def __post_init__(self) -> None:
         """A yes carries a pointer, and when it was given is an instant."""
@@ -803,6 +810,7 @@ def _detached_yes(given: YesContext | None) -> YesContext | None:
         answers=tuple(AnsweredQuestion.model_validate(one.model_dump()) for one in given.answers),
         given_at=given.given_at,
         users_authority=given.users_authority is True,
+        who=ApprovalGiver(given.who),
     )
 
 
@@ -1442,7 +1450,8 @@ class AuthorizingStage:
         - the input carries the user's authority (§3:3);
         - **shown**: some pointer's question message has a done delivery record, the
           asking activation's message effect for the pointer's round, or at its place
-          and position, with its outcome done and its position written (ADR-0306 §5:5);
+          and position, with its outcome done and its position written (ADR-0306 §5:5),
+          in a place whose kind establishes the user as an author (ADR-0323 §4:8);
         - the approval covers the part: the call is checked against the pointer whose
           question asked it, by its round (ADR-0322 §3:1, §3:3), and that pointer names
           the part or names no part, which is every part shown (§3:6);
@@ -1515,7 +1524,7 @@ class AuthorizingStage:
             if number in recorded
         )
         approval = Approval(
-            who=ApprovalGiver.USER_THROUGH_HUB_CHAT,
+            who=yes.who,
             how=YesToQuestion(activation_id=pointer.activation_id, round=delivered),
             covers=covers,
             given=ApprovalGiven(activation_id=state.activation_id, at=yes.given_at),
@@ -1574,10 +1583,12 @@ class AuthorizingStage:
 
         The message is the asking activation's message effect for the pointer's round,
         at its place and position where the pointer names them, its outcome done and its
-        position written (ADR-0306 §5:5). Every place a message is written into is the
-        place its activation's input came from (ADR-0306 §4:7), so a done message is in
-        one of the user's conversations; the *couldn't finish* message names no round and
-        is never a question.
+        position written (ADR-0306 §5:5), **in a place whose kind establishes the user as
+        an author there** (ADR-0323 §4:8): one of the user's conversations, or the line's
+        chat. The place is read off the record through the kinds' declarations
+        (:func:`~ai_assistant.orchestration.channel_kinds.users_place`), so no rule here
+        names a channel (§4:5). The *couldn't finish* message names no round and is
+        never a question.
 
         Raises:
             PlanningError: If the plan store cannot be read.
@@ -1585,6 +1596,7 @@ class AuthorizingStage:
         for effect in await plans.activation_effects([pointer.activation_id]):
             if (
                 _is_delivered(effect)
+                and users_place(effect.place)
                 and effect.round is not None
                 and (pointer.round is None or effect.round == pointer.round)
                 and (

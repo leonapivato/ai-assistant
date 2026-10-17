@@ -190,7 +190,7 @@ from ai_assistant.orchestration.payloads import (
     page_argument,
     positive_page_argument,
 )
-from ai_assistant.orchestration.phase_path import failing_stage
+from ai_assistant.orchestration.phase_path import PlaceTarget, failing_stage
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.speech import (
     DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
@@ -206,6 +206,12 @@ from ai_assistant.orchestration.stories import (
 from ai_assistant.orchestration.story_links import StoryLinksDecision
 from ai_assistant.orchestration.story_standing import OWNER_READER
 from ai_assistant.orchestration.story_standing import story_standing as standing_of
+from ai_assistant.orchestration.telegram import (
+    LINE_GIVER,
+    TELEGRAM,
+    TelegramReader,
+    TelegramWriter,
+)
 from ai_assistant.orchestration.traces import Observation, OperationTraces
 from ai_assistant.orchestration.understanding import (
     ChannelWindow,
@@ -291,6 +297,7 @@ if TYPE_CHECKING:
         StoryCandidates,
         StoryLinksStage,
     )
+    from ai_assistant.orchestration.telegram import TelegramInput, TelegramLineSeams
     from ai_assistant.orchestration.understanding import (
         Fetched,
         UnderstandingStage,
@@ -1421,16 +1428,24 @@ def _log_if_defect(
     return True
 
 
-def _log_chat_failure(failure: Exception, *, state: ActivationState, marked: bool) -> None:
-    """Log how the reader's activation failed: a defect at error level (#2904).
+def _log_chat_failure(
+    failure: Exception,
+    *,
+    state: ActivationState,
+    marked: bool,
+    reader: str = "chat",
+) -> None:
+    """Log how a reader's activation failed: a defect at error level (#2904).
 
     Under the line it always was, by whether the activation marked anything: a defect
     at error level, by its class and frames alone (:func:`_log_if_defect`), and an
-    expected failure at the warning it always was.
+    expected failure at the warning it always was. ``reader`` names the reader: the
+    hub chat's, or the Telegram line's (ADR-0323 §2:2).
     """
-    event = "chat_activation_failed" if marked else "chat_input_not_taken_in"
-    if not _log_if_defect(event, failure, state=state, step="chat_reader"):
-        _log.warning(event, stage="chat_reader", exc_info=True)
+    event = f"{reader}_activation_failed" if marked else f"{reader}_input_not_taken_in"
+    step = f"{reader}_reader"
+    if not _log_if_defect(event, failure, state=state, step=step):
+        _log.warning(event, stage=step, exc_info=True)
 
 
 _EMPTY_CHANNEL_CONTEXT = ChannelContext()
@@ -1489,6 +1504,7 @@ class Engine:
         diagnostics: DiagnosticSink | None = None,
         diagnostic_retention: DiagnosticRetention | None = None,
         diagnostic_window: timedelta | None = None,
+        telegram: TelegramLineSeams | None = None,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -1815,6 +1831,13 @@ class Engine:
                 is written back. ``False`` leaves the medium without its reader, so a
                 written message is recorded and waits — for a suite that holds the
                 medium alone to the surface's contract.
+            telegram: The Telegram line's bot, records, channel and bounds, where the
+                line's two settings are set (ADR-0323 §3:2-§3:3); ``None``, the
+                default, is a deployment with no line, where nothing of it starts. Its
+                reader is the line's long-running task: :meth:`start` starts it, as
+                the hub chat's reader takes in what waits, and :meth:`aclose` stops
+                it before the drain (§2:2). It runs every activation through the
+                phases, so it is refused without them.
             chat_turn_budget: The budget each activation the reader starts is given
                 (:data:`~ai_assistant.orchestration.chat.CHAT_TURN_BUDGET`); the
                 reader has no caller to hand it one (ADR-0029 §4).
@@ -2038,6 +2061,35 @@ class Engine:
             spawn=self._spawn_read,
             closing=lambda: self._closing,
         )
+        # ADR-0323 §2:2: the Telegram line's spoke in the hub, its reader and its writer,
+        # wired only beside the phases, which plan every activation it starts.
+        self._telegram_writer: TelegramWriter | None = None
+        self._telegram_reader: TelegramReader | None = None
+        self._telegram_started = False
+        if telegram is not None:
+            if self._phases is None:
+                msg = (
+                    "the Telegram line runs every activation through the phases, so it "
+                    "is wired only beside them (ADR-0309 §2:6, ADR-0323 §15)"
+                )
+                raise ConfigurationError(msg)
+            self._telegram_writer = TelegramWriter(
+                client=telegram.client,
+                intake=telegram.intake,
+                channel=telegram.channel,
+                send_bound=telegram.send_bound,
+            )
+            self._telegram_reader = TelegramReader(
+                seams=telegram,
+                writer=self._telegram_writer,
+                memory=memory,
+                activate=self._line_read_in,
+                closing=lambda: self._closing,
+                mint=self._chat_activation_id,
+                # ADR-0323 §4:13, §10: the window's messages, and a quoted one, link
+                # to the activation that wrote them, by their effect records.
+                written=self._phases.written_in,
+            )
         # ADR-0298 §7: the engine's half of the change stream, over the same chat
         # space and the same account of what runs as ``conversation`` reads.
         self._change_stream = ChangeStream(
@@ -2139,6 +2191,12 @@ class Engine:
         # interrupted activation took in stays taken in. A restart writes nothing (§9:2).
         if self._chat_reader is not None:
             await self._chat_reader.notice_awaiting()
+        # ADR-0323 §2:2, §5:10: the line's reader starts once the dead process's open
+        # episodes are closed, so the activation a restart cut off reads *interrupted*
+        # when the reader looks for it, once per engine.
+        if self._telegram_reader is not None and not self._telegram_started:
+            self._telegram_started = True
+            self._spawn_read(self._telegram_reader.run())
         if self._notification_outbox is not None:
             await self._recover_leases_once()
             await self._notification_outbox.reconcile()
@@ -5411,6 +5469,10 @@ class Engine:
         run exactly once.
         """
         self._closing = True  # stop accepting new work at once (§2)
+        if self._telegram_reader is not None:
+            # ADR-0323 §11:11: a poll the line holds open ends now, its record unknown;
+            # an activation it runs is drained as any other.
+            self._telegram_reader.close()
         if self._shutdown is None:
             self._shutdown = asyncio.ensure_future(self._drain_and_close())
         await asyncio.shield(self._shutdown)
@@ -5690,6 +5752,151 @@ class Engine:
     async def _chat_input_turn(self, taken: ChatInput) -> None:
         """The reader's input, planned by the phases (ADR-0309 §2:6)."""
         await self._phases_turn(taken)
+
+    async def _line_read_in(self, taken: TelegramInput) -> bool:
+        """Admit the activation for the Telegram line's input (ADR-0323 §5, §6).
+
+        As :meth:`_read_in` admits the hub chat's: the input is admitted as a typed
+        message on the line's channel, with the id the reader minted and each message
+        it took in recorded on the trigger, dated, a forward with its original sender
+        (§4:10, §5:4) — so an input taking one in is admitted with the origin the kind
+        declares for it (§4:11). Its **first step, once its episode is written, marks
+        the updates taken in** on the line's intake record (§5:8, ADR-0293 §6:8), so
+        whatever cancels it leaves its updates either marked by it or never taken in
+        (§5:10). It then runs as a typed turn of a bounded audience — the line is
+        private (§9:6) — with the line's episode window as its channel window (§10),
+        and the phases write its messages into the line's chat through the line's
+        writer alone (§6:1, §11:3). A shutdown that cancels it, and a stop, write
+        nothing (ADR-0295 §3:3); the restart's message is the reader's (§6:10).
+
+        Returns:
+            Whether the activation marked anything taken in; ``False`` too where the
+            engine was already closing, and nothing was admitted.
+
+        Raises:
+            CancelledError: If the activation, or this read, was cancelled.
+        """
+        if self._closing:
+            return False
+        reader = self._telegram_reader
+        writer = self._telegram_writer
+        assert reader is not None  # noqa: S101 — only the line's reader calls this
+        assert writer is not None  # noqa: S101 — wired with the reader
+        accepted = ChannelInput(target=taken.channel, payload=TextChannelPayload(text=taken.text))
+        state = admit_channel(
+            accepted,
+            WholeTextReply(),
+            clock=self._now,
+            id_factory=lambda: taken.activation_id,
+            stage_limit=self._stage_record_limit,
+            messages=taken.recorded,
+        )
+        target = PlaceTarget(channel=taken.channel, writer=writer.for_place(taken.channel))
+        marked: list[int] = []
+
+        async def turn() -> None:
+            try:
+                await reader.take_in(taken, into=marked)
+                if not marked:
+                    raise _NothingTakenInError
+                # §5:9: the pass runs on what it took in alone.
+                await self._line_turn(taken.narrowed(marked), target)
+            except Exception:
+                # As the chat's: what was marked is consumed, so a failure before the
+                # phases' run began writes *couldn't finish* here (ADR-0317 §3:3).
+                if marked and state.working is None and self._phases is not None:
+                    await self._phases.unbegun(
+                        activation_id=taken.activation_id,
+                        state=state,
+                        target=target,
+                        description=TELEGRAM.description,
+                    )
+                raise
+
+        deadline = asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()
+        task = self._activation_task(
+            ActivationScope(state),
+            turn,
+            seam="telegram_reader",
+            check_output=_unchecked,
+            deadline=deadline,
+        )
+        try:
+            await task
+        except asyncio.CancelledError:
+            raise
+        except ActivationStoppedError:
+            # ADR-0295 §3:3: a stopped activation writes nothing new into the chat.
+            return bool(marked)
+        except Exception as failure:  # every failure of the pass is §10:2's ending
+            _log_chat_failure(failure, state=state, marked=bool(marked), reader="telegram")
+            if not marked:
+                return False
+        return True
+
+    async def _line_turn(self, taken: TelegramInput, target: PlaceTarget) -> None:
+        """The line's input, planned by the phases (ADR-0309 §2:6, ADR-0323 §15).
+
+        A turn as the hub chat's is, its input already resolved to the line's channel
+        — the line's chat is no conversation the lifecycle begins (§2:5) — so the
+        controller runs the windows, recall, understanding and the story links, then
+        recall's second run and the four phase stages. The working set's place is the
+        line's chat, its messages go through the line's writer, its window is the
+        line's episode window (§10), and a yes it carries is given through the line
+        (§4:9).
+        """
+        phases = self._phases
+        assert phases is not None  # noqa: S101 — the line is wired only beside them
+        state = active_state()
+        trigger = None if state is None else state.trigger
+        resolved = ResolvedChannelInput(
+            channel=taken.channel,
+            text=taken.text,
+            modality=Modality.TEXT,
+            context=_EMPTY_CHANNEL_CONTEXT,
+        )
+        working = _TurnPass(
+            utterance=taken.text,
+            requested=None,
+            context=_EMPTY_CHANNEL_CONTEXT,
+            deadline=(asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()),
+            # ADR-0323 §9:6: the line is private, declared by setting it up, so a
+            # record placed for the owner alone may be shown (ADR-0307 §6:4).
+            supply=BoundedAudienceSupply(
+                speakable_attested_sources=self._speakable_attested_sources
+            ),
+            transcript=taken.window,
+            understanding_wired=self._understanding is not None,
+            recall_wired=self._recall is not None,
+            story_links_wired=self._story_links is not None,
+            phases=phases.begin_line(
+                activation_id=taken.activation_id,
+                window=taken.window,
+                target=target,
+                description=TELEGRAM.description,
+                giver=LINE_GIVER,
+                trigger_origin=None if trigger is None else trigger.origin,
+                owner_records=True,
+            ),
+            input=resolved,
+        )
+        stages: list[ControllerStageRun[_TurnPass]] = [
+            Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),
+            phases.recall_stage(
+                TolerantStage(ControllerStage.RECALL, self._recall_stage, expired=_recall_expired),
+                self._recall,
+            ),
+            Stage(ControllerStage.UNDERSTANDING, self._understanding_stage, expired=_turn_expired),
+            TolerantStage(
+                ControllerStage.STORY_LINKS, self._story_links_stage, expired=_story_links_expired
+            ),
+            *phases.stages(),
+        ]
+        await phases.run(
+            working,
+            lambda: self._controlled(working, stages),
+            state=state,
+        )
 
     async def _phases_turn(self, taken: ChatInput) -> None:
         """The reader's input planned by the phases (ADR-0309 §2:6, §3).
@@ -6306,6 +6513,9 @@ class Engine:
                     recall=None if recalled is None else recalled.result,
                     recalled=fetched.recalled,
                     stories=stories,
+                    # ADR-0284 §2:2: the origin admission recorded, which a kind
+                    # declaring it per input sets for this input (ADR-0323 §4:11).
+                    origin=None if state is None else state.trigger.origin,
                 )
         except BaseException as exc:
             # A timer fires only when the loop gets control, so a stage can cross the

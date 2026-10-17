@@ -2636,7 +2636,15 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     the projection is never stored and crosses no wire. A peer at 107 refuses the
 #:     sequence where it reads one pointer, and a hub at 108 refuses one pointer where
 #:     it reads a sequence (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 108
+#: 109: ADR-0323 §15:2 advances the version once for the Telegram line, on these
+#:     grounds: ``ApprovalGiver`` gains ``user_through_telegram`` (§4:9), carried on
+#:     ``PermissionDecision.approval`` by ``recent_decisions`` and
+#:     ``export_decisions``; and the wire-carried ``EpisodicMemory.processing_record``
+#:     holds ``RecordedChannelTrigger.messages`` (``RecordedInputMessage``,
+#:     ``ClaimedAuthor``), each message an input took in, dated, with a forward's
+#:     original sender (§4:10, §5:4). A peer at 108 refuses the new field as extra and
+#:     the new member as unknown (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 109
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client
