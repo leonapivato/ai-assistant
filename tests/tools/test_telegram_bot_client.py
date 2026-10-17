@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, final
@@ -208,9 +209,16 @@ class AnsweringChannel:
     does.
     """
 
-    def __init__(self, answers: dict[str, bytes]) -> None:
-        """Open it, secure, answering each method with ``answers[method]``."""
+    def __init__(self, answers: dict[str, bytes], *, stall: float = 0.0) -> None:
+        """Open it, secure, answering each method with ``answers[method]``.
+
+        Args:
+            answers: The answer per method.
+            stall: Seconds the write holds the loop **synchronously**, never yielding:
+                work no cancellation can land in, as decoding a large answer is.
+        """
         self._answers = answers
+        self._stall = stall
         self._inbound = bytearray()
         self.written = bytearray()
         self.closed = False
@@ -233,6 +241,7 @@ class AnsweringChannel:
     async def write(self, data: bytes, /) -> None:
         """Record the request, and choose its answer by its method."""
         self.written += data
+        time.sleep(self._stall)  # noqa: ASYNC251 — blocking the loop is the point
         target = bytes(self.written).split(b" ", 2)[1].decode("ascii")
         self._inbound += self._answers[target.rsplit("/", 1)[1]]
 
@@ -248,15 +257,16 @@ class AnsweringChannel:
 class AnsweringTransport:
     """An outbound transport whose every channel is an :class:`AnsweringChannel`."""
 
-    def __init__(self, answers: dict[str, bytes]) -> None:
-        """Answer every call by its method."""
+    def __init__(self, answers: dict[str, bytes], *, stall: float = 0.0) -> None:
+        """Answer every call by its method, after ``stall`` seconds of blocked loop."""
         self._answers = answers
+        self._stall = stall
         self.channels: list[AnsweringChannel] = []
 
     async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
         """Open an answering channel; the endpoint is the client's one origin."""
         assert endpoint == TELEGRAM_ENDPOINT
-        channel = AnsweringChannel(self._answers)
+        channel = AnsweringChannel(self._answers, stall=self._stall)
         self.channels.append(channel)
         return channel
 
@@ -622,6 +632,35 @@ async def test_a_poll_reaching_its_bound_before_the_write_is_still_unknown() -> 
     assert outcome.failure is TelegramFailure.UNKNOWN
 
 
+@pytest.mark.parametrize("method", ["poll", "send"])
+async def test_work_that_overruns_the_bound_without_yielding_is_past_it(method: str) -> None:
+    """The bound covers the whole call (§11:10), work no cancellation can land in too.
+
+    The far end answers at once, and in full, but only after holding the loop past
+    the bound: a timer cannot fire inside synchronous work, so ``Timeout.expired()``
+    alone would call this call kept within its bound.
+    """
+    telegram = AnsweringTransport(
+        {
+            "getUpdates": done([update_json(TelegramUpdate(update_id=1))]),
+            "sendMessage": done({"message_id": 4}),
+        },
+        stall=SHORT_BOUND.total_seconds() * 3,
+    )
+    rig = await harness(transport=telegram)
+
+    if method == "poll":
+        polled = await rig.client.poll(
+            attempt=ATTEMPT, offset=None, wait=timedelta(0), timeout=SHORT_BOUND
+        )
+        assert polled.failure is TelegramFailure.UNKNOWN
+        assert polled.updates == ()
+    else:
+        sent = await rig.client.send(attempt=ATTEMPT, chat_id=CHAT, text="hi", timeout=SHORT_BOUND)
+        assert sent.failure is TelegramFailure.UNKNOWN
+        assert sent.message_id is None
+
+
 async def test_a_silent_far_ends_channel_is_closed_at_the_bound() -> None:
     """§11:11: cancelled, and its channel closed."""
     transport = SilentTransport()
@@ -835,8 +874,24 @@ async def test_a_forward_carries_its_origin(
         {"forward_origin": {"type": "user", "date": _AT}},
         {"forward_date": _AT},
         {"forward_from": {"id": 9, "is_bot": False, "first_name": "Ana"}},
+        {"forward_origin": {"type": [], "date": _AT}},
+        {"forward_origin": {"type": {}, "date": _AT}},
+        {
+            "forward_origin": {
+                "type": "user",
+                "sender_user": {"id": 9, "first_name": "A", "last_name": 5},
+            }
+        },
     ],
-    ids=["unknown-kind", "user-with-no-sender", "legacy-date-only", "legacy-from-only"],
+    ids=[
+        "unknown-kind",
+        "user-with-no-sender",
+        "legacy-date-only",
+        "legacy-from-only",
+        "kind-a-list",
+        "kind-an-object",
+        "last-name-not-text",
+    ],
 )
 async def test_a_forward_whose_origin_cannot_be_read_is_not_read_as_the_users(
     fields: dict[str, Any],

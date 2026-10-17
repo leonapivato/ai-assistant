@@ -43,7 +43,6 @@ from ai_assistant.core.types import (
     TelegramFailure,
     TelegramMessage,
     TelegramUpdate,
-    telegram_message_parts,
 )
 
 if TYPE_CHECKING:
@@ -324,17 +323,6 @@ class TelegramBotClientContract:
 
         outcome = await prepared.client.send(
             attempt=ATTEMPT, chat_id=prepared.client.chat_id, text=text, timeout=A_BOUND
-        )
-
-        assert outcome.done
-
-    async def test_every_part_of_a_long_message_is_sendable(self) -> None:
-        """The split rule's parts are exactly what a send takes (§6:6)."""
-        prepared = await self.accepting(message_id=5)
-        (first, *_) = telegram_message_parts("word " * 2000)
-
-        outcome = await prepared.client.send(
-            attempt=ATTEMPT, chat_id=prepared.client.chat_id, text=first, timeout=A_BOUND
         )
 
         assert outcome.done

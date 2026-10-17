@@ -3784,6 +3784,9 @@ _CLIENT_ERRORS: Final = range(400, 500)
 #: wait anyone means, and the outcome carries none.
 _MAX_RETRY_AFTER: Final = 2**31
 
+#: The four ``MessageOrigin`` kinds a forward's origin may name, as text.
+_FORWARD_KINDS: Final = frozenset(kind.value for kind in TelegramForwardKind)
+
 #: The keys a message carries when it is a forward, in Bot API 7's spelling and in
 #: the one it replaced. A message carrying any of them is a forward, and one whose
 #: origin cannot be read is not read at all rather than read as the user's own.
@@ -3799,14 +3802,6 @@ class _Failed:
 
     failure: TelegramFailure
     retry_after: int | None = None
-
-
-@final
-@dataclass(frozen=True, slots=True)
-class _Answered:
-    """A call Telegram answered as done, with the ``result`` it returned."""
-
-    result: object
 
 
 @final
@@ -3937,11 +3932,15 @@ class HttpsTelegramBotClient:
         if offset is not None:
             payload["offset"] = offset
         reply = await self._call(
-            attempt=attempt, method=_GET_UPDATES, payload=payload, bound=bound, poll=True
+            attempt=attempt,
+            method=_GET_UPDATES,
+            payload=payload,
+            bound=bound,
+            read=_polled,
         )
         if isinstance(reply, _Failed):
             return TelegramPollOutcome(failure=reply.failure, retry_after_seconds=reply.retry_after)
-        return _polled(reply.result)
+        return TelegramPollOutcome(updates=reply)
 
     async def send(
         self,
@@ -3973,15 +3972,11 @@ class HttpsTelegramBotClient:
             method=_SEND_MESSAGE,
             payload={"chat_id": chat, "text": body},
             bound=bound,
-            poll=False,
+            read=_sent_id,
         )
         if isinstance(reply, _Failed):
             return TelegramSendOutcome(failure=reply.failure, retry_after_seconds=reply.retry_after)
-        message_id = _sent_id(reply.result)
-        if message_id is None:
-            _log.warning("telegram_call_unread", attempt=attempt, method=_SEND_MESSAGE)
-            return TelegramSendOutcome(failure=TelegramFailure.UNKNOWN)
-        return TelegramSendOutcome(message_id=message_id)
+        return TelegramSendOutcome(message_id=reply)
 
     async def show_typing(
         self,
@@ -4010,13 +4005,10 @@ class HttpsTelegramBotClient:
             method=_SEND_CHAT_ACTION,
             payload={"chat_id": chat, "action": "typing"},
             bound=bound,
-            poll=False,
+            read=_shown,
         )
         if isinstance(reply, _Failed):
             return TelegramOutcome(failure=reply.failure, retry_after_seconds=reply.retry_after)
-        if reply.result is not True:
-            _log.warning("telegram_call_unread", attempt=attempt, method=_SEND_CHAT_ACTION)
-            return TelegramOutcome(failure=TelegramFailure.UNKNOWN)
         return TelegramOutcome()
 
     def _other_chat(self, attempt: str, method: str) -> TelegramFailure:
@@ -4032,15 +4024,15 @@ class HttpsTelegramBotClient:
         _log.warning("telegram_call_other_chat_refused", attempt=attempt, method=method)
         return TelegramFailure.OTHER_CHAT
 
-    async def _call(
+    async def _call[T](
         self,
         *,
         attempt: str,
         method: str,
         payload: Mapping[str, object],
         bound: timedelta,
-        poll: bool,
-    ) -> _Answered | _Failed:
+        read: Callable[[object], T | None],
+    ) -> T | _Failed:
         """Make one call under its bound, and class what came of it (§6, §11).
 
         **The class is read off what happened, never off an exception's type alone**
@@ -4050,15 +4042,24 @@ class HttpsTelegramBotClient:
         A bound that ended outranks whatever else came back: a channel that caught
         the cancellation and answered anyway is not a call that kept within it.
 
+        **The bound covers the whole call, its reading included** (§11:10). Decoding
+        an answer and building its value is synchronous, and a cancellation cannot
+        land in it, so a large answer read past the bound would leave
+        ``Timeout.expired()`` unset. So the answer is read **inside** the window, and
+        the loop's clock is compared with the window's end after it as well: a call
+        whose work ran past its bound is past its bound however it got there.
+
         Args:
             attempt: The claimed record's id.
             method: The Bot API method.
             payload: Its JSON body.
             bound: The call's bound, already checked.
-            poll: Whether this is a poll, whose expiry is always unknown (§11:11).
+            read: Turns a done answer's ``result`` into the call's value, or ``None``
+                where it is not the shape the Bot API documents — which is unknown,
+                since Telegram may have done it.
 
         Returns:
-            What Telegram answered, or the failure.
+            The call's value, or the failure.
 
         Raises:
             CancelledError: Re-raised when the call is cancelled from outside, after
@@ -4068,10 +4069,10 @@ class HttpsTelegramBotClient:
         entered_with = pending_cancellations()
         written = _Written()
         deadline = asyncio.timeout(bound.total_seconds())
-        reply: _Answered | _Failed
+        reply: T | _Failed
         try:
             async with deadline:
-                reply = await self._asked(method, payload, written)
+                reply = await self._asked(method, payload, written, read)
         except asyncio.CancelledError:
             if pending_cancellations() > entered_with:
                 raise
@@ -4087,25 +4088,33 @@ class HttpsTelegramBotClient:
             )
         else:
             _deliver_absorbed(entered_with)
-        if deadline.expired():
+        ends = deadline.when()
+        if deadline.expired() or (ends is not None and asyncio.get_running_loop().time() >= ends):
+            # A poll at its bound is unknown whatever it had written (§11:11).
+            poll = method == _GET_UPDATES
             reply = _Failed(TelegramFailure.UNKNOWN if poll else _unanswered(written))
         outcome = reply.failure.value if isinstance(reply, _Failed) else "done"
         _log.info("telegram_call", attempt=attempt, method=method, outcome=outcome)
         return reply
 
-    async def _asked(
-        self, method: str, payload: Mapping[str, object], written: _Written
-    ) -> _Answered | _Failed:
+    async def _asked[T](
+        self,
+        method: str,
+        payload: Mapping[str, object],
+        written: _Written,
+        read: Callable[[object], T | None],
+    ) -> T | _Failed:
         """Read the token under its record, and make the one request (§11:4, §11:8).
 
         Args:
             method: The Bot API method.
             payload: Its JSON body.
             written: Set once the request is handed to the channel.
+            read: Turns a done answer's ``result`` into the call's value.
 
         Returns:
-            What Telegram answered, or :attr:`TelegramFailure.UNAVAILABLE` where the
-            line could not be used and nothing was written.
+            The call's value, or the failure: :attr:`TelegramFailure.UNAVAILABLE`
+            where the line could not be used and nothing was written.
         """
         secret = await self._token()
         if isinstance(secret, _Failed):
@@ -4121,7 +4130,14 @@ class HttpsTelegramBotClient:
             # Raised before a channel is opened — the target or the body is not one
             # this seam will write — so nothing was sent. Neither is named.
             return self._unavailable("request_unwritable")
-        return _answer_of(response)
+        answered = _answer_of(response)
+        if isinstance(answered, _Failed):
+            return answered
+        value = read(answered)
+        if value is None:
+            _log.warning("telegram_call_unread", method=method)
+            return _Failed(TelegramFailure.UNKNOWN)
+        return value
 
     async def _token(self) -> str | _Failed:
         """Read the bot's token under the record that names it (§11:4, ADR-0148 §6).
@@ -4307,7 +4323,7 @@ def _checked_text(text: object) -> str:
     if telegram_length(text) > TELEGRAM_MESSAGE_LIMIT:
         msg = (
             f"text is longer than one Telegram message ({TELEGRAM_MESSAGE_LIMIT} UTF-16 "
-            f"units); send each of telegram_message_parts(text) instead (ADR-0323 §6:6)"
+            f"units); a longer message is sent as parts (ADR-0323 §6:6)"
         )
         raise ValueError(msg)
     return text
@@ -4345,7 +4361,7 @@ def _checked_duration(value: object, *, name: str, floor: str) -> timedelta:
     return duration
 
 
-def _answer_of(response: HttpsResponse) -> _Answered | _Failed:
+def _answer_of(response: HttpsResponse) -> object:
     """Read a Bot API answer: done, a refusal, or not an answer at all (§6:3 to §6:5).
 
     **Only a Bot API answer can say Telegram did not do it.** A body that is not a
@@ -4357,7 +4373,7 @@ def _answer_of(response: HttpsResponse) -> _Answered | _Failed:
         response: The response the exchange read.
 
     Returns:
-        :class:`_Answered` for ``ok: true`` with a ``result`` on a ``200``;
+        The ``result`` for ``ok: true`` with one on a ``200``;
         :attr:`TelegramFailure.RATE_LIMITED` for a ``429``;
         :attr:`TelegramFailure.REFUSED` for any other client error; and
         :attr:`TelegramFailure.UNKNOWN` for everything else.
@@ -4367,7 +4383,7 @@ def _answer_of(response: HttpsResponse) -> _Answered | _Failed:
         return _Failed(TelegramFailure.UNKNOWN)
     ok = decoded.get("ok")
     if ok is True and response.status == _OK and "result" in decoded:
-        return _Answered(decoded["result"])
+        return decoded["result"]
     code = decoded.get("error_code")
     if ok is not False or type(code) is not int:
         return _Failed(TelegramFailure.UNKNOWN)
@@ -4395,6 +4411,18 @@ def _retry_after(parameters: object) -> int | None:
     return seconds
 
 
+def _shown(result: object) -> bool | None:
+    """``True`` where a ``sendChatAction`` result is ``true``, the one it documents.
+
+    Args:
+        result: The answer's ``result``.
+
+    Returns:
+        ``True``, or ``None`` for any other result.
+    """
+    return True if result is True else None
+
+
 def _sent_id(result: object) -> int | None:
     """The message id a ``sendMessage`` result carries, or ``None`` (§6:2).
 
@@ -4412,7 +4440,7 @@ def _sent_id(result: object) -> int | None:
     return message_id
 
 
-def _polled(result: object) -> TelegramPollOutcome:
+def _polled(result: object) -> tuple[TelegramUpdate, ...] | None:
     """A poll's updates, or *unknown* where the result is not a list of them.
 
     **An update this line cannot place is a poll it cannot use**: its id is what the
@@ -4425,20 +4453,20 @@ def _polled(result: object) -> TelegramPollOutcome:
         result: The answer's ``result``.
 
     Returns:
-        The outcome.
+        The updates, in ascending update id; or ``None`` where the result is not a
+        list of updates in that order.
     """
     if not isinstance(result, list):
-        return TelegramPollOutcome(failure=TelegramFailure.UNKNOWN)
+        return None
     updates: list[TelegramUpdate] = []
     for raw in result:
         update_id = raw.get("update_id") if isinstance(raw, Mapping) else None
         if type(update_id) is not int or not 0 <= update_id < 2**63:
-            return TelegramPollOutcome(failure=TelegramFailure.UNKNOWN)
+            return None
+        if updates and update_id <= updates[-1].update_id:
+            return None
         updates.append(TelegramUpdate(update_id=update_id, message=_message_of(raw.get("message"))))
-    try:
-        return TelegramPollOutcome(updates=tuple(updates))
-    except ValidationError:
-        return TelegramPollOutcome(failure=TelegramFailure.UNKNOWN)
+    return tuple(updates)
 
 
 def _message_of(raw: object) -> TelegramMessage | None:
@@ -4521,22 +4549,10 @@ def _forward_of(raw: object) -> TelegramForwardOrigin | None:
     if not isinstance(raw, Mapping):
         return None
     kind = raw.get("type")
-    named: tuple[object, object]
-    if kind == TelegramForwardKind.USER:
-        user = raw.get("sender_user")
-        if not isinstance(user, Mapping):
-            return None
-        first, last = user.get("first_name"), user.get("last_name")
-        name = first if last is None or type(first) is not str else f"{first} {last}"
-        named = (name, user.get("id"))
-    elif kind == TelegramForwardKind.HIDDEN_USER:
-        named = (raw.get("sender_user_name"), None)
-    elif kind in {TelegramForwardKind.CHAT, TelegramForwardKind.CHANNEL}:
-        source = raw.get("sender_chat" if kind == TelegramForwardKind.CHAT else "chat")
-        if not isinstance(source, Mapping):
-            return None
-        named = (source.get("title"), source.get("id"))
-    else:
+    # A discriminator that is not text names no kind, and is refused before any
+    # comparison, so an unhashable one cannot raise out of a membership test.
+    named = _origin_named(kind, raw) if type(kind) is str and kind in _FORWARD_KINDS else None
+    if named is None:
         return None
     try:
         return TelegramForwardOrigin.model_validate(
@@ -4544,6 +4560,31 @@ def _forward_of(raw: object) -> TelegramForwardOrigin | None:
         )
     except ValidationError:
         return None
+
+
+def _origin_named(kind: str, raw: Mapping[str, object]) -> tuple[object, object] | None:
+    """The name and id a forward's origin of ``kind`` carries, unchecked.
+
+    Args:
+        kind: One of the four kinds.
+        raw: The ``forward_origin``.
+
+    Returns:
+        The name and the id, for :class:`TelegramForwardOrigin` to check; or
+        ``None`` where the member that carries them is missing.
+    """
+    if kind == TelegramForwardKind.USER:
+        user = raw.get("sender_user")
+        if not isinstance(user, Mapping):
+            return None
+        name, last = user.get("first_name"), user.get("last_name")
+        if last is not None:
+            name = f"{name} {last}" if type(name) is str and type(last) is str else None
+        return (name, user.get("id"))
+    if kind == TelegramForwardKind.HIDDEN_USER:
+        return (raw.get("sender_user_name"), None)
+    source = raw.get("sender_chat" if kind == TelegramForwardKind.CHAT else "chat")
+    return (source.get("title"), source.get("id")) if isinstance(source, Mapping) else None
 
 
 def _quoted_of(raw: object) -> TelegramQuotedMessage | None:

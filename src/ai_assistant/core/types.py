@@ -18310,12 +18310,11 @@ class DiagnosticEntry(BaseModel):
 # --- The Telegram line's Bot API client (ADR-0323 §5, §6, §11, §15) ---------
 #
 # The shapes :class:`~ai_assistant.core.protocols.TelegramBotClient` exchanges, and
-# the one rule both of its sides need: how a message too long for one Telegram
-# message is cut into parts (§6:6). They are here, rather than beside the client in
-# ``ai_assistant.tools.egress``, because the line's writer is in ``orchestration``
-# (§15's table) and reaches the client only through the contract: what it hands the
-# client and what it reads back cross that boundary, and the cut has to be made by
-# the writer, which owns the effect record each part's outcome lands on.
+# the one measure both of its sides need: how long a text is against Telegram's limit
+# on one message (§6:6). The line's writer is in ``orchestration`` (§15's table) and
+# reaches the client only through the contract, so what it hands the client, what it
+# reads back and the limit a send is held to cross that boundary here. How a longer
+# message is cut into parts is the writer's own delivery rule, and is not here.
 
 #: Telegram's limit on one message's text (ADR-0323 §6:6, §9's requirements row).
 #: Counted in UTF-16 code units by :func:`telegram_length`, which is never fewer
@@ -18341,81 +18340,6 @@ def telegram_length(text: str) -> int:
         Its length in UTF-16 code units.
     """
     return len(text.encode("utf-16-le", "surrogatepass")) // 2
-
-
-#: Where §6:6 prefers to cut, in its own order: a paragraph break, then a line
-#: break. A break between words is the third preference and is any whitespace,
-#: which :func:`_telegram_cut` finds itself.
-_TELEGRAM_BREAKS: Final = ("\n\n", "\n")
-
-
-def telegram_message_parts(text: str) -> tuple[str, ...]:
-    """Cut ``text`` into consecutive parts none longer than Telegram takes (§6:6).
-
-    "A message longer than Telegram's 4,096 characters is sent as consecutive parts,
-    none longer than that, together holding the whole text in order. It is split at
-    paragraph breaks; a paragraph longer than a part is split at line breaks, then
-    between words, and at the limit only where a run of text has no break."
-
-    **Each part ends at the latest break that keeps it within the limit**, the
-    preference taken in that order: the latest paragraph break, else the latest line
-    break, else the latest whitespace, else the limit itself. The break stays at the
-    end of the part before it, so the parts **concatenate to the text exactly** —
-    "the whole text in order" with nothing re-spaced — and Telegram, which trims a
-    message's surrounding whitespace, shows each part without it.
-
-    **A part holding nothing but whitespace is the one thing left out**, because
-    Telegram refuses an empty message: such a part arises only from a run of
-    whitespace longer than a whole part, and it carries no text to keep.
-
-    Args:
-        text: The message, of any length.
-
-    Returns:
-        The parts, in order: one part for a text within the limit, and none for a
-        text that holds only whitespace.
-    """
-    parts: list[str] = []
-    rest = text
-    while rest:
-        cut = _telegram_cut(rest)
-        part, rest = rest[:cut], rest[cut:]
-        if part.strip():
-            parts.append(part)
-    return tuple(parts)
-
-
-def _telegram_cut(rest: str) -> int:
-    """Where the next part of ``rest`` ends, in code points (§6:6's preferences).
-
-    Args:
-        rest: What remains of the text, non-empty.
-
-    Returns:
-        A cut in ``1..len(rest)``: the whole of ``rest`` where it fits, and otherwise
-        the end of the latest paragraph break, line break or whitespace character
-        inside the longest prefix that fits, or that prefix's end where there is none.
-    """
-    if telegram_length(rest) <= TELEGRAM_MESSAGE_LIMIT:
-        return len(rest)
-    fits, units = 0, 0
-    for character in rest:
-        units += telegram_length(character)
-        if units > TELEGRAM_MESSAGE_LIMIT:
-            break
-        fits += 1
-    window = rest[:fits]
-    for brk in _TELEGRAM_BREAKS:
-        found = window.rfind(brk)
-        if found >= 0 and window[:found].strip():
-            return found + len(brk)
-    # A break is usable only after the part's first visible character, so that no
-    # part is whitespace alone while there is text it could have carried instead.
-    first = len(window) - len(window.lstrip())
-    for index in range(len(window) - 1, first, -1):
-        if window[index].isspace():
-            return index + 1
-    return fits
 
 
 class TelegramFailure(StrEnum):

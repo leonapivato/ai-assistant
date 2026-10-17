@@ -218,7 +218,12 @@ class FakeTelegramBotClient:
             msg = "only an unknown outcome can hide a delivered message"
             raise ValueError(msg)
         self._arranged.append(
-            _Arranged(failure=failure, retry_after_seconds=retry_after_seconds, delivered=delivered)
+            _Arranged(
+                failure=failure,
+                retry_after_seconds=retry_after_seconds,
+                delivered=delivered,
+                written=_REACHED[failure],
+            )
         )
         return self
 
@@ -316,12 +321,15 @@ class FakeTelegramBotClient:
         if offset is not None:
             parameters["offset"] = offset
         ended = await self._ended(attempt, GET_UPDATES, parameters, bound, poll=True)
+        if ended is None or (ended.failure is TelegramFailure.UNKNOWN and ended.written):
+            # A poll Telegram received confirms its offset, whether or not its answer
+            # came back: an unknown poll may have confirmed, and the fake takes the
+            # case a reader must survive (§11:11).
+            self._confirm(offset)
         if ended is not None:
             return TelegramPollOutcome(
                 failure=ended.failure, retry_after_seconds=ended.retry_after_seconds
             )
-        if offset is not None:
-            self._held = [update for update in self._held if update.update_id >= offset]
         return TelegramPollOutcome(updates=tuple(self._held[:_POLL_LIMIT]))
 
     async def send(
@@ -423,7 +431,7 @@ class FakeTelegramBotClient:
         """
         if not self._connected:
             self._record(attempt, method, parameters, TelegramFailure.UNAVAILABLE)
-            return _Arranged(failure=TelegramFailure.UNAVAILABLE)
+            return _Arranged(failure=TelegramFailure.UNAVAILABLE, written=False)
         arranged = self._arranged.popleft() if self._arranged else None
         if arranged is None:
             self._record(attempt, method, parameters, None)
@@ -443,7 +451,7 @@ class FakeTelegramBotClient:
             TelegramFailure.UNKNOWN if poll or arranged.written else TelegramFailure.NOT_WRITTEN
         )
         self._complete(index, failure)
-        return _Arranged(failure=failure)
+        return _Arranged(failure=failure, written=arranged.written)
 
     def _record(
         self,
@@ -495,6 +503,15 @@ class FakeTelegramBotClient:
             reached=call.reached,
             failure=failure,
         )
+
+    def _confirm(self, offset: int | None) -> None:
+        """Forget every held update ``offset`` confirms, as Telegram does.
+
+        Args:
+            offset: The poll's offset, or ``None``, which confirms nothing.
+        """
+        if offset is not None:
+            self._held = [update for update in self._held if update.update_id >= offset]
 
     def _deliver(self, text: str) -> int:
         """Put a message into the chat under the next id.
