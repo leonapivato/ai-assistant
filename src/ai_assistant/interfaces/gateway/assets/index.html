@@ -4,7 +4,11 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="referrer" content="no-referrer" />
-    <title>Assistant</title>
+    <!--
+      The page's name, written here and nowhere else: the bar's heading takes it from
+      this element (`app.js`), so naming the assistant something else is this one edit.
+    -->
+    <title>Aether</title>
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
@@ -23,7 +27,17 @@
         is open.
       -->
       <header class="topbar">
-        <h1>Assistant</h1>
+        <!--
+          The mark and the name. The mark is the name's first letter drawn as a sign,
+          so it is hidden from a screen reader, which reads the heading beside it.
+        -->
+        <div class="brand">
+          <span class="mark" aria-hidden="true">æ</span>
+          <div class="brand-text">
+            <h1 id="page-name"></h1>
+            <p class="brand-subtitle">your assistant</p>
+          </div>
+        </div>
         <!--
           The chat is where the assistant is talked to (ADR-0293, ADR-0309 §5:4): typed
           messages go into a conversation there, and the assistant writes its reply back.
@@ -215,7 +229,27 @@
                     placeholder="Write a message"
                     required
                   ></textarea>
-                  <button type="submit" id="chat-send">Send</button>
+                  <!--
+                    Drawn as an arrow, and still named "Send" in words: the word is the
+                    button's text for a screen reader, clipped rather than removed.
+                  -->
+                  <button type="submit" id="chat-send">
+                    <svg
+                      aria-hidden="true"
+                      width="20"
+                      height="20"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <path d="M5 12h14" />
+                      <path d="M13 6l6 6-6 6" />
+                    </svg>
+                    <span class="visually-hidden">Send</span>
+                  </button>
                 </div>
               </form>
             </div>

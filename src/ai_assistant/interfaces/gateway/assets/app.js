@@ -5859,6 +5859,11 @@ function showConsole() {
   }
 }
 
+// The page's name is written once, in the document's <title>, and the bar's heading
+// takes it from there — so a rename is one edit, and the tab and the heading cannot
+// come to disagree.
+el("page-name").textContent = document.title;
+
 el("bootstrap-form").addEventListener("submit", startSession);
 // Wrapped rather than passed, because the listener's argument is a `MouseEvent` and
 // `watchDeliveries` reads its first argument as the sentence to announce.

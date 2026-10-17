@@ -1,46 +1,140 @@
 /*
  * The front end's only stylesheet, served from the gateway's own origin because
  * ADR-0168 §10 forbids the page loading "any asset, font, style, script or datum
- * from any origin but the gateway's own". No web font, no CDN, no import: the type is
- * the system's own stack.
+ * from any origin but the gateway's own". No CDN and no import: the three faces below
+ * ship as package data beside this file and are served from the bundle like it.
  *
  * The page is the chat first (#3098): a bar with the page's name and its controls,
  * the chat filling the screen under it, and every other panel opened from the bar's
  * menu below the chat. Calm on purpose — one accent, quiet surfaces, and the owner's
  * messages set off from the assistant's by where they sit and who they say wrote
  * them, never by colour alone.
+ *
+ * **The look is Aether's** (#3113): Night, Air and Haze, with one starlight gold for
+ * the owner's own messages and the act a panel leads with; Cormorant Garamond for the
+ * name and the headings, Manrope for the text, JetBrains Mono for a setting's name.
+ * Every colour is a token on `:root`, so the dark variant below is the same sheet with
+ * other values, and every pair of text and ground clears 4.5:1 in both.
  */
 
+/*
+ * The faces, from the bundle (`fonts/`, with each one's licence — all three are SIL
+ * Open Font License fonts). Latin subsets from Fontsource 5.3.0, and only the weights
+ * this sheet asks for: a character outside the subset is drawn from the stack after
+ * the face, so a hub value in another script is still shown, in the system's type.
+ *
+ * `swap` so the page is legible before a face has arrived rather than blank until it
+ * does.
+ */
+@font-face {
+  font-family: "Cormorant Garamond";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/cormorant-garamond-latin-500-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Cormorant Garamond";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/cormorant-garamond-latin-600-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Manrope";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/manrope-latin-400-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Manrope";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/manrope-latin-500-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Manrope";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/manrope-latin-600-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-latin-400-normal.woff2") format("woff2");
+}
+
+/*
+ * The light variant is the default and the dark one follows the reader's setting, as
+ * before; the brand's own ground is the dark one. `--accent` is the gold as a *fill*,
+ * which carries ink on either ground; `--accent-text` is the gold as *text or a line*,
+ * which on the light ground has to be a darker gold to be read at all.
+ */
 :root {
   color-scheme: light dark;
-  --ink: #1d2026;
-  --paper: #f6f6f4;
+  --display: "Cormorant Garamond", "Iowan Old Style", Georgia, serif;
+  --text: "Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --ink: #0d1017;
+  --paper: #f4f5f7;
   --surface: #ffffff;
-  --side: #fafaf9;
-  --muted: #5f6573;
-  --line: #e1e2e6;
-  --hover: #f0f1f3;
-  --selected: #e7ecf5;
-  --accent: #3c5a8a;
-  --on-accent: #ffffff;
-  --bubble: #e8eef7;
+  --raised: #ffffff;
+  --field: #ffffff;
+  --chat: #ffffff;
+  --side: #eef0f3;
+  --chip: #e9ecf2;
+  --muted: #4a5260;
+  --line: #dde1e8;
+  --line-strong: #c5cbd5;
+  --hover: #e9ecf2;
+  --selected: #e4e8ef;
+  --accent: #f3d9a4;
+  --accent-hover: #ffe9c2;
+  --accent-text: #7a5a14;
+  --accent-text-hover: #5f4510;
+  --on-accent: #0d1017;
+  --on-accent-muted: #4a4434;
+  --bubble: #e9ecf2;
+  --code: #e9ecf2;
   --alarm: #a4232b;
+  --shadow: rgb(13 16 23 / 0.12);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --ink: #e6e7ea;
-    --paper: #131518;
-    --surface: #1a1d21;
-    --side: #171a1d;
-    --muted: #9aa1ad;
-    --line: #2c3038;
-    --hover: #23272d;
-    --selected: #263247;
-    --accent: #8eaad8;
-    --on-accent: #10141b;
-    --bubble: #243149;
-    --alarm: #f08a90;
+    --ink: #e9ecf2;
+    --paper: #0d1017;
+    --surface: #121722;
+    --raised: #181d28;
+    --field: #121722;
+    --chat: #0d1017;
+    --side: #10141c;
+    --chip: #161b25;
+    --muted: #9aa3b2;
+    --line: #1e2430;
+    --line-strong: #2e3546;
+    --hover: #161b25;
+    --selected: #1c2230;
+    --accent: #f3d9a4;
+    --accent-hover: #ffe9c2;
+    --accent-text: #f3d9a4;
+    --accent-text-hover: #ffe9c2;
+    --on-accent: #0d1017;
+    --on-accent-muted: #4a4434;
+    --bubble: #181d28;
+    --code: #080a0f;
+    --alarm: #ff9c94;
+    --shadow: rgb(0 0 0 / 0.45);
   }
 }
 
@@ -64,8 +158,37 @@ body {
   margin: 0;
   background: var(--paper);
   color: var(--ink);
-  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 400 16px/1.55 var(--text);
   overflow-wrap: anywhere;
+}
+
+strong,
+b {
+  font-weight: 600;
+}
+
+a {
+  color: var(--accent-text);
+}
+
+a:hover {
+  color: var(--accent-text-hover);
+}
+
+::selection {
+  color: var(--on-accent);
+  background: var(--accent);
+}
+
+/*
+ * Where the keyboard is, on every control that is not a text field (a field keeps its
+ * own ring, below): the gold, outside the control's edge so it never sits on its text.
+ */
+button:focus-visible,
+summary:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent-text);
+  outline-offset: 2px;
 }
 
 /*
@@ -127,24 +250,103 @@ body {
   justify-content: space-between;
   gap: 0.75rem;
   min-height: 3.5rem;
+  padding: 0.5rem 0;
+  box-sizing: border-box;
   margin-bottom: 0.75rem;
   background: var(--paper);
   border-bottom: 1px solid var(--line);
 }
 
+/*
+ * The mark beside the name: Cormorant's æ in a ring of the gold. The glyph sits low in
+ * its em box, so it is lifted by a padding at the ring's foot to look centred in it.
+ */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  box-sizing: border-box;
+  padding-bottom: 4px;
+  border: 1.5px solid var(--accent-text);
+  border-radius: 50%;
+  font-family: var(--display);
+  font-size: 26px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--accent-text);
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.brand-subtitle {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--muted);
+}
+
+/*
+ * Cormorant draws old-style figures unless asked otherwise, and a heading here can
+ * carry a hub id — "Conversation c-1" — whose 1 would then read as an I. Lining
+ * figures for every heading set in it.
+ */
 h1 {
-  font-size: 1.1rem;
-  letter-spacing: 0.01em;
+  font-family: var(--display);
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: lining-nums;
+  line-height: 1;
   margin: 0;
 }
 
+h2,
+h3 {
+  font-family: var(--display);
+  font-weight: 600;
+  font-variant-numeric: lining-nums;
+  line-height: 1.15;
+  letter-spacing: 0.005em;
+}
+
 h2 {
-  font-size: 1rem;
+  font-size: 1.5rem;
   margin: 0 0 0.6rem;
 }
 
 h3 {
-  font-size: 0.95rem;
+  font-size: 1.35rem;
+}
+
+/*
+ * A heading inside a panel or a popover that names a part of it rather than a panel:
+ * small, upper case and spaced, in the muted ink, so it reads as a label over what
+ * follows and not as a second level of panel.
+ */
+.chat-devices-said h3,
+.chat-about-body h4,
+#tuning-body h4 {
+  font-family: var(--text);
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .console {
@@ -171,14 +373,20 @@ h3 {
   align-items: center;
   min-height: 44px;
   padding: 0.45rem 1rem;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: transparent;
   box-sizing: border-box;
+  font-size: 14px;
+  font-weight: 600;
   line-height: 1.2;
   cursor: pointer;
   list-style: none;
   user-select: none;
+}
+
+.menu > summary:hover {
+  border-color: var(--muted);
 }
 
 .menu > summary::-webkit-details-marker,
@@ -205,18 +413,21 @@ h3 {
   max-height: calc(100vh - 5rem);
   overflow-y: auto;
   padding: 0.4rem;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  box-shadow: 0 10px 28px rgb(0 0 0 / 0.14);
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  box-shadow: 0 12px 32px var(--shadow);
 }
 
 .menu-list > button {
   margin-top: 0;
   justify-content: flex-start;
   text-align: left;
+  font-size: 15px;
+  font-weight: 500;
   background: transparent;
   border-color: transparent;
+  border-radius: 10px;
 }
 
 .menu-list > button:hover {
@@ -231,10 +442,10 @@ h3 {
 .panel {
   max-width: 48rem;
   margin: 1.2rem auto;
-  padding: 1.1rem 1.2rem;
+  padding: 1.25rem 1.35rem;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 16px;
   scroll-margin-top: 4.5rem;
 }
 
@@ -274,15 +485,21 @@ textarea {
   min-height: 44px;
   font: inherit;
   color: inherit;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.5rem 0.65rem;
+  background: var(--field);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  padding: 0.5rem 0.75rem;
+}
+
+input:not([type="checkbox"]):not([type="radio"])::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+  opacity: 1;
 }
 
 input:not([type="checkbox"]):not([type="radio"]):focus,
 textarea:focus {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--accent-text);
   outline-offset: -1px;
 }
 
@@ -308,10 +525,10 @@ select {
   min-height: 44px;
   font: inherit;
   color: inherit;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.4rem 0.5rem;
+  background: var(--field);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  padding: 0.4rem 0.6rem;
 }
 
 /*
@@ -325,8 +542,9 @@ select {
  * that keeps a long label inside the page: a button that cannot exceed its container
  * wraps between its words, where one that could would push the document sideways.
  *
- * Outlined and quiet by default; the acts the page leads with — sending, starting a
- * conversation, starting a session — are filled (the rule after the next).
+ * Outlined by default, in Manrope at 14px; the acts the page leads with — starting a
+ * conversation, starting a session — are outlined in the gold (the rule after the
+ * next), and sending is the one filled control, round, at the foot of the chat.
  */
 button {
   margin-top: 0.7rem;
@@ -336,11 +554,14 @@ button {
   align-items: center;
   justify-content: center;
   gap: 0.4rem;
-  font: inherit;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
   color: var(--ink);
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
   padding: 0.45rem 1rem;
   cursor: pointer;
 }
@@ -351,9 +572,14 @@ button:hover {
 
 button[type="submit"],
 .chat-new {
-  color: var(--on-accent);
-  background: var(--accent);
-  border-color: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent-text);
+}
+
+button[type="submit"]:hover,
+.chat-new:hover {
+  color: var(--accent-text-hover);
+  border-color: var(--accent-text-hover);
 }
 
 button[disabled] {
@@ -412,7 +638,7 @@ button.quiet:hover {
 .fault,
 .account {
   border: 1px solid var(--alarm);
-  border-radius: 10px;
+  border-radius: 12px;
   padding: 0.8rem 1rem;
   color: var(--alarm);
 }
@@ -509,13 +735,14 @@ button.quiet:hover {
 }
 
 /*
- * A setting's name, marked as one. `monospace` is a generic family the browser
- * resolves out of its own installed faces — ADR-0168 §10 forbids fetching a font, not
- * asking for the one the reader already has.
+ * A setting's name, marked as one: JetBrains Mono from the bundle, on the code ground.
  */
 code {
-  font-family: monospace;
-  font-size: 0.95em;
+  font-family: var(--mono);
+  font-size: 0.9em;
+  padding: 0.05em 0.35em;
+  background: var(--code);
+  border-radius: 4px;
 }
 
 /*
@@ -542,12 +769,17 @@ code {
   display: inline-flex;
   align-items: center;
   min-height: 44px;
-  padding: 0.2rem 0.7rem;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  font-size: 0.85rem;
+  padding: 0.2rem 0.85rem;
+  box-sizing: border-box;
+  border-radius: 999px;
+  background: var(--chip);
+  font-size: 0.8rem;
   color: var(--muted);
   text-decoration: none;
+}
+
+.panel-index a:hover {
+  color: var(--ink);
 }
 
 /*
@@ -648,9 +880,9 @@ code {
   height: calc(100vh - 7.5rem);
   height: calc(100dvh - 7.5rem);
   min-height: 24rem;
-  background: var(--surface);
+  background: var(--chat);
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 16px;
   overflow: hidden;
 }
 
@@ -695,8 +927,9 @@ code {
   flex-direction: column;
   align-items: flex-start;
   gap: 0.05rem;
-  padding: 0.5rem 0.65rem;
+  padding: 0.5rem 0.7rem;
   text-align: left;
+  font-weight: 400;
   background: transparent;
   border-color: transparent;
 }
@@ -716,7 +949,7 @@ code {
 }
 
 .chat-when {
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   color: var(--muted);
 }
 
@@ -727,9 +960,7 @@ code {
 }
 
 .chat-devices-said h3 {
-  margin: 0 0 0.2rem;
-  font-size: 0.8rem;
-  color: var(--muted);
+  margin: 0 0 0.3rem;
 }
 
 .chat-devices-said .hint,
@@ -770,7 +1001,7 @@ code {
   display: flex;
   align-items: center;
   gap: 0.25rem;
-  padding: 0.4rem 0.5rem 0.4rem 0.9rem;
+  padding: 0.4rem 0.5rem 0.4rem 1rem;
   border-bottom: 1px solid var(--line);
 }
 
@@ -778,6 +1009,7 @@ code {
   flex: 1 1 0;
   min-width: 0;
   margin: 0;
+  font-size: 1.3rem;
 }
 
 .chat-thread-head > button {
@@ -818,16 +1050,14 @@ code {
   max-height: calc(100dvh - 13rem);
   overflow-y: auto;
   padding: 0.3rem 0.9rem 0.6rem;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  box-shadow: 0 10px 28px rgb(0 0 0 / 0.14);
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  box-shadow: 0 12px 32px var(--shadow);
 }
 
 .chat-about-body h4 {
-  margin: 0.8rem 0 0.2rem;
-  font-size: 0.85rem;
-  color: var(--muted);
+  margin: 0.9rem 0 0.3rem;
 }
 
 #chat-reread,
@@ -848,8 +1078,13 @@ code {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 1.1rem;
-  padding: 1rem 0.9rem;
+  gap: 0.75rem;
+  padding: 1.1rem 1rem;
+}
+
+.chat-message {
+  font-size: 15px;
+  line-height: 1.45;
 }
 
 .chat-message p {
@@ -857,23 +1092,40 @@ code {
 }
 
 /*
- * The assistant's messages read as the page's text, full width with a rule on their
- * side; the owner's sit to the right in a bubble. Which is which is said in words on
- * every message as well ("You", "Assistant"), so neither colour nor side is the only
- * signal.
+ * Two kinds of bubble: the assistant's on the left, raised off the ground, and the
+ * owner's on the right in the gold, each with its corner nearest its own side cut
+ * small. Which is which is said in words on every message as well ("You",
+ * "Assistant"), so neither colour nor side is the only signal.
  */
 .chat-message.from-assistant {
-  align-self: stretch;
-  padding-left: 0.8rem;
-  border-left: 3px solid var(--accent);
+  align-self: flex-start;
+  max-width: min(84%, 42rem);
+  padding: 0.4rem 0.875rem 0.6rem;
+  color: var(--ink);
+  background: var(--bubble);
+  border-radius: 18px 18px 18px 4px;
 }
 
 .chat-message.from-user {
   align-self: flex-end;
-  max-width: min(85%, 38rem);
-  padding: 0.3rem 0.85rem 0.55rem;
-  background: var(--bubble);
-  border-radius: 14px 14px 4px 14px;
+  max-width: min(78%, 38rem);
+  padding: 0.4rem 0.875rem 0.6rem;
+  color: var(--on-accent);
+  background: var(--accent);
+  border-radius: 18px 18px 4px 18px;
+}
+
+/*
+ * Inside the gold everything is the ink: the gold's own muted ink for the line saying
+ * who and when and for the quiet controls, which the ground's muted ink would fail on.
+ */
+.chat-message.from-user .hint,
+.chat-message.from-user .notice {
+  color: var(--on-accent-muted);
+}
+
+.chat-message.from-user .chat-meta strong {
+  color: var(--on-accent);
 }
 
 .chat-head {
@@ -886,7 +1138,7 @@ code {
 
 .chat-message .chat-meta {
   margin: 0;
-  font-size: 0.78rem;
+  font-size: 0.75rem;
 }
 
 .chat-meta strong {
@@ -896,13 +1148,20 @@ code {
 
 .chat-text {
   white-space: pre-wrap;
-  line-height: 1.6;
+  line-height: 1.45;
 }
 
-.chat-quote {
+/* The message a reply answers, set into the bubble on the chat's own ground. */
+.chat-message .chat-quote {
+  margin: 0.25rem 0 0.35rem;
+  padding: 0.3rem 0.65rem;
   font-style: italic;
-  padding-left: 0.5rem;
-  border-left: 2px solid var(--line);
+  background: var(--chat);
+  border-radius: 10px;
+}
+
+.chat-message.from-user .chat-quote {
+  background: rgb(13 16 23 / 0.08);
 }
 
 /*
@@ -920,15 +1179,26 @@ code {
 .chat-acts button {
   margin-top: 0;
   padding: 0.2rem 0.55rem;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
+  font-weight: 500;
   color: var(--muted);
   background: transparent;
   border-color: transparent;
+  border-radius: 10px;
 }
 
 .chat-acts button:hover {
   color: var(--ink);
   background: var(--hover);
+}
+
+.chat-message.from-user .chat-acts button {
+  color: var(--on-accent-muted);
+}
+
+.chat-message.from-user .chat-acts button:hover {
+  color: var(--on-accent);
+  background: rgb(13 16 23 / 0.08);
 }
 
 .chat-message.pending {
@@ -937,7 +1207,7 @@ code {
 
 /* Whether the assistant is working, between the transcript and the box to write in. */
 .chat-working {
-  padding: 0 0.9rem;
+  padding: 0 1rem;
 }
 
 .chat-working p {
@@ -955,7 +1225,7 @@ code {
   height: 0.55rem;
   margin-right: 0.45rem;
   vertical-align: 0.05rem;
-  background: var(--accent);
+  background: var(--accent-text);
   border-radius: 50%;
 }
 
@@ -963,8 +1233,13 @@ code {
   margin-top: 0;
 }
 
+/*
+ * The box to write in: a pill on the field's ground, and the round gold send beside it.
+ * The box grows with what is written where the browser can size a field to its
+ * content (`field-sizing`), up to its ceiling, and is two rows tall where it cannot.
+ */
 .chat-composer {
-  padding: 0.6rem 0.9rem 0.8rem;
+  padding: 0.75rem 1rem 0.9rem;
   border-top: 1px solid var(--line);
 }
 
@@ -979,18 +1254,37 @@ code {
 .chat-compose-row {
   display: flex;
   align-items: flex-end;
-  gap: 0.5rem;
+  gap: 0.625rem;
 }
 
 .chat-compose-row textarea {
   flex: 1;
   min-width: 0;
   max-height: 12rem;
-  resize: vertical;
+  padding: 0.55rem 1rem;
+  line-height: 1.45;
+  border-radius: 22px;
+  resize: none;
+  field-sizing: content;
 }
 
 .chat-compose-row button {
   margin-top: 0;
+}
+
+#chat-send {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  color: var(--on-accent);
+  background: var(--accent);
+  border: 0;
+  border-radius: 50%;
+}
+
+#chat-send:hover {
+  background: var(--accent-hover);
 }
 
 /*
@@ -1026,9 +1320,10 @@ code {
  * because a default scope would be this surface deciding what the user permitted.
  */
 .scope-form {
-  border-left: 2px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: 12px;
   margin: 0.5rem 0;
-  padding: 0.2rem 0 0.2rem 0.8rem;
+  padding: 0.3rem 0.9rem;
 }
 
 /*
@@ -1047,11 +1342,11 @@ code {
  * lists are separate elements, because they are two objects and the surface says so.
  *
  * The tuning panel's headings sit inside a panel that already has one, so they are
- * quieter than an `h3` and are not a second level of panel.
+ * labels (the rule with the other section labels, near the top) and not a second
+ * level of panel.
  */
 #tuning-body h4 {
-  font-size: 0.9rem;
-  margin: 1.1rem 0 0.3rem;
+  margin: 1.2rem 0 0.35rem;
 }
 
 #tuning-body .choice select,
@@ -1107,10 +1402,6 @@ code {
     padding: 0 0.75rem 2rem;
   }
 
-  h1 {
-    font-size: 1rem;
-  }
-
   /*
    * The inset costs a tenth of a 390px screen to draw a border the heading already
    * implies. It is halved rather than dropped, because the border is what says where
@@ -1131,7 +1422,7 @@ code {
     grid-template-columns: minmax(0, 1fr);
     height: calc(100vh - 8rem);
     height: calc(100dvh - 8rem);
-    border-radius: 10px;
+    border-radius: 14px;
   }
 
   .chat-side {
@@ -1142,8 +1433,12 @@ code {
     padding: 0.8rem 0.7rem;
   }
 
+  .chat-message.from-assistant {
+    max-width: 88%;
+  }
+
   .chat-message.from-user {
-    max-width: 92%;
+    max-width: 84%;
   }
 
   .chat-thread-head,
