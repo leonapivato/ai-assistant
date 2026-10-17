@@ -44,6 +44,7 @@ import argparse
 import bisect
 import difflib
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -1022,6 +1023,13 @@ DIFF_CHARS: Final = 400_000
 #: The most lines one changed part's diff shows.
 DIFF_LINES: Final = 800
 
+#: The most lines either side of a changed part's middle may have for its diff to be
+#: drawn, the lines both sides share at the start and the end set aside.
+DIFF_SPAN: Final = 3_000
+
+#: The lines of context a diff shows around each change.
+DIFF_CONTEXT: Final = 2
+
 #: How deep, and how many, a value's nested lists are counted.
 LIST_DEPTH: Final = 6
 LIST_PATHS: Final = 40
@@ -1288,21 +1296,37 @@ def _usage(value: object) -> dict[str, int] | None:
     return shown or None
 
 
-def _round_tool_parts(arguments: object, call_id: str | None) -> list[dict[str, object]]:
-    """The round's own tool's call, as the notes and the asks it carries."""
-    held = _mapping(arguments)
+def _arguments_text(raw: object, parsed: object) -> str:
+    """A call's arguments as text: laid out where they read as JSON, as written where not."""
+    if parsed is None and isinstance(raw, str):
+        return raw
+    return _pretty(raw if parsed is None else parsed)
+
+
+def _round_tool_parts(raw: object, call_id: str | None) -> list[dict[str, object]]:
+    """The round's own tool's call, as the notes and the asks it carries.
+
+    Where its arguments are not of the tool's shape, as a round that did not read as one
+    may hold, the call is also shown with its arguments as they were written.
+    """
+    parsed = _arguments(raw)
+    held = _mapping(parsed)
     parts: list[dict[str, object]] = []
-    notes = held.get("notes")
+    notes, asks = held.get("notes"), held.get("asks")
     if isinstance(notes, str):
         parts.append(_sized(notes, kind="notes", title="Episode notes"))
-    asks = held.get("asks")
-    if isinstance(asks, list):
-        named = [one if isinstance(one, str) else _pretty(one) for one in asks]
+    named = asks if isinstance(asks, list) and all(isinstance(one, str) for one in asks) else None
+    if named is not None:
         parts.append({**_sized("\n".join(named), kind="asks", title="Asks named"), "items": named})
-    if not isinstance(arguments, dict) or set(held) - {"notes", "asks"}:
-        parts.append(
-            _sized(_pretty(arguments), kind="call", title=f"Call · {ROUND_TOOL}", id=call_id)
-        )
+    shaped = (
+        isinstance(parsed, dict)
+        and not set(held) - {"notes", "asks"}
+        and (notes is None or isinstance(notes, str))
+        and (asks is None or named is not None)
+    )
+    if not shaped:
+        title = f"Call · {ROUND_TOOL} · arguments not of its shape"
+        parts.append(_sized(_arguments_text(raw, parsed), kind="call", title=title, id=call_id))
     return parts
 
 
@@ -1319,11 +1343,11 @@ def _response_part(part: object) -> list[dict[str, object]]:
     if kind == "tool-call":
         name = _text(shown.get("tool_name")) or "?"
         call_id = _text(shown.get("tool_call_id"))
-        arguments = _arguments(shown.get("args"))
+        raw = shown.get("args")
         if name == ROUND_TOOL:
-            return _round_tool_parts(arguments, call_id)
-        shown_args = shown.get("args") if arguments is None else arguments
-        return [_sized(_pretty(shown_args), kind="call", title=f"Call · {name}", id=call_id)]
+            return _round_tool_parts(raw, call_id)
+        text = _arguments_text(raw, _arguments(raw))
+        return [_sized(text, kind="call", title=f"Call · {name}", id=call_id)]
     title = kind if isinstance(kind, str) else "part"
     return [_sized(_pretty(part), kind="other", title=title)]
 
@@ -1405,12 +1429,49 @@ def request_parts(body: object) -> dict[str, tuple[str, int]]:
 
 
 def text_diff(before: str, after: str) -> dict[str, object]:
-    """A changed part's line diff, unified, cut at :data:`DIFF_LINES` lines."""
+    """A changed part's line diff, unified, with two lines of context.
+
+    The lines both sides share at their start and end are set aside first, and only
+    what lies between them is matched, so a long part changed in one place costs that
+    place alone. Where that middle is longer than :data:`DIFF_SPAN` lines either side,
+    or either side is longer than :data:`DIFF_CHARS`, no diff is drawn: matching lines
+    can cost the square of their number. The diff shown is cut at :data:`DIFF_LINES`.
+    """
+    too_large: dict[str, object] = {"lines": [], "cut": False, "too_large": True}
     if len(before) > DIFF_CHARS or len(after) > DIFF_CHARS:
-        return {"lines": [], "cut": False, "too_large": True}
-    diff = difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
-    lines = [one for one in diff if not one.startswith(("--- ", "+++ "))]
+        return too_large
+    old, new = before.splitlines(), after.splitlines()
+    shortest = min(len(old), len(new))
+    head = 0
+    while head < shortest and old[head] == new[head]:
+        head += 1
+    tail = 0
+    while tail < shortest - head and old[-1 - tail] == new[-1 - tail]:
+        tail += 1
+    if max(len(old), len(new)) - head - tail > DIFF_SPAN:
+        return too_large
+    start = max(0, head - DIFF_CONTEXT)
+    kept = max(0, tail - DIFF_CONTEXT)
+    diff = difflib.unified_diff(
+        old[start : len(old) - kept], new[start : len(new) - kept], lineterm="", n=DIFF_CONTEXT
+    )
+    # The first two records are the file headers, there wherever anything differs.
+    lines = [_moved(one, start) for one in itertools.islice(diff, 2, DIFF_LINES + 3)]
     return {"lines": lines[:DIFF_LINES], "cut": len(lines) > DIFF_LINES, "too_large": False}
+
+
+_HUNK: Final = re.compile(r"@@ -(\d+)((?:,\d+)?) \+(\d+)((?:,\d+)?) @@")
+
+
+def _moved(line: str, offset: int) -> str:
+    """A hunk's header numbered from the part's first line, not the matched middle's."""
+    if not offset or not line.startswith("@@"):
+        return line
+    found = _HUNK.fullmatch(line)
+    if found is None:
+        return line
+    old, old_size, new, new_size = found.groups()
+    return f"@@ -{int(old) + offset}{old_size} +{int(new) + offset}{new_size} @@"
 
 
 def compare_requests(before: object, after: object) -> list[dict[str, object]]:
@@ -3015,6 +3076,10 @@ SCRIPT: Final = r"""
       }
       if (p.diff.too_large) {
         prose(one, "Too large to compare here; both requests show it whole.");
+        continue;
+      }
+      if (!p.diff.lines.length) {
+        prose(one, "Its lines are the same: only its line endings changed.");
         continue;
       }
       const shown = el("pre", "diff");

@@ -10,6 +10,7 @@ meets them (§7:3).
 from __future__ import annotations
 
 import ast
+import difflib
 import hashlib
 import http.client
 import inspect
@@ -1014,6 +1015,64 @@ def test_a_large_request_is_split_and_compared_within_bounds() -> None:
     assert (len(cut["lines"]), cut["cut"]) == (viewer.DIFF_LINES, True)
     huge = viewer.text_diff("x" * (viewer.DIFF_CHARS + 1), "y")
     assert (huge["lines"], huge["too_large"]) == ([], True)
+
+
+def _round_tool(args: object) -> list[tuple[str, str]]:
+    part = {"part_kind": "tool-call", "tool_name": "planning_round", "args": args}
+    body = {"response": {"parts": [part]}}
+    view = viewer.model_call([viewer.Entry(0, "planning", "returned", 1.0, "", body)], 0)
+    assert view is not None
+    return [(one["title"], one["text"]) for one in view["did"]["parts"]]
+
+
+def test_the_round_tools_arguments_of_another_shape_are_shown_as_written() -> None:
+    odd = "Call · planning_round · arguments not of its shape"
+    assert _round_tool({"notes": "kept", "asks": ["c1"]}) == [
+        ("Episode notes", "kept"),
+        ("Asks named", "c1"),
+    ]
+    assert _round_tool('{"notes": "kept"}') == [("Episode notes", "kept")]
+    # The rejected round's own arguments are what diagnoses it: none is dropped.
+    assert _round_tool({"notes": 42, "asks": "c1"}) == [
+        (odd, json.dumps({"notes": 42, "asks": "c1"}, indent=1))
+    ]
+    assert _round_tool('{"notes": "kept", "another_round": true') == [
+        (odd, '{"notes": "kept", "another_round": true')
+    ]
+    assert _round_tool({"asks": ["c1", 2]}) == [(odd, json.dumps({"asks": ["c1", 2]}, indent=1))]
+    assert _round_tool({"notes": "kept", "another_round": True})[0] == ("Episode notes", "kept")
+    part = {"part_kind": "tool-call", "tool_name": "web_search", "args": "{not json"}
+    body = {"response": {"parts": [part]}}
+    view = viewer.model_call([viewer.Entry(0, "planning", "returned", 1.0, "", body)], 0)
+    assert view is not None
+    assert view["did"]["parts"][0]["text"] == "{not json"
+
+
+def test_a_diff_keeps_content_that_looks_like_its_headers() -> None:
+    assert viewer.text_diff("-- old", "++ new")["lines"] == ["@@ -1 +1 @@", "--- old", "+++ new"]
+
+
+def test_a_diff_of_one_change_in_a_long_part_matches_difflibs_own() -> None:
+    before = [f"line {number}" for number in range(5_000)]
+    for after in (
+        [*before[:4_000], "inserted", *before[4_000:]],
+        [*before[:10], *before[11:]],
+        [*before[:-1], "changed"],
+        ["first", *before],
+    ):
+        expected = list(difflib.unified_diff(before, after, lineterm="", n=2))[2:]
+        assert viewer.text_diff("\n".join(before), "\n".join(after))["lines"] == expected
+
+
+def test_a_diff_whose_changed_middle_is_too_long_is_not_drawn() -> None:
+    # Matching many short, interleaved lines costs the square of their number.
+    count = viewer.DIFF_SPAN
+    before = "\n".join(f"{number}\na" for number in range(count))
+    after = "\n".join(f"{number}\nb" for number in range(count))
+    assert viewer.text_diff(before, after)["too_large"] is True
+    # The lines both sides share are set aside first, so a long part changed once is drawn.
+    shared = "\n".join(f"{number}" for number in range(viewer.DIFF_SPAN * 3))
+    assert viewer.text_diff(shared + "\na", shared + "\nb")["lines"][-2:] == ["-a", "+b"]
 
 
 def test_a_token_estimate_is_characters_over_four_rounded_up() -> None:
