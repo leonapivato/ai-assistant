@@ -1,6 +1,6 @@
 # 149. One component in `tools/` provisions a connection, and the record it writes is the hub's
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0325 (§3:4's *and the slot* limb, §4:2's *in the same act that supplies the credential* and §4:7's *and supplies the credential a callable reads* limb, each as it reaches a keyless connection)
 - Date: 2026-08-13
 - **Decides** the two questions ADR-0148 §11's fourth clause and ADR-0148 §13's
   ninth bullet name as undecided — who performs a provisioning act, and where a
@@ -45,6 +45,7 @@
   before an implementation commits to an answer (`CONTRIBUTING.md` → "Contract
   ADRs land before their implementation"). §15 records the set that ran and the
   order it ran in.
+- Partially superseded: 2026-10-17 by ADR-0325 — a connection with no credential, whose record carries an identity, the `ACTIVE` state and no slot. As they reach such a connection: §3:4's *and the slot* limb; §4:2's *in the same act that supplies the credential*, the identity being supplied in a user act that supplies none; and §4:7's *and supplies the credential a callable reads* limb. §4:1, *recorded verbatim* and the inference bar of §4:2, *a connection authorises nothing*, and every other clause stand. This replacement takes effect on ratification of ADR-0325. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
