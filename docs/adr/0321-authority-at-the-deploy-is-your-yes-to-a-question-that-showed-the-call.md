@@ -1,6 +1,6 @@
 # 321. Authority at the deploy is your yes to a question that showed the call
 
-- Status: Partially superseded by ADR-0322 (§3:1's one pointer: one per question; §3:2, in the addition alone: questions are marked and labelled; §3:6, per question; §9's `ProposedActivationUnderstanding` and `ActivationUnderstanding` rows: the pointer becomes a sequence)
+- Status: Partially superseded by ADR-0322 (§3:1's one pointer: one per question; §3:2, in the addition alone: questions are marked and labelled; §3:6, per question; §9's `ProposedActivationUnderstanding` and `ActivationUnderstanding` rows: the pointer becomes a sequence) and ADR-0323 (§3:3's second sentence, §4:4's *in one of your conversations* and §4:6's *through the hub chat*, each restated without naming a channel)
 - Date: 2026-10-15
 - Scope: the authority milestone, M44 ([milestone #11](https://github.com/leonapivato/ai-assistant/milestone/11)), acceptance [#3058](https://github.com/leonapivato/ai-assistant/issues/3058), batch [#3059](https://github.com/leonapivato/ai-assistant/issues/3059): how the assistant asks about a call that needs you, how your answer becomes permission, and how the call is then checked and run. It is the smallest version the deploy waits for (ADR-0309 §6).
 - Dependency: the phases as ADR-0306 to ADR-0309 and ADR-0312 to ADR-0320 decide them, all Accepted and built on `main` at `2ff6298c`.
@@ -25,6 +25,16 @@
   [ADR-0315](0315-a-round-that-made-a-call-brings-another-round-and-the-mark-asking-for-one-retires.md) and
   [ADR-0319](0319-the-decisions-the-cutover-left-standing-over-deleted-code-retire-the-stamp-drops-recalls-limit-and-an-unasked-memory-question-is-logged.md).
 - Partially superseded: 2026-10-15 by ADR-0322 — four narrow scopes. §3:1's one pointer becomes one per question the input approves, naming it by the question's own label, and a reply approves several only where it says which (ADR-0322 §2:1–§2:2, §4:5). §3:2 gains, in the addition alone, a mark and a label on each message that is a question; *nothing lists unanswered questions* stands (ADR-0322 §4). §3:6 applies per question (ADR-0322 §2:4). §9's `ProposedActivationUnderstanding` and `ActivationUnderstanding` rows carry a sequence of pointers (ADR-0322 §6). §3:5, §3:10 and §4 stand, applied to each question separately (ADR-0322 §3). These replacements take effect on ratification of ADR-0322. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
+- Partially superseded: 2026-10-17 by ADR-0323 — three narrow scopes, each restated without
+  naming a channel. §3:3's second sentence: input approves only where its author is one its
+  channel's kind establishes as the user and it was sent as an instruction; an email, an
+  event or a forward saying yes approves nothing (ADR-0323 §4:7). §4:4's *in one of your
+  conversations*: in a place whose kind establishes the user as an author there, the
+  Telegram line's chat among them (§4:8). §4:6's *who*'s *through the hub chat*: through the
+  channel the yes came on (§4:9). §3:3's first sentence, §4:4's three facts, §4:6's other
+  four slots and every other clause stand. This replacement takes effect on ratification of
+  ADR-0323. This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
