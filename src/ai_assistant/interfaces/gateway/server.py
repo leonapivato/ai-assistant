@@ -533,10 +533,27 @@ _ADDRESS_PARTS: Final = 2
 #: assets that shipped in the installed distribution", so the map is fixed here
 #: and the files are package data — nothing is fetched, listed or resolved from a
 #: path a request supplies.
+#:
+#: The faces the stylesheet names are in it for the same clause's other half: the
+#: page "loads no asset, font, style, script or datum from any origin but the
+#: gateway's own", so a web font is one the gateway serves or one the page does
+#: without. Each is listed by name rather than by a directory, so the licence texts
+#: beside them ship in the distribution and are served by nothing.
 _BUNDLE: Final[Mapping[str, tuple[str, str]]] = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    **{
+        f"/fonts/{face}.woff2": (f"fonts/{face}.woff2", "font/woff2")
+        for face in (
+            "cormorant-garamond-latin-500-normal",
+            "cormorant-garamond-latin-600-normal",
+            "manrope-latin-400-normal",
+            "manrope-latin-500-normal",
+            "manrope-latin-600-normal",
+            "jetbrains-mono-latin-400-normal",
+        )
+    },
 }
 
 
@@ -713,7 +730,7 @@ def packaged_bundle() -> Mapping[str, tuple[bytes, str]]:
     """
     root = resources.files(__package__) / "assets"
     return {
-        path: ((root / name).read_bytes(), media_type)
+        path: (root.joinpath(*name.split("/")).read_bytes(), media_type)
         for path, (name, media_type) in _BUNDLE.items()
     }
 

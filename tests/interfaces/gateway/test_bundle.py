@@ -39,6 +39,22 @@ from ai_assistant.wire import GRANTABLE_SCOPES
 
 _ROOT = Path(__file__).resolve().parents[3] / "src" / "ai_assistant" / "interfaces" / "gateway"
 _ASSETS = _ROOT / "assets"
+_FONTS = _ASSETS / "fonts"
+
+#: The faces the page is set in (#3113), each a file in the bundle. Written out rather
+#: than read off the directory, so a face added to the sheet and not to the bundle — or
+#: the reverse — is a difference between two lists and not two readings of one.
+_FACES: Final = (
+    "cormorant-garamond-latin-500-normal",
+    "cormorant-garamond-latin-600-normal",
+    "manrope-latin-400-normal",
+    "manrope-latin-500-normal",
+    "manrope-latin-600-normal",
+    "jetbrains-mono-latin-400-normal",
+)
+
+#: The three families, each shipped with its licence beside it (SIL OFL 1.1).
+_FAMILIES: Final = ("cormorant-garamond", "manrope", "jetbrains-mono")
 
 #: What the page must never reach for. Every one of these is an origin the gateway
 #: does not serve, and a content security policy of `default-src 'none'` would
@@ -154,9 +170,19 @@ def test_the_bundle_is_read_out_of_the_installed_package() -> None:
     distribution. It fetches nothing at runtime"."""
     bundle = packaged_bundle()
 
-    assert set(bundle) == {"/", "/app.css", "/app.js"}
+    assert set(bundle) == {
+        "/",
+        "/app.css",
+        "/app.js",
+        *(f"/fonts/{face}.woff2" for face in _FACES),
+    }
     assert all(body for body, _ in bundle.values())
     assert bundle["/"][1].startswith("text/html")
+    for face in _FACES:
+        body, media_type = bundle[f"/fonts/{face}.woff2"]
+        assert media_type == "font/woff2", face
+        # The file is a WOFF2 and not a page or a stub that happens to have the name.
+        assert body[:4] == b"wOF2", face
 
 
 def test_the_bundle_lives_inside_the_package_that_ships_it() -> None:
@@ -164,7 +190,56 @@ def test_the_bundle_lives_inside_the_package_that_ships_it() -> None:
     ``src/ai_assistant``, so a file under it ships and a file beside it does not."""
     assert _ASSETS.parent.name == "gateway"
     assert (_ROOT / "server.py").exists()
-    assert {path.name for path in _ASSETS.iterdir()} == {"index.html", "app.css", "app.js"}
+    assert {path.name for path in _ASSETS.iterdir()} == {"index.html", "app.css", "app.js", "fonts"}
+    # The faces, and each family's licence with them: the SIL Open Font License lets a
+    # face be redistributed only with its copyright notice and the licence, so the
+    # distribution that carries the one carries the other.
+    assert {path.name for path in _FONTS.iterdir()} == {
+        *(f"{face}.woff2" for face in _FACES),
+        *(f"{family}-OFL.txt" for family in _FAMILIES),
+    }
+    for family in _FAMILIES:
+        licence = (_FONTS / f"{family}-OFL.txt").read_text(encoding="utf-8")
+        assert "SIL Open Font License, Version 1.1" in licence, family
+        assert licence.startswith("Copyright"), family
+
+
+def test_every_face_the_sheet_names_is_one_the_gateway_serves() -> None:
+    """ADR-0168 §10's origin clause, at the one rule that loads a font (#3113).
+
+    A ``url()`` in an ``@font-face`` is a request the page makes, so a face the sheet
+    names that the bundle does not carry is a 404 on every load and a page set in the
+    fallback — and one named by any path but the gateway's own is the off-origin load
+    the clause forbids. Read both ways: every source the sheet asks for is a served
+    path, and every face the bundle serves is one the sheet asks for, so nothing ships
+    that nothing loads.
+    """
+    stylesheet = _style("app.css")
+    asked = re.findall(r'url\("([^"]+)"\)', stylesheet)
+
+    assert sorted(asked) == sorted(f"/fonts/{face}.woff2" for face in _FACES)
+    assert stylesheet.count("@font-face {") == len(_FACES)
+    assert set(asked) <= set(packaged_bundle())
+
+
+def test_the_pages_name_is_written_once() -> None:
+    """The name the page goes by is one edit to change (#3113).
+
+    It is written in the document's ``<title>`` and nowhere else in the bundle: the
+    bar's heading is empty in the document and takes the title's text at load, so the
+    tab and the heading cannot disagree and a rename cannot miss one of them.
+    """
+    document = _markup("index.html")
+    title = re.search(r"<title>([^<]+)</title>", document)
+
+    assert title is not None
+    name = title.group(1)
+    assert name == "Aether"
+    assert '<h1 id="page-name"></h1>' in document
+    assert 'el("page-name").textContent = document.title;' in _code("app.js")
+    for asset in ("index.html", "app.js", "app.css"):
+        source = _markup(asset) if asset == "index.html" else _code(asset)
+        assert source.count(name) == (1 if asset == "index.html" else 0), asset
 
 
 @pytest.mark.parametrize("name", ["index.html", "app.css", "app.js"])
