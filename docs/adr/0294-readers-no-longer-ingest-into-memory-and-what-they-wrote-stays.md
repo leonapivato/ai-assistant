@@ -1,6 +1,6 @@
 # 294. Readers no longer ingest into memory, and what they wrote stays
 
-- Status: Partially superseded by ADR-0318 (§2:2's request-path facets; §4:3's and §4:6's `FACET`) and ADR-0320 (§2:3 and §3:2)
+- Status: Partially superseded by ADR-0318 (§2:2's request-path facets; §4:3's and §4:6's `FACET`) and ADR-0320 (§2:3 and §3:2) and ADR-0324 (§4:3's and §4:6's subsets, in the addition alone)
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the retirement of readers' scheduled ingestion into memory that ADR-0292 §13 names, taken ahead of the readers' channels.
 - Authorization: the owner ruled on 2026-10-04, in the review ADR-0292 records, that readers' scheduled ingestion into memory retires (ADR-0292 §13's table), and directed that it go now rather than wait for the readers' channel design. The dispatcher assigned 0294.
@@ -22,6 +22,13 @@
   reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   the ratified body below is preserved.
 - Partially superseded: 2026-10-14 by ADR-0320 — §2:3 and §3:2. They governed the keep clause for `MemoryWriter.ingest_reading` and its reconciliation (§2:3, ADR-0320 §2), and a question parked from an ingested proposal, whose queue is gone (§3:2); the readers, their coverage, §3:1, §3:3, §4 and §5 stand. Every other clause stands. §3:2's queue was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2); §2:3 binds until the lane ADR-0320 §1:3 names removes the member (ADR-0320 §1:4). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-17 by ADR-0324 — one scope. §4:3's and §4:6's subsets, in
+  the addition alone: `GrantScope` gains `PULL`, so a new grant names a non-empty subset of
+  `NOTIFY` and `PULL`, and a surface offering the uses for a new grant offers both (ADR-0324
+  §6:4). The refusal of `INGEST` stands, and so does every other clause. This replacement
+  takes effect on ratification of ADR-0324. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
+  below are preserved.
 
 ## Context
 

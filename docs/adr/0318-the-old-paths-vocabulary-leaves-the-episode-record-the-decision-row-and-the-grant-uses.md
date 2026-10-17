@@ -1,6 +1,6 @@
 # 318. The old path's vocabulary leaves the episode record, the decision row and the grant uses
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0324 (§6:2's *`NOTIFY` alone*, in the addition alone)
 - Date: 2026-10-14
 - Scope: the phases after understanding, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)), the cutover's stores-and-types residue: the decision [ADR-0309](0309-the-phases-are-built-beside-the-old-path-and-one-cutover-switches-the-controller-over-deletes-the-old-path-and-goes-live-in-one-deploy.md) §5:11 asks for on the `AssistantEngine` members that stay and whose results still carry what only the old path produced, which [ADR-0313](0313-spoken-conversation-retires-at-the-cutover-an-event-returns-how-it-ended-and-the-establishing-act-leaves-the-engine.md) did not reach: the episode record `episode_chunk` carries, the processing status `episodes` and `story` carry, the decision row `recent_decisions` and `export_decisions` return, and the grant uses the grant and read members take and return.
 - Dependency: ADR-0309 and ADR-0313, both Accepted.
@@ -17,6 +17,13 @@
   [ADR-0283](0283-a-channels-history-is-its-episodes-and-the-turn-index-is-retired.md) (§3:4);
   [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md) (§4:2's `response_degraded`; §8:1's stage verdicts; §8:6's verdict phrases);
   [ADR-0294](0294-readers-no-longer-ingest-into-memory-and-what-they-wrote-stays.md) (§2:2's request-path facets; §4:3's and §4:6's `FACET`).
+- Partially superseded: 2026-10-17 by ADR-0324 — one scope. §6:2's *`NOTIFY` alone*, in
+  the addition alone: `GrantScope` gains `PULL`, reading the source when an activation pulls
+  it, so a new grant names a non-empty subset of `NOTIFY` and `PULL`, and a surface offering
+  the uses for a new grant offers both, each named in words (ADR-0324 §6:1, §6:4). `FACET`'s
+  removal and every other clause stand. This replacement takes effect on ratification of
+  ADR-0324. This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; the ratified body below is preserved.
 
 ## Context
 
