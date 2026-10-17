@@ -568,6 +568,11 @@ class TranscriptWindow:
             position, claimed (ADR-0323 §4:10). A forward is rendered as its original
             sender's, never as the user's, and planning is never shown its raw text
             (ADR-0307 §9:2). Empty for a place that takes no forward, as the hub chat's.
+        claimed: The positions of the other messages whose author the place's kind
+            does not establish: on the line, a message a reply quotes that the
+            assistant did not write (ADR-0323 §4:2), which may be the user's or a
+            forward Telegram sent without its origin. Rendered as claimed, and, as a
+            forward is, never shown to planning as raw text.
 
     **The Telegram line brings its window in this same shape** (ADR-0323 §10): its
     ``conversation`` is the line's channel, its messages are built from the recent
@@ -581,6 +586,7 @@ class TranscriptWindow:
     links: Mapping[int, str] = field(default_factory=dict)
     asked: Mapping[int, AskedIn] = field(default_factory=dict)
     forwarded: Mapping[int, ClaimedAuthor] = field(default_factory=dict)
+    claimed: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1581,6 +1587,10 @@ _AUTHOR_TEXT: Final = {
 #: who forwarded it (ADR-0323 §4:10).
 _FORWARDED_TEXT: Final = "a forward from someone else, its sender claimed"
 
+#: Who wrote a message the place's kind does not establish an author for, as the window
+#: renders it: claimed, and never the user (ADR-0323 §4:2).
+_CLAIMED_TEXT: Final = "an author this place does not establish, claimed"
+
 
 def _transcript_items(window: TranscriptWindow) -> list[_ChannelItem]:
     """The chat's window, its recent messages then those the input replies to (§6:4).
@@ -1671,9 +1681,13 @@ def _message_item(
         body["deleted"] = True
     else:
         forward = window.forwarded.get(message.position)
-        body["author"] = _AUTHOR_TEXT[message.author] if forward is None else _FORWARDED_TEXT
         if forward is not None:
+            body["author"] = _FORWARDED_TEXT
             body["forwarded_from"] = _forward_of(forward)
+        elif message.position in window.claimed:
+            body["author"] = _CLAIMED_TEXT
+        else:
+            body["author"] = _AUTHOR_TEXT[message.author]
         body["written_at"] = message.written_at.isoformat()
         body["text"] = message.text
         excerpt = _excerpt(message.text)

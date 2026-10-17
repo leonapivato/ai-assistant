@@ -20,8 +20,7 @@ import pytest
 
 from ai_assistant.core.types import (
     TELEGRAM_MESSAGE_LIMIT,
-    MessageAuthor,
-    NewMessage,
+    TRANSCRIPT_MESSAGE_MAX_CHARS,
     TelegramCallKind,
     TelegramCallOutcome,
     TelegramFailure,
@@ -115,10 +114,6 @@ class _Rig:
         return [one.attempt for one in self.client.calls if one.method == SEND_MESSAGE]
 
 
-def _message(text: str) -> NewMessage:
-    return NewMessage(author=MessageAuthor.ASSISTANT, text=text)
-
-
 # --- splitting (§6:6) -----------------------------------------------------------------
 
 
@@ -184,7 +179,7 @@ def test_a_limit_no_character_fits_is_refused() -> None:
 async def test_a_message_is_sent_once_and_its_id_is_the_position() -> None:
     rig = _Rig()
 
-    delivered = await rig.writer.deliver(LINE, _message("Hi."), effect_id=EFFECT)
+    delivered = await rig.writer.deliver(LINE, "Hi.", effect_id=EFFECT)
 
     assert delivered.outcome is ToolOutcome.SUCCEEDED
     assert delivered.position == 100
@@ -197,7 +192,7 @@ async def test_a_long_message_is_sent_in_parts_and_recorded_as_one() -> None:
     rig = _Rig()
     text = "\n\n".join("p" * 3000 for _ in range(3))
 
-    delivered = await rig.writer.deliver(LINE, _message(text), effect_id=EFFECT)
+    delivered = await rig.writer.deliver(LINE, text, effect_id=EFFECT)
 
     assert [one for _, one in rig.client.messages] == ["p" * 3000] * 3
     assert delivered.outcome is ToolOutcome.SUCCEEDED
@@ -222,7 +217,7 @@ async def test_a_send_telegram_did_not_get_is_retried(
     rig = _Rig()
     rig.client.fail_next(failure, retry_after_seconds=retry_after)
 
-    delivered = await rig.writer.deliver(LINE, _message("Hi."), effect_id=EFFECT)
+    delivered = await rig.writer.deliver(LINE, "Hi.", effect_id=EFFECT)
 
     assert delivered.outcome is ToolOutcome.SUCCEEDED
     assert rig.waits == [wait]
@@ -235,7 +230,7 @@ async def test_a_send_with_an_unknown_outcome_is_never_retried() -> None:
     rig = _Rig()
     rig.client.fail_next(TelegramFailure.UNKNOWN, delivered=True)
 
-    delivered = await rig.writer.deliver(LINE, _message("Hi."), effect_id=EFFECT)
+    delivered = await rig.writer.deliver(LINE, "Hi.", effect_id=EFFECT)
 
     assert delivered.outcome is ToolOutcome.INDETERMINATE
     assert (delivered.position, delivered.reason, delivered.written) == (None, None, None)
@@ -247,7 +242,7 @@ async def test_a_send_cut_off_by_its_bound_after_its_write_is_unknown_and_not_re
     rig = _Rig(bound=timedelta(milliseconds=20))
     rig.client.hang_next(written=True)
 
-    delivered = await rig.writer.deliver(LINE, _message("Hi."), effect_id=EFFECT)
+    delivered = await rig.writer.deliver(LINE, "Hi.", effect_id=EFFECT)
 
     assert delivered.outcome is ToolOutcome.INDETERMINATE
     assert len(rig.sends()) == 1
@@ -263,7 +258,7 @@ async def test_every_other_refusal_is_not_done_and_not_retried(failure: Telegram
     rig = _Rig()
     rig.client.fail_next(failure)
 
-    delivered = await rig.writer.deliver(LINE, _message("Hi."), effect_id=EFFECT)
+    delivered = await rig.writer.deliver(LINE, "Hi.", effect_id=EFFECT)
 
     assert delivered.outcome is ToolOutcome.FAILED
     assert delivered.reason == f"telegram_did_not_send:{failure.value}"
@@ -276,7 +271,7 @@ async def test_a_rate_limit_longer_than_an_activation_waits_is_not_done() -> Non
     rig = _Rig()
     rig.client.fail_next(TelegramFailure.RATE_LIMITED, retry_after_seconds=600)
 
-    delivered = await rig.writer.deliver(LINE, _message("Hi."), effect_id=EFFECT)
+    delivered = await rig.writer.deliver(LINE, "Hi.", effect_id=EFFECT)
 
     assert delivered.outcome is ToolOutcome.FAILED
     assert len(rig.sends()) == 1
@@ -287,7 +282,7 @@ async def test_retries_stop_after_their_bound() -> None:
     for _ in range(SEND_ATTEMPTS):
         rig.client.fail_next(TelegramFailure.NOT_WRITTEN)
 
-    delivered = await rig.writer.deliver(LINE, _message("Hi."), effect_id=EFFECT)
+    delivered = await rig.writer.deliver(LINE, "Hi.", effect_id=EFFECT)
 
     assert delivered.outcome is ToolOutcome.FAILED
     assert len(rig.sends()) == SEND_ATTEMPTS
@@ -309,7 +304,7 @@ async def test_a_message_cut_short_between_parts_is_never_done(
     rig = _Rig(fail_send=2, failure=failure)
     first, second = "a" * 4000, "b" * 4000
 
-    delivered = await rig.writer.deliver(LINE, _message(f"{first}\n\n{second}"), effect_id=EFFECT)
+    delivered = await rig.writer.deliver(LINE, f"{first}\n\n{second}", effect_id=EFFECT)
 
     assert delivered.outcome is outcome
     assert delivered.position is None
@@ -321,12 +316,8 @@ async def test_a_message_for_another_chat_is_refused_before_any_byte() -> None:
     """§6:1, §9:2: the place is the input's, and the line writes only to its own chat."""
     rig = _Rig()
 
-    delivered = await rig.writer.deliver(
-        line_channel(REFERENCE, CHAT + 1), _message("Hi."), effect_id=EFFECT
-    )
-    elsewhere = await rig.writer.deliver(
-        line_channel("conn-other", CHAT), _message("Hi."), effect_id=EFFECT
-    )
+    delivered = await rig.writer.deliver(line_channel(REFERENCE, CHAT + 1), "Hi.", effect_id=EFFECT)
+    elsewhere = await rig.writer.deliver(line_channel("conn-other", CHAT), "Hi.", effect_id=EFFECT)
 
     assert delivered.outcome is ToolOutcome.FAILED
     assert delivered.reason == "telegram_other_chat"
@@ -334,13 +325,29 @@ async def test_a_message_for_another_chat_is_refused_before_any_byte() -> None:
     assert rig.client.calls == (), "nothing reached the client"
 
 
+async def test_a_message_past_the_hub_chats_transcript_bound_is_sent_whole() -> None:
+    """§6:6: the parts hold the whole text; the conversation's bound is not the line's."""
+    rig = _Rig()
+    text = "\n\n".join(f"{n}:" + "y" * 3990 for n in range(5)) + "\n\nThe end."
+    assert len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS
+
+    fitted = rig.writer.for_place(LINE).fitted(text)
+    delivered = await rig.writer.for_place(LINE).deliver(fitted, effect_id=EFFECT)
+
+    assert delivered.outcome is ToolOutcome.SUCCEEDED
+    assert delivered.written == text
+    assert "\n\n".join(one for _, one in rig.client.messages) == text
+    assert rig.client.messages[-1][1].endswith("The end.")
+
+
 async def test_the_place_writer_writes_whole_and_into_its_own_place() -> None:
     rig = _Rig()
     place = rig.writer.for_place(LINE)
-    message = _message("x" * 5000)
+    text = "x" * 5000
 
-    assert place.fitted(message) == message
-    delivered = await place.deliver(message, effect_id=EFFECT)
+    fitted = place.fitted(text)
+    assert (fitted.text, fitted.cut_off) == (text, False)
+    delivered = await place.deliver(fitted, effect_id=EFFECT)
     assert delivered.outcome is ToolOutcome.SUCCEEDED
     assert len(rig.client.messages) == 2
 

@@ -511,6 +511,7 @@ async def test_a_reply_to_a_message_older_than_the_window_is_brought_in_from_its
         "my old note",
     )
     assert window.links == {}, "nothing links a message the window's records do not name"
+    assert window.claimed == {3}, "a quote the assistant did not write is claimed (§4:2)"
 
 
 async def test_a_fixed_line_telegram_refused_is_still_answered_and_never_sent_again() -> None:

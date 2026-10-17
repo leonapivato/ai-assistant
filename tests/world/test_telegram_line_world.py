@@ -29,7 +29,7 @@ import structlog
 from m25_harness import Backing, point_the_keyring_at
 from pydantic import SecretStr
 
-from ai_assistant.app.composition import build_composition
+from ai_assistant.app.composition import build_composition, telegram_intake_path
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import TransportEndpoint
 from ai_assistant.memory import SqliteTelegramIntakeRecord
@@ -136,10 +136,13 @@ class _Channel:
 class _Telegram:
     """An outbound transport whose far end is a scripted Telegram."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, polls_answered: int | None = None) -> None:
+        """Answer as Telegram does; after ``polls_answered`` polls, answer none of them."""
         self.channels: list[_Channel] = []
         self.sent: list[str] = []
+        self.polls: list[dict[str, Any]] = []
         self._held = _updates()
+        self._polls_answered = polls_answered
 
     async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
         assert endpoint == TELEGRAM, "the line reaches one origin, fixed in code"
@@ -150,6 +153,9 @@ class _Telegram:
 
     def answer(self, method: str, body: dict[str, Any]) -> bytes:
         if method == "getUpdates":
+            self.polls.append(body)
+            if self._polls_answered is not None and len(self.polls) > self._polls_answered:
+                return b""  # written, and never answered: the poll's outcome is unknown
             offset = body.get("offset")
             if isinstance(offset, int):
                 self._held = [one for one in self._held if one["update_id"] >= offset]
@@ -187,6 +193,11 @@ async def _connected(tmp_path: Path, backing: Backing) -> str:
     return account.reference
 
 
+def _intake_files(directory: Path) -> list[Path]:
+    """Every file a line's intake record could be opened at, under ``directory``."""
+    return list(directory.glob("telegram*"))
+
+
 def _reader(composition: Composition) -> Any:
     return composition.engine._telegram_reader
 
@@ -221,7 +232,7 @@ async def test_the_line_runs_over_the_production_route_and_no_token_escapes(
     assert SECRET_PART not in rendered
     assert "/bot" not in rendered
     assert isinstance(intake, SqliteTelegramIntakeRecord)
-    assert (tmp_path / "telegram.db").exists()
+    assert telegram_intake_path(tmp_path, reference=reference, chat_id=CHAT).exists()
 
 
 async def test_a_deployment_that_names_no_line_holds_none_and_opens_nothing(
@@ -238,4 +249,42 @@ async def test_a_deployment_that_names_no_line_holds_none_and_opens_nothing(
 
     assert _reader(composition) is None
     assert telegram.channels == []
-    assert not (tmp_path / "telegram.db").exists()
+    assert not _intake_files(tmp_path), "no intake record is opened"
+
+
+async def test_another_bot_on_the_same_data_directory_starts_its_own_record(
+    tmp_path: Path,
+) -> None:
+    """§2:3, §5:6: a new line is a new place, and another's owed offset confirms none of it.
+
+    Bot A deals with its updates and owes Telegram their confirmation, its next poll
+    never answered, when the hub stops. Bot B, connected and named in its place, polls
+    with no offset: what A's record owed is A's, and B's unread messages are not
+    confirmed away before B has taken them in.
+    """
+    backing = Backing()
+    first = await _connected(tmp_path, backing)
+    second = await _connected(tmp_path, backing)
+    owed = _Telegram(polls_answered=1)
+    before = build_composition(_settings(first), data_dir=tmp_path, transport=owed)
+    point_the_keyring_at(before, backing)
+    await before.engine.start()
+    async with asyncio.timeout(10):
+        while not (owed.sent and len(owed.polls) >= 2):  # noqa: ASYNC110 — the fake answers at once
+            await asyncio.sleep(0.005)
+    await before.engine.aclose()
+    assert owed.polls[-1].get("offset") == 3, "A owes Telegram the confirmation through 2"
+
+    fresh = _Telegram()
+    after = build_composition(_settings(second), data_dir=tmp_path, transport=fresh)
+    point_the_keyring_at(after, backing)
+    await after.engine.start()
+    async with asyncio.timeout(10):
+        while not fresh.polls:  # noqa: ASYNC110 — the fake answers at once
+            await asyncio.sleep(0.005)
+    await after.engine.aclose()
+
+    assert "offset" not in fresh.polls[0], "B's first poll confirms nothing of A's"
+    assert telegram_intake_path(tmp_path, reference=first, chat_id=CHAT) != telegram_intake_path(
+        tmp_path, reference=second, chat_id=CHAT
+    )

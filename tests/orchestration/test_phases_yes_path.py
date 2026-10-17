@@ -86,6 +86,7 @@ from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import (
     Delivery,
+    Fitted,
     PhasePath,
     PhaseTools,
     PhaseWorking,
@@ -865,10 +866,10 @@ def test_only_the_users_own_chat_message_carries_their_authority(
 class _NoWrites:
     """A place writer no case here reaches: it only names the place."""
 
-    def fitted(self, message: NewMessage) -> NewMessage:
-        return message
+    def fitted(self, text: str) -> Fitted:
+        return Fitted(text=text)
 
-    async def deliver(self, message: NewMessage, *, effect_id: str) -> Delivery:
+    async def deliver(self, fitted: Fitted, *, effect_id: str) -> Delivery:
         raise AssertionError
 
 
