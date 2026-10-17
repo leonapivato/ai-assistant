@@ -422,3 +422,62 @@ async def test_the_typing_indicator_is_renewed_each_time_claimed_until_cancelled
     assert {one.attempt for one in records} == {
         one.attempt for one in rig.client.calls if one.method == SEND_CHAT_ACTION
     }
+
+
+class _GatedFinish:
+    """The fake intake record, its ``finish`` held until :attr:`release` is set."""
+
+    def __init__(self, record: FakeTelegramIntakeRecord) -> None:
+        self._record = record
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.finished = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._record, name)
+
+    async def finish(self, attempt: str, outcome: TelegramOutcome) -> None:
+        self.entered.set()
+        await self.release.wait()
+        await self._record.finish(attempt, outcome)
+        self.finished = True
+
+
+async def test_a_call_cancelled_twice_still_waits_for_its_record_to_be_finished() -> None:
+    """ADR-0042 §2: a drain that cancels again must not leave the finish writing alone.
+
+    The first cancellation is the close cutting a poll short; the second is the drain's,
+    once its budget is spent. The finish is the store's write, and the store is closed
+    only after the task has ended, so the task waits for the write.
+    """
+    rig = _Rig()
+    gated = _GatedFinish(rig.intake)
+    attempt = await rig.intake.claim_typing("act-1")
+    rig.client.hang_next()
+    writer = TelegramWriter(
+        client=rig.client,
+        intake=gated,
+        channel=LINE,
+        send_bound=timedelta(seconds=5),
+    )
+    task = asyncio.ensure_future(writer.typing("act-1"))
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if rig.client.calls:
+            break
+    task.cancel()
+    await asyncio.wait_for(gated.entered.wait(), 5)
+    task.cancel()
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    assert not task.done(), "the second cancellation is held until the record is finished"
+    gated.release.set()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert task.cancelled()
+    assert gated.finished
+    records = {one.attempt: one for one in (await rig.intake.export()).calls}
+    assert records[attempt].outcome is None, "the earlier claim is untouched"
+    (cut,) = [one for one in records.values() if one.attempt != attempt]
+    assert cut.outcome is TelegramCallOutcome.UNKNOWN

@@ -70,6 +70,7 @@ by injection and are seen only through their Protocols (CLAUDE.md golden rule 1)
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from functools import partial
@@ -80,7 +81,6 @@ import structlog
 from ai_assistant.core.errors import MemoryStoreError, TelegramIntakeRecordError
 from ai_assistant.core.types import (
     TELEGRAM_MESSAGE_LIMIT,
-    TRANSCRIPT_MESSAGE_MAX_CHARS,
     ApprovalGiver,
     ChannelIdentity,
     ClaimedAuthor,
@@ -420,8 +420,12 @@ async def _finished[O: TelegramOutcome](
     """Make one claimed call and finish its record with what came of it (§13:2).
 
     A call cancelled from outside may have reached Telegram, so its record is finished
-    *unknown* before the cancellation goes on, shielded, so it is never left open by a
-    shutdown (T2's ordering note). A record that cannot be finished stays claimed with
+    *unknown* before the cancellation goes on, so it is never left open by a shutdown
+    (T2's ordering note). **The finish is awaited to its end whatever else is
+    cancelled meanwhile**: a shutdown's drain cancels what is left after its budget,
+    and a finish abandoned then would still be writing when the store is closed
+    (ADR-0042 §2), so a further cancellation is held until the write has returned and
+    the cancellation then goes on. A record that cannot be finished stays claimed with
     no outcome, which is never resolved by guessing; the call's outcome is still
     returned.
 
@@ -434,9 +438,10 @@ async def _finished[O: TelegramOutcome](
         finishing = asyncio.ensure_future(
             intake.finish(attempt, TelegramOutcome(failure=TelegramFailure.UNKNOWN))
         )
-        try:
-            await asyncio.shield(finishing)
-        except TelegramIntakeRecordError:
+        while not finishing.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(finishing)
+        if not finishing.cancelled() and finishing.exception() is not None:
             _log.warning("telegram_call_unfinished", stage="line", reason="store_failed")
         raise
     try:
@@ -1027,7 +1032,7 @@ class TelegramReader:
                 position=one.position,
                 written_at=one.sent_at,
                 author=MessageAuthor.USER,
-                text=one.text[:TRANSCRIPT_MESSAGE_MAX_CHARS],
+                text=one.text,
             )
             links[one.position] = activation_id
             if one.forwarded_from is not None:
@@ -1044,7 +1049,7 @@ class TelegramReader:
                 position=position,
                 written_at=at,
                 author=MessageAuthor.ASSISTANT,
-                text=text[:TRANSCRIPT_MESSAGE_MAX_CHARS],
+                text=text,
             )
             links[position] = activation_id
 
@@ -1060,7 +1065,7 @@ class TelegramReader:
             position=message.message_id,
             written_at=message.sent_at,
             author=MessageAuthor.USER,
-            text=(message.text or "")[:TRANSCRIPT_MESSAGE_MAX_CHARS],
+            text=message.text or "",
             replies_to=replies_to,
         )
 
@@ -1106,7 +1111,7 @@ class TelegramReader:
                 position=quoted.message_id,
                 written_at=one.sent_at,
                 author=MessageAuthor.ASSISTANT if bot else MessageAuthor.USER,
-                text=quoted.text[:TRANSCRIPT_MESSAGE_MAX_CHARS],
+                text=quoted.text,
             )
             if not bot:
                 claimed.add(quoted.message_id)
